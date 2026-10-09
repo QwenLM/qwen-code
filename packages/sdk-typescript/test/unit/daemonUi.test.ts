@@ -11012,6 +11012,30 @@ describe('transcript timing frames', () => {
     ).toEqual([]);
   });
 
+  it.each(['execution-1', '', '   ', null, 42])(
+    'validates request execution identity %s',
+    (executionId) => {
+      const update = {
+        ...TIMING_FRAME,
+        _meta: {
+          ...TIMING_FRAME._meta,
+          timing: { ...TIMING_FRAME._meta.timing, executionId },
+        },
+      };
+      const timing = extractTranscriptTiming(update);
+      if (executionId === 'execution-1')
+        expect(timing?.executionId).toBe(executionId);
+      else expect(timing).not.toHaveProperty('executionId');
+      expect(
+        normalizeDaemonEvent({
+          v: 1,
+          type: 'session_update',
+          data: { update },
+        }),
+      ).toEqual([]);
+    },
+  );
+
   it('reads a request timing frame', () => {
     expect(extractTranscriptTiming(TIMING_FRAME)).toEqual({
       kind: 'request',

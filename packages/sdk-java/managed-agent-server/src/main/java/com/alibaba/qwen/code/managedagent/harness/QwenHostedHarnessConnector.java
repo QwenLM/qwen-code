@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.StoreModels;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
@@ -479,6 +480,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public void runChildOperation(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        try {
+            client().runChildOperation(attachment(tenantId, sessionId, true),
+                    body);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
     public String closeSession(String tenantId, String sessionId) {
         try {
             return doCloseSession(tenantId, sessionId);
@@ -561,6 +574,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     session);
             if (store != null) {
                 builder.managedSessionStore(store);
+            }
+            StoreModels.SessionLineage lineage = sessions.findChildLineage(
+                    session.tenantId(), session.sessionId());
+            if (lineage != null) {
+                builder.lineage(lineage.parentSessionId(),
+                        lineage.rootSessionId(), lineage.parentChildRunId(),
+                        lineage.depth());
             }
             return client().createSession(builder.build());
         } catch (DaemonHttpException error) {
