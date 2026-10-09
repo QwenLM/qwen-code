@@ -221,7 +221,10 @@ export class ToolCallEvent implements BaseTelemetryEvent {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   metadata?: { [key: string]: any };
 
-  constructor(call: CompletedToolCall) {
+  constructor(
+    call: CompletedToolCall,
+    config?: Pick<Config, 'getChatCompression'>,
+  ) {
     this['event.name'] = 'tool_call';
     this['event.timestamp'] = new Date().toISOString();
     this.call_id = call.request.callId;
@@ -255,7 +258,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     this.error = call.response.error?.message;
     this.error_type = call.response.errorType;
     this.prompt_id = call.request.prompt_id;
-    const processed = measureToolOutput(call.response.responseParts);
+    const processed = measureToolOutput(call.response.responseParts, config);
     const provenance = call.response.responseParts
       .map(getToolOutputProvenance)
       .find(Boolean);
@@ -1035,7 +1038,7 @@ export class ToolResultSizeEvent implements BaseTelemetryEvent {
     readonly injected_content_length: number,
     readonly raw_estimated_tokens: number | undefined,
     readonly injected_estimated_tokens: number,
-    readonly truncated: boolean,
+    readonly truncated: boolean | undefined,
     readonly applied_budget?: number,
     readonly budget_source?: ToolOutputBudgetSource,
     readonly call_id?: string,

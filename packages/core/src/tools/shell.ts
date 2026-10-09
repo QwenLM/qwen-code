@@ -3230,6 +3230,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
         {
           layer: 'producer',
+          source: this.config.isTruncateToolOutputThresholdExplicit?.()
+            ? 'explicit'
+            : 'per_tool',
           threshold: bodyBudgetChars,
           previewChars: Math.min(4000, bodyBudgetChars),
           keep: 'both',

@@ -272,7 +272,7 @@ const HISTOGRAM_DEFINITIONS = {
     attributes: {} as {
       function_name: string;
       tool_type: 'native' | 'mcp';
-      truncated: boolean;
+      truncated?: boolean;
       phase: 'raw' | 'injected';
     },
   },
@@ -284,7 +284,7 @@ const HISTOGRAM_DEFINITIONS = {
     attributes: {} as {
       function_name: string;
       tool_type: 'native' | 'mcp';
-      truncated: boolean;
+      truncated?: boolean;
       phase: 'raw' | 'injected';
     },
   },
@@ -776,7 +776,7 @@ export function recordToolResultSizeMetrics(
     ...baseMetricDefinition.getCommonAttributes(config),
     function_name: event.function_name,
     tool_type: event.tool_type,
-    truncated: event.truncated,
+    ...(event.truncated !== undefined ? { truncated: event.truncated } : {}),
   };
   if (event.raw_content_length !== undefined)
     toolResultCharsHistogram?.record(event.raw_content_length, {

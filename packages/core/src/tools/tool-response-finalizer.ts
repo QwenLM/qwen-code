@@ -5,8 +5,8 @@
  */
 
 import {
-  getToolOutputProvenance,
   measureToolOutput,
+  getToolOutputProvenance,
   updateToolOutputBudget,
 } from './tool-output-size.js';
 import { logToolResultSize } from '../telemetry/loggers.js';
@@ -340,13 +340,16 @@ export function enforceFunctionResponseBudget(
       budget,
     ),
   );
-  for (let index = 0; index < reduced.length; index++) {
-    if (
-      toolResponseTextLength(reduced[index].responseParts) <
-      toolResponseTextLength(entries[index].responseParts)
-    )
-      updateToolOutputBudget(reduced[index].responseParts, budget, 'batch');
-  }
+  for (let index = 0; index < reduced.length; index++)
+    for (
+      let partIndex = 0;
+      partIndex < reduced[index].responseParts.length;
+      partIndex++
+    ) {
+      const part = reduced[index].responseParts[partIndex];
+      if (part !== entries[index].responseParts[partIndex])
+        updateToolOutputBudget([part], budget, 'batch');
+    }
   return reduced;
 }
 
@@ -478,6 +481,7 @@ export async function finalizeToolResponses(
         entry.toolName,
         content,
         config,
+        promptIds?.get(entry.callId),
       );
       withPersistence[entryIndex] = {
         ...entry,
@@ -497,20 +501,27 @@ export async function finalizeToolResponses(
   for (let index = 0; index < finalized.length; index++) {
     if (!entriesToPersist.has(index)) continue;
     const entry = finalized[index];
-    const before = measureToolOutput(entries[index].responseParts);
-    const after = measureToolOutput(entry.responseParts);
-    for (const part of entry.responseParts) {
-      const provenance = getToolOutputProvenance(part);
-      if (provenance)
-        provenance.persistedOutputFiles = entry.persistedOutputFiles;
+    const before = measureToolOutput(entries[index].responseParts, config);
+    const after = measureToolOutput(entry.responseParts, config);
+    for (
+      let partIndex = 0;
+      partIndex < entry.responseParts.length;
+      partIndex++
+    ) {
+      const part = entry.responseParts[partIndex];
+      if (part !== entries[index].responseParts[partIndex])
+        updateToolOutputBudget([part], budget, 'batch');
     }
-    updateToolOutputBudget(entry.responseParts, budget, 'batch');
+    const provenance = entry.responseParts
+      .map(getToolOutputProvenance)
+      .find(Boolean);
     try {
       logToolResultSize(
         config,
         new ToolResultSizeEvent(
-          entry.toolName,
-          entry.toolName.startsWith('mcp__') ? 'mcp' : 'native',
+          provenance?.toolName ?? entry.toolName,
+          provenance?.toolType ??
+            (entry.toolName.startsWith('mcp__') ? 'mcp' : 'native'),
           'batch',
           before.chars,
           after.chars,

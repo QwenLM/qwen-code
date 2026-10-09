@@ -2394,6 +2394,15 @@ export class LlmChat {
   ) {
     validateHistory(history);
     this.redactApprovedPlansFromLoadedHistory();
+    this.markLoadedToolResults();
+  }
+
+  private markLoadedToolResults(): void {
+    for (const content of this.history)
+      for (const part of content.parts ?? []) {
+        const provenance = getToolOutputProvenance(part);
+        if (provenance) this.injectedToolResults.add(provenance);
+      }
   }
 
   enableManualPlanExitNotices(): void {
@@ -3118,7 +3127,6 @@ export class LlmChat {
                 toolType: part.functionResponse.name?.startsWith('mcp__')
                   ? 'mcp'
                   : 'native',
-                truncated: false,
               })[0]
             : part,
         ),
@@ -5272,7 +5280,7 @@ export class LlmChat {
         }
       for (const [provenance, parts] of groups) {
         this.injectedToolResults.add(provenance);
-        const injected = measureToolOutput(parts);
+        const injected = measureToolOutput(parts, this.config);
         logToolResultSize(
           this.config,
           new ToolResultSizeEvent(
@@ -5779,6 +5787,7 @@ export class LlmChat {
     completedToolCallIds?: readonly string[],
   ): void {
     this.history = history;
+    this.markLoadedToolResults();
     this.setCompletedToolCallIds(completedToolCallIds);
     // History replacement (compression, /clear, --resume reload) wipes
     // the index basis the partial-push marker was captured against. The

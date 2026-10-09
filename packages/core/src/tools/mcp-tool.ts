@@ -779,7 +779,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: truncated.parts,
-        rawOutputSize: measureToolOutput(transformedParts),
+        rawOutputSize: measureToolOutput(transformedParts, this.cliConfig),
         returnDisplay: appDisplay ?? fallbackText,
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
@@ -1023,7 +1023,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: truncated.parts,
-        rawOutputSize: measureToolOutput(transformedParts),
+        rawOutputSize: measureToolOutput(transformedParts, this.cliConfig),
         returnDisplay: getDisplayFromPartsWithPersistedOutput(
           transformedParts,
           truncated.persistedOutputFiles,
@@ -1049,6 +1049,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ): Promise<ToolResult> {
     const rawOutputSize = measureToolOutput(
       transformMcpContentToParts(rawResponseParts),
+      this.cliConfig,
     );
     const imageContent = getMcpErrorImageContent(rawResponseParts);
     let llmContent: PartListUnion;

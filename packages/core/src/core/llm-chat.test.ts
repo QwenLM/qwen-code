@@ -11907,7 +11907,6 @@ describe('LlmChat', async () => {
           toolType: 'native',
           promptId: 'p',
           rawSize: { chars: 20000, estimatedTokens: 5000 },
-          persistedOutputFiles: [],
           truncated: false,
         },
       );
@@ -11940,6 +11939,56 @@ describe('LlmChat', async () => {
       ).toHaveLength(1);
     });
 
+    it.each(['constructor', 'setHistory'] as const)(
+      'does not recount %s history while counting new fork results',
+      async (load) => {
+        const inherited = result();
+        const history = [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'shell',
+                  args: {},
+                  id: 'anonymous-result',
+                },
+              },
+            ],
+          },
+          { role: 'user', parts: inherited },
+          modelText('parent complete'),
+        ];
+        if (load === 'constructor') chat = new LlmChat(mockConfig, {}, history);
+        else chat.setHistory(history);
+        vi.spyOn(chat, 'tryCompress').mockResolvedValue({
+          compressionStatus: CompressionStatus.NOOP,
+          originalTokenCount: 0,
+          newTokenCount: 0,
+        });
+        const fresh = attachToolOutputProvenance(
+          [fnResponse('shell', { output: 'fresh' }, 'fork-result')],
+          {
+            callId: 'fork-result',
+            toolName: 'shell',
+            toolType: 'native',
+            promptId: 'fork',
+            truncated: false,
+          },
+        );
+        mockStreamsOnce(textStream('done'), textStream('again'));
+        await sendDrain(fresh, 'fork');
+        await sendDrain('next', 'replay');
+        const events = vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection')
+          .map(([, event]) => event);
+        expect(events).toHaveLength(1);
+        expect(events[0].call_id).toBe('fork-result');
+        expect(events[0].prompt_id).toBe('fork');
+      },
+    );
+
     it('records each parallel result and preserves user steering', async () => {
       const second = attachToolOutputProvenance(
         [fnResponse('read_file', { output: 'y'.repeat(20000) }, 'second')],
@@ -11949,7 +11998,6 @@ describe('LlmChat', async () => {
           toolType: 'native',
           promptId: 'p',
           rawSize: { chars: 20000, estimatedTokens: 5000 },
-          persistedOutputFiles: [],
           truncated: false,
         },
       );

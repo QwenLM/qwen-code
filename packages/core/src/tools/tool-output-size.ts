@@ -5,6 +5,8 @@
  */
 
 import type { Part, PartListUnion } from '@google/genai';
+import type { Config } from '../config/config.js';
+import { resolveSlimmingConfig } from '../services/compactionInputSlimming.js';
 import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
   estimatePartChars,
@@ -28,10 +30,9 @@ export interface ToolOutputProvenance {
   promptId: string;
   toolType: 'native' | 'mcp';
   rawSize?: ToolOutputSize;
-  persistedOutputFiles?: string[];
   budget?: number;
   budgetSource?: ToolOutputBudgetSource;
-  truncated: boolean;
+  truncated?: boolean;
 }
 
 const provenanceKey = Symbol('tool-output-provenance');
@@ -39,8 +40,15 @@ type MeasuredPart = Part & { [provenanceKey]?: ToolOutputProvenance };
 
 export function measureToolOutput(
   content: PartListUnion,
-  imageTokenEstimate = DEFAULT_IMAGE_TOKEN_ESTIMATE,
+  imageConfig:
+    | number
+    | Pick<Config, 'getChatCompression'> = DEFAULT_IMAGE_TOKEN_ESTIMATE,
 ): ToolOutputSize {
+  const imageTokenEstimate =
+    typeof imageConfig === 'number'
+      ? imageConfig
+      : resolveSlimmingConfig(imageConfig.getChatCompression?.())
+          .imageTokenEstimate;
   const parts = (Array.isArray(content) ? content : [content]).map((part) =>
     typeof part === 'string' ? { text: part } : part,
   );

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { describe, expect, it } from 'vitest';
+import type { Config } from '../config/config.js';
 import { estimatePartChars } from '../services/compactionInputSlimming.js';
 import {
   attachToolOutputProvenance,
@@ -88,4 +89,12 @@ describe('result-size provenance', () => {
     });
     expect(getToolOutputProvenance(structuredClone(part))).toBeUndefined();
   });
+});
+
+it('uses the same configured image estimate as compaction', () => {
+  const config = {
+    getChatCompression: () => ({ imageTokenEstimate: 800 }),
+  } as unknown as Config;
+  const part = { inlineData: { mimeType: 'image/png', data: 'base64' } };
+  expect(measureToolOutput([part], config).estimatedTokens).toBe(800);
 });
