@@ -103,9 +103,13 @@ public class ManagedWorkspaceRegistry {
                         + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                         + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
                         + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                        + " AND actor_id = ?",
+                        + " AND actor_id = ? AND role IN ('READER', 'OPERATOR',"
+                        + " 'OWNER')",
                 String.class, tenantId, workspaceId, tenantId, workspaceId,
                 key);
+        // An out-of-enum stored value (only reachable by an out-of-band
+        // write past V53's CHECK) fails closed exactly like a revoked
+        // grant, never into valueOf's IllegalArgumentException.
         return roles.isEmpty() ? WorkspaceAccess.NONE
                 : WorkspaceAccess.valueOf(roles.getFirst());
     }
@@ -339,7 +343,8 @@ public class ManagedWorkspaceRegistry {
                         + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                         + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
                         + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                        + " AND actor_id = ? FOR UPDATE",
+                        + " AND actor_id = ? AND role IN ('READER', 'OPERATOR',"
+                        + " 'OWNER') FOR UPDATE",
                 (result, row) -> new AccessRow(WorkspaceAccess.valueOf(
                         result.getString("role"))), tenantId,
                 workspaceId, tenantId, workspaceId, key);

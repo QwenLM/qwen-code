@@ -1130,7 +1130,10 @@ public class ManagedAgentStore implements AgentStateStore {
     // operating actor no longer holds OPERATOR — revoking one in-flight
     // initiator stops only their own admitted change, as the W2 guard
     // intends. A pre-V54 (NULL key) row settles on the creator-keyed facts
-    // alone.
+    // alone. The vocabulary filter keeps an out-of-enum stored role (only
+    // reachable by an out-of-band write past V53's CHECK) on the same
+    // fail-closed workspace_unavailable verdict as a revocation, rather
+    // than an IllegalArgumentException looping through the retry.
     private boolean initiatorKeepsOperate(SessionRecord session,
             OperationRecord operation) {
         if (operation.actorKey() == null) {
@@ -1138,7 +1141,8 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         List<String> roles = jdbc.queryForList("SELECT role FROM"
                         + " managed_workspace_access WHERE tenant_id = ? AND"
-                        + " workspace_id = ? AND actor_id = ?",
+                        + " workspace_id = ? AND actor_id = ? AND role IN"
+                        + " ('READER', 'OPERATOR', 'OWNER')",
                 String.class, session.tenantId(),
                 session.workspace().getWorkspaceId(), operation.actorKey());
         return !roles.isEmpty() && WorkspaceAccess.valueOf(roles.getFirst())

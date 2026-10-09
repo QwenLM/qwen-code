@@ -592,6 +592,36 @@ class ManagedWorkspaceAdmissionTest {
                 Integer.class, tenant)).isZero();
     }
 
+    // An out-of-enum stored role — reachable only by an out-of-band write
+    // past V53's CHECK — fails closed at the unfiltered role reads: the
+    // plain access read answers NONE (the invisible-404 shape a caller
+    // already meets below a valid role) and creation keeps its domain
+    // 404, instead of a valueOf IllegalArgumentException surfacing a 500.
+    @Test
+    void anOutOfEnumStoredRoleFailsClosedAtEveryRoleRead() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a");
+        grant(tenant, "ws-a", "actor-a", true);
+        String digest = "sha256:" + "a".repeat(64);
+        store.insertWorkspaceSessionCommand(tenant, "actor-a", "create",
+                digest, "qwen-code", null, null, List.of(), null,
+                new WorkspaceSelection("ws-a", "."));
+        jdbc.update("ALTER TABLE managed_workspace_access"
+                + " DROP CONSTRAINT managed_workspace_access_role");
+        jdbc.update("UPDATE managed_workspace_access SET role = 'BROKEN'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws-a'"
+                + " AND actor_id = ?", tenant,
+                "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertThat(registry.accessOf(tenant, "actor-a", "ws-a"))
+                .isEqualTo(com.alibaba.qwen.code.runtimebroker
+                        .managedworkspace.WorkspaceAccess.NONE);
+        assertThat(registry.canRead(tenant, "actor-a", "ws-a")).isFalse();
+        assertRefused(() -> store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create-2", digest, "qwen-code", null, null,
+                List.of(), null, new WorkspaceSelection("ws-a", ".")),
+                "workspace_not_found");
+    }
+
     // The pre-V40 fallback: a bound Session whose owner and creator
     // columns are both NULL (the state the V53 backfill leaves rows it
     // cannot attribute) is owned through its create-command record alone.

@@ -710,6 +710,43 @@ class ManagedCwdChangeOperationTest {
                 .workspace().getCwdRelative()).isEqualTo(kept);
     }
 
+    // An out-of-enum stored role — reachable only by an out-of-band write
+    // past V53's CHECK — settles the change fail-closed under the
+    // vocabulary filter, instead of a valueOf IllegalArgumentException the
+    // recovery would keep retrying.
+    @Test
+    void settlementFailsClosedWhenTheInitiatorsStoredRoleIsOutOfEnum() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        fixture.grant(TENANT, WS, "operator-colleague", "OPERATOR");
+        OperationAdmission admitted = begin(fixture, sessionId, "key",
+                "digest", "services/b", 1, "operator-colleague",
+                "digest-operator");
+        OperationRecord claimed = claim(fixture, sessionId,
+                admitted.operation().operationId(), "owner");
+        String kept = fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getCwdRelative();
+        fixture.jdbc.update("ALTER TABLE managed_workspace_access"
+                + " DROP CONSTRAINT managed_workspace_access_role");
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+                        + " 'BROKEN' WHERE tenant_id = ? AND"
+                        + " workspace_id = ? AND actor_id = ?", TENANT, WS,
+                "operator-colleague".getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8));
+        assertThat(fixture.jdbc.queryForObject("SELECT role FROM"
+                        + " managed_workspace_access WHERE tenant_id = ? AND"
+                        + " workspace_id = ? AND actor_id = ?", String.class,
+                TENANT, WS, "operator-colleague".getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8)))
+                .isEqualTo("BROKEN");
+        CwdChangeOutcome outcome = settle(fixture, sessionId,
+                claimed.operationId(), "owner", claimed.claimGeneration());
+        assertThat(outcome.completed()).isFalse();
+        assertThat(outcome.failureCode()).isEqualTo("workspace_unavailable");
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getCwdRelative()).isEqualTo(kept);
+    }
+
     @Test
     void settlementHonoursTheClaimAndTheKind() {
         Fixture fixture = fixture(true);
