@@ -2845,7 +2845,10 @@ export class Session implements SessionContext {
     this.goalProcessing = true;
     this.#activeWorkChanged();
     this.activeGoalTurn = turn;
-    const parts = buildGoalContinuationParts(turn);
+    const parts = buildGoalContinuationParts(
+      turn,
+      this.config.getToolRegistry?.(),
+    );
     let result: PromptResponse | undefined;
     await this.#emitGoalStartTurn();
     try {

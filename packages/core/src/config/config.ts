@@ -407,7 +407,10 @@ import {
   scanMemoryMetadataCorpusStatus,
   type MemoryMetadataCorpusStatus,
 } from '../memory/metadata-migration.js';
-import { buildStructuredAutoMemoryPrompt } from '../memory/prompt.js';
+import {
+  buildAutoMemoryIndexContext,
+  buildStructuredAutoMemoryPrompt,
+} from '../memory/prompt.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { isSafeModeEnv } from '../utils/safe-mode.js';
 
@@ -2985,14 +2988,9 @@ export class Config {
   private promptToolSnapshot: ReadonlySet<string> | undefined;
   private promptAgentReachable = false;
 
-  /**
-   * Volatile system-prompt layer: the managed auto-memory section
-   * (instructions + MEMORY.md indexes). Kept separate from `userMemory`
-   * (context files, stable in-session) because it is rewritten on every
-   * memory save — prompt assembly appends it last so a save invalidates
-   * the shortest possible cached prompt prefix.
-   */
+  /** Stable managed-memory policy, separate from the changing catalog. */
   private autoMemoryPrompt = '';
+  private autoMemoryContext = '';
   private memoryRecallMode: MemoryRecallMode = 'legacy';
   private memoryCorpusRevision = '';
   private memoryRecallModeInitialized = false;
@@ -5395,6 +5393,7 @@ export class Config {
     if (this.isSafeMode()) {
       this.setUserMemory('');
       this.autoMemoryPrompt = '';
+      this.autoMemoryContext = '';
       this.setMemoryFileCount(0);
       this.setContextFilePaths([]);
       this.conditionalRulesRegistry = new ConditionalRulesRegistry(
@@ -5568,32 +5567,44 @@ export class Config {
       // empty" placeholder — the same shape the per-project layer has used
       // since day one — so the cost is one extra index header.
       this.setUserMemory(memoryContent);
-      this.autoMemoryPrompt =
-        this.memoryRecallMode === 'structured'
-          ? buildStructuredAutoMemoryPrompt(
-              getAutoMemoryRoot(this.getProjectRoot()),
-              getUserAutoMemoryRoot(),
-              teamMemoryEnabled
-                ? getTeamAutoMemoryRoot(this.getProjectRoot())
-                : undefined,
-            )
-          : this.memoryManager.buildAutoMemoryPrompt(
-              getAutoMemoryRoot(this.getProjectRoot()),
-              managedAutoMemoryIndex,
-              {
-                memoryDir: getUserAutoMemoryRoot(),
-                indexContent: userAutoMemoryIndex,
-              },
-              teamMemoryEnabled
-                ? {
-                    memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
-                    indexContent: teamAutoMemoryIndex,
-                  }
-                : undefined,
-            );
+      const memoryDir = getAutoMemoryRoot(this.getProjectRoot());
+      const userSection = {
+        memoryDir: getUserAutoMemoryRoot(),
+        indexContent: userAutoMemoryIndex,
+      };
+      const teamSection = teamMemoryEnabled
+        ? {
+            memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
+            indexContent: teamAutoMemoryIndex,
+          }
+        : undefined;
+      if (this.memoryRecallMode === 'structured') {
+        this.autoMemoryPrompt = buildStructuredAutoMemoryPrompt(
+          memoryDir,
+          userSection.memoryDir,
+          teamSection?.memoryDir,
+        );
+      } else {
+        const policy = this.memoryManager.buildAutoMemoryPrompt(
+          memoryDir,
+          managedAutoMemoryIndex,
+          userSection,
+          teamSection,
+          { includeIndexes: false },
+        );
+        const catalog = buildAutoMemoryIndexContext(
+          memoryDir,
+          managedAutoMemoryIndex,
+          userSection,
+          teamSection,
+        );
+        this.autoMemoryPrompt = policy;
+        this.autoMemoryContext = catalog;
+      }
     } else {
       this.setUserMemory(memoryContent);
       this.autoMemoryPrompt = '';
+      this.autoMemoryContext = '';
     }
     this.setMemoryFileCount(fileCount);
     this.setContextFilePaths(contextFilePaths);
@@ -6239,10 +6250,13 @@ export class Config {
    * and should be displayed to the user during startup.
    */
   getWarnings(): string[] {
-    // Both layers are always loaded into the system prompt, so the size
-    // estimate must cover context files and the auto-memory section alike.
+    // Include the request-only catalog as well as the system memory policy.
     const memoryContextWarning = this.buildMemoryContextWarning(
-      [this.getUserMemory(), this.autoMemoryPrompt]
+      [
+        this.getUserMemory(),
+        this.getAutoMemoryPrompt(),
+        this.getAutoMemoryContext(),
+      ]
         .filter(Boolean)
         .join('\n\n'),
     );
@@ -7862,6 +7876,7 @@ export class Config {
     // reassigns it, and the stale text keeps routing to search_memory while
     // the reset mode leaves that tool undeclared.
     this.autoMemoryPrompt = '';
+    this.autoMemoryContext = '';
 
     let memoryRefreshError: unknown;
     try {
@@ -9036,13 +9051,18 @@ export class Config {
     this.promptAgentReachable = reachable;
   }
 
-  /**
-   * The managed auto-memory section of the system prompt (volatile layer).
-   * Empty when managed memory is unavailable. Callers assembling a system
-   * prompt must append this after all stable/context content.
-   */
+  /** Managed-memory policy for the system prompt, without legacy indexes. */
   getAutoMemoryPrompt(): string {
     return this.autoMemoryPrompt;
+  }
+
+  /** Latest legacy catalog, sent only at the request tail, never stored history. */
+  getAutoMemoryContext(): string {
+    // Scoped maintenance configs override the policy getter to suppress session
+    // memory. Respect that override rather than inheriting the parent's catalog.
+    return this.memoryRecallMode === 'legacy' && this.getAutoMemoryPrompt()
+      ? this.autoMemoryContext
+      : '';
   }
 
   getMemoryRecallMode(): MemoryRecallMode {
