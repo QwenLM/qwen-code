@@ -3569,9 +3569,9 @@ export const useLlmStream = (
     [midTurnRestoreRef, onDebugMessage, resolveSteeredMessages],
   );
 
-  // One answer for both boundary paths: is a peer envelope actually going to be
-  // delivered at this boundary? Only then may the barrier hold user text behind
-  // it. Asked in one place so the two paths cannot diverge about it.
+  // Is a peer envelope actually going to be delivered at this boundary? Only
+  // then may the barrier hold user text behind it. Only the tool-round boundary
+  // asks it — the peer pop lives there and nowhere else.
   const peerMidTurnWillDeliver = useCallback(
     () => midTurnPeerDrainRef?.current?.eligible?.() ?? false,
     [midTurnPeerDrainRef],
@@ -3579,16 +3579,22 @@ export const useLlmStream = (
 
   const drainSteerAtBoundary = useCallback(
     async (signal: AbortSignal): Promise<SteerInput | undefined> => {
+      // Never a barrier here. This is core's continuation steer — reached from
+      // the `next_speaker === 'model'` and stop-hook continuations, where core
+      // substitutes `Please continue.` — and it pops no peer envelope. Holding
+      // typed text behind one this call cannot deliver would withhold the
+      // user's own correction while the model carries on with the course that
+      // correction was meant to change.
       const messages =
         midTurnDrainRef?.current?.(
           false,
           Boolean(activeGoalAdmissionRef.current),
-          peerMidTurnWillDeliver(),
+          false,
         ) ?? [];
       if (messages.length === 0) return undefined;
       return resolveDrainedSteerMessages(messages, signal);
     },
-    [midTurnDrainRef, peerMidTurnWillDeliver, resolveDrainedSteerMessages],
+    [midTurnDrainRef, resolveDrainedSteerMessages],
   );
 
   const submitQuery = useCallback(

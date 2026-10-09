@@ -8250,6 +8250,54 @@ describe('useLlmStream', () => {
     expect(recordNotification).not.toHaveBeenCalled();
   });
 
+  it('never arms the peer barrier on the getSteerInput path', async () => {
+    // Core reaches this drain on the `next_speaker === 'model'` and stop-hook
+    // continuations, where it substitutes `Please continue.` — and that path
+    // pops no peer envelope. Arming the barrier here would withhold the user's
+    // own queued correction behind a delivery this call cannot make, letting
+    // the model carry on with the course the correction was meant to change.
+    // No test observed this third argument before now, which is how the barrier
+    // came to be armed on a path that never delivers.
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage: vi.fn(),
+    });
+    const drainSteer = vi.fn<() => string[]>().mockReturnValue([]);
+    const peerDrain = vi.fn<() => null>().mockReturnValue(null);
+    // Fully eligible: at a real tool-round boundary this envelope would be
+    // taken, so the only thing that may hold the barrier down is the path.
+    Object.assign(peerDrain, { eligible: () => true });
+
+    const { result, mockSendMessageStream: streamMock } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      () => {},
+      undefined,
+      undefined,
+      false,
+      { current: peerDrain },
+      { current: drainSteer },
+    );
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'start the analysis',
+        SendMessageType.UserQuery,
+        'prompt-id-steer-no-barrier',
+      );
+    });
+
+    const sendOptions = streamMock.mock.calls[0][3] as {
+      getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+    };
+    expect(sendOptions.getSteerInput).toEqual(expect.any(Function));
+    await act(async () => {
+      await sendOptions.getSteerInput!(new AbortController().signal);
+    });
+
+    expect(drainSteer).toHaveBeenCalledWith(false, false, false);
+  });
+
   it('provides queued steer input to core at the next sampling boundary', async () => {
     const steeredPrompt = 'focus on the error handling';
     const recordMidTurnUserMessage = vi.fn();
