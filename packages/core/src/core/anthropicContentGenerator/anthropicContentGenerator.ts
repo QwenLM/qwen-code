@@ -782,18 +782,24 @@ export class AnthropicContentGenerator implements ContentGenerator {
       isProxyHostedClaude &&
       !!thinking &&
       this.modelSupportsAdaptiveThinking(true);
-    // Strict Anthropic-compatible proxies (SGLang, llama.cpp, vLLM) reject a
-    // `thinking` block with no `signature` field at all (HTTP 400, e.g.
-    // SGLang `thinking.signature`) while accepting an empty signature. The
-    // repaired blocks come from HISTORY, not the outgoing request, so this is
-    // deliberately not gated on `thinking`: the #11772 consumers (auto-memory
-    // extraction, prompt suggestions, skill review) fork with
-    // `includeThoughts: false` and still replay unsigned blocks. On Claude
-    // 4.6+ through a proxy, `dropUnsignedAssistantThinking` runs after this
-    // fill and reads `signature: ''` as unsigned, so that quadrant keeps its
-    // drop-only wire shape; the native API's history is left untouched.
+    // Strict Anthropic-compatible proxies (verified against SGLang v0.5.19,
+    // #11772; llama.cpp/vLLM expected to behave the same but untested)
+    // reject a `thinking` block with no `signature` field at all (HTTP 400,
+    // e.g. SGLang `thinking.signature`) while accepting an empty signature.
+    // The repaired blocks come from HISTORY, not the outgoing request, so
+    // this is deliberately not gated on `thinking`: the #11772 consumers
+    // (auto-memory extraction, prompt suggestions, skill review) fork with
+    // `includeThoughts: false` and still replay unsigned blocks. 4.6+
+    // adaptive models are excluded — that quadrant is owned by
+    // `dropUnsignedAssistantThinking` (an empty string cannot stand in for
+    // the native API's opaque signature), and the two passes must stay
+    // disjoint so the 4.6+ wire shape never changes. Unknown or unversioned
+    // model ids parse as non-adaptive and keep the fill — that is exactly
+    // what a custom SGLang model id needs. The native API's history is left
+    // untouched.
     // https://github.com/QwenLM/qwen-code/issues/11772
-    const fillUnsignedThinkingSignature = isProxyHostedClaude;
+    const fillUnsignedThinkingSignature =
+      isProxyHostedClaude && !this.modelSupportsAdaptiveThinking(true);
     // Opus/Sonnet 4.6+ and every 5.x family reject a request whose final
     // message has role 'assistant' ("assistant message prefill") with a
     // hard 400 — per Anthropic's own migration guidance this is a
@@ -830,10 +836,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
       request,
       {
         // DeepSeek normalization and injection run together. Proxy-hosted
-        // Claude gets two passes of its own: every non-4.6 model fills
-        // `signature: ''` (strict serde only requires the key to be present),
-        // while 4.6+ adaptive models drop unsigned blocks, since an empty
-        // string cannot stand in for the native API's opaque signature.
+        // Claude is split two ways: non-4.6 models fill `signature: ''`
+        // (strict serde only requires the key to be present), while 4.6+
+        // adaptive models drop unsigned blocks, since an empty string
+        // cannot stand in for the native API's opaque signature. The two
+        // quadrants are disjoint by construction.
         normalizeAssistantThinkingSignature: deepseekThinkingOn,
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
         dropUnsignedAssistantThinking,

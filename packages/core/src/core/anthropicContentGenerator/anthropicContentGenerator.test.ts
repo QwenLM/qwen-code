@@ -1617,10 +1617,11 @@ describe('AnthropicContentGenerator', () => {
 
     it('fills an empty signature for unsigned history through a strict non-4.6 proxy', async () => {
       // Pre-4.6 model through a non-native, non-DeepSeek proxy: the strict
-      // backends (SGLang, llama.cpp, vLLM) accept an empty signature, so we
-      // fill `signature: ''` instead of shipping a `thinking` block with no
-      // `signature` field (HTTP 400). Unlike 4.6+ the block is NOT dropped,
-      // and unlike the native API it IS rewritten.
+      // backend (verified against SGLang v0.5.19, #11772; llama.cpp/vLLM
+      // expected to behave the same but untested) accepts an empty
+      // signature, so we fill `signature: ''` instead of shipping a
+      // `thinking` block with no `signature` field (HTTP 400). Unlike 4.6+
+      // the block is NOT dropped, and unlike the native API it IS rewritten.
       // https://github.com/QwenLM/qwen-code/issues/11772
       const request = (
         await send(
@@ -1665,6 +1666,35 @@ describe('AnthropicContentGenerator', () => {
         role: 'assistant',
         content: [
           { type: 'thinking', thinking: 'unsigned reasoning', signature: '' },
+          { type: 'text', text: 'Visible answer' },
+        ],
+      });
+    });
+
+    it('leaves unsigned history byte-identical for 4.6 through a proxy when thinking is off', async () => {
+      // 4.6+ quadrant with thinking off: the fill is excluded (that
+      // quadrant is owned by `dropUnsignedAssistantThinking`), and the drop
+      // does not run either (it requires the outgoing `thinking`) — so the
+      // block ships exactly as it did before this PR: unsigned. The two
+      // passes stay disjoint, so the 4.6+ wire shape never changes.
+      // https://github.com/QwenLM/qwen-code/issues/11772
+      const request = (
+        await send(
+          nativeCfg('claude-opus-4-6', {
+            baseUrl: 'https://internal-proxy.example/anthropic',
+          }),
+          {
+            contents: unsignedThinkingConversation,
+            config: { thinkingConfig: { includeThoughts: false } },
+          },
+        )
+      ).req;
+
+      expect(request.thinking).toBeUndefined();
+      expect(request.messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'unsigned reasoning' },
           { type: 'text', text: 'Visible answer' },
         ],
       });
