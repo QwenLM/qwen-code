@@ -283,6 +283,12 @@ const WRITE_SCENARIOS: WriteScenario[] = [
         expect(constrainedConfirmation).toContain('`code`');
         expect(constrainedConfirmation).toContain('<u>under</u>');
         expect(constrainedConfirmation).not.toContain('CONFIRM_TAIL');
+        // The trusted destination heads the body, so it stays inside the
+        // collapsed head window; placed after the content it would sit in
+        // the hidden tail and a spoofed content head could name a different
+        // destination in its place.
+        expect(constrainedScreen).toContain('MCP Server: external-context');
+        expect(constrainedScreen).toContain('Tool: context_remember');
 
         ptyProcess.write('\x13');
         // CONFIRM_TAIL only becomes visible after expansion on both legs,

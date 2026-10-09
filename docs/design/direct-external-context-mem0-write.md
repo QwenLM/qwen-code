@@ -1,5 +1,7 @@
 # Direct External Context Mem0 Write
 
+[English](direct-external-context-mem0-write.md) | [简体中文](direct-external-context-mem0-write.zh-CN.md)
+
 **Status:** Implemented
 
 **Date:** 2026-08-03
@@ -244,8 +246,11 @@ The managed settings put search in `permissions.allow` and remember in
 `permissions.ask`. In an interactive session the Hook's ask is the
 confirmation: it shows the full content as literal text in place of the
 ordinary server/tool prompt, in every mode where the Hook asks (default,
-auto, auto-edit, and YOLO; in plan mode the Hook denies instead). The Hook
-runs once per call, so approval does not create a loop.
+auto, auto-edit, and YOLO; in plan mode the Hook denies instead). The body
+names the destination server and tool before the content, so the trusted
+destination stays inside the bounded head window regardless of how the
+content starts. The Hook runs once per call, so approval does not create a
+loop.
 
 Qwen command-Hook transport failures retain Qwen's existing fail-open
 semantics. A user who can disable the Hook, alter the launcher, or obtain the

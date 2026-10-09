@@ -1146,6 +1146,41 @@ describe('PermissionController', () => {
     );
   });
 
+  it('keeps the MCP destination in the suggestion for a hook-asked info confirmation', () => {
+    const controller = new PermissionController(
+      createContext(),
+      createRegistry(),
+      'PermissionController',
+    );
+
+    // A PreToolUse ask rewrites MCP details to a literal-text info
+    // confirmation; the title is the only field the info suggestion's
+    // description carries, so it must keep naming the destination.
+    const suggestions = controller.buildPermissionSuggestions({
+      type: 'info',
+      title:
+        'Hook requested confirmation to run context_remember (external-context)',
+      prompt:
+        'MCP Server: external-context\nTool: context_remember\n\nSave this exact content?',
+      renderPromptAsPlainText: true,
+      hideAlwaysAllow: true,
+    });
+
+    expect(suggestions).toEqual([
+      {
+        type: 'allow',
+        label: 'Allow Info Request',
+        description:
+          'Hook requested confirmation to run context_remember (external-context)',
+      },
+      {
+        type: 'deny',
+        label: 'Deny',
+        description: 'Block this information request',
+      },
+    ]);
+  });
+
   it('omits modify suggestions when edit confirmation hides modify actions', () => {
     const controller = new PermissionController(
       createContext(),

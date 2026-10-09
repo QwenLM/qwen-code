@@ -10884,6 +10884,18 @@ describe('CoreToolScheduler telemetry spans', () => {
     onConfirm: async () => {},
   });
 
+  /** The MCP confirmation an external-context write carries into the ask. */
+  const mcpConfirmation = async (): Promise<ToolCallConfirmationDetails> => ({
+    type: 'mcp',
+    title: 'Confirm MCP Tool Execution',
+    serverName: 'external-context',
+    toolName: 'context_remember',
+    // Distinct from `toolName`, as in production: the title assertions
+    // discriminate which field the rewrite reads.
+    toolDisplayName: 'context_remember (external-context MCP Server)',
+    onConfirm: async () => {},
+  });
+
   /**
    * Schedules one `ask-call` with hooks enabled (default bus: askMessageBus())
    * after clearing the recorded spans.
@@ -11035,16 +11047,6 @@ describe('CoreToolScheduler telemetry spans', () => {
   });
 
   it('shows a PreToolUse ask on an MCP tool as a literal-text info confirmation', async () => {
-    const mcpConfirmation = async (): Promise<ToolCallConfirmationDetails> => ({
-      type: 'mcp',
-      title: 'Confirm MCP Tool Execution',
-      serverName: 'external-context',
-      toolName: 'context_remember',
-      // Distinct from `toolName`, as in production: the title assertion
-      // below must discriminate which field is read.
-      toolDisplayName: 'context_remember (external-context MCP Server)',
-      onConfirm: async () => {},
-    });
     const { waiting } = await askUntilApproval({
       messageBus: askMessageBus(
         'Save this exact content to the bound Mem0 repository memory?\n[visible](https://hidden.example/target)',
@@ -11066,30 +11068,27 @@ describe('CoreToolScheduler telemetry spans', () => {
       renderPromptAsPlainText?: boolean;
       hideAlwaysAllow?: boolean;
     };
+    // The title names server and tool: the stream-json permission suggestion
+    // uses it as the allow description.
     expect(details.title).toBe(
-      'Hook requested confirmation to run context_remember',
+      'Hook requested confirmation to run context_remember (external-context)',
     );
-    // The reason stays literal and first; the destination follows it, because
-    // the info dialog renders no title and carries no server field.
+    // The info dialog renders no title and clips a long body to its head
+    // rows, so the trusted destination heads the body; the reason stays
+    // literal after it.
     expect(details.prompt).toBe(
-      'Save this exact content to the bound Mem0 repository memory?\n' +
-        '[visible](https://hidden.example/target)\n\n' +
-        'MCP Server: external-context\nTool: context_remember',
+      'MCP Server: external-context\nTool: context_remember\n\n' +
+        'Save this exact content to the bound Mem0 repository memory?\n' +
+        '[visible](https://hidden.example/target)',
     );
     expect(details.renderPromptAsPlainText).toBe(true);
-    // The hook re-evaluates on every call, so "always allow" is hidden.
+    // The wrapper publishing the awaiting_approval details forces
+    // hideAlwaysAllow for every PreToolUse ask — the hook re-evaluates on
+    // every call, so "always allow" must not be offered.
     expect(details.hideAlwaysAllow).toBe(true);
   });
 
   it('still blocks a hook-asked MCP tool call in plan mode', async () => {
-    const mcpConfirmation = async (): Promise<ToolCallConfirmationDetails> => ({
-      type: 'mcp',
-      title: 'Confirm MCP Tool Execution',
-      serverName: 'external-context',
-      toolName: 'context_remember',
-      toolDisplayName: 'context_remember (external-context MCP Server)',
-      onConfirm: async () => {},
-    });
     const execute = vi.fn().mockResolvedValue(textResult('ok'));
     const { onAllToolCallsComplete } = await scheduleWithAsk({
       approvalMode: ApprovalMode.PLAN,
@@ -11117,14 +11116,6 @@ describe('CoreToolScheduler telemetry spans', () => {
   });
 
   it('does not let AUTO_EDIT auto-approve a hook-asked MCP call', async () => {
-    const mcpConfirmation = async (): Promise<ToolCallConfirmationDetails> => ({
-      type: 'mcp',
-      title: 'Confirm MCP Tool Execution',
-      serverName: 'external-context',
-      toolName: 'context_remember',
-      toolDisplayName: 'context_remember (external-context MCP Server)',
-      onConfirm: async () => {},
-    });
     const execute = vi.fn().mockResolvedValue(textResult('ok'));
     const { waiting } = await askUntilApproval({
       approvalMode: ApprovalMode.AUTO_EDIT,
@@ -11143,6 +11134,42 @@ describe('CoreToolScheduler telemetry spans', () => {
     // executed write the hook explicitly asked the user about.
     expect(waiting.confirmationDetails.type).toBe('info');
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('does not let AUTO auto-approve or decorate a hook-asked MCP call', async () => {
+    // Approving classifier verdict: if the `!preToolUseAsk` gate ever lets a
+    // hook ask reach the AUTO machinery, this call executes without asking.
+    runSideQueryMock.mockResolvedValue({ shouldBlock: false });
+    const execute = vi.fn().mockResolvedValue(textResult('ok'));
+    const { waiting } = await askUntilApproval({
+      approvalMode: ApprovalMode.AUTO,
+      // The surface the AUTO gate's classifier path reads; unused while the
+      // gate keeps a hook ask out of it.
+      configOverrides: {
+        getCwd: () => '/repo',
+        getModel: () => 'test-model',
+        getAutoModeSettings: () => ({}),
+        getAutoModeDenialState: () => ({
+          consecutiveBlock: 0,
+          consecutiveUnavailable: 0,
+          totalBlock: 0,
+          totalUnavailable: 0,
+        }),
+        setAutoModeDenialState: vi.fn(),
+      },
+      messageBus: askMessageBus('Save this exact content?'),
+      tools: [
+        new MockTool({
+          name: 'mockTool',
+          execute,
+          getConfirmationDetails: mcpConfirmation,
+        }),
+      ],
+    });
+
+    expect(waiting.confirmationDetails.type).toBe('info');
+    expect(execute).not.toHaveBeenCalled();
+    expect(waiting.confirmationDetails.autoModeFallback).toBeUndefined();
   });
 
   it('executes the tool exactly once when the user approves an ask (no re-ask loop)', async () => {

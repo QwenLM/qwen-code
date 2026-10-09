@@ -8,7 +8,7 @@
 
 **相关设计：**
 [Direct External Context Provider](./direct-external-context-provider.md)、
-[Direct External Context Mem0 Write](./direct-external-context-mem0-write.md)、
+[Direct External Context Mem0 Write](./direct-external-context-mem0-write.zh-CN.md)、
 [External Context Provider Extensions](./external-context-provider-extensions.md)
 
 ## 决策

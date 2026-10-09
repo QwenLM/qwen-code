@@ -1612,11 +1612,15 @@ function withPreToolUseAskReason(
       // MCP details have no body that can carry the reason, so the ask falls
       // back to the literal-text info confirmation the pre-merge hook bounce
       // used. The info dialog renders no title and carries no server field,
-      // so the body names the destination after the reason.
+      // so the body names the destination. It comes first because both
+      // renderers clip a long body to its head rows: a spoofed reason head
+      // must not push the real destination into the hidden tail. The title
+      // names both too — stream-json permission suggestions use it as the
+      // allow description.
       return {
         type: 'info',
-        title: `Hook requested confirmation to run ${details.toolName}`,
-        prompt: `${reason}\n\nMCP Server: ${details.serverName}\nTool: ${details.toolName}`,
+        title: `Hook requested confirmation to run ${details.toolName} (${details.serverName})`,
+        prompt: `MCP Server: ${details.serverName}\nTool: ${details.toolName}\n\n${reason}`,
         renderPromptAsPlainText: true,
         hideAlwaysAllow: true,
         onConfirm: details.onConfirm,
