@@ -19,6 +19,7 @@ public final class SubmitHarnessTurn {
     private final String promptId;
     private final List<Map<String, Object>> promptContent;
     private final String payloadDigest;
+    private final Object wirePromptContent;
     private final Long deadlineMillis;
 
     private SubmitHarnessTurn(Builder builder) {
@@ -39,8 +40,22 @@ public final class SubmitHarnessTurn {
         this.promptContent = Collections.unmodifiableList(content);
         this.payloadDigest = HostedHarnessClient.requireDigest(
                 builder.payloadDigest, "payloadDigest");
-        String computed = computePayloadDigest(this.promptContent);
-        if (!computed.equals(payloadDigest)) {
+        // The hosted route recomputes the digest over the received prompt's
+        // key order before any replay check, so the digest must cover the
+        // exact bytes the wire carries. New digests are minted over the
+        // canonical (key-sorted) form; a digest persisted by a build that
+        // predates canonicalization covers the as-built key order instead,
+        // and neither the stored digest nor the stored input may be
+        // rewritten. Accept that legacy shape and keep it on the wire, or
+        // recovering such a turn row fails this self-check before any
+        // request is sent.
+        if (computePayloadDigest(this.promptContent).equals(
+                this.payloadDigest)) {
+            this.wirePromptContent = canonicalForDigest(this.promptContent);
+        } else if (digestOver(this.promptContent).equals(
+                this.payloadDigest)) {
+            this.wirePromptContent = this.promptContent;
+        } else {
             throw new IllegalArgumentException(
                     "payloadDigest does not match promptContent");
         }
@@ -57,22 +72,25 @@ public final class SubmitHarnessTurn {
             throw new IllegalArgumentException(
                     "promptContent must not be empty");
         }
+        // The hosted route recomputes this value by re-serializing the
+        // parsed `prompt` member (JavaScript `JSON.stringify`
+        // semantics: compact separators, literal non-ASCII) and hashing
+        // those bytes, so the digest must cover exactly the canonical
+        // form toJson() also emits. Iteration order is only
+        // canonicalized recursively because fastjson2 does not sort
+        // maps nested in a collection.
+        return digestOver(canonicalForDigest(promptContent));
+    }
+
+    private static String digestOver(Object value) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            // The hosted route recomputes this value by re-serializing the
-            // parsed `prompt` member (JavaScript `JSON.stringify`
-            // semantics: compact separators, literal non-ASCII) and hashing
-            // those bytes, so the digest must cover exactly the canonical
-            // form toJson() also emits. Iteration order is only
-            // canonicalized recursively because fastjson2 does not sort
-            // maps nested in a collection.
-            byte[] bytes = JsonSupport.encode(
-                    canonicalForDigest(promptContent))
+            byte[] bytes = JsonSupport.encode(value)
                     .getBytes(StandardCharsets.UTF_8);
             byte[] hashed = digest.digest(bytes);
             StringBuilder result = new StringBuilder("sha256:");
-            for (byte value : hashed) {
-                result.append(String.format("%02x", value & 0xff));
+            for (byte b : hashed) {
+                result.append(String.format("%02x", b & 0xff));
             }
             return result.toString();
         } catch (NoSuchAlgorithmException e) {
@@ -114,7 +132,7 @@ public final class SubmitHarnessTurn {
 
     Map<String, Object> toJson() {
         Map<String, Object> result = new LinkedHashMap<>();
-        result.put("prompt", canonicalForDigest(promptContent));
+        result.put("prompt", wirePromptContent);
         result.put("promptId", promptId);
         result.put("payloadDigest", payloadDigest);
         if (deadlineMillis != null) {
