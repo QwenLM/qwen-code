@@ -101,7 +101,7 @@ class WorkspaceCsiSessionGuardTest {
         var ownership = reservations.inspect(registration);
         assertApiCode(() -> transaction.execute(status -> managed.beginWorkspaceLifecycle("tenant", sessionId,
                 kind, "actor", "actor-digest", "public-lifecycle", "request-digest", true, 1)),
-                "workspace_unavailable");
+                "csi_managed_mutation_unavailable");
         assertThat(jdbc.queryForMap("SELECT * FROM managed_agent_session WHERE session_id = ?", sessionId))
                 .usingRecursiveComparison().isEqualTo(before);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation", Integer.class)).isZero();

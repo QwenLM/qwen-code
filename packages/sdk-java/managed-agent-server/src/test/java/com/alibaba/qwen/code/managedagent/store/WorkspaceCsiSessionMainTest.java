@@ -10,8 +10,8 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
@@ -21,19 +21,30 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestFactory;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -303,6 +314,197 @@ class WorkspaceCsiSessionMainTest {
                     .isInstanceOf(IllegalArgumentException.class).hasMessage("CSI Session request could not be read");
         }
         assertEmpty("managed_agent_session");
+    }
+
+    @TestFactory
+    Stream<DynamicTest> refusesEveryLegacyMutationWithoutChangingAnyPersistedTable() {
+        var original = create(request("legacy-boundary"));
+        // A leftover legacy operation is an unsupported fact, not CSI retirement authority.
+        insertLegacyOperation(original.sessionId());
+        var before = allTables();
+        var names = List.of("insertTurnCommand", "insertCancelCommand", "beginSessionMutation",
+                "completeSessionMutation", "abandonSessionMutation", "beginOperation", "beginWorkspaceClose",
+                "beginWorkspaceLifecycle", "unarchiveWorkspaceSession", "beginCwdChangeOperation",
+                "completeCwdChangeOperation", "failCwdChangeOperation", "claimOperation", "completeOperation",
+                "renewLifecycleOperation", "blockLifecycleOperation", "retryOperation", "advanceReplayFloor",
+                "materializeNextBatch", "claimTurn", "renewTurn", "releaseTurnLease", "scheduleTurnRetry",
+                "bindHarness", "bindRecoveredHarness", "markSubmissionAttempted", "withdrawSubmissionAttempted",
+                "recordAdmission", "recordRecoveryAdmission", "retractContinuationOutput", "retractHarnessTurnOutput",
+                "recordHarnessEvents", "cancelBeforeAdmission", "failTurn", "appendPublicEventIfAbsent",
+                "appendLiveSessionEventIfAbsent");
+        assertThat(Arrays.stream(ManagedAgentStore.class.getMethods()).map(Method::getName).distinct()
+                .filter(names::contains).sorted().toList())
+                .containsExactlyElementsOf(names.stream().sorted().toList());
+        return Arrays.stream(ManagedAgentStore.class.getMethods()).filter(method -> names.contains(method.getName()))
+                .map(method -> DynamicTest.dynamicTest(method.toString(), () -> {
+                    assertPrivateRefusal(() -> new TransactionTemplate(manager).executeWithoutResult(status ->
+                            invokeMutation(method, original.sessionId())));
+                    assertThat(allTables()).isEqualTo(before);
+                }));
+    }
+
+    @Test
+    void retainedRequestPinStillRefusesAfterAConflictingProfileChange() {
+        var original = create(request("retained-pin"));
+        jdbc.update("UPDATE managed_agent_session SET tool_profile = 'hosted-workspace-files/1'");
+        assertThat(jdbc.queryForObject("SELECT csi_guard FROM managed_agent_session", Boolean.class)).isTrue();
+        var before = allTables();
+        assertPrivateRefusal(() -> new TransactionTemplate(manager).executeWithoutResult(status ->
+                store().appendPublicEventIfAbsent("tenant", original.sessionId(), null, "session.environment",
+                        Map.of(), false, "late-warmup")));
+        assertPrivateRefusal(() -> new TransactionTemplate(manager).executeWithoutResult(status -> store()
+                .insertChildSessionCommand("tenant", original.sessionId(), "child", "digest", "child",
+                        List.of(), null, new StoreModels.SessionLineage(original.sessionId(),
+                                original.sessionId(), "child-run", 1))));
+        assertThat(allTables()).isEqualTo(before);
+    }
+
+    @Test
+    void privateBacklogDoesNotStarveOrdinaryProjectionDispatchOrOperationWork() {
+        for (int index = 0; index < 3; index++) {
+            var original = create(request("backlog-" + index));
+            insertLegacyOperation(original.sessionId());
+            jdbc.update("INSERT INTO managed_agent_snapshot (tenant_id, session_id, snapshot_version,"
+                    + " covered_sequence, items_json, created_at, updated_at) VALUES ('tenant', ?, 1, 1, '[]', 0, 0)",
+                    original.sessionId());
+        }
+        var tx = new TransactionTemplate(manager);
+        var ordinary = tx.execute(status -> store().insertSessionCommand("tenant", "actor", "CREATE_SESSION",
+                "ordinary-turn", "digest", "qwen-code", null, null,
+                List.of(Map.of("type", "text", "text", "hello")), "payload"));
+        var idle = tx.execute(status -> store().insertSessionCommand("tenant", "actor", "CREATE_SESSION",
+                "ordinary-operation", "other-digest", "qwen-code", null, null, List.of(), null));
+        var operation = tx.execute(status -> store().beginOperation("tenant", idle.sessionId(),
+                StoreModels.OperationKind.CLOSE, "", "close", "close-digest"));
+        assertThat(store().findMaterializationTargets(1)).extracting(StoreModels.MaterializationTarget::sessionId)
+                .containsExactly(ordinary.sessionId());
+        assertThat(tx.execute(status -> store().materializeNextBatch("tenant", ordinary.sessionId(), 100)).advanced())
+                .isTrue();
+        assertThat(store().findReplayFloorTargets(1)).extracting(StoreModels.ReplayFloorTarget::sessionId)
+                .containsExactly(ordinary.sessionId());
+        assertThat(tx.execute(status -> store().advanceReplayFloor("tenant", ordinary.sessionId(), 100)).floorSequence())
+                .isGreaterThan(0);
+        var ordinaryTurn = jdbc.queryForMap("SELECT * FROM managed_agent_turn WHERE session_id = ?", ordinary.sessionId());
+        var privateTurn = new java.util.LinkedHashMap<>(ordinaryTurn);
+        privateTurn.put("session_id", jdbc.queryForObject("SELECT session_id FROM managed_agent_session"
+                + " WHERE csi_guard = TRUE ORDER BY session_id LIMIT 1", String.class));
+        privateTurn.put("turn_id", "private-legacy-turn");
+        privateTurn.put("prompt_id", UUID.randomUUID().toString());
+        privateTurn.put("updated_at", 0L);
+        jdbc.update("INSERT INTO managed_agent_turn (" + String.join(",", privateTurn.keySet()) + ") VALUES ("
+                + String.join(",", java.util.Collections.nCopies(privateTurn.size(), "?")) + ")",
+                privateTurn.values().toArray());
+        assertThat(store().findDispatchable(System.currentTimeMillis(), 1))
+                .extracting(StoreModels.DispatchTarget::sessionId).containsExactly(ordinary.sessionId());
+        assertThat(store().findDeliverableOperations(0, 1)).extracting(StoreModels.OperationTarget::sessionId)
+                .containsExactly(idle.sessionId());
+        var claimedOperation = tx.execute(status -> store().claimOperation("tenant", idle.sessionId(),
+                operation.operation().operationId(), "owner", Duration.ofMinutes(1)));
+        assertThat(claimedOperation).isPresent();
+        var claimedTurn = tx.execute(status -> store().claimTurn("tenant", ordinary.sessionId(), ordinary.turnId(),
+                "owner", Duration.ofMinutes(1)));
+        assertThat(claimedTurn).isPresent();
+        var renewedTurn = tx.execute(status -> store().renewTurn("tenant", ordinary.sessionId(), ordinary.turnId(),
+                "owner", Duration.ofMinutes(1)));
+        assertThat(renewedTurn).isTrue();
+        tx.executeWithoutResult(status -> store().scheduleTurnRetry("tenant", ordinary.sessionId(),
+                ordinary.turnId(), "owner", 0));
+        assertThat(store().findTurn("tenant", ordinary.sessionId(), ordinary.turnId()).orElseThrow().dispatchOwner())
+                .isNull();
+        var reclaimedTurn = tx.execute(status -> store().claimTurn("tenant", ordinary.sessionId(), ordinary.turnId(),
+                "owner", Duration.ofMinutes(1)));
+        assertThat(reclaimedTurn).isPresent();
+        tx.executeWithoutResult(status -> store().releaseTurnLease("tenant", ordinary.sessionId(),
+                ordinary.turnId(), "owner"));
+        assertThat(store().findTurn("tenant", ordinary.sessionId(), ordinary.turnId()).orElseThrow().dispatchOwner())
+                .isNull();
+    }
+
+    private void invokeMutation(Method method, String sessionId) {
+        Object[] arguments = Arrays.stream(method.getParameterTypes()).map(type -> {
+            if (type == String.class) {
+                return (Object) "unused";
+            }
+            if (type == long.class) {
+                return 1L;
+            }
+            if (type == int.class) {
+                return 1;
+            }
+            if (type == boolean.class) {
+                return true;
+            }
+            if (type == Duration.class) {
+                return Duration.ofMinutes(1);
+            }
+            if (type.isEnum()) {
+                return type.getEnumConstants()[0];
+            }
+            if (type == List.class) {
+                return List.of();
+            }
+            if (type == Map.class) {
+                return Map.of();
+            }
+            throw new IllegalStateException("Unsupported mutation parameter " + type);
+        }).toArray();
+        arguments[0] = "tenant";
+        int sessionIndex = switch (method.getName()) {
+            case "insertTurnCommand", "insertCancelCommand", "beginSessionMutation" -> 4;
+            case "completeSessionMutation", "abandonSessionMutation" -> 3;
+            default -> 1;
+        };
+        arguments[sessionIndex] = sessionId;
+        try {
+            method.invoke(store(), arguments);
+        } catch (InvocationTargetException error) {
+            if (error.getCause() instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            throw new IllegalStateException(error.getCause());
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private void insertLegacyOperation(String session) {
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id, session_id, operation_id, operation_kind,"
+                + " actor_digest, idempotency_key, request_digest, state, admission_stage, delivery_state,"
+                + " session_status_before, available_at, created_at, updated_at) VALUES"
+                + " ('tenant', ?, ?, 'CLOSE', '', 'unused', 'digest', 'PENDING', 'JAVA_DURABLE', 'PENDING', 'ACTIVE', 0, 0, 0)",
+                session, count("managed_agent_operation") == 0 ? "unused" : UUID.randomUUID().toString());
+    }
+
+    private Map<String, JsonNode> allTables() {
+        var result = new TreeMap<String, JsonNode>();
+        for (String table : jdbc.queryForList("SELECT table_name FROM information_schema.tables"
+                + " WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name", String.class)) {
+            var rows = jdbc.queryForList("SELECT * FROM " + table).stream().map(row -> {
+                row.replaceAll((column, value) -> {
+                    if (value instanceof java.sql.Clob clob) {
+                        try {
+                            return clob.getSubString(1, Math.toIntExact(clob.length()));
+                        } catch (java.sql.SQLException error) {
+                            throw new IllegalStateException(error);
+                        }
+                    }
+                    return value;
+                });
+                return json.<JsonNode>valueToTree(row);
+            })
+                    .sorted(Comparator.comparing(JsonNode::toString)).toList();
+            result.put(table, json.valueToTree(rows));
+        }
+        assertThat(result).hasSize(57);
+        return result;
+    }
+
+    private static void assertPrivateRefusal(org.assertj.core.api.ThrowableAssert.ThrowingCallable operation) {
+        assertThatThrownBy(operation).isInstanceOf(ApiException.class).satisfies(error -> {
+            var refusal = (ApiException) error;
+            assertThat(refusal.getCode()).isEqualTo("csi_managed_mutation_unavailable");
+            assertThat(refusal.getStatus()).isEqualTo(org.springframework.http.HttpStatus.CONFLICT);
+        });
     }
 
     private WorkspaceCsiSessionMain.Request request(String idempotencyKey) {
