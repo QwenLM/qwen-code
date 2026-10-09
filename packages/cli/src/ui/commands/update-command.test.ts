@@ -11,33 +11,11 @@ const checkForUpdatesDetailed = vi.fn();
 const relaunchForUpdate = vi.fn();
 const performStandaloneUpdate = vi.fn();
 const getInstallationInfo = vi.fn();
-const resolveUpdateCommand = vi.fn(
-  (updateCommand: string, latestVersion: string) =>
-    updateCommand.replace('@latest', `@${latestVersion}`),
-);
-const standaloneUpdateMessage =
-  'Standalone install detected. Please rerun the standalone installer to update: curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash';
-const formatUpdateInstructions = vi.fn(
-  (
-    installationInfo: {
-      updateMessage?: string;
-      updateCommand?: string;
-      isStandalone?: boolean;
-    },
-    latestVersion: string,
-  ) => {
-    if (installationInfo.updateMessage && !installationInfo.updateCommand) {
-      return [installationInfo.updateMessage];
-    }
-    if (installationInfo.updateCommand) {
-      return [
-        'Run the following to update:',
-        `  ${resolveUpdateCommand(installationInfo.updateCommand, latestVersion)}`,
-      ];
-    }
-    return ['Manual update required. Please reinstall Qwen Code.'];
-  },
-);
+const standaloneGuidanceLine =
+  'Standalone install detected. Please rerun the standalone installer to update:';
+const standaloneUpdateCommand =
+  'curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash';
+const standaloneUpdateMessage = `${standaloneGuidanceLine} ${standaloneUpdateCommand}`;
 vi.mock('../utils/updateCheck.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../utils/updateCheck.js')>()),
   checkForUpdatesDetailed,
@@ -50,10 +28,11 @@ vi.mock('../../utils/processUtils.js', () => ({
 vi.mock('../standalone-update.js', () => ({
   performStandaloneUpdate,
 }));
-vi.mock('../../utils/installationInfo.js', () => ({
-  formatUpdateInstructions,
+// Only the detector is stubbed; the real formatter runs so the composed
+// content matches what /update actually emits.
+vi.mock('../../utils/installationInfo.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../utils/installationInfo.js')>()),
   getInstallationInfo,
-  resolveUpdateCommand,
 }));
 const { updateCommand } = await import('./update-command.js');
 
@@ -150,7 +129,7 @@ describe('updateCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: `Update available: 1.2.3\n${standaloneUpdateMessage}`,
+      content: `Update available: 1.2.3\n${standaloneGuidanceLine}\n ${standaloneUpdateCommand}`,
     });
     expect(getInstallationInfo).toHaveBeenCalledWith('/repo', false);
     expect(relaunchForUpdate).not.toHaveBeenCalled();
@@ -322,7 +301,7 @@ describe('updateCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: `Update available: 1.2.3\n${standaloneUpdateMessage}`,
+      content: `Update available: 1.2.3\n${standaloneGuidanceLine}\n ${standaloneUpdateCommand}`,
     });
     expect(getInstallationInfo).toHaveBeenCalledWith('/repo', false);
     expect(performStandaloneUpdate).not.toHaveBeenCalled();

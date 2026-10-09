@@ -75,6 +75,12 @@ const STANDALONE_UNIX_INSTALLER =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh';
 const STANDALONE_WINDOWS_INSTALLER =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1';
+// Both the detector message and the formatter's split read this one constant.
+// The sentence must stay byte-identical to the i18n catalogue key in
+// locales/*.js; the trailing space separates the interpolated command and is
+// trimmed from the line handed to t().
+const STANDALONE_UPDATE_PREFIX =
+  'Standalone install detected. Please rerun the standalone installer to update: ';
 
 function getStandaloneInstallerUrl(): string {
   return process.platform === 'win32'
@@ -132,14 +138,10 @@ function formatUpdateMessage(
     ];
   }
 
-  // The prefix must stay byte-identical to the i18n key in locales/*.js; with
-  // the interpolated command the line is an unmatchable lookup key.
-  const standalonePrefix =
-    'Standalone install detected. Please rerun the standalone installer to update: ';
-  if (message.startsWith(standalonePrefix)) {
+  if (message.startsWith(STANDALONE_UPDATE_PREFIX)) {
     return [
-      standalonePrefix.trimEnd(),
-      ` ${message.slice(standalonePrefix.length)}`,
+      STANDALONE_UPDATE_PREFIX.trimEnd(),
+      ` ${message.slice(STANDALONE_UPDATE_PREFIX.length)}`,
     ];
   }
 
@@ -411,7 +413,7 @@ function getStandaloneInstallInfo(
     standaloneDir: installDir,
     updateMessage: isAutoUpdateEnabled
       ? 'Standalone install detected. Attempting to automatically update now...'
-      : `Standalone install detected. Please rerun the standalone installer to update: ${updateCommand}`,
+      : `${STANDALONE_UPDATE_PREFIX}${updateCommand}`,
   };
 }
 

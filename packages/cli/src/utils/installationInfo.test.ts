@@ -222,6 +222,14 @@ describe('getInstallationInfo', () => {
       'Standalone install detected. Please rerun the standalone installer to update: ' +
         'curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash',
     );
+
+    // Compose the real detector output with the real formatter: the guidance
+    // must survive as a standalone translatable line, not just as fixtures
+    // transcribed by hand.
+    expect(formatUpdateInstructions(disabledInfo, '1.2.3')).toEqual([
+      'Standalone install detected. Please rerun the standalone installer to update:',
+      ' curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash',
+    ]);
   });
 
   it('should detect Windows standalone installs and avoid npm auto-update', () => {
