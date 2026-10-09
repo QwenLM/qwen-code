@@ -392,6 +392,35 @@ export class HostedHookSession {
     return this.acquired;
   }
 
+  get hasMountableToolResultHooks(): boolean {
+    const usedOnce = new Set(this.executions().map((entry) => entry.onceKey));
+    return (
+      this.catalog?.hooks.some(
+        (hook) =>
+          hook.config.type === HookType.Command &&
+          this.isHookEligible(hook, usedOnce, null) &&
+          (hook.eventName === HookEventName.PostToolUse ||
+            hook.eventName === HookEventName.PostToolUseFailure ||
+            hook.eventName === HookEventName.PostToolBatch),
+      ) ?? false
+    );
+  }
+
+  private isHookEligible(
+    hook: ManagedHookDescriptor,
+    usedOnce: ReadonlySet<string | null>,
+    agentId: unknown,
+  ): boolean {
+    return (
+      hook.enabled !== false &&
+      hook.sourceTrusted !== false &&
+      (!hook.owner || hook.owner.sessionId === this.key.sessionId) &&
+      (!hook.agentScope ||
+        (hook.owner !== undefined && hook.owner.agentId === agentId)) &&
+      (!hook.onceKey || !usedOnce.has(hook.onceKey))
+    );
+  }
+
   get hasPendingOperations(): boolean {
     return this.executions().some((record) => {
       if (record.run.state === 'recovery_blocked') return true;
@@ -672,13 +701,7 @@ export class HostedHookSession {
       const hooks = this.catalog!.hooks.filter(
         (hook) =>
           hook.eventName === event &&
-          hook.enabled !== false &&
-          hook.sourceTrusted !== false &&
-          (!hook.owner || hook.owner.sessionId === this.key.sessionId) &&
-          (!hook.agentScope ||
-            (hook.owner !== undefined &&
-              hook.owner.agentId === (fields['agent_id'] ?? null))) &&
-          (!hook.onceKey || !usedOnce.has(hook.onceKey)) &&
+          this.isHookEligible(hook, usedOnce, fields['agent_id'] ?? null) &&
           (!hook.matcher ||
             !target?.target ||
             matchesHookPattern(

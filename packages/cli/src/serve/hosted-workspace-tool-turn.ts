@@ -570,16 +570,13 @@ export class HostedWorkspaceToolTurn {
     return this.advertised;
   }
 
-  // The mount the Session already holds counts exactly like this Turn's
-  // own acquisition: `acquired` tracks only what this Turn took through
-  // the (possibly shared) broker, while the Hook catalog or MCP owner can
-  // hold the same Workspace mount until their Session-scoped close. A
-  // foreground child must not launch against either hold.
-  private sessionHoldsMount(): boolean {
+  // Result command Hooks can acquire after child admission and retain
+  // the mount until Session close, so count their future hold as well.
+  private sessionOwnerMayHoldMount(): boolean {
     return (
-      this.acquired ||
       (this.mcp?.mountHeld ?? false) ||
-      (this.hooks?.mountHeld ?? false)
+      (this.hooks?.mountHeld ?? false) ||
+      (this.hooks?.hasMountableToolResultHooks ?? false)
     );
   }
 
@@ -1318,29 +1315,12 @@ export class HostedWorkspaceToolTurn {
           } else if (backgroundIllFormed) {
             validationError =
               'Hosted child agent run_in_background must be a boolean.';
-          } else if (!agentBackground && this.sessionHoldsMount()) {
-            // v1: a foreground child waits out the parent's own wait, and
-            // the shared Workspace's mount is held by exactly that wait —
-            // its child could never borrow it. The hold can belong to an
-            // owner this Turn never counts on its own flag: the Session's
-            // Hook catalog or MCP owner acquired and retains the mount
-            // until their Session-scoped close. Refuse before the
-            // deadlock rather than let both Turns burn down to the
-            // deadline.
+          } else if (this.sessionOwnerMayHoldMount()) {
+            validationError = `Hosted child agent run_in_background=${agentBackground} is unavailable while the Session's Hook catalog or MCP owner holds or will acquire the Workspace mount; use a Session without that owner hold or enabled result command Hooks.`;
+          } else if (!agentBackground && this.acquired) {
+            // A foreground child cannot borrow its waiting parent's mount.
             validationError =
               'Hosted child agent run_in_background=false is unavailable while this Turn holds the Workspace mount; run it in the background or let the current tool work finish first in a fresh turn.';
-          } else if (
-            agentBackground &&
-            (this.mcp?.mountHeld === true || this.hooks?.mountHeld === true)
-          ) {
-            // The background recommendation dies with this owner: a Session
-            // -scoped mount (Hook catalog, MCP owner) survives the Turn, so
-            // the launched child cannot warm its own until the Session
-            // closes — the ordinary turn-wait workaround does not release
-            // it either. Turn-owned mounts at their finish do release, so
-            // only the Session-owned holds are gated on the background arm.
-            validationError =
-              'Hosted child agent run_in_background=true is unavailable while the Session’s Hook catalog or MCP owner holds the Workspace mount, which ends when the Session closes; launch after the owner closes or from a Session without the mount held.';
           } else if (
             !agentBackground &&
             calls.some((other) => other.name !== 'agent')
