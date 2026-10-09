@@ -618,10 +618,10 @@ consumption 发生在实际后续模型尝试成功后。successor 消费 settle
 原 outcome reference 保持准确。完成原 assistant、turn_settled、idle 链。已提交模型
 output 后重启须完成原 attempt，不能发送第三次模型请求；该窗口仍独立验收。
 
-当前私有 read-batch 返回 reference/input/declaration/state，不返回原始 SETTLED result
-和持久 grant。因此 receipt-absent 恢复还需要单独合格的原认证 readback，以及持久、
-只落定一次的 outcome/message 身份。observer 不能以随机 ID 充当权威、重建正向 SQL 行，
-也不能用 retirement export 授予存活 Session 的 takeover。
+原 preparation read-batch 返回 reference/input/declaration/state，不包含原始
+SETTLED result 或持久 grant。第 6.8.4 节的专用 cold readback 已在已安装 successor
+fence 下返回这些原 bytes，并仅一次建立 outcome/message 身份。observer 不能以随机
+ID 充当权威、重建正向 SQL 行，也不能用 retirement export 授予存活 Session 的 takeover。
 
 #### 6.8.3 冷恢复验收与实现边界
 
@@ -649,7 +649,7 @@ Main transport、保留 worker、原 ledgers 和共享 Harness，不另建公开
 
 #### 6.8.4 receipt 缺失前的合格 SETTLED 结果
 
-状态：候选实现已允许具备原始资格的 SETTLED 成员缺失 receipt；新鲜 C4 正向验收仍待完成。基线 `ca75a90014bb6c92e9c1a06dcdbdb9c01b8613b5` 在新建自有 MySQL 8.4.11 完成 Flyway 53–58 后复现该缺口：最后 Main GET 返回包含 settled 结果的 200，在交付 Hosted 前扣留响应；已有两个 receipt/message，最后 receipt/message/resolve 不存在。只终止已登记原 owner 并等待自然过期后，实际 native acquire 返回 409 `csi_native_execution_unavailable`，该事务前后全部 57 表精确相同。原三条 execution/result/grant 行以及 execute/effect 观察保持一致。producer 在完整 auditor 前 exit 1，原因是 observer 跨 JVM 逐字节比较启动请求序列化；完整 JSON 值与其它帧字段均相等，仅顶层 key 顺序不同。该 aggregate 继续保留为失败，只提供已复现的拒绝证据，不能当作正向恢复验收。
+状态：已实现，`3ca25ea71f987d093cc75bc59f440ee83d4375a4` 的有界正向 C4 验收记录在第 7.10 节。基线 `ca75a90014bb6c92e9c1a06dcdbdb9c01b8613b5` 在新建自有 MySQL 8.4.11 完成 Flyway 53–58 后复现该缺口：最后 Main GET 返回包含 settled 结果的 200，在交付 Hosted 前扣留响应；已有两个 receipt/message，最后 receipt/message/resolve 不存在。只终止已登记原 owner 并等待自然过期后，实际 native acquire 返回 409 `csi_native_execution_unavailable`，该事务前后全部 57 表精确相同。原三条 execution/result/grant 行以及 execute/effect 观察保持一致。producer 在完整 auditor 前 exit 1，原因是 observer 跨 JVM 逐字节比较启动请求序列化；完整 JSON 值与其它帧字段均相等，仅顶层 key 顺序不同。该 aggregate 继续保留为失败，只提供已复现的拒绝证据，不能当作正向恢复验收。
 
 候选实现与 live tool turn 共享原 accepted-input 规范化及 atomic receipt publication。新 cold reader 使用已安装 successor fence，对原 result/grant 做严格有界解码，并在任何写入前验证整个 batch。receipt-complete 路径不增加 batch read。本地中断回归核验新耐久 receipt 在重试时保留首次身份，但不验收 C5 进程断点或完整 K2。
 
@@ -675,9 +675,15 @@ receipt 尚不存在时，原随机 message ID 或 timestamp 也尚未耐久建�
 
 native qualification 必须明确识别这一种双 event final-output 事务，并独立核验两个既有 body、attempt/route/checkpoint、原 scoped resources、完整 assistant Parts 与零 function call。只有该合格 final output 才允许 assistant 已提交时消费结果。原 results-ready 成员、receipt/outcome、SQL result/grant 与已闭合 schema2 history 保持精确；采用 successor activation 仅改变 checkpoint 许可的 activation 身份。
 
-独立 C8 cold-tail 分类要求该原完整 final output、原成功 model2 attempt/input checkpoint、完整 SETTLED 且未 consumed 成员、原闭合 history，以及现有 scoped expiry/claim/install 证明。私有 text 恢复分支随后直接消费并结算原 turn，提交既有 turn-result/idle 链，返回原 assistant。它绕过 model runner，不新增第三次模型请求、attempt、assistant 身份、execution 或文件效果。正常 live 路径也须识别已原子提交的 assistant，避免外层再提交一次消息。具体 completion 接口须在实现前确定；必须由实际私有 CSI caller 填充，普通 consumer 有回归覆盖。
+提议的 completion 接口为 `ManagedMainModelAttempt` 增加可选 final `ChatRecord`。共享 turn wrapper 暴露内部 `completeFinalOutput(attempt, usage, record)` 回调；只有私有 CSI caller 填充，并将成功状态、原 usage 与完整 record 传给原 attempt。wrapper 用原 parent 和 stream 身份构建一次 record。模型层仅在无 Hook、处理原 pending tool results、已取得完整且零 function call 的 Parts 时调用它。在原子调用前标记此 completion 路径已处理：响应丢失必须抛 recovery-required，不能再补 legacy marker 或 abandoned event。成功后推进 wrapper parent，跳过稍后的重复 assistant commit。普通 Hosted、Hook、child-completion callback 与新 tool call 路径保持既有行为。
 
-新鲜 C8 测试只能在实际 atomic full-output 事务提交后、结果消费前切断；仅终止已登记 Main/Hosted，保留原 Worker/DB/文件直到自然过期。要求实际模型请求总数精确为二，原完整 output/Parts/stream 身份精确，一次消费/结算，零重复文件 I/O。仅有 marker、Parts/thought/parent/model/attempt/checkpoint/scope 改变、新 tool call 或未闭合 history 均须拒绝。覆盖 commit 响应丢失、renewal 竞争中的 sequence 分配及普通 Hook/Hosted 兼容。此设计不接受尚未执行的 C8、物理释放、安全复用或完整 K2。
+保留 operation `hostedModelAttempt` 与原 attempt 的 `output_committed` command ID。final-output content digest 绑定带版本的固定数组，其中包含原 attempt ID 与 route/checkpoint/usage/message reference tuple；tuple 含 resource ID、kind、schema version、byte length、digest。必须同时绑定输出和 usage，防止 local replay 吞掉变化内容。复用原 message-body chunking；完整 message、usage、manifest 与 chunks 必须共同满足现有 transaction budget。native parser 直接识别精确双 event 事务，复用纯 route/usage 校验，不伪造 single-event metadata。final message payload 携带现有可选 `modelAttemptId`；仅此 parser 为后续消费或冷准入派生 final message 身份/reference。
+
+final-output grammar 保留 closed text 与 inline-data Parts，可带 boolean `thought` 和 string `thoughtSignature`；校验 inline-data MIME type 和 canonical Base64，拒绝 function call 与不支持的形状。所有已接受字段均须保留，不能静默删去 thought、signature 或 media。这些提议的 final-output 规则不扩宽现有普通 tool-call message grammar。
+
+独立 C8 cold-tail 分类要求该原完整 final output、原成功 model2 attempt/input checkpoint、完整 SETTLED 且未 consumed 成员、原闭合 history，以及现有 scoped expiry/claim/install 证明。checkpoint items、原 SQL execution、intent 和带原结果消息/outcome reference 的完整 receipt，成员集合必须精确一致。C4 readback 的原 receipt-absent 分类继续分离，不能接受 C8 tail。私有 C8 分支校验完整已有 receipt/message 链，不 repair 写入、不新增 read-batch，再通过共享 ownership wrapper 直接消费并结算原 turn。提交既有 turn-result/idle 链；私有 text 响应仍为现有 turn-result record，原 assistant 保留在 journal/history/feed。它绕过 model runner，不新增第三次模型请求、attempt、assistant 身份、execution 或文件效果。TS event 相邻不是同一 SQL 事务的独立证明；该证明来自 native journal qualification 与成功 claim/install。此增量仍拒绝已经 consumed 或 turn-settled 的后续窗口。
+
+新鲜 C8 测试只能在实际 atomic full-output 事务提交后、结果消费前切断；仅终止已登记 Main/Hosted，保留原 Worker/DB/文件直到自然过期。要求实际模型请求总数精确为二，原完整 output/Parts/stream 身份精确，一次消费/结算，零重复文件 I/O。仅有 marker 的 tail、改写已持久 Parts/thought 或 usage 的 replay、parent/model/attempt/checkpoint/scope 关系错误、新 tool call 或未闭合 history 均须拒绝。首次合法输出可以有不同的合法 thought/usage；native parser 没有独立 provider transcript 可比较，不能证明 provider 作者身份。其保证是在可信私有 writer 边界内完整持久化、校验 scope/stream 并保留不可变 replay。覆盖 commit 响应丢失、renewal 竞争中的 sequence 分配及普通 Hook/Hosted 兼容。此设计不接受尚未执行的 C8、物理释放、安全复用或完整 K2。
 
 ## 7. 验证与验收
 
@@ -878,4 +884,24 @@ NodeUnpublish、原子 RELEASED、安全卷复用、目标 Linux/云和公开 CS
 
 ignored Worker snapshot 协议仅接受 `/^[a-z-]+$/`，但新增标签 `cold-c6-after-claimant2-crash` 含数字。helper 拒绝该观察请求后退出；原错误、coordinator wait/join 错误和 outer exit 均保留。失败清理 inventory 不能代替缺失的 post-crash 存活 Worker snapshot 或 I/O 计数。尚未观察 claimant2 自然过期、claimant3 generation3/epoch2、实际 model2、消费/idle 与完整 auditor。C6 尚未验收，也不宣称产品拒绝。
 
-root 独立核验 238 项封存 artifact、4407 个当前 selected input 加 4 个 product、4562 个 closing selected input 与 18 份历史 ref 后，解除失败窗口。记录的 Node load 与 load-before/terminal bytes 吻合，事前冻结范围仍具有 7.7 所述有界限制。自有数据库/用户已删除，MySQL shutdown exit 0，21 个已登记进程组通过 42 次缺席探测，11 个端口关闭，自有临时 data/socket 目录删除。修复观察器协议后仍须新鲜完整运行；此次部分观察不能验收 Linux CSI、物理释放或完整 K2。
+root 独立核验 238 项封存 artifact、4407 个当前 selected input 加 4 个 product、4562 个 closing selected input 与 18 份历史 ref 后，解除失败窗口。记录的 Node load 与 load-before/terminal bytes 吻合，事前冻结范围仍具有 7.7 所述有界限制。自有数据库/用户已删除，MySQL shutdown exit 0，21 个已登记进程组通过 42 次缺席探测，11 个端口关闭，自有临时 data/socket 目录删除。该失败时点仍须在修复观察器协议后完成新鲜完整运行；后来完整运行记录在第 7.9 节。此次部分观察不能验收 Linux CSI、物理释放或完整 K2。
+
+### 7.9 未安装 claim 后的有界正向 C6
+
+独立新鲜运行在干净 `3ca25ea71f987d093cc75bc59f440ee83d4375a4` 上完成 C6，使用自有 MySQL 8.4.11、Flyway 53–58 和全部 57 表/725 列。原最后 receipt 在 revision/sequence 23 耐久，message/resolve 尚缺。只终止已登记原 Main/Hosted，保留原 Worker/数据库/文件直至自然过期。真实第二 claimant 取得 writer generation 2；其实际提交的 200 响应在 activation install 前被 held，随后其已登记 Main/Hosted 被终止。该 acquire 仅改变四个许可 head 列；已安装 epoch、journal、scoped credential hash 和所有原 execution/grant/result 行精确保持。claimant2 崩溃与自然过期期间，全部表精确相同。
+
+真实第三 owner 取得 writer generation 3 并安装 activation epoch 2。以精确原 prompt 重入，修补原最后 message/resolve、关闭保留 history、仅发出第二次模型请求、消费结果并在 revision 34/sequence 35 完成 settlement/idle。原 accepted ordinal 0/2/3、三条 SQL result/grant 行、保留 runtime 以及 working/backup file bytes/device/inode/effects 精确保持；没有中间 claimant2 journal commit、model3 或重复 execute/文件效果。
+
+编译、实际 producer 与完整 auditor 均 exit 0：一个实际行为组，31 项 producer 检查、251 项 auditor 谓词。root 独立检查原 ownership/journal/SQL 守恒、315 项封存 artifact 及 closing input/dependency/class bridge。自有数据库/用户删除、MySQL shutdown exit 0，50 次已登记 PID/group 缺席探测和全部 11 个端口探测通过，临时目录删除后，root 才解除 source/product 窗口。第 7.8 节原失败，以及稍后只读 inspector 对 SQL 表名的错误假设均保留；没有将它们追认为通过，也未用本次运行覆盖原记录。
+
+此轮仅接受有界本地 C6，不赋予 C5/C8、生产 isolation 竞争、物理退役、安全复用、Linux/云或公开 CSI 选择资格。MockMvc transport、合成 Kubernetes/attestation、Darwin 适配和确定性 SSE 仍是限制；不声称完整 Node 依赖事前闭包、原生独立 review、maintainer approval 或完整 K2。
+
+### 7.10 首个缺失 receipt 的有界正向 C4
+
+同一干净 `3ca25ea71f987d093cc75bc59f440ee83d4375a4` 上，另一轮新鲜自有 MySQL 在实际最后 Edit terminal Main GET 200 后、交付 Hosted 前切断：三个 execution 均 SETTLED/success，已有两份原 outcome/receipt/message 身份，最后 outcome/receipt/message/resolve 尚缺。只终止已登记原 Main/Hosted 并等待自然过期后，successor 安装 writer generation 2/activation epoch 2，在四字段已安装 owner fence 下精确读取一次完整原 batch，于 sequence 24 原子建立首份 final outcome 加 receipt。前两份原身份与三条完整原 SQL execution/grant/result 行精确保持。
+
+实际链路在 25 修补最后 message、26 resolve、27 闭合 history、28 启动 model2、30 提交 output、31 消费、32 提交最后 assistant、33 到达 turn-settled、34/35 完成 settlement/idle。实际模型请求精确为两个，没有第三请求、额外 prepare/execute 或重复文件效果。schema 保留全部 57 表/725 列。编译、producer 与完整 auditor 均 exit 0；23 项 producer 检查和 236 项 auditor 谓词归属同一个实际行为组。
+
+此前两轮实际候选运行仍保留为失败 observer aggregate：一轮遗漏 `check` 必需的第三个参数，另一轮把实际 SQL activation phase `active` 误期望为 `ACTIVE`。完整只读诊断还修正了实际 binding 列 `runtime_generation` 和原 BLOB `inline_bytes` 投影。诊断的 236 项离线谓词仅用于诊断。上述验收来自这些 mapping-only 修复后的一个新实际 producer；没有修改生产代码或旧 raw 证据来让失败变绿。
+
+root 独立解码原 SQL/journal 守恒、核对 287 项封存 artifact、当前 source/product input 与删除的 dependency/class bridge，再验证 38 次 PID/group 缺席探测、11 个关闭端口、临时目录删除及自有 MySQL 数据库/用户/server 清理后解除此窗口。reporter/root 的行读取错误保留，只读修正后没有再跑 producer。C4 验收绑定此精确 commit 与有界本地场景；C5 重复中断窗口、C8 耐久完整 final output、物理释放/复用、Linux/云、公开 selector、原生独立 review、maintainer approval 与完整 K2 仍待完成。
