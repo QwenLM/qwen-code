@@ -87,8 +87,12 @@ const refused = new Map<
 >();
 let correctedCallId = '';
 const correction = () => {
+  const file =
+    sessionId === config.secondarySessionId
+      ? 'unicode-secondary-ok.txt'
+      : 'unicode-ok.txt';
   const call = fakeToolCall('run_shell_command', {
-    command: "printf '%s' '中文😀é\\ud800' > unicode-ok.txt",
+    command: "printf '%s' '中文😀é\\ud800' > " + file,
     description: validText,
   });
   correctedCallId = call.id;
@@ -310,11 +314,17 @@ try {
           ...profile,
         })
       ).clientId;
+      await assert.rejects(
+        access(path.join(session.directory, 'unicode-secondary-ok.txt')),
+      );
       corrected = true;
       await prompt();
       corrected = false;
       assert.equal(
-        await readFile(path.join(session.directory, 'unicode-ok.txt'), 'utf8'),
+        await readFile(
+          path.join(session.directory, 'unicode-secondary-ok.txt'),
+          'utf8',
+        ),
         validText,
       );
       await json('/session/' + sessionId + '/detach', {}, 204);

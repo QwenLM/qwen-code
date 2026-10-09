@@ -756,36 +756,63 @@ export class HostedWorkspaceToolTurn {
     const effective = await Promise.all(
       calls.map(async (call) => {
         let args = call.args;
-        for (const event of [
-          HookEventName.PermissionRequest,
-          HookEventName.PreToolUse,
-        ]) {
-          const marker = this.session.authority.extensionRecord(
-            'hook_execution',
-            hostedHookOccurrenceId(event, `${this.promptId}:${call.callId}`),
-          );
-          if (!marker) continue;
-          const record = parseHookExecution(marker.record);
-          const original = JSON.parse(
-            (await this.session.resources.read(record.inputRef)).toString(),
-          ) as {
-            tool_input?: Record<string, unknown>;
-            tool_use_id?: string;
-            tool_name?: string;
-          };
-          const saved = record.resultRef
-            ? (JSON.parse(
-                (
-                  await this.session.resources.read(record.resultRef)
-                ).toString(),
-              ) as { output?: HookOutput })
-            : undefined;
-          if (
-            !record.resultRef ||
-            original.tool_use_id !== call.callId ||
-            original.tool_name !== call.name
-          )
-            completeEvidence = false;
+        const records = await Promise.all(
+          [HookEventName.PermissionRequest, HookEventName.PreToolUse].map(
+            async (event) => {
+              const marker = this.session.authority.extensionRecord(
+                'hook_execution',
+                hostedHookOccurrenceId(
+                  event,
+                  `${this.promptId}:${call.callId}`,
+                ),
+              );
+              if (!marker) return undefined;
+              const record = parseHookExecution(marker.record);
+              const [inputBytes, resultBytes] = await Promise.all([
+                this.session.resources.read(record.inputRef),
+                record.resultRef
+                  ? this.session.resources.read(record.resultRef)
+                  : undefined,
+              ]);
+              const original = JSON.parse(inputBytes.toString()) as {
+                tool_input?: Record<string, unknown>;
+                tool_use_id?: string;
+                tool_name?: string;
+              };
+              const saved = resultBytes
+                ? (JSON.parse(resultBytes.toString()) as {
+                    output?: HookOutput;
+                  })
+                : undefined;
+              let matches =
+                original.tool_use_id === call.callId &&
+                original.tool_name === call.name;
+              if (!matches) {
+                const plan = JSON.parse(
+                  (
+                    await this.session.resources.read(record.planRef)
+                  ).toString(),
+                ) as {
+                  refusedInputDigest?: string;
+                  hooks?: unknown[];
+                  input?: unknown;
+                };
+                matches =
+                  typeof plan.refusedInputDigest === 'string' &&
+                  /^[a-f0-9]{64}$/.test(plan.refusedInputDigest) &&
+                  plan.hooks?.length === 0 &&
+                  isDeepStrictEqual(plan.input, original) &&
+                  record.run.state === 'settled' &&
+                  record.run.execution === 'settled';
+              }
+              if (!record.resultRef || !matches) completeEvidence = false;
+              return { event, original, saved };
+            },
+          ),
+        );
+        for (const record of records) {
+          if (!record) continue;
+          const { event, original, saved } = record;
           const specific = saved?.output?.hookSpecificOutput;
           const decision = specific?.['decision'] as
             | { updatedInput?: Record<string, unknown> }
@@ -819,7 +846,11 @@ export class HostedWorkspaceToolTurn {
         !completeEvidence ||
         intents.length ||
         !isDeepStrictEqual(
-          originalCalls,
+          originalCalls?.map((call) => ({
+            id: call.id,
+            name: call.name,
+            args: call.args ?? {},
+          })),
           calls.map((call) => ({
             id: call.callId,
             name: call.name,
@@ -1267,9 +1298,10 @@ export class HostedWorkspaceToolTurn {
       });
     };
     const unicodeErrors = calls.map((call) =>
-      this.mcp ? undefined : hostedShellInputError(call.name, call.args),
+      hostedShellInputError(call.name, call.args),
     );
     if (unicodeErrors.some((error) => error !== undefined)) {
+      // Profile, duplicate-id and truncated-input hard refusals still win.
       prepareRequests(calls);
       return this.refuseBatch(calls, unicodeErrors, parts, model);
     }
@@ -1446,7 +1478,7 @@ export class HostedWorkspaceToolTurn {
           );
           if (unicodeError) {
             const errors = requests.map((_, ordinal) =>
-              ordinal === index ? unicodeError : undefined,
+              ordinal === index ? unicodeError : refusals[ordinal],
             );
             return await this.refuseBatch(calls, errors, undefined, model);
           }
@@ -1520,6 +1552,7 @@ export class HostedWorkspaceToolTurn {
         }
       }
     } catch (cause) {
+      if (cause instanceof HostedToolRecoveryRequiredError) throw cause;
       throw new HostedToolRecoveryRequiredError(cause);
     }
     const refusal = (index: number): Part[] | undefined => {

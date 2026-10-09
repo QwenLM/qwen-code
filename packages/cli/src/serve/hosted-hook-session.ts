@@ -114,10 +114,15 @@ function sequentialInput(
   if (!result.success || !result.output) return input;
   const effective = applyHookOutputToInput(input, result.output, event);
   const output = result.output.hookSpecificOutput;
+  const decision =
+    event === HookEventName.PermissionRequest
+      ? (output?.['decision'] as { updatedInput?: unknown } | undefined)
+      : undefined;
+  const updatedInput = decision?.updatedInput ?? output?.['updatedInput'];
   return {
     ...effective,
-    ...(output?.['updatedInput'] && typeof output['updatedInput'] === 'object'
-      ? { tool_input: output['updatedInput'] }
+    ...(updatedInput && typeof updatedInput === 'object'
+      ? { tool_input: updatedInput }
       : {}),
     ...(typeof output?.['updatedPrompt'] === 'string'
       ? { prompt: output['updatedPrompt'] }
@@ -142,8 +147,10 @@ function shellRefusalOutput(
 ): HookOutput | undefined {
   if (!('tool_input' in input) || !malformedShellInput(input, event))
     return output;
-  const specific = output?.hookSpecificOutput;
-  return {
+  const specific = { ...output?.hookSpecificOutput };
+  delete specific['tool_input'];
+  delete specific['updatedInput'];
+  const refusal = {
     ...output,
     hookSpecificOutput: {
       ...specific,
@@ -159,6 +166,9 @@ function shellRefusalOutput(
         : { updatedInput: input['tool_input'] }),
     },
   };
+  return exceedsHookResourceLimit({ output: refusal })
+    ? byteLimitOutput(event)
+    : refusal;
 }
 
 function semanticInput(value: object): Record<string, unknown> {

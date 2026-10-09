@@ -72,7 +72,7 @@ class HostedWorkspaceToolTurnIT {
 
     @ParameterizedTest
     @ValueSource(strings = {"local", "o2"})
-    @Timeout(180)
+    @Timeout(360)
     void malformedShellUnicodeIsCorrectableBeforeAcquisition(String capture) throws Exception {
         runDriver(List.of(capture), "shell-unicode");
     }
@@ -419,6 +419,14 @@ class HostedWorkspaceToolTurnIT {
                             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution"
                                     + " WHERE harness_session_id = ?", Integer.class, sessions.get(index).get("sessionId")))
                                     .isEqualTo(1);
+                            assertThat(Files.readString(workspace.resolve("child/unicode-secondary-ok.txt")))
+                                    .isEqualTo("中文😀é\\ud800");
+                            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution"
+                                    + " WHERE harness_session_id = ?", Integer.class, secondarySessionId))
+                                    .isEqualTo(1);
+                            assertThat(jdbc.queryForObject("SELECT execution_status FROM qwen_tool_execution"
+                                    + " WHERE harness_session_id = ?", String.class, secondarySessionId))
+                                    .isEqualTo("success");
                         } else if (providerControl) providerProbe.assertReport(sessions.get(index), reports.get(index));
                         else if (latency) {
                             boolean tool = cases.get(index).equals("tool");
