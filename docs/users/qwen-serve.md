@@ -632,7 +632,11 @@ ones will keep being found. Do not grant a daemon broader trust on the
 strength of it. It does not interpret script files,
 track environment variable values across commands, or analyze heredoc bodies
 (Git-shaped text inside a heredoc can be denied even though the shell never
-executes it). `/fork` and agent-backed workspace memory remember/dream remain
+executes it). Because an unread body cannot be told apart from a program, a
+heredoc that can feed one to a shell or interpreter over stdin
+(`bash <<'EOF'`, `python3 - <<'PY'`, `cat <<'EOF' | bash`) is denied
+outright; pass the program via `-c` or as ordinary commands instead.
+`/fork` and agent-backed workspace memory remember/dream remain
 available under the built-in guard; they are only restricted while the
 external provider mode below is active. An optional external tool guard
 remains an additional policy and receives the same request only after the
