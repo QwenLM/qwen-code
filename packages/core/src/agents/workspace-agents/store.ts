@@ -988,7 +988,10 @@ export async function updateWorkspaceAgent(
       return 'managed_host_persona_unsupported';
     }
     // Live session-agent runs are checked by the caller (the daemon route),
-    // which owns the orchestrator; the store cannot see in-memory runs.
+    // which owns the orchestrator; the store cannot see in-memory runs. That
+    // caller covers both changes that can strand one: an `execution` move,
+    // and a disable whose agent has a `queued` run, which could never start
+    // once the agent is not addressable.
     if ('execution' in patch) {
       const execution = next.execution;
       if (execution?.mode === 'managed-host') {

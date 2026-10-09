@@ -58,6 +58,7 @@ import {
 import { probeAgentPrograms } from '../session-agents/program-probe.js';
 import { availablePrograms } from '../agent-host-programs.js';
 import { registerAgentHostRemoteConnectRoute } from './agent-host-connection.js';
+import { ensureSessionAgentOrchestratorForRuntime } from './session-agents.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
@@ -109,11 +110,31 @@ async function liveRunsOf(
   return orchestrator ? orchestrator.liveRuns() : [];
 }
 
+/**
+ * The live runs a roster change has to respect.
+ *
+ * The orchestrator is created on demand here, the way the Host routes do it.
+ * `liveRunsOf` answers "none" for a workspace whose orchestrator this daemon
+ * has not created yet — which is the state right after a restart — and a run a
+ * previous daemon left queued is only counted once a new orchestrator's
+ * startup recovery has adopted it, which `liveRuns()` waits for.
+ */
+async function liveRunsForRosterChange(
+  runtime: WorkspaceRuntime,
+): Promise<SessionAgentLiveRunSummary[]> {
+  const orchestrator =
+    getSessionAgentOrchestrator(runtime.workspaceCwd) ??
+    ensureSessionAgentOrchestratorForRuntime(runtime);
+  return orchestrator ? orchestrator.liveRuns() : [];
+}
+
 async function hasLiveRuns(
   runtime: WorkspaceRuntime,
   agentId: string,
 ): Promise<boolean> {
-  return (await liveRunsOf(runtime)).some((run) => run.agentId === agentId);
+  return (await liveRunsForRosterChange(runtime)).some(
+    (run) => run.agentId === agentId,
+  );
 }
 
 /**
@@ -863,10 +884,21 @@ export function registerWorkspaceAgentRoutes(
       try {
         const agentId = String(req.params['id']);
         // Moving an agent under a live run would leave that run on a runtime
-        // the agent no longer names.
-        if (execution !== undefined && (await hasLiveRuns(runtime, agentId))) {
-          res.status(409).json({ error: 'agent_has_live_work' });
-          return;
+        // the agent no longer names. Disabling one strands the runs it has
+        // queued: a disabled agent is not addressable, so a queued run can
+        // never start, and nothing settles it — leaving the agent unable to
+        // run and refused (`409 agent_has_live_work`) when it is deleted.
+        // A run already executing does not block the disable: it finishes.
+        if (execution !== undefined || enabled === false) {
+          const strands = (await liveRunsForRosterChange(runtime)).some(
+            (run) =>
+              run.agentId === agentId &&
+              (execution !== undefined || run.status === 'queued'),
+          );
+          if (strands) {
+            res.status(409).json({ error: 'agent_has_live_work' });
+            return;
+          }
         }
         if (
           execution?.mode === 'local' &&

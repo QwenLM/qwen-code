@@ -43,6 +43,19 @@ vi.mock('../session-agents/orchestrator.js', () => ({
         },
 }));
 
+// The orchestrator a roster change has to create for itself when this daemon
+// has not made one yet (the state right after a restart).
+const ensuring = vi.hoisted(() => ({
+  orchestrator: undefined as
+    | { liveRuns: () => Promise<SessionAgentLiveRunSummary[]> }
+    | undefined,
+}));
+
+vi.mock('./session-agents.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./session-agents.js')>()),
+  ensureSessionAgentOrchestratorForRuntime: () => ensuring.orchestrator,
+}));
+
 // The real probe runs `claude --version` and friends; the route only needs
 // its answer.
 vi.mock('../session-agents/program-probe.js', () => ({
@@ -88,6 +101,7 @@ beforeEach(async () => {
   runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-route-'));
   Storage.setRuntimeBaseDir(runtimeDir);
   liveRuns.value = undefined;
+  ensuring.orchestrator = undefined;
 });
 
 afterEach(async () => {
@@ -214,6 +228,67 @@ it('refuses to move an agent while it has a live session-agent run', async () =>
   expect(
     (await readWorkspaceAgents(workspaceCwd))[0]?.execution,
   ).toBeUndefined();
+});
+
+it('refuses to disable an agent whose queued run would be stranded', async () => {
+  const workspaceCwd = path.join(runtimeDir, 'disable-queued');
+  await updateWorkspaceAgents(workspaceCwd, () => [
+    { id: 'ag_alice', name: 'alice', createdAt: 1 },
+  ]);
+  const app = appFor(runtimeAt(workspaceCwd));
+  liveRuns.value = [
+    { sessionId: 's1', runId: 'r1', agentId: 'ag_alice', status: 'queued' },
+  ];
+
+  // A disabled agent is not addressable, so that run can never start and
+  // nothing settles it: the agent could then neither run nor be retired.
+  await request(app)
+    .patch('/workspaces/workspace/agent/agents/ag_alice')
+    .send({ enabled: false })
+    .expect(409, { error: 'agent_has_live_work' });
+  expect((await readWorkspaceAgents(workspaceCwd))[0]?.enabled).not.toBe(false);
+
+  // A run already executing does not block the disable: it finishes.
+  liveRuns.value = [
+    { sessionId: 's1', runId: 'r1', agentId: 'ag_alice', status: 'running' },
+  ];
+  await request(app)
+    .patch('/workspaces/workspace/agent/agents/ag_alice')
+    .send({ enabled: false })
+    .expect(200);
+  expect((await readWorkspaceAgents(workspaceCwd))[0]?.enabled).toBe(false);
+});
+
+it('sees a run an earlier daemon left queued before a roster change', async () => {
+  const workspaceCwd = path.join(runtimeDir, 'restart-live');
+  await updateWorkspaceAgents(workspaceCwd, () => [
+    { id: 'ag_alice', name: 'alice', createdAt: 1 },
+  ]);
+  // This daemon has not created the workspace's orchestrator yet, so the
+  // roster routes have to create one — its startup recovery is what adopts
+  // that run — instead of reading "no live runs" and retiring over it.
+  ensuring.orchestrator = {
+    liveRuns: async () => [
+      {
+        sessionId: 's1',
+        runId: 'run_persisted_1',
+        agentId: 'ag_alice',
+        status: 'queued',
+      },
+    ],
+  };
+
+  await request(appFor(runtimeAt(workspaceCwd)))
+    .delete('/workspaces/workspace/agent/agents/ag_alice')
+    .expect(409, { error: 'agent_has_live_work' });
+  expect(
+    (await readWorkspaceAgents(workspaceCwd))[0]?.retiredAt,
+  ).toBeUndefined();
+
+  ensuring.orchestrator = undefined;
+  await request(appFor(runtimeAt(workspaceCwd)))
+    .delete('/workspaces/workspace/agent/agents/ag_alice')
+    .expect(200);
 });
 
 it('disables an agent and reports it offline', async () => {
