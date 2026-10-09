@@ -282,6 +282,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
 export class ApiRequestEvent implements BaseTelemetryEvent {
   'event.name': 'api_request';
   'event.timestamp': string;
+  execution_id?: string;
   model: string;
   prompt_id: string;
   request_text?: string;
@@ -296,9 +297,11 @@ export class ApiRequestEvent implements BaseTelemetryEvent {
     prompt_id: string,
     request_text?: string,
     subagent_name?: string,
+    execution_id?: string,
   ) {
     this['event.name'] = 'api_request';
     this['event.timestamp'] = new Date().toISOString();
+    this.execution_id = execution_id;
     this.model = model;
     this.prompt_id = prompt_id;
     this.request_text = request_text;
@@ -310,6 +313,7 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
   'event.name': 'api_error';
   'event.timestamp': string; // ISO 8601
   response_id?: string;
+  execution_id?: string;
   model: string;
   duration_ms: number;
   prompt_id: string;
@@ -327,6 +331,7 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
   subagent_name?: string;
 
   constructor(opts: {
+    executionId?: string;
     responseId?: string;
     model: string;
     durationMs: number;
@@ -340,6 +345,7 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
     this['event.name'] = 'api_error';
     this['event.timestamp'] = new Date().toISOString();
     this.response_id = opts.responseId;
+    this.execution_id = opts.executionId;
     this.model = opts.model;
     this.duration_ms = opts.durationMs;
     this.prompt_id = opts.promptId;
@@ -382,6 +388,7 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
   'event.name': 'api_response';
   'event.timestamp': string; // ISO 8601
   response_id: string;
+  execution_id?: string;
   model: string;
   status_code?: number | string;
   duration_ms: number;
@@ -411,10 +418,12 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     response_text?: string,
     subagent_name?: string,
     ttft_ms?: number,
+    execution_id?: string,
   ) {
     this['event.name'] = 'api_response';
     this['event.timestamp'] = new Date().toISOString();
     this.response_id = response_id;
+    this.execution_id = execution_id;
     this.model = model;
     this.duration_ms = duration_ms;
     this.status_code = 200;

@@ -32,6 +32,8 @@ public final class PublicSurface {
         // The bare collection route (POST /v1/agents) has no trailing slash,
         // so the prefix alone would let it skip the public surface.
         return path.equals("/v1/agents") || path.startsWith("/v1/agents/")
+                || path.equals("/v1/agent-channels")
+                || path.startsWith("/v1/agent-channels/")
                 || path.startsWith("/api/agent/web-shell/v1/");
     }
 }
