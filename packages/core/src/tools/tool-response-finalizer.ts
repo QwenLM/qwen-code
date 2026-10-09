@@ -108,25 +108,25 @@ function isBudgetExemptOutputName(name: string | undefined): boolean {
 }
 
 /**
- * Whether `enforceFunctionResponseBudget` shortens text in this part. Mirrors
- * `collectTextSlots`, so a caller that charges a batch of results against a
- * token headroom holds out exactly the text the budget will not shorten:
- * exempt output, empty output, and nested media (which is not text) have to be
- * counted as input instead.
+ * Whether `enforceFunctionResponseBudget` shortens text in this part. Derived
+ * from `collectTextSlots` itself, so a caller that charges a batch of results
+ * against a token headroom holds out exactly the text the budget will not
+ * shorten — exempt output, empty output, output the plan-mode lifecycle prefix
+ * covers entirely, and nested media (which is not text) are counted as input
+ * instead. A hand-written mirror of those rules drifts from them silently.
  *
- * An `error` field is budgeted for any entry `collectTextSlots` does not skip
- * whole; the entry-level exemption skips it along with the rest, and this
- * predicate is only ever reached for the synthetic batch entry, which does not
- * match that exemption.
+ * The synthetic entry is the send boundary's own: `enforceFunctionResponseBudget`
+ * collects with `includeTopLevelText = false` and one entry named
+ * `tool-response-batch`, so the entry-level exemption never applies and the
+ * skip is decided by each part's own tool name.
  */
 export function isBudgetShrinkablePart(part: Part): boolean {
-  const response = part.functionResponse;
-  if (!response) return false;
-  const payload = response.response;
-  if (typeof payload?.['error'] === 'string') return true;
-  if (isBudgetExemptOutputName(response.name)) return false;
-  const output = payload?.['output'];
-  return typeof output === 'string' && output.length > 0;
+  return (
+    collectTextSlots(
+      [{ callId: '', toolName: '', responseParts: [part] }],
+      false,
+    ).length > 0
+  );
 }
 
 function collectTextSlots(

@@ -800,4 +800,27 @@ describe('tool response finalization', () => {
     expect(output.length).toBe(1_000);
     expect(guarded.responseParts[0].functionResponse?.parts).toHaveLength(1);
   });
+
+  it('treats a lifecycle-only response as text the budget cannot shorten', () => {
+    // `collectTextSlots` strips the plan-mode prefix before it decides whether
+    // to budget a slot, so a response that is nothing but the reminder yields
+    // no slot and travels whole (see the lifecycle case above). A caller
+    // measuring what the budget can shorten has to agree, or it charges the
+    // headroom for text the cut never reaches.
+    const reminderOnly = fnResponse(
+      ToolNames.ENTER_PLAN_MODE,
+      { output: getPlanModeSystemReminder(false) },
+      'enter-plan',
+    );
+    const entries: ToolResponseBudgetEntry[] = [
+      {
+        callId: 'send-boundary',
+        toolName: 'tool-response-batch',
+        responseParts: [reminderOnly],
+      },
+    ];
+
+    expect(enforceFunctionResponseBudget(entries, 1)).toBe(entries);
+    expect(isBudgetShrinkablePart(reminderOnly)).toBe(false);
+  });
 });
