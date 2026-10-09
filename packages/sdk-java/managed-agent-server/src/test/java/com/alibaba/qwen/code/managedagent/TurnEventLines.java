@@ -4,15 +4,46 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /**
- * The input.accepted turn event the session-store integration test commits,
- * shared with the reader replay, so a payload either edits is the payload
- * both see. The oversized-commit derivation keys on {@code "sequence":1,}
- * and {@code turn-1:accepted} staying single, so the payload names neither.
+ * The turn events the session-store integration test commits, shared with
+ * the reader replay, so a payload either edits is the payload both see. The
+ * oversized-commit derivation keys on {@code "sequence":1,} and
+ * {@code turn-1:accepted} staying single, so the payload names neither.
  */
 final class TurnEventLines {
     private static final ObjectMapper JSON = new ObjectMapper();
+    /** The reader's maxTextBytes, which bounds one delta's text. */
+    static final int MAX_DELTA_TEXT_BYTES = 4096;
 
     private TurnEventLines() {
+    }
+
+    /** A message.delta event: the only raw-text payload the reader takes,
+     * so the densest line it accepts. */
+    static ObjectNode messageDeltaEvent(String tenant, String workspace,
+            String session, long sequence, String text) {
+        ObjectNode sessionKey = JSON.createObjectNode()
+                .put("tenantId", tenant).put("workspaceId", workspace)
+                .put("sessionId", session);
+        ObjectNode payload = JSON.createObjectNode()
+                .put("messageId", "message-1").put("turnId", "turn-1")
+                .put("role", "assistant").put("text", text);
+        return PublicationJournalFixture.eventNode(sequence, "message.delta",
+                payload, sessionKey, 1);
+    }
+
+    /** {@code count} message.delta lines from {@code firstSequence}, then
+     * the commit marker. */
+    static String deltaBytes(String tenant, String workspace, String session,
+            long firstSequence, int count, String text) {
+        StringBuilder lines = new StringBuilder();
+        for (int index = 0; index < count; index++) {
+            lines.append(ExtensionRecordJournal.line(session,
+                    "managed_session_event_v1", messageDeltaEvent(tenant,
+                            workspace, session, firstSequence + index,
+                            text)));
+        }
+        return lines.append(PublicationJournalFixture.COMMIT_MARKER)
+                .toString();
     }
 
     /** The input.accepted event the turn transaction carries. */

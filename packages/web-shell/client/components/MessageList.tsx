@@ -735,12 +735,28 @@ export interface ApplyTurnCollapseOptions {
   enabled: boolean;
 }
 
+/**
+ * A workspace agent's reply in the session. It is never the session's own
+ * answer: its record can land inside a main-model turn (the user prompted
+ * while the agent ran), and taking it as that turn's final answer would fold
+ * the main reply on collapse and move the copy / feedback / branch footer
+ * onto the agent's reply.
+ */
+function isAgentReply(item: DisplayItem): boolean {
+  return (
+    item.type === 'message' &&
+    item.message.role === 'assistant' &&
+    item.message.agentMessage?.kind === 'agent_message'
+  );
+}
+
 function isFinalContentCandidate(
   item: DisplayItem,
   includeBackgroundNotifications: boolean,
 ): boolean {
   return (
     item.type === 'message' &&
+    !isAgentReply(item) &&
     (item.message.role === 'assistant' ||
       (includeBackgroundNotifications &&
         item.message.role === 'system' &&
@@ -851,7 +867,8 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
     case 'plan':
       return true;
     case 'assistant':
-      return !isFinalAnswer;
+      // An agent's reply is its own message, kept like a user row.
+      return !isFinalAnswer && !isAgentReply(item);
     case 'thinking':
       return true;
     case 'system':
@@ -5870,8 +5887,13 @@ export const MessageList = memo(
           // only stamps the prompt's; both carry the same value.
           const feedbackPromptId =
             displayItem.message.promptId ?? feedbackHead?.promptId;
+          // An agent's reply gets a copy button only: no feedback marks (they
+          // rate the session's own answer) and no branching from it.
+          const agentReply =
+            displayItem.message.role === 'assistant' &&
+            displayItem.message.agentMessage?.kind === 'agent_message';
           const branchRecordId =
-            displayItem.message.role === 'assistant'
+            displayItem.message.role === 'assistant' && !agentReply
               ? displayItem.message.branchRecordId
               : undefined;
           const editableUserContent =
@@ -5948,21 +5970,27 @@ export const MessageList = memo(
               branchRecordId={branchRecordId}
               showAssistantActions={
                 displayItem.message.role === 'assistant' &&
-                finalAssistantTurnIdByAssistantId.has(displayItem.message.id)
+                (agentReply ||
+                  finalAssistantTurnIdByAssistantId.has(displayItem.message.id))
               }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
+                !agentReply &&
                 !isResponding &&
                 branchRecordId !== undefined
               }
               assistantFeedbackTurnId={
-                assistantFeedbackEnabled ? finalAssistantTurnId : undefined
+                assistantFeedbackEnabled && !agentReply
+                  ? finalAssistantTurnId
+                  : undefined
               }
               assistantFeedbackPromptId={
-                assistantFeedbackEnabled ? feedbackPromptId : undefined
+                assistantFeedbackEnabled && !agentReply
+                  ? feedbackPromptId
+                  : undefined
               }
               assistantFeedbackRating={
-                assistantFeedbackEnabled && feedbackPromptId
+                assistantFeedbackEnabled && !agentReply && feedbackPromptId
                   ? assistantFeedbackRatings[feedbackPromptId]
                   : undefined
               }

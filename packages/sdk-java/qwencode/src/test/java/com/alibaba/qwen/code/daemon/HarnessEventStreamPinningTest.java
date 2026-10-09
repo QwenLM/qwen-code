@@ -12,7 +12,6 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -55,7 +54,8 @@ class HarnessEventStreamPinningTest {
         server.setExecutor(serverExecutor);
         server.createContext("/capabilities", exchange -> {
             byte[] bytes = ("{\"v\":1,\"mode\":\"http-bridge\","
-                    + "\"features\":[\"hosted_harness_private_v1\"],"
+                    + "\"features\":[\"hosted_harness_private_v1\","
+                    + "\"managed_session_journal_delta_v1\"],"
                     + "\"transports\":[\"rest\"],\"hostedHarness\":{"
                     + "\"protocolVersions\":{\"current\":1,"
                     + "\"supported\":[1]},\"bootId\":\"" + BOOT_ID
@@ -125,7 +125,7 @@ class HarnessEventStreamPinningTest {
             throws Exception {
         assumeTrue(virtualThreadsAvailable(),
                 "virtual threads unavailable on this JDK");
-        int carriers = ForkJoinPool.getCommonPoolParallelism();
+        int carriers = carrierCount();
         int streamCount = carriers + 2;
         List<HarnessEventStream> streams = new ArrayList<>();
         List<Thread> readers = new ArrayList<>();
@@ -207,6 +207,29 @@ class HarnessEventStreamPinningTest {
         } catch (NoSuchMethodException unavailable) {
             return false;
         }
+    }
+
+    // The JDK reads jdk.virtualThreadScheduler.parallelism base-10 while
+    // Integer.getInteger resolves through Integer.decode, so "0100" would
+    // read as 64 while the JVM builds 100 carriers and the witness would
+    // under-size its stream fleet. runtime-broker's CarrierCount is the
+    // same read; this module cannot see that test tree. Package-private
+    // for HarnessEventStreamCarrierCountTest.
+    static int carrierCount() {
+        String configured =
+                System.getProperty("jdk.virtualThreadScheduler.parallelism");
+        if (configured == null) {
+            return Runtime.getRuntime().availableProcessors();
+        }
+        // The JDK's own read of parallelism is a bare Integer.parseInt,
+        // once, in VirtualThread.createDefaultScheduler: no trim, no
+        // catch. A malformed value kills scheduler init there before any
+        // witness can run, so leniency here would only mis-size fleets in
+        // a JVM that cannot start a virtual thread at all. This models
+        // parallelism alone: the JDK also clamps it down to
+        // jdk.virtualThreadScheduler.maxPoolSize when that is set, so an
+        // externally capped pool makes this read too high.
+        return Integer.parseInt(configured);
     }
 
     private static void marker(String message) {

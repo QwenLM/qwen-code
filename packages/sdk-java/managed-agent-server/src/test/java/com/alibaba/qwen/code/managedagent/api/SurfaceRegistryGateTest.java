@@ -110,10 +110,9 @@ class SurfaceRegistryGateTest {
                     Set<RequestMethod> methods =
                             info.getMethodsCondition().getMethods();
                     if (methods.isEmpty()) {
-                        // A mapping without a method attribute matches
-                        // every verb, and SurfaceRegistry has no
-                        // any-method entry to register it under: surface
-                        // it as "*" drift instead of dropping the route.
+                        // An untyped @RequestMapping mounts every HTTP
+                        // method; without the sentinel the handler lands in
+                        // neither set and the bijection passes silently.
                         routes.add("* " + pattern);
                         continue;
                     }

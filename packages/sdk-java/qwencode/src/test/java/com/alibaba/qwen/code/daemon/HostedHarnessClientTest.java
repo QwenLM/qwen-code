@@ -20,11 +20,16 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import java.util.stream.Stream;
 
 class HostedHarnessClientTest {
     private static final String BOOT_ID =
@@ -46,14 +51,17 @@ class HostedHarnessClientTest {
     private HttpServer server;
     private ExecutorService serverExecutor;
     private URI baseUri;
+    private AtomicReference<String> capabilitiesBody;
 
     @BeforeEach
     void setUp() throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         serverExecutor = Executors.newCachedThreadPool();
         server.setExecutor(serverExecutor);
+        capabilitiesBody =
+                new AtomicReference<>(capabilitiesJson(DIGEST, BOOT_ID));
         server.createContext("/capabilities", exchange -> sendJson(exchange,
-                200, capabilitiesJson(DIGEST, BOOT_ID), false));
+                200, capabilitiesBody.get(), false));
         server.start();
         baseUri = URI.create("http://127.0.0.1:"
                 + server.getAddress().getPort());
@@ -66,6 +74,212 @@ class HostedHarnessClientTest {
         }
         if (serverExecutor != null) {
             serverExecutor.shutdownNow();
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("lifecycleDetachResponses")
+    void lifecycleDetachStopsHeartbeatOnlyAfterConfirmedAbsence(boolean byId, int status, boolean sameBoot) throws Exception {
+        createSessionRoute();
+        AtomicBoolean detached = new AtomicBoolean();
+        CountDownLatch firstHeartbeat = new CountDownLatch(1);
+        CountDownLatch laterHeartbeats = new CountDownLatch(2);
+        server.createContext("/session/" + SESSION_ID + "/heartbeat", exchange -> {
+            firstHeartbeat.countDown();
+            if (detached.get()) laterHeartbeats.countDown();
+            sendSessionJson(exchange, 200, "{\"sessionId\":\"" + SESSION_ID
+                    + "\",\"clientId\":\"" + CLIENT_ID + "\",\"lastSeenAt\":123}");
+        });
+        server.createContext("/session/" + SESSION_ID + "/detach", exchange -> {
+            assertPrivateHeaders(exchange, !byId);
+            if (status == 204) {
+                exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                exchange.getResponseHeaders().set("Connection", "close");
+                exchange.sendResponseHeaders(204, -1);
+                exchange.close();
+            } else {
+                exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, sameBoot ? BOOT_ID : OTHER_BOOT_ID);
+                sendJson(exchange, status, "{\"code\":\"session_not_found\"}", false);
+            }
+        });
+        try (HostedHarnessClient client = HostedHarnessClient.builder().baseUri(baseUri).bearerToken("harness-token")
+                .capabilityDigest(DIGEST).heartbeatInterval(Duration.ofMillis(20)).build()) {
+            HarnessSessionRef session = createSession(client);
+            assertTrue(firstHeartbeat.await(2, TimeUnit.SECONDS));
+            var authority = Map.<String, Object>of("operationId", "delete-1", "claimGeneration", 2);
+            Runnable detach = () -> {
+                if (byId) client.detachLifecycle(SESSION_ID, authority);
+                else client.detachLifecycle(session, authority);
+            };
+            boolean confirmed = sameBoot && (status == 204 || status == 404);
+            if (confirmed) detach.run();
+            else {
+                Class<? extends DaemonException> expected = sameBoot ? status == 500 ? MutationOutcomeUnknownException.class
+                        : DaemonHttpException.class : HostedHarnessGenerationException.class;
+                assertThrows(expected, detach::run);
+            }
+            detached.set(true);
+            assertEquals(!confirmed, confirmed
+                    ? laterHeartbeats.await(200, TimeUnit.MILLISECONDS)
+                    : laterHeartbeats.await(5, TimeUnit.SECONDS));
+        }
+    }
+
+    static Stream<Arguments> lifecycleDetachResponses() {
+        return Stream.of(true, false).flatMap(byId -> Stream.of(Arguments.of(byId, 204, true),
+                Arguments.of(byId, 404, true), Arguments.of(byId, 403, true), Arguments.of(byId, 409, true),
+                Arguments.of(byId, 500, true), Arguments.of(byId, 404, false)));
+    }
+
+    @ParameterizedTest
+    @MethodSource("confirmedLifecycleDetachResponses")
+    void lifecycleDetachReleasesOnlyTheOriginalPrompt(boolean byId, int status, boolean replacement) throws Exception {
+        createSessionRoute();
+        CountDownLatch detaching = new CountDownLatch(1);
+        CountDownLatch reply = new CountDownLatch(1);
+        server.createContext("/session/" + SESSION_ID + "/detach", exchange -> {
+            assertPrivateHeaders(exchange, !byId);
+            detaching.countDown();
+            if (replacement) {
+                try { assertTrue(reply.await(2, TimeUnit.SECONDS)); }
+                catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new IOException(error); }
+            }
+            exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+            if (status == 204) {
+                exchange.getResponseHeaders().set("Connection", "close");
+                exchange.sendResponseHeaders(204, -1);
+                exchange.close();
+            } else sendJson(exchange, status, "{\"code\":\"session_not_found\"}", false);
+        });
+        server.createContext("/session/" + SESSION_ID + "/load", exchange ->
+                sendSessionJson(exchange, 200, sessionJson().replace(CLIENT_ID, "replacement-client")));
+        AtomicInteger calls = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/prompt", exchange -> {
+            int call = calls.incrementAndGet();
+            assertEquals(call == 1 ? CLIENT_ID : "replacement-client",
+                    exchange.getRequestHeaders().getFirst(HostedHarnessClient.CLIENT_ID_HEADER));
+            var request = JsonSupport.parseObject(readBody(exchange), "prompt");
+            exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+            sendJson(exchange, 202, "{\"promptId\":\"" + request.get("promptId")
+                    + "\",\"lastEventId\":0,\"eventEpoch\":\"" + EVENT_EPOCH + "\"}", false);
+        });
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef original = createSession(client);
+            Map<String, Object> block = Map.of("type", "text", "text", "first");
+            client.submitTurn(requestForSession(block, original));
+            var detach = executor.submit(() -> {
+                var authority = Map.<String, Object>of("operationId", "delete", "claimGeneration", 1);
+                if (byId) client.detachLifecycle(SESSION_ID, authority);
+                else client.detachLifecycle(original, authority);
+            });
+            assertTrue(detaching.await(2, TimeUnit.SECONDS));
+            HarnessSessionRef next;
+            if (!replacement) detach.get(2, TimeUnit.SECONDS);
+            next = client.loadSession(new LoadHarnessSession(SESSION_ID,
+                    ManagedSessionStoreConnection.builder().baseUri(URI.create("https://store.example/"))
+                            .tenantId("tenant").workspaceId("workspace").writerId(BOOT_ID)
+                            .leaseDuration(Duration.ofSeconds(45)).build()));
+            if (replacement) {
+                // A completed old prompt permits the replacement's new prompt before the old detach returns.
+                server.createContext("/session/" + SESSION_ID + "/status", exchange -> {
+                    exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                    sendJson(exchange, 200, "{\"sessionId\":\"" + SESSION_ID + "\",\"hasActivePrompt\":false}", false);
+                });
+                client.getStatus(next);
+            }
+            var second = SubmitHarnessTurn.builder().session(next).promptId(SECOND_PROMPT_ID).addContent(block)
+                    .payloadDigest(SubmitHarnessTurn.computePayloadDigest(List.of(block))).build();
+            client.submitTurn(second);
+            reply.countDown();
+            detach.get(2, TimeUnit.SECONDS);
+            assertEquals(2, calls.get());
+            var third = SubmitHarnessTurn.builder().session(next).promptId(OTHER_BOOT_ID).addContent(block)
+                    .payloadDigest(SubmitHarnessTurn.computePayloadDigest(List.of(block))).build();
+            assertThrows(DaemonException.class, () -> client.submitTurn(third));
+            assertEquals(2, calls.get());
+        } finally {
+            reply.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    static Stream<Arguments> confirmedLifecycleDetachResponses() {
+        return Stream.of(true, false).flatMap(byId -> Stream.of(204, 404)
+                .flatMap(status -> Stream.of(true, false).map(replacement -> Arguments.of(byId, status, replacement))));
+    }
+
+    @Test
+    void lifecycleSettlementRetainsAttachmentAndDetachCarriesTheNewClaim() {
+        server.removeContext("/capabilities");
+        server.createContext("/capabilities", exchange -> sendJson(exchange, 200,
+                capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{", "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,"), false));
+        createSessionRoute();
+        AtomicReference<Map<String, Object>> settlement = new AtomicReference<>();
+        AtomicReference<Map<String, Object>> detach = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/lifecycle", exchange -> {
+            assertEquals("POST", exchange.getRequestMethod());
+            assertEquals(CLIENT_ID, exchange.getRequestHeaders().getFirst(HostedHarnessClient.CLIENT_ID_HEADER));
+            settlement.set(JsonSupport.parseObject(readBody(exchange), "lifecycle"));
+            sendSessionJson(exchange, 200, "{\"protocolVersion\":1,\"operationId\":\"delete-1\",\"kind\":\"delete\","
+                    + "\"sessionKey\":{\"tenantId\":\"tenant\",\"workspaceId\":\"workspace\",\"sessionId\":\"" + SESSION_ID + "\"},\"effects\":[]}");
+        });
+        server.createContext("/session/" + SESSION_ID + "/detach", exchange -> {
+            detach.set(JsonSupport.parseObject(readBody(exchange), "detach"));
+            sendSessionNoContent(exchange);
+        });
+        try (HostedHarnessClient client = newClient()) {
+            var session = createSession(client);
+            var authority = Map.<String, Object>of("operationId", "delete-1", "claimGeneration", 2);
+            var request = Map.<String, Object>of("kind", "delete", "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace",
+                    "sessionId", SESSION_ID), "authority", authority);
+            assertEquals(1, client.capabilities().getLifecycleProtocolVersion());
+            assertEquals("delete-1", client.settleLifecycle(session, request).get("operationId"));
+            assertEquals(request, settlement.get());
+            assertNull(detach.get());
+            client.detachLifecycle(session, authority);
+            assertEquals(Map.of("authority", authority), detach.get());
+        }
+    }
+
+    @Test
+    void successorLifecycleDetachNeedsNoNewAttachmentOrLifecycleDispatch() {
+        AtomicReference<Map<String, Object>> detach = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/detach", exchange -> {
+            assertEquals("POST", exchange.getRequestMethod());
+            detach.set(JsonSupport.parseObject(readBody(exchange), "detach"));
+            assertPrivateHeaders(exchange, false);
+            exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+            exchange.getResponseHeaders().set("Connection", "close");
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        AtomicInteger otherMutations = new AtomicInteger();
+        server.createContext("/session", exchange -> {
+            otherMutations.incrementAndGet();
+            sendSessionJson(exchange, 500, "{}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            var authority = Map.<String, Object>of("operationId", "delete-1", "claimGeneration", 2);
+            client.detachLifecycle(SESSION_ID, authority);
+            assertEquals(Map.of("authority", authority), detach.get());
+            assertEquals(0, otherMutations.get());
+        }
+    }
+
+    @Test
+    void legacyHarnessCannotFallBackToDeleteForLifecycleSettlement() {
+        AtomicInteger requests = new AtomicInteger();
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID, exchange -> {
+            requests.incrementAndGet();
+            sendSessionNoContent(exchange);
+        });
+        try (HostedHarnessClient client = newClient()) {
+            var session = createSession(client);
+            assertEquals(0, client.capabilities().getLifecycleProtocolVersion());
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, Map.of()));
+            assertEquals(0, requests.get());
         }
     }
 
@@ -443,6 +657,32 @@ class HostedHarnessClientTest {
                 + "\""));
         assertTrue(loadBody.get().contains(
                 "\"passiveManagedRuntimeRecovery\":true"));
+    }
+
+    // The cancellation flag rides the wire separately: a plain passive
+    // re-attach omits it, and only an explicit cancellation takeover adds
+    // the field — anything else would let the daemon mint a canned
+    // CANCELLED record for a wait whose owner could still exist (Arm B).
+    @Test
+    void carriesTheCancellationTakeoverFlagOnlyOnTheCancellationLoad() {
+        AtomicReference<String> loadBody = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> {
+                    loadBody.set(new String(exchange.getRequestBody()
+                            .readAllBytes(), StandardCharsets.UTF_8));
+                    sendSessionJson(exchange, 200, sessionJson());
+                });
+        try (HostedHarnessClient client = newClient()) {
+            client.loadSession(new LoadHarnessSession(SESSION_ID, null,
+                    true));
+        }
+        assertFalse(loadBody.get().contains("cancellationTakeover"));
+        try (HostedHarnessClient client = newClient()) {
+            client.loadSession(new LoadHarnessSession(SESSION_ID, null,
+                    true, null, false, true));
+        }
+        assertTrue(loadBody.get().contains(
+                "\"cancellationTakeover\":true"));
     }
 
     @Test
@@ -900,6 +1140,99 @@ class HostedHarnessClientTest {
                 .build();
     }
 
+    // The journal-contract marker is part of negotiation: a build too old to
+    // open message.delta journals is refused once here, not per Session.
+    @Test
+    void refusesAHarnessWithoutTheJournalContractToken() {
+        capabilitiesBody.set(
+                capabilitiesJsonWithoutJournalToken(DIGEST, BOOT_ID));
+        DaemonProtocolException error = assertThrows(
+                DaemonProtocolException.class, this::newClient);
+        assertTrue(error.getMessage()
+                .contains("managed_session_journal_delta_v1"));
+    }
+
+    // The load timeout is a distinct builder knob, validated like the
+    // other timeouts.
+    @Test
+    void loadTimeoutMustBePositive() {
+        assertThrows(IllegalArgumentException.class,
+                () -> HostedHarnessClient.builder()
+                        .loadTimeout(Duration.ZERO));
+    }
+
+    // The two knobs discriminate at the call site: a recovery-flagged load
+    // pays loadTimeout while a plain attach load meets requestTimeout
+    // (which also guards the connector's ConcurrentHashMap bin locks).
+    @Test
+    void recoveryLoadUsesLoadTimeoutPlainLoadUsesRequestTimeout()
+            throws Exception {
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> {
+                    try {
+                        Thread.sleep(2_500);
+                    } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                    }
+                    sendSessionJson(exchange, 200, sessionJson());
+                });
+        try (HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ZERO)
+                // requestTimeout also caps the /capabilities negotiation
+                // inside build(); give it headroom past the contended-lane
+                // round trip while keeping requestTimeout < sleep <
+                // loadTimeout so the discrimination itself is unchanged.
+                .requestTimeout(Duration.ofMillis(1_000))
+                .loadTimeout(Duration.ofSeconds(10))
+                .build()) {
+            assertThrows(MutationOutcomeUnknownException.class,
+                    () -> client.loadSession(
+                            new LoadHarnessSession(SESSION_ID, null,
+                                    false)));
+            assertNotNull(client.loadSession(
+                    new LoadHarnessSession(SESSION_ID, null, true)));
+            // The drive disjunct of the same predicate: an active takeover
+            // drive (passive=false, drive=true) also pays loadTimeout —
+            // the connector's headline recovery path.
+            assertNotNull(client.loadSession(
+                    new LoadHarnessSession(SESSION_ID, null, false, null,
+                            true)));
+        }
+    }
+
+    // The serve delegating app answers with a bare 404 while its runtime is
+    // still starting (before the contract middleware exists); that window is
+    // transient, never a protocol defect (G3 Harness-restart race).
+    @Test
+    void preContract404IsTransientNotAProtocolDefect() {
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    exchange.getResponseHeaders().set("Content-Type",
+                            "text/plain");
+                    exchange.sendResponseHeaders(404, -1);
+                    exchange.close();
+                });
+        Map<String, Object> block = Map.of("type", "text", "text", "hi");
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            DaemonTransportException error = assertThrows(
+                    DaemonTransportException.class,
+                    () -> client.submitTurn(SubmitHarnessTurn.builder()
+                            .session(session)
+                            .promptId(PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(
+                                    SubmitHarnessTurn.computePayloadDigest(
+                                            List.of(block)))
+                            .build()));
+            assertTrue(error.getMessage().contains("pre-contract"));
+        }
+    }
+
     private void createSessionRoute() {
         server.createContext("/session", exchange ->
                 sendSessionJson(exchange, 200, sessionJson()));
@@ -924,6 +1257,17 @@ class HostedHarnessClientTest {
     }
 
     private static String capabilitiesJson(String digest, String bootId) {
+        return "{\"v\":1,\"mode\":\"http-bridge\","
+                + "\"features\":[\"hosted_harness_private_v1\","
+                + "\"managed_session_journal_delta_v1\"],"
+                + "\"transports\":[\"rest\"],\"hostedHarness\":{"
+                + "\"protocolVersions\":{\"current\":1,"
+                + "\"supported\":[1]},\"bootId\":\"" + bootId
+                + "\",\"capabilityDigest\":\"" + digest + "\"}}";
+    }
+
+    private static String capabilitiesJsonWithoutJournalToken(String digest,
+            String bootId) {
         return "{\"v\":1,\"mode\":\"http-bridge\","
                 + "\"features\":[\"hosted_harness_private_v1\"],"
                 + "\"transports\":[\"rest\"],\"hostedHarness\":{"

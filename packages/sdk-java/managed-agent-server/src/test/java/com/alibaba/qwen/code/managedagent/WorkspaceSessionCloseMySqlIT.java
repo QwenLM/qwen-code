@@ -107,14 +107,14 @@ class WorkspaceSessionCloseMySqlIT {
             var started = new CountDownLatch(1);
             var queued = new java.util.concurrent.atomic.AtomicReference<Future<Object>>();
             transaction(() -> {
-                lock(tenant, session);
+                var close = first.beginWorkspaceClose(tenant, session, OWNER, ACTOR_DIGEST, "close", "digest", true);
                 queued.set(pool.submit(() -> {
                     started.countDown();
                     return outcome(() -> transaction(() -> journal.acquireWriter(tenant, session, TOKEN,
                             new AcquireWriterRequest("workspace", "late", 60_000L))));
                 }));
                 awaitBlocked(started, queued.get());
-                return first.beginWorkspaceClose(tenant, session, OWNER, ACTOR_DIGEST, "close", "digest", true);
+                return close;
             });
             assertCode(queued.get().get(5, TimeUnit.SECONDS), "managed_session_not_writable");
         }
@@ -149,7 +149,7 @@ class WorkspaceSessionCloseMySqlIT {
             var turns = new java.util.concurrent.atomic.AtomicReference<Future<Object>>();
             var responses = new java.util.concurrent.atomic.AtomicReference<Future<Object>>();
             transaction(() -> {
-                lock(tenant, session);
+                var close = first.beginWorkspaceClose(tenant, session, OWNER, ACTOR_DIGEST, "close", "digest", true);
                 turns.set(pool.submit(() -> {
                     started.countDown();
                     return outcome(() -> transaction(() -> second.insertTurnCommand(tenant, "CREATE_TURN", "turn",
@@ -162,7 +162,7 @@ class WorkspaceSessionCloseMySqlIT {
                 }));
                 awaitBlocked(started, turns.get());
                 assertThrows(TimeoutException.class, () -> responses.get().get(100, TimeUnit.MILLISECONDS));
-                return first.beginWorkspaceClose(tenant, session, OWNER, ACTOR_DIGEST, "close", "digest", true);
+                return close;
             });
             // With Workspace files enabled, a bound Session admits later Turns (#13112), so
             // the queued Turn reaches the Session status and sees the committed close.
@@ -279,11 +279,6 @@ class WorkspaceSessionCloseMySqlIT {
         }
         return transaction(() -> store.insertWorkspaceSessionCommand(tenant, OWNER, UUID.randomUUID().toString(),
                 "create", "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", "."))).sessionId();
-    }
-
-    private void lock(String tenant, String session) {
-        jdbc.queryForObject("SELECT session_id FROM managed_agent_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
-                String.class, tenant, session);
     }
 
     private static void awaitBlocked(CountDownLatch started, Future<Object> queued) {

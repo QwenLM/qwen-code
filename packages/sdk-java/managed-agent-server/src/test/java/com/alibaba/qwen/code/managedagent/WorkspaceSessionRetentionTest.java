@@ -6,9 +6,12 @@ import static org.awaitility.Awaitility.await;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
@@ -17,6 +20,9 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Acquir
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
+import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -88,10 +94,10 @@ class WorkspaceSessionRetentionTest {
         request(post(PUBLIC + session + "/unarchive"), tenant, "owner", "unarchive")
                 .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("archived"));
         assertThatThrownBy(() -> journal.acquireWriter(tenant, session, "b".repeat(43),
-                new AcquireWriterRequest("ws", "late", 60_000L))).hasMessageContaining("closing or closed");
+                new AcquireWriterRequest("ws", "late", 60_000L))).isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_lifecycle_active"));
         assertThat(count(tenant, session, "session.archived")).isEqualTo(2);
         assertThat(count(tenant, session, "session.unarchived")).isEqualTo(1);
-        assertThat(runtime.calls.get(session)).isEqualTo(2);
+        assertThat(runtime.calls.get(session)).isEqualTo(1);
     }
 
     @ParameterizedTest
@@ -119,7 +125,7 @@ class WorkspaceSessionRetentionTest {
         assertThat(jdbc.queryForObject("SELECT operation_id FROM qwen_output_session_retirement WHERE tenant_id = ?"
                 + " AND session_id = ?", String.class, tenant, session)).isEqualTo(id);
         assertThat(count(tenant, session, "session.deleted")).isEqualTo(1);
-        assertThat(runtime.calls.get(session)).isEqualTo(2);
+        assertThat(runtime.calls.get(session)).isEqualTo(1);
     }
 
     @ParameterizedTest
@@ -155,7 +161,7 @@ class WorkspaceSessionRetentionTest {
         assertThat(jdbc.queryForObject("SELECT operation_id FROM qwen_output_session_retirement WHERE tenant_id = ?"
                 + " AND session_id = ?", String.class, tenant, session)).isEqualTo(id);
         assertThat(count(tenant, session, "session.deleted")).isEqualTo(1);
-        assertThat(runtime.calls.get(session)).isEqualTo(2);
+        assertThat(runtime.calls.get(session)).isEqualTo(1);
     }
 
     @Test
@@ -204,10 +210,10 @@ class WorkspaceSessionRetentionTest {
     }
 
     @Test
-    void sourceStatesAndMissingCloseProofAreRefused() throws Exception {
+    void archiveAndUnarchiveSourceStatesAndMissingCloseProofAreRefused() throws Exception {
         String tenant = tenant();
         String session = create(tenant);
-        for (String operation : new String[] {"archive", "unarchive", "delete"}) {
+        for (String operation : new String[] {"archive", "unarchive"}) {
             web(operation, tenant, session, "owner", "key").andExpect(status().isConflict())
                     .andExpect(jsonPath("$.error.code").value("session_state_conflict"));
         }
@@ -248,7 +254,7 @@ class WorkspaceSessionRetentionTest {
             String id = json(web("delete", tenant, session, "owner", "delete").andExpect(status().isAccepted()))
                     .path("operationId").asText();
             await().untilAsserted(() -> assertThat(store.findOperation(tenant, session, id).orElseThrow().state()).isEqualTo("COMPLETED"));
-            assertThat(runtime.calls.get(session)).isEqualTo(2);
+            assertThat(runtime.calls.get(session)).isEqualTo(1);
         } finally {
             runtime.supportRemoved = false;
         }
@@ -351,6 +357,15 @@ class WorkspaceSessionRetentionTest {
 
     @TestConfiguration
     static class Configuration {
+        @Bean RuntimeBindingRepository lifecycleBindings(javax.sql.DataSource source) {
+            return new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+        }
+        @Bean @Primary HarnessConnector uninitializedHarness() {
+            return new UnavailableHarnessConnector() {
+                public boolean supportsLifecycle() { return true; }
+                public void detachLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {}
+            };
+        }
         @Bean @Primary OnceCloseRuntime retentionRuntime() { return new OnceCloseRuntime(); }
         @Bean @Primary ManagedAgentStore retentionStore(JdbcTemplate jdbc, ObjectMapper mapper, ManagedWorkspaceRegistry registry) {
             var properties = new ManagedAgentProperties();
@@ -368,10 +383,10 @@ class WorkspaceSessionRetentionTest {
         }
         public CompletionStage<Void> warm(String id) { throw new AssertionError("Unexpected warm"); }
         public CompletionStage<Void> drain(String id) { throw new AssertionError("Unexpected drain"); }
-        public void requestWorkspaceClose(String tenant, String id) { record(id); }
+        public void requestWorkspaceClose(String tenant, String id) { throw new AssertionError("Unexpected legacy close"); }
         public CompletionStage<Void> closeWorkspace(String tenant, String id) { record(id); return CompletableFuture.completedFuture(null); }
         private void record(String id) {
-            if (calls.merge(id, 1, Integer::sum) > 2) { throw new AssertionError("Cleanup repeated after close"); }
+            if (calls.merge(id, 1, Integer::sum) > 1) { throw new AssertionError("Cleanup repeated after close"); }
         }
     }
 }

@@ -14,6 +14,11 @@ registry plus its build gate.
 Verified at `main` = `ac497aeed9` (one commit past the `b585508733` baseline the
 issue names; the delta is a TUI change outside this module).
 
+Status: slice A (#13543) lands the registry and its gates over today's
+admission, and the V53 role storage of D2/D3 lands with slice B (#13544);
+both are merged. This PR is slice C — the D4/D7 enforcement sections below
+describe the changes it lands.
+
 ## 1. Problem
 
 Two gaps, different in kind:
@@ -24,10 +29,15 @@ Two gaps, different in kind:
   are blocked today: a second operator on the same Workspace cannot answer an
   approval that blocks a Turn, and a Workspace-bound Session cannot be handed
   over because nothing expresses an owner distinct from the creator.
-- **R2 — no systematic acceptance.** Cross-tenant refusal is covered slice by
-  slice, per merged capability. Nothing fails when a new route lands without an
-  admission check, which is the failure mode that matters most while this
-  surface is still growing quickly.
+- **R2 — no systematic acceptance.** Admission coverage arrived slice by
+  slice, per merged capability. For the 56 public and WebShell routes the API
+  contract test already fails a mapped route that the OpenAPI contract lacks,
+  and fires a cross-tenant probe at every contract operation. Nothing gates
+  the original slice-A baseline's 22 internal routes, nothing probes a caller
+  below read or with read but without the family's power, and nothing ties a
+  route to the admission rule it should follow — so a route can land with the
+  wrong check and every test stays green, which is the failure mode that
+  matters most while this surface is still growing quickly.
 
 ## 2. Current state
 
@@ -64,8 +74,9 @@ tenant may mutate them today; internal store/publication routes admit a writer
 HMAC credential, not an actor. The public surface is `/v1/agents/**` plus
 `/api/agent/web-shell/v1/**` (`PublicSurface`), realised by ten Spring
 controllers — the section-10 matrix enumerates the current 32 public + 24
-WebShell + 22 internal routes (78 in total, counted by the slice-A gate;
-this body previously said 77/21 before #13088's `receipts/verify` handler).
+WebShell + 24 internal routes (80 in total, including the two L3
+authorization routes, counted by the slice-A gate; this body previously said
+77/21 before #13088's `receipts/verify` handler, 78 before L3).
 
 There is no production provisioning of workspace registry/access rows —
 today only tests and fixture entry points write them, and a deployment writes
@@ -103,27 +114,35 @@ of actors the server cannot enumerate; the blocking behaviours are defined by
 who shares the _Workspace binding_. Not tenant-keyed: it cannot express
 "reader on A, operator on B".
 
-Concretely, migration V48 replaces the two booleans with one column:
+Concretely, migration V53 replaces the two booleans with one column:
 
 ```sql
 ALTER TABLE managed_workspace_access
-    ADD COLUMN role VARCHAR(16) NOT NULL DEFAULT 'READER';
+    ADD COLUMN role VARCHAR(16) NULL;
 -- A row without can_read grants nothing today; keeping it would gain
 -- READER (or OPERATOR, for a can_create row) through the backfill.
 DELETE FROM managed_workspace_access WHERE can_read = FALSE;
 UPDATE managed_workspace_access
     SET role = CASE WHEN can_create THEN 'OPERATOR' ELSE 'READER' END;
+ALTER TABLE managed_workspace_access
+    MODIFY COLUMN role VARCHAR(16) NOT NULL;
 ALTER TABLE managed_workspace_access DROP COLUMN can_read;
 ALTER TABLE managed_workspace_access DROP COLUMN can_create;
 ALTER TABLE managed_workspace_access
     ADD CONSTRAINT managed_workspace_access_role
-    CHECK (role IN ('READER', 'OPERATOR', 'OWNER'));
+    CHECK ((role = 'READER' AND CHAR_LENGTH(role) = 6)
+        OR (role = 'OPERATOR' AND CHAR_LENGTH(role) = 8)
+        OR (role = 'OWNER' AND CHAR_LENGTH(role) = 5));
 ```
 
 The compound shapes are split into per-action statements, matching the
-in-repo migration precedent (V7, V12, V24, V40); dropping unreadable rows
-before the backfill is what makes the change purely a relabelling for every
-reachable grant row. `role` is the single stored vocabulary; no
+in-repo migration precedent (V7, V12, V24, V40); `role` arrives without a
+default so an omission fails loudly exactly as a boolean omission did, the
+backfill supplies every existing row's value before `NOT NULL` is set, and
+the `CHAR_LENGTH` pin defeats utf8mb4's PAD-SPACE equality storing
+`'READER '` instead of `READER`. Dropping unreadable rows before the
+backfill is what makes the change purely a relabelling for every reachable
+grant row. `role` is the single stored vocabulary; no
 dual-write. The `WorkspaceAccess`
 enum becomes `NONE / READER / OPERATOR / OWNER` (READ→READER,
 CREATE→OPERATOR); `OWNER` implies `OPERATOR` implies `READER`. Every store
@@ -140,7 +159,7 @@ appears in this slice (section 7).
 
 ### D3 — the Session record keeps an owner, defaulting to its creator
 
-V48 also adds `managed_agent_session.owner_actor_key VARBINARY(2048) NULL`
+V53 also adds `managed_agent_session.owner_actor_key VARBINARY(2048) NULL`
 and backfills it from `creator_actor_key`. Three identity facts stay
 deliberately separate:
 
@@ -156,7 +175,7 @@ deliberately separate:
 
 `managed_workspace_create_command` remains what it is — an idempotency-command
 record whose `actor_id` belongs to the idempotency domain, not to
-authorization. After V48 its authorization reads (the NULL-creator fallbacks
+authorization. After V53 its authorization reads (the NULL-creator fallbacks
 in `requireOwner` / `requireWorkspaceCreator`) do not cover only sessions
 created before V40: every actor-less legacy open-mode creation still writes
 NULL to both key columns, so the fallbacks stay live for the legacy arm, and
@@ -265,7 +284,7 @@ file-scope disjointness, not topic:
 | Slice                              | Content                                                                                                                                                                                                                                             | Touches                                                                                        |
 | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | **A — registry + gate (R2 first)** | `SurfaceRegistry` over today's rules, correspondence gate, acceptance probes, parity assertions, bilingual route matrix in this doc                                                                                                                 | new files only: `api/SurfaceRegistry.java`, two test classes; no production edits              |
-| **B — role storage (R1 storage)**  | V48 migration + backfill, `WorkspaceAccess` rename, registry store reads re-derivd from `role`, `owner_actor_key` column + write at creation, fixture INSERT updates (~24 sites), migration-shape tests                                             | `store/**`, `runtime-broker` enum, `db/migration`, test fixtures; no admission-decision change |
+| **B — role storage (R1 storage)**  | V53 migration + backfill, `WorkspaceAccess` rename, registry store reads re-derivd from `role`, `owner_actor_key` column + write at creation, fixture INSERT updates (~24 sites), migration-shape tests                                             | `store/**`, `runtime-broker` enum, `db/migration`, test fixtures; no admission-decision change |
 | **C — enforcement (R1)**           | the three creator helpers re-pointed at role/owner, refusal-code normalisation, Action respond opens to OPERATOR, WebShell capabilities by role, registry rule flips, probe expectation flips, contract v1.34 + OpenAPI text, contract-test updates | `service/**`, `store/**` checks, controllers, contract, A's enum + tests                       |
 
 A ∥ B is safe: disjoint files (A adds; B edits store-side). C is serial after
@@ -276,9 +295,8 @@ tracked as #13617 and #13618 respectively); A and B reference it.
 
 ## 5. Migration and compatibility
 
-- V48 follows the established single-version doctrine (stop old servers
-  before the migration; no `outOfOrder`). Taking V48 requires renumbering any
-  open branch's later migration; `scripts/check-flyway-migrations.js` already
+- V53 follows the established single-version doctrine (stop old servers
+  before the migration; no `outOfOrder`). `scripts/check-flyway-migrations.js` already
   gates numbering across both migration locations.
 - Contract v1.34 records: the role vocabulary, OPERATOR admission for the
   submitter and Action families, owner-based lifecycle, the submitter-family
@@ -330,8 +348,10 @@ Same as the issue's, plus the explicit deferrals named there:
   registry does not register, and one registered route with no handler);
   `SurfaceRegistryGateUnconstrainedTest` adds the method-agnostic-mapping
   arm; probes pin today's statuses per rule class on public + WebShell.
-- Slice B: migration-shape test applying V48 over V47 fixtures asserts the
-  backfill (can_create → OPERATOR, can_read-only → READER, owner := creator).
+- Slice B: migration-shape test applying V53 over the earlier fixtures
+  asserts the backfill (can_create → OPERATOR, can_read-only → READER,
+  owner := creator) and the hardened CHECK (a padded role value is
+  rejected).
   Existing expectations change only where they name a renamed
   `WorkspaceAccess` constant; the behaviour-invisibility proof is the
   preserved `canRead()`/`canCreate()` truth table pinned by
@@ -378,20 +398,20 @@ Same as the issue's, plus the explicit deferrals named there:
 
 ## 10. Surface route matrix (the slice-A registry, bilingual summary)
 
-`api/SurfaceRegistry.java` at slice-A head carries 78 route constants: 32
-public + 24 WebShell + 22 internal handler methods of the ten controllers.
-(The 21-internal figure section 2 previously carried is stale: #13088 added
-the `receipts/verify` handler to ToolPublicationController, so the
-controller has 13 routes and the mounted set is 22 internal, 78 in total;
-the gate derives everything from scanning, so the count is information, not
-an asserted constant.)
+`api/SurfaceRegistry.java` integrated with L3 carries 80 route constants:
+32 public + 24 WebShell + 24 internal handler methods of the ten
+controllers, including the two L3 authorization routes. (The 21-internal
+figure section 2 previously carried is stale: #13088 added the
+`receipts/verify` handler to ToolPublicationController, and L3 added its
+two authorization routes; the gate derives everything from scanning, so the
+count is information, not an asserted constant.)
 
 Rule classes name the implemented admission. After slice C (contract
 v1.34): `WORKSPACE_CREATE` (2), `READER` (24), `READER_ACTOR` (6),
 `READER_ACTOR_POLICY` (1), `OPERATOR` — the submitter family plus cwd
 change and Action respond — (8), `OWNER` — the lifecycle family alone —
 (8), `WORKSPACE_DISCOVERY` (4), `TENANT_SCOPED` (3), `INTERNAL_WRITER`
-(22). The design's `legacy_create` and `legacy_tenant` names are kept in
+(24). The design's `legacy_create` and `legacy_tenant` names are kept in
 the class documentation as the names of the legacy arms: a route carries
 exactly one rule class and, per the separation rule, it is the
 bound-Session one. The matrix's rule column below is the post-C matrix;

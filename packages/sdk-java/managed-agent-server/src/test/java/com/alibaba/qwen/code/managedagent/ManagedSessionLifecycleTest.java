@@ -498,6 +498,134 @@ class ManagedSessionLifecycleTest {
                 Integer.class, tenant, sessionId)).isEqualTo(1);
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void retiredRenameCannotCompleteOverALaterCompletedRename(boolean legacyReceipt)
+            throws Exception {
+        String tenant = tenant();
+        String sessionId = attachedSession(tenant);
+        String bootId = store.requireSession(tenant, sessionId).harnessBootId();
+        RequestDigests digests = new RequestDigests();
+        String first = digests.digest(
+                java.util.Map.of("sessionId", sessionId, "title", "A"));
+        String second = digests.digest(
+                java.util.Map.of("sessionId", sessionId, "title", "B"));
+        // K1 and its same-key retry both enter the Harness; one fails and
+        // retires K1, which frees the Session for a fresh key.
+        store.beginSessionMutation(tenant, "RENAME_SESSION", "k1", first,
+                sessionId, SessionMutationKind.RENAME);
+        store.beginSessionMutation(tenant, "RENAME_SESSION", "k1", first,
+                sessionId, SessionMutationKind.RENAME);
+        store.abandonSessionMutation(tenant, "RENAME_SESSION", "k1", sessionId);
+        if (legacyReceipt) {
+            assertThat(jdbc.update("UPDATE managed_agent_command SET mutation_attempt_sequence"
+                            + " = NULL WHERE tenant_id = ? AND operation = ?"
+                            + " AND idempotency_key = ?",
+                    tenant, "RENAME_SESSION", "k1")).isEqualTo(1);
+        }
+        store.beginSessionMutation(tenant, "RENAME_SESSION", "k2", second,
+                sessionId, SessionMutationKind.RENAME);
+        store.completeSessionMutation(tenant, "RENAME_SESSION", "k2", sessionId,
+                SessionMutationKind.RENAME, "B", bootId);
+
+        // The sibling still inside the Harness finishes K1 last: it must
+        // not revert the newer committed title.
+        assertThatThrownBy(() -> store.completeSessionMutation(tenant,
+                "RENAME_SESSION", "k1", sessionId, SessionMutationKind.RENAME,
+                "A", bootId))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode())
+                                .isEqualTo("session_mutation_superseded"));
+        assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("B");
+        assertThat(jdbc.queryForObject("SELECT command_status FROM"
+                        + " managed_agent_command WHERE tenant_id = ? AND"
+                        + " operation = 'RENAME_SESSION' AND idempotency_key = 'k1'",
+                String.class, tenant)).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND event_type = 'session.updated'",
+                Integer.class, tenant, sessionId)).isEqualTo(1);
+
+        // A same-key request sent after K2 is the newest request, so it
+        // still re-drives K1 and wins.
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"A\"}"), tenant, "k1")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.metadata.title").value("A"));
+    }
+
+    @Test
+    void pendingRenameCompletesAfterAnOlderRetiredSibling() throws Exception {
+        String tenant = tenant();
+        String sessionId = attachedSession(tenant);
+        String bootId = store.requireSession(tenant, sessionId).harnessBootId();
+        store.beginSessionMutation(tenant, "RENAME_SESSION", "k1", "first",
+                sessionId, SessionMutationKind.RENAME);
+        store.beginSessionMutation(tenant, "RENAME_SESSION", "k1", "first",
+                sessionId, SessionMutationKind.RENAME);
+        store.abandonSessionMutation(tenant, "RENAME_SESSION", "k1", sessionId);
+        store.beginSessionMutation(tenant, "RENAME_SESSION", "k2", "second",
+                sessionId, SessionMutationKind.RENAME);
+        assertThat(store.completeSessionMutation(tenant, "RENAME_SESSION", "k1",
+                sessionId, SessionMutationKind.RENAME, "A", bootId).title())
+                .isEqualTo("A");
+        assertThat(store.completeSessionMutation(tenant, "RENAME_SESSION", "k2",
+                sessionId, SessionMutationKind.RENAME, "B", bootId).title())
+                .isEqualTo("B");
+        assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("B");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void latestRenameAttemptCompletesAfterItsSiblingRetires(boolean recreatedReceipt)
+            throws Exception {
+        String tenant = tenant();
+        String sessionId = attachedSession(tenant);
+        String bootId = store.requireSession(tenant, sessionId).harnessBootId();
+        RequestDigests digests = new RequestDigests();
+        String first = digests.digest(
+                java.util.Map.of("sessionId", sessionId, "title", "A"));
+        String second = digests.digest(
+                java.util.Map.of("sessionId", sessionId, "title", "B"));
+        store.beginSessionMutation(tenant, "RENAME_SESSION", "k1", first,
+                sessionId, SessionMutationKind.RENAME);
+        store.abandonSessionMutation(tenant, "RENAME_SESSION", "k1", sessionId);
+        store.beginSessionMutation(tenant, "RENAME_SESSION", "k2", second,
+                sessionId, SessionMutationKind.RENAME);
+        harness.rename(tenant, sessionId, "B");
+        store.completeSessionMutation(tenant, "RENAME_SESSION", "k2", sessionId,
+                SessionMutationKind.RENAME, "B", bootId);
+        if (recreatedReceipt) {
+            assertThat(jdbc.update("DELETE FROM managed_agent_command WHERE tenant_id = ?"
+                            + " AND operation = ? AND idempotency_key = ?",
+                    tenant, "RENAME_SESSION", "k1")).isEqualTo(1);
+        }
+        store.beginSessionMutation(tenant, "RENAME_SESSION", "k1", first,
+                sessionId, SessionMutationKind.RENAME);
+        store.beginSessionMutation(tenant, "RENAME_SESSION", "k1", first,
+                sessionId, SessionMutationKind.RENAME);
+        store.abandonSessionMutation(tenant, "RENAME_SESSION", "k1", sessionId);
+        harness.rename(tenant, sessionId, "A");
+        assertThat(store.completeSessionMutation(tenant, "RENAME_SESSION", "k1",
+                sessionId, SessionMutationKind.RENAME, "A", bootId).title())
+                .isEqualTo("A");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event"
+                        + " WHERE tenant_id = ? AND session_id = ? AND source_key = ?",
+                Integer.class, tenant, sessionId,
+                "control:RENAME_SESSION:k1:requested")).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND event_type = 'session.updated'",
+                Integer.class, tenant, sessionId)).isEqualTo(2);
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"A\"}"), tenant, "k1")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.metadata.title").value("A"))
+                .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"));
+    }
+
     @Test
     void retryingFailedRenameAgainBlocksOtherLifecycleWork() throws Exception {
         String tenant = tenant();
@@ -522,9 +650,12 @@ class ManagedSessionLifecycleTest {
         String sessionId = attachedSession(tenant);
         AgentStateStore faulted = mock(AgentStateStore.class, delegatesTo(store));
         if ("lookup".equals(phase)) {
-            AtomicInteger reads = new AtomicInteger();
             doAnswer(call -> {
-                if (reads.incrementAndGet() == 2) {
+                if (jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND operation = 'RENAME_SESSION' AND idempotency_key = 'key'"
+                        + " AND command_status = 'PENDING'", Integer.class,
+                        tenant, sessionId) > 0) {
                     throw new IllegalStateException("lookup unavailable");
                 }
                 return store.requireSession(tenant, sessionId);
@@ -672,15 +803,14 @@ class ManagedSessionLifecycleTest {
                         .principal(actor(tenant, "actor-a")), tenant, "bound-close")
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
-        for (MockHttpServletRequestBuilder request : List.of(
-                post("/v1/agents/sessions/{id}/archive", sessionId),
-                delete("/v1/agents/sessions/{id}", sessionId))) {
-            lifecycle(request.principal(actor(tenant, "actor-a")), tenant,
-                    "bound-" + UUID.randomUUID())
-                    .andExpect(status().isConflict())
-                    .andExpect(jsonPath("$.error.code")
-                            .value("session_state_conflict"));
-        }
+        lifecycle(post("/v1/agents/sessions/{id}/archive", sessionId)
+                        .principal(actor(tenant, "actor-a")), tenant, "bound-archive")
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("session_state_conflict"));
+        lifecycle(delete("/v1/agents/sessions/{id}", sessionId)
+                        .principal(actor(tenant, "actor-a")), tenant, "bound-delete")
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
         mvc.perform(post(WEB_SHELL + "/sessions/delete").header(TENANT, tenant)
                         .principal(actor(tenant, "actor-b"))
                         .contentType(MediaType.APPLICATION_JSON)
