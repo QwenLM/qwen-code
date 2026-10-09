@@ -272,10 +272,12 @@ public class ManagedSessionStore {
             String session, String writer, long generation, String token) {
         validateScope(tenant, workspace, session);
         requireCredential(tenant, workspace, session, token);
+        var csiOriginal = lockCsiOriginal(tenant, session);
         HeadRow head = requireHeadForUpdate(tenant, session);
         requireHeadScope(head, tenant, workspace, session);
         Timestamp now = databaseNow();
         requireWriter(head, writer, generation, token, now, true);
+        requireInstalledCsiWriter(csiOriginal);
         return new PublicationWriter(databaseEpochMillis(now), databaseEpochMillis(head.writerLeaseUntil()),
                 head.journalRevision(), head.committedSequence(), head.activationEpoch(),
                 head.latestCheckpointResourceId(), head.recoveryStatus(), head.activationId(),
@@ -380,7 +382,19 @@ public class ManagedSessionStore {
         long generation = increment(head.writerGeneration(),
                 "writer generation");
         if (csiOriginal != null) {
-            throw conflict("csi_original_writer_unavailable", "The original CSI writer cannot be replaced.");
+            if (!"ACTIVE".equals(head.state()) || head.storageVersion() != STORAGE_VERSION
+                    || head.compactedThroughRevision() != 0 || !"READY".equals(head.recoveryStatus())
+                    || head.writerLeaseUntil() == null || head.journalRevision() < 2 || head.activationEpoch() < 1) {
+                throw conflict("csi_original_writer_unavailable", "The original CSI writer cannot be replaced.");
+            }
+            requireCsiHistoryOwner(csiOriginal);
+            jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                JdbcCsiActivationAdmission.qualifyColdWriter(connection, csiOriginal, csiBindings,
+                        head.journalRevision(), head.committedSequence(), head.lastCommitDigest(), head.writerId(),
+                        head.writerGeneration(), head.activationEpoch(), databaseEpochMillis(head.writerLeaseUntil()),
+                        request.writerId());
+                return null;
+            });
         }
         Timestamp leaseUntil = plusMillis(now, request.leaseMillis());
         jdbc.update("UPDATE qwen_managed_session_journal_head SET"
@@ -555,6 +569,7 @@ public class ManagedSessionStore {
         if (existing != null) {
             requireTransactionWorkspace(existing, request.workspaceId());
             if (csiOriginal != null) {
+                requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
                 jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
                     JdbcCsiActivationAdmission.requireReplay(connection, csiOriginal,
                             head.journalRevision(), head.committedSequence(), head.lastCommitDigest(), head.writerId());
@@ -880,6 +895,7 @@ public class ManagedSessionStore {
         requireCsiWriter(csiOriginal, head);
         Timestamp now = databaseNow();
         requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, now, true);
+        requireInstalledCsiWriter(csiOriginal);
         String scopeKey = sessionScopeKey(tenantId, sessionId);
         ResourceRow existing = findResource(scopeKey, request.resourceId());
         if (existing == null) {
@@ -1263,8 +1279,17 @@ public class ManagedSessionStore {
     }
 
     private static void requireCsiWriter(JdbcCsiFilesRetirementGuard.Original original, HeadRow head) {
-        if (original != null && head.writerGeneration() != 1) {
+        if (original != null && head.writerGeneration() < 1) {
             throw conflict("csi_original_writer_unavailable", "The original CSI writer cannot be replaced.");
+        }
+    }
+
+    private void requireInstalledCsiWriter(JdbcCsiFilesRetirementGuard.Original original) {
+        if (original != null) {
+            jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                JdbcCsiActivationAdmission.lockNativeHead(connection, original);
+                return null;
+            });
         }
     }
 

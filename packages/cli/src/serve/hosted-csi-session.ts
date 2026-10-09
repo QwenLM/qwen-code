@@ -31,6 +31,7 @@ import {
   type HostedTurnSession,
 } from './hosted-harness-turn.js';
 import { HostedCsiToolTurn } from './hosted-csi-tool-turn.js';
+import { recoverHostedCsiReceipts } from './hosted-csi-cold-recovery.js';
 import {
   bindHostedCsiHistory,
   commitInitialHostedCsiHistory,
@@ -64,6 +65,7 @@ interface Owner {
   stopped: boolean;
   admission?: Admission;
   stores?: HttpManagedSessionStores;
+  recovering?: boolean;
   session?: HostedTurnSession;
   timer?: NodeJS.Timeout;
   renewing?: Promise<void>;
@@ -207,23 +209,26 @@ async function initialize(
     });
     owner.stores = stores;
     const journal = await stores.journalStore.open({ sessionKey: owner.key });
-    if ((await stores.publication.owner()).writerGeneration !== 1)
-      throw new Refusal('csi_writer_generation_conflict');
+    owner.recovering = (await stores.publication.owner()).writerGeneration > 1;
     active(owner);
-    const definitionRef = await stores.resourceStore.publish(
-      'managed-definition',
-      Buffer.from(
-        JSON.stringify({
-          engine: 'managed',
-          sessionId: owner.key.sessionId,
-          toolProfile: 'csi-files-retirement/1',
-        }),
-      ),
-    );
-    const rootSnapshotRef = await stores.resourceStore.publish(
-      'managed-root',
-      Buffer.from(JSON.stringify({ cwd: owner.admission.cwd })),
-    );
+    const definitionRef = owner.recovering
+      ? undefined
+      : await stores.resourceStore.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: owner.key.sessionId,
+              toolProfile: 'csi-files-retirement/1',
+            }),
+          ),
+        );
+    const rootSnapshotRef = owner.recovering
+      ? undefined
+      : await stores.resourceStore.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: owner.admission.cwd })),
+        );
     active(owner);
     const authority = await LocalManagedSessionAuthority.open({
       journal,
@@ -231,16 +236,25 @@ async function initialize(
       sessionKey: owner.key,
       cwd: owner.admission.cwd,
       version: 'hosted-harness/1',
-      requireNew: true,
-      create: { definitionRef, rootSnapshotRef, createdBy: 'hosted-harness' },
+      requireNew: !owner.recovering,
+      ...(definitionRef && rootSnapshotRef
+        ? {
+            create: {
+              definitionRef,
+              rootSnapshotRef,
+              createdBy: 'hosted-harness',
+            },
+          }
+        : {}),
     });
     active(owner);
+    const previousEpoch = authority.currentActivation?.epoch ?? 0;
     const activation = await authority.installActivation({
       activationId: randomUUID(),
       workerId: contract.bootId,
       leaseDurationMs: LEASE_MS,
     });
-    if (activation.epoch !== 1)
+    if (activation.epoch !== previousEpoch + 1)
       throw new Refusal('csi_activation_epoch_conflict');
     active(owner);
     const deny = async () => {
@@ -279,9 +293,11 @@ async function initialize(
         .catch(() => undefined);
     }, LEASE_MS / 3);
     owner.timer.unref();
-    const observation = await bindHostedCsiHistory(broker, owner.key);
-    active(owner);
-    await commitInitialHostedCsiHistory(managed, observation);
+    if (!owner.recovering) {
+      const observation = await bindHostedCsiHistory(broker, owner.key);
+      active(owner);
+      await commitInitialHostedCsiHistory(managed, observation);
+    }
     active(owner);
     owner.session = { managed, cwd: owner.admission.cwd, blocked: false };
   } catch (cause) {
@@ -421,32 +437,38 @@ export function registerHostedCsiSessionRoutes(
           const prompt = [{ type: 'text', text }];
           const digest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
           const managed = owner.session!.managed;
-          const contentRef = await managed.resources.publish(
-            'managed-input',
-            Buffer.from(JSON.stringify(prompt)),
-          );
-          const admissionRef = await managed.resources.publish(
-            'managed-admission',
-            Buffer.from(JSON.stringify({ promptId, digest })),
-          );
-          active(owner);
-          await managed.authority.submitInput(
-            {
-              operation: 'submitInput',
-              commandId: promptId,
-              sessionKey: owner.key,
-              contentDigest: digest.slice(7),
-            },
-            {
-              inputId: promptId,
-              turnId: promptId,
-              source: 'hosted-harness',
-              contentRef,
-              admissionRef,
-              deadline: null,
-              wakeReason: 'input',
-            },
-          );
+          const resumed = owner.recovering
+            ? await recoverHostedCsiReceipts(managed, broker, promptId, text)
+            : undefined;
+          if (!resumed) {
+            const contentRef = await managed.resources.publish(
+              'managed-input',
+              Buffer.from(JSON.stringify(prompt)),
+            );
+            const admissionRef = await managed.resources.publish(
+              'managed-admission',
+              Buffer.from(JSON.stringify({ promptId, digest })),
+            );
+            active(owner);
+            await managed.authority.submitInput(
+              {
+                operation: 'submitInput',
+                commandId: promptId,
+                sessionKey: owner.key,
+                contentDigest: digest.slice(7),
+              },
+              {
+                inputId: promptId,
+                turnId: promptId,
+                source: 'hosted-harness',
+                contentRef,
+                admissionRef,
+                deadline: null,
+                wakeReason: 'input',
+              },
+            );
+          }
+          owner.recovering = false;
           return await runHostedHarnessTurn({
             session: owner.session!,
             sessionId: owner.key.sessionId,
@@ -455,6 +477,7 @@ export function registerHostedCsiSessionRoutes(
             text,
             abort,
             historyMode: 'settled',
+            ...(resumed ? { resumeFromToolResults: resumed } : {}),
             createToolTurn: (harness, commit, messageFitsInline) =>
               new HostedCsiToolTurn(
                 managed,

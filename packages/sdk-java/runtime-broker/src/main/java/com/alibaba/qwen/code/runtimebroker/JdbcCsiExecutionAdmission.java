@@ -69,6 +69,25 @@ public final class JdbcCsiExecutionAdmission {
 
     static void verifyReceipts(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             JdbcCsiActivationAdmission.NativeHead head, CsiNativeActivationProof.Prefix prefix) throws SQLException {
+        receiptMembers(connection, original, head, prefix);
+        head.requireCurrentTime(connection);
+    }
+
+    static void verifyColdReceipts(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            JdbcCsiActivationAdmission.NativeHead head) throws SQLException {
+        var members = receiptMembers(connection, original, head, head.prefix());
+        require(!members.isEmpty() && head.prefix().receipts().keySet().equals(members.stream()
+                .map(ToolExecutionRecord::getExecutionCallId).collect(java.util.stream.Collectors.toSet())));
+        for (var member : members) {
+            require(member.getState() == ToolExecutionRecord.State.SETTLED && !member.isCancelRequested()
+                    && member.getResult() != null && member.getAuthorizedDispatchGeneration() != null
+                    && java.util.Set.of("success", "error").contains(member.getExecutionStatus()));
+        }
+    }
+
+    private static List<ToolExecutionRecord> receiptMembers(Connection connection,
+            JdbcCsiFilesRetirementGuard.Original original, JdbcCsiActivationAdmission.NativeHead head,
+            CsiNativeActivationProof.Prefix prefix) throws SQLException {
         CsiNativeToolReservation.requireReady(connection, original);
         var members = CsiNativeToolReservation.complete(connection, original, prefix, CsiNativeToolReservation.inventory(connection, original));
         for (var member : members) {
@@ -83,7 +102,7 @@ public final class JdbcCsiExecutionAdmission {
                     && same(execution.getResult(), map(entry.getValue().body().path("envelope")))
                     && execution.getExecutionStatus().equals(entry.getValue().body().path("envelope").path("executionStatus").textValue()));
         }
-        head.requireCurrentTime(connection);
+        return members;
     }
 
     static void requireDispatch(Connection connection, JdbcCsiFilesRetirementGuard.Original original,

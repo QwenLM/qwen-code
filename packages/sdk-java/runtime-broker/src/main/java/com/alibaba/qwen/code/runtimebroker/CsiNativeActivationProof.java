@@ -57,7 +57,7 @@ public final class CsiNativeActivationProof {
     }
 
     public record Activation(String activationId, String workerId, JsonNode installRef,
-            long leaseDurationMs, long expiresAt, long renewalSequence) {
+            long leaseDurationMs, long expiresAt, long renewalSequence, long epoch, long writerGeneration) {
     }
 
     public record Input(String inputId, String text, String userMessageId, boolean noDeadline) {
@@ -222,7 +222,8 @@ public final class CsiNativeActivationProof {
             long previousRevision, long previousSequence, Prefix previous, Function<JsonNode, byte[]> resources) {
         require(activation != null && writerId.equals(activation.workerId())
                 && writerId.equals(text(metadata, "writerId"))
-                && number(metadata.get("writerGeneration")) == 1 && number(metadata.get("activationEpoch")) == 1);
+                && number(metadata.get("writerGeneration")) == activation.writerGeneration()
+                && number(metadata.get("activationEpoch")) == activation.epoch());
         return switch (text(metadata, "operation")) {
             case "submitInput" -> {
                 require(previous.input() == null && previous.pendingBatch() == null);
@@ -473,6 +474,7 @@ public final class CsiNativeActivationProof {
             if (consume) {
                 require(changed && !previous.assistantCommitted()
                         && canonical(previous.attempt().checkpointRef()).equals(canonical(previous.checkpoint().ref())));
+                ((ObjectNode) expected.path("identity")).put("activationId", activation.activationId());
                 command = "harness:results_consumed:" + activation.activationId() + ":" + previousSequence;
             } else {
                 require(previous.assistantCommitted());
@@ -984,7 +986,8 @@ public final class CsiNativeActivationProof {
         closed(subject, Set.of("type", "scopeId", "activationId", "epoch"));
         require("activation".equals(text(subject, "type"))
                 && activation.activationId().equals(id(subject, "scopeId"))
-                && activation.activationId().equals(id(subject, "activationId")) && number(subject.get("epoch")) == 1);
+                && activation.activationId().equals(id(subject, "activationId"))
+                && number(subject.get("epoch")) == activation.epoch());
         return event.path("payload");
     }
 
@@ -1435,8 +1438,10 @@ public final class CsiNativeActivationProof {
     public static Activation activation(Transaction transaction, JsonNode metadata,
             RuntimeProvisionRequest original, String writerId, String definitionDigest,
             Activation previous, Function<JsonNode, byte[]> resources) {
-        require(transaction.events().size() == 1 && number(metadata.get("writerGeneration")) == 1
-                && number(metadata.get("activationEpoch")) == 1
+        long generation = number(metadata.get("writerGeneration"));
+        long epoch = number(metadata.get("activationEpoch"));
+        boolean install = "installActivation".equals(text(metadata, "operation"));
+        require(transaction.events().size() == 1 && generation > 0 && epoch > 0
                 && definitionDigest.equals(text(metadata, "contentDigest"))
                 && metadata.path("latestCheckpointResourceId").isNull());
         JsonNode event = transaction.events().getFirst();
@@ -1446,19 +1451,19 @@ public final class CsiNativeActivationProof {
         time(event.get("occurredAt"));
         JsonNode payload = event.path("payload");
         Set<String> payloadFields = new java.util.HashSet<>(PAYLOAD);
-        if (previous != null) {
+        if (!install) {
             payloadFields.add("renewalSeq");
         }
         closed(payload, payloadFields);
         String id = id(payload, "activationId");
-        require(number(payload.get("epoch")) == 1 && "active".equals(text(payload, "phase"))
+        require(number(payload.get("epoch")) == epoch && "active".equals(text(payload, "phase"))
                 && writerId.equals(text(payload, "workerId")) && writerId.equals(text(metadata, "writerId"))
                 && payload.path("boundaryRef").isNull());
         uuid(writerId);
         JsonNode subject = payload.path("subject");
         closed(subject, Set.of("type", "scopeId", "activationId", "epoch"));
         require("activation".equals(text(subject, "type")) && id.equals(text(subject, "scopeId"))
-                && id.equals(text(subject, "activationId")) && number(subject.get("epoch")) == 1);
+                && id.equals(text(subject, "activationId")) && number(subject.get("epoch")) == epoch);
         long lease = number(payload.get("leaseDurationMs"));
         long expires = time(payload.get("expiresAt"));
         require(lease > 0 && expires > time(event.get("occurredAt")));
@@ -1467,23 +1472,30 @@ public final class CsiNativeActivationProof {
         JsonNode body = readObject(bytes);
         closed(body, Set.of("version", "activationId", "epoch", "workerId", "leaseDurationMs"));
         require(number(body.get("version")) == 1 && id.equals(text(body, "activationId"))
-                && number(body.get("epoch")) == 1 && writerId.equals(text(body, "workerId"))
+                && number(body.get("epoch")) == epoch && writerId.equals(text(body, "workerId"))
                 && number(body.get("leaseDurationMs")) > 0);
-        long renewal = previous == null ? 0 : number(payload.get("renewalSeq"));
-        String suffix = previous == null ? "" : ":renewal:" + renewal;
-        require((previous == null ? "installActivation" : "renewActivation").equals(text(metadata, "operation"))
+        long renewal = install ? 0 : number(payload.get("renewalSeq"));
+        String suffix = install ? "" : ":renewal:" + renewal;
+        require((install ? "installActivation" : "renewActivation").equals(text(metadata, "operation"))
                 && (id + ":active" + suffix).equals(id(metadata, "commandId"))
                 && ("activation:" + id + ":active" + suffix).equals(id(event, "eventId")));
         if (previous == null) {
-            require(number(metadata.get("firstSequence")) == 1 && number(body.get("leaseDurationMs")) == lease);
+            require(install && generation == 1 && epoch == 1 && number(metadata.get("firstSequence")) == 1
+                    && number(body.get("leaseDurationMs")) == lease);
+        } else if (install) {
+            require(generation > previous.writerGeneration() && epoch == previous.epoch() + 1
+                    && !id.equals(previous.activationId()) && !writerId.equals(previous.workerId())
+                    && time(event.get("occurredAt")) >= previous.expiresAt()
+                    && number(body.get("leaseDurationMs")) == lease);
         } else {
             require(id.equals(previous.activationId()) && writerId.equals(previous.workerId())
+                    && generation == previous.writerGeneration() && epoch == previous.epoch()
                     && canonical(ref).equals(canonical(previous.installRef()))
                     && renewal == previous.renewalSequence() + 1);
         }
         var array = JSON.createArrayNode().add(event);
         require(sha256(canonical(array).getBytes(StandardCharsets.UTF_8)).equals(text(metadata, "eventsDigest")));
-        return new Activation(id, writerId, ref.deepCopy(), lease, expires, renewal);
+        return new Activation(id, writerId, ref.deepCopy(), lease, expires, renewal, epoch, generation);
     }
 
     public static boolean hasActivation(Transaction transaction) {

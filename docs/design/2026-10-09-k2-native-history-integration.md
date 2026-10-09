@@ -549,7 +549,7 @@ public selectors retain their existing gates.
 
 Both production schema paths must create the original execution authorization
 column: the standalone Broker schema and Agent Server's Flyway migration.
-The first candidate exposed a missing Agent migration before dispatch; V55 adds
+The first candidate exposed a missing Agent migration before dispatch; V57 adds
 the nullable column without granting or changing any existing execution.
 
 Persist one immutable native authorization JSON on the original ToolExecution
@@ -680,13 +680,15 @@ Prepared mutations retain their original backup and execution identity until
 the original effect/result can be qualified. Restoring evidence alone does not
 authorize a replacement worker or physical volume handoff.
 
-The current private Hosted initializer requires a new authority, writer generation
-1 and activation epoch 1. The original Store refuses an expired CSI writer;
-native history replay also pins the original writer and has no takeover grammar.
+The baseline private Hosted initializer requires a new authority, writer generation
+1 and activation epoch 1. The baseline Store refuses an expired CSI writer;
+baseline native history replay pins the original writer and has no takeover grammar.
 Therefore a read-only evidence match cannot be reported as genuine cold Hosted
 recovery. That delivery must qualify the original durable tail before a fenced
 writer/activation transition, recover each original receipt's fixed message
 identity, and resume the existing Harness model loop without a new tool dispatch.
+The local candidate implementing this transition is described in section 6.8.1;
+its independent cold acceptance remains pending.
 Ordinary load's legacy history parser and recovery path remain unchanged.
 
 The snapshot exporter requires actual MySQL/InnoDB consistent read-only snapshots.
@@ -709,6 +711,133 @@ or results. Positive and refusal cases cover mixed/multiple batches, incomplete
 inventory, changed original refs, lost result responses and UNKNOWN members.
 Real MySQL isolation and Linux CSI/target-cluster retirement remain separate
 qualification requirements; no new cloud resources are authorized by this design.
+
+#### 6.8.1 Qualified live-session writer recovery
+
+Status: implemented as a local candidate; genuine cold takeover is not accepted. The
+first delivery targets the original finite file batch after all SQL executions
+and immutable receipts settle but before the final message/resolve closes.
+Additional cold cuts below remain part of the required work.
+
+Keep the existing private Main text entry, original request/session and exact
+prompt. On a new Main process, reconcile and attest the original provisioned
+handle and READY Runtime Session; do not create a new Pod, worker, binding or
+file-history instance. A new Hosted boot ID is the new journal writer identity.
+It is not the retained file worker's identity. Admission must preserve both.
+
+Under the existing placement-domain, original-binding/session and journal-head
+locks on the same transactional Connection, qualify a bounded complete native
+history and all related execution/resource rows before modifying the writer.
+Require the original private profile, ACTIVE/READY state, uncompacted complete
+journal, fixed first activation, original encrypted runtime handle/context and
+one original READY Runtime Session. Validate the full original batch, including
+ordinal gaps, all eleven reference fields, input/declaration/prepared bytes,
+immutable grants, their original intent/dispatch revisions, raw results and
+receipt history. Every related execution must be SETTLED with a complete
+success/error result, original non-null authorization and no cancellation.
+The first cut additionally requires every original receipt. PREPARED, executing,
+UNKNOWN/ABANDONED, legacy contamination, omitted/orphan members, changed bytes,
+pagination/budget failure, a retirement cut or an unsupported continuation
+refuse without changing the head, journal, resources, grant or result.
+
+Use database time to require both the old writer and old activation expired.
+A live old owner continues to refuse replacement. Reuse the ordinary writer
+update only after this CSI-specific qualification: increment writer generation,
+install the new boot ID/token and lease, and preserve the committed journal,
+checkpoint and activation epoch. Do not grant new execution authority. This
+qualification is a dedicated cold-admission path; it is not an allow-expired
+option on ordinary live dispatch or receipt admission.
+
+Writer acquire and successor activation install are separate transactions.
+Between them only the qualified successor install may append; ordinary native
+mutation must remain unavailable. Reload the existing authority without
+publishing a new definition/root or requiring a new journal. The activation
+install rechecks the original tail and current live writer, uses a new activation
+ID, and advances the last installed epoch exactly once. An expired claim that
+crashed before installation may be replaced by another qualified claim; unused
+writer generations can be skipped, but installed activation epochs cannot.
+
+Native history replay follows original writer/activation segments. Genesis and
+the first activation remain generation/epoch 1. Renewal stays in its original
+segment, with the same writer, activation, install reference and next renewal
+sequence. A successor install starts the next epoch under a strictly newer
+writer generation. Old transaction rows and original grant revisions remain
+unchanged. General live reads require the locked head and last installed segment
+to agree; only the dedicated cold claim/install path recognizes an uninstalled
+claim. Historical replay never rewrites all rows to the current writer ID.
+
+For CSI existing-command replay, validate the current head writer ID,
+generation/token and live lease before returning an old receipt, in addition to
+the existing exact transaction comparison. Renewal and publication retain those
+same current-head fences. Preserve ordinary legacy replay semantics. Captured
+old-writer requests must refuse after takeover, including byte-exact replay,
+renewal and valid publication; malformed requests are not fencing evidence.
+
+#### 6.8.2 Repair before the model gate
+
+The first recovery consumer reads the existing durable receipts and their
+original outcome resources. Preserve history.messageId, timestamp, model and
+parts. Verify any existing tool-result message byte-for-byte; append only a
+missing original message in original ordinal order, then resolve only its
+original in-progress checkpoint member. Never allocate another execution,
+prepare again, redispatch, reuse a replacement result or rewrite an old grant.
+
+Perform private repair before entering the shared Harness runner. Its current
+harness.run model gate rejects await_runtime, so a callback executed inside that
+run is too late. A temporary handle for the qualified successor activation can
+repair the original receipts/checkpoints. Then close the retained schema2 result
+history, preserving backups/snapshot/path identity and changing only fingerprints
+allowed by the original mutation plan. Obtain only a snapshot from the retained
+worker; do not bind, clear or recreate its history.
+
+The private text recovery branch must match the durable original prompt ID and
+input/admission bytes. It skips submitInput and the duplicate user message,
+projects the repaired original history, supplies all original response Parts as
+resumeFromToolResults, and enters the existing Harness/model loop from
+results_ready. A changed prompt refuses. The CSI tool turn confirms the already
+closed result-history obligation; it does not execute the batch again. The
+subsequent real model request must contain every original accepted result,
+including Read members around locally refused ordinal gaps.
+
+Consumption follows the actual successful model attempt. Mirror the existing
+Harness adoption of checkpoint activation identity when the successor consumes
+settled results; all other checkpoint groups and original outcome references
+remain exact. Complete the original assistant, turn_settled and idle chain.
+A model-output-committed restart requires finishing that original attempt without
+sending a third model request and remains a separate acceptance cut.
+
+The present private read-batch returns reference/input/declaration/state, not the
+raw SETTLED result and persisted grant. Receipt-absent recovery therefore needs a
+separately qualified original authenticated readback and durable once-only
+outcome/message identity. The observer cannot supply a random ID as authority,
+reconstruct SQL rows or use a retirement export to authorize live takeover.
+
+#### 6.8.3 Cold acceptance and implementation boundary
+
+| Independently verified cut                     | Required observation                                                                                                                                                                       |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Last receipt committed; message/resolve absent | Actual old Main/Hosted exit, retained worker, fresh boot IDs, natural DB expiry, qualified successor, original repairs, actual model2, consumption/settlement; zero new file dispatch/I/O. |
+| Live old owner                                 | A valid replacement acquire refuses with complete original SQL/files unchanged.                                                                                                            |
+| UNKNOWN with a real write effect               | The original UNKNOWN and remaining PREPARED member block takeover; no replay, replacement result or repeated mutation.                                                                     |
+| SETTLED but receipt absent                     | Read the qualified original raw result/grant and durably establish its outcome/receipt once; observer supplies no positive rows or message authority.                                      |
+| After message or resolve                       | Exact original identities survive repeated recovery, without duplicate journal messages/results or file effects.                                                                           |
+| Claim before activation install                | Crash after actual acquire, wait natural expiry, qualify another claim, then install only the next activation epoch. No intermediate journal mutation.                                     |
+| Old owner after takeover                       | Captured exact old transaction/renewal and valid original-generation publication refuse; no unrelated table changes.                                                                       |
+| Model2 output committed before consumed        | Retain that original attempt/output and settle without model3 or file I/O.                                                                                                                 |
+
+Use fresh owned MySQL for database-time fencing and claim/install contention;
+H2/unit fixtures cannot qualify InnoDB isolation. Observe actual
+READ COMMITTED and warmed REPEATABLE READ contention separately. The first
+receipt cut is one increment, not all cold recovery or complete K2.
+
+Affected implementation layers are the private Hosted session/tool turn/history
+consumer, native activation/conversation/checkpoint proof, same-Connection
+activation/execution admission and Managed Session writer/commit/publication
+fences. Update their collocated tests and both design languages together. Reuse
+existing Main transport, retained worker, original ledgers and shared Harness;
+introduce no public recovery selector or second authorization ledger. Aggregate
+writer closure, physical termination/NodeUnpublish, release/reuse and target
+cluster qualification remain separate gates with their existing review boundary.
 
 ## 7. Validation and acceptance
 
@@ -858,3 +987,19 @@ work and inside the locked Store transaction. Ordinary child consumption still
 occurs after durable completed-turn settlement through the shared runner.
 See the paired lifecycle-main integration design for migration and validation
 requirements. None of these integration checks opens cold or physical gates.
+
+### 7.5 Genuine current-head cold refusal baseline B0
+
+On 2026-10-09, one fresh owned MySQL cold restart ran on `e8f11063463f846ab807764ede8e9aad272204f2`. The original Read, Write and Edit SQL success results and receipts were durable. After final Edit receipt revision 23 committed but before its message/resolve was delivered, only the registered old Main/Hosted were killed; the original worker, DB and file instance remained. New Main/Hosted reentered the original request/session/prompt after natural database expiry. The earliest native writer acquire returned 409 `csi_original_writer_unavailable`; Hosted attach separately wrapped it as 503 `csi_operation_unavailable`.
+
+There was no model2, repeated tool execution or new journal result. Original execution/grant/result bytes, 23 transactions, 27 resources and 49 references were preserved. The dynamic schema contained 54 tables and 699 columns; 53/54 tables were identical from cut to refusal, with only explicitly recorded original binding reconciliation. Counts are 1 actual behavior group, 27 observer checks and 20 offline predicates; the latter two are not additional behavior groups.
+
+The report and 201 evidence files were sealed. Root independently verified 264 source/doc/test pins, 4 products plus the SDK, 44 PID/group absence checks, 11 closed ports and removal of the owned temporary directory before releasing the window. This is bounded local software refusal evidence. Positive cold recovery, target Linux CSI, physical release and full K2 remain unaccepted; the first positive candidate requires a separate window for this design.
+
+### 7.6 Local cold candidate checks
+
+The first local candidate implements the receipt-complete writer claim, successor activation segment, original message/checkpoint repair before the model gate, and current-owner mutation fences described in section 6.8. Its full Node build, typecheck, bundle, focused lint and formatting checks passed. The first build/typecheck exposed two missing durable-reference label arguments; those failures were preserved and the arguments corrected before the successful checks. CLI regression covered 21 files with 1292 passing and 26 skipped tests; Core regression covered 4 files with 158 passing tests. The added local repair test exercises original outcome/message identity and refusal of changed prompt bytes through a local journal and mocked Broker; it does not prove SQL takeover or actual model2.
+
+The exact offline Java sequence completed Broker 19 suites/78 tests and Agent 39 suites/778 tests with no failures/errors/skips, followed by successful forced package/install and Checkstyle/SpotBugs checks. The original post-test observer failed on an incorrect standalone SDK path; its error was preserved and only the offline package bridge inspection was corrected, with no Maven rerun. Root independently verified 107 sealed evidence files, 12 unchanged candidate source/doc/test paths, 1179 compiled-class pins, 4 whole embedded package bridges, 3 installed package bridges and 8 PID/group absence checks before releasing that window. A root inspector's same absent-path assumption was separately preserved and corrected read-only.
+
+These are candidate build and regression checks. The required native review workflow is unavailable in this Codex session; no independent review approval or maintainer approval is asserted. Positive cold acceptance still requires the separate fresh MySQL C1 window. Its C7 subset must capture actual 200 responses for the original receipt transaction including atomic outcome publication and for writer renewal, then resend those same request bytes after takeover. They constitute two mutation predicates; the transaction/publication replay is one combined predicate. The standalone tool-result-content/page/manifest publication endpoint is not exercised by this inline CSI outcome producer and remains unqualified. None of these checks completes all eight cold cuts, physical retirement, safe reuse or full K2.

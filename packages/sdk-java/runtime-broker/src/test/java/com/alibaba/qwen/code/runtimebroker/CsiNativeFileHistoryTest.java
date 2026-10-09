@@ -28,7 +28,7 @@ class CsiNativeFileHistoryTest {
             "tenant", "workspace", 1, "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1), "/workspace", OWNER);
     private final Map<String, byte[]> resources = new HashMap<>();
     private final CsiNativeActivationProof.Activation activation = new CsiNativeActivationProof.Activation(
-            "activation", "worker", null, 60_000, 1_000_000, 0);
+            "activation", "worker", null, 60_000, 1_000_000, 0, 1, 1);
 
     @Test
     void acceptsInitialIntentAndPreparedWithOriginalMembershipAndIntentSequence() throws Exception {

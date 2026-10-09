@@ -165,6 +165,53 @@ class CsiNativeActivationProofTest {
     }
 
     @Test
+    void successorAdvancesInstalledEpochAcrossSkippedWriterClaimsAndFencesRenewal() throws Exception {
+        var genesis = genesis();
+        var originalInstall = transaction(1, genesis.lastRecordUuid());
+        var previous = activation(originalInstall, request(1), genesis, null, resources);
+        String successor = "550e8400-e29b-41d4-a716-446655440091";
+        String activationId = "550e8400-e29b-41d4-a716-446655440092";
+        ObjectNode event = originalInstall.events().getFirst().deepCopy();
+        event.put("sequence", 2).put("occurredAt", previous.expiresAt());
+        event.put("eventId", "activation:" + activationId + ":active");
+        ObjectNode payload = (ObjectNode) event.path("payload");
+        payload.put("activationId", activationId).put("workerId", successor).put("epoch", 2)
+                .put("expiresAt", previous.expiresAt() + 60_000);
+        ((ObjectNode) payload.path("subject")).put("scopeId", activationId).put("activationId", activationId)
+                .put("epoch", 2);
+        JsonNode body = CsiNativeActivationProof.readObject(resources.apply(payload.path("installRef"))).deepCopy();
+        ((ObjectNode) body).put("activationId", activationId).put("workerId", successor).put("epoch", 2);
+        byte[] bytes = JSON.writeValueAsBytes(body);
+        ((ObjectNode) payload.path("installRef")).put("resourceId", activationId).put("byteLength", bytes.length)
+                .put("digest", CsiNativeActivationProof.sha256(bytes));
+        ObjectNode metadata = request(1).deepCopy();
+        metadata.put("writerId", successor).put("writerGeneration", 3).put("activationEpoch", 2)
+                .put("firstSequence", 2).put("commandId", activationId + ":active");
+        var parsed = new CsiNativeActivationProof.Transaction(List.of(event), originalInstall.lastRecordUuid());
+        var accepted = CsiNativeActivationProof.activation(parsed, digestForEvents(metadata, parsed.events()),
+                original, successor, genesis.definitionDigest(), previous, ignored -> bytes);
+        assertEquals(2, accepted.epoch());
+        assertEquals(3, accepted.writerGeneration());
+        assertEquals(0, accepted.renewalSequence());
+        for (String field : List.of("writerGeneration", "activationEpoch")) {
+            ObjectNode changed = metadata.deepCopy();
+            changed.put(field, 1);
+            JsonNode changedMetadata = digestForEvents(changed, parsed.events());
+            rejected(() -> CsiNativeActivationProof.activation(parsed, changedMetadata,
+                    original, successor, genesis.definitionDigest(), previous, ignored -> bytes));
+        }
+        ObjectNode early = event.deepCopy();
+        early.put("occurredAt", previous.expiresAt() - 1);
+        var earlyTransaction = new CsiNativeActivationProof.Transaction(List.of(early), parsed.lastRecordUuid());
+        var earlyMetadata = digestForEvents(metadata, earlyTransaction.events());
+        rejected(() -> CsiNativeActivationProof.activation(earlyTransaction,
+                earlyMetadata, original, successor,
+                genesis.definitionDigest(), previous, ignored -> bytes));
+        var renewal = transaction(2, originalInstall.lastRecordUuid());
+        rejected(() -> activation(renewal, request(2), genesis, accepted, resources));
+    }
+
+    @Test
     void rejectsDuplicateTrailingInvalidUtf8AndOversizedLines() {
         for (byte[] bytes : List.of("{\"uuid\":1,\"uuid\":2}\n".getBytes(StandardCharsets.UTF_8),
                 "{} {}\n".getBytes(StandardCharsets.UTF_8), new byte[] {(byte) 0xc0, (byte) 0x80, '\n'},

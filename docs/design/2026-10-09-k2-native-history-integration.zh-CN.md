@@ -427,7 +427,7 @@ outcome/receipt、tool-result 消息、results-ready、后续模型继续、消�
 Write/Edit 和冷恢复随后沿同一贯通路径推进；物理退休和公开选择继续保持现有门禁。
 
 两条生产 schema 路径都必须创建原始执行授权列：独立 Broker schema 和 Agent Server
-的 Flyway 迁移。首轮候选在派发前暴露 Agent 迁移遗漏；V55 添加可空列，不为任何
+的 Flyway 迁移。首轮候选在派发前暴露 Agent 迁移遗漏；V57 添加可空列，不为任何
 已有执行生成授权或改变其状态。
 
 在写入原始授权标记的同一事务中，将一份不可变原生授权 JSON 持久化在原始
@@ -522,11 +522,12 @@ consumed/settled checkpoint 链。它支持 schema2 history，并保留 legacy �
 UNKNOWN 执行不能因为 process 或 Pod 消失而变成可重试。prepared 变更保留原始 backup
 和执行身份，直到原始效果/结果获得资格。恢复证据本身不授权替代 worker 或物理卷交接。
 
-当前私有 Hosted initializer 要求新 authority、writer generation 1 和 activation epoch 1。
-原始 Store 拒绝过期的 CSI writer；native history 重放也固定原始 writer，尚无 takeover
+基线私有 Hosted initializer 要求新 authority、writer generation 1 和 activation epoch 1。
+基线 Store 拒绝过期的 CSI writer；基线 native history 重放也固定原始 writer，尚无 takeover
 语法。因此只读证据匹配不能被报告为真正的 Hosted 冷恢复。该交付必须先校验原始持久尾部，
 再执行带 fencing 的 writer/activation 转移，按照各原始 receipt 的固定消息身份恢复，
-并在不重新派发工具的前提下继续既有 Harness 模型循环。普通 load 的 legacy history parser
+并在不重新派发工具的前提下继续既有 Harness 模型循环。第 6.8.1 节描述实现此转移的本地候选，
+独立冷验收仍待完成。普通 load 的 legacy history parser
 与恢复路径保持不变。
 
 snapshot exporter 要求真实 MySQL/InnoDB 一致的只读快照。此前的 H2 软件贯通运行
@@ -543,6 +544,107 @@ snapshot exporter 要求真实 MySQL/InnoDB 一致的只读快照。此前的 H2
 reader，不能重建 grant 或 result。正向和拒绝组覆盖混合/多批次、不完整 inventory、变化的
 原始引用、结果响应丢失与 UNKNOWN 成员。真实 MySQL isolation 和 Linux CSI/目标集群
 退休仍是独立资格要求；此设计不授权创建新云资源。
+
+#### 6.8.1 合格的存活 Session writer 冷恢复
+
+状态：已实现本地候选；真正的冷接管尚未验收。首项交付针对所有 SQL execution 与不可变
+receipt 已落定、最后 message/resolve 尚未收口的原有限文件批次。下方其他冷恢复窗口
+仍属于必须完成的工作。
+
+保留既有私有 Main text 入口、原始 request/session 和准确 prompt。新 Main 进程重新
+核对并 attest 原 provisioned handle 与 READY Runtime Session，不创建新 Pod、worker、
+binding 或 file-history 实例。新 Hosted boot ID 是新的 journal writer 身份，不是
+保留文件 worker 的身份；准入必须同时保留这两种身份。
+
+在同一事务 Connection 的既有 placement-domain、原 binding/session 与 journal-head
+锁下，先校验有界、完整 native history 以及全部关联 execution/resource 行，再修改
+writer。要求原私有 profile、ACTIVE/READY、未 compact 且完整的 journal、固定 first
+activation、原加密 runtime handle/context，以及唯一原 READY Runtime Session。
+验证完整原批次，包括 ordinal 缺口、全部十一字段引用、input/declaration/prepared
+字节、不可变 grant 及其原 intent/dispatch revision、原始 result 和 receipt history。
+每个关联 execution 必须 SETTLED、具有完整 success/error result、原始非空授权且未
+取消。首个窗口还要求每个原 receipt 已持久化。PREPARED、executing、UNKNOWN/ABANDONED、
+legacy 混入、遗漏/孤立成员、字节变化、分页/预算失败、retirement cut 或不支持的
+continuation 均拒绝，不能修改 head、journal、resource、grant 或 result。
+
+用数据库时间要求旧 writer 与旧 activation 均已过期；仍存活的旧 owner 继续阻止替换。
+只有 CSI 专用资格通过后才复用既有 writer 更新：递增 writer generation，设置新 boot
+ID/token 与租约，保留已提交 journal、checkpoint 和 activation epoch。不授予新的
+execution 权限。这是专门的 cold-admission 路径，不是普通 live dispatch/receipt
+准入上的 allow-expired 选项。
+
+writer acquire 与 successor activation install 是两个事务。中间只有合格 successor
+install 可以 append，普通 native mutation 仍须不可用。重新读取既有 authority，不
+发布新 definition/root、不要求新 journal。activation install 重查原尾部与当前存活
+writer，使用新 activation ID，准确递增最后已 install epoch 一次。claim 后尚未
+install 就崩溃，须待其自然过期，再由另一个合格 claim 替换；未使用的 writer generation
+可以跳过，已 install 的 activation epoch 不能跳过。
+
+native history 按原 writer/activation 分段重放。genesis 与首个 activation 仍为
+generation/epoch 1。renew 保留原段的 writer、activation、install reference 并递增
+renewal sequence。successor install 在严格更大的 writer generation 下开始下一个
+epoch。旧 transaction 行与原 grant revision 保持不变。普通 live 读取要求锁定 head
+与最后 install 段一致；只有专门 cold claim/install 路径识别尚未 install 的 claim。
+历史重放不能让所有旧行改名为当前 writer ID。
+
+CSI 的 existing-command replay 在返回旧 receipt 前，除既有准确 transaction 比较，
+还必须验证当前 head writer ID、generation/token 与存活租约。renew 与 publication
+保留相同当前 head fencing。普通 legacy replay 语义保持不变。接管后捕获的旧 writer
+请求必须拒绝，包括 byte-exact replay、renew 和合法 publication；畸形请求不是 fencing
+证据。
+
+#### 6.8.2 在模型门禁前修复
+
+首个恢复消费者读取已有持久 receipt 与其原 outcome resource，保留
+history.messageId、timestamp、model 和 parts。逐字节核对已有 tool-result message，
+按原 ordinal 顺序仅补写缺失原 message，再 resolve 其原 in-progress checkpoint 成员。
+不能另分配 execution、重新 prepare/dispatch、替换 result 或改写旧 grant。
+
+私有修复必须发生在共享 Harness runner 之前。当前 harness.run 的模型门禁会拒绝
+await_runtime，在 run 内才执行的 callback 太晚。合格 successor activation 的临时
+handle 可以修复原 receipt/checkpoint，然后收口保留 schema2 result history：保持
+backup/snapshot/path 身份，只改变原 mutation plan 允许的 fingerprint。仅从保留 worker
+取得 snapshot，不 bind、clear 或重建 history。
+
+私有 text 恢复分支必须匹配持久原 prompt ID 与 input/admission 字节。它跳过 submitInput
+及重复 user message，投影修复后的原 history，以全部原 response Parts 作为
+resumeFromToolResults，从 results_ready 进入既有 Harness/模型循环。变化的 prompt
+拒绝。CSI tool turn 仅确认 result-history 义务已闭合，不再执行批次。实际后续模型请求
+必须包含所有原已接受结果，包括本地拒绝 ordinal 缺口前后的 Read 成员。
+
+consumption 发生在实际后续模型尝试成功后。successor 消费 settled result 时，应镜像
+既有 Harness 对 checkpoint activation identity 的接续，所有其他 checkpoint group 和
+原 outcome reference 保持准确。完成原 assistant、turn_settled、idle 链。已提交模型
+output 后重启须完成原 attempt，不能发送第三次模型请求；该窗口仍独立验收。
+
+当前私有 read-batch 返回 reference/input/declaration/state，不返回原始 SETTLED result
+和持久 grant。因此 receipt-absent 恢复还需要单独合格的原认证 readback，以及持久、
+只落定一次的 outcome/message 身份。observer 不能以随机 ID 充当权威、重建正向 SQL 行，
+也不能用 retirement export 授予存活 Session 的 takeover。
+
+#### 6.8.3 冷恢复验收与实现边界
+
+| 独立验证窗口                              | 必须观察的行为                                                                                                                            |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| 最后 receipt 已提交，message/resolve 缺失 | 真实旧 Main/Hosted 退出、保留 worker、新 boot ID、数据库自然过期、合格 successor、原修复、实际 model2、消费/结算；零新文件 dispatch/I/O。 |
+| 旧 owner 存活                             | 合法 replacement acquire 拒绝，完整原 SQL/文件不变。                                                                                      |
+| 有真实 Write 效果的 UNKNOWN               | 原 UNKNOWN 与剩余 PREPARED 成员阻止 takeover；不 replay、替换 result 或重复变更。                                                         |
+| SETTLED 但 receipt 缺失                   | 读取合格原 raw result/grant，仅一次持久 outcome/receipt；observer 不提供正向行或消息权威。                                                |
+| message 或 resolve 之后                   | 重复恢复保留准确原身份，不重复 journal message/result 或文件效果。                                                                        |
+| claim 后、activation install 前           | 实际 acquire 后崩溃，待自然过期，再校验另一个 claim，仅 install 下一 activation epoch；中间不修改 journal。                               |
+| 接管后的旧 owner                          | 捕获的准确旧 transaction/renew 及合法原 generation publication 拒绝，无无关表变化。                                                       |
+| model2 output 已提交、consumed 之前       | 保留原 attempt/output，不发 model3、不做文件 I/O 即结算。                                                                                 |
+
+数据库时间 fencing 与 claim/install 竞争使用全新自有 MySQL；H2/单元 fixture 不能
+赋予 InnoDB isolation 资格。真实 READ COMMITTED 与预热 REPEATABLE READ 竞争须分别
+观察。首个 receipt 窗口只是增量，不是全部冷恢复或完整 K2。
+
+影响层为私有 Hosted session/tool turn/history 消费者、native activation/conversation/
+checkpoint proof、同 Connection activation/execution 准入，以及 Managed Session
+writer/commit/publication fencing。同批更新 collocated tests 与双语设计。复用既有
+Main transport、保留 worker、原 ledgers 和共享 Harness，不另建公开 recovery selector
+或第二授权 ledger。聚合 writer 收口、物理终止/NodeUnpublish、释放/复用与目标集群资格
+仍为独立门禁，并保留既有审查边界。
 
 ## 7. 验证与验收
 
@@ -658,3 +760,19 @@ V55/V56/V57，SQL 字节不变；首个原生候选的 V55 grant migration 现�
 拒绝 CSI parent。普通 child consumption 仍通过共享 runner，发生在 completed
 turn 持久落定之后。Migration 与验证要求见完整双语 lifecycle-main 集成设计。
 这些集成检查不开放冷恢复或物理门禁。
+
+### 7.5 当前提交的真实冷拒绝基线 B0
+
+2026-10-09 对 `e8f11063463f846ab807764ede8e9aad272204f2` 完成一次全新自有 MySQL 冷重启。原 Read、Write、Edit 三项 SQL success 与 receipt 已持久化；最后 Edit receipt revision 23 已提交、message/resolve 尚未交付时，仅终止注册旧 Main/Hosted，保留原 worker、DB 与文件实例。新 Main/Hosted 使用原 request/session/prompt，等待数据库自然过期后重入。最早 native writer acquire 返回 409 `csi_original_writer_unavailable`；Hosted attach 的 503 `csi_operation_unavailable` 是独立包装结果。
+
+未出现 model2、重复工具执行或新 journal 结果。完整原 execution/grant/result、23 个 transaction、27 个 resource、49 个 reference 保持；动态 schema 为 54 表、699 列，53/54 表在 cut 到 refusal 期间相同，binding 仅发生明确记录的原实例 reconciliation。计数为 1 个实际行为组、27 个 observer 检查、20 个离线谓词；不把后两者累计为新行为组。
+
+原报告和 201 个证据文件已封存。root 独立验证 264 个 source/doc/test pin、4 个 product 和 SDK、44 次 PID/group 缺席检查、11 个关闭端口、原临时目录清理后解除本轮 freeze。这是有界本地软件拒绝基线；正向冷恢复、目标 Linux CSI、物理释放与完整 K2 仍未验收。首个正向候选必须另建窗口验证本节设计。
+
+### 7.6 本地冷恢复候选检查
+
+首个本地候选实现第 6.8 节的 receipt-complete writer claim、successor activation 分段、模型门禁前的原 message/checkpoint 修复与当前 owner mutation fencing。全量 Node build、typecheck、bundle、聚焦 lint 和格式检查通过。首轮 build/typecheck 发现两处 durable-reference label 参数缺失，原失败保留；修正参数后检查通过。CLI 回归覆盖 21 文件，1292 项通过、26 项跳过；Core 回归覆盖 4 文件，158 项通过。新增本地修复测试通过本地 journal 和 mocked Broker 验证原 outcome/message 身份与变化 prompt 字节拒绝，不证明 SQL takeover 或实际 model2。
+
+准确离线 Java 顺序完成 Broker 19 suites/78 tests、Agent 39 suites/778 tests，零 failure/error/skip；强制 package/install 和 Checkstyle/SpotBugs 检查通过。测试后的原 observer 因 standalone SDK 路径错误失败，原错误保留；仅修正离线 package bridge 核验，没有重跑 Maven。root 独立验证 107 个封存证据文件、12 个不变 candidate source/doc/test 路径、1179 个 compiled-class pin、4 个整包 embedded bridge、3 个 installed package bridge 与 8 次 PID/group 缺席检查后释放窗口。root inspector 对同一缺席路径的错误假设也另行保留，仅只读修正。
+
+这些是候选构建与回归检查。本 Codex 会话缺少必需的原生 review workflow 工具，不声称独立 review 或 maintainer approval 通过。正向冷验收仍需独立全新 MySQL C1 窗口。其 C7 子集必须捕获原 receipt transaction（含原子 outcome publication）与 writer renewal 的实际 200，接管后原样重发相同请求字节。这是两个 mutation 谓词；transaction/publication replay 是一个合并谓词。此 inline CSI outcome producer 不使用独立 tool-result-content/page/manifest publication 入口，该入口仍未验收。这些检查不完成全部八个冷窗口、物理退休、安全复用或完整 K2。

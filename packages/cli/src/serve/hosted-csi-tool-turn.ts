@@ -35,6 +35,7 @@ import type {
   CsiHistoryPreparation,
 } from './managed-csi-file-history-protocol.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { requireClosedHostedCsiHistory } from './hosted-csi-cold-recovery.js';
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -565,6 +566,25 @@ export class HostedCsiToolTurn implements HostedToolTurn {
     )
       throw new Error('Original CSI Broker response differs.');
     return result;
+  }
+
+  async resumeCommittedResults(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    await requireClosedHostedCsiHistory(this.session);
+    const authorization =
+      await this.session.authority.harnessRunAuthorization();
+    if (
+      authorization.status !== 'runnable' ||
+      authorization.checkpoint.continuation.phase !== 'results_ready' ||
+      authorization.checkpoint.identity.promptId !== this.promptId ||
+      !authorization.checkpoint.tools?.items.length ||
+      authorization.checkpoint.tools.items.some(
+        (item) => item.state !== 'settled',
+      )
+    )
+      throw new HostedToolRecoveryRequiredError(
+        'Original CSI results are unavailable.',
+      );
   }
 
   async consumeResults(): Promise<void> {
