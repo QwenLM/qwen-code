@@ -2298,7 +2298,10 @@ function resolveCdTargetCwd(
     // directory bash picks at runtime; the literal word is a path no shell
     // enters, so it certifies nothing (#12280 R2-1).
     /[*?[\]{}]/.test(target) ||
-    target.startsWith('~')
+    target.startsWith('~') ||
+    // A process substitution expands to an fd path, and `cd /dev/fd/N` fails
+    // (`Not a directory`): the shell stays where it was (#12280 R1-6).
+    target.startsWith('/dev/fd/')
   ) {
     return { kind: 'dynamic' };
   }

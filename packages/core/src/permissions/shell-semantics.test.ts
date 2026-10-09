@@ -1005,14 +1005,17 @@ describe('R2 review round: comment-continuation desync, merge flag union', () =>
   // A `cd` target is only trusted when the analysis can show bash enters
   // exactly that directory. Glob and tilde spellings expand at runtime, an
   // erased process substitution under-counts the operands (bash fails the
-  // cd with too many arguments), and an option word bash rejects leaves the
-  // shell where it started (#12280 R2-1).
+  // cd with too many arguments) and its fd path is not a directory bash can
+  // enter at all, and an option word bash rejects leaves the shell where it
+  // started (#12280 R2-1).
   it.each([
     ['cd * ; echo {} > .qwen/settings.json', REPO_SETTINGS],
     ['cd su* ; echo {} > settings.json', '/repo/settings.json'],
     ['cd {a,b} ; echo {} > settings.json', '/repo/settings.json'],
     ['cd ~- ; echo {} > settings.json', '/repo/settings.json'],
     ['cd -x ; echo {} > .qwen/settings.json', REPO_SETTINGS],
+    ['cd >(tee log) ; echo {} > settings.json', '/repo/settings.json'],
+    ['cd <(echo x) ; echo {} > settings.json', '/repo/settings.json'],
     ['cd backup >(tee log) ; cd sub ; echo {} > f', '/repo/sub/f'],
   ])(
     'escalates a cd bash does not provably perform: `%s` (#12280-R2-1)',
