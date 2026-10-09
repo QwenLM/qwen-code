@@ -269,6 +269,16 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         }
     }
 
+    /**
+     * The owned Runtime Broker Service, exposed for the child result relay
+     * and the close cascade's binding probe at registration time. The
+     * closing lifecycle stays with this Broker alone — the wiring uses
+     * {@code destroyMethod = ""} so Spring never closes it twice.
+     */
+    public RuntimeBrokerService service() {
+        return service;
+    }
+
     @Override
     public void close() {
         if (recovery != null) {
