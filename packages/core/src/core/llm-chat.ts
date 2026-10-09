@@ -2039,6 +2039,7 @@ class SystemReminderEchoFilter {
           closeIdx === -1 ? undefined : closeIdx,
         ),
       );
+      let decidedLiteral = false;
       if (closeIdx !== -1) {
         const after = closeIdx + SYSTEM_REMINDER_CLOSE.length;
         const closeLineStart = this.buffer.lastIndexOf('\n', closeIdx) + 1;
@@ -2060,7 +2061,8 @@ class SystemReminderEchoFilter {
           !earlyClose &&
           !crossesFence &&
           closeIsAnchored &&
-          ticksAfter === this.openingTicks
+          (ticksAfter === this.openingTicks ||
+            (this.openingTicks === 3 && ticksAfter > this.openingTicks))
         ) {
           let end = ticksAt + ticksAfter;
           if (this.buffer[end] === '\r' && this.buffer[end + 1] === '\n') {
@@ -2076,8 +2078,10 @@ class SystemReminderEchoFilter {
           emitted += this.scan(remainder, startsAtLineStart);
           continue;
         }
+        decidedLiteral = ticksAt + ticksAfter < this.buffer.length;
       }
       if (
+        decidedLiteral ||
         earlyClose ||
         crossesFence ||
         this.buffer.length > SYSTEM_REMINDER_ECHO_MAX_BUFFER ||
@@ -6258,50 +6262,37 @@ export class LlmChat {
     // user-visible text. Strip-only (never retries), so mid-stream holds do
     // not need the whole-chunk atomicity that a leak-retry requires.
     const systemReminderEchoFilter = new SystemReminderEchoFilter();
-    // True once any text has been released by the leading detector (i.e. the
-    // pending text parts' bytes now live in a detector/filter buffer rather
-    // than only in the parts themselves). Flush sites use this to decide
-    // between verbatim part replay (leading detector still owns the text)
-    // and the stripped rebuild below.
     let textReleasedThroughDetectors = false;
-    const isEchoTextPart = (part: Part): part is Part & { text: string } =>
-      isValidNonThoughtTextPart(part);
-    const takePendingProtocolPartsStripped = (): Part[] => {
-      const parts = pendingProtocolParts;
-      pendingProtocolParts = [];
+    const isVisibleProtocolText = (
+      part: Part,
+    ): part is Part & { text: string } =>
+      typeof part.text === 'string' && !part.thought;
+    const releaseEchoParts = (parts: Part[]): Part[] => {
       const released: Part[] = [];
       for (const part of parts) {
-        // Pure text parts routed here while a detector held them; their text
-        // re-enters through the filter's released string instead.
-        if (isEchoTextPart(part)) {
-          const { text: _text, ...metadata } = part;
-          if (Object.keys(metadata).length > 0) released.push(metadata);
+        if (isValidNonThoughtTextPart(part)) {
+          const text = systemReminderEchoFilter.accept(part.text!);
+          if (text) {
+            released.push({ ...part, text });
+          } else {
+            const { text: _text, ...metadata } = part;
+            if (Object.keys(metadata).length > 0) released.push(metadata);
+          }
         } else {
+          // Buffered text belongs before this part, including an indivisible
+          // signed part. Never move it across a tool call or signature.
+          const tail = systemReminderEchoFilter.finish();
+          if (tail) released.push({ text: tail });
           released.push(part);
         }
       }
       return released;
     };
     const finishEchoFilterAndTakePending = (): Part[] => {
-      if (!textReleasedThroughDetectors) {
-        // Only replay after the leading detector has ruled out a leak. Its
-        // JSON hold must not bypass the same echo filter used by streaming.
-        const released: Part[] = [];
-        for (const part of takePendingProtocolParts()) {
-          if (!isEchoTextPart(part)) {
-            released.push(part);
-          } else {
-            const text = systemReminderEchoFilter.accept(part.text);
-            if (text) released.push({ ...part, text });
-          }
-        }
-        const tail = systemReminderEchoFilter.finish();
-        if (tail) released.push({ text: tail });
-        return released;
-      }
+      const released = releaseEchoParts(takePendingProtocolParts());
       const tail = systemReminderEchoFilter.finish();
-      const released = takePendingProtocolPartsStripped();
-      return tail ? [...released, { text: tail }] : released;
+      if (tail) released.push({ text: tail });
+      return released;
     };
     const currentUserTurn = this.history[this.history.length - 1];
     const isToolResultContinuation =
@@ -6378,61 +6369,26 @@ export class LlmChat {
               ) {
                 continue;
               }
-              if (!isEchoTextPart(part)) {
+              if (!isVisibleProtocolText(part)) {
                 if (
                   pendingProtocolParts.length > 0 ||
                   protocolTagDetector.leaked
                 ) {
                   pendingProtocolParts.push(part);
                 } else {
-                  outputParts.push(part);
+                  outputParts.push(...releaseEchoParts([part]));
                 }
                 continue;
               }
               const text = protocolTagDetector.accept(part.text);
-              if (text) {
+              if (text || !protocolTagDetector.blockingOutput) {
                 textReleasedThroughDetectors = true;
-                const filteredText = systemReminderEchoFilter.accept(text);
-                if (filteredText) {
-                  if (pendingProtocolParts.length > 0) {
-                    // Held parts' text flowed through the detector buffers
-                    // and is represented by `filteredText`; keep only their
-                    // non-text payloads (thoughts, tool calls, ...).
-                    outputParts.push(...takePendingProtocolPartsStripped(), {
-                      ...part,
-                      text: filteredText,
-                    });
-                  } else {
-                    outputParts.push({ ...part, text: filteredText });
-                  }
-                  continue;
-                }
-                // The echo filter is holding mid-stream: park the part (its
-                // text re-enters through a later filter release). Unlike a
-                // leading-tag hold this never retries the turn, so parts of
-                // this chunk that already resolved stay in `outputParts` and
-                // remain yieldable — no whole-chunk withdrawal.
-                pendingProtocolParts.push(part);
-                protocolTextWasSuppressed ||= part.text.length > 0;
+                outputParts.push(
+                  ...releaseEchoParts([...takePendingProtocolParts(), part]),
+                );
                 continue;
               }
-              if (protocolTagDetector.blockingOutput) {
-                // Withdrawal is only correct while the leading detector
-                // blocks: it has not released anything yet, so
-                // `textReleasedThroughDetectors` stays false, the flush
-                // replays these parts verbatim, and whole-chunk atomicity
-                // survives a potential leak-retry.
-                pendingProtocolParts.push(...outputParts.splice(0), part);
-              } else {
-                // Empty text with the detector clean and terminal (no retry
-                // can follow, so chunk atomicity is moot): a withdrawal would
-                // park parts whose bytes were already released past every
-                // buffer, and the stripped flush would drop their text with
-                // nothing re-entering through a later filter release. Park
-                // just this part instead — whether or not the echo filter is
-                // still holding earlier bytes.
-                pendingProtocolParts.push(part);
-              }
+              pendingProtocolParts.push(...outputParts.splice(0), part);
               protocolTextWasSuppressed ||= part.text.length > 0;
             }
             content.parts = outputParts;
@@ -6642,7 +6598,7 @@ export class LlmChat {
     let pendingProtocolChunk: GenerateContentResponse | undefined;
     if (
       streamError === null &&
-      pendingProtocolParts.length > 0 &&
+      (pendingProtocolParts.length > 0 || systemReminderEchoFilter.pending) &&
       (hasToolCall ||
         pendingProtocolParts.some((part) => part.functionCall !== undefined))
     ) {

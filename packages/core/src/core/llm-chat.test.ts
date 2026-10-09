@@ -9854,6 +9854,98 @@ describe('LlmChat', async () => {
     expectStreamCalls(1);
   });
 
+  it.each([
+    [
+      'a longer fence closer',
+      'First\n```\n<system-reminder>\nstale todos\n</system-reminder>\n````\nLast',
+      'First\nLast',
+    ],
+    [
+      'a decided literal closer',
+      '```md\n`<system-reminder>\nunfinished\n</system-reminder>\n```\nAnswer',
+      '```md\n`<system-reminder>\nunfinished\n</system-reminder>\n```\nAnswer',
+    ],
+  ])(
+    'streams %s before the next delta (#10797)',
+    async (_name, first, expected) => {
+      mockStreamsOnce(
+        streamOf(textChunk(first), textChunk(' More.'), stopResponse([])),
+      );
+      const stream = await send('test', 'prompt-10797-resolved-streaming');
+      let next = await stream.next();
+      while (!next.done && next.value.type !== StreamEventType.CHUNK) {
+        next = await stream.next();
+      }
+      if (next.done || next.value.type !== StreamEventType.CHUNK) {
+        throw new Error('Expected a visible first chunk.');
+      }
+      expect(next.value.value.candidates?.[0]?.content?.parts).toEqual([
+        { text: expected },
+      ]);
+      await drain(stream);
+      expect(chat.getLastModelMessageText()).toBe(expected + ' More.');
+      expectStreamCalls(1);
+    },
+  );
+
+  it('retries signed leading scaffolding without detaching a signature (#10797)', async () => {
+    const signedPart = {
+      text: '<file_path>fixture</file_path><action>saved</action></tool_result>',
+      thoughtSignature: 'opaque-signature',
+    };
+    mockStreamsOnce(
+      streamOf(stopResponse([signedPart])),
+      streamOf(stopResponse([{ text: 'Saved cleanly.' }])),
+    );
+    const events = await sendCollect('test', 'prompt-10797-signed-scaffold');
+    expect(hasRetry(events)).toBe(true);
+    expect(chunkParts(events)).toEqual([{ text: 'Saved cleanly.' }]);
+    expect(chat.getHistory().at(-1)?.parts).toEqual([
+      { text: 'Saved cleanly.' },
+    ]);
+    expectStreamCalls(2);
+  });
+
+  it.each([
+    ['a trailing tick carry', 'Example\n```'],
+    ['an unfinished reminder', 'Before\n`<system-reminder>unfinished'],
+  ])(
+    'keeps %s before a tool call at clean EOF (#10797)',
+    async (_name, text) => {
+      const record = vi.fn();
+      const target = chatWithRecorder(record);
+      const call = fnCall('read_file', { path: 'fixture' }, 'ordered-call');
+      mockStreamsOnce(streamOf(textChunk(text), modelChunk([call])));
+      const delivered: Part[] = [];
+      for await (const event of await send(
+        'test',
+        'prompt-10797-part-order',
+        target,
+      )) {
+        if (event.type === StreamEventType.CHUNK) {
+          delivered.push(
+            ...(event.value.candidates?.[0]?.content?.parts ?? []).map(
+              (part) => ({ ...part }),
+            ),
+          );
+        }
+      }
+      const callIndex = delivered.findIndex((part) => part.functionCall);
+      expect(
+        delivered
+          .slice(0, callIndex)
+          .map((part) => part.text ?? '')
+          .join(''),
+      ).toBe(text);
+      expect(delivered.slice(callIndex)).toEqual([call]);
+      expect(target.getHistory().at(-1)?.parts).toEqual([{ text }, call]);
+      expect(record).toHaveBeenCalledWith(
+        expect.objectContaining({ message: [{ text }, call] }),
+      );
+      expectStreamCalls(1);
+    },
+  );
+
   it('retains the line anchor between separate complete echoes (#10797)', async () => {
     const echo = '`<system-reminder>\nstale todos\n</system-reminder>`\n';
     mockStreamsOnce(
@@ -9986,7 +10078,7 @@ describe('LlmChat', async () => {
     expectStreamCalls(1);
   });
 
-  it('records only delivered parts when cancelled during an echo hold (#10797)', async () => {
+  it('records delivered parts when cancelled after an echo boundary flush (#10797)', async () => {
     const controller = new AbortController();
     const record = vi.fn();
     const recordingChat = chatWithRecorder(record);
@@ -10029,16 +10121,28 @@ describe('LlmChat', async () => {
         for await (const event of stream) {
           if (event.type === StreamEventType.CHUNK) {
             delivered.push(
-              ...(event.value.candidates?.[0]?.content?.parts ?? []),
+              ...(event.value.candidates?.[0]?.content?.parts ?? []).map(
+                (part) => ({ ...part }),
+              ),
             );
           }
         }
       })(),
     ).rejects.toThrow();
-    expect(delivered).toEqual([deliveredCall, { text: 'Here is the plan:\n' }]);
-    expect(recordingChat.getHistory().at(-1)?.parts).toEqual(delivered);
+    expect(delivered).toEqual([
+      deliveredCall,
+      { text: 'Here is the plan:\n' },
+      { text: '`<system-reminder>unfinished' },
+      parkedCall,
+    ]);
+    const expectedHistory = [
+      deliveredCall,
+      { text: 'Here is the plan:\n`<system-reminder>unfinished' },
+      parkedCall,
+    ];
+    expect(recordingChat.getHistory().at(-1)?.parts).toEqual(expectedHistory);
     expect(record).toHaveBeenCalledWith(
-      expect.objectContaining({ message: delivered }),
+      expect.objectContaining({ message: expectedHistory }),
     );
     expectStreamCalls(1);
   });
