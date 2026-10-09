@@ -307,7 +307,10 @@ import {
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
-import { createAgentRecordTranscriptUpdate } from '@qwen-code/acp-bridge/transcriptReplay';
+import {
+  createAgentRecordTranscriptUpdate,
+  createTranscriptExecutionLifecycleUpdate,
+} from '@qwen-code/acp-bridge/transcriptReplay';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   SERVE_CONTROL_EXT_METHODS,
@@ -2320,6 +2323,7 @@ export class Session implements SessionContext {
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
   private unsubscribeApprovalModeChange?: () => void;
+  private unsubscribeRequestLifecycle?: () => void;
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
@@ -2534,6 +2538,17 @@ export class Session implements SessionContext {
     this.planEmitter = new PlanEmitter(this);
     this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
+    this.unsubscribeRequestLifecycle = this.config.onRequestLifecycle?.(
+      (event) => {
+        if (this.disposed || this.closing || event.sessionId !== this.sessionId)
+          return;
+        void this.sendUpdate(
+          createTranscriptExecutionLifecycleUpdate(event),
+        ).catch((error) =>
+          debugLogger.warn('Failed to send request lifecycle:', error),
+        );
+      },
+    );
 
     this.unsubscribeApprovalModeChange = this.config.onApprovalModeChange?.(
       (mode, prePlanMode) => {
@@ -4645,6 +4660,8 @@ export class Session implements SessionContext {
     this.clearActiveTodoPlanRevision();
     this.unsubscribeApprovalModeChange?.();
     this.unsubscribeApprovalModeChange = undefined;
+    this.unsubscribeRequestLifecycle?.();
+    this.unsubscribeRequestLifecycle = undefined;
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
     this.resolveCloseGate?.();

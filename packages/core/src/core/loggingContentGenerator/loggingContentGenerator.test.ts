@@ -13,6 +13,7 @@ import type {
 import { GenerateContentResponse } from '@google/genai';
 import { SpanStatusCode } from '@opentelemetry/api';
 import type { Config } from '../../config/config.js';
+import type { RequestLifecycleEvent } from '../../telemetry/request-lifecycle.js';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
@@ -342,6 +343,8 @@ const createConfig = (overrides: Record<string, unknown> = {}): Config => {
     getTelemetrySensitiveSpanAttributeMaxLength: () =>
       (configContent['sensitiveSpanAttributeMaxLength'] as number) ??
       1024 * 1024,
+    getChatRecordingService: () => undefined,
+    notifyRequestLifecycle: vi.fn(),
     getSessionId: () =>
       (configContent['sessionId'] as string | undefined) ?? 'test-session',
     getTelemetryUserId: () => configContent['userId'] as string | undefined,
@@ -353,7 +356,7 @@ const createConfig = (overrides: Record<string, unknown> = {}): Config => {
     getToolRegistry: () =>
       configContent['toolRegistry'] ?? { getTool: () => undefined },
     getSkillManager: () => configContent['skillManager'] ?? null,
-  } as Config;
+  } as unknown as Config;
 };
 
 const createWrappedGenerator = (
@@ -607,6 +610,317 @@ describe('LoggingContentGenerator', () => {
     convertLlmRequestToOpenAISpy.mockClear();
     convertLlmToolsToOpenAISpy.mockClear();
     convertLlmResponseToOpenAISpy.mockClear();
+  });
+
+  describe('request lifecycle', () => {
+    const events = (config: Config): RequestLifecycleEvent[] =>
+      vi
+        .mocked(config.notifyRequestLifecycle)
+        .mock.calls.map(([event]) => event);
+
+    const expectEnded = (
+      config: Config,
+      outcome: 'success' | 'error' | 'cancelled' | 'interrupted',
+    ) => {
+      const [start, end] = events(config);
+      expect(events(config)).toHaveLength(2);
+      expect(start).toMatchObject({
+        v: 1,
+        kind: 'request',
+        phase: 'started',
+        sessionId: 'test-session',
+        model: 'test-model',
+      });
+      expect(start).not.toHaveProperty('durationMs');
+      expect(start).not.toHaveProperty('outcome');
+      expect(end).toMatchObject({
+        executionId: start.executionId,
+        startedAt: start.startedAt,
+        promptId: start.promptId,
+        phase: 'ended',
+        outcome,
+      });
+      if (end.phase === 'ended') {
+        expect(end.durationMs).toBeGreaterThanOrEqual(0);
+        expect(end.endedAt - start.startedAt).toBe(end.durationMs);
+      }
+    };
+
+    it('publishes start before the provider and succeeds with telemetry disabled', async () => {
+      vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
+      const config = createConfig({ logPrompts: false });
+      const generate = vi.fn(async () => {
+        expect(events(config)).toHaveLength(1);
+        expect(events(config)[0]).toMatchObject({ phase: 'started' });
+        return resp('response');
+      });
+      await runContent(generate, 'lifecycle-success', { config });
+      expectEnded(config, 'success');
+      expect(loggedResponse().execution_id).toBe(events(config)[0].executionId);
+    });
+
+    it.each([false, true])(
+      'succeeds for a consumed stream, empty=%s',
+      async (empty) => {
+        const config = createConfig();
+        await runStream(
+          empty ? streams() : streams(resp('stream-response')),
+          'lifecycle-stream',
+          { config },
+        );
+        expectEnded(config, 'success');
+      },
+    );
+
+    it.each(['content', 'stream', 'iteration'] as const)(
+      'ends once when %s fails',
+      async (path) => {
+        const config = createConfig();
+        const error = new Error('provider failed');
+        const operation =
+          path === 'content'
+            ? runContent(rejecting(error), 'lifecycle-failure', { config })
+            : path === 'stream'
+              ? openStream(rejecting(error), 'lifecycle-failure', { config })
+              : runStream(
+                  failingStream(error, resp('partial')),
+                  'lifecycle-failure',
+                  { config },
+                );
+        await expect(operation).rejects.toBe(error);
+        expectEnded(config, 'error');
+      },
+    );
+
+    it('confirms cancellation when an aborted provider actually exits', async () => {
+      const config = createConfig();
+      const abort = new AbortController();
+      const gate = deferred();
+      const generate = vi.fn(async () => {
+        await gate.promise;
+        throw userAbort();
+      });
+      const pending = runContent(generate, 'lifecycle-abort', {
+        config,
+        request: helloRequest({ abortSignal: abort.signal }),
+      });
+      abort.abort();
+      expect(events(config).map((event) => event.phase)).toEqual(['started']);
+      gate.resolve();
+      await expect(pending).rejects.toBeInstanceOf(APIUserAbortError);
+      expectEnded(config, 'cancelled');
+    });
+
+    it('confirms cancellation when stream iteration exits after abort', async () => {
+      const config = createConfig();
+      const abort = new AbortController();
+      const iterator = await openStream(
+        failingStream(userAbort(), resp('partial')),
+        'lifecycle-stream-abort',
+        { config, request: helloRequest({ abortSignal: abort.signal }) },
+      );
+      await iterator.next();
+      abort.abort();
+      expect(events(config)).toHaveLength(1);
+      await expect(iterator.next()).rejects.toBeInstanceOf(APIUserAbortError);
+      expectEnded(config, 'cancelled');
+    });
+
+    it.each([false, true])(
+      'closes a stream once when return follows iteration=%s',
+      async (iterated) => {
+        const config = createConfig();
+        const source = streamOf(resp('first'), resp('second'));
+        const close = vi.spyOn(source, 'return');
+        const iterator = await openStream(
+          resolving(source),
+          'lifecycle-return',
+          { config },
+        );
+        if (iterated) await iterator.next();
+        await iterator.return(undefined);
+        await iterator.return(undefined);
+        expect(close).toHaveBeenCalled();
+        expectEnded(config, 'interrupted');
+        expect(events(config)[1]).toMatchObject({ reason: 'consumer_closed' });
+        expect(logApiError).not.toHaveBeenCalled();
+      },
+    );
+
+    it('reports an injected failure before the first next and closes the source', async () => {
+      const config = createConfig();
+      const source = streamOf(resp('unconsumed'));
+      const close = vi.spyOn(source, 'return');
+      const iterator = await openStream(resolving(source), 'lifecycle-throw', {
+        config,
+      });
+      const error = new Error('consumer failed');
+      await expect(iterator.throw(error)).rejects.toBe(error);
+      expect(close).toHaveBeenCalledWith(undefined);
+      expectEnded(config, 'error');
+    });
+
+    it('confirms an injected abort before the first next after source cleanup', async () => {
+      const config = createConfig();
+      const abort = new AbortController();
+      const source = streamOf(resp('unconsumed'));
+      const close = vi.spyOn(source, 'return');
+      const iterator = await openStream(
+        resolving(source),
+        'lifecycle-throw-abort',
+        {
+          config,
+          request: helloRequest({ abortSignal: abort.signal }),
+        },
+      );
+      abort.abort();
+      const error = userAbort();
+      await expect(iterator.throw(error)).rejects.toBe(error);
+      expect(close).toHaveBeenCalledWith(undefined);
+      expectEnded(config, 'cancelled');
+    });
+
+    it.each(['return', 'throw'] as const)(
+      'preserves a source cleanup error on early %s despite an aborted signal',
+      async (operation) => {
+        const config = createConfig();
+        const abort = new AbortController();
+        const source = streamOf(resp('unconsumed'));
+        const cleanupError = new Error('cleanup failed');
+        vi.spyOn(source, 'return').mockRejectedValue(cleanupError);
+        const iterator = await openStream(
+          resolving(source),
+          'lifecycle-cleanup-error',
+          {
+            config,
+            request: helloRequest({ abortSignal: abort.signal }),
+          },
+        );
+        abort.abort();
+        const result =
+          operation === 'throw'
+            ? iterator.throw(userAbort())
+            : iterator.return(undefined);
+        await expect(result).rejects.toBe(cleanupError);
+        expectEnded(config, 'error');
+      },
+    );
+
+    it('does not declare an unconsumed and unclosed stream complete', async () => {
+      const config = createConfig();
+      const iterator = await openStream(
+        streams(resp('unconsumed')),
+        'lifecycle-abandoned',
+        { config },
+      );
+      expect(events(config).map((event) => event.phase)).toEqual(['started']);
+      await iterator.return(undefined);
+      expectEnded(config, 'interrupted');
+    });
+
+    it('continues request lifecycle after the span idle timer fires', async () => {
+      const config = createConfig();
+      const idle = captureIdleTimeout();
+      const gate = deferred();
+      try {
+        const iterator = await openStream(
+          resolving(
+            (async function* () {
+              yield resp('first');
+              await gate.promise;
+              yield resp('late');
+            })(),
+          ),
+          'lifecycle-idle',
+          { config },
+        );
+        await iterator.next();
+        expect(idle.callback).toBeDefined();
+        idle.callback?.();
+        expect(events(config).map((event) => event.phase)).toEqual(['started']);
+        gate.resolve();
+        expect((await iterator.next()).done).toBe(false);
+        expect((await iterator.next()).done).toBe(true);
+        expectEnded(config, 'success');
+      } finally {
+        gate.resolve();
+        idle.restore();
+      }
+    });
+
+    it('ends a provider failure before delayed OpenAI logging completes', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(10_000);
+      const config = createConfig();
+      const providerError = new Error('provider failed');
+      const loggingEntered = deferred();
+      const loggingGate = deferred();
+      const generator = makeGenerator(
+        { stream: failingStream(providerError) },
+        { enableOpenAILogging: true },
+        config,
+      );
+      openaiLogger().logInteraction.mockImplementationOnce(() => {
+        loggingEntered.resolve();
+        return loggingGate.promise;
+      });
+      const iterator = await generator.generateContentStream(
+        helloRequest(),
+        'lifecycle-delayed-error-log',
+      );
+      const pending = iterator.next();
+      try {
+        await loggingEntered.promise;
+        expectEnded(config, 'error');
+        const end = events(config)[1];
+        expect(end).toMatchObject({ endedAt: 10_000, durationMs: 0 });
+        vi.setSystemTime(40_000);
+        expect(events(config)).toHaveLength(2);
+        loggingGate.resolve();
+        await expect(pending).rejects.toBe(providerError);
+        expectEnded(config, 'error');
+        expect(events(config)[1]).toBe(end);
+      } finally {
+        loggingGate.resolve();
+      }
+    });
+
+    it('keeps concurrent identical prompts distinct when completion order reverses', async () => {
+      const config = createConfig();
+      const firstGate = deferred();
+      const secondGate = deferred();
+      const generate = vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          await firstGate.promise;
+          return resp('same-response');
+        })
+        .mockImplementationOnce(async () => {
+          await secondGate.promise;
+          return resp('same-response');
+        });
+      const generator = makeGenerator({ generate }, undefined, config);
+      const first = generator.generateContent(helloRequest(), 'same-prompt');
+      const second = generator.generateContent(helloRequest(), 'same-prompt');
+      const [firstStart, secondStart] = events(config);
+      expect(firstStart.executionId).not.toBe(secondStart.executionId);
+      secondGate.resolve();
+      await second;
+      firstGate.resolve();
+      await first;
+      expect(
+        events(config).map((event) => [event.executionId, event.phase]),
+      ).toEqual([
+        [firstStart.executionId, 'started'],
+        [secondStart.executionId, 'started'],
+        [secondStart.executionId, 'ended'],
+        [firstStart.executionId, 'ended'],
+      ]);
+      expect(events(config).slice(2)).toEqual([
+        expect.objectContaining({ outcome: 'success' }),
+        expect.objectContaining({ outcome: 'success' }),
+      ]);
+    });
   });
 
   it('passes the owning config identity to a standalone LLM span', async () => {

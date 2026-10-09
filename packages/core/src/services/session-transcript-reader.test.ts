@@ -1137,7 +1137,20 @@ describe('SessionTranscriptReader', () => {
       },
       sys('compression', 'a1', 'chat_compression', compressedTurn()),
       sys('telemetry', 'compression', 'ui_telemetry', { uiEvent }),
-      sys('attribution', 'telemetry', 'attribution_snapshot', {
+      sys('request-start', 'telemetry', 'ui_telemetry', {
+        uiEvent: {
+          'event.name': 'request_lifecycle',
+          v: 1,
+          kind: 'request',
+          phase: 'started',
+          executionId: 'execution',
+          sessionId,
+          promptId: `${sessionId}########3`,
+          model: 'model',
+          startedAt: 10,
+        },
+      }),
+      sys('attribution', 'request-start', 'attribution_snapshot', {
         snapshot: attributionSnapshot,
       }),
       sys('files', 'attribution', 'file_history_snapshot', {

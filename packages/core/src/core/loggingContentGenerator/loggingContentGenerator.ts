@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { startRequestLifecycle } from '../../telemetry/request-lifecycle.js';
 import {
   GenerateContentResponse,
   type Content,
@@ -432,6 +433,12 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     const startTime = Date.now();
     const session = this.startCaptureSession();
+    const lifecycle = startRequestLifecycle(
+      this.config,
+      executionId,
+      userPromptId,
+      req.model,
+    );
     let responseCompleted = false;
     let abortedBeforeResponseCompletion =
       req.config?.abortSignal?.aborted ?? false;
@@ -460,6 +467,9 @@ export class LoggingContentGenerator implements ContentGenerator {
           this.wrapped.generateContent(req, userPromptId),
         );
         responseCompleted = true;
+        lifecycle.finish(
+          abortedBeforeResponseCompletion ? 'cancelled' : 'success',
+        );
         const durationMs = Date.now() - startTime;
         const responseText = isInternal
           ? undefined
@@ -514,6 +524,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       // a real upstream failure that merely races an abort remains an error.
       const cancelled =
         (req.config?.abortSignal?.aborted ?? false) && isAbortError(error);
+      lifecycle.finish(cancelled ? 'cancelled' : 'error');
       endLLMRequestSpan(llmSpan, {
         success: false,
         cancelled,
@@ -606,6 +617,12 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     const startTime = Date.now();
     const session = this.startCaptureSession();
+    const lifecycle = startRequestLifecycle(
+      this.config,
+      executionId,
+      userPromptId,
+      req.model,
+    );
 
     let streamRequest: {
       stream: AsyncGenerator<GenerateContentResponse>;
@@ -652,6 +669,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       );
       const cancelled =
         (req.config?.abortSignal?.aborted ?? false) && isAbortError(error);
+      lifecycle.finish(cancelled ? 'cancelled' : 'error');
       endLLMRequestSpan(llmSpan, {
         success: false,
         cancelled,
@@ -687,9 +705,10 @@ export class LoggingContentGenerator implements ContentGenerator {
         })
       : undefined;
 
-    return bindAsyncGeneratorToContext(
+    const wrapped = bindAsyncGeneratorToContext(
       this.loggingStreamWrapper(
         executionId,
+        lifecycle,
         stream,
         startTime,
         requestIssuedAtMs,
@@ -704,6 +723,52 @@ export class LoggingContentGenerator implements ContentGenerator {
       ),
       spanContext,
     );
+    let iterated = false;
+    const result: AsyncGenerator<GenerateContentResponse> = {
+      next: (...args: [] | [unknown]) => {
+        iterated = true;
+        return wrapped.next(...args);
+      },
+      return: async (value) => {
+        try {
+          if (!iterated)
+            await context.with(spanContext, () => stream.return(value));
+          return await wrapped.return(value);
+        } catch (error) {
+          lifecycle.finish('error');
+          throw error;
+        } finally {
+          lifecycle.finish(
+            req.config?.abortSignal?.aborted ? 'cancelled' : 'interrupted',
+          );
+        }
+      },
+      throw: async (error) => {
+        try {
+          if (!iterated) {
+            await context.with(spanContext, () => stream.return(undefined));
+          }
+          return await wrapped.throw(error);
+        } catch (actualError) {
+          lifecycle.finish(
+            req.config?.abortSignal?.aborted && isAbortError(actualError)
+              ? 'cancelled'
+              : 'error',
+          );
+          throw actualError;
+        } finally {
+          lifecycle.finish(
+            req.config?.abortSignal?.aborted && isAbortError(error)
+              ? 'cancelled'
+              : 'error',
+          );
+        }
+      },
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+    };
+    return result;
   }
 
   private startCaptureSession(): {
@@ -730,6 +795,7 @@ export class LoggingContentGenerator implements ContentGenerator {
 
   private async *loggingStreamWrapper(
     executionId: string,
+    lifecycle: ReturnType<typeof startRequestLifecycle>,
     stream: AsyncGenerator<GenerateContentResponse>,
     startTime: number,
     requestIssuedAtMs: number,
@@ -912,6 +978,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         yield response;
       }
       streamCompleted = true;
+      lifecycle.finish(abortedBeforeStreamCompletion ? 'cancelled' : 'success');
       refreshLateUsageMetadata();
       if (spanEndTimeout !== undefined) {
         clearTimeout(spanEndTimeout);
@@ -965,6 +1032,11 @@ export class LoggingContentGenerator implements ContentGenerator {
     } catch (error) {
       errorOccurred = true;
       lastError = error;
+      lifecycle.finish(
+        abortedBeforeStreamCompletion && isAbortError(error)
+          ? 'cancelled'
+          : 'error',
+      );
       // Same gating as the success path above: if the idle timeout already
       // closed the span as failed, do not emit a parallel api_error log
       // (the span is the canonical signal). Otherwise we'd produce the
@@ -992,6 +1064,18 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       throw error;
     } finally {
+      const cancelled =
+        abortedBeforeStreamCompletion &&
+        (lastError === undefined || isAbortError(lastError));
+      lifecycle.finish(
+        cancelled
+          ? 'cancelled'
+          : errorOccurred
+            ? 'error'
+            : streamCompleted
+              ? 'success'
+              : 'interrupted',
+      );
       abortSignal?.removeEventListener('abort', markStreamAborted);
       if (spanEndTimeout !== undefined) {
         clearTimeout(spanEndTimeout);
