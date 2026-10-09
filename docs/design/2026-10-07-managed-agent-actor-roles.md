@@ -212,14 +212,18 @@ Live behaviour that re-reads grants (SSE read-grant recheck, mid-stream
 artifact revalidation, execution-time `authorizePassiveAttachment`) consults
 `role` with identical thresholds, so revocation keeps its current meaning.
 
-On the bound arm, the submitter family and the cwd change additionally
-certify the Session's creator-keyed execution facts — the Registry still
-backs the binding exactly and stays ACTIVE, and the actor recorded by the
-Workspace create command keeps OPERATOR or above, because the admitted work
-executes under that actor's grants (the execution authority re-verifies the
-same join). Their failure is the family's domain `409
-workspace_unavailable`, answered synchronously at admission rather than as
-an asynchronously failing Turn. A cwd operation's settlement re-verifies both the recorded
+On the bound arm, new work — Turn submit, rename and the cwd change —
+additionally certifies the Session's creator-keyed execution facts — the
+Registry still backs the binding exactly and stays ACTIVE, and the actor
+recorded by the Workspace create command keeps OPERATOR or above, because
+the admitted work executes under that actor's grants (the execution
+authority re-verifies the same join). Turn cancel admits on the OPERATOR
+role and the executable shape alone, because its delivery reuses the
+admitted attachment and re-checks no grants. Every bound Action respond
+certifies the same facts at admission, whichever arm — recorded owner or
+Workspace operator — admitted the caller. The failure is the family's
+domain `409 workspace_unavailable`, answered synchronously at admission
+rather than as an asynchronously failing Turn. A cwd operation's settlement re-verifies both the recorded
 creator-keyed facts and the V54-persisted initiator's role, so an
 operation fails with `workspace_unavailable` when either actor is
 demoted after admission (pre-V54 rows carry no initiator key and settle
@@ -308,10 +312,10 @@ tracked as #13617 and #13618 respectively); A and B reference it.
   from 409 `workspace_unavailable` to 403 `session_operation_forbidden`,
   while an OPERATOR past the role check still meets the family's domain 409
   on shape or creator-fact failure; Action respond now succeeds for
-  OPERATORs that are not the creator; Turn submit, cancel, rename and cwd
-  change now succeed for OPERATORs that are not the creator, while the
-  Session's creator-keyed execution facts hold. Everything else is
-  caller-preserving.
+  OPERATORs that are not the creator; Turn submit, rename and cwd change
+  now succeed for OPERATORs that are not the creator, while the Session's
+  creator-keyed execution facts hold, and cancel succeeds for them on the
+  role and shape alone. Everything else is caller-preserving.
 - Test fixtures writing `can_read`/`can_create` move to `role` in slice B;
   the generated-columns alternative was rejected to keep one source of truth
   and H2/MySQL parity simple.

@@ -112,7 +112,7 @@ owner 的更新路径（移交命令）是建在此列之上的后续切片，�
 
 所有重读授权的在线行为（SSE 读授权复查、artifact 流中重验、执行期 `authorizePassiveAttachment`）按 `role` 以相同阈值查询，撤销因此保持今天的含义。
 
-在绑定臂上，submitter 族与 cwd 变更还要额外担保 Session 的「创建者键」执行事实成立 —— Registry 仍精确支撑该绑定并处于 ACTIVE，且 Workspace 创建命令记录的 actor 保持 OPERATOR 及以上，因为被准入的工作以该 actor 的授权执行（执行授权复查的是同一条 join）。这些事实失效时按族给出域名级 `409 workspace_unavailable`，在准入时同步拒绝，而不是让一个注定失败的 Turn 异步落空。cwd 操作的结算同时复查记录的创建者键事实与 V54 持久化的发起者角色 —— 准入之后降级任何一个 actor 都以 `workspace_unavailable` 失败（V54 前的存量行没有发起者键，仍只按创建者键事实结算）；这正是 W2 设计「准入后撤销授权仍阻止变更」在放宽后的准入下应有的形态。
+在绑定臂上，新工作 —— Turn 提交、改名与 cwd 变更 —— 还要额外担保 Session 的「创建者键」执行事实成立 —— Registry 仍精确支撑该绑定并处于 ACTIVE，且 Workspace 创建命令记录的 actor 保持 OPERATOR 及以上，因为被准入的工作以该 actor 的授权执行（执行授权复查的是同一条 join）。Turn 取消只凭 OPERATOR 角色与可执行形态准入，因为它的投递复用已准入的 attachment、不复查任何授权。每个绑定 Action 回答同样在准入时担保同一组创建者键事实，无论由哪条臂 —— 记录的 owner 还是 Workspace operator —— 准入。这些事实失效时按族给出域名级 `409 workspace_unavailable`，在准入时同步拒绝，而不是让一个注定失败的 Turn 异步落空。cwd 操作的结算同时复查记录的创建者键事实与 V54 持久化的发起者角色 —— 准入之后降级任何一个 actor 都以 `workspace_unavailable` 失败（V54 前的存量行没有发起者键，仍只按创建者键事实结算）；这正是 W2 设计「准入后撤销授权仍阻止变更」在放宽后的准入下应有的形态。
 
 ### D5 —— 版本化 surface 注册表
 
@@ -147,7 +147,7 @@ A ∥ B 是安全的：文件不相交（A 纯新增；B 改 store 侧）。C �
 
 - V53 沿用既有单版本纪律（迁移前停掉旧版本服务器；不用 `outOfOrder`）。
 - 契约 v1.34 记录：角色词表、submitter 族与 Action 族的 OPERATOR 准入、基于 owner 的生命周期、submitter 族拒绝语义 409 `workspace_unavailable` → 403 `session_operation_forbidden` 的变化、以及按角色的能力广告。
-- 客户端可观察的变化：可读但低于 OPERATOR 的 submitter（提交、取消、改名）在同一请求上的拒绝从 409 `workspace_unavailable` 归一为 403 `session_operation_forbidden`，而已过角色检查的 OPERATOR 在形态或创建者键事实失效处仍遇该族的域名级 409；Action 回答对非创建者的 OPERATOR 由拒绝变为成功；Turn 提交、取消、改名与 cwd 变更在 Session 的创建者键执行事实成立期间对非创建者的 OPERATOR 开放。其余对调用方保持不变。
+- 客户端可观察的变化：可读但低于 OPERATOR 的 submitter（提交、取消、改名）在同一请求上的拒绝从 409 `workspace_unavailable` 归一为 403 `session_operation_forbidden`，而已过角色检查的 OPERATOR 在形态或创建者键事实失效处仍遇该族的域名级 409；Action 回答对非创建者的 OPERATOR 由拒绝变为成功；Turn 提交、改名与 cwd 变更在 Session 的创建者键执行事实成立期间对非创建者的 OPERATOR 开放，取消则只凭角色与形态对他们开放。其余对调用方保持不变。
 - 写 `can_read`/`can_create` 的测试 fixture 在切片 B 改写 `role`；曾考虑生成列方案，为保持单一事实源与 H2/MySQL 简单对齐而放弃。
 
 ## 6. 范围边界

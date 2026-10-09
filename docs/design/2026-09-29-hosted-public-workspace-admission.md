@@ -38,13 +38,13 @@ Admitting new work requires the facts conjunct as well, so a demotion of
 the recorded creator or a re-registration refuses submit and rename before
 any command is written.
 Cancelling only aborts work already running: while the deployment still enables
-Workspace files, the creator who can still read the Workspace may cancel even
-after the create grant is revoked, the Workspace starts draining or it is
-re-registered. A live cancel reuses the running Turn's resident attachment.
+Workspace files, a caller holding OPERATOR may cancel even when the Workspace
+starts draining or it is re-registered, since cancellation admits on the
+caller's role and the Session's executable shape alone. A live cancel reuses the running Turn's resident attachment.
 A cold connector cache re-attaches for the persisted cancellation, validating
 its frozen Session binding and exact tenant/Session identity without requiring
-mutable creation grants, registry state or mount readiness. New API requests
-still require the creator's read grant; a cancellation already accepted keeps
+mutable creation grants, registry state or mount readiness. New cancellation
+requests still require the OPERATOR role; a cancellation already accepted keeps
 retrying if that grant is later revoked. New work always rechecks execution
 authority, including when physical recovery is disabled. Passive load of a
 resident Harness Session returns the original client identity after validating
