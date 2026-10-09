@@ -151,6 +151,7 @@ vi.mock('@qwen-code/channel-base', async () => {
     '@qwen-code/channel-base',
   );
   return {
+    splitMarkdown: real.splitMarkdown,
     ChannelBase: class {
       protected config: Record<string, unknown>;
       protected name: string;
@@ -4654,7 +4655,7 @@ describe('DingtalkChannel question cards', () => {
     expect(bodies.length).toBeGreaterThan(1);
     for (const body of bodies) {
       expect(body.markdown.text).toMatch(/^\\\[review\\\]\n\n/u);
-      expect(body.markdown.text.length).toBeLessThanOrEqual(3800);
+      expect(body.markdown.text.length).toBeLessThanOrEqual(20_000);
     }
   });
 
@@ -8563,6 +8564,38 @@ describe('DingtalkChannel reply mentions', () => {
     expect(body).not.toHaveProperty('at');
   });
 
+  it('sends the synthetic knowledge-search fixture in multiple messages with intact citation URLs and tables', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const text = readFileSync(
+      new URL(
+        '../../base/src/fixtures/synthetic-knowledge-search.md',
+        import.meta.url,
+      ),
+      'utf8',
+    );
+    await channel.sendMessage('cid123', text);
+    const contents = fetchSpy.mock.calls.map(
+      ([, init]) =>
+        JSON.parse(String((init as RequestInit).body)).markdown.text as string,
+    );
+    expect(contents.length).toBeGreaterThan(1);
+    const urls = [...text.matchAll(/\[来源\]\((https:\/\/[^)]+)\)/gu)].map(
+      (match) => match[1]!,
+    );
+    expect(urls).toHaveLength(12);
+    for (const url of urls)
+      expect(contents.filter((chunk) => chunk.includes(url))).toHaveLength(1);
+    expect(contents.find((chunk) => chunk.includes('示例指标五'))).toContain(
+      '| 文档 | 内容摘要 |\n|---|---|',
+    );
+    for (const chunk of contents)
+      expect(chunk.length).toBeLessThanOrEqual(20_000);
+  });
+
   it('reserves the mention prefix within the first markdown chunk limit', async () => {
     const channel = createChannel({ atSender: true });
     seedWebhook(channel, 'cid123');
@@ -8604,7 +8637,7 @@ describe('DingtalkChannel reply mentions', () => {
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}', { status: 200 }));
-    const text = `\`\`\`\n${'a'.repeat(3800)}\n\`\`\``;
+    const text = `\`\`\`\n${'a'.repeat(40_000)}\n\`\`\``;
 
     getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
     await getResponseHook(channel)('cid123', text, 'session-1');
@@ -8615,6 +8648,7 @@ describe('DingtalkChannel reply mentions', () => {
         ? body.markdown.text.slice('@staff-1\n\n'.length)
         : body.markdown.text;
     });
+    expect(contents.length).toBeGreaterThan(1);
     expect(contents[0]).toMatch(/^```/u);
     expect(contents.at(-1)).toMatch(/```$/u);
     expect(contents.join('').replace(/[`\n]/gu, '')).toBe(
@@ -8623,7 +8657,7 @@ describe('DingtalkChannel reply mentions', () => {
     expect(
       fetchSpy.mock.calls.every(([, init]) => {
         const body = JSON.parse(String((init as RequestInit).body));
-        return body.markdown.text.length <= 3800;
+        return body.markdown.text.length <= 20_000;
       }),
     ).toBe(true);
   });
@@ -13991,8 +14025,11 @@ describe('DingtalkChannel proactive send', () => {
       });
 
       const sends = sendCalls();
-      expect(sends).toHaveLength(4);
-      expect(msgParamOf(sends[3]!).text).toBe('✅ Background task completed');
+      const texts = sends.map((call) => msgParamOf(call).text);
+      expect(texts.length).toBeGreaterThanOrEqual(4);
+      expect(texts.filter((text) => text === texts[0])).toHaveLength(1);
+      expect(texts[1]).toBe(texts[2]);
+      expect(texts.at(-1)).toBe('✅ Background task completed');
     } finally {
       vi.useRealTimers();
     }

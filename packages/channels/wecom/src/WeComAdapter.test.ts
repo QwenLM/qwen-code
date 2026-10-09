@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -4131,6 +4132,36 @@ describe('WeComChannel', () => {
     });
   });
 
+  it('sends the synthetic knowledge-search fixture in multiple messages without splitting citation URLs or table rows', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const text = readFileSync(
+      new URL(
+        '../../base/src/fixtures/synthetic-knowledge-search.md',
+        import.meta.url,
+      ),
+      'utf8',
+    );
+    await channel.sendAttributed('chat-1', text, '[检索😀]');
+    const contents = lastClient().sendMessage.mock.calls.map(
+      (call) => (call[1] as { markdown: { content: string } }).markdown.content,
+    );
+    expect(contents.length).toBeGreaterThan(1);
+    const urls = [...text.matchAll(/\[来源\]\((https:\/\/[^)]+)\)/gu)].map(
+      (match) => match[1]!,
+    );
+    expect(urls).toHaveLength(12);
+    for (const url of urls)
+      expect(contents.filter((chunk) => chunk.includes(url))).toHaveLength(1);
+    expect(contents.find((chunk) => chunk.includes('示例指标五'))).toContain(
+      '| 文档 | 内容摘要 |\n|---|---|',
+    );
+    for (const chunk of contents) {
+      expect(chunk.startsWith('\\[检索😀\\]\n')).toBe(true);
+      expect(Buffer.byteLength(chunk)).toBeLessThanOrEqual(20_000);
+    }
+  });
+
   it('splits long markdown responses before sending', async () => {
     const channel = new WeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();
@@ -4189,7 +4220,7 @@ describe('WeComChannel', () => {
 
     await channel.sendAttributed(
       'chat-1',
-      `\`\`\`text\n${'x'.repeat(3900)}\n\`\`\``,
+      `\`\`\`text\n${'x'.repeat(40_000)}\n\`\`\``,
       '[review]',
     );
 
@@ -4222,7 +4253,7 @@ describe('WeComChannel', () => {
     const channel = new WeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();
     const client = lastClient();
-    const text = `intro\n\`\`\`ts\n${'a'.repeat(3900)}\n\`\`\`\noutro`;
+    const text = `intro\n\`\`\`ts\n${'a'.repeat(40_000)}\n\`\`\`\noutro`;
 
     await channel.sendMessage('chat-1', text);
 
@@ -4232,11 +4263,12 @@ describe('WeComChannel', () => {
     });
     expect(chunks.length).toBeGreaterThan(1);
     for (const chunk of chunks) {
-      expect(Buffer.byteLength(chunk, 'utf8')).toBeLessThan(4096);
+      expect(Buffer.byteLength(chunk, 'utf8')).toBeLessThanOrEqual(20_000);
       expect((chunk.match(/```/g) ?? []).length % 2).toBe(0);
     }
-    expect(chunks[0]).toMatch(/^intro\n```ts\n/);
-    expect(chunks[0]).toMatch(/\n```$/);
+    expect(chunks[0]).toBe('intro');
+    expect(chunks[1]).toMatch(/^```ts\n/);
+    expect(chunks[1]).toMatch(/\n```$/);
     expect(chunks[1]).toMatch(/^```/);
     expect(chunks.at(-1)).toContain('outro');
   });
