@@ -10,6 +10,7 @@ import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import {
   isDefinitionPinConsistent,
+  isTerminalRunState,
   parseMonitorRun,
   parseOperationGrant,
   type ExtensionRun,
@@ -40,6 +41,7 @@ import {
   MANAGED_SESSION_MINIMUM_READER,
   ManagedSessionRecordError,
   assertManagedSessionChildRunKindEnabled,
+  assertManagedSessionChannelAdapterEnabled,
   assertManagedSessionDigest,
   assertManagedSessionDomainEnabled,
   assertManagedSessionEventActor,
@@ -76,6 +78,7 @@ import {
   parseChannelDelivery,
   parseChannelRoute,
 } from './managed-channel-record.js';
+import { decodeChannelPolicy } from './managed-channel-operations.js';
 import {
   parseChildAcceptance,
   type ChildAcceptance,
@@ -1470,6 +1473,7 @@ export class LocalManagedSessionAuthority {
         );
       }
       await this.verifyExtensionResources(request.domain, parsed.record);
+      await this.assertChannelRouteAdmittable(request.domain, parsed);
       this.assertExtensionRevision(
         request.domain,
         body,
@@ -1728,6 +1732,23 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
+   * H5b: a route chain opens and rebinds only for an enabled adapter. The
+   * committed policy names the adapter, so the gate reads the policy the
+   * closure just verified; a rebind may change the policyRef, so the gate
+   * runs on every channel route revision, not only the opening one.
+   */
+  private async assertChannelRouteAdmittable(
+    domain: ManagedSessionDomain,
+    parsed: ReturnType<ManagedExtensionRecordBody['parse']>,
+  ): Promise<void> {
+    if (domain !== 'channel_route') return;
+    const policy = decodeChannelPolicy(
+      await this.resources!.read(parseChannelRoute(parsed.record).policyRef),
+    );
+    assertManagedSessionChannelAdapterEnabled(policy.adapter);
+  }
+
+  /**
    * `operationId` is the command that commits the revision. The command that
    * opens a record becomes its operation, so it may open no other record.
    */
@@ -1739,6 +1760,24 @@ export class LocalManagedSessionAuthority {
     reject: (message: string) => never,
   ): void {
     const previous = this.extensionRecord(domain, parsed.recordId);
+    if (domain === 'channel_delivery' && previous === undefined) {
+      // H5c: a delivery goes out through a committed, live binding at the
+      // revision it was planned against — never through a retired route or
+      // one re-keyed since the plan.
+      const delivery = parseChannelDelivery(parsed.record);
+      const route = this.extensionRecord('channel_route', delivery.routeId);
+      const binding =
+        route === undefined ? undefined : parseChannelRoute(route.record);
+      if (
+        binding === undefined ||
+        binding.routeRevision !== delivery.routeRevision ||
+        isTerminalRunState(binding.run.state)
+      ) {
+        reject(
+          'Channel delivery must bind to its committed route at the pinned revision.',
+        );
+      }
+    }
     if (domain === 'mcp_configuration') {
       for (const configuration of this.extensionRecordsInDomain(domain)) {
         if (
@@ -1824,7 +1863,7 @@ export class LocalManagedSessionAuthority {
     if (domain === 'child_run') {
       const child = parseChildRun(parsed.record);
       if (
-        child.kind === 'child_agent' &&
+        child.kind !== 'shell' &&
         child.depth === 1 &&
         child.rootSessionId !== this.sessionKey.sessionId
       ) {
@@ -1838,8 +1877,10 @@ export class LocalManagedSessionAuthority {
       const target = this.extensionRecord('child_run', acceptance.childRunId);
       const child =
         target === undefined ? undefined : parseChildRun(target.record);
-      if (child === undefined || child.kind !== 'child_agent') {
-        reject('Child acceptance must name a child agent run of this Session.');
+      if (child === undefined || child.kind === 'shell') {
+        reject(
+          'Child acceptance must name a child Session run of this Session.',
+        );
       }
       if (child.run.state !== 'settled' || child.stopReason !== 'completed') {
         reject(
@@ -1880,7 +1921,7 @@ export class LocalManagedSessionAuthority {
       // does. Before any acceptance, accepting → unknown stays legal as
       // the relay's retry vocabulary.
       const child = parseChildRun(parsed.record);
-      if (child.kind === 'child_agent') {
+      if (child.kind !== 'shell') {
         const delivery = child.run.delivery!.state;
         const acceptance = this.extensionRecord(
           'child_acceptance',

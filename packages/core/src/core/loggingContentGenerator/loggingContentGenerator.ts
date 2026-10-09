@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import {
   GenerateContentResponse,
   type Content,
@@ -230,6 +231,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   }
 
   private logApiRequest(
+    executionId: string,
     contents: Content[],
     model: string,
     promptId: string,
@@ -245,12 +247,14 @@ export class LoggingContentGenerator implements ContentGenerator {
         promptId,
         requestText,
         subagentNameContext.getStore(),
+        executionId,
       ),
       sessionId,
     );
   }
 
   private _logApiResponse(
+    executionId: string,
     responseId: string,
     durationMs: number,
     model: string,
@@ -273,6 +277,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         this.config.getTelemetryLogPromptsEnabled() ? responseText : undefined,
         subagentNameContext.getStore(),
         ttftMs,
+        executionId,
       ),
       sessionId,
       identity
@@ -286,6 +291,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   }
 
   private _logApiError(
+    executionId: string,
     responseId: string | undefined,
     durationMs: number,
     error: unknown,
@@ -305,6 +311,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     logApiError(
       this.config,
       new ApiErrorEvent({
+        executionId,
         responseId: errorResponseId,
         model,
         durationMs,
@@ -327,6 +334,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   }
 
   private safelyLogApiError(
+    executionId: string,
     responseId: string | undefined,
     durationMs: number,
     error: unknown,
@@ -346,6 +354,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     }
     try {
       this._logApiError(
+        executionId,
         responseId,
         durationMs,
         error,
@@ -359,6 +368,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   }
 
   private safelyLogApiResponse(
+    executionId: string,
     responseId: string,
     durationMs: number,
     model: string,
@@ -370,6 +380,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   ): void {
     try {
       this._logApiResponse(
+        executionId,
         responseId,
         durationMs,
         model,
@@ -390,6 +401,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   ): Promise<GenerateContentResponse> {
     // Phase 4b — snapshot retry context in the synchronous prelude BEFORE any
     // await. ALS frame from `retryWithBackoff` is guaranteed to be active here.
+    const executionId = randomUUID();
     const retrySnapshot = snapshotRetryMetadata();
     const isInternal = isInternalPromptId(userPromptId);
     const contextUsage = this.snapshotContextUsage(req, isInternal);
@@ -437,6 +449,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       const response = await context.with(spanContext, async () => {
         if (!isInternal) {
           this.logApiRequest(
+            executionId,
             this.toContents(req.contents),
             req.model,
             userPromptId,
@@ -453,6 +466,7 @@ export class LoggingContentGenerator implements ContentGenerator {
           : this.extractResponseText(result, MAX_RESPONSE_TEXT_LENGTH);
         if (!abortedBeforeResponseCompletion) {
           this.safelyLogApiResponse(
+            executionId,
             result.responseId ?? '',
             durationMs,
             result.modelVersion || req.model,
@@ -516,6 +530,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       });
       await context.with(spanContext, async () => {
         this.safelyLogApiError(
+          executionId,
           '',
           durationMs,
           error,
@@ -555,6 +570,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     // resolved and the frame has exited. Threaded as a parameter to
     // loggingStreamWrapper so its closure carries the snapshot to all later
     // endLLMRequestSpan callsites (success / error / idle-timeout / abort).
+    const executionId = randomUUID();
     const retrySnapshot = snapshotRetryMetadata();
     const isInternal = isInternalPromptId(userPromptId);
     const contextUsage = this.snapshotContextUsage(req, isInternal);
@@ -603,6 +619,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       streamRequest = await context.with(spanContext, async () => {
         if (!isInternal) {
           this.logApiRequest(
+            executionId,
             this.toContents(req.contents),
             req.model,
             userPromptId,
@@ -623,6 +640,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       const observedFinishReasons = exchange.controller.finalize(false);
       context.with(spanContext, () =>
         this.safelyLogApiError(
+          executionId,
           '',
           durationMs,
           error,
@@ -671,6 +689,7 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     return bindAsyncGeneratorToContext(
       this.loggingStreamWrapper(
+        executionId,
         stream,
         startTime,
         requestIssuedAtMs,
@@ -710,6 +729,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   }
 
   private async *loggingStreamWrapper(
+    executionId: string,
     stream: AsyncGenerator<GenerateContentResponse>,
     startTime: number,
     requestIssuedAtMs: number,
@@ -924,6 +944,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       // during incident response.
       if (!spanEndedByTimeout && !abortedBeforeStreamCompletion) {
         this.safelyLogApiResponse(
+          executionId,
           firstResponseId,
           durationMs,
           firstModelVersion || model,
@@ -952,6 +973,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       if (!spanEndedByTimeout) {
         const durationMs = Date.now() - startTime;
         this.safelyLogApiError(
+          executionId,
           firstResponseId,
           durationMs,
           error,
