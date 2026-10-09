@@ -19,6 +19,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
@@ -2008,6 +2009,19 @@ public class ManagedAgentStore implements AgentStateStore {
                     "The Session was not found.");
         }
         return rows.getFirst();
+    }
+
+    public List<ReplayFloorTarget> findReplayFloorTargets(int limit) {
+        return jdbc.query("SELECT s.tenant_id, s.session_id FROM"
+                        + " managed_agent_session s JOIN"
+                        + " managed_agent_snapshot p ON p.tenant_id ="
+                        + " s.tenant_id AND p.session_id = s.session_id WHERE"
+                        + " p.covered_sequence > s.replay_floor_sequence"
+                        + " ORDER BY s.updated_at ASC LIMIT ?",
+                (result, row) -> new ReplayFloorTarget(
+                        result.getString("tenant_id"),
+                        result.getString("session_id")),
+                limit);
     }
 
     /**
