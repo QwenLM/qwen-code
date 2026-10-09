@@ -476,6 +476,64 @@ describe('A2A send', () => {
     expect(task.contextId).toBe(created);
   });
 
+  it('releases the session an earlier attempt left when the retry is refused', async () => {
+    const caller = await grant();
+    // The first attempt makes the session and is not posted into, so the
+    // retry resumes a reservation that already names one and creates none.
+    port.mentionFailure = new A2ASessionError('unavailable', 'starting up');
+    await expect(send(caller)).resolves.toEqual({
+      ok: false,
+      kind: 'unavailable',
+    });
+    const created = port.sessions[0]!.id;
+
+    // The retry is permanently refused: that session is empty and every later
+    // retry would reuse it, so it is released and removed like one this call
+    // made.
+    port.mentionFailure = new A2ASessionError('refused', 'text too long');
+    await expect(send(caller)).resolves.toEqual({
+      ok: false,
+      kind: 'refused',
+    });
+    expect(port.discarded).toEqual([created]);
+    const file = JSON.parse(
+      await fs.readFile(
+        getExternalCallerFilePath(PROJECT_ROOT, caller.callerId),
+        'utf8',
+      ),
+    ) as { contexts: unknown[]; tasks: Array<{ sessionId?: string }> };
+    expect(file.contexts).toEqual([]);
+    expect(file.tasks[0]?.sessionId).toBeUndefined();
+
+    port.mentionFailure = undefined;
+    await expect(send(caller)).resolves.toMatchObject({ ok: true });
+    expect(port.sessions).toHaveLength(2);
+    expect(port.posts[0]!.sessionId).toBe(port.sessions[1]!.id);
+  });
+
+  it('keeps the session a caller continued when the post is refused', async () => {
+    const caller = await grant();
+    const first = await sent(caller);
+    // The second message continues the first one's session, which belongs to
+    // that task: a refusal may release this reservation, never that session.
+    port.mentionFailure = new A2ASessionError('refused', 'text too long');
+
+    await expect(
+      send(caller, 'msg-2', 'And now?', first.contextId),
+    ).resolves.toEqual({ ok: false, kind: 'refused' });
+
+    expect(port.discarded).toEqual([]);
+    const file = JSON.parse(
+      await fs.readFile(
+        getExternalCallerFilePath(PROJECT_ROOT, caller.callerId),
+        'utf8',
+      ),
+    ) as { contexts: Array<{ sessionId: string }> };
+    expect(file.contexts.map((context) => context.sessionId)).toEqual([
+      first.contextId,
+    ]);
+  });
+
   it('refuses work for a retired agent but keeps its tasks readable', async () => {
     const caller = await grant();
     const task = await sent(caller);

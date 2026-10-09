@@ -551,8 +551,11 @@ export async function a2aSendMessage(
       if (reserved) {
         // A failure below leaves the reservation without a run; a retry of
         // the same request resumes it (in the same session, if one was made).
-        // Set only when this call made the session, so the refusal path in
-        // the catch never removes one an earlier message is still using.
+        // Set only when this call made the session. The refusal path in the
+        // catch removes the session this reservation owns — the one made here,
+        // or the one an earlier attempt of the same request attached — and
+        // never a session the caller brought as its `contextId`, which is an
+        // earlier conversation other messages are still using.
         // Declared outside the try because that catch is what reads it.
         let createdHere: string | undefined;
         try {
@@ -619,24 +622,35 @@ export async function a2aSendMessage(
         } catch (error) {
           if (error instanceof A2ASessionError) {
             // A permanent refusal is never going to be posted into the
-            // session this call made, and every retry would reuse it, so
-            // release the reservation and remove the session. A retryable
+            // session this reservation owns, and every retry would reuse it,
+            // so release the reservation and remove the session. A retryable
             // `unavailable` keeps both: that retry continues where it
             // stopped. Release first — removing the session while the
             // reservation still names it would send the retry to a session
             // that is gone.
-            if (createdHere && error.kind === 'refused') {
+            //
+            // The reservation owns a session this call made, or the one an
+            // earlier attempt of this same request attached and an
+            // `unavailable` left behind. A session the caller named as its
+            // `contextId` is neither: it belongs to earlier messages. The
+            // request key's content hash includes the `contextId`, so a retry
+            // of a context-bearing request cannot arrive without it and pass
+            // this test.
+            const owned =
+              createdHere ??
+              (request.contextId === undefined ? entry.sessionId : undefined);
+            if (owned && error.kind === 'refused') {
               const released = await releaseExternalReservation(
                 projectRoot,
                 caller.callerId,
                 entry.key,
-                createdHere,
+                owned,
               ).then(
                 () => true,
                 () => false,
               );
               if (released) {
-                await port.discardSession(createdHere).catch(() => {});
+                await port.discardSession(owned).catch(() => {});
               }
             }
             return { ok: false, ...sessionFailure(error) };
