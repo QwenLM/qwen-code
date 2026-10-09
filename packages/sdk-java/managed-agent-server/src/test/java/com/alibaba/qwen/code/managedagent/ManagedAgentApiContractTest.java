@@ -1670,6 +1670,20 @@ class ManagedAgentApiContractTest {
                         .principal(actor)
                         .header(IDEMPOTENCY_KEY, "automation-create-tz"),
                 body.replace("Asia/Shanghai", "Mars/Olympus_Mons"));
+        // Grammar-valid but over the declared mirror bound
+        // (cron VARCHAR(400), OpenAPI maxLength 400): the service refuses
+        // before the funnel commits, instead of answering 500 from the
+        // mirror INSERT with the Idempotency-Key already burned.
+        String longCron = String.join(",", java.util.Collections.nCopies(300, "0"))
+                + " 0 1 1 0";
+        JsonNode longCronRefusal = json(exchange(drift, "createAgentAutomation",
+                400, post("/v1/agent-automations").header(TENANT, tenant)
+                        .principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-create-long-cron"),
+                body.replace("\"cron\":\"0 2 * * *\"",
+                        "\"cron\":\"" + longCron + "\"")));
+        assertThat(longCronRefusal.path("error").path("code").asText())
+                .isEqualTo("invalid_automation");
         exchange(drift, "createAgentAutomation", 409,
                 post("/v1/agent-automations").header(TENANT, tenant)
                         .principal(actor)

@@ -112,6 +112,12 @@ describe('automation definitions', () => {
     };
     for (const [patch, message] of [
       [{ cron: '0 24 * * *' }, /cron hour field values/],
+      // Grammar-valid but over the declared mirror bound (V56
+      // `cron VARCHAR(400)`): 300 in-bounds atoms is 607 characters.
+      [
+        { cron: `${Array(300).fill('0').join(',')} 0 1 1 0` },
+        /cron exceeds 400 UTF-8 bytes/,
+      ],
       [{ timezone: 'Mars/Olympus Mons' }, /timezone/],
       [{ goal: '' }, /goal/],
       [{ goal: 5 }, /goal/],

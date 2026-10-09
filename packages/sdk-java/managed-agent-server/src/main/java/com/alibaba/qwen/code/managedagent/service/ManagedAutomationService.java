@@ -628,6 +628,15 @@ public class ManagedAutomationService {
                     "The timezone does not resolve on this deployment.");
         }
         if (request.cron() != null) {
+            // The declared bound the mirror column and the public
+            // contract share (cron VARCHAR(400), OpenAPI maxLength 400):
+            // a valid-but-longer cron would commit a definition this
+            // control plane can never mirror, list, fire or retire.
+            if (request.cron().getBytes(StandardCharsets.UTF_8).length
+                    > 400) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "invalid_automation", "cron exceeds 400 bytes.");
+            }
             try {
                 CronSlots.compile(request.cron());
             } catch (IllegalArgumentException error) {

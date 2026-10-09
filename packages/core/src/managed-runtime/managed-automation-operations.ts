@@ -48,6 +48,13 @@ export const MANAGED_AUTOMATION_LIMITS = Object.freeze({
    */
   maxInputBytes: 64 * 1024,
   maxGoalBytes: 4096,
+  /**
+   * The declared cron bound the control plane's mirror column carries
+   * (V56 `cron VARCHAR(400)`) and the public contract publishes
+   * (`maxLength: 400`): a longer cron would commit a definition the
+   * mirror can never hold, so it is refused at admission.
+   */
+  maxCronBytes: 400,
   maxDefinitionsPerSession: 32,
 } as const);
 
@@ -232,6 +239,15 @@ export function assertAutomationDefinition(
   ) {
     fail(
       `Automation definition goal exceeds ${MANAGED_AUTOMATION_LIMITS.maxGoalBytes} UTF-8 bytes.`,
+    );
+  }
+  if (
+    typeof definition.cron === 'string' &&
+    Buffer.byteLength(definition.cron, 'utf8') >
+      MANAGED_AUTOMATION_LIMITS.maxCronBytes
+  ) {
+    fail(
+      `Automation definition cron exceeds ${MANAGED_AUTOMATION_LIMITS.maxCronBytes} UTF-8 bytes.`,
     );
   }
   // The contract validators decide the rest; a placeholder prompt

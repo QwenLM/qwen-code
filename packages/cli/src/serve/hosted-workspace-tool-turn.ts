@@ -1764,6 +1764,10 @@ export class HostedWorkspaceToolTurn {
                   request.argsDigest,
                   request.digest,
                   request.publicationId!,
+                  // The reserve persists this logical id as the
+                  // execution's turn id, exactly what the publisher's
+                  // register reference names on the checkpoint axis.
+                  this.promptId,
                 )
               : null;
           executionCallId =
