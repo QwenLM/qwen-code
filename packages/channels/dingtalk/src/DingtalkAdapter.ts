@@ -22,6 +22,7 @@ import {
 } from '@qwen-code/channel-base';
 import {
   DINGTALK_CHUNK_LIMIT,
+  DINGTALK_MAX_CHUNK_LENGTH,
   escapeDingTalkMarkdown,
   normalizeDingTalkMarkdown,
   extractTitle,
@@ -1683,12 +1684,17 @@ export class DingtalkChannel extends ChannelBase {
       sourceLabel && outgoingText.trim().length > 0
         ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n`
         : '';
-    const contentLimit =
-      DINGTALK_CHUNK_LIMIT - mentionPrefix.length - sourcePrefix.length;
-    if (contentLimit <= 0) {
+    const overhead = mentionPrefix.length + sourcePrefix.length;
+    const contentLimit = Math.max(1, DINGTALK_CHUNK_LIMIT - overhead);
+    const maxLength = DINGTALK_MAX_CHUNK_LENGTH - overhead;
+    if (maxLength <= 0) {
       throw new Error('DingTalk source label exceeds the message limit.');
     }
-    const chunks = normalizeDingTalkMarkdown(outgoingText, contentLimit).map(
+    const chunks = normalizeDingTalkMarkdown(
+      outgoingText,
+      contentLimit,
+      maxLength,
+    ).map(
       (chunk, index) =>
         `${index === 0 ? mentionPrefix : ''}${sourcePrefix}${chunk}`,
     );
@@ -1881,13 +1887,19 @@ export class DingtalkChannel extends ChannelBase {
     const sourcePrefix = sourceLabel
       ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n`
       : '';
-    const contentLimit = DINGTALK_CHUNK_LIMIT - sourcePrefix.length;
-    if (contentLimit <= 0) {
+    const contentLimit = Math.max(
+      1,
+      DINGTALK_CHUNK_LIMIT - sourcePrefix.length,
+    );
+    const maxLength = DINGTALK_MAX_CHUNK_LENGTH - sourcePrefix.length;
+    if (maxLength <= 0) {
       throw new Error('DingTalk source label exceeds the message limit.');
     }
-    const chunks = normalizeDingTalkMarkdown(outgoingText, contentLimit).map(
-      (chunk) => `${sourcePrefix}${chunk}`,
-    );
+    const chunks = normalizeDingTalkMarkdown(
+      outgoingText,
+      contentLimit,
+      maxLength,
+    ).map((chunk) => `${sourcePrefix}${chunk}`);
     return { title: extractTitle(outgoingText), chunks, nextChunk: 0 };
   }
 
