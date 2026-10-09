@@ -1319,6 +1319,49 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     ]);
   });
 
+  it('does not let an unusable closer mention suppress the last-resort close', () => {
+    // The last-resort test asks whether prose has a closer it can actually use:
+    // a `</example>` the lexer does not read as a tag (it sits in a code span)
+    // or a self-closing one cannot end the example, so counting it would leave
+    // the range open to the end of the turn and drop the real call after it.
+    // See #13492.
+    const block =
+      '<invoke name="w"><parameter name="content">Usage:\n' +
+      invoke('r', param('p', 'x')) +
+      '\n</example>\n</parameter></invoke>';
+    for (const mention of ['`</example>`', '</example/>']) {
+      const text =
+        '<example>\n' +
+        block +
+        `see ${mention}\n` +
+        invoke('real', param('file_path', 'a.ts'));
+      expect(extractXmlToolCalls(text)).toEqual([
+        { name: 'real', args: { file_path: 'a.ts' } },
+      ]);
+    }
+  });
+
+  it('does not let a line that cannot close the fence suppress the last-resort close', () => {
+    // Same question on the fence side: a later mask-free line closes a
+    // prose-opened fence only when it is a run of the same delimiter, at least
+    // as long, with nothing after it. A run of the other delimiter or one
+    // carrying an info string cannot, so it must not leave the fence open and
+    // drop a real call. See #13492.
+    const quoted = invoke('read_file', param('file_path', 'x.txt'));
+    const block = invoke('w', param('content', `${quoted}\n\`\`\`\ntail`));
+    for (const later of ['~~~', '```xml']) {
+      const text =
+        '```\n' +
+        block +
+        '\n' +
+        invoke('real', param('file_path', 'a.ts')) +
+        `\n${later}\n`;
+      expect(extractXmlToolCalls(text)).toEqual([
+        { name: 'real', args: { file_path: 'a.ts' } },
+      ]);
+    }
+  });
+
   it('masks quoted values out of the lexer prose without changing its length', () => {
     // Example tag positions are reported in prose offsets and looked up again
     // in the raw text, so the mask has to be length-preserving. Appending the

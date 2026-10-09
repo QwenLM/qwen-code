@@ -113,25 +113,40 @@ function stripDelimitingNewlines(value: string): string {
 const FENCE_DELIMITER_LINE = /^ {0,3}((`{3,})|~{3,})/;
 
 /**
- * Offset of the last delimiter line that is prose rather than parameter text,
- * or -1 when prose has none. Consulted only when a masked delimiter could close
- * an open fence, which is rare, so no pass is paid for by calls that never see
- * one.
+ * Offset of the last unmasked line that can close a fence of this kind, or -1.
+ * A masked delimiter is the last resort only when prose has no such line left;
+ * a later run of another delimiter, a shorter run, or one carrying an info
+ * string cannot close this fence, so it must not suppress the masked close.
+ * Asked per delimiter kind, since the close test depends on the open fence's
+ * kind and length, and nothing bounds a model turn's length.
  */
-function lastUnmaskedDelimiter(
+function lastProseCloser(
   text: string,
   parameterRanges: Array<[number, number]>,
+  delim: string,
+  len: number,
 ): number {
   let last = -1;
-  let scanStart = 0;
+  let lineStart = 0;
   for (const line of text.split('\n')) {
-    const masked = parameterRanges.some(
-      ([start, end]) => scanStart >= start && scanStart < end,
-    );
-    if (!masked && FENCE_DELIMITER_LINE.test(line)) {
-      last = scanStart;
+    const startsAt = lineStart;
+    lineStart += line.length + 1;
+    if (
+      parameterRanges.some(
+        ([start, end]) => startsAt >= start && startsAt < end,
+      )
+    ) {
+      continue;
     }
-    scanStart += line.length + 1;
+    const m = FENCE_DELIMITER_LINE.exec(line);
+    if (
+      m &&
+      (m[2] ? '`' : '~') === delim &&
+      m[1].length >= len &&
+      line.slice(m[0].length).trim() === ''
+    ) {
+      last = startsAt;
+    }
   }
   return last;
 }
@@ -142,7 +157,7 @@ function positionInsideFence(
   parameterRanges: Array<[number, number]>,
 ): boolean {
   let openFence: { delim: string; len: number } | null = null;
-  let lastProseDelimiter: number | null = null;
+  const proseCloser = new Map<string, number>();
   let lineStart = 0;
   for (const line of text.slice(0, index).split('\n')) {
     const lineEnd = lineStart + line.length;
@@ -162,8 +177,13 @@ function positionInsideFence(
       line.slice(m[0].length).trim() === '';
     if (startsInsideParameter) {
       if (!closes) continue;
-      lastProseDelimiter ??= lastUnmaskedDelimiter(text, parameterRanges);
-      if (startsAt > lastProseDelimiter) openFence = null;
+      const kind = `${delim}${len}`;
+      let last = proseCloser.get(kind);
+      if (last === undefined) {
+        last = lastProseCloser(text, parameterRanges, delim, len);
+        proseCloser.set(kind, last);
+      }
+      if (last <= startsAt) openFence = null;
     } else if (openFence === null) {
       openFence = { delim, len };
     } else if (closes) {
@@ -223,15 +243,22 @@ function computeExampleRanges(
 
   const ranges: Array<[number, number]> = [];
   const tags = /<\/?example(?=[\s/>])(?:[^>"']|"[^"]*"|'[^']*')*>/g;
-  // Where prose's last closer sits, so a masked closer knows whether it is the
-  // last resort. One forward pass, like the fence tracker below.
+  // Where prose's last *usable* closer sits, so a masked closer knows whether
+  // it is the last resort. A mention prose cannot end the example with — one
+  // the lexer does not see as a tag, a self-closing one, one already fenced —
+  // must not suppress the masked close, or the range runs to the end of the
+  // turn and a real call after it is filtered out. One forward pass, like the
+  // fence tracker's equivalent.
   let lastUnmaskedCloser = -1;
   let scan: RegExpExecArray | null;
   while ((scan = tags.exec(text)) !== null) {
     const index = scan.index;
     if (
       scan[0].startsWith('</') &&
-      !parameterRanges.some(([start, end]) => index >= start && index < end)
+      (skipLexer || tagPositions.has(index)) &&
+      !/\/\s*>$/.test(scan[0]) &&
+      !parameterRanges.some(([start, end]) => index >= start && index < end) &&
+      !positionInsideFence(text, index, parameterRanges)
     ) {
       lastUnmaskedCloser = index;
     }
@@ -628,19 +655,27 @@ export function tryRecoverXmlToolCalls(text: string): {
     cursor = end;
   }
   withoutRecoveredCalls += text.slice(cursor);
-  // Use the same complete boundaries as argument extraction, while still
-  // counting parameterless blocks as XML rather than surrounding prose. A
-  // rejected block leaves its opener behind with no closer for the pattern
-  // above to pair, so its markup would otherwise be charged to prose and
-  // refuse a turn whose only call was recovered: measure markup by the
-  // dialect's tags rather than by whether a boundary could be paired. See
+  // The measure counts something as prose only when no block claimed it, on the
+  // complete boundaries argument extraction uses: a rejected block leaves an
+  // opener behind that the lazy pattern can only delete as a pair, so charging
+  // that markup to prose refused a turn whose only call was recovered. Text
+  // that merely looks like a tag stays prose, as it does on the base. See
   // #13492.
+  const proseRanges = removedRanges.slice() as Array<[number, number]>;
   TOOL_CALL_PATTERN.lastIndex = 0;
-  const proseOnly = withoutRecoveredCalls
-    .replace(TOOL_CALL_PATTERN, '')
-    .replace(/<\/?(?:invoke|function|parameter)\b[^>]*>/g, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  let claimed: RegExpExecArray | null;
+  while ((claimed = TOOL_CALL_PATTERN.exec(text)) !== null) {
+    proseRanges.push([claimed.index, claimed.index + claimed[0].length]);
+  }
+  proseRanges.sort(([startA], [startB]) => startA - startB);
+  let proseOnly = '';
+  cursor = 0;
+  for (const [start, end] of proseRanges) {
+    if (start > cursor) proseOnly += text.slice(cursor, start);
+    cursor = Math.max(cursor, end);
+  }
+  proseOnly += text.slice(cursor);
+  proseOnly = proseOnly.replace(/\n{3,}/g, '\n\n').trim();
   if (text.length > 0 && proseOnly.length / text.length > 0.8) {
     return { recovered: false, functionCallParts: [], remainingText: text };
   }
