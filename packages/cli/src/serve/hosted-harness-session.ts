@@ -463,10 +463,10 @@ function unsettledPromptId(session: HostedSession): string | undefined {
  * either the record shows the dispatch never started, or the Runtime
  * republished the receipt of a definitively-ended evaluation — the abandoned
  * arm reconciles to a cancelled record, the over-budget arm to a settled
- * record carrying the timeout outcome the republish stamps with a hardcoded
- * zero duration. A callback that genuinely ran and timed out at its own
- * deadline carries the same outcome with a measured duration, so it stays
- * real work, not a fence.
+ * record carrying the timeout outcome, and the republish stamps each with a
+ * hardcoded zero duration. A callback that genuinely ran — timed out at its
+ * own deadline or cancelled mid-flight — carries the same outcome with a
+ * measured duration, so it stays real work, not a fence.
  */
 async function isSettledHookFence(
   session: HostedSession,
@@ -479,7 +479,6 @@ async function isSettledHookFence(
     return true;
   if (execution.resultRef === null || execution.run.execution !== 'settled')
     return false;
-  if (execution.run.state === 'cancelled') return true;
   // A result that cannot be read or parsed is no fence: treat it as real
   // work, or one corrupt historical record would fail every recovery pass.
   try {
@@ -488,6 +487,8 @@ async function isSettledHookFence(
         (await session.managed.resources.read(execution.resultRef)).toString(),
       ),
     );
+    if (execution.run.state === 'cancelled')
+      return result?.['outcome'] === 'cancelled' && result?.['duration'] === 0;
     return result?.['outcome'] === 'timeout' && result?.['duration'] === 0;
   } catch {
     return false;

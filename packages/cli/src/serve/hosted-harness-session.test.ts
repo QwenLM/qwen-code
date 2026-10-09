@@ -758,6 +758,36 @@ describe('settleCancelledHookTurn', () => {
     expect(session.blocked).toBe(true);
   });
 
+  it('does not settle a turn on a genuine callback-phase cancelled receipt', async () => {
+    const { record, resultRef } = settledPreToolRecord(
+      hostedHookOccurrenceId(HookEventName.PreToolUse, 'prompt:call-0'),
+      'r-ran',
+    );
+    const cancelledRecord = {
+      ...record,
+      run: { ...record.run, state: 'cancelled' },
+    };
+    const read = vi.fn(async (ref: unknown) => {
+      if ((ref as { resourceId?: string }).resourceId === resultRef.resourceId)
+        // A callback cancelled after it ran carries a measured duration;
+        // only the evaluation-fence republish hardcodes 0.
+        return Buffer.from(
+          '{"outcome":"cancelled","duration":3000,"error":"Hook execution cancelled."}',
+        );
+      return Buffer.from(
+        '{"prompt_id":"prompt","tool_use_id":"call-0","tool_name":"write_file"}',
+      );
+    });
+    const session = preToolParkedSession([{ record: cancelledRecord }], read);
+    const write = vi.fn();
+    (session.managed.sink as unknown as { write: typeof write }).write = write;
+    await settleCancelledHookTurn(session);
+    // The receipt proves the callback ran: nothing is certified cancelled,
+    // so no turn_result is written and the recovery barrier stays latched.
+    expect(write).not.toHaveBeenCalled();
+    expect(session.blocked).toBe(true);
+  });
+
   it('treats an unreadable InstructionsLoaded input of the parked turn as no fence', async () => {
     const hookExecutionId = 'hook-instructions';
     const resultRef = {
