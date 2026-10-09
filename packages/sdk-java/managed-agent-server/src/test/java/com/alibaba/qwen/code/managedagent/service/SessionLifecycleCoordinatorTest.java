@@ -59,8 +59,8 @@ class SessionLifecycleCoordinatorTest {
         jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES ('tenant', 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')",
                 WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                + " VALUES ('tenant', 'workspace', ?, TRUE, TRUE)", "owner".getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", "owner".getBytes(StandardCharsets.UTF_8));
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
         String session = transactions.execute(ignored -> store.insertWorkspaceSessionCommand("tenant", "owner", "create", "digest", "qwen-code",
                 null, null, List.of(), null, new WorkspaceSelection("workspace", ".")).sessionId());
@@ -145,8 +145,8 @@ class SessionLifecycleCoordinatorTest {
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES ('tenant', 'workspace', ?, TRUE, TRUE)",
+                        + " workspace_id, actor_id, role)"
+                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')",
                 "owner".getBytes(StandardCharsets.UTF_8));
         var transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(source));

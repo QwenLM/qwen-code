@@ -70,7 +70,7 @@ class ManagedArtifactApiIntegrationTest {
                 + " VALUES ('tenant-1', 'workspace-1', 1, 'storage-1', 'Test', 'config', 'policy', 'ACTIVE')");
         for (String actor : new String[] {"reader", "metadata-reader"}) {
             fixture.jdbc().update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id,"
-                    + " can_read, can_create) VALUES ('tenant-1', 'workspace-1', ?, TRUE, FALSE)",
+                    + " role) VALUES ('tenant-1', 'workspace-1', ?, 'READER')",
                     actor.getBytes(StandardCharsets.UTF_8));
         }
         sessions = new ManagedAgentService(fixture.sessions(), new RequestDigests(),
@@ -246,7 +246,7 @@ class ManagedArtifactApiIntegrationTest {
         mvc.perform(asActor(bytes(stdout), "tenant-1", "metadata-reader").header("Range", "malformed"))
                 .andExpect(status().isForbidden()).andExpect(jsonPath("$.error.code").value("artifact_content_forbidden"))
                 .andExpect(header().doesNotExist("Content-Range"));
-        fixture.jdbc().update("UPDATE managed_workspace_access SET can_read = FALSE WHERE actor_id = ?",
+        fixture.jdbc().update("DELETE FROM managed_workspace_access WHERE actor_id = ?",
                 "reader".getBytes(StandardCharsets.UTF_8));
         mvc.perform(asReader(bytes(stdout))).andExpect(status().isNotFound());
     }

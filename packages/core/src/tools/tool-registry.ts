@@ -1472,6 +1472,11 @@ export class ToolRegistry {
     );
   }
 
+  /** True under `ToolMode.CodeModeOnly`, where `tool_call` is hidden and refused. */
+  isCodeModeOnly(): boolean {
+    return this.config.getToolMode?.() === ToolMode.CodeModeOnly;
+  }
+
   /**
    * Returns an array of all registered and discovered tool names,
    * including tools that are registered via factory but not yet loaded.

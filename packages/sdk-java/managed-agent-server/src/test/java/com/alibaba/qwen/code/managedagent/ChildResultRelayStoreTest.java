@@ -47,9 +47,9 @@ class ChildResultRelayStoreTest {
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONFIG_REF,
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT IGNORE INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES ('" + TENANT + "', 'workspace', ?, TRUE,"
-                        + " TRUE)",
+                        + " workspace_id, actor_id, role)"
+                        + " VALUES ('" + TENANT + "', 'workspace', ?,"
+                        + " 'OPERATOR')",
                 "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         return state.insertWorkspaceSessionCommand(TENANT, "owner",
                 UUID.randomUUID().toString(), "digest", "qwen-code", null,

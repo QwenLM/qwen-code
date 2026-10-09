@@ -56,8 +56,8 @@ class ManagedAgentStoreChildCreationFenceTest {
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES ('tenant', 'workspace', ?, TRUE, TRUE)",
+                        + " workspace_id, actor_id, role)"
+                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')",
                 "owner".getBytes(StandardCharsets.UTF_8));
         transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(source));
