@@ -530,7 +530,7 @@ export interface components {
             /** @default false */
             actions: boolean;
             /**
-             * @description True when the caller may submit later Turns of this Workspace-bound Session, cancel its running Turns and rename it: the deployment enables Workspace files, the caller holds the OPERATOR role on a Workspace registry row whose state is ACTIVE that still backs the Session's binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is an active qwen-code Session on the frozen execution profile. False for every other caller and for unbound Sessions, which do not use it.
+             * @description True when the caller may submit later Turns of this Workspace-bound Session or rename it: the deployment enables Workspace files, the caller holds the OPERATOR role on a Workspace registry row whose state is ACTIVE and still backs the Session's binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is an active qwen-code Session on the frozen execution profile. Cancelling only aborts work already running, so an OPERATOR caller may cancel a running Turn even when this is false; the capability does not gate cancellation. False for every other caller and for unbound Sessions, which do not use it.
              * @default false
              */
             workspaceTurns: boolean;
