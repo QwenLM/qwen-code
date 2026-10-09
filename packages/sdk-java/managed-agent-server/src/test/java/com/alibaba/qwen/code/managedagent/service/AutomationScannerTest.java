@@ -116,12 +116,12 @@ class AutomationScannerTest {
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONFIG_REF,
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES (?, ?, ?, TRUE, TRUE)",
+                        + " workspace_id, actor_id, role)"
+                        + " VALUES (?, ?, ?, 'OPERATOR')",
                 tenant, WORKSPACE, ACTOR.getBytes(StandardCharsets.UTF_8));
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES (?, ?, ?, TRUE, FALSE)",
+                        + " workspace_id, actor_id, role)"
+                        + " VALUES (?, ?, ?, 'READER')",
                 tenant, WORKSPACE, READER.getBytes(StandardCharsets.UTF_8));
         sessionId = sessions.createWorkspaceSession(tenant, ACTOR,
                 "create-" + UUID.randomUUID(), "qwen-code", null, "Automation",
@@ -992,8 +992,8 @@ class AutomationScannerTest {
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONFIG_REF,
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES (?, ?, ?, TRUE, TRUE)",
+                        + " workspace_id, actor_id, role)"
+                        + " VALUES (?, ?, ?, 'OPERATOR')",
                 tenant, hidden, ACTOR.getBytes(StandardCharsets.UTF_8));
         String privateSession = sessions.createWorkspaceSession(tenant, ACTOR,
                 "create-" + UUID.randomUUID(), "qwen-code", null, "Private",

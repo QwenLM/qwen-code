@@ -46,7 +46,7 @@ import org.springframework.stereotype.Service;
  * H6b: the control plane's automation service. Public mutations are
  * relayed to the target Session's Hosted Harness, whose authority commits
  * the definition revision or the manual run; the answer is mirrored into
- * the V53 ledger and replayed by Idempotency-Key. Reads answer from the
+ * the V54 ledger and replayed by Idempotency-Key. Reads answer from the
  * ledger alone. See docs/design/2026-10-07-managed-automation-runtime.md,
  * decisions 11 and 12.
  */

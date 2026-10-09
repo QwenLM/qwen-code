@@ -11,7 +11,7 @@ import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
 /**
- * H6b: the JDBC side of the automation runtime — the V53 ledgers (the
+ * H6b: the JDBC side of the automation runtime — the V54 ledgers (the
  * definition mirror with its lease and watermark, the occurrence decisions,
  * the public command replay) and the small reads the scanner and service
  * need from the Session store. No row here is a journal fact: the Session
@@ -287,7 +287,8 @@ public class AutomationLedgerStore {
                 + " AND a.workspace_id = s.workspace_id"
                 + " AND CAST(CONCAT(a.workspace_id, '!') AS BINARY(513))"
                 + " = CAST(CONCAT(s.workspace_id, '!') AS BINARY(513))"
-                + " AND a.actor_id = ? AND a.can_read = TRUE)";
+                + " AND a.actor_id = ?"
+                + " AND a.role IN ('READER', 'OPERATOR', 'OWNER'))";
         List<ScheduleRow> rows = cursor == null
                 ? jdbc.query(select + " ORDER BY s.created_at DESC,"
                         + " s.schedule_id DESC LIMIT ?", SCHEDULE, tenantId,
