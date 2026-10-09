@@ -21,10 +21,14 @@ import type { ToolConfig } from './agent-types.js';
 // The skill-announcement gate asks whether the model can INVOKE a skill, and
 // that is two conditions, not one.
 //
-// Declared: `willHaveSkillTool()` reads only the `toolConfig` — the name list
-// and the `disallowedTools` blocklist — so it is blind to a tool the
-// permission layer kept out of the registry and to an inline declaration. So
-// the gate reads the declarations `prepareTools` produced.
+// Declared: `willHaveSkillTool()` reads the `toolConfig` — the name list and
+// the `disallowedTools` blocklist — plus registry state: hybrid `code_mode`
+// requires SKILL itself in the registry (a hybrid agent declares only what
+// the registry holds), and both code modes require exec to be registered
+// because the nested Skill binding runs through it (a deny rule or a legacy
+// coreTools allowlist can keep exec out entirely). It stays blind to an
+// inline declaration. So the gate reads the declarations `prepareTools`
+// produced.
 //
 // Executable: being declared is not sufficient. A fork keeps the parent's
 // declared names for prompt-cache parity while `fork_tools` narrows what may
@@ -43,6 +47,7 @@ describe('AgentCore skill-gate inputs', () => {
           declarations.filter((d) => wanted.includes(d.name as string)),
         ),
       getTool: vi.fn().mockReturnValue(undefined),
+      getAllToolNames: vi.fn().mockReturnValue(names),
     };
   }
 

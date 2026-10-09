@@ -1360,13 +1360,24 @@ describe('BackgroundAgentResumeService', () => {
       true,
     ],
     // Under CodeModeOnly a finite list naming `exec` reaches `skill` through
-    // the code-mode gateway, so launch keeps the manager and resume must keep
-    // the listing. Dropping the tool-mode argument at the resume call site —
-    // the parent Config here reports CodeModeOnly — turns this row red.
+    // the code-mode gateway while exec is actually registered, so launch
+    // keeps the manager and resume must keep the listing. Dropping the
+    // tool-mode argument at the resume call site — the parent Config here
+    // reports CodeModeOnly — turns this row red.
     [
-      'names exec without skill under CodeModeOnly',
+      'names exec without skill under CodeModeOnly with exec registered',
       { tools: [ToolNames.EXEC] },
       true,
+      ToolMode.CodeModeOnly,
+      true,
+    ],
+    // A deny rule or a legacy coreTools allowlist can keep exec out of the
+    // registry while the mode says code_mode_only; the agent then has no
+    // route to skill, so launch keeps no manager and resume must not list.
+    [
+      'names exec without skill under CodeModeOnly with exec unregistered',
+      { tools: [ToolNames.EXEC] },
+      false,
       ToolMode.CodeModeOnly,
     ],
     [

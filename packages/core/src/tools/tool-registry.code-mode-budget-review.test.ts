@@ -92,5 +92,17 @@ describe('Code-mode preload follows actual declaration growth', () => {
       `Own schema budget ${ownSchemaTokens}, actual growth ${actualGrowthTokens}`,
     ).toBe(0);
     expect(registry.isDeferredToolRevealed(deferred.name)).toBe(false);
+
+    // The accepting half: a budget that covers the real growth must reveal.
+    // Every other CodeMode assertion on this method expects 0, so without it
+    // a code-mode-only overcharge of the exec-delta term would retire the
+    // startup preload with the suite fully green.
+    const accepting = fixture(ToolMode.CodeMode);
+    expect(
+      accepting.registry.preloadDeferredToolsWithinBudget(actualGrowthTokens),
+    ).toBe(1);
+    expect(
+      accepting.registry.isDeferredToolRevealed(accepting.deferred.name),
+    ).toBe(true);
   });
 });

@@ -434,9 +434,12 @@ export interface QueryOptions {
    * session, a subagent definition change) re-declares.
    * These bridge and warning rules apply to direct and hybrid code modes.
    * On the session surface in hybrid mode, while `exec` is registered (container or SSH execution
-   * warns and falls back to direct tools without it), exec retains callable
-   * nested bindings; their schemas are included in exec when either bridge
-   * tool is unavailable. CodeModeOnly discovers deferred schemas through top-level tool_search and invokes them through exec. It skips deferred preload and startup catalogs; tools.eager reduces the initial exec description. When search is unavailable in the current scope, exec includes all allowed signatures. In Hybrid mode, AgentCore excludes tools still hidden by tools.eager
+   * warns and falls back to direct tools without it), withheld tools that have
+   * an actual nested exec binding remain callable through exec, and their
+   * schemas are included in the exec description when either bridge tool is
+   * unavailable; `direct-only` tools (`agent`, `send_message`,
+   * `create_sub_session`, the worktree tools) never get a nested binding and
+   * stay reachable only by a direct call by name. CodeModeOnly discovers deferred schemas through top-level tool_search and invokes them through exec. It skips deferred preload and startup catalogs; tools.eager reduces the initial exec description. When search is unavailable in the current scope, exec includes all allowed signatures. In Hybrid mode, AgentCore excludes tools still hidden by tools.eager
    * from nested bindings. In both code modes, agent allowlists that do not grant `exec` narrow nested bindings.
    * Inheriting or explicitly granting `exec` keeps all otherwise admitted
    * ordinary code-mode-callable bindings. An execution allowlist that
@@ -511,9 +514,12 @@ export interface QueryOptions {
    *   entry in a session, a subagent definition change) re-declares (#9827).
    *   These bridge and warning rules apply to direct and hybrid code modes.
    *   On the session surface in hybrid mode, while `exec` is registered (container or SSH
-   *   execution warns and falls back to direct tools without it), exec
-   *   retains callable nested bindings; their schemas are included in
-   *   exec when either bridge tool is unavailable. CodeModeOnly discovers deferred schemas through
+   *   execution warns and falls back to direct tools without it), withheld
+   *   tools that have an actual nested exec binding remain callable through
+   *   exec, and their schemas are included in the exec description when either
+   *   bridge tool is unavailable; `direct-only` tools (`agent`,
+   *   `send_message`, `create_sub_session`, the worktree tools) never get a
+   *   nested binding and stay reachable only by a direct call by name. CodeModeOnly discovers deferred schemas through
    *   top-level tool_search and invokes them through exec. It skips deferred
    *   preload and startup catalogs; tools.eager reduces the initial exec
    *   description. When search is unavailable in the current scope, exec

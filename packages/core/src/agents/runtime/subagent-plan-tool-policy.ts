@@ -109,13 +109,19 @@ export function hasAgentSkillExecBinding(
   registryWillBeRebuilt = false,
 ): boolean {
   const mode = context.getToolMode?.();
+  // The exec route needs exec itself registered, in either code mode: a deny
+  // rule or a legacy coreTools allowlist can keep it out of the registry
+  // while the mode alone still answers code_mode_only. Read registration
+  // metadata (getAllToolNames counts an unwarmed lazy factory), not
+  // isDeferredAndHidden — callers run before prepareTools()'s warmAll().
+  if (
+    !context.getToolRegistry?.()?.getAllToolNames().includes(ToolNames.EXEC)
+  ) {
+    return false;
+  }
   return (
     mode === ToolMode.CodeModeOnly ||
     (mode === ToolMode.CodeMode &&
-      !!context
-        .getToolRegistry?.()
-        ?.getAllToolNames()
-        .includes(ToolNames.EXEC) &&
       !isAgentSkillEagerHidden(context, registryWillBeRebuilt))
   );
 }
