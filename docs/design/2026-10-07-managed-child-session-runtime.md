@@ -145,7 +145,7 @@ Each commit moves every state line at most one allowed step (the H0b successor r
 
 | Slice     | Scope                                                                                                                                                                    |
 | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| H4c       | The `workflow` body kind and Workflow-tool admission as a child run (definition pin names the workflow revision).                                                        |
+| H4c       | Done: `workflow` body kind (disabled), child launch budget ([design](2026-10-09-managed-workflow-child-kind.md)). Workflow-tool admission: later slice.                  |
 | H4d       | `session_message` bodies, `continueChildRun`'s first honest producer, revive of completed children as new chains.                                                        |
 | H4e       | Team domains and the seven team tools, plan resolution, member shutdown, legacy import.                                                                                  |
 | H4f       | Public task cancel routes settling #12847 A6/A7 and B12; the `unknown`-delivery operator story (open question 1).                                                        |

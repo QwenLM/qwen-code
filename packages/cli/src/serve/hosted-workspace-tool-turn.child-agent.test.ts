@@ -17,6 +17,7 @@ import {
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { managedExtensionRecordKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
+import { MANAGED_CHILD_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
   HostedWorkspaceToolTurn,
@@ -341,6 +342,57 @@ it('refuses a fifth concurrent launch with the count limit', async () => {
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     4,
   );
+});
+
+// H4c: the launch budget counts every child Session run the scope ever
+// committed, ended or not, so a spent budget refuses with no child active.
+// The refusal commits no record, and a re-driven batch re-derives it from
+// the same committed records.
+it('refuses a launch past the spent launch budget, replaying the refusal', async () => {
+  for (
+    let index = 0;
+    index < MANAGED_CHILD_LIMITS.maxLaunchesPerScope - 1;
+    index++
+  ) {
+    const childRunId = `prompt:seed-${index}`;
+    await children.admit({
+      childRunId,
+      ownerScopeId: sessionKey.sessionId,
+      rootSessionId: sessionKey.sessionId,
+      completion: 'sent',
+      description: `seed ${index}`,
+      prompt: 'seed',
+      definition: {
+        definitionId: 'hosted-agent/hosted-workspace-shell/1',
+        definitionRevision: 1,
+        definitionDigest: session.authority.sessionHeader.definitionRef.digest,
+      },
+      workingDirectory: '.',
+      executionCallId: childRunId,
+    });
+    await children.settleCancelled(childRunId, { started: false });
+  }
+  const last = await executeAgent(
+    createTurn(),
+    call({ description: 'last', prompt: 'work' }, 'call-last'),
+  );
+  expect(JSON.stringify(last)).toContain('started in the background');
+  const launched = MANAGED_CHILD_LIMITS.maxLaunchesPerScope;
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    launched,
+  );
+  await children.settleCancelled('prompt:call-last', { started: false });
+  expect(children.activeChildRunsOf(sessionKey.sessionId)).toHaveLength(0);
+  for (const turn of [createTurn(), createTurn()]) {
+    const refused = await executeAgent(
+      turn,
+      call({ description: 'one more', prompt: 'work' }, 'call-over'),
+    );
+    expect(JSON.stringify(refused)).toContain('budget_exhausted');
+    expect(
+      session.authority.extensionRecordsInDomain('child_run'),
+    ).toHaveLength(launched);
+  }
 });
 
 it('answers the tool arm from the committed acceptance, accepting it', async () => {

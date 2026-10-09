@@ -1741,6 +1741,105 @@ describe('SessionArtifactStore', () => {
     ]);
   });
 
+  it('keeps a stored description when a re-record derives one from its title', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-derived-description',
+      workspaceCwd: workspace,
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    await fs.writeFile(path.join(workspace, 'reports/report.html'), 'hello');
+
+    const created = await store.upsertMany(
+      [
+        {
+          title: 'Draft',
+          description: 'Ready for review',
+          workspacePath: 'reports/report.html',
+        },
+      ],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]?.artifactId;
+    expect(created.changes[0]?.artifact).toMatchObject({
+      title: 'Draft',
+      description: 'Ready for review',
+    });
+
+    const updated = await store.upsertMany(
+      [
+        {
+          title: 'report.html',
+          description: 'Q3 report v2',
+          workspacePath: 'reports/report.html',
+          metadata: { derivedFromTitle: true },
+          toolName: 'record_artifact',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(updated.changes[0]).toMatchObject({
+      action: 'updated',
+      artifactId,
+      artifact: {
+        title: 'report.html',
+        description: 'Ready for review',
+      },
+    });
+    expect(updated.changes[0]?.artifact?.metadata).not.toHaveProperty(
+      'derivedFromTitle',
+    );
+  });
+
+  it('strips a derivedFromTitle marker from a write_file re-record', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-strip-derived-marker',
+      workspaceCwd: workspace,
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    await fs.writeFile(path.join(workspace, 'reports/sales.csv'), 'a,b\n');
+
+    const created = await store.upsertMany(
+      [
+        {
+          title: 'Quarterly sales report',
+          description: 'Curated',
+          workspacePath: 'reports/sales.csv',
+          toolName: 'record_artifact',
+        },
+      ],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]?.artifactId;
+
+    const updated = await store.upsertMany(
+      [
+        {
+          title: 'sales.csv',
+          workspacePath: 'reports/sales.csv',
+          toolName: 'write_file',
+          metadata: { derivedFromTitle: true, other: 'kept' },
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(updated.changes[0]?.artifact?.metadata).toMatchObject({
+      other: 'kept',
+    });
+    expect(updated.changes[0]?.artifact?.metadata).not.toHaveProperty(
+      'derivedFromTitle',
+    );
+    expect((await store.list()).artifacts).toMatchObject([
+      {
+        id: artifactId,
+        title: 'Quarterly sales report',
+        description: 'Curated',
+        metadata: { other: 'kept' },
+      },
+    ]);
+  });
+
   it('keeps a curated title when write_file re-records the same workspace path', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's2-workspace-rerecord-preserve-title',
