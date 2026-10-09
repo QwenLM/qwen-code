@@ -128,8 +128,8 @@ class ToolPublicationLifecycleMySqlIT {
                     + " storage_id, display_name, config_ref, policy_ref, state)"
                     + " VALUES ('tenant-1', 'neighbor', 1, 'storage', 'Neighbor', ?, ?, 'ACTIVE')",
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                    + " VALUES ('tenant-1', 'neighbor', ?, TRUE, TRUE)", "owner".getBytes(StandardCharsets.UTF_8));
+            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                    + " VALUES ('tenant-1', 'neighbor', ?, 'OPERATOR')", "owner".getBytes(StandardCharsets.UTF_8));
             String session = transaction.execute(ignored -> agents.insertWorkspaceSessionCommand("tenant-1", "owner",
                     "create", "digest", "qwen-code", null, null, List.of(), null,
                     new WorkspaceSelection("neighbor", ".")).sessionId());
