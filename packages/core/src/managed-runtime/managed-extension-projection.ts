@@ -174,10 +174,14 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isMonitorRunSuccessor,
   }),
   child_run: Object.freeze({
-    taskKindOf: (record: unknown) =>
-      (record as AnyChildRun).kind === 'shell'
+    taskKindOf: (record: unknown) => {
+      const kind = (record as AnyChildRun).kind;
+      return kind === 'shell'
         ? 'background_shell'
-        : 'child_agent',
+        : kind === 'workflow'
+          ? 'workflow'
+          : 'child_agent';
+    },
     parse: (value: unknown) => {
       const record = parseChildRun(value);
       return {

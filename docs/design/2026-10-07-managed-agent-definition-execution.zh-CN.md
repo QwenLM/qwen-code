@@ -285,4 +285,4 @@ D8b 不单独发布。固定一个字段都不生效的定义，就是静默丢�
 
 Java 将非空 instructions 作为原始 UTF-8 的 `managed-agent-instructions` 资源发布到 Session Store，以 SHA-256 摘要寻址。引用进入不可变 `managed-definition` 资源的事务闭包与 W1 恢复闭包。创建、冷加载及每个 Turn 都核验资源字节；load 仅接受固定的 agent ID、revision 和 digest，身份缺失或变化返回 `409 hosted_agent_definition_conflict`，驻留会话的恢复和生命周期加载同样检查。Agent instructions 位于项目上下文之前，刷新上下文时仍然保留。
 
-数据库迁移采用 V56，因为 main 已用 V53 增加 Workspace 角色、V54 增加 child Session 血缘、V55 增加 channel instance binding。冲突处理同时保留主干的 creator/owner actor 身份、child 血缘与固定的定义身份。`QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` 默认仍为 `hosted-workspace-files/1`；仅在按 #13166 排空旧 worker 并升级所有 provisioner 后，才加入 `files/2`。
+数据库迁移采用 V57，因为 main 已用 V53 增加 Workspace 角色、V54 增加 child Session 血缘、V55 增加 channel instance binding、V56 增加 operation actor key。冲突处理同时保留主干的 creator/owner actor 身份、child 血缘与固定的定义身份。`QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` 默认仍为 `hosted-workspace-files/1`；仅在按 #13166 排空旧 worker 并升级所有 provisioner 后，才加入 `files/2`。
