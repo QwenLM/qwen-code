@@ -400,6 +400,8 @@ public class ManagedAgentStore implements AgentStateStore {
         String turnId = input.isEmpty() ? null : publicId("turn");
         String promptId = input.isEmpty() ? null
                 : UUID.randomUUID().toString();
+        byte[] actorKey = actorId == null ? null
+                : ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
                         + " session_id, agent_id, agent_revision, title,"
                         + " status, created_at, updated_at, workspace_id,"
@@ -407,9 +409,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " cwd_relative, context_config_ref,"
                         + " context_revision, workspace_config_ref,"
                         + " workspace_policy_ref, tool_profile,"
-                        + " creator_actor_key) VALUES"
+                        + " creator_actor_key, owner_actor_key) VALUES"
                         + " (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?,"
-                        + " ?, ?, ?, ?, ?)",
+                        + " ?, ?, ?, ?, ?, ?)",
                 tenantId, sessionId, agentId, agentRevision, title, now, now,
                 workspace == null ? null : workspace.getWorkspaceId(),
                 workspace == null ? null : workspace.getWorkspaceGeneration(),
@@ -420,9 +422,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 resolved == null ? null : resolved.configRef(),
                 resolved == null ? null : resolved.policyRef(),
                 workspace == null ? null : "hosted-workspace-files/1",
-                actorId == null ? null
-                        : ManagedWorkspaceRegistry.actorKey(tenantId,
-                                actorId));
+                actorKey, actorKey);
         jdbc.update("INSERT INTO managed_agent_consumer_progress"
                         + " (tenant_id, session_id, consumer_name,"
                         + " covered_sequence, updated_at) VALUES"
@@ -440,8 +440,7 @@ public class ManagedAgentStore implements AgentStateStore {
                             + " (tenant_id, actor_id, idempotency_key,"
                             + " request_digest, session_id, turn_id, created_at)"
                             + " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    tenantId, ManagedWorkspaceRegistry.actorKey(tenantId,
-                            actorId), idempotencyKey, requestDigest,
+                    tenantId, actorKey, idempotencyKey, requestDigest,
                     sessionId, turnId, now);
         }
         if (workspace != null) {
@@ -577,9 +576,11 @@ public class ManagedAgentStore implements AgentStateStore {
                 requireNoOpenOperation(tenantId, sessionId);
                 validateMutationStatus(session, kind);
                 jdbc.update("UPDATE managed_agent_command SET command_status ="
-                                + " 'PENDING', updated_at = ? WHERE tenant_id = ?"
+                                + " 'PENDING', mutation_attempt_sequence = ?,"
+                                + " updated_at = ? WHERE tenant_id = ?"
                                 + " AND operation = ? AND idempotency_key = ?",
-                        clock.millis(), tenantId, operation, idempotencyKey);
+                        session.lastSequence(), clock.millis(), tenantId,
+                        operation, idempotencyKey);
                 return new SessionMutationCommand(sessionId, "PENDING", true);
             }
             return new SessionMutationCommand(sessionId, command.status(),
@@ -593,6 +594,10 @@ public class ManagedAgentStore implements AgentStateStore {
         long now = clock.millis();
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                 sessionId, null, "PENDING", session.status(), now);
+        jdbc.update("UPDATE managed_agent_command SET mutation_attempt_sequence"
+                        + " = ? WHERE tenant_id = ? AND operation = ?"
+                        + " AND idempotency_key = ?",
+                session.lastSequence(), tenantId, operation, idempotencyKey);
         // Older retired commands may have left their requested event behind.
         String requestedSource = mutationSource(operation, idempotencyKey,
                 "requested");
@@ -630,6 +635,17 @@ public class ManagedAgentStore implements AgentStateStore {
                 && !"FAILED".equals(command.status())) {
             throw new IllegalStateException(
                     "Session mutation command has an unknown status");
+        }
+        // A retired receipt still completes for a sibling that entered the
+        // Harness before the retirement, but never over a later mutation:
+        // while it was FAILED another key could begin and complete, and
+        // completing this one now would revert that newer outcome.
+        if ("FAILED".equals(command.status()) && supersededByLaterMutation(
+                tenantId, sessionId, operation, idempotencyKey, kind)) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "session_mutation_superseded",
+                    "A later change to the Session completed after this"
+                            + " request was retired.");
         }
         if (session.workspace() != null) {
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
@@ -745,7 +761,7 @@ public class ManagedAgentStore implements AgentStateStore {
         if (!workspaces.canRead(session.tenantId(), actorId, session.workspace().getWorkspaceId())) {
             throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
         }
-        if (!workspaces.isSessionCreator(session.tenantId(), session.sessionId(), actorId)) {
+        if (!workspaces.createdSession(session.tenantId(), actorId, session.sessionId())) {
             throw new ApiException(HttpStatus.FORBIDDEN, "session_operation_forbidden",
                     "Only the Session creator may manage it.");
         }
@@ -1115,8 +1131,8 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " WHERE s.tenant_id = ? AND s.session_id = ? AND"
                         + " r.workspace_generation = s.workspace_generation"
                         + " AND r.storage_id = s.workspace_storage_id AND"
-                        + " r.state = 'ACTIVE' AND a.can_read = TRUE AND"
-                        + " a.can_create = TRUE",
+                        + " r.state = 'ACTIVE' AND a.role IN ('OPERATOR',"
+                        + " 'OWNER')",
                 (row, index) -> Boolean.TRUE, session.tenantId(),
                 session.sessionId());
         return rows.size() == 1;
@@ -1491,7 +1507,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + "managed_agent_session.workspace_id, '!')"
                         + " AS BINARY(513))"
                         + " AND wa.actor_id = ?"
-                        + " AND wa.can_read = TRUE))"
+                        + " AND wa.role IN ('READER', 'OPERATOR', 'OWNER')))"
                         + cursorClause
                         + " ORDER BY updated_at DESC, session_id DESC LIMIT ?",
                 sessionMapper, arguments.toArray());
@@ -2911,6 +2927,34 @@ public class ManagedAgentStore implements AgentStateStore {
         return "session."
                 + (kind == SessionMutationKind.RENAME ? "update" : "unarchive")
                 + "." + phase;
+    }
+
+    // The Session lock orders each new attempt against committed events.
+    // Legacy receipts fall back to their original requested event; a
+    // re-drive refreshes the boundary without appending another event.
+    private boolean supersededByLaterMutation(String tenantId,
+            String sessionId, String operation, String idempotencyKey,
+            SessionMutationKind kind) {
+        List<Long> attempts = jdbc.queryForList("SELECT COALESCE("
+                        + " c.mutation_attempt_sequence, e.sequence_id) FROM"
+                        + " managed_agent_command c LEFT JOIN managed_agent_event e"
+                        + " ON e.tenant_id = c.tenant_id AND"
+                        + " e.session_id = c.session_id AND e.source_key = ?"
+                        + " WHERE c.tenant_id = ? AND c.session_id = ? AND"
+                        + " c.operation = ? AND c.idempotency_key = ?",
+                Long.class, mutationSource(operation, idempotencyKey,
+                        "requested"), tenantId, sessionId, operation,
+                idempotencyKey);
+        if (attempts.isEmpty() || attempts.getFirst() == null) {
+            return false;
+        }
+        Integer later = jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_agent_event WHERE tenant_id = ? AND"
+                        + " session_id = ? AND sequence_id > ? AND"
+                        + " event_type = ? AND source_key LIKE 'control:%'",
+                Integer.class, tenantId, sessionId, attempts.getFirst(),
+                mutationEvent(kind, "completed"));
+        return later != null && later > 0;
     }
 
     private static String mutationSource(String operation,

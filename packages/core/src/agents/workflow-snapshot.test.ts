@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
+import vm from 'node:vm';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
@@ -153,6 +154,35 @@ describe('toSnapshot', () => {
     const s = toSnapshot(task({ result: 10n }));
     expect(typeof s.result).toBe('string');
     expect(s.result).toMatch(/non-JSON-serializable/);
+  });
+
+  it('previews a completed result from the live value, before plain JSON loses it', () => {
+    const result = vm.runInNewContext(
+      'const o = { err: new TypeError("boom"), errors: [new Error("lost")] }; o',
+    );
+    const t = task({ result });
+    const s = toSnapshot(t);
+    expect(s.result).toBe(result);
+    expect(JSON.parse(s.resultPreview!.text)).toEqual({
+      err: 'TypeError: boom',
+      errors: ['Error: lost'],
+    });
+    expect(s.resultPreview!.reportedFailures).toEqual([
+      'Reported errors: ["Error: lost"]',
+    ]);
+    // Display only: the live entry is untouched.
+    expect(t.result).toBe(result);
+  });
+
+  it('previews an undefined result, and none for a run that did not complete', () => {
+    expect(toSnapshot(task({ result: undefined })).resultPreview).toEqual({
+      text: '(workflow returned no value)',
+      truncated: false,
+      reportedFailures: [],
+    });
+    for (const status of ['failed', 'cancelled'] as const) {
+      expect(toSnapshot(task({ status })).resultPreview).toBeUndefined();
+    }
   });
 
   it('copies arrays defensively (snapshot is decoupled from the live entry)', () => {
@@ -454,6 +484,61 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
       snapshots.find((s) => s.runId === 'wf_unsized')?.sizeWarning,
     ).toBeUndefined();
   });
+
+  it('reads back the preview a written run kept, where the raw result lost it', async () => {
+    const result = vm.runInNewContext(
+      'const o = { marker: "M", errors: [new Error("kept")] }; o.self = o; o',
+    );
+    const live = toSnapshot(task({ runId: 'wf_preview', result }));
+    await write({ runId: 'wf_preview', result });
+
+    const back = await read('wf_preview');
+    expect(back?.result).toMatch(/non-JSON-serializable/);
+    expect(back?.resultPreview).toEqual(live.resultPreview);
+    expect(back?.resultPreview?.reportedFailures).toEqual([
+      'Reported errors: ["Error: kept"]',
+    ]);
+  });
+
+  it('keeps a run whose result cannot be formatted', async () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    await expect(write({ runId: 'wf_hostile', result: proxy })).resolves.toBe(
+      true,
+    );
+    expect((await read('wf_hostile'))?.resultPreview).toBeDefined();
+  });
+
+  it('loads a snapshot written before result previews', async () => {
+    await write({ runId: 'wf_nopreview', result: { a: 1 } });
+    await editSnapshot('wf_nopreview', (parsed) => {
+      delete parsed['resultPreview'];
+    });
+    expect((await read('wf_nopreview'))?.result).toEqual({ a: 1 });
+  });
+
+  it.each([
+    ['a non-object', 'text'],
+    [
+      'a text that is not a string',
+      { text: 1, truncated: false, reportedFailures: [] },
+    ],
+    ['a missing truncated flag', { text: 'x', reportedFailures: [] }],
+    [
+      'too many reported failures',
+      { text: 'x', truncated: false, reportedFailures: ['a', 'b', 'c', 'd'] },
+    ],
+  ])(
+    'discards a snapshot whose result preview is %s',
+    async (_label, value) => {
+      await write({ runId: 'wf_badpreview' });
+      await editSnapshot('wf_badpreview', (parsed) => {
+        parsed['resultPreview'] = value;
+      });
+      expect(await list()).toHaveLength(0);
+      expect(await read('wf_badpreview')).toBeUndefined();
+    },
+  );
 
   it('discards a snapshot whose size warning is malformed', async () => {
     await write({ runId: 'wf_badsize' });

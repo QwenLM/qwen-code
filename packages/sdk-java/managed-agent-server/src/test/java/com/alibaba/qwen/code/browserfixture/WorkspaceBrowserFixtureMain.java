@@ -47,14 +47,14 @@ public final class WorkspaceBrowserFixtureMain {
                         + " 'test-hidden', 'Hidden Workspace',"
                         + " 'test-config', 'test-policy', 'ACTIVE')");
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES ('w0d-browser', 'ws-default', ?, TRUE, TRUE)",
+                        + " workspace_id, actor_id, role)"
+                        + " VALUES ('w0d-browser', 'ws-default', ?, 'OPERATOR')",
                 "browser-actor".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, can_read, can_create)"
+                        + " workspace_id, actor_id, role)"
                         + " VALUES ('w0d-browser', 'ws-disabled', ?,"
-                        + " TRUE, TRUE), ('w0d-browser', 'ws-hidden', ?,"
-                        + " TRUE, TRUE)",
+                        + " 'OPERATOR'), ('w0d-browser', 'ws-hidden', ?,"
+                        + " 'OPERATOR')",
                 "browser-actor".getBytes(java.nio.charset.StandardCharsets.UTF_8),
                 "other-actor".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         jdbc.update("INSERT INTO managed_workspace_default"

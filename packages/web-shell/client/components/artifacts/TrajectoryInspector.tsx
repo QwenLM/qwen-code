@@ -40,6 +40,8 @@ export function TrajectoryInspector({
   turnSelected = false,
   hiddenByRange,
   hiddenByCollapse,
+  hiddenByFilter = false,
+  onClearFilter,
   onReveal,
   onClearRange,
   onClose,
@@ -50,6 +52,8 @@ export function TrajectoryInspector({
   turnSelected?: boolean;
   hiddenByRange: boolean;
   hiddenByCollapse: boolean;
+  hiddenByFilter?: boolean;
+  onClearFilter?: () => void;
   onReveal: () => void;
   onClearRange: () => void;
   onClose: () => void;
@@ -322,6 +326,16 @@ export function TrajectoryInspector({
           <XIcon size={15} aria-hidden="true" />
         </button>
       </div>
+      {hiddenByFilter && row && (
+        <div className={styles.notice}>
+          {t('trajectory.filter.hidden')}{' '}
+          {onClearFilter && (
+            <button type="button" onClick={onClearFilter}>
+              {t('trajectory.filter.clear')}
+            </button>
+          )}
+        </div>
+      )}
       {hiddenByRange && row && (
         <div className={styles.notice}>
           {t('trajectory.inspector.hiddenByRange')}{' '}
