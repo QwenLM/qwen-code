@@ -22,6 +22,30 @@ public class ManagedArtifactConfiguration {
     }
 
     /**
+     * The replay-floor pass's own tick: a first pass after an operator opts
+     * in drains every Session with a Snapshot, which on a large deployment
+     * takes minutes, and on the shared one-thread default taskScheduler it
+     * would hold off the message materializer and every recovery tick for
+     * that long.
+     */
+    @Bean
+    public ThreadPoolTaskScheduler replayFloorScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("replay-floor-").build();
+    }
+
+    /**
+     * The child result relay's own tick: the shared default taskScheduler
+     * also runs every sibling recovery, and this page's sequential
+     * harness calls would stall all of theirs behind one slow Session.
+     * Unconditional — the @Scheduled wiring binds by name at context
+     * refresh whether or not the broker lane is on.
+     */
+    @Bean
+    public ThreadPoolTaskScheduler childRelayScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("child-relay-").build();
+    }
+
+    /**
      * The recovery tick runs blocking JDBC, so it must never share the
      * one-thread default pool. Gated exactly like the Broker bean that carries
      * the tick: a deployment with the Broker off must not pay for an idle

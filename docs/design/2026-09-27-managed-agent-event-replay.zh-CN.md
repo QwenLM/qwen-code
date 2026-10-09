@@ -42,7 +42,8 @@ resync。
 
 ## 3. 非目标
 
-- 清理事件。生产环境中目前没有任何路径提升下限，这属于保留策略的工作。
+- 清理事件。现在有一个受开关控制的定时过程会提升下限（见 4.4），但它不删除
+  任何内容；清理仍属于保留策略的工作。
 - WebShell Session 的 `replayFloorSequence` 与 `snapshotThroughSequence`，仍为
   `planned`。
 - `listItems`，在 Snapshot 版本分页之前仍为 `partial`。
@@ -65,8 +66,8 @@ resync。
 - `content_part_id` 与 `contentPartId` 允许 128 个字符，与
   `PublicContentPart.part_id` 一致。Part id 以 sequence 结尾，sequence 达到十位数
   时就会超过 64 个字符。
-- `replay_floor_sequence` 增加说明：不超过它的事件可能被清理，低于它的游标已
-  过期。
+- `replay_floor_sequence` 增加说明：不超过它的事件可能被清理，低于它的游标在
+  Snapshot 支撑下限时才过期。
 - `SessionResyncRequired` 要求客户端从 Items 列表返回的 `snapshot_through_sequence`
   之后继续，因为帧中的值可能比客户端随后读到的 Snapshot 更旧。
 - WebShell transcript 写明它原本的返回内容：没有游标时，有 Snapshot 的 Session
@@ -125,7 +126,8 @@ Snapshot。
 
 ### 4.4 回放下限
 
-- 游标低于下限即为过期。等于下限的游标有效，因为下一条事件仍被保留。
+- 游标低于下限且 Snapshot 支撑下限时即为过期。等于下限的游标有效，因为下一条
+  事件仍被保留。
 - 读取在读完事件之后才检查下限。下限只会上升，保留策略也只清理下限以下的事件，
   因此读取之后不高于游标的下限，在读取期间也不高于游标。
 - JSON 查询对过期游标返回 `409 cursor_expired`，错误信封带有契约早已定义的
@@ -136,13 +138,20 @@ Snapshot。
   `id`，因此客户端的 `Last-Event-ID` 不会越过它缺失的事件。
 - `ManagedAgentStore.advanceReplayFloor` 只提升、不降低下限，并且不超过 Snapshot
   已覆盖的 sequence，保证重新读取 Snapshot 的客户端可以从
-  `snapshot_through_sequence` 之后继续。测试调用它；保留策略的工作将在删除事件之前
-  调用它。
+  `snapshot_through_sequence` 之后继续。测试调用它；定时的 `ReplayFloorAdvancer`
+  过程以该上限调用它，因此开启开关的部署会把每个 Session 的下限提升到 Snapshot
+  所证明的安全位置；保留策略的工作将在删除事件之前调用它。该过程由
+  `qwen.managed-agent.events.replay-floor-enabled`
+  （`QWEN_MANAGED_AGENT_REPLAY_FLOOR_ENABLED`，默认 `false`）控制，每
+  `qwen.managed-agent.events.replay-floor-interval`
+  （`QWEN_MANAGED_AGENT_REPLAY_FLOOR_INTERVAL`，默认 60 秒）运行一次。
 - `PublicSession.replay_floor_sequence` 返回已存储的下限。
-- 事件流重整会丢弃 Snapshot，因此在 Items 重建之前，其已覆盖的 sequence 为 `0`。
-  如果下限已被提升，这段时间内收到 resync 的公共客户端会发现游标再次过期（得到
-  `409` 或又一帧 resync），直到重建完成。生产环境中目前没有任何路径提升下限；保留策略的工作必须在提升下限之前消除
-  这段窗口。
+- 事件流重整会丢弃 Snapshot，因此在 Items 重建之前，其已覆盖的 sequence 为 `0`；
+  而下限从不降低，所以重建期间下限可能超过覆盖位置。只有当 Snapshot 能支撑下限
+  （`floor <= snapshot_through_sequence`）时，读取才会判定低于下限的游标过期；由于
+  尚无任何路径清理事件，重建期间这样的游标仍从保留的事件中读出，而不是循环返回
+  `409` 或又一帧 resync。一旦保留策略开始删除已存储下限之下的行，它必须重新评估
+  这个条件：届时被放行的游标可能指向已不存在的事件。
 - WebShell transcript 不检查下限。事件被清理之后，它的更早分页必须止于下限；这同样
   属于保留策略的工作。
 
@@ -200,6 +209,10 @@ resync。连续损坏超过三帧（即第四帧起，其间的心跳不打断�
   非零游标续传。该测试集把轮询间隔与心跳间隔都设为一分钟，因此空闲的事件流在测试期间不会读取
   存储，实时事件只能经由 hub 到达事件流。
 
+- `ReplayFloorRetractionTest` 暂停物化器，把下限提升到 Snapshot 并撤回
+  continuation 输出，然后验证：Snapshot 缺失期间低于下限的游标仍可读取、已存储的
+  下限从不回退、重建后的 Snapshot 重新支撑下限后该游标再次过期。
+
 - `EventIdentityTest` 固定该规则。集成测试在以下情形后把每条事件的身份与物化后的
   Snapshot 对照：分两批追加、且有一个 reasoning Part 跨越两批的增量；逐条追加的
   增量；以及撤回，包括接续了被撤回增量的保留增量。
@@ -223,8 +236,8 @@ resync。连续损坏超过三帧（即第四帧起，其间的心跳不打断�
 - 所有副本需要一起升级。V14 之后仍运行旧版本的副本写入的事件没有身份，新副本在
   其后追加的文本增量会开始一个 Items 中没有的 Part。
 - 忽略 resync 帧的客户端会看到事件流结束，用同一个游标重连后再次收到该帧。
-  web-shell 客户端会处理它。在保留策略的工作提升下限之前，生产环境中的事件流不会
-  发送它。
+  web-shell 客户端会处理它。只有选择开启回放下限过程的部署，其生产环境的事件流
+  才会发送它。
 - 生成的 `@qwen-code/web-shell` 类型新增 `WebShellResyncRequired`，事件流
   operation 不再列出 `409`。可选的事件字段原本就在 WebShell 事件 schema 中。
 
@@ -243,8 +256,9 @@ resync。连续损坏超过三帧（即第四帧起，其间的心跳不打断�
 
 ## 8. 后续工作
 
-- 保留策略：清理事件，在清理之前提升下限，在事件流重整重建 Items 期间把下限保持
-  在 Snapshot 之下或与之相等，并让 WebShell transcript 的更早分页止于下限。
+- 保留策略：清理上述过程已提升的下限之下的事件，并让 WebShell transcript 的更早
+  分页止于下限。上述 Snapshot 丢弃窗口只在尚不清理事件时于读取侧关闭；清理那一半
+  在删除行之前必须重新决策生效下限。
 - WebShell Session 的下限与 Snapshot 水位。
 - 带 Snapshot 版本分页的 `listItems`。
 - 生命周期工作：剩余的三行差异。
