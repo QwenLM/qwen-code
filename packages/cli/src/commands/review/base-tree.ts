@@ -70,6 +70,8 @@ import {
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { baseWorktreePath, REVIEW_TMP_DIR } from './lib/paths.js';
 import {
+  checkoutFilterCommands,
+  describeFilterScreen,
   filterBlankEnv,
   filterScreenForTree,
   resolvedContentTransformForTree,
@@ -348,8 +350,8 @@ function statusFilterBlanks(tree: string): NodeJS.ProcessEnv | string {
  * refresh compares only what CHANGED — and compares raw bytes for it, which is
  * stricter.
  *
- * This runs filters, deliberately and only here: the ones the repository's own
- * config defines, on the tree `worktree add` has just checked out through those
+ * This runs the trusted user filters admitted by the pre-checkout screen,
+ * on the tree `worktree add` has just checked out through those
  * very filters, before the build opens the window — the exposure the
  * checkout's own smudge already has. What the wait itself opens is closed the
  * way the reuse arm closes its window: the screen and the pointer are asked
@@ -1957,6 +1959,12 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       const untrusted = untrustedGitfile(worktree);
       if (untrusted !== null) {
         throw new Error(`refusing to create a base tree: ${untrusted}`);
+      }
+      const filters = checkoutFilterCommands(worktree);
+      if (filters.length > 0) {
+        throw new Error(
+          `refusing to create a base tree with unscreened filters: ${describeFilterScreen(filters)}`,
+        );
       }
       git(worktree, 'worktree', 'add', '--detach', tree, baseSha);
     } catch (e) {

@@ -946,7 +946,7 @@ describe('filter origin regressions (real Git)', () => {
     expect(checkoutFilterCommands(linked)).toEqual([TEAM]);
   });
 
-  it('R7-3: refuses a partial trusted-list failure while global filter records remain visible', () => {
+  it('R7-3: screens relevant keys even when unrelated config overflows a full listing', () => {
     const { linked, payload, common, gitDir } = trackedInclude(false);
     expect(filterCommandsIn(common, gitDir, linked)).toEqual(refusedTeam);
     expect(checkoutFilterCommands(linked)).toEqual([TEAM]);
@@ -987,10 +987,8 @@ describe('filter origin regressions (real Git)', () => {
     ).not.toMatch(/^filter\./m);
 
     const screen = filterCommandsIn(common, gitDir, linked);
-    expect(screen.exempt).toEqual([]);
-    expect(screen.attribution.join('\n')).toContain('ENOBUFS');
-    expect.soft(screen.unread).not.toEqual([]);
-    expect.soft(checkoutFilterCommands(linked)).not.toEqual([]);
+    expect(screen).toEqual(refusedTeam);
+    expect(checkoutFilterCommands(linked)).toEqual([TEAM]);
   }, 60_000);
 
   it('R7-1: does not re-trust a native slot the screened tree can rewrite', () => {
@@ -1037,7 +1035,7 @@ describe('filter origin regressions (real Git)', () => {
           'for arg in "$@"; do',
           '  [ "$arg" = --show-scope ] && scope=1',
           '  [ "$arg" = --includes ] && includes=1',
-          '  [ "$arg" = --list ] && list=1',
+          '  [ "$arg" = --get-regexp ] && list=1',
           'done',
           '[ "$scope$includes$list" = 111 ] && exit 129',
           `exec ${shellQuotePath(realGit)} "$@"`,

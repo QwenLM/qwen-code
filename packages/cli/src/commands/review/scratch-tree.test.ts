@@ -300,7 +300,7 @@ describe('runScratchTree', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'remains available when only trusted-origin attribution fails',
+    'refuses checkout when effective-config enumeration is unavailable',
     () => {
       const realGit = execFileSync('which', ['git'], {
         encoding: 'utf8',
@@ -321,7 +321,8 @@ describe('runScratchTree', () => {
       try {
         process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
         const result = run();
-        expect(result.available).toBe(true);
+        expect(result.available).toBe(false);
+        expect(result.note).toContain('git config exited 129');
       } finally {
         if (savedPath === undefined) delete process.env['PATH'];
         else process.env['PATH'] = savedPath;

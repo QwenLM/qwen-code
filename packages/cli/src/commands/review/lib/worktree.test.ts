@@ -2392,6 +2392,7 @@ describe('filterCommandsIn — the include walk', () => {
   });
 
   it('follows includes in the active global graph before exempting an origin', () => {
+    execFileSync('git', ['init', '--bare', '-q', dir]);
     const included = join(gitIsolation.home, 'filters.inc');
     writeFileSync(included, '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n');
     writeFileSync(
@@ -2414,6 +2415,7 @@ describe('filterCommandsIn — the include walk', () => {
   });
 
   it('R8-2: records transitive trusted reach without refusing a missing user include', () => {
+    execFileSync('git', ['init', '--bare', '-q', dir]);
     const globalConfig = join(gitIsolation.home, '.gitconfig');
     const included = join(gitIsolation.home, 'filters.inc');
     writeFileSync(included, '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n');
@@ -2438,6 +2440,7 @@ describe('filterCommandsIn — the include walk', () => {
   });
 
   it('continues through a trusted global boundary to mark transitive filters reached', () => {
+    execFileSync('git', ['init', '--bare', '-q', dir]);
     const included = join(gitIsolation.home, 'filters.inc');
     const globalConfig = join(gitIsolation.home, '.gitconfig');
     writeFileSync(included, '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n');
@@ -2864,7 +2867,9 @@ describe('filterCommandsIn — the include walk', () => {
         process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
         const screen = filterCommandsIn(dir, dir);
         expect(screen.filters).toEqual(['filter.lfs.clean']);
-        expect(screen.unread).toEqual([]);
+        expect(screen.unread).toEqual([
+          expect.stringContaining('git config exited 129'),
+        ]);
         expect(screen.attribution.join(' ')).toContain('git config exited 129');
 
         writeFileSync(join(dir, 'config'), '');
@@ -2872,7 +2877,9 @@ describe('filterCommandsIn — the include walk', () => {
         const healthy = filterCommandsIn(dir, dir);
         expect(healthy.filters).toEqual([]);
         expect(healthy.exempt).toEqual([]);
-        expect(healthy.unread).toEqual([]);
+        expect(healthy.unread).toEqual([
+          expect.stringContaining('git config exited 129'),
+        ]);
         expect(healthy.dangling).toEqual([]);
         expect(healthy.attribution.join(' ')).toContain(
           'git config exited 129',
@@ -2921,6 +2928,19 @@ describe('filterCommandsIn — the include walk', () => {
         true,
       ),
     ).toBeNull();
+  });
+
+  it('rejects truncated records and unknown scopes, but ignores valid non-user scopes', () => {
+    const file = join(dir, 'config');
+    expect(parseTrustedConfigRecords(`global\0file:${file}\0filte`)).toBeNull();
+    expect(
+      parseTrustedConfigRecords(`bogus\0file:${file}\0filter.x.clean\ncat\0`),
+    ).toBeNull();
+    expect(
+      parseTrustedConfigRecords(
+        `local\0file:${file}\0filter.x.clean\ncat\0worktree\0file:${file}\0filter.x.clean\ncat\0command\0command line:\0filter.x.clean\ncat\0`,
+      ),
+    ).toEqual([]);
   });
 
   it('keeps a global filter attributable when the config also has a valueless key', () => {
