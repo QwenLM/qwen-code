@@ -131,7 +131,72 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     'mcp_operation',
     'hook_registration',
     'hook_execution',
+    'child_acceptance',
+    'channel_route',
+    'channel_delivery',
   ];
+
+/**
+ * The `child_run` body kinds a caller may actually submit today (H4b).
+ * `child_run` carries two capabilities with independent enablement gates —
+ * H3's background Shell and H4's child agent — so it never joins the plain
+ * enabled list as a whole: the shell kind stays disabled here until the H3
+ * enablement gates clear, while H4b admits `child_agent`. The Java store
+ * validates both kinds and, since H4a, deploys before any writer, keeping
+ * the server-first order H1/H2 used.
+ */
+export const MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS = Object.freeze([
+  'child_agent',
+] as const);
+
+/**
+ * The `child_run` gate. This stands beside {@link
+ * assertManagedSessionDomainEnabled} for that one domain: enablement is
+ * decided per capability, and the body kind is the capability.
+ */
+export function assertManagedSessionChildRunKindEnabled(kind: string): void {
+  if (
+    !(MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS as readonly string[]).includes(
+      kind,
+    )
+  ) {
+    throw new ManagedSessionRecordError(
+      `domain child_run kind ${kind} is registered but not enabled for submission.`,
+    );
+  }
+}
+
+/**
+ * The channel adapters whose routes a Session may actually commit today
+ * (H5b/H5c). `channel_route` and `channel_delivery` are enabled as domains,
+ * but a route's committed policy names the adapter that produced it, and
+ * the authority admits a first route revision only for an adapter listed
+ * here; deliveries bind to a committed route, so they are gated with it.
+ * The Java store validates both bodies since H5a and deploys before any
+ * writer, keeping the server-first order H1/H2 used.
+ */
+export const MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS = Object.freeze([
+  'email',
+] as const);
+
+/**
+ * The channel adapter gate. This stands beside {@link
+ * assertManagedSessionDomainEnabled} for the two channel domains: enablement
+ * is decided per adapter, and the route policy names the adapter.
+ */
+export function assertManagedSessionChannelAdapterEnabled(
+  adapter: string,
+): void {
+  if (
+    !(MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS as readonly string[]).includes(
+      adapter,
+    )
+  ) {
+    throw new ManagedSessionRecordError(
+      `channel adapter ${adapter} is not enabled for submission.`,
+    );
+  }
+}
 
 /**
  * The enabled domains whose records commit through the envelope path

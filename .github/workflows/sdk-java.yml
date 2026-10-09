@@ -30,6 +30,7 @@ on:
       - 'scripts/run-managed-agent-server-e2e.ts'
       - 'scripts/check-failsafe-reports.js'
       - 'scripts/check-flyway-migrations.js'
+      - 'scripts/flyway-migration-utils.js'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
   push:
@@ -60,6 +61,7 @@ on:
       - 'scripts/run-managed-agent-server-e2e.ts'
       - 'scripts/check-failsafe-reports.js'
       - 'scripts/check-flyway-migrations.js'
+      - 'scripts/flyway-migration-utils.js'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
 
@@ -504,12 +506,12 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (25 + 9×10 + 12 = 127 — the Verify step's 25
-    # sits above its failsafe fork timeout) plus ~10 minutes for the
+    # The step ceilings (25 + 9×10 + 20 = 135 — the Verify and O4 steps
+    # sit above their failsafe fork timeouts) plus ~10 minutes for the
     # uncapped setup steps (Checkout..Install MySQL binaries, the report
-    # checks) need ~137; 140 keeps a thin margin, and each arm buys its
+    # checks) need ~145; 148 keeps a thin margin, and each arm buys its
     # own 10 instead of sharing an envelope.
-    timeout-minutes: 140
+    timeout-minutes: 148
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -641,7 +643,12 @@ jobs:
       - name: 'Verify O4 filesystem process and capacity gates'
         id: 'o4_mysql'
         if: "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}"
-        timeout-minutes: 12
+        # Must outlive the o4-mysql-gates failsafe fork timeout (600 s) plus
+        # the wrapped compile/surefire/spotbugs/checkstyle work — the same
+        # ordering the Hosted verify step needed at #13503: killed at 12
+        # minutes on a loaded runner, the step left no per-test failure
+        # lines (#13684). hosted-process-ci.test.js pins this ordering.
+        timeout-minutes: 20
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"

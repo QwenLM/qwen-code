@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -141,7 +142,7 @@ public class WorkspaceExecutionStore {
                 + " r.workspace_generation, r.storage_id, r.state,"
                 + " c.tenant_id AS command_tenant, c.session_id AS command_session,"
                 + " a.tenant_id AS access_tenant, a.workspace_id AS access_workspace,"
-                + " a.can_read, a.can_create")
+                + " a.role")
                 + " FROM managed_agent_session s"
                 + (cancellation
                         ? " JOIN managed_agent_turn t ON t.tenant_id = s.tenant_id"
@@ -152,7 +153,8 @@ public class WorkspaceExecutionStore {
                 + " JOIN managed_workspace_create_command c ON c.tenant_id = s.tenant_id"
                 + " AND c.session_id = s.session_id"
                 + " JOIN managed_workspace_access a ON a.tenant_id = r.tenant_id"
-                + " AND a.workspace_id = r.workspace_id AND a.actor_id = c.actor_id")
+                + " AND a.workspace_id = r.workspace_id AND a.actor_id = c.actor_id"
+                + " AND a.role IN ('READER', 'OPERATOR', 'OWNER')")
                 + " WHERE s.tenant_id = ? AND s.session_id = ?",
                 (row, index) -> {
                     boolean structural = session.tenantId().equals(row.getString("tenant_id"))
@@ -191,7 +193,8 @@ public class WorkspaceExecutionStore {
                     // verdict the terminal exit promises.
                     return cancellation
                             || ("ACTIVE".equals(row.getString("state"))
-                                    && row.getBoolean("can_read") && row.getBoolean("can_create"))
+                                    && WorkspaceAccess.valueOf(row.getString("role"))
+                                            .atLeast(WorkspaceAccess.OPERATOR))
                             ? 2 : 1;
                 },
                 session.tenantId(), session.sessionId());
