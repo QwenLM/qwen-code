@@ -3154,8 +3154,11 @@ export function registerHostedHarnessSessionRoutes(
               }
               if (
                 turn.source === AUTOMATION_INPUT_SOURCE &&
-                outcome === 'settled'
+                (outcome === 'settled' || outcome === 'settled_incomplete')
               ) {
+                // Both burned the input: the run settles from the turn's
+                // own committed result (completed or errored), never from
+                // a re-run of it.
                 await settleAutomation(turn.turnId);
               }
               return outcome;
@@ -5774,7 +5777,7 @@ export function registerHostedHarnessSessionRoutes(
       // pending one settles cancelled here, model-free, before the log
       // closes; a run whose input settled that way ends cancelled with an
       // execution proven not to have started.
-      if (session.monitors || session.automations) {
+      if (session.monitors || session.childAgents || session.automations) {
         await settlePendingMonitorInputs({
           authority: session.managed.authority,
           sink: session.managed.sink,
@@ -5782,6 +5785,7 @@ export function registerHostedHarnessSessionRoutes(
           cwd: session.cwd,
           sources: [
             ...(session.monitors ? ['monitor'] : []),
+            ...(session.childAgents ? ['child_agent'] : []),
             ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
           ],
         });
