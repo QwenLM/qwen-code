@@ -51,6 +51,9 @@ Harness 遵循 Java 创建 Hosted Session 时已经以 `approvalMode` 发送的�
 | `default`   | `read_file`                         | `write_file`、`edit` 与 `run_shell_command` |
 | `auto-edit` | `read_file`、`write_file` 与 `edit` | `run_shell_command`                         |
 
+`/2` 搜索 profile 在 `default` 与 `auto-edit` 下还预批准 `glob`；见
+[搜索 profile 设计](2026-10-01-hosted-workspace-search-profile.zh-CN.md)。
+
 每种模式列出的是它预批准的工具，因此之后加入配置的工具在有人把它列入之前都会被询问。Java 目前选择的文件配置 `hosted-workspace-files/1` 没有 shell 工具，因此 `auto-edit` 在其中什么都不询问；shell 那一行适用于 `hosted-workspace-shell/1`。
 
 对于工具配置，`plan` 与 `auto` 返回 `400 invalid_hosted_approval`：plan 模式需要自己的规划语义，auto 模式需要分类器，而 Hosted 路径两者都没有。超出范围的超时也返回同样的错误；`yolo` 从不等待，因此忽略超时。没有工具配置的 Session 继续忽略该模式，因为它不运行工具。
@@ -83,7 +86,7 @@ Workspace 每个 Turn 获取一次，在 Turn 等待期间保持占用，与模�
 | 选项           | `allow`（Allow）与 `deny`（Deny）                          |
 | 创建与过期时间 | 由 Harness 设定；过期时间为创建时间加上 Session 的审批超时 |
 
-选项、策略版本、两个时间、Turn、模型的函数调用 ID 与工具名在请求提交之前作为 Action 的 `optionsRef` 资源发布，因此 Java 无需询问 Harness 就能投影出 Action。authority 只把 `tool_call` 记为来源，因此函数调用 ID 放在该资源中；它指向已提交的助手消息中的一个调用。公共 Action 不展示工具参数。
+选项、策略版本、两个时间、Turn、模型的函数调用 ID 与工具名在请求提交之前作为 Action 的 `optionsRef` 资源发布，因此 Java 无需询问 Harness 就能投影出 Action。authority 只把 `tool_call` 记为来源，因此函数调用 ID 放在该资源中；它指向已提交的助手消息中的一个调用。版本 1 公共 Action 不展示工具参数。[Java 先行的输入预览步骤](2026-10-04-hosted-action-input-preview.zh-CN.md)接受带输入引用的版本 2 options，并提供 requested 原生工具的精确输入，最多 8192 UTF-8 字节，附截断标记与完整长度。在 Harness 写版本 2 前先部署读取端。原生写入内容会在上限内展示给 Session 读取者；MCP 内部 grant 不提供预览。通用脱敏作为独立后续工作。
 
 审批超时是 Session 定义的一部分，由创建请求设定，默认 10 分钟，范围 1 秒到 24 小时。
 
@@ -132,7 +135,7 @@ Session Store 已经会读取每一行已提交的 journal 来投影 Stage H 记
 - 只有 Session 的 owner（记录为其创建者的可信 actor）可以回答。其他 actor 得到 `403 action_forbidden`。
 - 迟到的回答得到 `409 action_expired`、`409 action_cancelled` 或 `409 action_already_resolved`，未知的 Action 得到 `404 action_not_found`。契约会新增这些错误码。
 - 对于审批模式可能询问的 Session，Session 能力 `actions` 为 `true`。Java 在 Workspace Session 受理时固定模式；迁移前的 Session 默认为 `yolo`。owner 检查使用已有创建者记录，不新增授权或 owner；无法确定创建者时拒绝回答。
-- `allow` 与 `deny` 是稳定的选项 ID。Action 提供两个版本、function call ID、工具名称及过期时间；参数从 Items 读取。每个 Turn 同时最多有一个 Hosted 审批待处理。列表只返回 `requested` Action，按从新到旧排序，不在本地将它们标记为过期。
+- `allow` 与 `deny` 是稳定的选项 ID。Action 提供两个版本、function call ID、工具名称及过期时间；版本 1 参数不会投影到 Items，版本 2 可提供上述有界 Action 输入预览。每个 Turn 同时最多有一个 Hosted 审批待处理。列表只返回 `requested` Action，按从新到旧排序，不在本地将它们标记为过期。
 
 Turn 在等待期间仍读作 `running`；让客户端知道它在等待的，是它未决的 Action。
 

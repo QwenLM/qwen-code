@@ -131,6 +131,116 @@ async function settled(instance: ManagedHookRuntime, id = 'execution') {
   return view!;
 }
 describe('ManagedHookRuntime', () => {
+  it.each([1, 2])(
+    'fences native hook dispatch when CSI seals during directory lookup %s',
+    async (gateLookup) => {
+      let lookups = 0;
+      let entered!: () => void;
+      let release!: () => void;
+      const waiting = new Promise<void>((resolve) => (entered = resolve));
+      const lookup = new Promise<void>((resolve) => (release = resolve));
+      const instance = new ManagedHookRuntime(
+        { ...key, workspaceGeneration: '1' },
+        async () => {
+          if (++lookups === gateLookup) {
+            entered();
+            await lookup;
+          }
+          return directory;
+        },
+        {
+          version: 1,
+          catalogs: [
+            {
+              ...pin,
+              tenantId: key.tenantId,
+              workspaceId: key.workspaceId,
+              hooks: [
+                {
+                  ...definition(),
+                  config: {
+                    type: HookType.Http,
+                    url: 'https://example.com/hook',
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      );
+      runtimes.push(instance);
+      const native = vi.spyOn(HttpHookRunner.prototype, 'execute');
+      const call = request();
+      const pending = instance.control('runtime-session', call);
+      const result = pending.catch((error: unknown) => error);
+      await waiting;
+      expect(instance.getDrainInspection()).toMatchObject({
+        hasActivity: true,
+        ...(gateLookup === 1
+          ? { pendingStarts: 1 }
+          : { pendingInvocations: 1 }),
+      });
+      instance.sealAdmission();
+      try {
+        await expect(
+          instance.control('runtime-session', request('new')),
+        ).rejects.toThrow('managed_hook_closed');
+        if (gateLookup === 2) {
+          expect(await instance.control('runtime-session', call)).toMatchObject(
+            {
+              operationId: call.operationId,
+              state: 'running',
+            },
+          );
+          await expect(
+            instance.control('runtime-session', {
+              ...call,
+              input: { ...call.input, timestamp: 'different' },
+            }),
+          ).rejects.toThrow('managed_hook_operation_conflict');
+          expect(
+            await instance.control('runtime-session', {
+              kind: 'hook-status',
+              sessionKey: key,
+              operationId: 'status',
+              targetOperationId: call.operationId,
+            }),
+          ).toMatchObject({ state: 'running' });
+        }
+      } finally {
+        release();
+      }
+      if (gateLookup === 1) {
+        expect(await result).toMatchObject({ code: 'managed_hook_closed' });
+      } else {
+        await result;
+        const receipt = await settled(instance);
+        expect(receipt).toMatchObject({
+          state: 'settled',
+          error: { code: 'managed_hook_closed' },
+        });
+        expect(await instance.control('runtime-session', call)).toEqual(
+          receipt,
+        );
+        expect(
+          await instance.control('runtime-session', {
+            kind: 'hook-cancel',
+            sessionKey: key,
+            operationId: 'cancel',
+            targetOperationId: call.operationId,
+          }),
+        ).toEqual(receipt);
+      }
+      expect(native).not.toHaveBeenCalled();
+      await instance.close();
+      expect(instance.getDrainInspection()).toEqual({
+        hasActivity: true,
+        pendingStarts: 0,
+        pendingInvocations: 0,
+      });
+    },
+  );
+
   it.each(['_scope', '.scope', '-scope', ':scope'])(
     'accepts existing scope and manifest identifiers with a leading punctuation (%s)',
     async (id) => {

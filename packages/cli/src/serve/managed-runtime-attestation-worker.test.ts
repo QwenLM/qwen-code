@@ -5,12 +5,23 @@
  */
 
 import { spawn } from 'node:child_process';
+import { Server } from 'node:http';
 import { connect, createServer, type AddressInfo } from 'node:net';
-import { networkInterfaces } from 'node:os';
+import { networkInterfaces, tmpdir } from 'node:os';
+import path from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { ManagedCsiMount } from './managed-csi-mount.js';
+import {
+  MANAGED_CSI_ACK_PATH,
+  parseManagedCsiBoot,
+  type ManagedCsiPodIdentity,
+  type ManagedCsiAckRequest,
+} from './managed-csi-envelope.js';
+import type { ManagedShellCapturePublisher } from './managed-runtime-tool-executor.js';
 import {
   isManagedContextReady,
   type ManagedContextBoot,
@@ -22,6 +33,12 @@ import {
   type ManagedRuntimeWorkerBoot,
   type ManagedRuntimeWorkerReady,
 } from './managed-runtime-attestation-worker.js';
+import {
+  MANAGED_RUNTIME_LEDGER_ENV,
+  ManagedRuntimeLedger,
+  testInternals,
+} from './managed-runtime-ledger.js';
+import { ManagedToolExecutor } from './managed-runtime-tool-executor.js';
 
 const boot = Object.freeze({
   type: 'boot',
@@ -319,6 +336,41 @@ describe('Managed Runtime attestation worker', () => {
     expect(unknown.headers.get('cache-control')).toBe('no-store');
   });
 
+  it('creates its ledger from the launch environment, arms its watch, and never leaks the path', async () => {
+    const sandbox = await mkdtemp(path.join(tmpdir(), 'qwen-worker-ledger-'));
+    const ledgerFile = path.join(sandbox, 'worker.json');
+    const previous = process.env[MANAGED_RUNTIME_LEDGER_ENV];
+    const forWorkspace = vi.spyOn(ManagedToolExecutor, 'forWorkspace');
+    const watch = vi.spyOn(ManagedRuntimeLedger.prototype, 'watch');
+    onTestFinished(async () => {
+      forWorkspace.mockRestore();
+      watch.mockRestore();
+      await worker.close().catch(() => undefined);
+      if (previous === undefined) {
+        delete process.env[MANAGED_RUNTIME_LEDGER_ENV];
+      } else {
+        process.env[MANAGED_RUNTIME_LEDGER_ENV] = previous;
+      }
+      await rm(sandbox, { recursive: true, force: true });
+    });
+    process.env[MANAGED_RUNTIME_LEDGER_ENV] = ledgerFile;
+
+    const worker = await startManagedRuntimeAttestationWorker(boot);
+
+    expect(forWorkspace).toHaveBeenCalledWith(
+      boot.workspaceCwd,
+      boot.runtimeInstanceId,
+      expect.objectContaining({ ledger: expect.any(ManagedRuntimeLedger) }),
+    );
+    expect(watch).toHaveBeenCalledTimes(1);
+    // The path is for the worker alone: no Shell command inherits the name
+    // of the file that accounts for it.
+    expect(process.env[MANAGED_RUNTIME_LEDGER_ENV]).toBeUndefined();
+    expect(
+      testInternals.readLedgerDocument(ledgerFile)?.worker.incarnation,
+    ).toBe(boot.runtimeIncarnation);
+  });
+
   it('rejects an invalid identity before opening a listener', async () => {
     const listeners = () =>
       process
@@ -530,4 +582,97 @@ describe('Managed Runtime attestation worker', () => {
       /scrubbed inherited loader env vars from the Managed Runtime worker process;.*NODE_OPTIONS/u,
     );
   }, 30_000);
+});
+
+const csiAckFixture = JSON.parse(
+  readFileSync(
+    new URL(
+      './contracts/managed-csi-worker-ack-v1.fixtures.json',
+      import.meta.url,
+    ),
+    'utf8',
+  ),
+) as {
+  boot: unknown;
+  expectedPod: ManagedCsiPodIdentity;
+  request: ManagedCsiAckRequest;
+};
+
+describe('boot-v3 original-worker ACK ownership', () => {
+  it.each([false, true])(
+    'registers the owned ACK route in the actual boot-v3 startup (capture profile: %s)',
+    async (captureProfile) => {
+      const boot = parseManagedCsiBoot(csiAckFixture.boot);
+      vi.stubEnv('QWEN_POD_UID', csiAckFixture.expectedPod.uid);
+      vi.stubEnv('QWEN_POD_NAMESPACE', csiAckFixture.expectedPod.namespace);
+      vi.stubEnv('QWEN_NODE_NAME', csiAckFixture.expectedPod.nodeName);
+      const observation = vi
+        .spyOn(ManagedCsiMount.prototype, 'observe')
+        .mockResolvedValue({
+          mountId: '1',
+          device: '259:8',
+          source: '/dev/nvme0n1',
+          diskSerial: boot.storage.diskSerial,
+          rootDevice: '66312',
+          rootInode: '2',
+        });
+      const prepare = vi.fn(async () => {
+        throw new Error('must never prepare');
+      });
+      const publisher: ManagedShellCapturePublisher | undefined = captureProfile
+        ? { prepare }
+        : undefined;
+      const nativeListen = Server.prototype.listen;
+      const listen = vi
+        .spyOn(Server.prototype, 'listen')
+        .mockImplementation(function (this: Server) {
+          return Reflect.apply(nativeListen, this, [0, '127.0.0.1']);
+        });
+      try {
+        const worker = await startManagedRuntimeAttestationWorker(
+          boot,
+          publisher,
+          undefined,
+          true,
+        );
+        openWorkers.add(worker);
+        expect(listen).toHaveBeenCalledWith(43190, '0.0.0.0');
+        const response = await fetch(worker.ready.url + MANAGED_CSI_ACK_PATH, {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer ' + boot.context.token,
+            'Cache-Control': 'no-store',
+            'Content-Type': 'application/json',
+            'X-Qwen-Managed-Lease-Id': boot.context.leaseId,
+            'X-Qwen-Managed-Lease-Epoch': String(boot.context.epoch),
+          },
+          body: JSON.stringify(csiAckFixture.request),
+        });
+        expect(response.status).toBe(409);
+        expect(response.headers.get('cache-control')).toBe('no-store');
+        expect(await response.json()).toEqual({
+          code: 'managed_csi_ack_conflict',
+          error: 'Managed CSI acknowledgement conflicts.',
+        });
+        expect(prepare).not.toHaveBeenCalled();
+        expect(observation).toHaveBeenCalledTimes(1);
+      } finally {
+        listen.mockRestore();
+        observation.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+  it('keeps the ACK path unowned for unchanged boot-v2 workers', async () => {
+    const worker = await startManagedRuntimeAttestationWorker(
+      contextFixtures.boot,
+    );
+    openWorkers.add(worker);
+    const response = await fetch(worker.ready.url + MANAGED_CSI_ACK_PATH, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(csiAckFixture.request),
+    });
+    expect(response.status).toBe(404);
+  });
 });

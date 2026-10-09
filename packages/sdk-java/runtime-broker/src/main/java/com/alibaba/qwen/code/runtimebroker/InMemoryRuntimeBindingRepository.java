@@ -13,7 +13,15 @@ import java.util.function.Supplier;
 /** Process-local Runtime binding repository for tests and single-node use. */
 public final class InMemoryRuntimeBindingRepository
         implements RuntimeBindingRepository {
+    @Override
+    public void requireHookAdmission(RuntimeScope scope, String harnessSessionId,
+            RuntimeLifecycleAuthority authority) {
+        if (authority != null) {
+            requireHarnessAdmission(scope, harnessSessionId, authority);
+        }
+    }
     private final java.util.Set<java.util.List<String>> draining = new java.util.HashSet<>();
+    private final Map<List<String>, String> storageFences = new HashMap<>();
     private final Clock clock;
     private final Supplier<String> idSupplier;
     private final Map<String, RuntimeBindingRecord> records = new HashMap<>();
@@ -106,6 +114,10 @@ public final class InMemoryRuntimeBindingRepository
         if (current.getLossEvidence() == null) {
             return current;
         }
+        if ("kubernetes-workspace".equals(current.getRequest().getProvisionerKind())
+                && current.isDrainRequested()) {
+            return current;
+        }
         if (!(sessions instanceof InMemoryRuntimeSessionRepository memorySessions)
                 || !(executions instanceof InMemoryToolExecutionRepository memoryExecutions)) {
             throw new IllegalArgumentException("Recovery requires matching in-memory repositories");
@@ -180,7 +192,37 @@ public final class InMemoryRuntimeBindingRepository
         return draining.contains(List.of(tenantId, harnessSessionId));
     }
 
+    @Override
+    public synchronized void requestStorageFence(String tenantId, String storageId, String operationId) {
+        var previous = storageFences.putIfAbsent(List.of(tenantId, storageId), operationId);
+        if (previous != null && !previous.equals(operationId)) {
+            throw new RuntimeBrokerException(409, "migration_conflict", "Storage migration is already owned.", false);
+        }
+    }
+
+    @Override
+    public synchronized boolean isStorageFenced(String tenantId, String storageId, String operationId) {
+        var owner = storageFences.get(List.of(tenantId, storageId));
+        return owner != null && (operationId == null || operationId.equals(owner));
+    }
+
+    @Override
+    public synchronized List<RuntimeBindingRecord> findByStorage(String tenantId, String storageId,
+            String afterBindingId, int limit) {
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Storage batch must contain 1-100 bindings");
+        }
+        return records.values().stream().filter(record ->
+                tenantId.equals(record.getRequest().getScope().getTenantId())
+                && storageId.equals(record.getRequest().getStorageId())
+                && (afterBindingId == null || record.getBindingId().compareTo(afterBindingId) > 0))
+                .sorted(java.util.Comparator.comparing(RuntimeBindingRecord::getBindingId)).limit(limit).toList();
+    }
+
     private void requireAdmission(RuntimeProvisionRequest request) {
+        if (request.getStorageId() != null && isStorageFenced(request.getScope().getTenantId(), request.getStorageId(), null)) {
+            throw new RuntimeBrokerException(409, "workspace_migrating", "Storage is under maintenance.", false);
+        }
         if ("session".equals(request.getScope().getIsolationClass())
                 && isHarnessDraining(request.getScope().getTenantId(), request.getIsolationKey())) {
             throw new RuntimeBrokerException(409, "runtime_admission_closed", "Session is draining.", false);
@@ -199,6 +241,32 @@ public final class InMemoryRuntimeBindingRepository
                 && harnessSessionId.equals(record.getRequest().getIsolationKey())
                 && (afterBindingId == null || record.getBindingId().compareTo(afterBindingId) > 0))
                 .sorted(java.util.Comparator.comparing(RuntimeBindingRecord::getBindingId)).limit(limit).toList();
+    }
+
+    @Override
+    public synchronized ToolExecutionRecord authorizeDispatch(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, ToolExecutionRecord expected,
+            String owner, long dispatchGeneration) {
+        if (expected == null || expected.getState() != ToolExecutionRecord.State.DISPATCHING
+                || expected.isCancelRequested()) {
+            throw new IllegalArgumentException("Dispatch admission requires an uncancelled claim");
+        }
+        var binding = findById(expected.getBindingId());
+        RuntimeAdmission.requireReady(binding, expected.getRuntimeGeneration());
+        synchronized (sessions) {
+            RuntimeAdmission.requireSession(sessions.findById(
+                    binding.getRequest().getScope(), expected.getRuntimeSessionId()), expected);
+            if (sessions instanceof InMemoryRuntimeSessionRepository
+                    && executions instanceof InMemoryToolExecutionRepository memoryExecutions) {
+                return memoryExecutions.authorizeDispatch(expected, owner, dispatchGeneration, binding.getVersion());
+            }
+            if ("kubernetes-workspace".equals(binding.getRequest().getProvisionerKind())) {
+                throw new RuntimeBrokerException(501, "runtime_dispatch_admission_unavailable",
+                        "CSI dispatch authorization requires native repositories", false);
+            }
+            return executions.compareAndSet(expected,
+                    expected.withState(ToolExecutionRecord.State.EXECUTING, false), owner, dispatchGeneration);
+        }
     }
 
     @Override

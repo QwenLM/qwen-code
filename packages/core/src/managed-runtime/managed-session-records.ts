@@ -19,6 +19,12 @@ export type ManagedSessionJsonValue =
   | { [key: string]: ManagedSessionJsonValue };
 
 export const MANAGED_SESSION_FORMAT_VERSION = 1;
+// Sessions stay readable by every deployed reader: every domain the log
+// may hold, `monitor_run` included, parses in readers since #12837
+// (v0.24.7). A `managed-session/2` stamp on each new Session would make a
+// rollback or a mixed-version rollout lose access to every Session
+// created in between (H3 round-5 verification matrix), so the stamp
+// rises only when a change genuinely breaks an older reader mid-scan.
 export const MANAGED_SESSION_MINIMUM_READER = 'managed-session/1';
 
 const MANAGED_SESSION_DOMAIN_RECORD_VERSION = 1;
@@ -124,7 +130,38 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     'mcp_operation',
     'hook_registration',
     'hook_execution',
+    'child_acceptance',
   ];
+
+/**
+ * The `child_run` body kinds a caller may actually submit today (H4b).
+ * `child_run` carries two capabilities with independent enablement gates —
+ * H3's background Shell and H4's child agent — so it never joins the plain
+ * enabled list as a whole: the shell kind stays disabled here until the H3
+ * enablement gates clear, while H4b admits `child_agent`. The Java store
+ * validates both kinds and, since H4a, deploys before any writer, keeping
+ * the server-first order H1/H2 used.
+ */
+export const MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS = Object.freeze([
+  'child_agent',
+] as const);
+
+/**
+ * The `child_run` gate. This stands beside {@link
+ * assertManagedSessionDomainEnabled} for that one domain: enablement is
+ * decided per capability, and the body kind is the capability.
+ */
+export function assertManagedSessionChildRunKindEnabled(kind: string): void {
+  if (
+    !(MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS as readonly string[]).includes(
+      kind,
+    )
+  ) {
+    throw new ManagedSessionRecordError(
+      `domain child_run kind ${kind} is registered but not enabled for submission.`,
+    );
+  }
+}
 
 /**
  * The enabled domains whose records commit through the envelope path
@@ -1324,7 +1361,7 @@ export function isManagedSessionLifecycleTransitionAllowed(
   return LIFECYCLE_TRANSITIONS[from].includes(to);
 }
 
-function managedSessionReaderVersion(value: unknown): number | null {
+export function managedSessionReaderVersion(value: unknown): number | null {
   if (typeof value !== 'string') return null;
   const match = /^managed-session\/(0|[1-9][0-9]*)$/.exec(value);
   if (match === null) return null;
