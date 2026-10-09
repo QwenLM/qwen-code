@@ -1156,8 +1156,19 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     // point is dropped: the required `content` here never reaches write_file,
     // validation fails, and the block is accepted so nothing is left behind in
     // the turn to explain it.
-    const text = `${OPEN} name='write_file'>\n${param('file_path', 'doc.md')}\n${param('content', 'body')}\n${CLOSE}`;
+    //
+    // The name therefore has to *really* mix quote characters. On paired quotes
+    // the scan-derived split and the body-length arithmetic land on the same
+    // offset, so a paired-quote input pins nothing: deriving `paramsStart` as
+    // `match.index + openTagEnd(match[0])` keeps it green.
+    const text = `${OPEN} name='write_file">\n${param('file_path', 'doc.md')}\n${param('content', 'body')}\n${CLOSE}`;
     expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'write_file', args: { file_path: 'doc.md', content: 'body' } },
+    ]);
+    // Paired-quote control: both derivations agree on this input, which is why
+    // it sits beside the mixed one instead of replacing it.
+    const paired = `${OPEN} name='write_file'>\n${param('file_path', 'doc.md')}\n${param('content', 'body')}\n${CLOSE}`;
+    expect(extractXmlToolCalls(paired)).toEqual([
       { name: 'write_file', args: { file_path: 'doc.md', content: 'body' } },
     ]);
   });
@@ -1165,7 +1176,7 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
   it('keeps a single-parameter block whose name mixes quote characters', () => {
     // The same split lands past the block's only parameter, which previously
     // dropped the whole call instead of disabling it.
-    const text = `${OPEN} name='read_file'>\n${param('file_path', 'a.ts')}\n${CLOSE}`;
+    const text = `${OPEN} name='read_file">\n${param('file_path', 'a.ts')}\n${CLOSE}`;
     expect(extractXmlToolCalls(text)).toEqual([
       { name: 'read_file', args: { file_path: 'a.ts' } },
     ]);
