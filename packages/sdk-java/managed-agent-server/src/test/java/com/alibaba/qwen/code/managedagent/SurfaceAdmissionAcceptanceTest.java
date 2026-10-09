@@ -169,8 +169,8 @@ class SurfaceAdmissionAcceptanceTest {
                 + " 'ACTIVE')", ARTIFACT_TENANT, ARTIFACT_WORKSPACE);
         for (String actor : List.of(READER, OWNER)) {
             jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                    + " workspace_id, actor_id, can_read, can_create)"
-                    + " VALUES (?, ?, ?, TRUE, FALSE)", ARTIFACT_TENANT,
+                    + " workspace_id, actor_id, role)"
+                    + " VALUES (?, ?, ?, 'READER')", ARTIFACT_TENANT,
                     ARTIFACT_WORKSPACE, actor.getBytes(StandardCharsets.UTF_8));
         }
         var artifacts = fixture.results()
@@ -815,6 +815,8 @@ class SurfaceAdmissionAcceptanceTest {
         variables.put("actionId", pendingAction);
         variables.put("workspaceId", "ws");
         variables.put("agentId", "agent-missing");
+        variables.put("channelId", "channel-missing");
+        variables.put("deliveryId", "delivery-missing");
         variables.put("itemId", artifactItemId);
         variables.put("artifactId", artifactId);
         variables.put("resourceId", "resource-0000000000000000");
@@ -1032,9 +1034,10 @@ class SurfaceAdmissionAcceptanceTest {
 
     private void grant(String tenant, String actor, boolean canCreate) {
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                + " workspace_id, actor_id, can_read, can_create) VALUES"
-                + " (?, 'ws', ?, TRUE, ?)", tenant,
-                actor.getBytes(StandardCharsets.UTF_8), canCreate);
+                + " workspace_id, actor_id, role) VALUES"
+                + " (?, 'ws', ?, ?)", tenant,
+                actor.getBytes(StandardCharsets.UTF_8),
+                canCreate ? "OPERATOR" : "READER");
     }
 
     private String insertAction(String tenant, String session)

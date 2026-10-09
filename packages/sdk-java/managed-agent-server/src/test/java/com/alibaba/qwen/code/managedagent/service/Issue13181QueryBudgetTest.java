@@ -453,8 +453,8 @@ class Issue13181QueryBudgetTest {
                 + " 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                + " workspace_id, actor_id, can_read, can_create) VALUES"
-                + " (?, 'workspace', ?, TRUE, TRUE)", tenant,
+                + " workspace_id, actor_id, role) VALUES"
+                + " (?, 'workspace', ?, 'OPERATOR')", tenant,
                 "actor".getBytes(StandardCharsets.UTF_8));
         String sessionId = fixture.tx.execute(status -> fixture.store
                 .insertWorkspaceSessionCommand(tenant, "actor",
@@ -660,8 +660,8 @@ class Issue13181QueryBudgetTest {
                 + " 'ACTIVE')", bound, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                + " workspace_id, actor_id, can_read, can_create) VALUES"
-                + " (?, 'workspace', ?, TRUE, TRUE)", bound,
+                + " workspace_id, actor_id, role) VALUES"
+                + " (?, 'workspace', ?, 'OPERATOR')", bound,
                 "actor".getBytes(StandardCharsets.UTF_8));
         List<String> boundIds = new ArrayList<>();
         for (int index = 0; index < 20; index++) {
@@ -745,12 +745,12 @@ class Issue13181QueryBudgetTest {
                 WorkspaceExecutionProfile.POLICY_REF);
         for (String actor : new String[] {"actor", "other"}) {
             fixture.jdbc.update("INSERT INTO managed_workspace_access"
-                    + " (tenant_id, workspace_id, actor_id, can_read,"
-                    + " can_create) VALUES (?, 'workspace', ?, TRUE, TRUE)",
+                    + " (tenant_id, workspace_id, actor_id, role)"
+                    + " VALUES (?, 'workspace', ?, 'OPERATOR')",
                     tenant, actor.getBytes(StandardCharsets.UTF_8));
         }
         // A second workspace where the actor reads but cannot create: its
-        // session exercises the grant's can_create term, and the page's two
+        // session exercises the grant's role term, and the page's two
         // workspaces make the grant batch's single-query shape
         // discriminable.
         fixture.jdbc.update("INSERT INTO managed_workspace_registry"
@@ -760,8 +760,8 @@ class Issue13181QueryBudgetTest {
                 + " ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         fixture.jdbc.update("INSERT INTO managed_workspace_access"
-                + " (tenant_id, workspace_id, actor_id, can_read,"
-                + " can_create) VALUES (?, 'workspace2', ?, TRUE, TRUE)",
+                + " (tenant_id, workspace_id, actor_id, role)"
+                + " VALUES (?, 'workspace2', ?, 'OPERATOR')",
                 tenant, "actor".getBytes(StandardCharsets.UTF_8));
         List<String> ids = new ArrayList<>();
         for (int index = 0; index < 7; index++) {
@@ -777,13 +777,13 @@ class Issue13181QueryBudgetTest {
                     .sessionId());
         }
         // One creator-owned session is closed: the shape gate fences it even
-        // for its creator. The workspace2 grant then drops can_create: its
+        // for its creator. The workspace2 grant then drops to READER: its
         // session exercises the grant term.
         fixture.jdbc.update("UPDATE managed_agent_session SET status ="
                 + " 'CLOSED' WHERE tenant_id = ? AND session_id = ?", tenant,
                 ids.get(3));
         fixture.jdbc.update("UPDATE managed_workspace_access SET"
-                + " can_create = FALSE WHERE tenant_id = ? AND workspace_id"
+                + " role = 'READER' WHERE tenant_id = ? AND workspace_id"
                 + " = 'workspace2'", tenant);
         fixture.ledger.reset();
         var page = fixture.service.listWebShellSessions(tenant, "actor",

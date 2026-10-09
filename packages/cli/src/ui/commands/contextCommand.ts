@@ -461,7 +461,12 @@ export async function collectContextData(
     config.getWorkingDir(),
     extensionContextFileOwners(config, config.getWorkingDir()),
   );
-  const autoMemoryPrompt = config.getAutoMemoryPrompt();
+  const autoMemoryPrompt = [
+    config.getAutoMemoryPrompt(),
+    config.getAutoMemoryContext?.() ?? '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
   if (autoMemoryPrompt) {
     memoryFiles.push({
       path: t('auto memory'),
