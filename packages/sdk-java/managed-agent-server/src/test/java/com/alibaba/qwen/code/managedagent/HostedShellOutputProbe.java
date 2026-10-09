@@ -320,10 +320,15 @@ final class HostedShellOutputProbe implements AutoCloseable {
     }
 
     void observePublicPrefix(Map<String, Object> session) throws Exception {
-        String id = session.get("sessionId").toString();
-        assertThat(owners.putIfAbsent(id, owner(session))).isNull();
-        capture(worker(execution(id)));
-        check(session, "prefix");
+        try {
+            String id = session.get("sessionId").toString();
+            assertThat(owners.putIfAbsent(id, owner(session))).isNull();
+            capture(worker(execution(id)));
+            check(session, "prefix");
+        } catch (Exception | AssertionError error) {
+            failure.compareAndSet(null, error);
+            throw error;
+        }
     }
 
     void assertPublicFault(Map<String, Object> session) throws Exception {

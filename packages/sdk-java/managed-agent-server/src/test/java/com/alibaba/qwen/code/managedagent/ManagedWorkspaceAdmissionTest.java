@@ -42,6 +42,7 @@ import java.util.concurrent.TimeUnit;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -84,6 +85,30 @@ class ManagedWorkspaceAdmissionTest {
 
     @Autowired
     private PlatformTransactionManager transactionManager;
+
+    @ParameterizedTest
+    @CsvSource({"true, yolo", "true, unknown", "true, plan", "true, ''", "false, default", "false, auto-edit"})
+    void foregroundShellRequiresFilesAndPersistedAskingApproval(boolean filesEnabled, String mode) {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-shell", "storage-shell", WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-shell", "actor-a", true);
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        properties.getHarness().setApprovalMode("default");
+        var enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
+        String session = new TransactionTemplate(transactionManager).execute(status ->
+                enabled.insertWorkspaceSessionCommand(tenant, "actor-a", "create", "digest", "qwen-code",
+                        null, null, List.of(), null, new WorkspaceSelection("ws-shell", ".")).sessionId());
+        jdbc.update("UPDATE managed_agent_session SET approval_mode = ? WHERE tenant_id = ? AND session_id = ?", mode, tenant, session);
+        properties.getHarness().setWorkspaceFilesEnabled(filesEnabled);
+        var defensive = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
+        var projection = new ManagedAgentService(defensive, new RequestDigests(), mock(HarnessCoordinator.class),
+                new UnavailableHarnessConnector(), registry);
+        assertThat(projection.getPublicSession(tenant, "actor-a", session).capabilities().foregroundShell()).isFalse();
+        assertThat(projection.getWebShellSession(tenant, "actor-a", session).capabilities().foregroundShell()).isFalse();
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})

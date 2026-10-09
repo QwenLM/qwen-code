@@ -3,6 +3,8 @@ package com.alibaba.qwen.code.managedagent;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
+import com.alibaba.qwen.code.daemon.HarnessSessionRef;
+import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
@@ -37,6 +39,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -83,6 +86,7 @@ class HostedPublicWorkspaceIT {
     private HostedShellOutputProbe shellProbe;
     private Map<String, Object> faultSession;
     private final List<byte[]> receiptRequests = new CopyOnWriteArrayList<>();
+    private final AtomicInteger receiptResponses = new AtomicInteger();
     private final java.util.Set<String> answered = new java.util.HashSet<>();
 
     @Test
@@ -156,6 +160,8 @@ class HostedPublicWorkspaceIT {
                     + " AND operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE')", Integer.class, session)).isZero();
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_turn WHERE session_id = ?",
                     Integer.class, session)).isEqualTo(1);
+            if ("allow".equals(decision)) assertThat(Files.readString(marker)).isEqualTo("once\n");
+            else assertThat(marker).doesNotExist();
         }
         assertThat(answered).hasSize(2);
         assertThat(modelFailure.get()).isNull();
@@ -201,6 +207,22 @@ class HostedPublicWorkspaceIT {
                 assertThat(jdbc.queryForList("SELECT execution_state FROM qwen_tool_execution WHERE harness_session_id = ?",
                         String.class, session)).containsExactly("UNKNOWN");
             });
+            var connector = spring.getBean(HarnessConnector.class);
+            var attachments = (Map<?, ?>) ReflectionTestUtils.getField(connector, "attachments");
+            var attached = attachments.values().stream().map(HarnessSessionRef.class::cast)
+                    .filter(ref -> session.equals(ref.getHarnessSessionId())).findFirst().orElseThrow();
+            var client = (HostedHarnessClient) ReflectionTestUtils.getField(connector, "client");
+            // The third request is counted before its handler finishes; wait for the
+            // producer's prompt and all receipt handlers before taking final evidence.
+            await().atMost(Duration.ofSeconds(15)).failFast(() -> {
+                if (modelFailure.get() != null) throw new AssertionError("Fault fixture failed", modelFailure.get());
+            }).untilAsserted(() -> {
+                var status = client.getStatus(attached);
+                assertThat(status.hasActivePrompt()).isFalse();
+                assertThat(status.getRaw().get("recoveryBlocked")).isEqualTo(true);
+                assertThat(receiptResponses.get()).isEqualTo(3);
+            });
+            assertThat(receiptRequests).hasSize(3);
             assertThat(answered).hasSize(1);
             assertThat(modelRequests).hasSize(1);
             assertThat(jdbc.queryForObject("SELECT tool_profile FROM managed_agent_session WHERE session_id = ?",
@@ -221,7 +243,10 @@ class HostedPublicWorkspaceIT {
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_turn WHERE session_id = ?", Integer.class, session)).isEqualTo(1);
             assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_turn WHERE session_id = ?", String.class, session)).isNotEqualTo("COMPLETED");
             assertThat(decoy.resolve("proof.txt")).doesNotExist();
-            System.out.println("PUBLIC_FG6F " + fault + " session=" + session + " turn=" + turn + " receiptAttempts=3 effect=once");
+            assertThat(modelFailure.get()).isNull();
+            assertThat(receiptRequests).hasSize(3);
+            System.out.println("PUBLIC_FG6F " + fault + " session=" + session + " turn=" + turn
+                    + " receiptAttempts=" + receiptRequests.size() + " effect=once");
         } finally {
             if ("receipt-failure".equals(fault)) jdbc.execute("DROP TRIGGER " + trigger);
         }
@@ -937,6 +962,15 @@ class HostedPublicWorkspaceIT {
     }
 
     private void answerActions(String session, boolean web) throws Exception {
+        try {
+            doAnswerActions(session, web);
+        } catch (AssertionError error) {
+            // untilAsserted must not retry a one-shot response after its ID is deduped.
+            throw new IllegalStateException("Action response fixture failed", error);
+        }
+    }
+
+    private void doAnswerActions(String session, boolean web) throws Exception {
         JsonNode capability = request("GET", "/v1/agents/sessions/" + session, null, null, "actor", 200);
         assertThat(capability.at("/capabilities/actions").asBoolean()).isTrue();
         JsonNode page = web ? request("POST", "/api/agent/web-shell/v1/actions/query",
@@ -1045,6 +1079,9 @@ class HostedPublicWorkspaceIT {
             if (!shell && step == 3) assertThat(results.get(2).toString()).contains("after");
             if (shell && shellFault == null && step >= 1) assertThat(results.get(0).toString()).contains("Hosted Monitor is unavailable");
             if (shell && shellFault == null && step >= 2) assertThat(results.get(1).toString()).contains("Hosted Shell requires a foreground command");
+            if (shell && shellFault == null && step >= 3 && "allow".equals(shellDecision)) {
+                assertThat(results.get(2).toString()).contains("G0_SHELL_STDOUT");
+            }
             var chunk = json.createObjectNode().put("id", "g0").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "g0-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);
@@ -1056,7 +1093,7 @@ class HostedPublicWorkspaceIT {
                 Map<String, Object> args = shell ? switch (step) {
                     case 0 -> Map.of("command", "printf 'monitor\\n' >> monitor-proof.txt");
                     case 1 -> Map.of("command", "printf 'background\\n' >> background-proof.txt", "is_background", true);
-                    default -> Map.of("command", "printf 'once\\n' >> shell-proof.txt; pwd", "description", "Write a Shell proof");
+                    default -> Map.of("command", "printf 'once\\n' >> shell-proof.txt; pwd; printf 'G0_SHELL_STDOUT\\n'", "description", "Write a Shell proof");
                 } : switch (step) {
                     case 0 -> Map.of("file_path", "proof.txt", "content", "before");
                     case 1 -> Map.of("file_path", "proof.txt", "old_string", "before", "new_string", "after");
@@ -1089,16 +1126,20 @@ class HostedPublicWorkspaceIT {
     }
 
     private void relayStore(HttpExchange exchange) throws IOException {
+        boolean receipt = false;
         try {
             byte[] body = exchange.getRequestBody().readAllBytes();
             JsonNode fields = body.length == 0 ? json.createObjectNode() : json.readTree(body);
             String records = fields.has("recordBytesBase64")
                     ? new String(Base64.getDecoder().decode(fields.path("recordBytesBase64").asText()), StandardCharsets.UTF_8) : "";
-            boolean receipt = records.lines().anyMatch(line -> {
+            receipt = records.lines().anyMatch(line -> {
                 try { return "tool.receipt".equals(json.readTree(line).path("managedSession").path("kind").asText()); }
                 catch (IOException error) { throw new IllegalStateException(error); }
             });
-            if (receipt) receiptRequests.add(body);
+            if (receipt) {
+                receiptRequests.add(body);
+                assertThat(receiptRequests).as("Harness receipt retry budget").hasSizeLessThanOrEqualTo(3);
+            }
             HttpRequest.Builder forwarded = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + exchange.getRequestURI()))
                     .timeout(Duration.ofSeconds(15)).method(exchange.getRequestMethod(), body.length == 0
                             ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofByteArray(body));
@@ -1125,6 +1166,7 @@ class HostedPublicWorkspaceIT {
             modelFailure.compareAndSet(null, error);
         } finally {
             exchange.close();
+            if (receipt) receiptResponses.incrementAndGet();
         }
     }
 
@@ -1153,17 +1195,31 @@ class HostedPublicWorkspaceIT {
 
     @AfterEach
     void stop() throws Exception {
-        if (harness != null) {
-            harness.descendants().forEach(ProcessHandle::destroyForcibly);
-            harness.destroyForcibly();
-            harness.waitFor(10, TimeUnit.SECONDS);
+        Throwable failure = null;
+        List<org.junit.jupiter.api.function.Executable> cleanup = List.of(
+                () -> {
+                    if (harness != null) {
+                        harness.descendants().forEach(ProcessHandle::destroyForcibly);
+                        harness.destroyForcibly();
+                        harness.waitFor(10, TimeUnit.SECONDS);
+                    }
+                },
+                () -> { if (shellProbe != null) shellProbe.close(); },
+                () -> { if (spring != null) spring.close(); },
+                () -> { if (storeRelay != null) storeRelay.stop(0); },
+                () -> { if (relayExecutor != null) relayExecutor.close(); },
+                () -> { if (durableClose) stopDurableWorkers(); },
+                () -> { if (model != null) model.stop(0); });
+        for (var step : cleanup) {
+            try {
+                step.execute();
+            } catch (Throwable error) {
+                if (failure == null) failure = error;
+                else failure.addSuppressed(error);
+            }
         }
-        if (shellProbe != null) shellProbe.close();
-        if (spring != null) spring.close();
-        if (storeRelay != null) storeRelay.stop(0);
-        if (relayExecutor != null) relayExecutor.close();
-        if (durableClose) stopDurableWorkers();
-        if (model != null) model.stop(0);
+        if (failure instanceof Exception error) throw error;
+        if (failure instanceof Error error) throw error;
     }
 
     private void stopDurableWorkers() throws Exception {

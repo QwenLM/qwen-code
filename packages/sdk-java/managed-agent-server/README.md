@@ -17,7 +17,7 @@ authentication and writer credentials" below.
 ## Integration status
 
 The Hosted path supports durable no-tool Sessions and private Workspace tool
-profiles. G0 adds opt-in public creation with an initial file-tool Turn through
+profiles. G0 adds opt-in public creation with an initial Workspace Turn (file tools, or mandatory-approval foreground Shell under the Shell opt-in) through
 the production Broker. This is not complete Workspace lifecycle, in-flight
 recovery or distributed provisioning support. See the G0 section below for its
 exact deployment and admission boundary, and the historical
@@ -492,12 +492,15 @@ no dispatched Shell is automatically replayed. Keep the opt-in off until the
 deployment passes #12904, #13010 and public FG6f physical failure gates. See
 [the complete design](../../../docs/design/public-hosted-shell-admission.md).
 
-### Initial Workspace file Turn (G0)
+### Initial Workspace Turn (G0)
 
 `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true` opts in to an initial
-Read/Write/Edit Turn supplied with public Session creation. The WebShell creation
-adapter uses the same admission. This requires the Hosted Harness and HTTP
-Session Store, a `yolo`, `default` or `auto-edit` approval mode, and a `local-process`, `session`-isolated
+Workspace Turn supplied with public Session creation: Read/Write/Edit under
+`hosted-workspace-files/1`, or file tools plus mandatory-approval foreground Shell
+under `hosted-workspace-shell/1` when the Shell opt-in above is enabled. The
+WebShell creation adapter uses the same admission. This requires the Hosted
+Harness and HTTP Session Store, `default` or `auto-edit` approval for Shell
+(`yolo` is also valid for files), and a `local-process`, `session`-isolated
 Broker with configured `runtime-broker.workspace-mounts`. Registry entries must
 use `managed-runtime-tools/1` and `preapproved-workspace-tools/1`, and their
 tenant/storage identity must have a deployment mount. The trusted ingress must
@@ -526,16 +529,19 @@ profile. W1c offline migration remains files/1-only and refuses persisted Shell
 definitions with `migration_profile_unsupported`. Configure the
 Harness's deployment-owned `--managed-runtime-broker-url` and
 `--managed-runtime-broker-token` options to reach this Broker. A repeated creation key returns
-the original Session/Turn; changed input conflicts. Disabling the opt-in refuses
-creation with input, including replays, while empty bound creation remains
-available. The directory mounted for a Workspace is trusted deployment data,
+the original Session/Turn; changed input conflicts. Disabling the Workspace files
+opt-in refuses creation with input, including replays, while empty bound creation
+remains available. The Shell opt-in selects the persisted profile; it does not
+independently admit creation input. The directory mounted for a Workspace is trusted deployment data,
 not a filesystem sandbox.
 
-Later Turns may be submitted by the Session's creator under the
-same opt-in while they can still read and create in the Workspace (the
-per-caller `workspaceTurns` capability flag reflects the caller's current
-grants, the Workspace registry's `ACTIVE` state and the Workspace generation and storage the
-Session was bound to), and the creator may rename the Session. The creator may
+Later Turns may be submitted by the Session's creator under the Workspace files
+opt-in while they can still read and create in the Workspace. Shell Sessions also
+require the Shell opt-in and valid persisted approval for fresh sending. The
+per-caller `workspaceTurns` capability reflects creator/grant permission, the
+Workspace registry's `ACTIVE` state and the frozen generation/storage; it does
+not certify Shell admission. Shell clients also require `foregroundShell=true`.
+The creator may rename the Session under its existing admission. The creator may
 also cancel a running Turn while they can still read the Workspace, under the
 cancel rule below. Workspace close follows
 its separate close capability and lifecycle admission. Archive, delete and
@@ -786,9 +792,12 @@ and Shell can reach other paths allowed by the worker's host permissions.
 Foreground Shell may create detached descendants. Use this only with trusted
 local workloads. The W0e recovery above handles trusted host reboot; it
 does not provide physical isolation or recovery after worker-only death.
-Public bound Turn admission is limited to the opt-in initial file Turn described
-in G0 above and to later Turns submitted by the Session's creator under the same
-opt-in while they can still read and create in the Workspace (the per-caller
+Public bound Turn admission is limited to the initial Workspace Turn described
+in G0 above (file tools, or mandatory-approval foreground Shell under the Shell
+opt-in) and later Turns submitted by the Session's creator under the Workspace
+files opt-in. Shell Sessions additionally require the Shell opt-in and valid
+persisted approval for fresh sending. The creator must still read and create in
+the Workspace (the per-caller
 `workspaceTurns` capability flag reflects the caller's current grants, the
 registry's `ACTIVE` state and the Workspace generation and storage the Session was bound
 to); the creator may also rename the Session. Cancelling aborts work that is
@@ -813,7 +822,8 @@ refusal: `workspace_unavailable` when the actor can read the Workspace,
 `session_not_found` when they cannot. Public close follows its separate close
 capability and lifecycle admission. Archive, delete and unarchive follow their
 separate retention capabilities after reliable Workspace close;
-the private Shell profile is not enabled through public creation.
+the Shell profile reaches public creation only through the deployment Shell
+opt-in described above; callers cannot select it.
 See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
 for the exact boundary.
 

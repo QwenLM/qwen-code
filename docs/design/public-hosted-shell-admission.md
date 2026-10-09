@@ -128,6 +128,22 @@ surfaces after a lost answer with one delivery. This H2/MockMvc test uses a
 simulated Harness decision and does not prove real Shell execution or a deployment
 restart.
 
+Defensive projection tests cover invalid non-null persisted approval and a
+manually constructed files-off store; SQL forbids null approval, and a validated
+deployment forbids Shell-on/files-off. Synthetic persisted Shell/2 rows exercise
+the existing exclusion predicate, without adding public Shell/2 creation.
+Lifecycle projections also retain the close-capable positive control with Shell
+enabled. Cached stream/rename reject invalid approval before Harness access;
+Shell/1 retains the non-executing cwd admission and replay contract.
+
+The public integration fixture must fail immediately on one-shot Action response
+assertions. Receipt evidence waits for the attached Harness prompt to become
+inactive and recovery-blocked, and for all three receipt handlers to finish,
+before checking exact attempts and asynchronous failure channels. Public prefix
+checks retain their first failure and rethrow it. Allow stdout must reach the
+model, and Allow/Deny side effects are rechecked after replay. Teardown runs all
+cleanup steps even when the output probe fails, retaining the original failure.
+
 Real Java/Broker/Session Store/Harness tests must prove public Shell Allow has
 one side effect, Deny has none, and lost response/retry does not execute twice.
 Cold attachment must preserve profile and approval. FG6f publisher/receipt

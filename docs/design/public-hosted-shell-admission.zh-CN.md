@@ -101,6 +101,18 @@ Session 在 files 开启、Shell 关闭时，requested Action 必须提交匹配
 receipt、完成 response operation，并在丢失响应后跨表面重放且仅一次 delivery。
 该 H2/MockMvc 测试模拟 Harness 决策，不证明真实 Shell 执行或完整部署重启。
 
+防御性能力投影测试覆盖非 null 的无效持久化审批和手工构造的 files 关闭 store；
+SQL 不允许 null 审批，经校验的部署不允许 Shell 开启而 files 关闭。人工持久化
+Shell/2 行只验证已有排除谓词，不增加公开 Shell/2 创建。Shell 开启时的生命周期
+投影也保留支持关闭的正向对照。缓存 stream/rename 在访问 Harness 前拒绝无效
+审批；Shell/1 保留非执行 cwd 准入及重放契约。
+
+公开集成夹具的一次性 Action 响应断言必须立即失败。Receipt 证据等待已挂接的
+Harness prompt 变为 inactive 且 recovery-blocked，并等待三个 receipt handler
+全部结束，再核对精确尝试次数和异步错误通道。公开 prefix 校验记录首个错误并
+继续抛出。Allow stdout 必须传回模型，重放之后再次核对 Allow/Deny 副作用。
+即使输出探针失败，拆除也执行全部清理步骤并保留原始错误。
+
 真实 Java/Broker/Session Store/Harness 测试须证明公开 Shell Allow 仅一次副作用、
 Deny 零副作用、丢失响应与重试不重复执行。冷 attachment 保持 profile 和审批。
 FG6f publisher/receipt 故障要求真实 worker 与 SQL 证据；macOS 替代和 H2 不证明

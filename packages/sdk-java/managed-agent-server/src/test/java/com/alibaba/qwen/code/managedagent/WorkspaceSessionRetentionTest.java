@@ -35,6 +35,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -69,10 +70,14 @@ class WorkspaceSessionRetentionTest {
     @Autowired OnceCloseRuntime runtime;
     @Autowired PlatformTransactionManager transactions;
     @Autowired SessionLifecycleCoordinator lifecycle;
+    @Autowired ManagedWorkspaceRegistry registry;
+    @Autowired HarnessConnector harness;
+    @Autowired com.alibaba.qwen.code.managedagent.service.HarnessCoordinator coordinator;
 
     @ParameterizedTest
-    @ValueSource(strings = {"ACTIVE", "CLOSED", "ARCHIVED"})
-    void shellCapabilitiesAndLifecycleStayDisabledDespiteCloseSupportAndProof(String state) throws Exception {
+    @CsvSource({"ACTIVE, hosted-workspace-shell/1", "CLOSED, hosted-workspace-shell/1", "ARCHIVED, hosted-workspace-shell/1",
+            "ACTIVE, hosted-workspace-shell/2", "CLOSED, hosted-workspace-shell/2", "ARCHIVED, hosted-workspace-shell/2"})
+    void shellCapabilitiesAndLifecycleStayDisabledDespiteCloseSupportAndProof(String state, String profile) throws Exception {
         String tenant = tenant();
         String session = closed(tenant, true);
         assertThat(runtime.supportsWorkspaceClose()).isTrue();
@@ -83,12 +88,33 @@ class WorkspaceSessionRetentionTest {
                 .andExpect(jsonPath("$.capabilities.session_archive").value(true))
                 .andExpect(jsonPath("$.capabilities.session_unarchive").value(true))
                 .andExpect(jsonPath("$.capabilities.session_delete").value(true));
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        var enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
+        var projection = new com.alibaba.qwen.code.managedagent.service.ManagedAgentService(enabled,
+                new com.alibaba.qwen.code.managedagent.service.RequestDigests(), coordinator, harness, registry);
+        org.springframework.test.util.ReflectionTestUtils.setField(projection, "runtimeWarmer", runtime);
+        assertThat(projection.getPublicSession(tenant, "owner", session).capabilities().sessionClose()).isTrue();
+        assertThat(projection.getWebShellSession(tenant, "owner", session).capabilities().sessionDelete()).isTrue();
         int operations = jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?",
                 Integer.class, tenant, session);
         int commands = jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command WHERE tenant_id = ? AND session_id = ?",
                 Integer.class, tenant, session);
-        jdbc.update("UPDATE managed_agent_session SET tool_profile = 'hosted-workspace-shell/1', approval_mode = 'default', status = ?"
-                + " WHERE tenant_id = ? AND session_id = ?", state, tenant, session);
+        jdbc.update("UPDATE managed_agent_session SET tool_profile = ?, approval_mode = 'default', status = ?"
+                + " WHERE tenant_id = ? AND session_id = ?", profile, state, tenant, session);
+        var publicCapabilities = projection.getPublicSession(tenant, "owner", session).capabilities();
+        assertThat(publicCapabilities.foregroundShell()).isTrue();
+        assertThat(publicCapabilities.sessionClose()).isFalse();
+        assertThat(publicCapabilities.sessionArchive()).isFalse();
+        assertThat(publicCapabilities.sessionUnarchive()).isFalse();
+        assertThat(publicCapabilities.sessionDelete()).isFalse();
+        var webCapabilities = projection.getWebShellSession(tenant, "owner", session).capabilities();
+        assertThat(webCapabilities.foregroundShell()).isTrue();
+        assertThat(webCapabilities.sessionClose()).isFalse();
+        assertThat(webCapabilities.sessionArchive()).isFalse();
+        assertThat(webCapabilities.sessionUnarchive()).isFalse();
+        assertThat(webCapabilities.sessionDelete()).isFalse();
         request(get(PUBLIC + session), tenant, "owner", null)
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.capabilities.foreground_shell").hasJsonPath())

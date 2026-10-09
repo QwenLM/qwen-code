@@ -249,6 +249,10 @@ class QwenHostedHarnessConnectorTest {
                 new ObjectMapper().createObjectNode().put("optionId", "allow")
                         .put("inputRevision", 1L).put("policyRevision", "hosted-tool-approval/1")))
                 .hasMessageContaining("requires persisted default or auto-edit");
+        assertThatThrownBy(() -> connector.stream("tenant-a", SESSION_ID, 0, "epoch"))
+                .hasMessageContaining("requires persisted default or auto-edit");
+        assertThatThrownBy(() -> connector.rename("tenant-a", SESSION_ID, "title"))
+                .hasMessageContaining("requires persisted default or auto-edit");
         verifyNoInteractions(client);
     }
 

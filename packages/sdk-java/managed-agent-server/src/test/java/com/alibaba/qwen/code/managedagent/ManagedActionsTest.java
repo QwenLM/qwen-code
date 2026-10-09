@@ -109,10 +109,11 @@ class ManagedActionsTest {
     @TestConfiguration
     static class Configuration {
         @Bean @Primary
-        ManagedAgentStore actionStore(JdbcTemplate jdbc, ObjectMapper mapper, ManagedWorkspaceRegistry registry) {
+        ManagedAgentStore actionStore(JdbcTemplate jdbc, ObjectMapper mapper, ManagedWorkspaceRegistry registry,
+                Clock clock, com.alibaba.qwen.code.managedagent.store.CommittedEventPublisher publisher) {
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
-            return new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
+            return new ManagedAgentStore(jdbc, mapper, clock, publisher, registry, properties);
         }
     }
 
