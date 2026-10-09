@@ -65,9 +65,15 @@ Ordering is governed by one barrier rule — user text queued behind a waiting
 envelope never overtakes it — applied at each path's own strength. On the idle
 path, where every waiting envelope drains, `popNextSubmission` stops at the
 first peer entry. At the boundary, `drainQueue` stops only at the envelope the
-mid-turn drain could take right here: the first `"now"` inside the leading run
-of peers, with an allowance left to pay for it. An envelope this boundary
-cannot deliver is not a barrier, because the alternative would hold the user's
+mid-turn drain could take right here: the first `"now"` that this boundary's
+own steer drain leaves at the head, with an allowance left to pay for it. That
+drain runs first, and its removals are what promote an envelope, so the scan
+passes over entries it takes and stops at any entry it cannot — such an entry
+is a wall the pop breaks on, and nothing behind it is this boundary's to
+deliver. Judging the barrier against the queue as it stands, rather than as the
+pop will find it, releases user text that then overtakes the envelope inside
+the same submission. An envelope this boundary cannot deliver is not a
+barrier, because the alternative would hold the user's
 own input for the rest of the turn to preserve the place of a delivery that is
 not going to happen. Peer text never enters the raw-string steer channel: it
 would lose attribution and reach user preprocessing.

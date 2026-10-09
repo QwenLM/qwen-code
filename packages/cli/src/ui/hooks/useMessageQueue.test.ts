@@ -1524,6 +1524,55 @@ describe('useMessageQueue', () => {
       ]);
     });
 
+    it('holds text queued behind an envelope its own steer drain promotes', () => {
+      // The barrier must be decided against the queue the pop will actually
+      // see. `drainQueue` runs first, and removing the user entry in front of
+      // the envelope is exactly what promotes it to the head — so judging
+      // eligibility against the queue as it stands answers "nothing takeable",
+      // releases both typed entries, and the boundary then pops the envelope
+      // and pushes it *behind* them: `typed B`, queued after the envelope was
+      // accepted, reaches the model first. Red without the widened rule.
+      const { result } = renderHook(() => useMessageQueue());
+      const now = (msgId: string) => ({
+        msgId,
+        from: '/tmp/peer.sock',
+        toSessionId: 's1',
+        priority: 'now' as const,
+      });
+
+      act(() => {
+        result.current.addMessage('typed A');
+        result.current.addPeerMessage(
+          '<envelope now>',
+          'Session A: now',
+          now('m1'),
+        );
+        result.current.addMessage('typed B');
+      });
+
+      expect(result.current.hasMidTurnTakeablePeer()).toBe(true);
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue(false, false, true);
+      });
+      // Only the entry ahead of the envelope leaves; the one behind it waits.
+      expect(drained).toEqual(['typed A']);
+      expect(result.current.messageQueue).toEqual([
+        '<envelope now>',
+        'typed B',
+      ]);
+      // And the pop the boundary runs next really does take it, which is what
+      // made the barrier owed.
+      let popped: string[] = [];
+      act(() => {
+        popped = result.current
+          .drainPeerEntries(1)
+          .map(({ modelText }) => modelText);
+      });
+      expect(popped).toEqual(['<envelope now>']);
+    });
+
     it('keeps an entry the barrier left behind in the queue', () => {
       // `rest` is identity-based, not predicate-based. Whatever `scan` excluded
       // must stay queued whether or not it would have been drainable: reverting
@@ -1588,10 +1637,25 @@ describe('useMessageQueue', () => {
           now('m1'),
         );
       });
-      // The leading run ends at the typed entry, so the pop takes nothing and
-      // the envelope is no barrier.
-      expect(result.current.hasMidTurnTakeablePeer()).toBe(false);
+      // A pop taken before the boundary has drained would find no leading
+      // peer, but that is not what the boundary does: it drains `typed text`
+      // into the steer batch first, and that removal promotes the envelope.
+      // The envelope is therefore this boundary's to deliver and is a barrier,
+      // so the eligibility answer must be yes even while the pop is empty.
+      expect(result.current.hasMidTurnTakeablePeer()).toBe(true);
       expect(result.current.drainPeerEntries(1)).toEqual([]);
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue(false, false, true);
+      });
+      expect(drained).toEqual(['typed text']);
+      let popped: string[] = [];
+      act(() => {
+        popped = result.current
+          .drainPeerEntries(1)
+          .map(({ modelText }) => modelText);
+      });
+      expect(popped).toEqual(['<envelope now>']);
 
       act(() => {
         result.current.clearQueue();

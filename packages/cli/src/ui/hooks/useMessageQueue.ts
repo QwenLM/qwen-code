@@ -182,20 +182,39 @@ function aggregateUserMessages(
 }
 
 /**
+ * What the boundary's raw-string steer drain takes when it is asked for
+ * nothing deferred and no Goal turn owns the session — the shape both boundary
+ * call sites use. Peer entries carry `deferUntilIdle`, so they never leave by
+ * here. The barrier consults this so it cannot drift from the drain whose
+ * removals it has to predict.
+ */
+function isMidTurnSteerDrainable(message: QueuedMessage): boolean {
+  return !isSlashCommand(message.text) && !message.deferUntilIdle;
+}
+
+/**
  * The single mid-turn eligibility rule: which queued envelope, if any, a
- * tool-round boundary could actually deliver. `drainPeerEntries` scans only the
- * leading run of peer entries and takes those the sender marked "now", so an
- * envelope outside that run — or a "next" inside it — waits for the idle drain
- * and must not hold anything back. The boundary's barrier asks the same
- * question so the two cannot disagree about what is really waiting.
+ * tool-round boundary could actually deliver. `drainPeerEntries` takes a "now"
+ * only from the leading run of peer entries, so the question is what that run
+ * looks like once this boundary's own steer drain has run — those removals are
+ * what promote an envelope to the head, and deciding against the queue as it
+ * stands now would call an envelope undeliverable merely because the user's
+ * text happens to sit in front of it. Scan past entries `willDrain` takes; an
+ * entry it leaves behind is a wall the pop breaks on, so nothing past it is
+ * this boundary's to deliver and no barrier is owed. A "next" inside the run
+ * is skipped by the pop too, so the scan passes over it.
  */
 function firstMidTurnTakeablePeerIndex(
   queue: readonly QueuedMessage[],
+  willDrain: (message: QueuedMessage) => boolean,
 ): number {
   for (let index = 0; index < queue.length; index++) {
     const entry = queue[index];
-    if (!entry.peer) break;
-    if (entry.delivery?.priority === 'now') return index;
+    if (entry.peer) {
+      if (entry.delivery?.priority === 'now') return index;
+      continue;
+    }
+    if (!willDrain(entry)) return -1;
   }
   return -1;
 }
@@ -547,7 +566,11 @@ export function useMessageQueue(): UseMessageQueueReturn {
   }, []);
 
   const hasMidTurnTakeablePeer = useCallback(
-    () => firstMidTurnTakeablePeerIndex(queueRef.current) !== -1,
+    () =>
+      firstMidTurnTakeablePeerIndex(
+        queueRef.current,
+        isMidTurnSteerDrainable,
+      ) !== -1,
     [],
   );
 
@@ -574,7 +597,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
       // out of this raw-string channel by `deferUntilIdle`, as it always has.
       // Goal commands keep their barrier-free priority, as they do there.
       const barrierIndex = peerMidTurnActive
-        ? firstMidTurnTakeablePeerIndex(current)
+        ? firstMidTurnTakeablePeerIndex(current, shouldDrain)
         : -1;
       const scan =
         goalTurnActive || barrierIndex === -1
