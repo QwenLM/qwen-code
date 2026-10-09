@@ -28,6 +28,7 @@ export interface ExtractedToolCall {
 interface ToolCallBlock extends ExtractedToolCall {
   start: number;
   end: number;
+  parameterSpans: Array<[number, number]>;
 }
 
 /**
@@ -99,57 +100,9 @@ function stripDelimitingNewlines(value: string): string {
  * close). A closing fence must also be whitespace-only after the delimiter
  * run — CommonMark forbids an info string on a closing fence.
  *
- * Delimiters inside a line that starts in `parameterRanges` are only allowed to
- * *close* a fence, and only as a last resort: those lines are parameter values,
- * not prose, so fence-like content there must not open one — but the mask
- * covers a value wholesale, and a prose-opened fence whose closing delimiter
- * sits inside a value would otherwise never close, marking the rest of the turn
- * fenced and dropping every call after it. A masked delimiter may therefore
- * close a fence only when prose has no delimiter line left that can do it:
- * otherwise the fence ends inside the value, the documentation after it is
- * dispatched, and the prose's own delimiter re-opens a fence that swallows a
- * real call. See #13492.
+ * Parameter data is skipped; only prose can open or close its fences.
  */
 const FENCE_DELIMITER_LINE = /^ {0,3}((`{3,})|~{3,})/;
-
-/**
- * Offset of the last unmasked line that can close a fence of this kind, or -1.
- * A masked delimiter is the last resort only when prose has no such line left;
- * a later run of another delimiter, a shorter run, or one carrying an info
- * string cannot close this fence, so it must not suppress the masked close.
- * Asked per delimiter kind, since the close test depends on the open fence's
- * kind and length, and nothing bounds a model turn's length.
- */
-function lastProseCloser(
-  text: string,
-  parameterRanges: Array<[number, number]>,
-  delim: string,
-  len: number,
-): number {
-  let last = -1;
-  let lineStart = 0;
-  for (const line of text.split('\n')) {
-    const startsAt = lineStart;
-    lineStart += line.length + 1;
-    if (
-      parameterRanges.some(
-        ([start, end]) => startsAt >= start && startsAt < end,
-      )
-    ) {
-      continue;
-    }
-    const m = FENCE_DELIMITER_LINE.exec(line);
-    if (
-      m &&
-      (m[2] ? '`' : '~') === delim &&
-      m[1].length >= len &&
-      line.slice(m[0].length).trim() === ''
-    ) {
-      last = startsAt;
-    }
-  }
-  return last;
-}
 
 function positionInsideFence(
   text: string,
@@ -157,14 +110,12 @@ function positionInsideFence(
   parameterRanges: Array<[number, number]>,
 ): boolean {
   let openFence: { delim: string; len: number } | null = null;
-  const proseCloser = new Map<string, number>();
   let lineStart = 0;
   for (const line of text.slice(0, index).split('\n')) {
     const lineEnd = lineStart + line.length;
     const startsInsideParameter = parameterRanges.some(
       ([start, end]) => lineStart >= start && lineStart < end,
     );
-    const startsAt = lineStart;
     lineStart = lineEnd + 1;
     const m = FENCE_DELIMITER_LINE.exec(line);
     if (!m) continue;
@@ -175,16 +126,8 @@ function positionInsideFence(
       openFence.delim === delim &&
       len >= openFence.len &&
       line.slice(m[0].length).trim() === '';
-    if (startsInsideParameter) {
-      if (!closes) continue;
-      const kind = `${delim}${len}`;
-      let last = proseCloser.get(kind);
-      if (last === undefined) {
-        last = lastProseCloser(text, parameterRanges, delim, len);
-        proseCloser.set(kind, last);
-      }
-      if (last <= startsAt) openFence = null;
-    } else if (openFence === null) {
+    if (startsInsideParameter) continue;
+    if (openFence === null) {
       openFence = { delim, len };
     } else if (closes) {
       openFence = null;
@@ -193,20 +136,21 @@ function positionInsideFence(
   return openFence !== null;
 }
 
-function computeExampleRanges(
+function exampleTagPositions(
   text: string,
   parameterRanges: Array<[number, number]>,
-): Array<[number, number]> {
+): Set<number> | null {
   // marked's inline lexer is super-linear on unterminated link/emphasis runs
   // and nothing bounds the model's output length, so it is only worth running
   // when the text can actually produce an example range. The tag scan below
   // re-checks every candidate against `tagPositions`, so skipping the lexer
   // here can only yield "no ranges" — which is what an example-free text has.
-  if (!text.includes('<example') && !text.includes('</example')) return [];
+  if (!text.includes('<example') && !text.includes('</example'))
+    return new Set();
 
   // Over the cap the lexer is skipped and every regex-matched tag is taken at
   // face value, which is the regex-only behaviour this replaced.
-  let skipLexer = text.length > MAX_LEXER_SCAN_LENGTH;
+  if (text.length > MAX_LEXER_SCAN_LENGTH) return null;
   const tagPositions = new Set<number>();
   function collectTags(tokens: Token[], raw: string, baseOffset: number) {
     let cursor = 0;
@@ -232,60 +176,47 @@ function computeExampleRanges(
   }
   proseParts.push(text.slice(cursor));
   const prose = proseParts.join('');
-  if (!skipLexer) {
-    try {
-      collectTags(Lexer.lexInline(prose), prose, 0);
-    } catch {
-      // Preserve example filtering with the same fallback as oversized text.
-      skipLexer = true;
-    }
+  try {
+    collectTags(Lexer.lexInline(prose), prose, 0);
+  } catch {
+    // Preserve example filtering with the same fallback as oversized text.
+    return null;
   }
+  return tagPositions;
+}
 
+function computeExampleRanges(
+  text: string,
+  parameterRanges: Array<[number, number]>,
+  tagPositions: Set<number> | null,
+  quotedValueRanges: Array<[number, number]>,
+): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
   const tags = /<\/?example(?=[\s/>])(?:[^>"']|"[^"]*"|'[^']*')*>/g;
-  // Where prose's last *usable* closer sits, so a masked closer knows whether
-  // it is the last resort. A mention prose cannot end the example with — one
-  // the lexer does not see as a tag, a self-closing one, one already fenced —
-  // must not suppress the masked close, or the range runs to the end of the
-  // turn and a real call after it is filtered out. One forward pass, like the
-  // fence tracker's equivalent.
-  let lastUnmaskedCloser = -1;
-  let scan: RegExpExecArray | null;
-  while ((scan = tags.exec(text)) !== null) {
-    const index = scan.index;
-    if (
-      scan[0].startsWith('</') &&
-      (skipLexer || tagPositions.has(index)) &&
-      !/\/\s*>$/.test(scan[0]) &&
-      !parameterRanges.some(([start, end]) => index >= start && index < end) &&
-      !positionInsideFence(text, index, parameterRanges)
-    ) {
-      lastUnmaskedCloser = index;
-    }
-  }
-  tags.lastIndex = 0;
   let depth = 0;
   let start = 0;
+  let quotedIndex = 0;
+  // Earlier documentation masks affect later values' context, so merge their
+  // start events into this tag scan instead of classifying them all up front.
+  function maskValuesBefore(index: number) {
+    while (quotedIndex < quotedValueRanges.length) {
+      const span = quotedValueRanges[quotedIndex];
+      if (span[0] > index) break;
+      if (depth > 0 || positionInsideFence(text, span[0], parameterRanges)) {
+        parameterRanges.push(span);
+      }
+      quotedIndex++;
+    }
+  }
   let match: RegExpExecArray | null;
   while ((match = tags.exec(text)) !== null) {
     const tagPosition = match.index;
+    maskValuesBefore(tagPosition);
     const closes = match[0].startsWith('</');
     const masked = parameterRanges.some(
       ([start, end]) => tagPosition >= start && tagPosition < end,
     );
-    // Masked tags are parameter data, which may close an example but never
-    // open one, and a masked closer is only a last resort: when prose closes
-    // the example further on, that closer is the boundary. Symmetric treatment
-    // matters because the mask covers a value wholesale: an opener that stays
-    // inert is what keeps documented syntax from swallowing the turn, while a
-    // closer that ends the range early leaves the documentation after it
-    // outside every range, and the prose's own closer then opens a range that
-    // filters out a real call. A swallowed closer with no prose closer left
-    // would instead leave the range running to the end of the text and filter
-    // out every real call after it. See #13492.
-    if (masked) {
-      if (!closes || tagPosition < lastUnmaskedCloser) continue;
-    } else if (!skipLexer && !tagPositions.has(tagPosition)) {
+    if (masked || (tagPositions !== null && !tagPositions.has(tagPosition))) {
       continue;
     }
     if (positionInsideFence(text, tagPosition, parameterRanges)) continue;
@@ -299,6 +230,7 @@ function computeExampleRanges(
       depth += 1;
     }
   }
+  maskValuesBefore(text.length);
   if (depth > 0) ranges.push([start, text.length]);
   return ranges;
 }
@@ -349,7 +281,10 @@ const PARAMETER_TAG_PATTERN =
  * value merely mentioning the tag shape does not make the region behind it
  * unrescannable.
  */
-function closedParameterSpans(text: string): Array<[number, number]> {
+function parameterOwnership(text: string): {
+  closed: Array<[number, number]>;
+  unclosed: number[];
+} {
   const spans: Array<[number, number]> = [];
   const openStarts: number[] = [];
   PARAMETER_TAG_PATTERN.lastIndex = 0;
@@ -364,7 +299,7 @@ function closedParameterSpans(text: string): Array<[number, number]> {
       openStarts.push(tagMatch.index);
     }
   }
-  return spans;
+  return { closed: spans, unclosed: openStarts };
 }
 
 function hasBalancedQuotedCalls(value: string): boolean {
@@ -413,7 +348,8 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
   // still recovered, with that value intact. Skipping the match whole also
   // keeps the rejected-block rescan below out of the value it belongs to. See
   // #13492.
-  const valueSpans = closedParameterSpans(text).sort(
+  const ownership = parameterOwnership(text);
+  const valueSpans = ownership.closed.sort(
     ([startA, endA], [startB, endB]) => startA - startB || endB - endA,
   );
   const quotedValueRanges: Array<[number, number]> = [];
@@ -429,7 +365,7 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     // value, so the element would be classified from behind its own leading
     // text and a truncated argument dispatched. Fall back to the flat match
     // instead, which leaves the block rejected. See #13492.
-    if (!/^<parameter(?:\s+name=(["'])[^"']*\1|=)[^>]*>/.test(element)) {
+    if (!/^<parameter(?:\s+name=(["'])[^"']+\1|=[^\s<>"']+)>/.test(element)) {
       continue;
     }
     const valueStart = openTagEnd(element);
@@ -441,8 +377,14 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       quotedValueRanges.push([start, end]);
     }
   }
-  parameterRanges.push(...quotedValueRanges);
-  // Quoted-value spans are appended out of text order and overlap the flat
+  const tagPositions = exampleTagPositions(text, parameterRanges);
+  const exampleRanges = computeExampleRanges(
+    text,
+    parameterRanges,
+    tagPositions,
+    quotedValueRanges,
+  );
+  // Documentation spans are appended out of text order and overlap the flat
   // matches they extend, so restore the ordered, disjoint sequence the mask
   // below needs: it blanks these ranges with a single forward cursor, which is
   // only length-preserving while no range starts behind that cursor. Example
@@ -560,6 +502,13 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     // visible turn. What the advance swallowed must therefore be nothing but
     // the block's own parameter elements and the quoted values inside them.
     if (closeStart > lazyCloseStart) {
+      // Extending a call from inside an unclosed outer value would promote
+      // that value's documentation into executable syntax. Flat recovery of
+      // a separate call remains unchanged when no advance is needed.
+      if (ownership.unclosed.some((start) => start < matchStart)) {
+        TOOL_CALL_PATTERN.lastIndex = resumeAt;
+        continue;
+      }
       const covered: Array<[number, number]> = [];
       for (const span of parameterSpans.concat(quotedValueRanges)) {
         const coveredStart = Math.max(span[0], lazyCloseStart);
@@ -603,19 +552,27 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
         args,
         start: match.index,
         end: blockEnd,
+        parameterSpans,
       });
     }
   }
 
-  const exampleRanges = computeExampleRanges(text, parameterRanges);
   return blocks.filter(
-    ({ start, end }) =>
+    ({ start, end, parameterSpans }) =>
       !positionInsideFence(text, start, parameterRanges) &&
-      !positionInsideFence(text, end - 1, parameterRanges) &&
+      !positionInsideFence(
+        text,
+        end - 1,
+        parameterRanges.concat(parameterSpans),
+      ) &&
       !exampleRanges.some(
         ([exampleStart, exampleEnd]) =>
           (start >= exampleStart && start < exampleEnd) ||
-          (end - 1 >= exampleStart && end - 1 < exampleEnd),
+          (end - 1 >= exampleStart &&
+            end - 1 < exampleEnd &&
+            !parameterSpans.some(
+              ([from, to]) => exampleStart >= from && exampleStart < to,
+            )),
       ),
   );
 }

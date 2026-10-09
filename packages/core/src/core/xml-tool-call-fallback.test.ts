@@ -1248,27 +1248,20 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     expect(tryRecoverXmlToolCalls(text).remainingText).toBe('');
   });
 
-  it('keeps a later call when a quoted value hides an example closer', () => {
-    // The mask covers the quoting value wholesale, so the `</example>` that
-    // ends the prose construct sits inside it. Masked tags may not open an
-    // example, but they must still close one: otherwise the prose-opened range
-    // runs to the end of the turn and every real call in it is filtered out.
+  it('keeps documentation inert when only its quoted value closes the example', () => {
     const quoted = invoke('b', param('p', 'w'));
     const text =
       '<example>\n' +
       `<invoke name="a"><parameter name="content">${quoted}</example>\n</parameter></invoke>\n` +
       invoke('c', param('q', 'z'));
-    expect(extractXmlToolCalls(text)).toEqual([
-      { name: 'c', args: { q: 'z' } },
-    ]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
   });
 
   it('does not let a value-borne example closer end a prose-opened example', () => {
-    // The complementary half: the masked closer may end the range only as a
-    // last resort, since a closer prose writes further on is the boundary.
-    // Ending the range at the masked one leaves the documented call between
-    // them outside every range, and the prose's own closer then opens a range
-    // that filters out the real call after it. See #13492.
     const documented = invoke(
       'run_shell_command',
       param('command', 'rm -rf /tmp/x'),
@@ -1291,9 +1284,7 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     ]);
   });
 
-  it('keeps a later call when a quoted value hides a fence closer', () => {
-    // Same asymmetry with a delimiter: a prose-opened fence must still be
-    // closed by the delimiter line the mask covers.
+  it('keeps documentation inert when only its quoted value closes the fence', () => {
     const quoted = invoke('b', param('p', 'w'));
     const text =
       '```\n' +
@@ -1301,18 +1292,14 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
       quoted +
       '\n```\n</parameter></invoke>\n' +
       invoke('c', param('q', 'z'));
-    expect(extractXmlToolCalls(text)).toEqual([
-      { name: 'c', args: { q: 'z' } },
-    ]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
   });
 
   it('does not let a value-borne delimiter close a fence prose still closes', () => {
-    // The complementary half for a fence, and it fails in both directions:
-    // clearing on the masked delimiter ends the fence inside the value, so the
-    // documented call between them is dispatched, while the prose's genuine
-    // delimiter then opens a fence that swallows the real call after it. The
-    // masked line may close only when prose has no delimiter left to do it.
-    // See #13492.
     const quoted = invoke('read_file', param('file_path', 'x.txt'));
     const documented = invoke(
       'run_shell_command',
@@ -1330,12 +1317,7 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     ]);
   });
 
-  it('does not let an unusable closer mention suppress the last-resort close', () => {
-    // The last-resort test asks whether prose has a closer it can actually use:
-    // a `</example>` the lexer does not read as a tag (it sits in a code span)
-    // or a self-closing one cannot end the example, so counting it would leave
-    // the range open to the end of the turn and drop the real call after it.
-    // See #13492.
+  it('keeps example documentation inert when prose has no usable closer', () => {
     const block =
       '<invoke name="w"><parameter name="content">Usage:\n' +
       invoke('r', param('p', 'x')) +
@@ -1346,18 +1328,15 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
         block +
         `see ${mention}\n` +
         invoke('real', param('file_path', 'a.ts'));
-      expect(extractXmlToolCalls(text)).toEqual([
-        { name: 'real', args: { file_path: 'a.ts' } },
-      ]);
+      expect(tryRecoverXmlToolCalls(text)).toEqual({
+        recovered: false,
+        functionCallParts: [],
+        remainingText: text,
+      });
     }
   });
 
-  it('does not let a line that cannot close the fence suppress the last-resort close', () => {
-    // Same question on the fence side: a later mask-free line closes a
-    // prose-opened fence only when it is a run of the same delimiter, at least
-    // as long, with nothing after it. A run of the other delimiter or one
-    // carrying an info string cannot, so it must not leave the fence open and
-    // drop a real call. See #13492.
+  it('keeps fenced documentation inert when prose has no usable closer', () => {
     const quoted = invoke('read_file', param('file_path', 'x.txt'));
     const block = invoke('w', param('content', `${quoted}\n\`\`\`\ntail`));
     for (const later of ['~~~', '```xml']) {
@@ -1367,23 +1346,15 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
         '\n' +
         invoke('real', param('file_path', 'a.ts')) +
         `\n${later}\n`;
-      expect(extractXmlToolCalls(text)).toEqual([
-        { name: 'real', args: { file_path: 'a.ts' } },
-      ]);
+      expect(tryRecoverXmlToolCalls(text)).toEqual({
+        recovered: false,
+        functionCallParts: [],
+        remainingText: text,
+      });
     }
   });
 
-  it('masks quoted values out of the lexer prose without changing its length', () => {
-    // Example tag positions are reported in prose offsets and looked up again
-    // in the raw text, so the mask has to be length-preserving. Appending the
-    // quoted-value spans after the flat parameter matches puts them out of text
-    // order, which is what the sort plus overlap-compaction undoes. Dropping
-    // that normalization flips no end-to-end outcome here: the only tags it
-    // mispositions are the ones after the last parameter element, and a region
-    // holding no parameter element holds no call for an example range to
-    // filter. So the mask length is the assertion that pins it — without the
-    // normalization the prose outgrows the text it is read back against, and
-    // the lexer cap, which is measured on text.length, stops bounding it.
+  it('keeps the single lexer pass length-preserving when a value quotes calls', () => {
     const spy = vi.spyOn(Lexer, 'lexInline');
     try {
       const quoted = invoke('read_file', param('file_path', 'x.txt'));
@@ -1401,7 +1372,7 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
           args: { content: `Usage:\n${quoted}`, file_path: 'd.md' },
         },
       ]);
-      expect(spy).toHaveBeenCalled();
+      expect(spy).toHaveBeenCalledTimes(1);
       for (const call of spy.mock.calls) {
         expect(String(call[0]).length).toBe(text.length);
       }
@@ -1409,4 +1380,123 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
       spy.mockRestore();
     }
   });
+});
+
+describe('reviewed XML ownership and documentation regressions', () => {
+  const cases = [
+    {
+      id: 'R2-5',
+      text: '```\n<invoke name="write_file"><parameter name="content">fence line\n````\ntail</parameter></invoke>\n<invoke name="run_shell_command"><parameter name="command">rm -rf /tmp/x</parameter></invoke>\n```\n<invoke name="read_file"><parameter name="file_path">real.ts</parameter></invoke>',
+      expected: ['read_file'],
+    },
+    {
+      id: 'R4-2',
+      text: '```\n<invoke name="write_file"><parameter name="content"><invoke name="b"><parameter name="p">w</parameter></invoke>\n```\n~~~\ntail</parameter></invoke>\n<invoke name="run_shell_command"><parameter name="command">rm -rf /tmp/x</parameter></invoke>\n~~~',
+      expected: [],
+    },
+    {
+      id: 'R3-1',
+      text: '<example>\n<invoke name="write_file"><parameter name="content">Use </example> to close a docs region</parameter></invoke>\n<invoke name="run_shell_command"><parameter name="command">rm -rf ~</parameter></invoke>',
+      expected: [],
+    },
+    {
+      id: 'R2-1',
+      text: '<invoke name="write_file"><parameter name="content">Usage:\n<invoke name="run_shell_command"><parameter name="command">rm -rf /tmp/x</parameter><parameter name="note">see <invoke name="read_file">...</invoke></parameter></invoke>\n<parameter name="stray"></parameter></invoke>',
+      expected: [],
+    },
+    {
+      id: 'R3-2',
+      text: '<function=write_file><parameter=file_path>doc.md</parameter><parameter=co\'ntent>Leading text A\' x><invoke name="a"></invoke></parameter></function>',
+      expected: [],
+    },
+    {
+      id: 'R4-1',
+      text: '<invoke name="write_file"><parameter name="content"><invoke name="b"><parameter name="p">w</parameter></invoke>\n```\ntail</parameter></invoke>\n```\n<invoke name="read_file"><parameter name="file_path">real.ts</parameter></invoke>',
+      expected: ['write_file', 'read_file'],
+    },
+  ];
+  it.each(cases)(
+    '$id keeps quoted syntax inert and preserves genuine calls',
+    ({ id, text, expected }) => {
+      expect(extractXmlToolCalls(text).map(({ name }) => name)).toEqual(
+        expected,
+      );
+      const result = tryRecoverXmlToolCalls(text);
+      expect(
+        result.functionCallParts.map((part) => part.functionCall?.name),
+      ).toEqual(expected);
+      if (expected.length === 0) {
+        expect(result).toEqual({
+          recovered: false,
+          functionCallParts: [],
+          remainingText: text,
+        });
+      } else if (id === 'R4-1') {
+        expect(result.functionCallParts[0]?.functionCall?.args).toEqual({
+          content:
+            '<invoke name="b"><parameter name="p">w</parameter></invoke>\n```\ntail',
+        });
+        expect(result.functionCallParts[1]?.functionCall?.args).toEqual({
+          file_path: 'real.ts',
+        });
+      } else {
+        expect(result.functionCallParts[0]?.functionCall?.args).toEqual({
+          file_path: 'real.ts',
+        });
+        expect(result.remainingText).toContain('run_shell_command');
+      }
+    },
+  );
+
+  it('keeps a flat sibling recoverable after declining an advance inside an unclosed value', () => {
+    const witness = cases.find(({ id }) => id === 'R2-1')!.text;
+    const read = invoke('read_file', param('file_path', 'real.ts'));
+    const result = tryRecoverXmlToolCalls(`${witness}\n${read}`);
+    expect(result.functionCallParts.map((part) => part.functionCall)).toEqual([
+      expect.objectContaining({
+        name: 'read_file',
+        args: { file_path: 'real.ts' },
+      }),
+    ]);
+    expect(result.remainingText).toBe(witness);
+  });
+
+  it('leaves a following call inert when the flat prose context has an unclosed fence', () => {
+    const content =
+      '<invoke name="b"><parameter name="p">w</parameter></invoke>\n```\ntail';
+    const write = invoke('write_file', param('content', content));
+    const read = invoke('read_file', param('file_path', 'real.ts'));
+    const text = `${write}\n\`\`\`\nDocumentation\n\`\`\`\n${read}`;
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'write_file', args: { content } },
+    ]);
+    expect(tryRecoverXmlToolCalls(text).remainingText).toContain(read);
+  });
+});
+
+describe('sequential documentation masks', () => {
+  const cases = [
+    {
+      id: 'fence',
+      text: '```\n<invoke name="write_file"><parameter name="content"><invoke name="b"><parameter name="p">w</parameter></invoke>\n```\ntail</parameter></invoke>\n<invoke name="write_file"><parameter name="content"><invoke name="b"><parameter name="p">w</parameter></invoke>\n```\ntail</parameter></invoke>\n<invoke name="run_shell_command"><parameter name="command">harmless-doc-only</parameter></invoke>\n```\n<invoke name="read_file"><parameter name="file_path">real.ts</parameter></invoke>',
+    },
+    {
+      id: 'example',
+      text: '<example>\n<invoke name="write_file"><parameter name="content"><invoke name="b"><parameter name="p">w</parameter></invoke></example>\n</parameter></invoke>\n<invoke name="write_file"><parameter name="content"><invoke name="b"><parameter name="p">w</parameter></invoke></example>\n</parameter></invoke>\n<invoke name="run_shell_command"><parameter name="command">harmless-doc-only</parameter></invoke>\n</example>\n<invoke name="read_file"><parameter name="file_path">real.ts</parameter></invoke>',
+    },
+  ];
+  it.each(cases)(
+    '$id keeps repeated quoted values in their prose documentation',
+    ({ text }) => {
+      const expected = [{ name: 'read_file', args: { file_path: 'real.ts' } }];
+      expect(extractXmlToolCalls(text)).toEqual(expected);
+      const result = tryRecoverXmlToolCalls(text);
+      expect(result.functionCallParts.map((part) => part.functionCall)).toEqual(
+        [expect.objectContaining(expected[0])],
+      );
+      expect(result.remainingText).toBe(
+        text.slice(0, text.lastIndexOf('<invoke name="read_file">')).trim(),
+      );
+    },
+  );
 });
