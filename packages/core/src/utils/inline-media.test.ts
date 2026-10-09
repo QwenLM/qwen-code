@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { base64ByteLength, readFileWithinBase64Limit } from './inline-media.js';
@@ -100,3 +101,51 @@ it('closes the owned handle on read failure and on success', async () => {
     expect(close).toHaveBeenCalledOnce();
   }
 });
+
+it('opens nonblocking and rejects a non-regular handle before reading', async () => {
+  const file = join(directory, 'media');
+  await fs.writeFile(file, 'abc');
+  const handle = await fs.open(file, 'r');
+  vi.spyOn(fs, 'open').mockClear().mockResolvedValueOnce(handle);
+  vi.spyOn(handle, 'stat').mockResolvedValueOnce({
+    isFile: () => false,
+  } as Awaited<ReturnType<typeof handle.stat>>);
+  const read = vi.spyOn(handle, 'read');
+  const close = vi.spyOn(handle, 'close');
+  await expect(readFileWithinBase64Limit(file, 4)).rejects.toThrow(
+    'regular file',
+  );
+  expect(fs.open).toHaveBeenCalledWith(
+    file,
+    constants.O_RDONLY | constants.O_NONBLOCK,
+  );
+  expect(read).not.toHaveBeenCalled();
+  expect(close).toHaveBeenCalledOnce();
+});
+
+it.each(['abort', 'read'])(
+  'preserves the %s error when closing also fails',
+  async (kind) => {
+    const file = join(directory, 'media');
+    await fs.writeFile(file, 'abc');
+    const handle = await fs.open(file, 'r');
+    vi.spyOn(fs, 'open').mockResolvedValueOnce(handle);
+    const controller = new AbortController();
+    const failure =
+      kind === 'abort'
+        ? new DOMException('cancelled', 'AbortError')
+        : new Error('read failure');
+    vi.spyOn(handle, 'read').mockImplementationOnce(async () => {
+      if (kind === 'abort') controller.abort(failure);
+      throw failure;
+    });
+    const close = handle.close.bind(handle);
+    vi.spyOn(handle, 'close').mockImplementationOnce(async () => {
+      await close();
+      throw new Error('close failure');
+    });
+    await expect(
+      readFileWithinBase64Limit(file, 4, controller.signal),
+    ).rejects.toBe(failure);
+  },
+);

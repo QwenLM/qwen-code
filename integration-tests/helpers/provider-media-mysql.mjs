@@ -38,7 +38,7 @@ if (!prepareOnly) {
   console.log(`M4_BUNDLE_SHA256 ${hash}`);
 }
 const temporary = await mkdtemp(
-  path.join(tmpdir(), 'qwen-provider-media-mysql-'),
+  path.join(tmpdir(), 'qwen-e2e-home-provider-media-mysql-'),
 );
 const datadir = path.join(temporary, 'data');
 const socket = path.join(temporary, 'mysql.sock');
@@ -66,7 +66,7 @@ try {
       `--datadir=${datadir}`,
       `--log-error=${temporary}/mysql.log`,
     ],
-    { stdio: 'pipe' },
+    { stdio: 'pipe', timeout: 30_000, killSignal: 'SIGKILL' },
   );
   mysql = spawn(
     'mysqld',
@@ -85,17 +85,18 @@ try {
   mysql.on('error', (cause) => {
     mysqlFailure = cause;
   });
-  for (let attempt = 0; ; attempt++) {
+  const startupDeadline = Date.now() + 30_000;
+  for (;;) {
     try {
       execFileSync(
         'mysqladmin',
         ['--no-defaults', `--socket=${socket}`, '-u', 'root', 'ping'],
-        { stdio: 'pipe' },
+        { stdio: 'pipe', timeout: 1000, killSignal: 'SIGKILL' },
       );
       break;
     } catch {
       assert(
-        attempt < 200 &&
+        Date.now() < startupDeadline &&
           mysql.exitCode === null &&
           mysql.signalCode === null &&
           mysqlFailure === undefined,
@@ -114,7 +115,7 @@ try {
       '-e',
       'CREATE DATABASE provider_media_m4',
     ],
-    { stdio: 'pipe' },
+    { stdio: 'pipe', timeout: 30_000, killSignal: 'SIGKILL' },
   );
   console.log(
     'M4_ISOLATED_MYSQL ' +
@@ -129,7 +130,7 @@ try {
           '-e',
           'SELECT VERSION()',
         ],
-        { encoding: 'utf8' },
+        { encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL' },
       ).trim(),
   );
   if (!prepareOnly) {
@@ -184,7 +185,7 @@ try {
       execFileSync(
         'mysqladmin',
         ['--no-defaults', `--socket=${socket}`, '-u', 'root', 'shutdown'],
-        { stdio: 'pipe' },
+        { stdio: 'pipe', timeout: 1000, killSignal: 'SIGKILL' },
       );
     } catch {
       mysql.kill('SIGKILL');

@@ -237,7 +237,7 @@ async function evidence(sessionId: string, phase: string, fields: object = {}) {
 }
 const reports: Array<Record<string, unknown>> = [];
 const harnessDirectory = await mkdtemp(
-  path.join(tmpdir(), 'qwen-provider-media-harness-'),
+  path.join(tmpdir(), 'qwen-e2e-home-provider-media-harness-'),
 );
 const originalCwd = process.cwd();
 process.chdir(harnessDirectory);

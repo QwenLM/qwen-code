@@ -49,6 +49,6 @@ export async function readFileWithinBase64Limit(
     }
     return undefined;
   } finally {
-    await handle.close();
+    await handle.close().catch(() => {});
   }
 }

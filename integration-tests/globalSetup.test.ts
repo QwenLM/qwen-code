@@ -155,6 +155,9 @@ describe('globalSetup hermetic qwen home', () => {
     ['per-agent ACP home', ACP_HOME_PREFIX],
     ['Hosted process root', HOSTED_HOME_PREFIX],
     ['Hosted Session Store root', HOSTED_STORE_PREFIX],
+    ['provider media MySQL root', 'qwen-e2e-home-provider-media-mysql-'],
+    ['provider media harness root', 'qwen-e2e-home-provider-media-harness-'],
+    ['provider media fixture root', 'qwen-e2e-home-provider-media-fixtures-'],
   ])(
     'sweeps a stale %s a torn-down run left behind',
     async (_label, prefix) => {

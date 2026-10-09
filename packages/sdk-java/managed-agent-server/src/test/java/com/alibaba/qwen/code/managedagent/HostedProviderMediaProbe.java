@@ -63,14 +63,7 @@ final class HostedProviderMediaProbe implements AutoCloseable {
         server.setExecutor(executor);
         Object service = ReflectionTestUtils.getField(broker, "service");
         Object transport = ReflectionTestUtils.getField(service, "transport");
-        provisioner = ReflectionTestUtils.getField(ReflectionTestUtils.getField(service, "provisioner"), "delegate");
-        List<?> command = (List<?>) ReflectionTestUtils.getField(provisioner, "command");
-        assertThat(command.size()).isEqualTo(3);
-        assertThat(command.get(2)).isEqualTo("managed-runtime-worker");
-        Path cli = Path.of(command.get(1).toString());
-        Path readProbe = cli.getParent().getParent().resolve("integration-tests/helpers/provider-media-read-probe.mjs");
-        ReflectionTestUtils.setField(provisioner, "command", List.of(command.get(0).toString(), "--import",
-                readProbe.toUri().toString(), cli.toString(), "managed-runtime-worker"));
+        provisioner = injectReadProbe(broker);
         forwarded = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
                 .proxy(ProxySelector.of(server.getAddress())).build();
         ReflectionTestUtils.setField(transport, "delegate", new HttpRuntimeTransport(forwarded));
@@ -103,6 +96,19 @@ final class HostedProviderMediaProbe implements AutoCloseable {
                 exchange.close();
             }
         });
+    }
+
+    private Object injectReadProbe(EmbeddedRuntimeBroker broker) {
+        Object service = ReflectionTestUtils.getField(broker, "service");
+        Object provisioner = ReflectionTestUtils.getField(ReflectionTestUtils.getField(service, "provisioner"), "delegate");
+        List<?> command = (List<?>) ReflectionTestUtils.getField(provisioner, "command");
+        assertThat(command.size()).isEqualTo(3);
+        assertThat(command.get(2)).isEqualTo("managed-runtime-worker");
+        Path cli = Path.of(command.get(1).toString());
+        Path readProbe = cli.getParent().getParent().resolve("integration-tests/helpers/provider-media-read-probe.mjs");
+        ReflectionTestUtils.setField(provisioner, "command", List.of(command.get(0).toString(), "--import",
+                readProbe.toUri().toString(), cli.toString(), "managed-runtime-worker"));
+        return provisioner;
     }
 
     private void recordFailure(Throwable cause, String stage) {
@@ -182,6 +188,7 @@ final class HostedProviderMediaProbe implements AutoCloseable {
                 assertThat(process.isAlive()).as("original media worker stopped").isFalse();
             }
             restarted = restart.get();
+            injectReadProbe(restarted);
             return Map.of("brokerUrl", restarted.getBaseUri().toString());
         }
         var row = execution(session);

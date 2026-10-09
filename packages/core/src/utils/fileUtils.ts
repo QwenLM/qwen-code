@@ -1178,16 +1178,14 @@ export async function processSingleFileContent(
       ? path.relative(rootDirectory, displayPath)
       : displayPath
   ).replace(/\\/g, '/');
-  const mediaTooLarge = (): ProcessedFileReadResult => {
-    const message =
-      "File exceeds the inline media byte limit. For PDFs, use 'pages' with a narrower range; otherwise use a smaller file.";
-    return {
-      llmContent: message,
-      returnDisplay: message,
-      error: message,
-      errorType: ToolErrorType.FILE_TOO_LARGE,
-    };
-  };
+  const mediaTooLarge = (
+    message = "File exceeds the inline media byte limit. For PDFs, use 'pages' with a narrower range; otherwise use a smaller file.",
+  ): ProcessedFileReadResult => ({
+    llmContent: message,
+    returnDisplay: message,
+    error: message,
+    errorType: ToolErrorType.FILE_TOO_LARGE,
+  });
   try {
     signal?.throwIfAborted();
     let stats: import('node:fs').Stats;
@@ -1997,24 +1995,37 @@ export async function processSingleFileContent(
               render.success &&
               render.bytesTruncated)
           ) {
-            return mediaTooLarge();
+            return mediaTooLarge(!render.success ? render.error : undefined);
           }
           if (render.success && render.images.length > 0) {
-            if (
-              mediaLimits &&
-              pageRange &&
-              render.images.length !== pageRange.lastPage - startPage + 1
-            ) {
-              const message =
-                'The requested PDF page range was not fully rendered. Use a range within the document.';
-              return {
-                llmContent: message,
-                returnDisplay: message,
-                error: message,
-                errorType: ToolErrorType.READ_CONTENT_FAILURE,
-              };
+            if (mediaLimits && pageRange) {
+              pdfPageCount = await getPDFPageCount(filePath, signal);
+              signal?.throwIfAborted();
+              const lastPage = Math.min(
+                pageRange.lastPage,
+                pdfPageCount ?? pageRange.lastPage,
+              );
+              if (render.images.length !== lastPage - startPage + 1) {
+                const message =
+                  'The requested PDF page range was not fully rendered. Use a range within the document.';
+                return {
+                  llmContent: message,
+                  returnDisplay: message,
+                  error: message,
+                  errorType: ToolErrorType.READ_CONTENT_FAILURE,
+                };
+              }
             }
             const parts = toImageParts(render.images, startPage);
+            if (
+              pageRange &&
+              pdfPageCount != null &&
+              pageRange.lastPage > pdfPageCount
+            ) {
+              parts.push({
+                text: `[The document has ${pdfPageCount} pages; rendered pages ${startPage}-${pdfPageCount}.]`,
+              });
+            }
             // Never drop pages silently. Two ways a no-page-range read can be
             // partial: the byte cap kicked in, or the render filled the page
             // ceiling (the page count was unknown/underestimated upstream, so
@@ -2099,7 +2110,7 @@ export async function processSingleFileContent(
               render.success &&
               render.bytesTruncated)
           ) {
-            return mediaTooLarge();
+            return mediaTooLarge(!render.success ? render.error : undefined);
           }
           if (render.success && render.images.length > 0) {
             const parts = toImageParts(render.images, firstPage);

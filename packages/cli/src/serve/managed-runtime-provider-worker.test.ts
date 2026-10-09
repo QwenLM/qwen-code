@@ -745,28 +745,36 @@ describe('Managed Runtime provider worker', () => {
     expect(await control({ kind: 'release' }, second)).toBe(true);
   });
 
-  it('does not enable audio or video from a multimodal provider context', async () => {
-    const file = path.join(workspace, 'clip.mp3');
-    fs.writeFileSync(
-      file,
-      Buffer.from('ID3\u0000\u0000\u0000\u0000\u0000\u0000\u0000'),
-    );
-    await begin();
-    const prepared = await control<ManagedToolPrepareResponse>({
-      kind: 'prepare',
-      identity,
-      toolName: 'read_file',
-      input: { file_path: file },
-      mediaContext: {
-        inputModalities: { image: true, pdf: true, audio: true, video: true },
-      },
-    });
-    const answer = await execute<{ result: { llmContent: unknown } }>(
-      reference(prepared),
-    );
-    expect(answer.result.llmContent).toContain('Unsupported audio file');
-    expect(await control({ kind: 'release' })).toBe(true);
-  });
+  it.each([
+    ['audio', 'mp3'],
+    ['video', 'mp4'],
+  ])(
+    'does not enable %s from a multimodal provider context',
+    async (modality, extension) => {
+      const file = path.join(workspace, `clip.${extension}`);
+      fs.writeFileSync(
+        file,
+        Buffer.from('ID3\u0000\u0000\u0000\u0000\u0000\u0000\u0000'),
+      );
+      await begin();
+      const prepared = await control<ManagedToolPrepareResponse>({
+        kind: 'prepare',
+        identity,
+        toolName: 'read_file',
+        input: { file_path: file },
+        mediaContext: {
+          inputModalities: { image: true, pdf: true, audio: true, video: true },
+        },
+      });
+      const answer = await execute<{ result: { llmContent: unknown } }>(
+        reference(prepared),
+      );
+      expect(answer.result.llmContent).toContain(
+        `Unsupported ${modality} file`,
+      );
+      expect(await control({ kind: 'release' })).toBe(true);
+    },
+  );
 
   it('reports input errors separately from identity conflicts and permits corrected preparation', async () => {
     await begin();

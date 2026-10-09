@@ -1019,6 +1019,25 @@ describe('managed-runtime-provider/1', () => {
       },
     );
 
+    it('stubs non-media content that the text cut cannot reach', () => {
+      const limit = 1024 * 1024;
+      const result = {
+        executionStatus: 'success',
+        result: {
+          llmContent: [
+            { functionResponse: { response: { text: 'x'.repeat(limit) } } },
+          ],
+        },
+      };
+      fitManagedRuntimeProviderResult(execute, result, limit);
+      expect(result.result.llmContent).toBe(
+        '[Managed Runtime provider omitted this tool result to fit the wire limit.]',
+      );
+      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(
+        limit,
+      );
+    });
+
     it('refuses a media-bearing result above its complete JSON budget', () => {
       const result = {
         executionStatus: 'success',
@@ -1034,31 +1053,74 @@ describe('managed-runtime-provider/1', () => {
       ).toThrow('media result exceeds its admitted budget');
     });
 
-    it('preserves a Hook stop decision when fitting its media observation', () => {
-      const result = {
-        executionStatus: 'success',
-        result: {
-          llmContent: {
-            inlineData: {
-              mimeType: 'image/png',
-              data: 'A'.repeat(MAX_PROVIDER_INLINE_MEDIA_BASE64_BYTES),
+    it.each([28, 5000])(
+      'preserves a %i-character Hook stop reason when fitting media',
+      (length) => {
+        const stopReason = 'x'.repeat(length);
+        const hookError = 'Hook failed.';
+        const result = {
+          executionStatus: 'success',
+          result: {
+            llmContent: {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'A'.repeat(MAX_PROVIDER_INLINE_MEDIA_BASE64_BYTES),
+              },
             },
           },
-        },
-        postHook: {
+          postHook: {
+            shouldStop: true,
+            stopReason,
+            hookError,
+            additionalContext: 'c'.repeat(512 * 1024),
+          },
+        };
+        const original = resultDigest(result.result);
+        fitManagedRuntimeProviderResult(execute, result, 1024 * 1024);
+        expect(result.postHook).toEqual({
           shouldStop: true,
-          stopReason: 'Do not continue the model.',
-          additionalContext: 'c'.repeat(512 * 1024),
-        },
-      };
-      const original = resultDigest(result.result);
-      fitManagedRuntimeProviderResult(execute, result, 1024 * 1024);
-      expect(result.postHook).toEqual({
-        shouldStop: true,
-        stopReason: 'Do not continue the model.',
-      });
-      expect(resultDigest(result.result)).toBe(original);
-    });
+          stopReason,
+          hookError,
+        });
+        expect(resultDigest(result.result)).toBe(original);
+      },
+    );
+
+    it.each(['stopReason', 'hookError'])(
+      'trims only the oversized Hook %s diagnostic',
+      (field) => {
+        const result = {
+          executionStatus: 'success',
+          result: {
+            llmContent: {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'A'.repeat(MAX_PROVIDER_INLINE_MEDIA_BASE64_BYTES),
+              },
+            },
+          },
+          postHook: {
+            shouldStop: true,
+            stopReason: 'Stop requested.',
+            hookError: 'Hook failed.',
+            [field]: 'x'.repeat(1024 * 1024),
+          },
+        };
+        const original = resultDigest(result.result);
+        fitManagedRuntimeProviderResult(execute, result, 1024 * 1024);
+        expect(result.postHook.shouldStop).toBe(true);
+        expect(result.postHook[field as 'stopReason' | 'hookError']).toContain(
+          'omitted to fit',
+        );
+        expect(
+          result.postHook[field === 'stopReason' ? 'hookError' : 'stopReason'],
+        ).toBe(field === 'stopReason' ? 'Hook failed.' : 'Stop requested.');
+        expect(resultDigest(result.result)).toBe(original);
+        expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(
+          1024 * 1024,
+        );
+      },
+    );
 
     it('keeps original media when an impossible observation budget is refused', () => {
       const result = {
@@ -1067,12 +1129,16 @@ describe('managed-runtime-provider/1', () => {
           llmContent: { inlineData: { mimeType: 'image/png', data: 'AA==' } },
           returnDisplay: 'original display',
         },
+        postHook: { note: 'auxiliary' },
+        failureHook: { note: 'auxiliary' },
       };
       const original = structuredClone(result);
       expect(() =>
         fitManagedRuntimeProviderResult(execute, result, 16),
       ).toThrow('media observation exceeds its wire budget');
-      expect(result).toEqual(original);
+      expect(resultDigest(result.result)).toBe(resultDigest(original.result));
+      expect(result).not.toHaveProperty('postHook');
+      expect(result).not.toHaveProperty('failureHook');
     });
 
     it('keeps hooks when cutting the text makes room', () => {

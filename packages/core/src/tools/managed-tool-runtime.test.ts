@@ -468,7 +468,7 @@ describe('ManagedToolRuntime', () => {
       getFileService: () => ({ shouldQwenIgnoreFile: () => false }),
       getFileReadCache: () => new FileReadCache(),
       getFileReadCacheDisabled: () => true,
-      getEffectiveInputModalities: () => ({}),
+      getEffectiveInputModalities: () => ({ image: true }),
       getContentGeneratorConfig: generator,
       getModel: () => 'local-test',
       getUsageStatisticsEnabled: () => false,
@@ -537,11 +537,12 @@ describe('ManagedToolRuntime', () => {
           displayName: 'tiny.gif',
         },
       });
-      for (const prepared of [disabled, missing]) {
-        expect((await execute(prepared)).result?.llmContent).toContain(
-          'Unsupported image',
-        );
-      }
+      expect((await execute(disabled)).result?.llmContent).toContain(
+        'Unsupported image',
+      );
+      expect((await execute(missing)).result?.llmContent).toEqual(
+        delivered.result?.llmContent,
+      );
       expect((await execute(native)).result?.llmContent).toEqual({
         inlineData: {
           data: Buffer.from('%PDF-1.7').toString('base64'),
@@ -550,6 +551,7 @@ describe('ManagedToolRuntime', () => {
         },
       });
       await fs.writeFile(image, 'changed');
+      expect(await runtime.execute(reference(enabled))).toEqual(delivered);
       expect(runtime.status(reference(enabled)).result).toEqual(delivered);
       expect(generator).not.toHaveBeenCalled();
     } finally {

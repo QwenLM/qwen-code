@@ -766,6 +766,8 @@ function providerFitLevel(
  * through `firstAvailableSeq`/`progressGap`), then bulk text fields are cut
  * head-and-tail with an inline notice; `truncated` is set on shell displays.
  * Mutates and returns `value`; the caller owns a JSON-round-tripped copy.
+ * Invalid or unadmitted media is refused before fitting. An impossible media
+ * envelope is refused after auxiliary fields may have been trimmed.
  */
 export function fitManagedRuntimeProviderResult(
   operation: ManagedRuntimeProviderOperation,
@@ -870,21 +872,37 @@ export function fitManagedRuntimeProviderResult(
       ) {
         const fields = hook as Record<string, unknown>;
         const reason = fields['stopReason'];
+        const hookError = fields['hookError'];
         execution['postHook'] = {
           shouldStop: fields['shouldStop'],
           ...(typeof reason === 'string'
             ? {
-                stopReason:
-                  reason.length <= 4096
-                    ? reason
-                    : 'Runtime Hook stop reason omitted to fit the media response.',
+                stopReason: reason,
               }
             : {}),
+          ...(typeof hookError === 'string' ? { hookError } : {}),
         };
       } else {
         delete execution['postHook'];
       }
       delete execution['failureHook'];
+      const retained = execution['postHook'] as
+        | Record<string, unknown>
+        | undefined;
+      if (retained) {
+        const diagnostics = ['stopReason', 'hookError']
+          .filter((field) => typeof retained[field] === 'string')
+          .sort(
+            (a, b) =>
+              Buffer.byteLength(retained[b] as string, 'utf8') -
+              Buffer.byteLength(retained[a] as string, 'utf8'),
+          );
+        for (const field of diagnostics) {
+          if (fits()) break;
+          retained[field] =
+            `Runtime Hook ${field} omitted to fit the media response.`;
+        }
+      }
     }
     if (!fits())
       throw new ManagedRuntimeProviderProtocolError(

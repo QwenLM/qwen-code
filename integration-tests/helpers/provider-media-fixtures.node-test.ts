@@ -61,6 +61,52 @@ for (const alreadyExited of [false, true]) {
   );
 }
 
+test(
+  'fixture cleanup kills a child that accepts shutdown but never exits',
+  { timeout: 3000 },
+  async () => {
+    const child = spawn(
+      process.execPath,
+      ['-e', 'setInterval(() => {}, 1000)'],
+      { stdio: 'ignore' },
+    );
+    await once(child, 'spawn');
+    try {
+      await stopFixtureProcess(child, () => {}, 50);
+      assert.equal(child.signalCode, 'SIGKILL');
+    } finally {
+      await stopFixtureProcess(child);
+    }
+  },
+);
+
+test('worker read probe appends evidence across process generations', async () => {
+  const temporary = await mkdtemp(
+    path.join(tmpdir(), 'qwen-e2e-home-provider-media-probe-'),
+  );
+  try {
+    const file = path.join(temporary, 'proof.pdf');
+    await writeFile(file, 'proof');
+    const probe = new URL('./provider-media-read-probe.mjs', import.meta.url)
+      .href;
+    const code = 'require("node:fs").readFileSync(process.argv[1])';
+    execFileSync(process.execPath, ['--import', probe, '-e', code, file]);
+    const first = await readFile(
+      path.join(temporary, '.provider-media-reads.json'),
+      'utf8',
+    );
+    execFileSync(process.execPath, ['--import', probe, '-e', code, file]);
+    const second = await readFile(
+      path.join(temporary, '.provider-media-reads.json'),
+      'utf8',
+    );
+    assert(second.startsWith(first));
+    assert(second.length > first.length);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test('worker read probe preserves execFile promisify stdout and stderr', async () => {
   const result = await promisify(execFile)(process.execPath, [
     '-e',
@@ -83,7 +129,7 @@ test('real image fixtures decode with the expected MIME and dimensions', async (
 
 test('real PDF fixtures distinguish text extraction, Poppler rendering and size refusal', async () => {
   const temporary = await mkdtemp(
-    path.join(tmpdir(), 'qwen-provider-media-fixtures-'),
+    path.join(tmpdir(), 'qwen-e2e-home-provider-media-fixtures-'),
   );
   try {
     const text = path.join(temporary, 'text.pdf');

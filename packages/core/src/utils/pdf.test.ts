@@ -149,8 +149,7 @@ describe('pdf utilities', () => {
       );
       controller.abort();
       callback(errorWith('cancelled', { name: 'AbortError' }), '', '');
-      await Promise.resolve();
-      await Promise.resolve();
+      await new Promise((resolve) => setImmediate(resolve));
       expect(settled).toBe(false);
       if (command === 'pdftoppm') {
         const { rm } = await import('node:fs/promises');

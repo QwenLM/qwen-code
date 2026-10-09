@@ -7,10 +7,10 @@
 import fs from 'node:fs';
 import childProcess from 'node:child_process';
 import path from 'node:path';
+import process from 'node:process';
 import { syncBuiltinESMExports } from 'node:module';
 
-const counts = {};
-const write = fs.writeFileSync;
+const append = fs.appendFileSync;
 function record(file) {
   if (
     typeof file !== 'string' ||
@@ -18,10 +18,9 @@ function record(file) {
   )
     return;
   const key = path.resolve(file);
-  counts[key] = (counts[key] ?? 0) + 1;
-  write(
+  append(
     path.join(path.dirname(key), '.provider-media-reads.json'),
-    JSON.stringify(counts),
+    JSON.stringify({ file: key, pid: process.pid }) + '\n',
   );
 }
 for (const [owner, names] of [

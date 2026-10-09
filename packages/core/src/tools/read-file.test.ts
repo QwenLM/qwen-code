@@ -226,11 +226,24 @@ describe('ReadFileTool', () => {
       await fsp.appendFile(file, 'x');
       const refused = await read(file, boundedTool());
       expect(refused.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
-      expect(refused.llmContent).toContain('pages');
+      expect(refused.llmContent).toContain('inline media byte limit');
+      expect(refused.llmContent).not.toContain(
+        'inline media result byte limit',
+      );
       expect(JSON.stringify(refused)).not.toContain('inlineData');
       expect(
         (await read(file, new ReadFileTool(makeConfig()))).error,
       ).toBeUndefined();
+    });
+
+    it('applies the tool-level aggregate limit to audio from a trusted config', async () => {
+      const file = await put('clip.mp3', Buffer.alloc(589825));
+      const result = await read(
+        file,
+        boundedTool({ getEffectiveInputModalities: () => ({ audio: true }) }),
+      );
+      expect(result.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(result.llmContent).toContain('inline media result byte limit');
     });
 
     it('measures complete JSON UTF-8 bytes, including escaped and multibyte metadata', async () => {
@@ -325,6 +338,35 @@ describe('ReadFileTool', () => {
       },
     );
 
+    it.each([2, null])(
+      'handles a rendered range beyond the document with page count %s',
+      async (pageCount) => {
+        const file = await put('scan.pdf', '%PDF-1.7');
+        pdfMocks.getPDFPageCount.mockResolvedValue(pageCount);
+        pdfMocks.renderPDFPagesToImages.mockResolvedValue({
+          success: true,
+          images: [
+            { data: 'YWJj', mimeType: 'image/jpeg' },
+            { data: 'YWJj', mimeType: 'image/jpeg' },
+          ],
+          bytesTruncated: false,
+        });
+        const result = await read(
+          { file_path: file, pages: '1-10' },
+          boundedTool({ getEffectiveInputModalities: () => ({ image: true }) }),
+        );
+        if (pageCount === null) {
+          expect(result.error?.type).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+        } else {
+          expect(result.error).toBeUndefined();
+          expect(
+            normalizeParts(result.llmContent).filter((part) => part.inlineData),
+          ).toHaveLength(2);
+          expect(JSON.stringify(result.llmContent)).toContain('2 pages');
+        }
+      },
+    );
+
     it('rejects an explicit incomplete rendered range but announces an implicit whole-page prefix', async () => {
       const file = await put('scan.pdf', '%PDF-1.7');
       pdfMocks.getPDFPageCount.mockResolvedValue(2);
@@ -365,9 +407,9 @@ describe('ReadFileTool', () => {
         error: 'first page too large',
         tooLarge: true,
       });
-      expect((await read(file, mediaTool)).error?.type).toBe(
-        ToolErrorType.FILE_TOO_LARGE,
-      );
+      const tooLarge = await read(file, mediaTool);
+      expect(tooLarge.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(tooLarge.llmContent).toBe('first page too large');
     });
 
     it.each(['page-count', 'text', 'render'])(
