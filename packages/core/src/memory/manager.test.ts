@@ -2375,6 +2375,79 @@ describe('MemoryManager', () => {
       expect(lengths).toContain(8);
     });
 
+    it('extracts a snapshot that replaced the parked run it did not join', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '3');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      let release!: () => void;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve(engagedNoop('other'));
+          }),
+      );
+      // Another session holds the project slot, so the flush parks behind it
+      // and its caller times out before the slot frees.
+      const other = turn(mgr, 2, 'other');
+      await expect(mgr.flushPendingExtract('sess', 1)).resolves.toBe(false);
+
+      // The refused close let the session take another turn, which the cadence
+      // skipped: `pending` is now a longer snapshot than the parked run's.
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+
+      // Retried while the older run is still parked, so it must not take that
+      // run's answer for turns it never extracted.
+      await expect(mgr.flushPendingExtract('sess', 1)).resolves.toBe(false);
+
+      release();
+      await other;
+      await vi.waitFor(
+        () =>
+          expect(
+            vi
+              .mocked(runAutoMemoryExtract)
+              .mock.calls.map((call) => call[0].history.length),
+          ).toContain(6),
+        { timeout: 2000 },
+      );
+    });
+
+    it('keeps a newer snapshot a parked run settled without extracting', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '3');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      let release!: () => void;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve(engagedNoop('other'));
+          }),
+      );
+      const other = turn(mgr, 2, 'other');
+      await expect(mgr.flushPendingExtract('sess', 1)).resolves.toBe(false);
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+
+      // The parked run extracts its own, older snapshot and settles before the
+      // boundary retries; its success path must leave the newer one pending
+      // rather than report an extraction that never covered it.
+      release();
+      await other;
+      await mgr.drain();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).toContain(6);
+    });
+
     it('keeps a later skipped turn pending when an older trailing run completes', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
       const mgr = new MemoryManager();

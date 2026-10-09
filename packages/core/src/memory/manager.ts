@@ -685,10 +685,15 @@ export class MemoryManager {
   // request is queued, not where it starts, or a bump landing while it waits
   // would be invisible to it.
   private cadenceDiscardEpoch = 0;
-  // One shared flush run per session (#13004), so overlapping boundaries wait
-  // for the same extraction instead of each passing on an entry the first one
-  // is already flushing. Each caller still applies its own timeout.
-  private readonly extractFlushRuns = new Map<string, Promise<boolean>>();
+  // One shared flush run per session and snapshot (#13004), so overlapping
+  // boundaries over the same pending turns wait for one extraction instead of
+  // each passing on an entry the first one is already flushing, while a skip
+  // that lands behind a parked run gets its own run rather than the older
+  // one's answer. Each caller still applies its own timeout.
+  private readonly extractFlushRuns = new Map<
+    string,
+    { pending: ScheduleExtractParams; run: Promise<boolean> }
+  >();
 
   // ── Skill-review in-flight dedup ─────────────────────────────────────────────
   private readonly skillReviewInFlightByProject = new Map<string, string>();
@@ -1389,12 +1394,16 @@ export class MemoryManager {
   ): Promise<boolean> {
     const pending = this.extractCadence.get(sessionId)?.pending;
     if (!pending) return true;
-    let run = this.extractFlushRuns.get(sessionId);
-    if (!run) {
-      run = this.runPendingExtractFlush(sessionId, pending);
-      this.extractFlushRuns.set(sessionId, run);
-      const started = run;
-      void started.then(() => {
+    // Join a run only when it was started for this same snapshot: a skip that
+    // landed while an older run was parked replaced `pending`, and that run's
+    // answer describes turns this caller did not ask about.
+    let entry = this.extractFlushRuns.get(sessionId);
+    if (!entry || entry.pending !== pending) {
+      const run = this.runPendingExtractFlush(sessionId, pending);
+      entry = { pending, run };
+      this.extractFlushRuns.set(sessionId, entry);
+      const started = entry;
+      void run.then(() => {
         if (this.extractFlushRuns.get(sessionId) === started) {
           this.extractFlushRuns.delete(sessionId);
         }
@@ -1403,7 +1412,7 @@ export class MemoryManager {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        run,
+        entry.run,
         new Promise<boolean>((resolve) => {
           timer = setTimeout(() => {
             debugLogger.warn(
@@ -1490,8 +1499,13 @@ export class MemoryManager {
       // leaving behind, and `/resume` restores that id — drop the entry so a
       // resumed session inherits no skip. The next completed run re-arms from
       // scratch, including on the compaction boundary, where the session
-      // lives on.
-      this.extractCadence.delete(sessionId);
+      // lives on. Only when this snapshot still owns the entry: a skip that
+      // landed while this run was parked left a newer snapshot pending, and
+      // that one describes turns this run never extracted.
+      const settled = this.extractCadence.get(sessionId);
+      if (!settled?.pending || settled.pending === pending) {
+        this.extractCadence.delete(sessionId);
+      }
       return true;
     } catch (error) {
       debugLogger.warn(
