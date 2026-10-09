@@ -65,50 +65,63 @@ export type TrajectoryPageLoader = (opts: {
  */
 export type TrajectoryWindowFailure =
   | { kind: 'partial' }
-  | { kind: 'unreadable'; message: string };
+  | { kind: 'unreadable'; message: string }
+  | { kind: 'expired' | 'protocol' | 'budget' };
+
+export const TRAJECTORY_BOOKMARK_LIMIT = 64;
+export const TRAJECTORY_CURSOR_BUDGET = 256 * 1024;
 
 export interface TrajectoryWindow {
   trajectory: Trajectory | undefined;
   status: 'idle' | 'loading' | 'ready' | 'error';
-  /**
-   * The newest page could not be read. The window already on screen, if any,
-   * is kept.
-   */
   error?: TrajectoryWindowFailure;
-  /**
-   * Pages read so far by the load under way, or held by the window once it
-   * is ready. What the placeholder counts while the walk back is running.
-   */
   loadedPages: number;
-  /**
-   * The session has history older than the window: the walk stopped at the
-   * page cap, at a page the daemon gave no cursor for, or at an older page it
-   * could not read.
-   */
+  windowPages: number;
   truncated: boolean;
-  /**
-   * An older page could not be read, so the window stops just after it. The
-   * newer pages are drawn; `refresh` is the retry.
-   */
   olderFailure?: TrajectoryWindowFailure;
-  /** Read the window again from the newest page. Also every retry. */
+  navigationError?: TrajectoryWindowFailure;
+  mode: 'latest' | 'history';
+  navigationVersion: number;
+  canRefresh: boolean;
+  canOlder: boolean;
+  canNewer: boolean;
+  historyReleased: boolean;
+  bookmarks: number;
   refresh: () => void;
+  older: () => void;
+  newer: () => void;
+  retry: () => void;
 }
 
+type Pages = ReadonlyArray<readonly DaemonEvent[]>;
+
 interface WindowState {
-  /** The window's pages, oldest first; undefined before the first lands. */
-  pages?: ReadonlyArray<readonly DaemonEvent[]>;
+  pages?: Pages;
   loadedPages: number;
   truncated: boolean;
+  nextCursor?: string;
   status: TrajectoryWindow['status'];
   error?: TrajectoryWindowFailure;
   olderFailure?: TrajectoryWindowFailure;
+  navigationError?: TrajectoryWindowFailure;
+  mode: TrajectoryWindow['mode'];
+  navigationVersion: number;
+  cursors: string[];
+  index: number;
+  historyReleased: boolean;
+  blocked: boolean;
 }
 
 const EMPTY_STATE: WindowState = {
   loadedPages: 0,
   truncated: false,
   status: 'idle',
+  mode: 'latest',
+  navigationVersion: 0,
+  cursors: [],
+  index: -1,
+  historyReleased: false,
+  blocked: false,
 };
 
 function errorMessage(error: unknown): string {
@@ -117,148 +130,297 @@ function errorMessage(error: unknown): string {
   return text.length > 0 ? text : 'Unknown error';
 }
 
-/**
- * A page the daemon could not read in full. Its events are a prefix of the
- * truth, so folding them would show a run with records silently missing —
- * report it instead.
- */
-function pageFailure(
-  page: TrajectoryPageResult,
-): TrajectoryWindowFailure | undefined {
-  if (page.replayError) {
-    return { kind: 'unreadable', message: page.replayError };
+function readFailure(error: unknown): TrajectoryWindowFailure {
+  // REST errors expose body.code; ACP transports use body.data.errorKind.
+  const body =
+    typeof error === 'object' && error !== null && 'body' in error
+      ? error.body
+      : undefined;
+  if (typeof body === 'object' && body !== null) {
+    const code = 'code' in body ? body.code : undefined;
+    const data = 'data' in body ? body.data : undefined;
+    const kind =
+      typeof data === 'object' && data !== null && 'errorKind' in data
+        ? data.errorKind
+        : undefined;
+    if (
+      [code, kind].some(
+        (value) =>
+          value === 'invalid_transcript_cursor' ||
+          value === 'transcript_snapshot_unavailable',
+      )
+    )
+      return { kind: 'expired' };
   }
-  return page.partial ? { kind: 'partial' } : undefined;
+  return { kind: 'unreadable', message: errorMessage(error) };
 }
 
-type PageRead =
-  | { ok: true; page: TrajectoryPageResult }
-  | { ok: false; failure: TrajectoryWindowFailure };
-
-async function readPage(
-  loadPage: TrajectoryPageLoader,
-  opts: { limit: number; cursor?: string },
-): Promise<PageRead> {
-  try {
-    const page = await loadPage(opts);
-    const failure = pageFailure(page);
-    return failure ? { ok: false, failure } : { ok: true, page };
-  } catch (error) {
-    return {
-      ok: false,
-      failure: { kind: 'unreadable', message: errorMessage(error) },
-    };
-  }
+interface Operation {
+  kind: 'latest' | 'older' | 'newer';
+  start?: string;
+  cursor?: string;
+  pages: Array<readonly DaemonEvent[]>;
+  seen: Set<string>;
+  target: number;
 }
 
 /**
- * Hold a window of one session's transcript and fold it into a trajectory.
- *
- * The pages are this view's own: paged replay is the only path that emits
- * timing frames, and the chat store is fed by the live stream and by bulk
- * replay, neither of which carries them. Reading here also keeps the window
- * contiguous by construction, which is what lets the projection pair a frame
- * with what it measured.
- *
- * A load walks back from the newest page by cursor, up to the page cap, and
- * the window lands once, whole, when the walk ends. Nothing is ever put in
- * front of rows already drawn: a list that grew upwards under the reader would
- * have to move its scroll offset, its keys, its selection and its focus in
- * step, and no part of that is observable outside a real browser.
- *
- * `refresh` rebuilds the window from the newest page rather than splicing into
- * it: page boundaries are chosen per request, so a fresh page and the held
- * ones overlap by an unknown amount and cannot be joined without dropping or
- * repeating records.
+ * Windows are contiguous cursor walks, committed whole. Only bookmarks survive
+ * a switch: replaying a saved cursor stays in its snapshot, whereas a read
+ * without one explicitly returns to the latest snapshot.
  */
 export function useTrajectoryWindow(
   loadPage: TrajectoryPageLoader | undefined,
-  options: { pageSize?: number; maxPages?: number } = {},
+  options: {
+    pageSize?: number;
+    maxPages?: number;
+    bookmarkLimit?: number;
+    cursorBudget?: number;
+  } = {},
 ): TrajectoryWindow {
   const pageSize = options.pageSize ?? TRAJECTORY_PAGE_SIZE;
   const maxPages = options.maxPages ?? TRAJECTORY_MAX_PAGES;
-
+  const bookmarkLimit = options.bookmarkLimit ?? TRAJECTORY_BOOKMARK_LIMIT;
+  const cursorBudget = options.cursorBudget ?? TRAJECTORY_CURSOR_BUDGET;
   const [state, setState] = useState<WindowState>(EMPTY_STATE);
-  // Every load carries the generation it started in, and checks it after each
-  // read. A refresh, a loader change and unmount all bump it, so a walk they
-  // superseded stops at its next reply instead of writing a window its caller
-  // no longer owns — or asking for another page.
+  const stateRef = useRef(state);
   const generationRef = useRef(0);
+  const pendingRef = useRef<Operation | undefined>(undefined);
 
-  const load = useCallback(() => {
-    if (!loadPage) return;
-    const generation = ++generationRef.current;
-    const current = () => generationRef.current === generation;
-    setState((previous) => ({
-      ...previous,
-      status: 'loading',
-      error: undefined,
-      loadedPages: 0,
-    }));
+  const update = useCallback((next: WindowState) => {
+    stateRef.current = next;
+    setState(next);
+  }, []);
 
-    void (async () => {
-      const newest = await readPage(loadPage, { limit: pageSize });
-      if (!current()) return;
-      if (!newest.ok) {
-        // Keep whatever is already on screen: a failed refresh should not
-        // also erase the run the reader was looking at. And do not walk on —
-        // older pages hang off a cursor this read never produced.
-        setState((previous) => ({
-          ...previous,
-          status: 'error',
-          error: newest.failure,
-          loadedPages: previous.pages?.length ?? 0,
-        }));
-        return;
+  const run = useCallback(
+    (operation: Operation) => {
+      if (!loadPage) return;
+      const generation = ++generationRef.current;
+      const previous = pendingRef.current;
+      if (previous && previous !== operation) {
+        previous.pages = [];
+        previous.seen.clear();
       }
-
-      const collected: Array<readonly DaemonEvent[]> = [newest.page.events];
-      let cursor = newest.page.nextCursor;
-      let more = newest.page.hasMore;
-      let olderFailure: TrajectoryWindowFailure | undefined;
-      setState((previous) => ({ ...previous, loadedPages: 1 }));
-
-      while (more && cursor !== undefined && collected.length < maxPages) {
-        const older = await readPage(loadPage, { limit: pageSize, cursor });
-        if (!current()) return;
-        if (!older.ok) {
-          // The page stays out: a partial one is missing records somewhere
-          // inside it, which would fold into a hole nothing marks.
-          olderFailure = older.failure;
-          break;
-        }
-        collected.unshift(older.page.events);
-        cursor = older.page.nextCursor;
-        more = older.page.hasMore;
-        const count = collected.length;
-        setState((previous) => ({ ...previous, loadedPages: count }));
-      }
-
-      setState({
-        pages: collected,
-        loadedPages: collected.length,
-        truncated: more,
-        status: 'ready',
-        ...(olderFailure !== undefined ? { olderFailure } : {}),
+      pendingRef.current = operation;
+      const current = () => generationRef.current === generation;
+      update({
+        ...stateRef.current,
+        status: 'loading',
+        error: undefined,
+        navigationError:
+          operation.kind === 'latest'
+            ? undefined
+            : stateRef.current.navigationError,
+        loadedPages: operation.pages.length,
       });
-    })();
-  }, [loadPage, maxPages, pageSize]);
 
-  useEffect(() => {
-    if (!loadPage) {
-      generationRef.current += 1;
-      setState(EMPTY_STATE);
+      const fail = (failure: TrajectoryWindowFailure) => {
+        const previous = stateRef.current;
+        const blocked =
+          failure.kind === 'expired' ||
+          failure.kind === 'protocol' ||
+          failure.kind === 'budget';
+        // On the first load, the readable prefix is useful. Subsequent failed
+        // replacements retain the entire window the reader was already using.
+        if (!previous.pages && operation.pages.length > 0) {
+          update({
+            ...previous,
+            pages: [...operation.pages],
+            status: 'ready',
+            loadedPages: operation.pages.length,
+            truncated: true,
+            nextCursor: operation.cursor,
+            olderFailure: failure,
+            blocked,
+          });
+        } else {
+          const fillingInitialWindow = previous.olderFailure !== undefined;
+          update({
+            ...previous,
+            status:
+              previous.pages &&
+              (operation.kind !== 'latest' || fillingInitialWindow)
+                ? 'ready'
+                : 'error',
+            loadedPages: previous.pages?.length ?? 0,
+            ...(fillingInitialWindow
+              ? { olderFailure: failure }
+              : operation.kind === 'latest'
+                ? { error: failure }
+                : { navigationError: failure }),
+            blocked: previous.blocked || blocked,
+          });
+        }
+        if (blocked) pendingRef.current = undefined;
+      };
+
+      void (async () => {
+        let more = true;
+        while (operation.pages.length < maxPages && more) {
+          const cursor = operation.cursor;
+          if (cursor !== undefined && cursor.length > cursorBudget) {
+            fail({ kind: 'budget' });
+            return;
+          }
+          let page: TrajectoryPageResult;
+          try {
+            page = await loadPage({
+              limit: pageSize,
+              ...(cursor !== undefined ? { cursor } : {}),
+            });
+          } catch (error) {
+            if (current()) fail(readFailure(error));
+            return;
+          }
+          if (!current()) return;
+          if (page.partial || page.replayError) {
+            fail(
+              page.replayError
+                ? { kind: 'unreadable', message: page.replayError }
+                : { kind: 'partial' },
+            );
+            return;
+          }
+          if (cursor !== undefined) operation.seen.add(cursor);
+          operation.pages.unshift(page.events);
+          more = page.hasMore;
+          operation.cursor = page.nextCursor;
+          if (
+            more &&
+            (!page.nextCursor ||
+              operation.seen.has(page.nextCursor) ||
+              (operation.kind !== 'latest' &&
+                stateRef.current.cursors
+                  .slice(0, operation.target + 1)
+                  .includes(page.nextCursor)))
+          ) {
+            fail({ kind: 'protocol' });
+            return;
+          }
+          update({
+            ...stateRef.current,
+            loadedPages: operation.pages.length,
+          });
+        }
+        const previous = stateRef.current;
+        let cursors = previous.cursors;
+        let index = operation.target;
+        let historyReleased = previous.historyReleased;
+        if (operation.kind === 'latest') {
+          cursors = [];
+          index = -1;
+          historyReleased = false;
+        } else if (index === cursors.length) {
+          cursors = [...cursors, operation.start!];
+          let bytes = cursors.reduce(
+            (total, cursor) => total + cursor.length,
+            0,
+          );
+          while (cursors.length > bookmarkLimit || bytes > cursorBudget) {
+            bytes -= cursors[0]!.length;
+            cursors = cursors.slice(1);
+            index -= 1;
+            historyReleased = true;
+          }
+        }
+        pendingRef.current = undefined;
+        update({
+          pages: operation.pages,
+          loadedPages: operation.pages.length,
+          status: 'ready',
+          truncated: more,
+          nextCursor: more ? operation.cursor : undefined,
+          mode: operation.kind === 'latest' ? 'latest' : 'history',
+          navigationVersion:
+            previous.navigationVersion +
+            (operation.kind !== 'latest' || previous.mode === 'history'
+              ? 1
+              : 0),
+          cursors,
+          index,
+          historyReleased,
+          blocked: false,
+        });
+      })();
+    },
+    [loadPage, pageSize, maxPages, bookmarkLimit, cursorBudget, update],
+  );
+
+  const refresh = useCallback(() => {
+    run({ kind: 'latest', pages: [], seen: new Set(), target: -1 });
+  }, [run]);
+
+  const older = useCallback(() => {
+    const previous = stateRef.current;
+    if (
+      previous.status === 'loading' ||
+      previous.blocked ||
+      previous.olderFailure ||
+      pendingRef.current ||
+      !previous.nextCursor
+    )
+      return;
+    const target = previous.index + 1;
+    const start = previous.cursors[target] ?? previous.nextCursor;
+    if (previous.cursors.slice(0, target).includes(start)) {
+      update({
+        ...previous,
+        navigationError: { kind: 'protocol' },
+        blocked: true,
+      });
       return;
     }
-    // A different loader is a different session, so the window on screen is
-    // not this loader's to keep. Only the effect resets; `refresh` reloads the
-    // same session and deliberately holds the window until the new one lands.
-    setState(EMPTY_STATE);
-    load();
+    run({
+      kind: 'older',
+      start,
+      cursor: start,
+      pages: [],
+      seen: new Set(),
+      target,
+    });
+  }, [run, update]);
+
+  const newer = useCallback(() => {
+    const previous = stateRef.current;
+    if (
+      previous.status === 'loading' ||
+      previous.blocked ||
+      previous.olderFailure ||
+      pendingRef.current ||
+      previous.index <= 0
+    )
+      return;
+    const target = previous.index - 1;
+    const start = previous.cursors[target]!;
+    run({
+      kind: 'newer',
+      start,
+      cursor: start,
+      pages: [],
+      seen: new Set(),
+      target,
+    });
+  }, [run]);
+
+  const retry = useCallback(() => {
+    if (stateRef.current.status === 'loading') return;
+    const operation = pendingRef.current;
+    if (operation) run(operation);
+  }, [run]);
+
+  useEffect(() => {
+    update(EMPTY_STATE);
+    pendingRef.current = undefined;
+    if (loadPage) refresh();
     return () => {
       generationRef.current += 1;
+      if (pendingRef.current) {
+        pendingRef.current.pages = [];
+        pendingRef.current.seen.clear();
+      }
+      pendingRef.current = undefined;
     };
-  }, [loadPage, load]);
+  }, [loadPage, refresh, update]);
 
   const pages = state.pages;
   const trajectory = useMemo(
@@ -268,16 +430,35 @@ export function useTrajectoryWindow(
         : buildTrajectory(projectTrajectoryWindow(pages.flat())),
     [pages],
   );
+  const navigable =
+    state.status !== 'loading' &&
+    !state.blocked &&
+    !state.olderFailure &&
+    !state.navigationError &&
+    !pendingRef.current;
 
   return {
     trajectory,
     status: state.status,
-    ...(state.error !== undefined ? { error: state.error } : {}),
+    error: state.error,
     loadedPages: state.loadedPages,
+    windowPages: state.pages?.length ?? 0,
     truncated: state.truncated,
-    ...(state.olderFailure !== undefined
-      ? { olderFailure: state.olderFailure }
-      : {}),
-    refresh: load,
+    olderFailure: state.olderFailure,
+    navigationError: state.navigationError,
+    mode: state.mode,
+    navigationVersion: state.navigationVersion,
+    canRefresh: Boolean(
+      loadPage &&
+        (state.status !== 'loading' || pendingRef.current?.kind !== 'latest'),
+    ),
+    canOlder: Boolean(navigable && state.nextCursor),
+    canNewer: Boolean(navigable && state.index > 0),
+    historyReleased: state.historyReleased,
+    bookmarks: state.cursors.length,
+    refresh,
+    older,
+    newer,
+    retry,
   };
 }

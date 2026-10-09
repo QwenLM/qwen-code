@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
+import { LOCATIONS } from '../flyway-migration-utils.js';
 
 const workflow = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
 const job = (name) => {
@@ -181,6 +182,93 @@ describe('SDK Java Flyway migration version guard', () => {
       expect(yml.on[event].paths).toContain(
         'scripts/check-flyway-migrations.js',
       );
+      expect(yml.on[event].paths).toContain(
+        'scripts/flyway-migration-utils.js',
+      );
+    }
+  });
+});
+
+// #13742: the guard above sees each PR merged with the main of the moment it
+// ran. This workflow re-checks every open PR whenever main gains a
+// migration, from the API's file lists, and marks each PR head with a status.
+describe('SDK Java Flyway re-check of open PRs', () => {
+  const recheck = parse(
+    readFileSync('.github/workflows/sdk-java-flyway-open-prs.yml', 'utf8'),
+  );
+  const job = recheck.jobs.recheck;
+  const moduleArgs = (run) =>
+    run.replace(/^node scripts\/check-flyway-[a-z-]+\.js /, '').split(' ');
+
+  it('runs after every push to main that changes a migration, and on a schedule', () => {
+    expect(Object.keys(recheck.on).sort()).toEqual([
+      'push',
+      'schedule',
+      'workflow_dispatch',
+    ]);
+    expect(recheck.on.schedule).toEqual([{ cron: '7,37 * * * *' }]);
+    expect(recheck.on.push.branches).toEqual(['main']);
+    // Every location the scripts scan, so a new one cannot go unwatched.
+    expect(recheck.on.push.paths).toEqual([
+      ...LOCATIONS.map(
+        (location) => `packages/sdk-java/*/${location.dir.join('/')}/**`,
+      ),
+      'scripts/check-flyway-open-prs.js',
+      'scripts/flyway-migration-utils.js',
+      '.github/workflows/sdk-java-flyway-open-prs.yml',
+    ]);
+    // A dispatch from another branch would run that branch's workflow.
+    expect(job.if).toBe(
+      "${{ github.repository == 'QwenLM/qwen-code' && github.ref == 'refs/heads/main' }}",
+    );
+  });
+
+  it('holds only the token scopes the status write needs', () => {
+    expect(recheck.permissions).toEqual({ contents: 'read' });
+    expect(job.permissions).toEqual({
+      contents: 'read',
+      'pull-requests': 'read',
+      statuses: 'write',
+    });
+    const checkout = job.steps.find((s) =>
+      String(s.uses ?? '').startsWith('actions/checkout'),
+    );
+    // main, not the triggering commit: a re-run must not write statuses
+    // computed against an older main over a newer run's.
+    expect(checkout.with).toEqual({
+      ref: 'main',
+      'persist-credentials': false,
+    });
+  });
+
+  it('lets a newer main queue behind a running re-check instead of cancelling it', () => {
+    // Keyed by ref: a skipped dispatch from another branch must not replace
+    // a pending main run.
+    expect(recheck.concurrency).toEqual({
+      group: 'sdk-java-flyway-open-prs-${{ github.ref }}',
+      'cancel-in-progress': false,
+    });
+  });
+
+  it('routes to the ECS pool behind the kill-switch', () => {
+    expect(job['runs-on']).toBe(
+      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-qwen"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
+    );
+  });
+
+  it('scans the same modules as the guard, each one level under packages/sdk-java', () => {
+    const guard = parse(workflow).jobs['flyway-migrations'].steps.find(
+      (s) => s.name === 'Check Flyway migration versions are unique',
+    ).run;
+    const run = job.steps.find((s) => s.name === 'Re-check open pull requests');
+    expect(run.run.startsWith('node scripts/check-flyway-open-prs.js ')).toBe(
+      true,
+    );
+    expect(run.env).toEqual({ GH_TOKEN: '${{ github.token }}' });
+    expect(moduleArgs(run.run)).toEqual(moduleArgs(guard));
+    // The push filter's `*` matches one path segment.
+    for (const module of moduleArgs(run.run)) {
+      expect(module).toMatch(/^packages\/sdk-java\/[^/]+$/);
     }
   });
 });
@@ -347,7 +435,12 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
 // files cannot drift apart (ci.yml's own copies are pinned the same way in
 // scripts/tests/review-worktree-cleanup-workflow.test.js).
 describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
-  const parsed = parse(workflow);
+  const docs = {
+    'sdk-java.yml': parse(workflow),
+    'sdk-java-flyway-open-prs.yml': parse(
+      readFileSync('.github/workflows/sdk-java-flyway-open-prs.yml', 'utf8'),
+    ),
+  };
   const ci = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
   const ciSteps = Object.values(ci.jobs).flatMap((job) => job.steps ?? []);
   const ciSweep = ciSteps.find(
@@ -357,16 +450,17 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
     (s) => s.name === 'Restore workspace ownership',
   )?.run;
   const poolJobs = [
-    'test',
-    'flyway-migrations',
-    'mysql-integration',
-    'daemon-e2e',
+    ['sdk-java.yml', 'test'],
+    ['sdk-java.yml', 'flyway-migrations'],
+    ['sdk-java.yml', 'mysql-integration'],
+    ['sdk-java.yml', 'daemon-e2e'],
+    ['sdk-java-flyway-open-prs.yml', 'recheck'],
   ];
 
   it.each(poolJobs)(
-    'restores ownership, sweeps stale .qwen, then checks out in the %s job',
-    (name) => {
-      const steps = parsed.jobs[name].steps;
+    'restores ownership, sweeps stale .qwen, then checks out in %s %s',
+    (file, name) => {
+      const steps = docs[file].jobs[name].steps;
       const names = steps.map((s) => s.name);
       const restoreIdx = names.indexOf('Restore workspace ownership');
       const sweepIdx = names.indexOf('Clean stale .qwen before checkout');
@@ -385,9 +479,9 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
   );
 
   it.each(poolJobs)(
-    'keeps the %s restore and sweep bodies byte-identical to ci.yml',
-    (name) => {
-      const steps = parsed.jobs[name].steps;
+    'keeps the %s %s restore and sweep bodies byte-identical to ci.yml',
+    (file, name) => {
+      const steps = docs[file].jobs[name].steps;
       const restore = steps.find(
         (s) => s.name === 'Restore workspace ownership',
       )?.run;
@@ -402,9 +496,9 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
   );
 
   it.each(poolJobs)(
-    'trusts the workspace as a git safe.directory in the %s job',
-    (name) => {
-      const restore = parsed.jobs[name].steps.find(
+    'trusts the workspace as a git safe.directory in %s %s',
+    (file, name) => {
+      const restore = docs[file].jobs[name].steps.find(
         (s) => s.name === 'Restore workspace ownership',
       )?.run;
       expect(restore).toContain(

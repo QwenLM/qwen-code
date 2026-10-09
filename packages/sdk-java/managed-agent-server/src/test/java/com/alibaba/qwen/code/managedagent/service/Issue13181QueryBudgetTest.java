@@ -50,13 +50,10 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import javax.sql.DataSource;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
@@ -64,8 +61,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
-import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter.DataWithMediaType;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 /**
  * Pinned query budgets for GitHub issue #13181: four managed-agent hot paths
@@ -458,8 +453,8 @@ class Issue13181QueryBudgetTest {
                 + " 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                + " workspace_id, actor_id, can_read, can_create) VALUES"
-                + " (?, 'workspace', ?, TRUE, TRUE)", tenant,
+                + " workspace_id, actor_id, role) VALUES"
+                + " (?, 'workspace', ?, 'OPERATOR')", tenant,
                 "actor".getBytes(StandardCharsets.UTF_8));
         String sessionId = fixture.tx.execute(status -> fixture.store
                 .insertWorkspaceSessionCommand(tenant, "actor",
@@ -469,23 +464,18 @@ class Issue13181QueryBudgetTest {
         long after = fixture.store.requireSession(tenant, sessionId)
                 .lastSequence();
         int events = 20;
-        RecordingEmitter emitter = new RecordingEmitter(60_000);
+        EventStreams.RecordingEmitter emitter = EventStreams.RecordingEmitter
+                .withTimeout(60_000);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            ManagedAgentProperties properties = new ManagedAgentProperties();
-            properties.getEvents().setPollInterval(Duration.ofSeconds(60));
-            properties.getEvents().setHeartbeatInterval(Duration.ofSeconds(60));
+            ManagedAgentProperties properties = EventStreams.pinnedProperties();
             // Longer than the completion budget, so no in-loop recheck can
             // fire mid-test even on a stalled runner.
             properties.getEvents()
                     .setReadGrantRecheckInterval(Duration.ofSeconds(60));
-            ManagedEventStreamService streams = new ManagedEventStreamService(
-                    fixture.service, fixture.hub, executor, properties) {
-                @Override
-                SseEmitter emitter() {
-                    return emitter;
-                }
-            };
+            ManagedEventStreamService streams = EventStreams.streams(
+                    fixture.service, fixture.hub, executor, properties,
+                    emitter);
             fixture.ledger.reset();
             streams.publicStream(tenant, "actor", sessionId, after);
             // The first in-loop grant check proves the hub subscription
@@ -525,19 +515,12 @@ class Issue13181QueryBudgetTest {
         long after = fixture.store.requireSession(tenant, sessionId)
                 .lastSequence();
         int events = 10;
-        RecordingEmitter emitter = new RecordingEmitter(60_000);
+        EventStreams.RecordingEmitter emitter = EventStreams.RecordingEmitter
+                .withTimeout(60_000);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            ManagedAgentProperties properties = new ManagedAgentProperties();
-            properties.getEvents().setPollInterval(Duration.ofSeconds(60));
-            properties.getEvents().setHeartbeatInterval(Duration.ofSeconds(60));
-            ManagedEventStreamService streams = new ManagedEventStreamService(
-                    fixture.service, fixture.hub, executor, properties) {
-                @Override
-                SseEmitter emitter() {
-                    return emitter;
-                }
-            };
+            ManagedEventStreamService streams = EventStreams.streams(
+                    fixture.service, fixture.hub, executor, emitter);
             streams.publicStream(tenant, null, sessionId, after);
             for (int index = 0; index < events; index++) {
                 fixture.store.appendPublicEventIfAbsent(tenant, sessionId,
@@ -677,8 +660,8 @@ class Issue13181QueryBudgetTest {
                 + " 'ACTIVE')", bound, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                + " workspace_id, actor_id, can_read, can_create) VALUES"
-                + " (?, 'workspace', ?, TRUE, TRUE)", bound,
+                + " workspace_id, actor_id, role) VALUES"
+                + " (?, 'workspace', ?, 'OPERATOR')", bound,
                 "actor".getBytes(StandardCharsets.UTF_8));
         List<String> boundIds = new ArrayList<>();
         for (int index = 0; index < 20; index++) {
@@ -762,12 +745,12 @@ class Issue13181QueryBudgetTest {
                 WorkspaceExecutionProfile.POLICY_REF);
         for (String actor : new String[] {"actor", "other"}) {
             fixture.jdbc.update("INSERT INTO managed_workspace_access"
-                    + " (tenant_id, workspace_id, actor_id, can_read,"
-                    + " can_create) VALUES (?, 'workspace', ?, TRUE, TRUE)",
+                    + " (tenant_id, workspace_id, actor_id, role)"
+                    + " VALUES (?, 'workspace', ?, 'OPERATOR')",
                     tenant, actor.getBytes(StandardCharsets.UTF_8));
         }
         // A second workspace where the actor reads but cannot create: its
-        // session exercises the grant's can_create term, and the page's two
+        // session exercises the grant's role term, and the page's two
         // workspaces make the grant batch's single-query shape
         // discriminable.
         fixture.jdbc.update("INSERT INTO managed_workspace_registry"
@@ -777,8 +760,8 @@ class Issue13181QueryBudgetTest {
                 + " ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         fixture.jdbc.update("INSERT INTO managed_workspace_access"
-                + " (tenant_id, workspace_id, actor_id, can_read,"
-                + " can_create) VALUES (?, 'workspace2', ?, TRUE, TRUE)",
+                + " (tenant_id, workspace_id, actor_id, role)"
+                + " VALUES (?, 'workspace2', ?, 'OPERATOR')",
                 tenant, "actor".getBytes(StandardCharsets.UTF_8));
         List<String> ids = new ArrayList<>();
         for (int index = 0; index < 7; index++) {
@@ -794,13 +777,13 @@ class Issue13181QueryBudgetTest {
                     .sessionId());
         }
         // One creator-owned session is closed: the shape gate fences it even
-        // for its creator. The workspace2 grant then drops can_create: its
+        // for its creator. The workspace2 grant then drops to READER: its
         // session exercises the grant term.
         fixture.jdbc.update("UPDATE managed_agent_session SET status ="
                 + " 'CLOSED' WHERE tenant_id = ? AND session_id = ?", tenant,
                 ids.get(3));
         fixture.jdbc.update("UPDATE managed_workspace_access SET"
-                + " can_create = FALSE WHERE tenant_id = ? AND workspace_id"
+                + " role = 'READER' WHERE tenant_id = ? AND workspace_id"
                 + " = 'workspace2'", tenant);
         fixture.ledger.reset();
         var page = fixture.service.listWebShellSessions(tenant, "actor",
@@ -1855,43 +1838,6 @@ class Issue13181QueryBudgetTest {
                             throw error.getCause();
                         }
                     });
-        }
-    }
-
-    /** Captures delivered event ids and stream completion. */
-    static final class RecordingEmitter extends SseEmitter {
-        private static final Pattern ID = Pattern.compile("(?m)^id:(\\d+)$");
-        final List<Long> ids = new CopyOnWriteArrayList<>();
-        final List<Throwable> failed = new CopyOnWriteArrayList<>();
-        final CountDownLatch completed = new CountDownLatch(1);
-
-        RecordingEmitter(long timeoutMillis) {
-            super(timeoutMillis);
-        }
-
-        @Override
-        public void send(SseEventBuilder builder) {
-            StringBuilder text = new StringBuilder();
-            for (DataWithMediaType part : builder.build()) {
-                if (part.getData() instanceof String value) {
-                    text.append(value);
-                }
-            }
-            Matcher matcher = ID.matcher(text);
-            if (matcher.find()) {
-                ids.add(Long.parseLong(matcher.group(1)));
-            }
-        }
-
-        @Override
-        public void complete() {
-            completed.countDown();
-        }
-
-        @Override
-        public void completeWithError(Throwable error) {
-            failed.add(error);
-            completed.countDown();
         }
     }
 }

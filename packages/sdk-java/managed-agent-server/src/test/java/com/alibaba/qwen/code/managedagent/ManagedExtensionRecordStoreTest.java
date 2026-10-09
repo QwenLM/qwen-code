@@ -224,7 +224,7 @@ class ManagedExtensionRecordStoreTest {
         ExtensionRecordJournal missingJournal = journal(missingChild);
         assertRefused("an acceptance without its child run", missingChild,
                 ManagedExtensionRecordStore.ERROR_REJECTED,
-                "must name a child agent run of this Session",
+                "must name a child Session run of this Session",
                 () -> missingJournal.commit(missingJournal.requestDomain(
                         "accept-1", "child_acceptance",
                         acceptance(resultResource, receiptResource, "accepted"),
@@ -303,7 +303,7 @@ class ManagedExtensionRecordStoreTest {
         namingShell.put("childRunId", "shell-x");
         assertRefused("an acceptance naming a background Shell", shellSession,
                 ManagedExtensionRecordStore.ERROR_REJECTED,
-                "must name a child agent run of this Session",
+                "must name a child Session run of this Session",
                 () -> shellJournal.commit(shellJournal.requestDomain(
                         "accept-1", "child_acceptance", namingShell,
                         List.of(resultResource, receiptResource), 1_000)));
@@ -405,6 +405,74 @@ class ManagedExtensionRecordStoreTest {
                         List.of(resultResource, receiptResource), 1_000)));
     }
 
+    /** A child agent body reshaped into the workflow kind (H4c): the pin
+     * names the workflow revision the launch runs. */
+    private static ObjectNode workflow(ObjectNode body) {
+        body.put("kind", "workflow");
+        ObjectNode definition = body.withObject("/run")
+                .withObject("/definition");
+        definition.put("definitionId", "workflow-review");
+        definition.put("definitionRevision", 3);
+        definition.put("definitionDigest", "9".repeat(64));
+        return body;
+    }
+
+    @Test
+    void commitsAWorkflowChainUnderTheChildSessionRules() throws Exception {
+        CommitResource inputResource = hookResource("input-w", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-w",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-w",
+                "managed-runtime-receipt",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        ObjectNode foreign = workflow(childAgent(sessionId, "sent",
+                "admitted", "intent", null, inputResource));
+        foreign.put("rootSessionId", "session-other");
+        assertRefused("a first-level workflow rooted at another Session",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "rootSessionId must be this Session for a first-level child",
+                () -> journal.commit(journal.requestDomain("agent-0",
+                        "child_run", foreign, List.of(inputResource), 500)));
+        settleChildSessionChain(sessionId, "sent", journal, inputResource,
+                resultResource, receiptResource,
+                ManagedExtensionRecordStoreTest::workflow);
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "child_run",
+                        "run-x"));
+        var task = records.findTask(TENANT, sessionId, taskId).orElseThrow();
+        assertThat(task.kind()).isEqualTo("workflow");
+        assertThat(task.projection().state()).isEqualTo("completed");
+        assertThat(task.projection().definitionRevision()).isEqualTo(3L);
+        // The acceptance gate and its reverse bind a workflow run exactly
+        // as they bind a child agent.
+        ObjectNode accepted = workflow(childAgent(sessionId, "sent",
+                "settled", "settled", "binding-1", inputResource));
+        accepted.withObject("/run").put("dispatchId", "dispatch-1");
+        accepted.put("childSessionId", "session-child");
+        accepted.put("stopReason", "completed");
+        accepted.set("resultRef", hookRef(resultResource));
+        accepted.set("terminalReceiptRef", hookRef(receiptResource));
+        accepted.withObject("/run").withObject("/delivery")
+                .put("state", "accepted");
+        assertRefused("a workflow delivery reaching accepted ahead of its"
+                        + " acceptance", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "reaches accepted or consumed only with its acceptance record",
+                () -> journal.commit(journal.requestDomain("agent-5",
+                        "child_run", accepted, List.of(), 5_000)));
+        commitDomain(journal, "accept-1", "child_acceptance",
+                acceptance(resultResource, receiptResource, "accepted"),
+                List.of(resultResource, receiptResource));
+        commitDomain(journal, "agent-6", "child_run", accepted, List.of());
+        assertThat(records.listRecords(TENANT, sessionId, "child_run")
+                .get(0).required("run").required("delivery")
+                .required("state").textValue()).isEqualTo("accepted");
+    }
+
     @Test
     void refusesAFirstLevelChildAgentRootedAtAnotherSession()
             throws Exception {
@@ -456,26 +524,111 @@ class ManagedExtensionRecordStoreTest {
                 "child_acceptance")).hasSize(1);
     }
 
+    @Test
+    void gatesAChildRunDeliveryOnItsAcceptanceRecord() throws Exception {
+        CommitResource inputResource = hookResource("input-g", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-g",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-g",
+                "managed-runtime-receipt",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        settleChildAgentChain(sessionId, "sent", journal, inputResource,
+                resultResource, receiptResource);
+        // The acceptance is authoritative: accepted/consumed before it is
+        // refused, unknown/rejected after it is refused, and the relay's
+        // accepting -> unknown retry stays legal while it is absent.
+        ObjectNode unknown = childAgent(sessionId, "sent", "settled",
+                "settled", "binding-1", inputResource);
+        unknown.withObject("/run").put("dispatchId", "dispatch-1");
+        unknown.put("childSessionId", "session-child");
+        unknown.put("stopReason", "completed");
+        unknown.set("resultRef", hookRef(resultResource));
+        unknown.set("terminalReceiptRef", hookRef(receiptResource));
+        unknown.withObject("/run").withObject("/delivery")
+                .put("state", "unknown");
+        ObjectNode accepted = unknown.deepCopy();
+        accepted.withObject("/run").withObject("/delivery").put("state",
+                "accepted");
+        assertRefused("a delivery reaching accepted ahead of its acceptance",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "reaches accepted or consumed only with its acceptance record",
+                () -> journal.commit(journal.requestDomain("agent-5",
+                        "child_run", accepted, List.of(), 5_000)));
+        commitDomain(journal, "agent-6", "child_run", unknown, List.of());
+        assertRefused("a delivery still reaching accepted without it",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "reaches accepted or consumed only with its acceptance record",
+                () -> journal.commit(journal.requestDomain("agent-7",
+                        "child_run", accepted, List.of(), 7_000)));
+        // The same requirement's second pre-acceptance disjunct:
+        // `consumed` past the first commit must also refuse.
+        ObjectNode consumedPre = unknown.deepCopy();
+        consumedPre.withObject("/run").withObject("/delivery").put("state",
+                "consumed");
+        assertRefused("a delivery reaching consumed without its acceptance",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "reaches accepted or consumed only with its acceptance record",
+                () -> journal.commit(journal.requestDomain("agent-7b",
+                        "child_run", consumedPre, List.of(), 7_500)));
+        commitDomain(journal, "accept-1", "child_acceptance",
+                acceptance(resultResource, receiptResource, "accepted"),
+                List.of(resultResource, receiptResource));
+        ObjectNode rejected = unknown.deepCopy();
+        rejected.withObject("/run").withObject("/delivery").put("state",
+                "rejected");
+        assertRefused("a delivery retracting after its acceptance",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "cannot go unknown or rejected after its acceptance record",
+                () -> journal.commit(journal.requestDomain("agent-8",
+                        "child_run", rejected, List.of(), 8_000)));
+        commitDomain(journal, "agent-9", "child_run", accepted, List.of());
+        // And the consumed-with-acceptance commit lands (settlement
+        // vocabulary, not a refusal).
+        ObjectNode consumed = unknown.deepCopy();
+        consumed.withObject("/run").withObject("/delivery").put("state",
+                "consumed");
+        commitDomain(journal, "agent-9b", "child_run", consumed, List.of());
+        assertThat(records.listRecords(TENANT, sessionId, "child_run")
+                .get(0).required("run").required("delivery")
+                .required("state").textValue()).isEqualTo("consumed");
+    }
+
     /** Commits a child agent through its settled result. */
     private static void settleChildAgentChain(String sessionId,
             String completion, ExtensionRecordJournal journal,
             CommitResource inputResource, CommitResource resultResource,
             CommitResource receiptResource) {
+        settleChildSessionChain(sessionId, completion, journal,
+                inputResource, resultResource, receiptResource,
+                body -> body);
+    }
+
+    /** Commits a child Session run through its settled result, each body
+     * shaped into its kind by {@code shape}. */
+    private static void settleChildSessionChain(String sessionId,
+            String completion, ExtensionRecordJournal journal,
+            CommitResource inputResource, CommitResource resultResource,
+            CommitResource receiptResource,
+            UnaryOperator<ObjectNode> shape) {
         commitDomain(journal, "agent-1", "child_run",
-                childAgent(sessionId, completion, "admitted", "intent", null,
-                        inputResource),
+                shape.apply(childAgent(sessionId, completion, "admitted",
+                        "intent", null, inputResource)),
                 List.of(inputResource));
-        ObjectNode dispatching = childAgent(sessionId, completion, "running",
-                "dispatch_started", "binding-1", inputResource);
+        ObjectNode dispatching = shape.apply(childAgent(sessionId, completion,
+                "running", "dispatch_started", "binding-1", inputResource));
         dispatching.withObject("/run").put("dispatchId", "dispatch-1");
         commitDomain(journal, "agent-2", "child_run", dispatching, List.of());
-        ObjectNode attached = childAgent(sessionId, completion, "running",
-                "running_attached", "binding-1", inputResource);
+        ObjectNode attached = shape.apply(childAgent(sessionId, completion,
+                "running", "running_attached", "binding-1", inputResource));
         attached.withObject("/run").put("dispatchId", "dispatch-1");
         attached.put("childSessionId", "session-child");
         commitDomain(journal, "agent-3", "child_run", attached, List.of());
-        ObjectNode settled = childAgent(sessionId, completion, "settled",
-                "settled", "binding-1", inputResource);
+        ObjectNode settled = shape.apply(childAgent(sessionId, completion,
+                "settled", "settled", "binding-1", inputResource));
         settled.withObject("/run").put("dispatchId", "dispatch-1");
         settled.put("childSessionId", "session-child");
         settled.put("stopReason", "completed");
@@ -636,6 +789,12 @@ class ManagedExtensionRecordStoreTest {
                         List.of(result, seg1), 1_000)));
         String proofWs = UUID.randomUUID().toString();
         ExtensionRecordJournal noProof = journal(proofWs);
+        // H5c: a delivery binds to its committed route, so the proof
+        // Session opens the route first.
+        var proofRoute = noProof.requestDomain("route-1", "channel_route",
+                channelRoute(templates, policy), List.of(policy), 500);
+        noProof.commit(proofRoute);
+        noProof.committed(proofRoute);
         var base = noProof.requestDomain("delivery-1", "channel_delivery",
                 channelDelivery(templates, result, seg1, seg2),
                 List.of(result, seg1, seg2), 1_000);
@@ -1417,6 +1576,68 @@ class ManagedExtensionRecordStoreTest {
             assertThat(new ManagedExtensionRecordStore(jdbc, state)
                     .latestHookRegistration(TENANT, sessionId)).contains(newer);
         }
+    }
+
+    @Test
+    void commitsAChannelDeliveryOnlyAgainstItsCommittedRoute() throws Exception {
+        JsonNode fixtures = ManagedChannelRecordContractTest.fixtures();
+        CommitResource policy = inline("{\"adapter\":\"email\"}",
+                "managed-channel-policy");
+        CommitResource result = inline("{\"text\":\"ok\"}",
+                "managed-channel-reply");
+        CommitResource seg1 = inline("part one", "managed-channel-segment");
+        CommitResource seg2 = inline("part two", "managed-channel-segment");
+        ObjectNode route = fixtures.get("templates").get("channel_route")
+                .deepCopy();
+        route.set("policyRef", hookRef(policy));
+        ObjectNode delivery = fixtures.get("templates").get("channel_delivery")
+                .deepCopy();
+        delivery.set("contentRef", hookRef(result));
+        ((ObjectNode) delivery.get("segments").get(0)).set("contentRef",
+                hookRef(seg1));
+        ((ObjectNode) delivery.get("segments").get(1)).set("contentRef",
+                hookRef(seg2));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        // H5c: no route yet, no delivery.
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain(
+                "delivery-0", "channel_delivery", delivery,
+                List.of(result, seg1, seg2), 1000)))
+                .hasMessageContaining("pinned revision");
+        commitDomain(journal, "route-1", "channel_route", route,
+                List.of(policy));
+        // The route is at revision 3; a plan against another revision is
+        // refused.
+        ObjectNode stale = delivery.deepCopy();
+        stale.put("routeRevision", 2);
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain(
+                "delivery-stale", "channel_delivery", stale,
+                List.of(result, seg1, seg2), 1000)))
+                .hasMessageContaining("pinned revision");
+        commitDomain(journal, "delivery-1", "channel_delivery", delivery,
+                List.of(result, seg1, seg2));
+        assertThat(records.listRecords(TENANT, sessionId, "channel_delivery"))
+                .extracting(record -> record.get("deliveryId").asText())
+                .containsExactly("delivery-1");
+        // A retired route admits no new delivery.
+        ObjectNode retired = route.deepCopy();
+        retired.withObject("/run").put("state", "cancelled");
+        commitDomain(journal, "route-2", "channel_route", retired, List.of());
+        ObjectNode second = delivery.deepCopy();
+        second.put("deliveryId", "delivery-2");
+        second.withObject("/run").put("effectId", "delivery-2")
+                .put("deliveryId", "delivery-2");
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain(
+                "delivery-2", "channel_delivery", second,
+                List.of(result, seg1, seg2), 2000)))
+                .hasMessageContaining("pinned revision");
+    }
+
+    private static CommitResource inline(String text, String kind) {
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        return new CommitResource(ExtensionRecordJournal.resourceId(bytes),
+                kind, 1, bytes.length, ExtensionRecordJournal.sha256(bytes),
+                Base64.getEncoder().encodeToString(bytes));
     }
 
     private static void commitDomain(ExtensionRecordJournal journal, String commandId,

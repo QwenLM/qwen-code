@@ -383,6 +383,15 @@ export class HostedHookSession {
     }
   }
 
+  /**
+   * Whether this Session's Hook owner currently holds the Workspace
+   * mount — the tool turn must not mistake that hold for its own
+   * acquisition-free state when a foreground child would need the mount.
+   */
+  get mountHeld(): boolean {
+    return this.acquired;
+  }
+
   get hasPendingOperations(): boolean {
     return this.executions().some((record) => {
       if (record.run.state === 'recovery_blocked') return true;
