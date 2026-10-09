@@ -59,7 +59,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description POST SSE consumed through fetch response.body. An afterSequence below the replay floor ends the stream with one agent.session.resync_required frame instead of a 409; reload the transcript and resume after its lastSequence. */
+        /** @description POST SSE consumed through fetch response.body. An afterSequence below the replay floor ends the stream with one agent.session.resync_required frame instead of a 409 only while the Snapshot backs the floor (replay_floor_sequence <= snapshot_through_sequence); a stream reconciliation discards the Snapshot without lowering the floor, and during that rebuild such a cursor is served from the retained events. On the resync frame, reload the transcript and resume after its lastSequence. */
         post: operations["webShellStreamEvents"];
         delete?: never;
         options?: never;
@@ -76,7 +76,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns and cancel its running Turns under the same opt-in, and may rename the Session, while the creator currently holds Workspace read and create grants on a registry row whose state is ACTIVE and the Session is an active, undeleted qwen-code Session on the frozen execution profile; Workspace close follows its separate close capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close; controlled same-Workspace cwd changes ship through the durable cwd_change operations (v1.32). The per-caller workspaceTurns capability on this surface advertises the same rule. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
+        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. Any caller holding the OPERATOR role may submit later Turns and rename the Session under the same opt-in, while the Workspace registry row stays ACTIVE and still backs the binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is an active, undeleted qwen-code Session on the frozen execution profile; Workspace close follows its separate close capability and lifecycle admission; the same caller may cancel a running Turn (its delivery re-checks no grants); archive and unarchive follow their separate retention capabilities after reliable Workspace close; delete supports either L3 idle ACTIVE files Sessions or L2 CLOSED/ARCHIVED Sessions; controlled same-Workspace cwd changes ship through the durable cwd_change operations (v1.32). The per-caller workspaceTurns capability on this surface advertises the same submit/rename admission rule; it does not gate cancellation. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
         post: operations["webShellCreateSession"];
         delete?: never;
         options?: never;
@@ -142,7 +142,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description W2, implemented: the camelCase twin of the public changeSessionCwd with the matched refusal order: 400 invalid_request for a missing or malformed field; 401 actor_required without a trusted actor; 400 invalid_idempotency_key for a malformed idempotencyKey — with two documented divergences: a key over 128 characters is refused during request validation with 400 invalid_request before the service's check, and a blank idempotencyKey is refused there too, while the public header answers 400 invalid_idempotency_key for both shapes; 400 invalid_cwd for a lexical violation and 400 invalid_request for an expectedContextRevision below 1; 404 session_not_found for an unknown Session id; 400 unsupported_feature for an unbound Session; 404 session_not_found for an unreadable Session and 403 session_operation_forbidden when a readable actor is not the creator; 409 idempotency_conflict when one key carries different content; 409 workspace_unavailable when execution is disabled; 404 session_not_found for a deleted Session — a completed change under the same key still replays instead; then 409 session_state_conflict, 409 workspace_unavailable from moved Registry facts, 409 context_revision_conflict and 409 session_context_busy exactly like the public surface. Poll the operation or await session.context.changed; do not treat 202 as activation. */
+        /** @description W2, implemented: the camelCase twin of the public changeSessionCwd with the matched refusal order: 400 invalid_request for a missing or malformed field; 401 actor_required without a trusted actor; 400 invalid_idempotency_key for a malformed idempotencyKey — with two documented divergences: a key over 128 characters is refused during request validation with 400 invalid_request before the service's check, and a blank idempotencyKey is refused there too, while the public header answers 400 invalid_idempotency_key for both shapes; 400 invalid_cwd for a lexical violation and 400 invalid_request for an expectedContextRevision below 1; 404 session_not_found for an unknown Session id; 400 unsupported_feature for an unbound Session; 404 session_not_found for an unreadable Session; 409 idempotency_conflict when one key carries different content, and a completed change under the same key always replays instead, before the role refusal; 403 session_operation_forbidden when a readable actor's Workspace role is below OPERATOR; 409 workspace_unavailable when execution is disabled; 404 session_not_found for a deleted Session; then 409 session_state_conflict, 409 workspace_unavailable from moved Registry facts (the recorded create-command actor's grant included, and the settlement re-checks the V56-persisted initiator the same way, so demoting either actor fails the operation, exactly like the public surface), 409 context_revision_conflict and 409 session_context_busy. Poll the operation or await session.context.changed; do not treat 202 as activation. */
         post: operations["webShellChangeCwd"];
         delete?: never;
         options?: never;
@@ -175,7 +175,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision. */
+        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["queryWebShellActions"];
         delete?: never;
         options?: never;
@@ -192,7 +192,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision. */
+        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["getWebShellAction"];
         delete?: never;
         options?: never;
@@ -209,7 +209,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision. */
+        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["respondWebShellAction"];
         delete?: never;
         options?: never;
@@ -226,7 +226,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Uses the same close admission, creator authorization and durable cleanup semantics as the public close route. sessionClose describes deployment support; it does not grant actor authorization. */
+        /** @description Uses the same close admission, owner authorization and durable cleanup semantics as the public close route. sessionClose describes deployment support; it does not grant actor authorization. New L3 Workspace close operations run SessionEnd only, retain data, and finish after durable effects verification and original Runtime stop. SessionDelete is reserved for ACTIVE delete. Missing protocol support rejects new admission; previously admitted operations retain their saved protocol. Unknown outcomes remain recovery_blocked. */
         post: operations["closeWebShellSession"];
         delete?: never;
         options?: never;
@@ -243,7 +243,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Workspace-bound archive requires a closed Session with completed reliable-close evidence and the creator with current read access. It completes atomically during admission, preserves data and the permanent close fence, and calls neither Harness nor Runtime. A readable non-creator returns 403; missing close evidence returns 409 workspace_unavailable. */
+        /** @description Workspace-bound archive requires a closed Session with completed reliable-close evidence and the Session's recorded owner with current read access. It completes atomically during admission, preserves data and the permanent close fence, and calls neither Harness nor Runtime. A readable non-owner returns 403; missing close evidence returns 409 workspace_unavailable. */
         post: operations["archiveWebShellSession"];
         delete?: never;
         options?: never;
@@ -260,7 +260,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Workspace-bound delete accepts only closed or archived Sessions with completed reliable-close evidence and the creator with current read access. Active deletion returns 409 session_state_conflict. Completion atomically retires private recovery/publication access with the tombstone, operation receipt and terminal event; it calls neither Harness nor Runtime and erases no shared Workspace files or backup bytes. Operations remain readable under current read grants; the same authorized actor/key can replay after deletion. A readable non-creator returns 403; missing close evidence returns 409 workspace_unavailable. */
+        /** @description Workspace-bound ACTIVE deletion supports idle hosted-workspace-files/1 Sessions when L3 lifecycle protocol and reliable Runtime stop are available. Only the Session's recorded owner (owner_actor_key, with the pre-V40 creator fallback) with current read access may admit it; accepted, running, cancelling or approval-waiting Turns return 409 turn_active. Admission persists a lifecycle-only execution fence and a versioned actor-scoped operation. SessionEnd settles before SessionDelete; committed Hook results are verified in Session Store and saved before permanent draining, attachment cleanup and original worker stop. Unknown outcomes or missing original stop evidence remain recovery_blocked and are never replayed on a replacement worker. CLOSED/ARCHIVED deletion retains L2: completed reliable-close evidence is required and no Harness or Hook is invoked. Completion atomically commits retirement, tombstone, receipt and terminal event, retaining shared Workspace files and neighboring holders. Authorized same-actor/key replays return the original operation, including after deletion; a readable non-owner returns 403. Missing lifecycle capability or close evidence returns 409 workspace_unavailable. */
         post: operations["deleteWebShellSession"];
         delete?: never;
         options?: never;
@@ -390,7 +390,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the creator with current read access (404 unreadable, 403 readable non-creator). Bound keys are tenant/Session/actor scoped. Replay returns the current visible Session without repeating the mutation; a deleted Session returns 404. The permanent close fence is preserved and no Harness or Runtime call is made. */
+        /** @description Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the Session's recorded owner with current read access (404 unreadable, 403 readable non-owner). Bound keys are tenant/Session/actor scoped. Replay returns the current visible Session without repeating the mutation; a deleted Session returns 404. The permanent close fence is preserved and no Harness or Runtime call is made. */
         post: operations["unarchiveWebShellSession"];
         delete?: never;
         options?: never;
@@ -530,14 +530,14 @@ export interface components {
             /** @default false */
             actions: boolean;
             /**
-             * @description True when the caller may submit later Turns of this Workspace-bound Session, cancel its running Turns and rename it: the deployment enables Workspace files, the caller created the Session and currently holds Workspace read and create grants on a registry row whose state is ACTIVE, and the Session is an active qwen-code Session on the frozen execution profile. False for every other caller and for unbound Sessions, which do not use it.
+             * @description True when the caller may submit later Turns of this Workspace-bound Session or rename it: the deployment enables Workspace files, the caller holds the OPERATOR role on a Workspace registry row whose state is ACTIVE and still backs the Session's binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is an active qwen-code Session on the frozen execution profile. Cancelling only aborts work already running, so an OPERATOR caller may cancel a running Turn even when this is false; the capability does not gate cancellation. False for every other caller and for unbound Sessions, which do not use it.
              * @default false
              */
-            workspaceTurns?: boolean;
+            workspaceTurns: boolean;
             tasks: boolean;
             artifacts: boolean;
             /**
-             * @description Deployment support for close independently of archive/delete. Admission also requires creator ownership and current read access for a bound Session.
+             * @description Deployment support for close independently of archive/delete. Admission also requires Session ownership and current read access for a bound Session.
              * @default false
              */
             sessionClose?: boolean;
@@ -552,7 +552,7 @@ export interface components {
              */
             sessionUnarchive?: boolean;
             /**
-             * @description Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply.
+             * @description Optional support capability. ACTIVE Workspace files Sessions require L3 lifecycle protocol and reliable original Runtime stop; CLOSED/ARCHIVED Sessions use independent L2 close evidence. Current creator/read authorization and idle/source-state admission checks still apply. The aggregate session lifecycle capability is unchanged.
              * @default false
              */
             sessionDelete?: boolean;
@@ -689,7 +689,7 @@ export interface components {
                  * @default false
                  */
                 workspaceContext: boolean;
-                /** @description Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; the Session creator may submit and cancel later Turns under the same opt-in, while close follows its separate capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close. */
+                /** @description Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; callers holding the OPERATOR role may submit later Turns or rename under the same opt-in while the registry row stays ACTIVE and still backs the Session's binding and the actor recorded by the Workspace create command keeps OPERATOR or above, and may cancel a running Turn (its delivery re-checks no grants), while close follows its separate capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close. */
                 workspaceBinding: boolean;
             };
             /** @description Same authorized explicit default as default_workspace, including when outside this page; null if absent or not creatable. A non-null default is active and has canCreateSession=true. */
@@ -1534,7 +1534,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
-            /** @description Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or a Session created before the V40 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL. The tenant filter's 403 actor_scope_mismatch also applies on this route. */
+            /** @description Responding requires the Session's recorded owner or a Workspace OPERATOR (action_forbidden). An unbound Session with no recorded creator and no recorded create command (anonymous open-mode creation, or an unbound Session created before the V40 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL; a bound Session with no recorded owner answers through the create-command actor recorded for it, or through the Workspace role arm. The tenant filter's 403 actor_scope_mismatch also applies on this route. */
             403: components["responses"]["Forbidden"];
             /** @description Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found). */
             404: components["responses"]["NotFound"];

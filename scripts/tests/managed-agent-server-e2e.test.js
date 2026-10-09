@@ -156,9 +156,18 @@ describe('managed-agent-server e2e runner', () => {
   // runner start the durable path off Linux and fail at server startup while
   // `npm run test:scripts` stayed green: trusted recovery is pinned off at
   // both Spring launch sites, and durable local process only ever follows the
-  // workspace-Turn modes.
+  // runtimeTakeover modes.
   it('pins the runtime recovery flags for every runner mode', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toContain(
+      'const runtimeTakeover = inflightFailover || continuationFailover;',
+    );
+    expect(
+      source.match(
+        /if \(runtimeTakeover && !harnessOnly && process\.platform !== 'linux'\)/,
+      ),
+      'only orphaned Runtime takeover modes must require Linux',
+    ).not.toBeNull();
     expect(
       source.match(
         /QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY:\s*'false'/g,
@@ -169,7 +178,13 @@ describe('managed-agent-server e2e runner', () => {
       source.match(
         /QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:\s*'false'/g,
       ),
-      'both non-workspaceTurns branches must pin durable local process off',
+      'both non-runtimeTakeover branches must pin durable local process off',
+    ).toHaveLength(2);
+    expect(
+      source.match(
+        /\.\.\.\(runtimeTakeover\s*\?\s*\{\s*QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:\s*'true'/g,
+      ),
+      'both durable local process branches must follow runtimeTakeover',
     ).toHaveLength(2);
   });
 
@@ -180,6 +195,21 @@ describe('managed-agent-server e2e runner', () => {
   // that reads like a takeover defect instead of a config asymmetry.
   it('pins the G0 workspace admission at both launch sites', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toContain(
+      'const workspaceTurns = runtimeTakeover || bigOutput;',
+    );
+    expect(
+      source.match(
+        /\.\.\.\(workspaceTurns\s*\?\s*\{\s*workspace:\s*\{\s*workspace_id:\s*boundWorkspaceId\s*\}\s*\}/,
+      ),
+      'every workspaceTurns mode must create a Workspace-bound Session',
+    ).not.toBeNull();
+    expect(
+      source.match(
+        /directory === runtimeState && workspaceTurns\s*\?\s*\{\s*mode:\s*0o700\s*\}/,
+      ),
+      'every workspaceTurns mode must keep Runtime state owner-only',
+    ).not.toBeNull();
     expect(
       source.match(
         /QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader/g,
@@ -224,19 +254,25 @@ describe('managed-agent-server e2e runner', () => {
     // conditionals and satisfied every count. These negative pins are the
     // symmetry witness. The windows stay short so the gates that must stay
     // (durable local process, the Linux check, the 0700 state dir, the
-    // unbound create body) and the comment mentioning workspaceTurns do not
+    // unbound create body) and comments mentioning either predicate do not
     // trip them.
-    for (const reGated of [
-      /workspaceTurns[\s\S]{0,120}?QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER/,
-      /workspaceTurns[\s\S]{0,120}?QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED/,
-      /workspaceTurns[\s\S]{0,120}?--managed-runtime-broker-url/,
-      /workspaceTurns[\s\S]{0,120}?workspaceMount/,
-      /if \(workspaceTurns\) \{\s*runMysql\(/,
-    ]) {
-      expect(
-        source.match(reGated),
-        `G0 admission re-gated behind workspaceTurns: ${reGated}`,
-      ).toBeNull();
+    for (const predicate of ['workspaceTurns', 'runtimeTakeover']) {
+      for (const reGated of [
+        new RegExp(
+          `${predicate}[\\s\\S]{0,120}?QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER`,
+        ),
+        new RegExp(
+          `${predicate}[\\s\\S]{0,120}?QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED`,
+        ),
+        new RegExp(`${predicate}[\\s\\S]{0,120}?--managed-runtime-broker-url`),
+        new RegExp(`${predicate}[\\s\\S]{0,120}?workspaceMount`),
+        new RegExp(`if \\(${predicate}\\) \\{\\s*runMysql\\(`),
+      ]) {
+        expect(
+          source.match(reGated),
+          `G0 admission re-gated behind ${predicate}: ${reGated}`,
+        ).toBeNull();
+      }
     }
   });
 

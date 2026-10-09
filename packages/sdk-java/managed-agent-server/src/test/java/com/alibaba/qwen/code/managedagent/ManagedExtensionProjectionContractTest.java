@@ -44,7 +44,10 @@ class ManagedExtensionProjectionContractTest {
                                 JSON.createObjectNode().put("kind", "shell")))
                         .put("child_agent", body.taskKindOf().apply(
                                 JSON.createObjectNode()
-                                        .put("kind", "child_agent"))));
+                                        .put("kind", "child_agent")))
+                        .put("workflow", body.taskKindOf().apply(
+                                JSON.createObjectNode()
+                                        .put("kind", "workflow"))));
             } else {
                 // Probe with a record-shaped node carrying the identity
                 // fields a mapping could regress into reading — the real
