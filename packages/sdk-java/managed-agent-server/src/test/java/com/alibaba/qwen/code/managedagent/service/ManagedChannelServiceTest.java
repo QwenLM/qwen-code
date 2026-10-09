@@ -96,8 +96,8 @@ class ManagedChannelServiceTest {
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONFIG_REF,
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT IGNORE INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES (?, ?, ?, TRUE, TRUE)",
+                        + " workspace_id, actor_id, role)"
+                        + " VALUES (?, ?, ?, 'OPERATOR')",
                 TENANT, WORKSPACE, ACTOR.getBytes(StandardCharsets.UTF_8));
         channel = "mail-" + UUID.randomUUID();
         harness = new RecordingHarness((sessionId, deliveryId, state) -> {

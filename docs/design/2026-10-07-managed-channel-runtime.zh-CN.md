@@ -88,7 +88,7 @@ H5a 钉住了*可以提交什么*：以 `routeId` 为链身份、各修订携带
 - `packages/cli/src/serve/`：`hosted-channel-session.ts`（新漏斗）、`hosted-harness-session.ts`（漏斗接线、操作路由、`channel` input 的 wake 放行、结束与打开时的回复规划、关闭时结算），`hosted-wake-intake.ts` 不变。
 - `packages/cli/src/commands/channel/`：`managed-email.ts`（新子命令）、`managed-channel-client.ts`（可信面的 HTTP 客户端）、在 `channel.ts` 注册。
 - `packages/channels/email/src/`：`managed-email-adapter.ts` 与 `managed-state.ts`（新增），从 `index.ts` 导出；基于既有 fake 的测试。
-- `packages/sdk-java/managed-agent-server`：`V53__managed_channel_instance_binding.sql`、`ChannelInstanceStore`、`ManagedChannelService`、`ManagedChannelAdapterController`（内部）、`ManagedChannelController`（公开）、`HarnessConnector.runChannelOperation` 及其客户端/连接器实现、`ManagedExtensionRecordStore` 中的跨记录检查、租户过滤器前缀、OpenAPI 翻为 `partial`、`ApiModels` 记录与测试（store、service、controller、contract）。
+- `packages/sdk-java/managed-agent-server`：`V55__managed_channel_instance_binding.sql`、`ChannelInstanceStore`、`ManagedChannelService`、`ManagedChannelAdapterController`（内部）、`ManagedChannelController`（公开）、`HarnessConnector.runChannelOperation` 及其客户端/连接器实现、`ManagedExtensionRecordStore` 中的跨记录检查、租户过滤器前缀、OpenAPI 翻为 `partial`、`ApiModels` 记录与测试（store、service、controller、contract）。
 - `packages/sdk-java/qwencode`：`HostedHarnessClient.runChannelOperation`。
 - 本设计双语版本；H5 设计中切片表的状态（双语）。
 

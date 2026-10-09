@@ -270,8 +270,8 @@ class ManagedAgentApiContractTest {
         jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, display_name,"
                 + " workspace_generation, storage_id, config_ref, policy_ref, state)"
                 + " VALUES (?, 'workspace', 'Workspace', 1, 'storage', 'config', 'policy', 'ACTIVE')", tenant);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                + " VALUES (?, 'workspace', ?, TRUE, TRUE)", tenant, actor.actorId().getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, actor.actorId().getBytes(StandardCharsets.UTF_8));
         jdbc.update("INSERT INTO qwen_runtime_storage_fence VALUES (?, ?, ?, 'storage', ?)",
                 JdbcRuntimeBindingRepository.storageFenceKey(tenant), JdbcRuntimeBindingRepository.storageFenceKey("storage"),
                 tenant, UUID.randomUUID().toString());
@@ -1039,8 +1039,8 @@ class ManagedAgentApiContractTest {
                             + " 'ACTIVE')", workspaceTenant, workspaceId,
                     workspaceId);
             jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                            + " workspace_id, actor_id, can_read, can_create)"
-                            + " VALUES (?, ?, ?, TRUE, TRUE)", workspaceTenant,
+                            + " workspace_id, actor_id, role)"
+                            + " VALUES (?, ?, ?, 'OPERATOR')", workspaceTenant,
                     workspaceId, actor.actorId().getBytes(StandardCharsets.UTF_8));
         }
         jdbc.update("INSERT INTO managed_workspace_default"
@@ -1603,8 +1603,8 @@ class ManagedAgentApiContractTest {
                         + " VALUES (?, 'ws-channel', 1, 'storage', 'Channel',"
                         + " 'config', 'policy', 'ACTIVE')", channelTenant);
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES (?, 'ws-channel', ?, TRUE, TRUE)",
+                        + " workspace_id, actor_id, role)"
+                        + " VALUES (?, 'ws-channel', ?, 'OPERATOR')",
                 channelTenant,
                 reader.actorId().getBytes(StandardCharsets.UTF_8));
         jdbc.update("INSERT INTO qwen_managed_channel_instance (tenant_id,"

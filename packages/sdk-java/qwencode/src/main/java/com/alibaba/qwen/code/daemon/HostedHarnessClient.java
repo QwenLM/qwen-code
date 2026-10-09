@@ -323,6 +323,41 @@ public final class HostedHarnessClient implements AutoCloseable {
     }
 
     /**
+     * H4b: one child operation onto the Session's journal (the control
+     * plane's verbs). The Hosted side commits through its funnel and
+     * answers 202 once settled; anything ambiguous is an unknown outcome
+     * for the caller to retry, never to guess at.
+     */
+    public void runChildOperation(HarnessSessionRef session,
+            Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/children/operations";
+        HttpSupport.Response response = sendMutation(
+                sessionPath(ref.getHarnessSessionId())
+                        + "/children/operations",
+                body, ref.getHarnessClientId(), operation);
+        try {
+            DaemonClient.requireStatus(response, 202, operation);
+            Map<String, Object> json = JsonSupport.parseObject(
+                    response.getBody(), "child operation response");
+            String state = JsonSupport.requiredString(json, "state",
+                    "child operation");
+            if (!"settled".equals(state)) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness did not settle the child operation");
+            }
+            String operationId = JsonSupport.requiredString(json,
+                    "operationId", "child operation");
+            if (!operationId.equals(body.get("operationId"))) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness settled a different child operation");
+            }
+        } catch (DaemonProtocolException e) {
+            throw new MutationOutcomeUnknownException(operation, e);
+        }
+    }
+
+    /**
      * H5b/H5c: one channel operation onto the Session's journal (the control
      * plane's verbs). The Hosted side commits through its funnel and answers
      * 202 with the settled result; a non-2xx answer surfaces as a

@@ -107,8 +107,10 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
     }),
   };
 });
-vi.mock('../../core/environmentContext.js', () => ({
-  SYSTEM_REMINDER_OPEN: '<system-reminder>',
+vi.mock('../../core/environmentContext.js', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('../../core/environmentContext.js')
+  >()),
   getEnvironmentContext: vi.fn().mockResolvedValue([{ text: 'Env Context' }]),
   getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
     [

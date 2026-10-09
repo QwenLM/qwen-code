@@ -79,9 +79,8 @@ class WorkspaceRuntimeResolutionPivotTest {
                             WorkspaceExecutionProfile.CONFIG_REF,
                             WorkspaceExecutionProfile.POLICY_REF);
                     jdbc.update("INSERT INTO managed_workspace_access"
-                            + " (tenant_id, workspace_id, actor_id,"
-                            + " can_read, can_create) VALUES (?, ?, ?,"
-                            + " TRUE, TRUE)", TENANT, WS,
+                            + " (tenant_id, workspace_id, actor_id, role)"
+                            + " VALUES (?, ?, ?, 'OPERATOR')", TENANT, WS,
                             ACTOR.getBytes(java.nio.charset
                                     .StandardCharsets.UTF_8));
                     return store.insertWorkspaceSessionCommand(TENANT, ACTOR,

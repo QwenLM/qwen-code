@@ -84,6 +84,17 @@ public interface HarnessConnector extends AutoCloseable {
     void cancel(String tenantId, String sessionId);
 
     /**
+     * H4b: one child operation onto the Session's journal, from the
+     * control plane's relay (dispatch/attach/result/accept/cancel/
+     * close-scope). The Hosted side settles it before answering.
+     */
+    default void runChildOperation(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        throw new UnsupportedOperationException(
+                "Child operations are unavailable");
+    }
+
+    /**
      * H5b/H5c: one channel operation onto the Session's journal, from the
      * control plane's channel service (submit_input, claim_delivery,
      * segment_receipt, settle_delivery, cancel_delivery, resend_delivery).

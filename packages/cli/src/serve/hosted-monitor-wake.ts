@@ -21,11 +21,16 @@ import { pendingSessionInputs } from './hosted-wake-intake.js';
 // model-free on the close path. See
 // docs/design/2026-10-03-managed-shell-monitor-runtime.md.
 
-/** One pending monitor notification, ready to be delivered to its turn. */
+/** One pending notification, ready to be delivered to its turn. */
 export interface HostedMonitorWakeTurn {
   readonly turnId: string;
   readonly text: string;
-  /** The input's source, so a settle hook can tell a channel turn apart. */
+  /**
+   * The committed input's source (`monitor`, or H4b's `child_agent`): the
+   * session wrapper consumes a child acceptance's evidence after the turn
+   * settles, which a monitor notification never owes. It also lets a
+   * settle hook tell a channel turn apart.
+   */
   readonly source?: string;
 }
 
@@ -75,7 +80,9 @@ export interface HostedMonitorWakeDeps {
    * busy claim must be checked and taken synchronously at the top of the
    * call so a prompt route admission cannot interleave.
    */
-  runTurn(turn: HostedMonitorWakeTurn): Promise<'settled' | 'busy' | 'held'>;
+  runTurn(
+    turn: HostedMonitorWakeTurn,
+  ): Promise<'settled' | 'settled_incomplete' | 'busy' | 'held'>;
   /** A failure the pump itself cannot recover: the owner decides. */
   failed(cause: unknown): void;
 }
@@ -212,22 +219,23 @@ export class HostedMonitorWakeScheduler {
 }
 
 /**
- * The unadmittable path: a monitor notification that never ran a turn
- * settles cancelled without a model turn, under the turn-result record's
- * own idempotency key. Called on the close path so no wedged notification
- * parks the Session as `hosted_turn_recovery_required` at its next open.
- * A notification whose wake turn already started belongs to the recovery
- * fleet, never to a `cancelled` line on top of a turn that ran.
+ * The unadmittable path: a monitor or child-agent notification that never
+ * ran a turn settles cancelled without a model turn, under the turn-result
+ * record's own idempotency key. Called on the close path so no wedged
+ * notification parks the Session as `hosted_turn_recovery_required` at its
+ * next open. A notification whose wake turn already started belongs to the
+ * recovery fleet, never to a `cancelled` line on top of a turn that ran.
  */
 export async function settlePendingMonitorInputs(params: {
   readonly authority: LocalManagedSessionAuthority;
   readonly sink: ManagedSessionRecordSink;
   readonly sessionId: string;
   readonly cwd: string;
-  /** The notification sources to settle; H5 adds `channel` to `monitor`. */
+  /** The notification sources to settle; H5 adds `channel` to the
+   * monitor-family default. */
   readonly sources?: readonly string[];
 }): Promise<number> {
-  const sources = params.sources ?? ['monitor'];
+  const sources = params.sources ?? ['monitor', 'child_agent'];
   // The whole committed prefix, not a bounded page: a notification input
   // lands late in the log, and `readEvents()` alone would stop at the
   // default page and leave the Session's owed inputs unsettled — which is
