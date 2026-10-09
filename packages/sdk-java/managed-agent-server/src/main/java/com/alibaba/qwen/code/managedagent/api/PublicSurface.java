@@ -34,6 +34,8 @@ public final class PublicSurface {
         return path.equals("/v1/agents") || path.startsWith("/v1/agents/")
                 || path.equals("/v1/agent-automations")
                 || path.startsWith("/v1/agent-automations/")
+                || path.equals("/v1/agent-channels")
+                || path.startsWith("/v1/agent-channels/")
                 || path.startsWith("/api/agent/web-shell/v1/");
     }
 }

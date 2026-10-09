@@ -357,7 +357,7 @@ definitions: a definition is created, revised, read and retired under the
 Workspace-bound Session its creator owns (`/v1/agent-automations`), a
 scanner derives each definition's due slots on this host's tz database,
 claims the definition under a lease with a fence, records every occurrence
-decision in its own ledger (V55) and fires a run as one idempotent Hosted
+decision in its own ledger (V56) and fires a run as one idempotent Hosted
 Harness operation; a manual run is the same operation keyed by its
 `Idempotency-Key`. The Session journal's `schedule` and `automation_run`
 chains stay the authority; the ledger locates, leases and indexes. The

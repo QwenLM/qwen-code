@@ -102,7 +102,19 @@ import type {
   Schedule,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-record.js';
 import {
+  ChannelGenerationStaleError,
+  HostedChannelSession,
+} from './hosted-channel-session.js';
+import {
+  CHANNEL_INPUT_SOURCE,
+  MANAGED_CHANNEL_LIMITS,
+  assertChannelPolicy,
+  assertChannelRouteScope,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-channel-operations.js';
+import type { ChannelDelivery } from '@qwen-code/qwen-code-core/managed-runtime/managed-channel-record.js';
+import {
   HostedMonitorWakeScheduler,
+  MonitorWakeTransientReadError,
   settlePendingMonitorInputs,
   wakeHasPriorAttempt,
 } from './hosted-monitor-wake.js';
@@ -129,6 +141,7 @@ import {
   originalRuntimeBroker,
   RecoveryDeclined,
   recoverHostedRuntimeTurn,
+  settleInterruptedTurnRuntime,
   settleParkedTurnCancelled,
   stopParkedRuntimeExecutions,
   type HostedRecoveryDeclineReason,
@@ -239,6 +252,8 @@ interface HostedSession {
   childDepth?: number;
   /** Tool-arm results answered by a turn; flushed at that turn's settle. */
   readonly childConsumption: Set<string>;
+  /** H5: the Session's channel routes and deliveries, on every profile. */
+  channels?: HostedChannelSession;
   hooksBusy?: boolean;
   mcpBusy?: boolean;
   mcpClosing?: boolean;
@@ -308,6 +323,117 @@ function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+const CHANNEL_ID = /^[A-Za-z0-9._:@+-]{1,128}$/u;
+
+/**
+ * H5b: the closed shape of a `submit_input` channel operation. Attachments
+ * arrive base64-encoded and bounded; anything malformed answers 400, never
+ * a partial commit. Exported for the parsing guard's own suite.
+ */
+export function parseChannelSubmitInput(
+  body: Record<string, unknown> | null,
+): import('./hosted-channel-session.js').ChannelSubmitInputParams | undefined {
+  const inputId = body?.['inputId'];
+  const channelInstanceId = body?.['channelInstanceId'];
+  const accountId = body?.['accountId'];
+  const accountGeneration = body?.['accountGeneration'];
+  const platformEventId = body?.['platformEventId'];
+  const semanticRevision = body?.['semanticRevision'];
+  const senderId = body?.['senderId'];
+  const chatId = body?.['chatId'] ?? null;
+  const threadId = body?.['threadId'] ?? null;
+  const subject = body?.['subject'] ?? null;
+  const text = body?.['text'];
+  const attachments = body?.['attachments'] ?? [];
+  const bounded = (value: unknown, max: number): value is string =>
+    typeof value === 'string' && value.length >= 1 && value.length <= max;
+  if (
+    !bounded(inputId, 512) ||
+    !bounded(channelInstanceId, 128) ||
+    !CHANNEL_ID.test(channelInstanceId) ||
+    !bounded(accountId, 512) ||
+    !Number.isSafeInteger(accountGeneration) ||
+    (accountGeneration as number) < 1 ||
+    !bounded(platformEventId, 512) ||
+    !Number.isSafeInteger(semanticRevision) ||
+    (semanticRevision as number) < 1 ||
+    !bounded(senderId, 512) ||
+    (chatId !== null && !bounded(chatId, 512)) ||
+    (threadId !== null && !bounded(threadId, 512)) ||
+    (subject !== null &&
+      !bounded(subject, MANAGED_CHANNEL_LIMITS.maxSubjectChars)) ||
+    typeof text !== 'string' ||
+    text.length > MANAGED_CHANNEL_LIMITS.maxTextChars ||
+    !Array.isArray(attachments) ||
+    attachments.length > MANAGED_CHANNEL_LIMITS.maxAttachments
+  ) {
+    return undefined;
+  }
+  let scope: import('@qwen-code/qwen-code-core/managed-runtime/managed-channel-record.js').ChannelRouteScope;
+  let policy: import('@qwen-code/qwen-code-core/managed-runtime/managed-channel-operations.js').ChannelPolicy;
+  try {
+    // The Java control plane's JSON encoder drops null map values, so a
+    // scope's absent senderId/chatId/threadId arrives as a missing key.
+    const rawScope = object(body?.['scope']);
+    scope = assertChannelRouteScope(
+      rawScope === null
+        ? body?.['scope']
+        : { senderId: null, chatId: null, threadId: null, ...rawScope },
+    );
+    policy = assertChannelPolicy(body?.['policy']);
+  } catch {
+    return undefined;
+  }
+  const staged: Array<{ fileName: string; mimeType: string; bytes: Buffer }> =
+    [];
+  for (const entry of attachments as unknown[]) {
+    const attachment = object(entry);
+    const fileName = attachment?.['fileName'];
+    const mimeType = attachment?.['mimeType'];
+    const bytesBase64 = attachment?.['bytesBase64'];
+    if (
+      !bounded(fileName, 128) ||
+      !bounded(mimeType, 128) ||
+      typeof bytesBase64 !== 'string' ||
+      !/^[A-Za-z0-9+/]*={0,2}$/.test(bytesBase64)
+    ) {
+      return undefined;
+    }
+    staged.push({
+      fileName,
+      mimeType,
+      bytes: Buffer.from(bytesBase64, 'base64'),
+    });
+  }
+  const replyContext = body?.['replyContext'] ?? null;
+  // The reply context is adapter-opaque, but the closed guard is the last
+  // place that can refuse on size before staging would side-effect.
+  if (
+    replyContext !== null &&
+    Buffer.byteLength(JSON.stringify(replyContext), 'utf8') >
+      MANAGED_CHANNEL_LIMITS.maxReplyContextBytes
+  ) {
+    return undefined;
+  }
+  return {
+    inputId,
+    channelInstanceId,
+    accountId,
+    accountGeneration: accountGeneration as number,
+    platformEventId,
+    semanticRevision: semanticRevision as number,
+    scope,
+    policy,
+    senderId,
+    chatId,
+    threadId,
+    subject,
+    text,
+    attachments: staged,
+    replyContext,
+  };
 }
 
 function lifecycleAuthority(
@@ -743,16 +869,33 @@ export async function settleCrashedWakeTurnAftermath(params: {
 // wake turn, so exempting only `monitor` here wedges the Session: the
 // pending notification counts as an unsettled Turn on every load while
 // the pump that would deliver it can never run. H6: an automation input
-// rides the same pump and the same rules.
+// rides the same pump and the same rules; H5: so does a channel input.
 function isWakeOwnedInput(event: ManagedSessionEvent): boolean {
   if (event.kind !== 'input.accepted') return false;
   if (isWakeInputSource(event.payload['source'] as string)) return true;
+  if (event.payload['source'] === CHANNEL_INPUT_SOURCE) return true;
   const turnId = event.payload['turnId'];
   return (
     event.payload['source'] === 'child_agent' &&
     typeof turnId === 'string' &&
     turnId.endsWith(':accept:notify')
   );
+}
+
+// H5/F5 follow-up: a channel input's parked turn is the wake pump's own,
+// exactly like the unsettled-input arithmetic above treats it — including
+// the file-history obligation the turn left behind. Naming this once
+// keeps the load gate's exception aligned with the pump's ownership.
+function isChannelInputTurn(session: HostedSession, turnId: string): boolean {
+  const authority = session.managed.authority;
+  return authority
+    .eventsInSequenceRange(1, authority.committedSequence)
+    .some(
+      (event) =>
+        event.kind === 'input.accepted' &&
+        event.payload['turnId'] === turnId &&
+        event.payload['source'] === CHANNEL_INPUT_SOURCE,
+    );
 }
 
 function unsettledInputsThrough(
@@ -1488,6 +1631,9 @@ async function verifyWorkspaceRestore(
         'automation_run',
         // H4b: the parent acceptance joins its child_run chains.
         'child_acceptance',
+        // H5: channel routes and deliveries, parsed by their own bodies.
+        'channel_route',
+        'channel_delivery',
       ].includes(event.payload['domain'] as string)
     )
       throw new Error('Hosted recovery domain is unsupported.');
@@ -3022,18 +3168,30 @@ export function registerHostedHarnessSessionRoutes(
         },
         managed.authority.sessionHeader.sessionKey,
       );
+      // H5b: every hosted Session owns its channel funnel — a channel input
+      // needs no Runtime, and its reply plans from the settled turn alone.
+      session.channels = new HostedChannelSession(
+        {
+          authority: managed.authority,
+          resources: managed.resources,
+          sink: managed.sink,
+        },
+        managed.authority.sessionHeader.sessionKey,
+      );
       // H3: the embedded wake scheduler of a notification-capable Session.
       // A notification rides its observation revision (H4b: its child
       // acceptance; H6: an automation input rides its run's dispatch
-      // revision) the same way; the pump delivers it as an ordinary text
-      // turn while the Session idles, queues in the journal while a turn
-      // runs, and leaves the remainder accurately pending the moment
-      // anything is parked or blocked.
+      // revision; H5: a channel input rides its route revision) the same
+      // way; the pump delivers it as an ordinary text turn while the
+      // Session idles, queues in the journal while a turn runs, and leaves
+      // the remainder accurately pending the moment anything is parked or
+      // blocked.
       if (
         ((session.monitors || session.childAgents) &&
           brokerOptions &&
           (session.shell || session.backgroundLane)) ||
-        session.automations
+        session.automations ||
+        session.channels
       ) {
         const wakeBusy = () =>
           session.active !== undefined ||
@@ -3073,19 +3231,42 @@ export function registerHostedHarnessSessionRoutes(
             const authority = session.managed.authority;
             const first = pendingSessionInputs(
               authority.eventsInSequenceRange(1, authority.committedSequence),
-            ).find((input) => isWakeInputSource(input.source));
+            ).find(
+              (input) =>
+                isWakeInputSource(input.source) ||
+                input.source === CHANNEL_INPUT_SOURCE,
+            );
             if (first === undefined) return undefined;
+            if (first.source === CHANNEL_INPUT_SOURCE) {
+              let text: string | undefined;
+              try {
+                text = await session.channels!.turnText(first.inputId);
+              } catch (cause) {
+                // A Store fault reading the durable envelope is owed the
+                // pump's retry, never a terminal Session lock (R8 P1).
+                throw new MonitorWakeTransientReadError(String(cause), {
+                  cause,
+                });
+              }
+              if (text === undefined)
+                throw new Error('Channel wake input has no envelope.');
+              return { turnId: first.turnId, text, source: first.source };
+            }
             const ref = assertManagedSessionDurableRef(
               first.contentRef,
               'notification wake input',
             );
             if (ref.kind !== 'managed-input')
               throw new Error('Wake input is not an input resource.');
-            const body = object(
-              JSON.parse(
-                (await session.managed.resources.read(ref)).toString('utf8'),
-              ),
-            );
+            let bytes: Buffer;
+            try {
+              bytes = await session.managed.resources.read(ref);
+            } catch (cause) {
+              throw new MonitorWakeTransientReadError(String(cause), {
+                cause,
+              });
+            }
+            const body = object(JSON.parse(bytes.toString('utf8')));
             if (typeof body?.['text'] !== 'string')
               throw new Error('Wake input has no text.');
             return {
@@ -3097,6 +3278,10 @@ export function registerHostedHarnessSessionRoutes(
           state: () =>
             wakeBlocked() ? 'blocked' : wakeBusy() ? 'busy' : 'idle',
           runTurn: (() => {
+            // One deferral log per turn, ever: a transiently faulting
+            // recovery retries on the busy cadence, and seven hundred
+            // identical lines an hour hide the one that matters.
+            const deferredWakeRecovery = new Set<string>();
             const runWakeTurn = createMonitorWakeRunTurn({
               session,
               sessionId,
@@ -3113,6 +3298,89 @@ export function registerHostedHarnessSessionRoutes(
                 ),
               busy: wakeBusy,
               needsRecovery: monitorWakeNeedsRecovery,
+              // F5/direction (a): channel turns interrupted mid-flight get
+              // terminal settlement from their own funnel; monitor turns
+              // keep the recovery-blocked freeze their fleet owns.
+              settleInterrupted: async (turn) => {
+                if (turn.source !== CHANNEL_INPUT_SOURCE || !session.channels)
+                  return false;
+                // F5 follow-up: a turn that died inside a tool call parked
+                // its checkpoint in `await_runtime`, where the terminal
+                // record cannot advance it — the next wake turn's
+                // requireModelStart refuses and the Session wedges. Stop
+                // and settle the parked executions first, mirroring the
+                // takeover cancellation. A wait that cannot be verified or
+                // proven stopped keeps the recovery fleet's freeze; a
+                // pending approval holds the turn instead — blocking the
+                // Session would refuse the approval's own resolve route.
+                let runtime;
+                try {
+                  runtime = await settleInterruptedTurnRuntime({
+                    session: session.managed,
+                    sessionId,
+                    cwd,
+                    promptId: turn.turnId,
+                    brokerOptions,
+                    toolProfile: session.toolProfile !== undefined,
+                  });
+                } catch (cause) {
+                  // R6 P1: a durable decline freezes for the fleet, but a
+                  // transient fault — a faulting Store read, a Broker
+                  // hiccup behind an otherwise verifiable checkpoint —
+                  // must stay retryable on the busy cadence instead of
+                  // latching the Session blocked on the first attempt.
+                  if (!(cause instanceof RecoveryDeclined)) {
+                    const retryable = await session.managed.authority
+                      .harnessRunAuthorization()
+                      .then(
+                        (verdict) =>
+                          verdict.status !== 'blocked' ||
+                          !isDurableBlockedVerdict(verdict),
+                      )
+                      .catch(() => true);
+                    if (retryable) {
+                      if (!deferredWakeRecovery.has(turn.turnId)) {
+                        deferredWakeRecovery.add(turn.turnId);
+                        writeStderrLineSafe(
+                          'qwen serve: Interrupted channel wake turn ' +
+                            turn.turnId +
+                            ' defers its recovery to the next wake attempt: ' +
+                            String(cause),
+                        );
+                      }
+                      return 'busy';
+                    }
+                  }
+                  writeStderrLineSafe(
+                    'qwen serve: Interrupted channel wake turn ' +
+                      turn.turnId +
+                      ' keeps its durable wait for the recovery fleet: ' +
+                      String(cause),
+                  );
+                  return false;
+                }
+                if (runtime.kind === 'held') return 'held';
+                const settled = await session.channels.settleInterruptedWake(
+                  turn.turnId,
+                );
+                // The recovered lease hands back only once the terminal
+                // record is durable: a release persisted earlier would
+                // wedge the retry on runtime_session_not_acquirable.
+                await runtime.broker?.release().catch((cause: unknown) => {
+                  if (
+                    cause instanceof HostedWorkspaceBrokerRejection &&
+                    cause.status === 404
+                  )
+                    return;
+                  writeStderrLineSafe(
+                    'qwen serve: Interrupted channel wake turn ' +
+                      turn.turnId +
+                      ' could not hand back its recovered Runtime: ' +
+                      String(cause),
+                  );
+                });
+                return settled ? 'settled' : false;
+              },
               writeStderr: writeStderrLineSafe,
             });
             // H6c: the automation turn settled; its run settles from the
@@ -3135,11 +3403,45 @@ export function registerHostedHarnessSessionRoutes(
               session,
               writeStderrLineSafe,
             );
+            // H5c: the channel turn settled; its reply plans from the
+            // committed result now, and again on the next open if this
+            // commit is lost — never twice, never from memory. A
+            // planning failure only loses the prompt path: while the
+            // owner is still resident the retry keeps re-planning with
+            // backing-off delays, and a later detach falls back to the
+            // open-path reconcile instead of a silent missing reply
+            // (R8 P2).
+            const replyPlanRetries = new Map<string, NodeJS.Timeout>();
+            const scheduleReplyPlanRetry = (
+              turnId: string,
+              delayMs: number,
+            ) => {
+              if (replyPlanRetries.has(turnId)) return;
+              const timer = setTimeout(() => {
+                replyPlanRetries.delete(turnId);
+                void session.channels?.planReply(turnId).catch((cause) => {
+                  writeStderrLineSafe(
+                    `qwen serve: Hosted channel reply of turn ${turnId} could not be planned: ${String(cause)}`,
+                  );
+                  // A sealed Session is nobody else's planner: the
+                  // open-path reconcile owns the reply from the next
+                  // detach, not this timer.
+                  if (!session.managed.authority.writesStopped)
+                    scheduleReplyPlanRetry(
+                      turnId,
+                      Math.min(delayMs * 2, 60_000),
+                    );
+                });
+              }, delayMs);
+              timer.unref();
+              replyPlanRetries.set(turnId, timer);
+            };
             return async (turn) => {
               let outcome:
                 | 'settled'
                 | 'busy'
                 | 'recovery'
+                | 'held'
                 | 'settled_incomplete';
               try {
                 outcome = await wakeWithConsumption(turn);
@@ -3150,7 +3452,10 @@ export function registerHostedHarnessSessionRoutes(
                   await settleAutomation(turn.turnId);
                 throw cause;
               }
-              if (outcome === 'recovery') {
+              if (
+                outcome === 'recovery' &&
+                turn.source !== CHANNEL_INPUT_SOURCE
+              ) {
                 // The aftermath is keyed on the journal and the
                 // checkpoint, not on which settle ran: an earlier pass
                 // (or an earlier load) may have finished any prefix of
@@ -3158,7 +3463,9 @@ export function registerHostedHarnessSessionRoutes(
                 // the pump continues with the next input at once; a
                 // pending one keeps block and input in place, and the
                 // blocked pump cycle below — or the next load, whose
-                // classification runs the same branch — retries it.
+                // classification runs the same branch — retries it. A
+                // channel turn's recovery is its funnel's and the open
+                // path's fleet, never this generic aftermath.
                 const aftermath = await wakeAftermath(turn.turnId);
                 if (aftermath === 'settled') {
                   session.blocked = false;
@@ -3172,6 +3479,25 @@ export function registerHostedHarnessSessionRoutes(
                 // own committed result (completed or errored), never from
                 // a re-run of it.
                 await settleAutomation(turn.turnId);
+              }
+              if (
+                outcome === 'settled' &&
+                turn.source === CHANNEL_INPUT_SOURCE &&
+                session.channels
+              ) {
+                try {
+                  await session.channels.planReply(turn.turnId);
+                  const pending = replyPlanRetries.get(turn.turnId);
+                  if (pending !== undefined) {
+                    clearTimeout(pending);
+                    replyPlanRetries.delete(turn.turnId);
+                  }
+                } catch (cause) {
+                  writeStderrLineSafe(
+                    `qwen serve: Hosted channel reply of turn ${turn.turnId} could not be planned: ${String(cause)}`,
+                  );
+                  scheduleReplyPlanRetry(turn.turnId, 1_000);
+                }
               }
               return outcome;
             };
@@ -3213,9 +3539,20 @@ export function registerHostedHarnessSessionRoutes(
       // refusing with 409 so it never drives a Runtime by accident.
       const takeover = !lifecycle && !session.hooks && takeoverFlags;
       const fileHistory = await readHostedFileHistory(managed);
+      // H5/F5 follow-up: a channel turn interrupted inside a Write/Edit
+      // owes the wake pump its recovery, but refusing here would kill that
+      // pump before it started — the input is pump-owned, so the takeover
+      // arithmetic above can never match its pendingTurn. Let the load
+      // through: the pump proves the stop and settles right after
+      // attachment.
+      const channelParked =
+        fileHistory?.pendingTurn !== null &&
+        fileHistory?.pendingTurn !== undefined &&
+        isChannelInputTurn(session, fileHistory.pendingTurn);
       if (
         fileHistory?.pendingUndo ||
         (fileHistory?.pendingTurn &&
+          !channelParked &&
           !(takeover && fileHistory.pendingTurn === unsettled) &&
           !(await canSettleHostedFileHistory(managed, fileHistory)))
       ) {
@@ -3662,6 +3999,15 @@ export function registerHostedHarnessSessionRoutes(
         .catch((cause: unknown) =>
           writeStderrLineSafe(
             `qwen serve: Hosted automation runs of session ${sessionId} could not be reconciled: ${String(cause)}`,
+          ),
+        );
+      // H5c: a settle → plan crash window closes here, before the pump
+      // can start another channel turn.
+      void session.channels
+        ?.reconcileReplies()
+        .catch((cause: unknown) =>
+          writeStderrLineSafe(
+            `qwen serve: Hosted channel replies of session ${sessionId} could not be reconciled: ${String(cause)}`,
           ),
         );
       session.monitorWake?.kick();
@@ -4875,6 +5221,154 @@ export function registerHostedHarnessSessionRoutes(
     }
   });
 
+  /**
+   * H5b/H5c: the control plane's channel operations onto this Session's
+   * journal. Each verb maps to one funnel act; replay-safety rides the
+   * funnel's derived command ids, so a redriven adapter request never mints
+   * a second input, revision or chain. A turn in flight is not a refusal:
+   * an input queues behind it in the journal.
+   */
+  app.post('/session/:id/channels/operations', async (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.channels)
+      return error(res, 409, 'hosted_channels_unavailable');
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    const body = object(req.body);
+    const operationId = body?.['operationId'];
+    const kind = body?.['kind'];
+    if (typeof operationId !== 'string' || !HOSTED_UUID.test(operationId)) {
+      return error(res, 400, 'invalid_channel_operation');
+    }
+    const channels = session.channels;
+    const summary = (delivery: ChannelDelivery) => ({
+      deliveryId: delivery.deliveryId,
+      routeId: delivery.routeId,
+      routeRevision: delivery.routeRevision,
+      sourceTurnId: delivery.sourceTurnId,
+      state: delivery.run.delivery?.state ?? null,
+      cancelRequested: delivery.cancelRequested,
+      segments: delivery.segments.map((segment) => ({
+        ordinal: segment.ordinal,
+        segmentId: segment.segmentId,
+        providerMessageId: segment.receipt?.providerMessageId ?? null,
+      })),
+    });
+    const deliveryId = body?.['deliveryId'];
+    const needsDelivery = kind !== 'submit_input';
+    if (
+      needsDelivery &&
+      (typeof deliveryId !== 'string' ||
+        deliveryId.length < 1 ||
+        deliveryId.length > 512)
+    ) {
+      return error(res, 400, 'invalid_channel_operation');
+    }
+    let result: Record<string, unknown>;
+    try {
+      switch (kind) {
+        case 'submit_input': {
+          const parsed = parseChannelSubmitInput(body);
+          if (parsed === undefined)
+            return error(res, 400, 'invalid_channel_operation');
+          result = { ...(await channels.submitInput(parsed)) };
+          break;
+        }
+        case 'claim_delivery': {
+          const claimed = await channels.claim(deliveryId as string);
+          result = {
+            delivery: summary(claimed.delivery),
+            reply: claimed.reply,
+            segments: claimed.segments,
+          };
+          break;
+        }
+        case 'segment_receipt': {
+          const ordinal = body?.['ordinal'];
+          const providerMessageId = body?.['providerMessageId'];
+          const acceptedAt = body?.['acceptedAt'];
+          if (
+            !Number.isSafeInteger(ordinal) ||
+            (ordinal as number) < 0 ||
+            typeof providerMessageId !== 'string' ||
+            providerMessageId.length < 1 ||
+            providerMessageId.length > 512 ||
+            !Number.isSafeInteger(acceptedAt) ||
+            (acceptedAt as number) < 0
+          ) {
+            return error(res, 400, 'invalid_channel_operation');
+          }
+          result = {
+            delivery: summary(
+              await channels.receipt(deliveryId as string, ordinal as number, {
+                providerMessageId,
+                acceptedAt: acceptedAt as number,
+                proofRef: null,
+              }),
+            ),
+          };
+          break;
+        }
+        case 'settle_delivery': {
+          const outcome = body?.['outcome'];
+          if (outcome !== 'unknown' && outcome !== 'rejected') {
+            return error(res, 400, 'invalid_channel_operation');
+          }
+          result = {
+            delivery: summary(
+              await channels.settle(deliveryId as string, outcome),
+            ),
+          };
+          break;
+        }
+        case 'cancel_delivery':
+          result = {
+            delivery: summary(await channels.cancel(deliveryId as string)),
+          };
+          break;
+        case 'resend_delivery':
+          result = {
+            delivery: summary(await channels.resend(deliveryId as string)),
+            possibleDuplicate: true,
+          };
+          break;
+        default:
+          return error(res, 400, 'invalid_channel_operation');
+      }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (cause instanceof ChannelGenerationStaleError)
+        return error(res, 409, 'channel_generation_stale', message);
+      if (message.includes('is not enabled for submission'))
+        return error(res, 409, 'channel_adapter_disabled', message);
+      // A record-validation refusal is a deterministic 400; the durable
+      // store's own transient fault classes must not masquerade as one —
+      // they fall through to the retryable 503 underneath (F10).
+      if (
+        cause instanceof ManagedSessionRecordError &&
+        !(cause instanceof ManagedSessionConflictError) &&
+        !(cause instanceof ManagedSessionStoreHttpError) &&
+        !(cause instanceof ManagedSessionStoreTransportError)
+      )
+        return error(res, 400, 'invalid_channel_operation', message);
+      if (
+        message.includes('cannot follow') ||
+        message.includes('cannot be') ||
+        message.includes('already') ||
+        message.includes('has no ') ||
+        message.includes('must bind')
+      ) {
+        return error(res, 409, 'channel_operation_conflict', message);
+      }
+      writeStderrLineSafe(
+        `qwen serve: Hosted channel operation ${String(kind)} of session ${req.params['id']} failed: ${message}`,
+      );
+      return error(res, 503, 'channel_operation_failed', message);
+    }
+    session.monitorWake?.kick();
+    res.status(202).json({ operationId, state: 'settled', ...result });
+  });
+
   app.post('/session/:id/managed-runtime/continue', async (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
@@ -5806,11 +6300,16 @@ export function registerHostedHarnessSessionRoutes(
       await session.shell?.publisher?.close();
       await session.backgroundLane?.publisher?.close();
       await session.mcp?.close();
-      // No monitor or automation notification may park the Session: every
-      // pending one settles cancelled here, model-free, before the log
-      // closes; a run whose input settled that way ends cancelled with an
-      // execution proven not to have started.
-      if (session.monitors || session.childAgents || session.automations) {
+      // No monitor, channel or automation notification may park the
+      // Session: every pending one settles cancelled here, model-free,
+      // before the log closes; a run whose input settled that way ends
+      // cancelled with an execution proven not to have started.
+      if (
+        session.monitors ||
+        session.childAgents ||
+        session.automations ||
+        session.channels
+      ) {
         await settlePendingMonitorInputs({
           authority: session.managed.authority,
           sink: session.managed.sink,
@@ -5820,6 +6319,7 @@ export function registerHostedHarnessSessionRoutes(
             ...(session.monitors ? ['monitor'] : []),
             ...(session.childAgents ? ['child_agent'] : []),
             ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
+            ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),
           ],
         });
         // A refused settle revision never blocks the close: the next open

@@ -934,6 +934,28 @@ public class ManagedExtensionRecordStore {
                         "Automation run id must be derived from its definition"
                                 + " and occurrence.");
             }
+            if (domain.equals("channel_delivery")) {
+                // H5c: a delivery goes out through a committed, live route
+                // at the revision it was planned against.
+                String routeKey = ManagedExtensionProjection.recordKey(sessionId,
+                        "channel_route", record.get("routeId").textValue());
+                String routeResource = jdbc.query("SELECT record_resource_id FROM"
+                                + " qwen_managed_session_extension_record WHERE"
+                                + " session_scope_key = ? AND record_key = ?",
+                        (result, row) -> result.getString("record_resource_id"),
+                        scopeKey, routeKey).stream().findFirst().orElse(null);
+                require(routeResource != null,
+                        "Channel delivery must bind to its committed route at the"
+                                + " pinned revision.");
+                JsonNode route = readBody(resources.apply(routeResource));
+                String routeState = route.get("run").get("state").textValue();
+                require(ManagedMcpRecords.same(route.get("routeRevision"),
+                        record.get("routeRevision"))
+                        && !List.of("settled", "failed", "cancelled")
+                                .contains(routeState),
+                        "Channel delivery must bind to its committed route at the"
+                                + " pinned revision.");
+            }
             require(body.isStart().test(record), "The first revision of "
                     + domain + " record " + recordId + " must open its run.");
             // The command that opens a record becomes the operation of its

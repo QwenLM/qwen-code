@@ -67,15 +67,68 @@ export function createMonitorWakeRunTurn(params: {
    * exception as an ordinary failure, settling its unconsumed input.
    */
   readonly needsRecovery: (cause: unknown) => boolean;
+  /**
+   * H5/F5: a source's own terminal settlement for a wake turn it already
+   * ran (a channel input cannot mint a second user record, and a text
+   * turn has no checkpoint to continue). 'settled' means the input is
+   * settled and the pump continues without freezing the Session; 'held'
+   * means a durable approval owns the wait and the Session must stay
+   * usable — blocking it would refuse the approval's own resolve route;
+   * 'busy' means the recovery proof stands but a transient fault ended
+   * this attempt, so the pump retries it like any synchronous
+   * contention; absent or false keeps the recovery-blocked freeze.
+   */
+  readonly settleInterrupted?: (
+    turn: HostedMonitorWakeTurn,
+    attempted: ChatRecord[],
+  ) => Promise<'settled' | 'held' | 'busy' | false>;
   readonly writeStderr: (line: string) => void;
 }): (
   turn: HostedMonitorWakeTurn,
-) => Promise<'settled' | 'busy' | 'recovery' | 'settled_incomplete'> {
+) => Promise<'settled' | 'busy' | 'recovery' | 'held' | 'settled_incomplete'> {
   const { session } = params;
   return async (turn) => {
     if (params.busy() || session.blocked) return 'busy';
     const attempted = await session.managed.sink.project();
     if (wakeHasPriorAttempt(attempted, turn.turnId)) {
+      let interrupted: 'settled' | 'held' | 'busy' | false | undefined;
+      try {
+        interrupted = await params.settleInterrupted?.(turn, attempted);
+      } catch (cause) {
+        // The settle hook classifies its own durable failures; anything
+        // that escapes it — a rejected terminal-record write among them —
+        // shares the transient account: this attempt ends without anything
+        // settled, and the busy retry re-drives next wake (F6).
+        params.writeStderr(
+          'qwen serve: Interrupted channel wake turn ' +
+            turn.turnId +
+            ' could not settle this pass; the next wake attempt drives it again: ' +
+            String(cause),
+        );
+        return 'busy';
+      }
+      if (interrupted === 'settled') {
+        params.writeStderr(
+          'qwen serve: Interrupted channel wake turn ' +
+            turn.turnId +
+            ' was settled without a reply; the Session stays usable.',
+        );
+        return 'settled';
+      }
+      if (interrupted === 'held') {
+        params.writeStderr(
+          'qwen serve: Interrupted channel wake turn ' +
+            turn.turnId +
+            ' keeps its durable wait for its approval; the Session stays usable.',
+        );
+        return 'held';
+      }
+      if (interrupted === 'busy') {
+        // A transiently faulted recovery attempt: the proof discipline
+        // still stands (nothing settled), and the pump's busy retry is
+        // the only re-drive that does not mint a second user record.
+        return 'busy';
+      }
       // The notification ran and died inside the turn it started.
       // Re-driving it text-only would mint a second user record and an
       // unanswered first call in the model's history, so it is for the
@@ -166,7 +219,7 @@ export function createMonitorWakeRunTurn(params: {
 export function withChildAgentConsumption(
   runWakeTurn: (
     turn: HostedMonitorWakeTurn,
-  ) => Promise<'settled' | 'busy' | 'recovery' | 'settled_incomplete'>,
+  ) => Promise<'settled' | 'busy' | 'recovery' | 'held' | 'settled_incomplete'>,
   session: {
     blocked: boolean;
     childAgents?: HostedChildAgentSession;
@@ -174,7 +227,7 @@ export function withChildAgentConsumption(
   writeStderr: (line: string) => void = () => {},
 ): (
   turn: HostedMonitorWakeTurn,
-) => Promise<'settled' | 'busy' | 'recovery' | 'settled_incomplete'> {
+) => Promise<'settled' | 'busy' | 'recovery' | 'held' | 'settled_incomplete'> {
   return async (turn) => {
     const outcome = await runWakeTurn(turn);
     if (
