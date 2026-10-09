@@ -495,16 +495,24 @@ async function writeMemoryIndex(
   // that ping-pong between collaborators. Only ENOENT means 'absent': an
   // existing but unreadable index is still rewritten (rename needs only
   // directory write permission) and announced as 'update', not 'create'.
-  const existing = await fs
-    .readFile(indexPath, 'utf-8')
+  options.signal?.throwIfAborted();
+  const leaf = await fs
+    .lstat(indexPath)
     .catch((err: unknown) =>
       (err as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : null,
     );
-  if (
-    existing === content &&
-    (!options.noFollow ||
-      (await fs.lstat(indexPath).catch(() => undefined))?.isFile())
-  ) {
+  const existing =
+    leaf === undefined
+      ? undefined
+      : leaf?.isFile()
+        ? await fs
+            .readFile(indexPath, {
+              encoding: 'utf-8',
+              signal: options.signal,
+            })
+            .catch(() => null)
+        : null;
+  if (existing === content) {
     return;
   }
   options.signal?.throwIfAborted();

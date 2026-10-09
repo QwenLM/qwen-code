@@ -3251,7 +3251,7 @@ export class Config {
   private readonly plansDir: string;
   private readonly plansDirectoryConfigured: boolean;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
-  private readonly enableManagedAutoMemory: boolean;
+  private enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
   private readonly enableTeamMemory: boolean;
   private readonly enableTeamMemorySync: boolean;
@@ -11005,6 +11005,10 @@ export class Config {
     return (
       this.enableManagedAutoMemory && !this.getBareMode() && !this.isSafeMode()
     );
+  }
+
+  setManagedAutoMemoryEnabled(enabled: boolean): void {
+    this.enableManagedAutoMemory = enabled;
   }
 
   /**

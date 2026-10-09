@@ -2405,6 +2405,26 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('setManagedAutoMemoryEnabled', () => {
+    it('updates the live extraction and availability gates', () => {
+      const config = makeConfig({ enableManagedAutoMemory: true });
+      expect(config.getManagedAutoMemoryEnabled()).toBe(true);
+      config.setManagedAutoMemoryEnabled(false);
+      expect(config.getManagedAutoMemoryEnabled()).toBe(false);
+      expect(config.isManagedMemoryAvailable()).toBe(false);
+      config.setManagedAutoMemoryEnabled(true);
+      expect(config.getManagedAutoMemoryEnabled()).toBe(true);
+      expect(config.isManagedMemoryAvailable()).toBe(true);
+    });
+
+    it('retains the bare-mode gate after enabling the preference', () => {
+      const config = makeConfig({ bareMode: true });
+      config.setManagedAutoMemoryEnabled(true);
+      expect(config.getManagedAutoMemoryEnabled()).toBe(false);
+      expect(config.isManagedMemoryAvailable()).toBe(false);
+    });
+  });
+
   describe('setAutoSkillEnabled', () => {
     it('flips the live value read by getAutoSkillEnabled', () => {
       const config = makeConfig({ enableAutoSkill: true });

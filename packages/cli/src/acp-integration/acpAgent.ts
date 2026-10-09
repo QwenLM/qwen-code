@@ -7256,6 +7256,43 @@ class QwenAgent implements Agent {
     }
   }
 
+  private applyManagedAutoMemorySetting(
+    settings: LoadedSettings,
+    settingsCwd: string,
+    scope: SettingScope,
+  ): void {
+    const workspace = this.canonicalWorkspacePath(settingsCwd);
+    const configs = new Set([
+      this.config,
+      ...this.getActiveSessions().map((session) => session.getConfig()),
+    ]);
+    for (const config of configs) {
+      const root =
+        config === this.config
+          ? config.getTargetDir()
+          : this.sessionWorkspaceRoot(config);
+      const sameWorkspace = this.canonicalWorkspacePath(root) === workspace;
+      if (scope !== SettingScope.User && !sameWorkspace) continue;
+      // User settings affect every workspace, each with its own overrides.
+      let merged = settings.merged;
+      if (!sameWorkspace) {
+        try {
+          merged = this.loadRequestSettings(root).merged;
+        } catch {
+          debugLogger.warn(
+            'Memory settings reload failed; keeping this workspace runtime setting',
+          );
+          continue;
+        }
+      }
+      config.setManagedAutoMemoryEnabled(
+        !config.getBareMode() &&
+          !config.isSafeMode() &&
+          (merged.memory?.enableManagedAutoMemory ?? true),
+      );
+    }
+  }
+
   /**
    * Load settings for a single `qwen/settings/*` / `qwen/permissions/*`
    * request. `skipLoadEnvironment` is set because a per-request read — and, for
@@ -9936,6 +9973,7 @@ class QwenAgent implements Agent {
             );
           }
         }
+        let memoryEnabledSaved = false;
         try {
           for (const key of QWEN_MEMORY_SETTING_KEYS) {
             if (updates[key] === undefined) continue;
@@ -9948,9 +9986,17 @@ class QwenAgent implements Agent {
                 throwOnWriteFailure: true,
               },
             );
+            if (key === 'enableManagedAutoMemory') memoryEnabledSaved = true;
           }
         } finally {
           this.adoptRequestSettings(settings, settingsCwd);
+          if (memoryEnabledSaved) {
+            this.applyManagedAutoMemorySetting(
+              settings,
+              settingsCwd,
+              SettingScope.User,
+            );
+          }
           const effectiveEnabled =
             settings.merged.memory?.enableManagedAutoMemory ?? true;
           if (effectiveEnabled !== previousEnabled) {
@@ -14575,6 +14621,9 @@ class QwenAgent implements Agent {
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
         this.adoptRequestSettings(settings, settingsCwd);
+        if (settingKey === 'memory.enableManagedAutoMemory') {
+          this.applyManagedAutoMemorySetting(settings, settingsCwd, scope);
+        }
         const effectiveEnabled =
           settings.merged.memory?.enableManagedAutoMemory ?? true;
         if (

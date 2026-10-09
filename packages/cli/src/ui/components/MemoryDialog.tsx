@@ -133,8 +133,8 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
   const safeMode = config.isSafeMode();
   const readToggle = (value: boolean | undefined): boolean =>
     !bareMode && !safeMode && (value ?? true);
-  const [autoMemoryOn, setAutoMemoryOn] = useState(() =>
-    readToggle(loadedSettings.merged.memory?.enableManagedAutoMemory),
+  const [autoMemoryOn, setAutoMemoryOn] = useState(
+    () => loadedSettings.merged.memory?.enableManagedAutoMemory ?? true,
   );
   const [autoDreamOn, setAutoDreamOn] = useState(() =>
     readToggle(loadedSettings.merged.memory?.enableManagedAutoDream),
@@ -348,7 +348,10 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
     setError(null);
     const effectiveValue =
       loadedSettings.merged.memory?.enableManagedAutoMemory ?? true;
-    setAutoMemoryOn(!bareMode && !safeMode && effectiveValue);
+    config.setManagedAutoMemoryEnabled(
+      !bareMode && !safeMode && effectiveValue,
+    );
+    setAutoMemoryOn(effectiveValue);
     if (effectiveValue !== previousEffective) {
       void notifyMemoryEnabledChange(
         config.getProjectRoot(),
@@ -519,6 +522,11 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
           {t('Auto-memory: {{status}}', {
             status: autoMemoryOn ? t('on') : t('off'),
           })}
+          {bareMode
+            ? ` · ${t('disabled (bare mode)')}`
+            : safeMode
+              ? ` · ${t('disabled (safe mode)')}`
+              : ''}
         </Text>
         <Text
           color={

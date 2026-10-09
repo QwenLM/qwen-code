@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -27,6 +28,7 @@ import { ensureAutoMemoryScaffold } from './store.js';
 import * as trustedMemoryFilesystem from './trusted-memory-filesystem.js';
 
 vi.mock('./trusted-memory-filesystem.js', { spy: true });
+vi.mock('node:fs/promises', { spy: true });
 
 // Extract the Markdown link target from a `- [title](target) — desc` line. The
 // encoder leaves no raw ')' in the target, so the first ')' is the link close.
@@ -116,6 +118,55 @@ describe('managed auto-memory indexer', () => {
       expect((await fs.lstat(index)).isSymbolicLink()).toBe(false);
     },
   );
+
+  it.skipIf(process.platform === 'win32').each([false, true])(
+    'replaces a non-regular index without reading it (symlink: %s)',
+    async (linked) => {
+      const root = path.join(tempDir, 'compat-memory');
+      const index = path.join(root, 'MEMORY.md');
+      const fifo = linked ? path.join(tempDir, 'outside.pipe') : index;
+      await fs.mkdir(root);
+      execFileSync('mkfifo', [fifo]);
+      if (linked) await fs.symlink(fifo, index);
+      // Bound the regression: the old read would otherwise wait for a writer.
+      const read = vi
+        .spyOn(fs, 'readFile')
+        .mockRejectedValue(new Error('must not read a non-regular index'));
+      try {
+        await rebuildAutoMemoryIndexAtRoot(root, 'project', { projectRoot });
+        expect(read).not.toHaveBeenCalled();
+        expect((await fs.lstat(index)).isFile()).toBe(true);
+        if (linked) expect((await fs.lstat(fifo)).isFIFO()).toBe(true);
+      } finally {
+        read.mockRestore();
+      }
+      expect(await fs.readFile(index, 'utf8')).toBe(
+        buildManagedAutoMemoryIndex([]),
+      );
+    },
+  );
+
+  it('does not read or replace an index after cancellation', async () => {
+    const root = path.join(tempDir, 'compat-memory');
+    const index = path.join(root, 'MEMORY.md');
+    await fs.mkdir(root);
+    await fs.writeFile(index, 'previous index');
+    const controller = new AbortController();
+    controller.abort();
+    const read = vi.spyOn(fs, 'readFile');
+    try {
+      await expect(
+        rebuildAutoMemoryIndexAtRoot(root, 'project', {
+          projectRoot,
+          signal: controller.signal,
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(read).not.toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+    }
+    expect(await fs.readFile(index, 'utf8')).toBe('previous index');
+  });
 
   it('preserves an existing index when the root cannot be read', async () => {
     const root = path.join(tempDir, 'compat-memory');

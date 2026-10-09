@@ -6,6 +6,7 @@
 
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs/promises';
+import { devNull } from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -200,10 +201,26 @@ export async function syncTeamMemory(
     // pull is hung in its network fetch phase (which holds no index.lock); the
     // ff ref-advance afterwards is fast and local, so a hard kill is safe.
     result.pulled = await withTeamMemorySync(projectRoot, async (record) => {
-      const before = (await tryGit(gitRoot, ['rev-parse', 'HEAD']))?.trim();
+      let before = (await tryGit(gitRoot, ['rev-parse', 'HEAD']))?.trim();
+      if (!before) {
+        const branchRef = await tryGit(gitRoot, [
+          'for-each-ref',
+          '--format=%(refname)',
+          `refs/heads/${branch.trim()}`,
+        ]);
+        if (
+          branchRef === null ||
+          branchRef.split('\n').includes(`refs/heads/${branch}`)
+        )
+          return false;
+        before = (
+          await tryGit(gitRoot, ['hash-object', '-w', '-t', 'tree', devNull])
+        )?.trim();
+        if (!before) return false;
+      }
       const pulled =
         (await tryGit(gitRoot, ['pull', '--ff-only'], 'SIGKILL')) !== null;
-      if (!pulled || !before) return pulled;
+      if (!pulled) return pulled;
       const after = (await tryGit(gitRoot, ['rev-parse', 'HEAD']))?.trim();
       if (!after || after === before) return pulled;
       const changes = await tryGit(

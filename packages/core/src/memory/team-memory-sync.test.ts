@@ -157,6 +157,54 @@ describe('syncTeamMemory', () => {
     ).toBe(true);
   }, 30_000);
 
+  it('excludes all first-pull imports on an unborn branch', async () => {
+    const { bare, repo: bob } = freshRemoteAndClone('bob');
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-sync-unborn-'));
+    cleanup.push(parent);
+    const alice = path.join(parent, 'repo');
+    git(parent, 'init', '--initial-branch=main', 'repo');
+    git(alice, 'remote', 'add', 'origin', bare);
+    git(alice, 'fetch', 'origin');
+    git(alice, 'config', 'branch.main.remote', 'origin');
+    git(alice, 'config', 'branch.main.merge', 'refs/heads/main');
+    git(alice, 'config', 'user.email', 'alice@example.com');
+    git(alice, 'config', 'user.name', 'alice');
+    vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', path.join(parent, 'private'));
+    for (const name of ['first', 'second']) {
+      writeTeamMemory(bob, `reference/${name}.md`, name);
+      git(bob, 'add', '--', '.qwen/team-memory');
+      git(bob, 'commit', '-m', name);
+      git(bob, 'push');
+    }
+    const seen: MemoryChangedNotice[] = [];
+    const registration = registerMemoryChangedListener(alice, (notice) => {
+      seen.push(notice);
+    });
+    try {
+      await withCoalescedMemoryChanges(alice, registration.id, async () => {
+        const result = await syncTeamMemory(alice, { message: 'first pull' });
+        expect(result.pulled).toBe(true);
+        for (const name of ['first', 'second']) {
+          expect(
+            fs.readFileSync(
+              path.join(getTeamAutoMemoryRoot(alice), `reference/${name}.md`),
+              'utf8',
+            ),
+          ).toContain(name);
+        }
+        writeTeamMemory(alice, 'feedback/local.md', 'local write');
+      });
+    } finally {
+      registration();
+    }
+    expect(seen).toEqual([
+      expect.objectContaining({
+        operation: 'create',
+        relativePaths: ['feedback/local.md'],
+      }),
+    ]);
+  }, 30_000);
+
   it.each([
     { autocrlf: false, large: false },
     { autocrlf: true, large: false },

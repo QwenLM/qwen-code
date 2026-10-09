@@ -117,6 +117,7 @@ function expectedFolderOpenCommand(platform = process.platform): string {
 
 describe('MemoryDialog', () => {
   let setAutoSkillEnabled: ReturnType<typeof vi.fn>;
+  let setManagedAutoMemoryEnabled: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -130,6 +131,7 @@ describe('MemoryDialog', () => {
     clearAutoMemoryRootCache();
 
     setAutoSkillEnabled = vi.fn();
+    setManagedAutoMemoryEnabled = vi.fn();
     mockedUseConfig.mockReturnValue({
       getWorkingDir: vi.fn(() => '/tmp/project'),
       getProjectRoot: vi.fn(() => '/tmp/project'),
@@ -142,6 +144,7 @@ describe('MemoryDialog', () => {
       getAutoSkillEnabled: vi.fn(() => false),
       isManagedMemoryAvailable: vi.fn(() => true),
       setAutoSkillEnabled,
+      setManagedAutoMemoryEnabled,
     } as never);
 
     mockedUseSettings.mockReturnValue({
@@ -694,6 +697,7 @@ describe('MemoryDialog', () => {
       isManagedMemoryAvailable: vi.fn(() => true),
       getMemoryHookDeliveryId: vi.fn(() => deliveryId),
       setAutoSkillEnabled,
+      setManagedAutoMemoryEnabled,
     } as never);
     // setValue writes through to the merged view, like the real
     // LoadedSettings recompute.
@@ -735,6 +739,7 @@ describe('MemoryDialog', () => {
       deliveryId,
     );
     expect(lastFrame()).toContain('Auto-memory: off');
+    expect(setManagedAutoMemoryEnabled).toHaveBeenCalledWith(false);
   });
   it.each([
     ['safe', true],
@@ -769,7 +774,10 @@ describe('MemoryDialog', () => {
       };
       try {
         for (let i = 0; i < 4; i++) pressKey('up');
-        expect(view.lastFrame()).toContain('› Auto-memory: off');
+        expect(view.lastFrame()).toContain(
+          `› Auto-memory: ${initialValue ? 'on' : 'off'}`,
+        );
+        expect(view.lastFrame()).toContain(`disabled (${mode} mode)`);
         for (const [index, expected] of [
           !initialValue,
           initialValue,
@@ -790,7 +798,13 @@ describe('MemoryDialog', () => {
             expected,
             deliveryId,
           );
-          expect(view.lastFrame()).toContain('› Auto-memory: off');
+          expect(view.lastFrame()).toContain(
+            `› Auto-memory: ${expected ? 'on' : 'off'}`,
+          );
+          expect(setManagedAutoMemoryEnabled).toHaveBeenNthCalledWith(
+            index + 1,
+            false,
+          );
         }
       } finally {
         view.unmount();
@@ -838,6 +852,7 @@ describe('MemoryDialog', () => {
       isSafeMode: () => false,
       isManagedMemoryAvailable: () => true,
       getMemoryHookDeliveryId: () => undefined,
+      setManagedAutoMemoryEnabled,
     } as never);
     const view = render(<MemoryDialog onClose={vi.fn()} />);
     expect(view.lastFrame()).toContain('Auto-memory: on');
@@ -856,6 +871,7 @@ describe('MemoryDialog', () => {
     expect(await fs.readFile(settingsPath, 'utf8')).toBe(corrupted);
     expect(notifyMemoryEnabledChange).not.toHaveBeenCalled();
     expect(loaded.merged.memory?.enableManagedAutoMemory).toBe(true);
+    expect(setManagedAutoMemoryEnabled).not.toHaveBeenCalled();
     await fs.rm(temp, { recursive: true, force: true });
   });
 });
