@@ -1966,7 +1966,23 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
           `refusing to create a base tree with unscreened filters: ${describeFilterScreen(filters)}`,
         );
       }
-      git(worktree, 'worktree', 'add', '--detach', tree, baseSha);
+      git(
+        worktree,
+        'worktree',
+        'add',
+        '--no-checkout',
+        '--detach',
+        tree,
+        baseSha,
+      );
+      // Conditional user includes can activate only in the new gitdir.
+      const destinationFilters = checkoutFilterCommands(tree);
+      if (destinationFilters.length > 0) {
+        throw new Error(
+          `refusing to check out a base tree with unscreened filters: ${describeFilterScreen(destinationFilters)}`,
+        );
+      }
+      git(tree, 'checkout', '--force', '--detach', baseSha);
     } catch (e) {
       return unavailable(
         worktreeCreateFailureDetail('base', e, String(sweep?.stderr ?? '')),

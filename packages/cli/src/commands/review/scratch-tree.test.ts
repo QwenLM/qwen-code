@@ -282,6 +282,55 @@ describe('runScratchTree', () => {
     expect(existsSync(pwned)).toBe(false);
   });
 
+  it.each([true, false])(
+    'screens a destination-only conditional filter before scratch checkout (repository-owned: %s)',
+    (controlled) => {
+      const canary = join(gitIsolation.home, 'destination-filter-ran');
+      const payload = join(
+        controlled ? repo : gitIsolation.home,
+        'destination-driver.cfg',
+      );
+      git(
+        repo,
+        'config',
+        '--file',
+        payload,
+        'filter.destination.smudge',
+        `touch ${shellQuotePath(canary)}; cat`,
+      );
+      if (controlled) git(repo, 'add', 'destination-driver.cfg');
+      const tree = scratchWorktreePath(worktree, 'verify--round-1--abc123');
+      const common = git(repo, 'rev-parse', '--absolute-git-dir');
+      git(
+        repo,
+        'config',
+        '--global',
+        `includeIf.gitdir:${common}/worktrees/${basename(tree)}.path`,
+        payload,
+      );
+      git(
+        repo,
+        'config',
+        'include.path',
+        join(gitIsolation.home, '.gitconfig'),
+      );
+      writeFileSync(
+        join(repo, '.git', 'info', 'attributes'),
+        '* filter=destination\n',
+      );
+
+      const report = run();
+      expect.soft(existsSync(canary)).toBe(!controlled);
+      expect.soft(report.available).toBe(!controlled);
+      if (controlled) {
+        expect(report.note).toContain('filter.destination.smudge');
+        expect(existsSync(join(tree, 'a.ts'))).toBe(false);
+        git(tree, 'checkout', '--force', '--detach', headSha);
+        expect(existsSync(canary)).toBe(true);
+      }
+    },
+  );
+
   it("allows a repo-local include of the user's exact global filter source", () => {
     const globalConfig = join(gitIsolation.home, '.gitconfig');
     writeFileSync(

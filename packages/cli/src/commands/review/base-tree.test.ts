@@ -2790,6 +2790,57 @@ describe('runBaseTree', () => {
     },
   );
 
+  itWhereContainmentExists.each([true, false])(
+    'screens a destination-only conditional filter before base checkout (repository-owned: %s)',
+    (controlled) => {
+      const canary = join(gitIsolation.home, 'destination-filter-ran');
+      const payload = join(
+        controlled ? repo : gitIsolation.home,
+        'destination-driver.cfg',
+      );
+      git(
+        repo,
+        'config',
+        '--file',
+        payload,
+        'filter.destination.smudge',
+        `touch ${shellQuotePath(canary)}; cat`,
+      );
+      if (controlled) git(repo, 'add', 'destination-driver.cfg');
+      const common = git(repo, 'rev-parse', '--absolute-git-dir');
+      git(
+        repo,
+        'config',
+        '--global',
+        `includeIf.gitdir:${common}/worktrees/${basename(tree())}.path`,
+        payload,
+      );
+      git(
+        repo,
+        'config',
+        'include.path',
+        join(gitIsolation.home, '.gitconfig'),
+      );
+      writeFileSync(
+        join(repo, '.git', 'info', 'attributes'),
+        '* filter=destination\n',
+      );
+      expect(filterScreenForTree(worktree)?.filters).toEqual([]);
+
+      const build = vi.fn(() => okBuild);
+      const report = run({}, build);
+      expect.soft(existsSync(canary)).toBe(!controlled);
+      expect.soft(report.available).toBe(!controlled);
+      expect(build).toHaveBeenCalledTimes(controlled ? 0 : 1);
+      if (controlled) {
+        expect(report.note).toContain('filter.destination.smudge');
+        expect(existsSync(join(tree(), 'a.txt'))).toBe(false);
+        git(tree(), 'checkout', '--force', '--detach', baseSha);
+        expect(existsSync(canary)).toBe(true);
+      }
+    },
+  );
+
   it.each(['local', 'global-include'])(
     'refuses a repository-delivered %s filter before the first base checkout',
     (origin) => {

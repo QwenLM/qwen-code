@@ -17,7 +17,11 @@ enumeration. This one result supplies both command keys and source origins.
 Exclude unrelated values to bound output. A failed or malformed enumeration
 always refuses checkout, including when every scoped query fails.
 Both scratch-tree and base-tree creation must call this gate before Git checks
-out files. Base-tree reuse still blanks known drivers for its controlled
+out files. Linked base, scratch and probe trees are first registered with
+`--no-checkout`, then screened in their destination context before an explicit
+checkout. A conditional user include can activate only for the new gitdir;
+screening the source alone does not authorize that destination.
+Base-tree reuse still blanks known drivers for its controlled
 measurement; that is not authorization to execute them during initial creation.
 
 Keep native global/system slots separate from their included files. Native

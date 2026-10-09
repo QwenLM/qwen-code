@@ -2779,8 +2779,27 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         ...CHECKOUT_INERT,
         'worktree',
         'add',
+        '--no-checkout',
         '--detach',
         probeTree,
+        headSha,
+      );
+      // Conditional user includes can activate only in the new gitdir.
+      const destinationFilters = checkoutFilterCommands(probeTree);
+      if (destinationFilters.length > 0) {
+        throw new Error(
+          filterScreenRefusal(
+            destinationFilters,
+            'checking out the probe tree would EXECUTE them',
+          ),
+        );
+      }
+      git(
+        probeTree,
+        ...CHECKOUT_INERT,
+        'checkout',
+        '--force',
+        '--detach',
         headSha,
       );
       created = true;
