@@ -478,8 +478,9 @@ Later Turns may be submitted by any caller holding OPERATOR on the bound
 Workspace under the same opt-in while the Session's creator-keyed execution
 facts hold (the Workspace registry still backs the binding and stays `ACTIVE`,
 and the actor recorded by the Workspace create command keeps OPERATOR or
-above; the per-caller `workspaceTurns` capability flag mirrors exactly that
-rule), and such a caller may cancel the Session's running Turns and rename
+above; the WebShell adapter's per-caller `workspaceTurns` capability flag
+mirrors exactly that rule, though the public surface publishes no such
+flag), and such a caller may cancel the Session's running Turns and rename
 the Session — a readable actor below OPERATOR gets `403
 session_operation_forbidden`, and an admitted OPERATOR blocked by the shape
 or fact gates gets `409 workspace_unavailable`. Workspace close follows its
