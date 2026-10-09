@@ -1542,6 +1542,7 @@ export class SubagentManager {
   private resolveModelOverride(
     model: string | undefined,
     runtimeContext?: Config,
+    fastExpanded = false,
   ): ResolvedModelId | undefined {
     const providerRoute = this.resolveCustomProviderRoute(
       model,
@@ -1554,6 +1555,17 @@ export class SubagentManager {
     // "inherit / no override" as a signal to skip building a dedicated
     // ContentGenerator entirely.
     const context = runtimeContext ? buildModelIdContext(runtimeContext) : {};
+    if (!fastExpanded && model?.trim().split('\0', 1)[0] === 'fast') {
+      const fastModel = context.fastModel;
+      // resolveModelId expands `fast` internally, but only splits known
+      // AuthType prefixes, so a modelProviders-prefixed fastModel would stay
+      // glued to the provider id; route it through the override resolution
+      // instead. A fastModel of literally `fast` falls through, where the
+      // fast branch returns undefined for the self-reference.
+      if (fastModel && fastModel.trim().split('\0', 1)[0] !== 'fast') {
+        return this.resolveModelOverride(fastModel, runtimeContext, true);
+      }
+    }
     return resolveModelId(model, { ...context, currentModel: undefined });
   }
 

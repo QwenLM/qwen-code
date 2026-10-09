@@ -273,7 +273,9 @@ Use the optional `model` frontmatter field to control which model a subagent use
 - `<providerId>:<modelId>`: Use a model declared by a custom provider registered
   under `modelProviders` in `settings.json`. The provider must declare the bare
   model ID; Qwen Code then sends the provider only that bare ID. This form also
-  disambiguates when two providers declare the same model ID.
+  disambiguates when two providers on different auth types declare the same
+  model ID; two providers sharing one auth type still resolve to the first
+  registered one.
 
 For example:
 
