@@ -46,8 +46,8 @@ its delivery without ever re-running the model.
 
 ## Current state
 
-The facts below are from `main` at `5ddfacc9d4`; a bullet that H6a changed
-when it landed says so.
+The facts below are from `main` at `5ddfacc9d4`; a bullet that H6a or H6b
+changed when it landed says so.
 
 - **Domain index.** `schedule` and `automation_run` are registered in the
   closed v1 domain index of
@@ -56,7 +56,9 @@ when it landed says so.
   `MANAGED_SESSION_ENABLED_DOMAINS`, and `commitExtensionRecord` refuses
   them. Since the H6a contract landed, both have record bodies in
   `MANAGED_EXTENSION_RECORD_BODIES` (`managed-extension-projection.ts`),
-  each body under the shared `managed-automation-record/1` contract.
+  each body under the shared `managed-automation-record/1` contract. H6b
+  has since added both to `MANAGED_SESSION_ENABLED_DOMAINS`, gated to the
+  `persistent` mode by `MANAGED_SESSION_ENABLED_SCHEDULE_SESSION_MODES`.
 - **Task projection.** The task kind `automation_run` is declared
   (`MANAGED_TASK_KINDS`) and frozen in the public `TaskKind` enum, and the
   H0b run block carries the run, execution and delivery lines an

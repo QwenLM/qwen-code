@@ -69,10 +69,10 @@ reads add a deployment policy gate (`403 artifact_content_forbidden`);
 workspace discovery lists only `can_read` rows (401 without actor); legacy
 (unbound) Sessions and agent definitions are **tenant-wide** — any actor in the
 tenant may mutate them today; internal store/publication routes admit a writer
-HMAC credential, not an actor. The public surface is `/v1/agents/**` plus
-`/api/agent/web-shell/v1/**` (`PublicSurface`), realised by ten Spring
-controllers — the section-10 matrix enumerates the current 32 public + 24
-WebShell + 24 internal routes (80 in total, including the two L3 authorization
+HMAC credential, not an actor. The public surface is `/v1/agents/**`, `/v1/agent-automations` and
+`/api/agent/web-shell/v1/**` (`PublicSurface`), realised by eleven Spring
+controllers — the section-10 matrix enumerates the current 39 public + 24
+WebShell + 24 internal routes (87 in total, including the two L3 authorization
 routes, counted by the gate).
 
 There is no production provisioning of workspace registry/access rows —
@@ -392,10 +392,12 @@ an asserted constant. The H6b automation runtime added the seven public
 `/v1/agent-automations` routes of an eleventh controller (three `READER`,
 four `OWNER`; the matrix below lists them), so the registry now carries 87.
 
-Rule classes name today's admission: `WORKSPACE_CREATE` (2), `READER` (24),
-`READER_ACTOR` (6), `READER_ACTOR_POLICY` (1), `OPERATOR` as today's
+Rule classes name today's admission: `WORKSPACE_CREATE` (2), `READER` (27
+— H6b's seven automation routes add three), `READER_ACTOR` (6),
+`READER_ACTOR_POLICY` (1), `OPERATOR` as today's
 submitter family (4), `OWNER` as today's creator families — lifecycle and
-cwd plus Action respond — (12), `WORKSPACE_DISCOVERY` (4), `TENANT_SCOPED`
+cwd plus Action respond — (16 — the automation routes add four),
+`WORKSPACE_DISCOVERY` (4), `TENANT_SCOPED`
 (3), `INTERNAL_WRITER` (24). The design's `legacy_create` and
 `legacy_tenant` names are kept in the class documentation as the names of
 the legacy arms: a route carries exactly one rule class and, per the

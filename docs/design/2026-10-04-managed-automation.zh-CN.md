@@ -10,9 +10,9 @@
 
 ## 现状
 
-以下事实基于 `main` 的 `5ddfacc9d4`；H6a 落地后改动的条目会注明。
+以下事实基于 `main` 的 `5ddfacc9d4`；H6a 或 H6b 落地后改动的条目会注明。
 
-- **Domain 索引。** `schedule` 与 `automation_run` 已在 `packages/core/src/managed-runtime/managed-session-records.ts` 的封闭 v1 domain 索引中注册。注册不等于开放：两者不在 `MANAGED_SESSION_ENABLED_DOMAINS` 中，`commitExtensionRecord` 会拒绝它们。H6a 契约落地后，两者在 `MANAGED_EXTENSION_RECORD_BODIES`（`managed-extension-projection.ts`）中都有了记录正文，各自的正文共享 `managed-automation-record/1` 契约。
+- **Domain 索引。** `schedule` 与 `automation_run` 已在 `packages/core/src/managed-runtime/managed-session-records.ts` 的封闭 v1 domain 索引中注册。注册不等于开放：两者不在 `MANAGED_SESSION_ENABLED_DOMAINS` 中，`commitExtensionRecord` 会拒绝它们。H6a 契约落地后，两者在 `MANAGED_EXTENSION_RECORD_BODIES`（`managed-extension-projection.ts`）中都有了记录正文，各自的正文共享 `managed-automation-record/1` 契约。H6b 已经将两者加入 `MANAGED_SESSION_ENABLED_DOMAINS`，并由 `MANAGED_SESSION_ENABLED_SCHEDULE_SESSION_MODES` 门限在 `persistent` 模式。
 - **任务投影。** 任务种类 `automation_run` 已声明（`MANAGED_TASK_KINDS`）并冻结在公开的 `TaskKind` 枚举中；H0b 运行块带有 `AutomationRun` 所需的运行、执行与交付三条状态线。
 - **公开契约。** H0a 在 v1.16 把自动化资源（`GET /v1/agent-automations`、`GET /v1/agent-automations/{automationId}/runs`）以 `planned` 命名，并把它们的形状划给 H6：定义 CRUD、手动 run 与 run 查询，定义与历史 run 分开分页（参考设计第 11 节）。变更使用 `Idempotency-Key` 并返回 `202 + operationId`。
 - **Legacy 计划任务。** `packages/cli/src/runtime/scheduled-task-run.ts` 按任务标签加触发时间为每次点火构造 child Session 名，`packages/cli/src/serve/scheduled-task-*.ts` 保存 daemon 路由与 keepalive。其中没有已提交的计划台账；没有任何内容能以可对账的事实在节点替换后存活。
