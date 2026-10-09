@@ -13,8 +13,10 @@ import { LocalManagedSessionResourceStore } from './managed-session-resources.js
 import { LocalToolResultSegmentStore } from './local-managed-tool-result-store.js';
 import { LocalShellStreamResultSession } from './local-shell-stream-result-session.js';
 
-// Both domains stay disabled for submission on main; this suite admits
+// monitor_run stays disabled for submission on main; this suite admits
 // captures ahead of the H3 enablement flip, like the sibling suites do.
+// child_run's gate is per kind since H4b, so the mock lifts the kind gate
+// while the flag stands.
 const enablement = vi.hoisted(() => ({ childRun: true, monitorRun: true }));
 
 vi.mock('./managed-session-records.js', async (importOriginal) => {
@@ -25,9 +27,13 @@ vi.mock('./managed-session-records.js', async (importOriginal) => {
     assertManagedSessionDomainEnabled: (
       domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
     ) => {
-      if (domain === 'child_run' && enablement.childRun) return;
       if (domain === 'monitor_run' && enablement.monitorRun) return;
       actual.assertManagedSessionDomainEnabled(domain);
+    },
+    assertManagedSessionChildRunKindEnabled: (kind: string) => {
+      if (!enablement.childRun) {
+        actual.assertManagedSessionChildRunKindEnabled(kind);
+      }
     },
   };
 });
@@ -239,6 +245,83 @@ describe('LocalShellStreamResultSession record admission', () => {
     );
     const prepared = await admission.prepare(requestFor('monitor-1'));
     expect(prepared.identity.executionCallId).toBe('monitor-1');
+    await fix.segments.close();
+    await fix.session.close();
+  });
+
+  it('refuses a child agent record as a Background Shell start', async () => {
+    const fix = await fixture();
+    const inputRef = await publish(
+      fix.sessionResources,
+      'managed-input',
+      '{"prompt":"audit"}',
+    );
+    const agent = (run: Record<string, unknown>) => ({
+      kind: 'child_agent',
+      childRunId: 'agent-1',
+      ownerScopeId: sessionKey.sessionId,
+      rootSessionId: sessionKey.sessionId,
+      depth: 1,
+      completion: 'sent',
+      inputRef,
+      workspaceMode: 'shared',
+      workingDirectory: '.',
+      childSessionId: null,
+      predecessorChildRunId: null,
+      resultVersion: 1,
+      resultRef: null,
+      terminalReceiptRef: null,
+      stopReason: null,
+      stopRequested: false,
+      run: {
+        state: 'admitted',
+        reason: null,
+        definition: {
+          definitionId: 'agent-1',
+          definitionRevision: 1,
+          definitionDigest: 'f'.repeat(64),
+        },
+        executionCallId: 'agent-1',
+        effectId: null,
+        dispatchId: null,
+        deliveryId: null,
+        execution: 'intent',
+        runtime: null,
+        delivery: { target: 'session', state: 'planned' },
+        ...run,
+      },
+    });
+    const authority = fix.session.authority;
+    await authority.commitExtensionRecord(
+      command('agent-1:1'),
+      { domain: 'child_run', record: agent({}) },
+      TRUSTED,
+    );
+    await authority.commitExtensionRecord(
+      command('agent-1:2'),
+      {
+        domain: 'child_run',
+        record: agent({
+          state: 'running',
+          execution: 'dispatch_started',
+          dispatchId: 'dispatch-1',
+          runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+        }),
+      },
+      TRUSTED,
+    );
+    const admission = new LocalShellStreamResultSession(
+      fix.session,
+      fix.segments,
+      '1',
+      async () => {},
+      'runtime-a',
+    );
+    // Same record domain and call id, but a child agent's run is not a
+    // Background Shell's proven start.
+    await expect(admission.prepare(requestFor('agent-1'))).rejects.toThrow(
+      "Child run kind must be 'shell' for this consumer",
+    );
     await fix.segments.close();
     await fix.session.close();
   });

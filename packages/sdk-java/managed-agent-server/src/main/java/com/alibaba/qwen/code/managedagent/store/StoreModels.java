@@ -73,6 +73,14 @@ public final class StoreModels {
             long createdAt, long updatedAt) {
     }
 
+    /**
+     * H4b: a child Session's ancestry (V54). v1 children run at depth 1;
+     * the tree root for a first-level child is the parent Session itself.
+     */
+    public record SessionLineage(String parentSessionId, String rootSessionId,
+            String parentChildRunId, int depth) {
+    }
+
     public enum SessionMutationKind {
         RENAME,
         UNARCHIVE
@@ -105,12 +113,37 @@ public final class StoreModels {
             String sessionStatusBefore, String receiptId, String leaseOwner,
             long claimGeneration, int attemptCount, String targetCwdRelative,
             Long expectedContextRevision, Long resultContextRevision,
-            String failureCode) {
+            String failureCode, int lifecycleProtocolVersion) {
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState, String sessionStatusBefore,
+                String receiptId, String leaseOwner, long claimGeneration, int attemptCount, String targetCwdRelative,
+                Long expectedContextRevision, Long resultContextRevision, String failureCode) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, targetCwdRelative,
+                    expectedContextRevision, resultContextRevision, failureCode, 0);
+        }
+
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState, String sessionStatusBefore,
+                String receiptId, String leaseOwner, long claimGeneration, int attemptCount, String failureCode,
+                int lifecycleProtocolVersion) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, null, null, null,
+                    failureCode, lifecycleProtocolVersion);
+        }
+
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState, String sessionStatusBefore,
+                String receiptId, String leaseOwner, long claimGeneration, int attemptCount, String failureCode) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, failureCode, 0);
+        }
+
         public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
                 String requestDigest, String state, String admissionStage, String deliveryState,
                 String sessionStatusBefore, String receiptId, String leaseOwner, long claimGeneration, int attemptCount) {
             this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
-                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, null, null, null, null);
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, null, 0);
         }
     }
 

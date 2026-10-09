@@ -25,6 +25,18 @@ public class ManagedArtifactConfiguration {
     }
 
     /**
+     * The child result relay's own tick: the shared default taskScheduler
+     * also runs every sibling recovery, and this page's sequential
+     * harness calls would stall all of theirs behind one slow Session.
+     * Unconditional — the @Scheduled wiring binds by name at context
+     * refresh whether or not the broker lane is on.
+     */
+    @Bean
+    public ThreadPoolTaskScheduler childRelayScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("child-relay-").build();
+    }
+
+    /**
      * The 100 ms materialize pass runs sequential JDBC transactions; sharing
      * the one-thread default scheduler would delay turn recovery by a whole
      * pass whenever a materialization stalls.

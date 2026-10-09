@@ -6,14 +6,14 @@
 
 核实基点：`main` = `ac497aeed9`（比 issue 点名的 `b585508733` 基线新一个提交；增量是本模块之外的 TUI 改动）。
 
-状态：切片 A（#13543）按今天的准入落地注册表及其门禁。D2/D3 中的 V48 存储随切片 B（#13544）落地，D4/D7 中的强制执行随切片 C（#13545）落地；在它们合入之前，相应各节描述的是计划中的改动，而不是树上的现状。
+状态：切片 A（#13543）按今天的准入落地注册表及其门禁。D2/D3 中的 V53 存储随切片 B（#13544）落地，D4/D7 中的强制执行随切片 C（#13545）落地；在它们合入之前，相应各节描述的是计划中的改动，而不是树上的现状。
 
 ## 1. 问题
 
 两个性质不同的缺口：
 
 - **R1 —— 没有角色词表。** 到目前为止合入的每个绑定 Session 操作都只准入其创建者，对其他任何人返回 `404` 或 `403`。`AuthenticatedTenantActor` 只带 `tenantId()` 与 `actorId()`，此外什么都没有。两个产品行为今天被阻塞：同一 Workspace 上的第二个操作者无法回答一个正阻塞 Turn 的审批；绑定 Workspace 的 Session 无法移交，因为没有任何东西能表达「与创建者不同的所有者」。
-- **R2 —— 没有系统性验收。** 准入覆盖是逐切片随各合入能力累积的。对 56 条公开与 WebShell 路由，API 契约测试已经会让契约里缺失的已挂载路由失败，并对每个契约 operation 发跨租户探针。但 22 条内部路由没有任何门禁，没有探针覆盖低于读权限或有读但无该族权限的调用方，也没有任何东西把一条路由与它应遵循的准入规则绑在一起 —— 于是一条路由可能带着错误的校验落地而所有测试保持全绿，而这个面还在快速增长，这恰恰是最要紧的失效模式。
+- **R2 —— 没有系统性验收。** 准入覆盖是逐切片随各合入能力累积的。对 56 条公开与 WebShell 路由，API 契约测试已经会让契约里缺失的已挂载路由失败，并对每个契约 operation 发跨租户探针。但原切片 A 基线的 22 条内部路由没有任何门禁，没有探针覆盖低于读权限或有读但无该族权限的调用方，也没有任何东西把一条路由与它应遵循的准入规则绑在一起 —— 于是一条路由可能带着错误的校验落地而所有测试保持全绿，而这个面还在快速增长，这恰恰是最要紧的失效模式。
 
 ## 2. 现状
 
@@ -32,7 +32,7 @@
 | 生命周期（close、archive、unarchive、delete）+ cwd 变更 | `POST …/close` / `…/archive` / `…/unarchive`、`DELETE`、`POST …/cwd`，及 WebShell 孪生                                | `requireWorkspaceCreator`（先 can_read 再创建命令行）                           | 403 `session_operation_forbidden` |
 | Action（审批）回答                                      | `POST …/actions/{id}/responses`、WebShell `actions/respond`                                                           | `requireOwner`（creator_actor_key，回退创建命令）                               | 403 `action_forbidden`            |
 
-其余已实现的规则形态：绑定读取与全部 list/stream/catalog 路由要求 `can_read`（否则 404）；绑定创建要求 actor + `can_create` + `ACTIVE` Workspace（按失败点返回 401/404/403/409）；artifact 字节读取叠加部署策略门（`403 artifact_content_forbidden`）；Workspace 发现只列出 `can_read` 行（无 actor 返回 401）；legacy（未绑定）Session 与 agent 定义是**租户级**的 —— 租户内任何 actor 今天都可以改它们；内部 store/publication 路由准入 writer HMAC 凭据而非 actor。公开面是 `/v1/agents/**` 加 `/api/agent/web-shell/v1/**`（`PublicSurface`），由十个 Spring controller 实现 —— 第 10 节的矩阵枚举当前的 32 条公开 + 24 条 WebShell + 22 条内部路由（切片 A 门禁实计共 78 条）。
+其余已实现的规则形态：绑定读取与全部 list/stream/catalog 路由要求 `can_read`（否则 404）；绑定创建要求 actor + `can_create` + `ACTIVE` Workspace（按失败点返回 401/404/403/409）；artifact 字节读取叠加部署策略门（`403 artifact_content_forbidden`）；Workspace 发现只列出 `can_read` 行（无 actor 返回 401）；legacy（未绑定）Session 与 agent 定义是**租户级**的 —— 租户内任何 actor 今天都可以改它们；内部 store/publication 路由准入 writer HMAC 凭据而非 actor。公开面是 `/v1/agents/**` 加 `/api/agent/web-shell/v1/**`（`PublicSurface`），由十个 Spring controller 实现 —— 第 10 节的矩阵枚举当前的 32 条公开 + 24 条 WebShell + 24 条内部路由（含 L3 两条授权入口，门禁实计共 80 条）。
 
 workspace registry/access 行没有任何生产置备路径 —— 今天只有测试与 fixture 入口写它们，部署环境靠带外方式写入；全仓没有 role 列、owner 列，也没有按租户存放 actor 的表。
 
@@ -52,36 +52,42 @@ workspace registry/access 行没有任何生产置备路径 —— 今天只有�
 
 Q4 的答案：一张授权表，按 `(tenant_id, workspace_id, actor_id)` 键 —— 即已经存在、且已在每条绑定路由读路径上的 `managed_workspace_access` 表。不采用网关声明：`AuthenticatedTenantActor` 契约保持 tenant + actor，按 Workspace 的授权塞不进声明集。不采用按 Session 键：那会把行数乘以 sessions × actors，且每次创建都要为一组服务器无法枚举的 actor 做扇出插入；被阻塞的行为恰恰由谁共享 _Workspace 绑定_ 定义。不采用按租户键：那无法表达「A 上是 reader、B 上是 operator」。
 
-具体地，迁移 V48 用一列取代两个布尔：
+具体地，迁移 V53 用一列取代两个布尔：
 
 ```sql
 ALTER TABLE managed_workspace_access
-    ADD COLUMN role VARCHAR(16) NOT NULL DEFAULT 'READER';
+    ADD COLUMN role VARCHAR(16) NULL;
 -- 没有 can_read 的行今天不授予任何东西；保留它会经回填拿到 READER
 -- （若是 can_create 行则拿到 OPERATOR）。
 DELETE FROM managed_workspace_access WHERE can_read = FALSE;
 UPDATE managed_workspace_access
     SET role = CASE WHEN can_create THEN 'OPERATOR' ELSE 'READER' END;
+ALTER TABLE managed_workspace_access
+    MODIFY COLUMN role VARCHAR(16) NOT NULL;
 ALTER TABLE managed_workspace_access DROP COLUMN can_read;
 ALTER TABLE managed_workspace_access DROP COLUMN can_create;
 ALTER TABLE managed_workspace_access
     ADD CONSTRAINT managed_workspace_access_role
-    CHECK (role IN ('READER', 'OPERATOR', 'OWNER'));
+    CHECK ((role = 'READER' AND CHAR_LENGTH(role) = 6)
+        OR (role = 'OPERATOR' AND CHAR_LENGTH(role) = 8)
+        OR (role = 'OWNER' AND CHAR_LENGTH(role) = 5));
 ```
 
-复合语句按仓内迁移先例（V7、V12、V24、V40）拆成每动作一条；先删除无可读行再回填，才使这次改动对每一个可达授权行都只是改名。`role` 是唯一存储词表；不双写。`WorkspaceAccess` 枚举变为 `NONE / READER / OPERATOR / OWNER`（READ→READER、CREATE→OPERATOR）；`OWNER` 蕴含 `OPERATOR` 蕴含 `READER`。每个 store 读取点（`canRead`、`findReadable`、`listReadable`、`canCreateSession`、`resolveForCreation`、`authorizePassiveAttachment`、SSE 读授权复查、list 路由的 SQL 过滤）保持当前判定不变，布尔由 `role` 重新推导 —— 这是一次行为不可见的内部改动，由现有测试套件钉住。`NONE` 不可存储（CHECK 排除它）；它保留为「无行」的领域值。
+约束刻意用「等值 + 精确长度」而不是 `IN` 列表：utf8mb4 比较忽略尾随空格（PAD SPACE），`IN` 列表会收下 `READER ` —— 读路径的枚举解析又拒绝它，于是一次带外置备笔误就会让该 actor 的发现路由全数返回 400。锚定 REGEXP 孤立地看也能做到，但它的反斜杠会在入库路上被改写（MySQL 字符串字面量把反斜杠当转义，H2 不当），所以谓词里干脆不放反斜杠：逐名等值加精确长度，让落库值与枚举名保持逐字节一致。
+
+复合语句按仓内迁移先例（V7、V12、V24、V40）拆成每动作一条；先删除无可读行再回填，才使这次改动对每一个可达授权行都只是改名。`role` 是唯一存储词表；不双写。`role` 也不带默认值：列先以 NULL 到来让回填覆盖全部存量行，随后 `MODIFY COLUMN` 收紧为 NOT NULL；此后省略它的 INSERT 违反 NOT NULL，与省略布尔列时相同，带外置备 SQL 因此响亮失败而不是静默授予 READER。`WorkspaceAccess` 枚举变为 `NONE / READER / OPERATOR / OWNER`（READ→READER、CREATE→OPERATOR）；`OWNER` 蕴含 `OPERATOR` 蕴含 `READER`。每个 store 读取点（`canRead`、`findReadable`、`listReadable`、`canCreateSession`、`resolveForCreation`、`authorizePassiveAttachment`、SSE 读授权复查、list 路由的 SQL 过滤）保持当前判定不变，布尔由 `role` 重新推导 —— 这是一次行为不可见的内部改动，由现有测试套件钉住。`NONE` 不可存储（CHECK 排除它）；它保留为「无行」的领域值。
 
 授权置备保持带外，与今天两个布尔的置备方式一致：fixture/部署 SQL 写行；本切片不出现 HTTP 授权管理路由（第 7 节）。
 
 ### D3 —— Session 记录持有 owner，默认为其创建者
 
-V48 同时新增 `managed_agent_session.owner_actor_key VARBINARY(2048) NULL`，并从 `creator_actor_key` 回填。三个身份事实刻意分开：
+V53 同时新增 `managed_agent_session.owner_actor_key VARBINARY(2048) NULL`，并从 `creator_actor_key` 回填。三个身份事实刻意分开：
 
 - **记录**（Session 行）持有 owner —— 一个 actor，初始即创建者；
 - **绑定**（workspace 授权行）持该租户每个 actor 在各 Workspace 上可做什么；
 - **角色**是准入路径查询的词表 —— 对 Session 级校验，Session 的 owner 对该 Session 以 OWNER 权利行事，与其 workspace 授权无关，这使今天的创建者行为被原样保留。
 
-`managed_workspace_create_command` 保持其本职 —— 幂等命令记录，其 `actor_id` 属于幂等域而非授权。V48 之后对它的授权性读取（`requireOwner` / `requireWorkspaceCreator` 中 NULL 创建者回退）只为 V40 之前创建的会话保留；新会话总是同时带 creator 与 owner。
+`managed_workspace_create_command` 保持其本职 —— 幂等命令记录，其 `actor_id` 属于幂等域而非授权。V53 之后对它的授权性读取（`requireOwner` / `requireWorkspaceCreator` 中 NULL 创建者回退）只为 V40 之前创建的会话保留；新会话总是同时带 creator 与 owner。
 
 owner 的更新路径（移交命令）是建在此列之上的后续切片；本切片给出移交所需的词表与存储，并把每个创建者校验改指 owner（第 7 节）。
 
@@ -112,7 +118,7 @@ owner 的更新路径（移交命令）是建在此列之上的后续切片；�
 
 注册表放在 `src/test/java`，因为生产代码里没有任何地方读它：下文的门禁与验收探针是它仅有的消费者，本切片如此，切片 C 也如此 —— C 的强制执行读的是存储的角色。只有出现运行时消费者时它才移到 `src/main`。
 
-它不取代 OpenAPI 契约（`managed-agent-public-api.openapi.json`）：契约仍是 56 条公开与 WebShell 路由对外发布形态的唯一来源，API 契约测试让它与已挂载的 handler 保持双射。规则类刻意不作为 `x-qwen-*` 扩展写进契约：契约是对外发布、被机器消费的（WebShell 客户端类型由它生成），它不描述 22 条内部路由，而准入规则类是服务端内部的分类。因此一条新的公开或 WebShell 路由要被点名三次 —— controller、契约、注册表 —— 且每一对都有门禁：契约测试让契约缺失的路由失败，对账门禁让注册表缺失的路由失败。
+它不取代 OpenAPI 契约（`managed-agent-public-api.openapi.json`）：契约仍是 56 条公开与 WebShell 路由对外发布形态的唯一来源，API 契约测试让它与已挂载的 handler 保持双射。规则类刻意不作为 `x-qwen-*` 扩展写进契约：契约是对外发布、被机器消费的（WebShell 客户端类型由它生成），它不描述 24 条内部路由，而准入规则类是服务端内部的分类。因此一条新的公开或 WebShell 路由要被点名三次 —— controller、契约、注册表 —— 且每一对都有门禁：契约测试让契约缺失的路由失败，对账门禁让注册表缺失的路由失败。
 
 ### D6 —— 构建门禁
 
@@ -134,14 +140,14 @@ owner 的更新路径（移交命令）是建在此列之上的后续切片；�
 | 切片                              | 内容                                                                                                                                                                          | 改动范围                                                                                 |
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | **A —— 注册表 + 门禁（先行 R2）** | 按今天规则建 `SurfaceRegistry`、对账门禁、验收探针、奇偶断言、本文档的双语路由矩阵                                                                                            | 全部为测试树新文件：`api/SurfaceRegistry.java`、门禁及其反向孪生、验收探针；不改生产代码 |
-| **B —— 角色存储（R1 存储）**      | V48 迁移与回填、`WorkspaceAccess` 改名、注册表 store 读取改由 `role` 推导、`owner_actor_key` 列与创建时写入、fixture INSERT 更新（约 24 处）、迁移形态测试                    | `store/**`、runtime-broker 枚举、`db/migration`、测试 fixture；不改任何准入判定          |
+| **B —— 角色存储（R1 存储）**      | V53 迁移与回填、`WorkspaceAccess` 改名、注册表 store 读取改由 `role` 推导、`owner_actor_key` 列与创建时写入、fixture INSERT 更新（约 24 处）、迁移形态测试                    | `store/**`、runtime-broker 枚举、`db/migration`、测试 fixture；不改任何准入判定          |
 | **C —— 强制执行（R1）**           | 三个创建者辅助方法改指角色/owner、拒绝码归一、Action 回答向 OPERATOR 开放、按角色的 WebShell 能力广告、注册表规则翻转、探针期望翻转、契约 v1.34 与 OpenAPI 文本、契约测试更新 | `service/**`、`store/**` 校验点、controller、契约、A 的枚举与测试                        |
 
 A ∥ B 是安全的：文件不相交（A 纯新增；B 改 store 侧）。C 必须在两者合入后串行，因为它同时改写 A 的注册表条目与 B 的辅助方法 —— 这是唯一真实的阻塞依赖，所以被排序而不是被抢跑。C 关闭 #13535；A 与 B 引用它。
 
 ## 5. 迁移与兼容
 
-- V48 沿用既有单版本纪律（迁移前停掉旧版本服务器；不用 `outOfOrder`）。占用 V48 意味着任何开放分支上的后续迁移号要重排；`scripts/check-flyway-migrations.js` 已跨两个迁移目录门禁编号。
+- V53 沿用既有单版本纪律（迁移前停掉旧版本服务器；不用 `outOfOrder`）。占用 V53 意味着任何开放分支上的后续迁移号要重排；`scripts/check-flyway-migrations.js` 已跨两个迁移目录门禁编号。
 - 契约 v1.34 记录：角色词表、submitter 族与 Action 族的 OPERATOR 准入、基于 owner 的生命周期、submitter 族拒绝语义 409 `workspace_unavailable` → 403 `session_operation_forbidden` 的变化、以及按角色的能力广告。
 - 客户端可观察的拒绝码变化：绑定 Session 上的非创建者提交（409 → 403）；Action 回答对非创建者的 OPERATOR 由拒绝变为成功。其余对调用方保持不变。
 - 写 `can_read`/`can_create` 的测试 fixture 在切片 B 改写 `role`；曾考虑生成列方案，为保持单一事实源与 H2/MySQL 简单对齐而放弃。
@@ -158,7 +164,7 @@ A ∥ B 是安全的：文件不相交（A 纯新增；B 改 store 侧）。C �
 ## 7. 验证计划
 
 - 切片 A：对账门禁会因未注册路由（带方法或不带方法的映射）失败，也会因无人挂载的注册条目失败 —— 一个已提交的反向测试持续证明这两者；探针按规则类在公开、WebShell 与内部路由上钉住今天的状态码。
-- 切片 B：迁移形态测试在 V47 fixture 之上应用 V48，断言回填（can_create → OPERATOR，仅 can_read → READER，owner := creator）；现有整套测试除 fixture INSERT 外原样全绿 —— 这就是行为不可见的证明。
+- 切片 B：迁移形态测试在 V47 fixture 之上应用 V53，断言回填（can_create → OPERATOR，仅 can_read → READER，owner := creator）；现有整套测试除 fixture INSERT 外原样全绿 —— 这就是行为不可见的证明。
 - 切片 C：更新后的探针与契约测试钉住新矩阵；定向测试：第二个 OPERATOR 在两个面上回答待答审批，OPERATOR 提交/取消/改名/改 cwd，owner 生命周期不变，可读陌生人保持 404，角色撤销按原窗口翻转 SSE 准入；MySQL 奇偶走 failsafe profile（`mysql-integration`、`hosted-harness-mysql`，视 fixture 允许）。
 - 跨面奇偶断言两次：结构性（注册表 能力→规则类）与行为性（孪生探针）。
 
@@ -179,14 +185,14 @@ A ∥ B 是安全的：文件不相交（A 纯新增；B 改 store 侧）。C �
 
 ## 10. Surface 路由矩阵（切片 A 注册表，双语摘要）
 
-切片 A 头的 `api/SurfaceRegistry.java` 携带 78 条路由常量：十个
-controller 的 32 公开 + 24 WebShell + 22 internal handler 方法。门禁从扫描推导一切，计数只是信息，不是被断言的常量。
+与 L3 整合后的 `api/SurfaceRegistry.java` 携带 80 条路由常量：十个
+controller 的 32 公开 + 24 WebShell + 24 internal handler 方法（含 L3 两条授权入口）。门禁从扫描推导一切，计数只是信息，不是被断言的常量。
 
 规则类按今天的准入命名：`WORKSPACE_CREATE`（2）、`READER`（24）、
 `READER_ACTOR`（6）、`READER_ACTOR_POLICY`（1）、`OPERATOR` 作为今天的
 submitter 族（4）、`OWNER` 作为今天的 creator 各族 —— lifecycle、cwd
 与 Action respond（12）、`WORKSPACE_DISCOVERY`（4）、`TENANT_SCOPED`
-（3）、`INTERNAL_WRITER`（22）。设计列出的 `legacy_create` 与
+（3）、`INTERNAL_WRITER`（24）。设计列出的 `legacy_create` 与
 `legacy_tenant` 两个名字保留在类的文档里，作为 legacy 分支的名字：
 每条路由恰有一个规则类，按分离规则取的是绑定 Session 的类。切片 C
 会把 cwd 与 Action respond 从 `OWNER` 翻到 `OPERATOR`，归一
@@ -253,6 +259,8 @@ submitter 族的拒绝码，并且只有在探针需要不同期望时才拆开 
 | `POST /api/agent/web-shell/v1/artifacts/query`                                                                                   | WEBSHELL | ARTIFACT_LIST             | READER_ACTOR        |
 | `POST /api/agent/web-shell/v1/workspaces/query`                                                                                  | WEBSHELL | WORKSPACE_LIST            | WORKSPACE_DISCOVERY |
 | `POST /api/agent/web-shell/v1/workspaces/get`                                                                                    | WEBSHELL | WORKSPACE_GET             | WORKSPACE_DISCOVERY |
+| `POST /internal/managed-session-store/v1/sessions/{sessionId}/execution:authorize`                                               | INTERNAL | STORE_EXECUTION_AUTHORIZE | INTERNAL_WRITER     |
+| `POST /internal/managed-session-store/v1/sessions/{sessionId}/lifecycle:authorize`                                               | INTERNAL | STORE_LIFECYCLE_AUTHORIZE | INTERNAL_WRITER     |
 | `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:acquire`                                                   | INTERNAL | STORE_WRITER_ACQUIRE      | INTERNAL_WRITER     |
 | `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:renew`                                                     | INTERNAL | STORE_WRITER_RENEW        | INTERNAL_WRITER     |
 | `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:seal`                                                      | INTERNAL | STORE_WRITER_SEAL         | INTERNAL_WRITER     |
