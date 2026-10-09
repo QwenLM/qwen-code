@@ -163,13 +163,15 @@ public final class ManagedExtensionRecords {
             "stopReason", "stopRequested", "exitCode", "exitSignal", "run");
     private static final List<String> CHILD_FIXED = List.of("kind", "shellId",
             "ownerScopeId", "commandRef");
+    // The closed keys of both child Session kinds: a workflow child rides
+    // the child agent's lifecycle field for field.
     private static final Set<String> CHILD_AGENT_KEYS = Set.of("kind",
             "childRunId", "ownerScopeId", "rootSessionId", "depth",
             "completion", "inputRef", "workspaceMode", "workingDirectory",
             "childSessionId", "predecessorChildRunId", "resultVersion",
             "resultRef", "terminalReceiptRef", "stopReason", "stopRequested",
             "run");
-    // The fields that no revision of a child agent may change.
+    // The fields that no revision of a child Session run may change.
     // `resultVersion` is not here on purpose: the parser forces it to 1,
     // so no two revisions can ever differ on it, and a fixed-key entry
     // for it could never refuse.
@@ -706,8 +708,9 @@ public final class ManagedExtensionRecords {
 
     /**
      * Checks the body of a managed-child_run schema version 1 record by its
-     * own {@code kind} field: {@code "shell"} (H3) or {@code "child_agent"}
-     * (H4), each a closed shape (see managed-child-run-record.ts for the
+     * own {@code kind} field: {@code "shell"} (H3), or one of the child
+     * Session kinds {@code "child_agent"} (H4a) and {@code "workflow"}
+     * (H4c), each a closed shape (see managed-child-run-record.ts for the
      * same rules).
      */
     public static void requireChildRun(JsonNode child) {
@@ -717,19 +720,21 @@ public final class ManagedExtensionRecords {
                 requireChildShell(child);
                 return;
             }
-            if ("child_agent".equals(kind.textValue())) {
-                requireChildAgent(child);
+            if ("child_agent".equals(kind.textValue())
+                    || "workflow".equals(kind.textValue())) {
+                requireChildSession(child);
                 return;
             }
         }
-        require(false, "Child run kind must be one of shell, child_agent in"
-                + " schema version 1");
+        require(false, "Child run kind must be one of shell, child_agent,"
+                + " workflow in schema version 1");
     }
 
     /** The task kind one child run projects, by its own kind. */
     public static String childRunTaskKind(JsonNode child) {
-        return "shell".equals(child.get("kind").textValue())
-                ? "background_shell" : "child_agent";
+        String kind = child.get("kind").textValue();
+        return "shell".equals(kind) ? "background_shell"
+                : "workflow".equals(kind) ? "workflow" : "child_agent";
     }
 
     /** The identity that keys a child run's revision chain, by its kind. */
@@ -862,18 +867,20 @@ public final class ManagedExtensionRecords {
     }
 
     /**
-     * Checks the body of a managed-child_run schema version 1 record
-     * ({@code kind: "child_agent"}): one child Session per record (H4 of
-     * #12827; the checks run in the same order as the TypeScript validator
-     * so both report the same clause of a doubly broken body).
+     * Checks the body of a managed-child_run schema version 1 record of a
+     * child Session kind ({@code kind: "child_agent"} or
+     * {@code "workflow"}): one child Session per record under one shared
+     * shape (H4 of #12827; the checks run in the same order as the
+     * TypeScript validator so both report the same clause of a doubly
+     * broken body).
      */
-    private static void requireChildAgent(JsonNode child) {
+    private static void requireChildSession(JsonNode child) {
         closed(child, CHILD_AGENT_KEYS, "childRun");
         JsonNode run = child.get("run");
         requireRun(run);
-        // A child agent is started by one tool call; its result travels
-        // the session delivery line its relay scans, never an effect
-        // identity or an external delivery.
+        // A child Session run is started by one tool call; its result
+        // travels the session delivery line its relay scans, never an
+        // effect identity or an external delivery.
         require(!run.get("executionCallId").isNull()
                 && run.get("effectId").isNull()
                 && run.get("deliveryId").isNull(),
@@ -883,6 +890,12 @@ public final class ManagedExtensionRecords {
         require(!delivery.isNull()
                 && "session".equals(delivery.get("target").textValue()),
                 "Child run delivery must target the parent session");
+        // A workflow run exists to run one workflow revision, so the
+        // launch itself names it: the pin is required from the opening
+        // revision on, never merely by the dispatch.
+        require(!"workflow".equals(child.get("kind").textValue())
+                || !run.get("definition").isNull(),
+                "Workflow run must pin its workflow definition from launch");
         // The launched definition is pinned no later than the dispatch
         // that admits the creation; the shared successor rule makes it
         // unaddable after that dispatch, so an absence is unrepairable.
@@ -907,10 +920,13 @@ public final class ManagedExtensionRecords {
             id(session, "childSessionId");
         }
         String execution = text(run, "execution");
-        // The Session exists only once the control plane admitted its
-        // creation.
+        // The Session exists once the control plane admitted its
+        // creation, and the mint alone never dispatches: a never-started
+        // proof may name the Session it minted (the mint is exactly what
+        // survives the create→attach window), everything earlier may not.
         require(session.isNull() || execution != null
-                && !CHILD_UNSTARTED_EXECUTIONS.contains(execution),
+                && (!CHILD_UNSTARTED_EXECUTIONS.contains(execution)
+                        || "not_started_proven".equals(execution)),
                 "Child run childSessionId needs its admitted creation"
                         + " dispatch");
         require(!session.isNull()
@@ -919,8 +935,11 @@ public final class ManagedExtensionRecords {
                 "Child run childSessionId is set once creation is proven");
         // The Session the child runs in is hosted by a Runtime binding,
         // set with the dispatch and unaddable once dispatched, like the
-        // definition pin.
-        require(session.isNull() || !run.get("runtime").isNull(),
+        // definition pin. The never-started proof is the one terminal
+        // with no dispatch to host from: minted, never dispatched, so
+        // never bound.
+        require(session.isNull() || !run.get("runtime").isNull()
+                || "not_started_proven".equals(execution),
                 "Child run childSessionId needs the Runtime binding that"
                         + " hosts it");
         // A dispatch that never started (not_started_proven) may carry no
@@ -1008,8 +1027,7 @@ public final class ManagedExtensionRecords {
                 "Child run failed needs settled or not_started_proven"
                         + " execution");
         require(!"creation_failed".equals(stopReason)
-                || "not_started_proven".equals(execution)
-                        && session.isNull(),
+                || "not_started_proven".equals(execution),
                 "Child run creation_failed needs a creation that never"
                         + " started");
         require(!"child_failed".equals(stopReason)
@@ -1050,8 +1068,9 @@ public final class ManagedExtensionRecords {
 
     /**
      * Whether {@code child} may open its chain: a Shell's run opens with no
-     * stop request and no output; a child agent's run opens with the
-     * delivery planned, no Session created, no result and no stop request.
+     * stop request and no output; a child Session run (either kind) opens
+     * with the delivery planned, no Session created, no result and no stop
+     * request.
      */
     public static boolean isChildRunStart(JsonNode child) {
         if (!accepts(() -> requireChildRun(child))
