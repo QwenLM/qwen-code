@@ -60,9 +60,10 @@ export function startRequestLifecycle(
     startedAt: Date.now(),
     ...(identity ? { subagentId: identity.id } : {}),
   };
+  const recorder = config.getChatRecordingService();
   const publish = (event: RequestLifecycleEvent) => {
     try {
-      config.getChatRecordingService()?.recordUiTelemetryEvent({
+      recorder?.recordUiTelemetryEvent({
         ...event,
         'event.name': 'request_lifecycle',
       });
