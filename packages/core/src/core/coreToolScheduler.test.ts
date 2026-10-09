@@ -1197,6 +1197,8 @@ describe('CoreToolScheduler', () => {
     deferredHiddenNames?: ReadonlySet<string>;
     includeToolSearch?: boolean;
     isToolExecutionAllowed?: (name: string) => boolean;
+    isInteractive?: boolean;
+    inputFormat?: InputFormat;
   }) {
     let autoModeDenialState = options.autoModeDenialState ?? {
       ...ZERO_DENIAL_STATE,
@@ -1284,8 +1286,8 @@ describe('CoreToolScheduler', () => {
           getWorkspaceContext: () => ({
             isPathWithinWorkspace: () => false,
           }),
-          isInteractive: () => true,
-          getInputFormat: () => undefined,
+          isInteractive: () => options.isInteractive ?? true,
+          getInputFormat: () => options.inputFormat,
           getExperimentalZedIntegration: () => false,
           getActiveTodoWorkChainOwner: options.getActiveTodoWorkChainOwner,
           // Threaded into resolveDeferredToolCall so the bridge's exclusion
@@ -5540,6 +5542,56 @@ describe('CoreToolScheduler', () => {
     expect(onConfirmSpy).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
   });
+
+  it('denies a destructive-command escalation in non-interactive STREAM_JSON instead of offering it to the host', async () => {
+    // Counterpart to the test above for the other programmatic approver.
+    // STREAM_JSON is exempt from the non-interactive deny because a host can
+    // answer `can_use_tool`, but that host is not a human — so handing it this
+    // dialog lets `{behavior:'allow'}` resolve to ProceedOnce and run the
+    // work-destroying command. Without a human channel the escalation must
+    // deny, as it did before the escalation existed.
+    const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue(textResult('executed'));
+    const harness = autoScheduler(
+      askingTool({
+        kind: Kind.Execute,
+        getConfirmationDetails: vi
+          .fn()
+          .mockResolvedValue(
+            execDetails('Run command', 'git reset --hard', 'git', onConfirmSpy),
+          ),
+        execute,
+      }),
+      {
+        isInteractive: false,
+        inputFormat: InputFormat.STREAM_JSON,
+        // One below maxTotalDenials, so this denial reaches the session cap and
+        // the destructive arm escalates instead of hard-blocking.
+        autoModeDenialState: denialState({ totalBlock: 19 }),
+        setAutoModeDenialState: vi.fn(),
+      },
+    );
+
+    await scheduleAndSettle(
+      harness,
+      shellRequest('destructive-stream-json', 'git reset --hard'),
+    );
+
+    const [denied] = firstBatch<CompletedToolCall>(
+      harness.onAllToolCallsComplete,
+    );
+    expect(denied.status).toBe('error');
+    expect(denied.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+    // `awaiting_approval` is the only status PermissionController's
+    // update callback picks up to emit `can_use_tool`, so never reaching it
+    // is what keeps the escalation off the wire.
+    expect(
+      reportedCalls(harness.onToolCallsUpdate).map((c) => c.status),
+    ).not.toContain('awaiting_approval');
+    expect(onConfirmSpy).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   /** Read-kind MockTools by name; each runs a mock or resolves a result. */
   function readToolMap(
     executes: Record<string, Mock | ToolResult>,
