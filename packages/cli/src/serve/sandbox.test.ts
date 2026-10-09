@@ -159,10 +159,12 @@ describe('start_sandbox', () => {
     // The root reaches the container read-only at its (translated) path.
     // Compare on the host side of the spec, which is never translated: a
     // host:host literal only holds where getContainerPath is identity.
-    const volumes = args.filter((_, index) => args[index - 1] === '--volume');
+    const mounts = args.filter((_, index) => args[index - 1] === '--mount');
     expect(
-      volumes.some(
-        (spec) => spec.startsWith(`${managedRoot}:`) && spec.endsWith(':ro'),
+      mounts.some(
+        (spec) =>
+          spec.startsWith(`type=bind,"source=${managedRoot}",`) &&
+          spec.endsWith(',readonly'),
       ),
     ).toBe(true);
     // ...and the forwarded flag still names that path, so the child's
@@ -294,14 +296,16 @@ describe('start_sandbox', () => {
 
         await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
         const args = spawnMock.mock.calls[1]?.[1] as string[];
-        const volumes = args.filter(
-          (_, index) => args[index - 1] === '--volume',
-        );
+        const mounts = args.filter((_, index) => args[index - 1] === '--mount');
         // The canonical mount stays, and the spelling the child actually
         // receives is covered read-only as well: without it the spelling
         // resolves through the read-write tmpdir mount inside the container.
-        expect(volumes).toContain(`${canonical}:${canonical}:ro`);
-        expect(volumes).toContain(`${canonical}:${launchSpelling}:ro`);
+        expect(mounts).toContain(
+          `type=bind,"source=${canonical}","target=${canonical}",readonly`,
+        );
+        expect(mounts).toContain(
+          `type=bind,"source=${canonical}","target=${launchSpelling}",readonly`,
+        );
         const tmpdirSpelling = path.join(
           os.tmpdir(),
           path.relative(fs.realpathSync.native(os.tmpdir()), canonical),
@@ -312,14 +316,23 @@ describe('start_sandbox', () => {
           tmpdirSpelling,
         ]);
         expect(
-          volumes.filter((spec) => spec.startsWith(`${canonical}:`)).sort(),
+          mounts
+            .filter((spec) =>
+              spec.startsWith(`type=bind,"source=${canonical}",`),
+            )
+            .sort(),
         ).toEqual(
           [...expectedDestinations]
-            .map((destination) => `${canonical}:${destination}:ro`)
+            .map(
+              (destination) =>
+                `type=bind,"source=${canonical}","target=${destination}",readonly`,
+            )
             .sort(),
         );
         expect(
-          volumes.some((spec) => spec.endsWith(`:${os.tmpdir()}:ro`)),
+          mounts.some((spec) =>
+            spec.endsWith(`"target=${os.tmpdir()}",readonly`),
+          ),
         ).toBe(false);
 
         child.emit('close', 0);
@@ -384,10 +397,10 @@ describe('start_sandbox', () => {
 
         await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
         const args = spawnMock.mock.calls[1]?.[1] as string[];
-        const volumes = args.filter(
-          (_, index) => args[index - 1] === '--volume',
+        const mounts = args.filter((_, index) => args[index - 1] === '--mount');
+        expect(mounts).toContain(
+          `type=bind,"source=${canonical}","target=${launchSpelling}",readonly`,
         );
-        expect(volumes).toContain(`${canonical}:${launchSpelling}:ro`);
 
         child.emit('close', 0);
         await expect(result).resolves.toBe(0);

@@ -43,16 +43,33 @@ interface Mount {
 }
 
 function volumes(args: string[]): Mount[] {
-  return args
-    .filter((_, index) => args[index - 1] === '--volume')
-    .map((spec) => {
-      const [source, destination, mode] = spec.split(':');
-      return {
+  return args.flatMap((spec, index) => {
+    if (args[index - 1] === '--mount') {
+      const fields = (spec.match(/"(?:[^"]|"")*"|[^,]+/g) ?? []).map((field) =>
+        field.startsWith('"')
+          ? field.slice(1, -1).replaceAll('""', '"')
+          : field,
+      );
+      return [
+        {
+          source: fields.find((field) => field.startsWith('source='))!.slice(7),
+          destination: fields
+            .find((field) => field.startsWith('target='))!
+            .slice(7),
+          readOnly: fields.includes('readonly'),
+        },
+      ];
+    }
+    if (args[index - 1] !== '--volume') return [];
+    const [source, destination, mode] = spec.split(':');
+    return [
+      {
         source,
         destination: path.posix.resolve('/', destination),
         readOnly: mode?.split(',').includes('ro') ?? false,
-      };
-    });
+      },
+    ];
+  });
 }
 
 function unprotectedAliases(mounts: Mount[], managedRoot: string) {
@@ -99,10 +116,14 @@ describe.skipIf(process.platform === 'win32')(
       vi.spyOn(process, 'cwd').mockReturnValue(workspace);
       vi.spyOn(os, 'homedir').mockReturnValue(path.join(root, 'home'));
       vi.spyOn(os, 'tmpdir').mockReturnValue(path.join(root, 'tmp'));
+      vi.stubEnv('HOME', path.join(root, 'home'));
       vi.stubEnv('QWEN_HOME', qwenHome);
       vi.stubEnv('QWEN_RUNTIME_DIR', qwenHome);
       vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
       for (const variable of [
+        'QWEN_SANDBOX',
+        'SANDBOX',
+        'SANDBOX_ENV',
         'SANDBOX_MOUNTS',
         'SANDBOX_FLAGS',
         'BUILD_SANDBOX',
@@ -132,13 +153,16 @@ describe.skipIf(process.platform === 'win32')(
       fs.rmSync(root, { recursive: true, force: true });
     });
 
-    async function launch(managedRoot?: string) {
+    async function launch(
+      managedRoot?: string,
+      command: 'docker' | 'podman' = 'docker',
+    ) {
       const config = managedRoot
         ? ({ getManagedExtensionsDir: () => managedRoot } as unknown as Config)
         : undefined;
       await expect(
         start_sandbox(
-          { command: 'docker', image: 'example.com/qwen-code:test' },
+          { command, image: 'example.com/qwen-code:test' },
           [],
           config,
           [
@@ -174,6 +198,104 @@ describe.skipIf(process.platform === 'win32')(
         false,
       );
     }
+
+    function runArgs(): string[] {
+      return spawnMock.mock.calls.find((call) => call[1]?.[0] === 'run')![1];
+    }
+
+    function requireSourceWithoutCreation(managedRoot: string) {
+      const args = runArgs();
+      const unsafe = args.filter(
+        (spec, index) =>
+          args[index - 1] === '--volume' && spec.startsWith(`${managedRoot}:`),
+      );
+      expect(unsafe).toEqual([]);
+      const mounts = args.filter((_, index) => args[index - 1] === '--mount');
+      expect(mounts).toContain(
+        `type=bind,"source=${managedRoot.replaceAll('"', '""')}","target=${managedRoot.replaceAll('"', '""')}",readonly`,
+      );
+      expect(mounts.some((spec) => spec.includes('bind-create-src'))).toBe(
+        false,
+      );
+    }
+
+    it('requires a missing pinned managed source instead of using an auto-creating Docker volume', async () => {
+      const managed = path.join(root, 'managed');
+      fs.mkdirSync(managed);
+      const pinned = fs.realpathSync.native(managed);
+      fs.rmdirSync(managed);
+      await launch(pinned);
+      requireSourceWithoutCreation(pinned);
+      expect(fs.existsSync(pinned)).toBe(false);
+    });
+
+    it.each([false, true])(
+      'requires a source removed at the process boundary, including an existing readonly volume: %s',
+      async (existing) => {
+        const managed = path.join(root, 'managed');
+        fs.mkdirSync(managed);
+        fs.writeFileSync(path.join(managed, 'sentinel'), 'deployment content');
+        if (existing) vi.stubEnv('SANDBOX_MOUNTS', `${managed}:${managed}:ro`);
+        const transport = spawnMock.getMockImplementation()!;
+        spawnMock.mockImplementation((command: string, args: string[]) => {
+          if (args[0] === 'run') fs.rmSync(managed, { recursive: true });
+          return transport(command, args);
+        });
+        await launch(managed);
+        requireSourceWithoutCreation(managed);
+        expect(fs.existsSync(managed)).toBe(false);
+        expect(runArgs()).toContain(`${workspace}:${workspace}`);
+      },
+    );
+
+    it('converts a same-root readonly volume at a separate alias', async () => {
+      const managed = path.join(root, 'managed');
+      fs.mkdirSync(managed);
+      vi.stubEnv('SANDBOX_MOUNTS', `${managed}:/readonly-alias:ro`);
+      await launch(managed);
+      requireSourceWithoutCreation(managed);
+      expect(runArgs()).toContain(
+        `type=bind,"source=${managed}","target=/readonly-alias",readonly`,
+      );
+    });
+
+    it('requires the source of an existing managed readonly subtree', async () => {
+      const managed = path.join(root, 'managed');
+      const pkg = path.join(managed, 'pkg');
+      fs.mkdirSync(pkg, { recursive: true });
+      vi.stubEnv('SANDBOX_MOUNTS', `${pkg}:${pkg}:ro`);
+      await launch(managed);
+      expect(runArgs()).toContain(
+        `type=bind,"source=${pkg}","target=${pkg}",readonly`,
+      );
+      expect(runArgs()).not.toContain(`${pkg}:${pkg}:ro`);
+    });
+
+    it.each(['with,comma', 'with"quote', 'with space, and "quote"'])(
+      'encodes managed bind CSV fields for %s',
+      async (name) => {
+        const managed = path.join(root, name);
+        fs.mkdirSync(managed);
+        const mounts = await launch(managed);
+        requireSourceWithoutCreation(managed);
+        expect(mounts).toContainEqual({
+          source: managed,
+          destination: managed,
+          readOnly: true,
+        });
+      },
+    );
+
+    it('retains Podman source-required volume syntax without changing ordinary mounts', async () => {
+      const managed = path.join(root, 'managed');
+      fs.mkdirSync(managed);
+      fs.rmdirSync(managed);
+      await launch(managed, 'podman');
+      expect(runArgs()).toContain(`${managed}:${managed}:ro`);
+      expect(runArgs()).not.toContain('--mount');
+      expect(runArgs()).toContain(`${workspace}:${workspace}`);
+      expect(fs.existsSync(managed)).toBe(false);
+    });
 
     it('does not expose a managed sibling through the writable Qwen settings alias', async () => {
       const managed = path.join(qwenHome, 'prepared');

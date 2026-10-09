@@ -1031,6 +1031,62 @@ describe('runCliEntry', () => {
       expect(stdout.join('')).not.toContain('Usage: qwen mcp');
     });
 
+    it.each([
+      (root: string) => ['mcp', '--managed-extensions', root, '--', 'list'],
+      (root: string) => ['mcp', `--managed-extensions=${root}`, '--', 'list'],
+      (root: string) => ['mcp', '--managedExtensions', root, '--', 'list'],
+      (root: string) => ['mcp', `--managedExtensions=${root}`, '--', 'list'],
+    ])(
+      'routes MCP commands after a managed-option delimiter: %j',
+      async (argv) => {
+        await runCliEntry(argv(managedRoot));
+
+        expect(mocks.mcpListHandler).toHaveBeenCalledTimes(1);
+        expect(mocks.mcpListHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ managedExtensions: managedRoot }),
+        );
+        expect(mocks.main).not.toHaveBeenCalled();
+        expect(process.exitCode).toBeUndefined();
+        expect(stdout.join('')).not.toContain('Usage: qwen mcp');
+      },
+    );
+
+    it.each(['--managed-extensions', '--managedExtensions'])(
+      'preserves server arguments after a managed-option command delimiter: %s',
+      async (flag) => {
+        await runCliEntry([
+          'mcp',
+          flag,
+          managedRoot,
+          '--',
+          'add',
+          'fixture',
+          'node',
+          '--',
+          '--managed-extensions',
+          'server-argument',
+          '--version',
+          '--managedExtensions',
+        ]);
+
+        expect(mocks.mcpAddHandler).toHaveBeenCalledTimes(1);
+        expect(mocks.mcpAddHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            managedExtensions: managedRoot,
+            '--': [
+              '--managed-extensions',
+              'server-argument',
+              '--version',
+              '--managedExtensions',
+            ],
+          }),
+        );
+        expect(mocks.main).not.toHaveBeenCalled();
+        expect(process.exitCode).toBeUndefined();
+        expect(stdout.join('')).not.toContain('Usage: qwen mcp');
+      },
+    );
+
     it('rejects a managed root that does not exist', async () => {
       await runCliEntry([
         'mcp',

@@ -498,15 +498,19 @@ export async function start_sandbox(
     from: string;
     to: string;
     readOnly: boolean;
+    argumentIndex: number;
   }> = [];
   const addBindMount = (from: string, to: string, opts = '') => {
-    args.push('--volume', `${from}:${to}${opts ? `:${opts}` : ''}`);
     const options = opts.split(',');
-    bindMounts.push({
+    const mount = {
       from,
       to: path.posix.resolve('/', to),
       readOnly: options.includes('ro') && !options.includes('rw'),
-    });
+      argumentIndex: args.length,
+    };
+    args.push('--volume', `${from}:${to}${opts ? `:${opts}` : ''}`);
+    bindMounts.push(mount);
+    return mount;
   };
 
   // mount current directory as working directory in sandbox (set via --workdir)
@@ -819,7 +823,26 @@ export async function start_sandbox(
     const mounts = bindMounts.map((mount) => ({
       ...mount,
       from: fs.realpathSync.native(mount.from),
+      original: mount,
     }));
+    const requireManagedSource = (mount: (typeof bindMounts)[number]) => {
+      if (config.command !== 'docker') return;
+      // Docker --volume creates missing bind sources, even with :ro. Use
+      // CSV --mount fields so an outage cannot manufacture empty deployment.
+      const fields = [
+        'type=bind',
+        `"source=${mount.from.replaceAll('"', '""')}"`,
+        `"target=${mount.to.replaceAll('"', '""')}"`,
+        'readonly',
+      ];
+      args[mount.argumentIndex] = '--mount';
+      args[mount.argumentIndex + 1] = fields.join(',');
+    };
+    for (const mount of mounts) {
+      if (mount.readOnly && isSubpath(managedExtensionsDir, mount.from)) {
+        requireManagedSource(mount.original);
+      }
+    }
     const protectedDestinations = new Set<string>();
     const protectManagedRoot = (destination: string) => {
       const normalized = path.posix.resolve('/', destination);
@@ -835,7 +858,9 @@ export async function start_sandbox(
         );
       }
       if (existing.length === 0) {
-        addBindMount(managedExtensionsDir, normalized, 'ro');
+        requireManagedSource(
+          addBindMount(managedExtensionsDir, normalized, 'ro'),
+        );
       }
       protectedDestinations.add(normalized);
     };
@@ -910,6 +935,7 @@ export async function start_sandbox(
             `Cannot protect managed extensions '${managedExtensionsDir}': sandbox mount '${mount.from}:${mount.to}' overlays protected destination '${destination}'. Choose separate mount paths.`,
           );
         }
+        requireManagedSource(mount.original);
       }
     }
   }

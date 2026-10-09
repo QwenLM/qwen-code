@@ -331,11 +331,24 @@ function firstPositionalArg(argv: readonly string[]): string | undefined {
   return undefined;
 }
 
+function firstMcpPositionalArg(argv: readonly string[]): string | undefined {
+  return firstPositionalArg(
+    argv.map((arg) =>
+      arg.replace(/^--managedExtensions(?==|$)/, '--managed-extensions'),
+    ),
+  );
+}
+
 function normalizeMcpFastPathArgv(argv: readonly string[]): readonly string[] {
-  if (argv[0] === 'mcp' && argv[1] === '--') {
-    return [argv[0], ...argv.slice(2)];
+  if (argv[0] !== 'mcp') return argv;
+  const delimiter = argv.indexOf('--', 1);
+  if (
+    delimiter === -1 ||
+    firstMcpPositionalArg(argv.slice(1, delimiter)) !== undefined
+  ) {
+    return argv;
   }
-  return argv;
+  return [...argv.slice(0, delimiter), ...argv.slice(delimiter + 1)];
 }
 
 export function resolveBootstrapRoute(
@@ -443,8 +456,8 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
   // inspecting argv[1] alone misreads `mcp --managed-extensions <root> list`
   // as flag-only and prints help with exit 0 while the requested mutation
   // silently never runs. firstPositionalArg skips the known value slots.
-  const hasSubcommand = firstPositionalArg(argv.slice(1)) !== undefined;
-  if (!hasSubcommand) {
+  const subcommand = firstMcpPositionalArg(argv.slice(1));
+  if (subcommand === undefined) {
     printMcpHelp();
     return;
   }
@@ -478,6 +491,11 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
       process.exitCode = 1;
     })
     .exitProcess(false);
+
+  // Preserve the server tail before the initial command-discovery parse.
+  if (subcommand === 'add') {
+    parser.parserConfiguration({ 'populate--': true });
+  }
 
   if (hasFlag(argv.slice(2), '--help', '-h')) {
     await parseYargsHelp(parser, argv);
