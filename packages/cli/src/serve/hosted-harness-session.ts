@@ -240,6 +240,14 @@ interface HostedSession {
    * fresh Turn until continue/cancel drives it to a terminal record. Never
    * alias this to active/blocked — both refuse the continue/cancel routes. */
   recoveredTurn?: string;
+  /** Executions a cancel drive accepted on the Broker's terminal fence
+   * alone, keyed by the recovered Turn they were counted for. A retried
+   * cancel is a fresh request whose stop re-reads the Broker, and a record
+   * reclaimed between attempts then certifies as already-stopped — the
+   * honest unobservable outcome has to survive across attempts or the
+   * retry journals a cancellation nobody witnessed. An entry clears when
+   * that Turn's terminal record lands. */
+  recoveryUnobserved?: Map<string, Set<string>>;
   /** The settled Turn's file-history retirement failed after the terminal
    * record landed; the next settled /prompt or close retires it. */
   fileHistoryOwed?: string;
@@ -4088,9 +4096,14 @@ export function registerHostedHarnessSessionRoutes(
 
   // A recovered Runtime Session the Broker already forgot is handed back
   // by definition — treat its 404 as a completed release instead of
-  // retrying a doomed handback forever.
+  // retrying a doomed handback forever. Only the runtime_session_not_found
+  // code certifies that: a foreign-coded 404 (a gateway, route version skew,
+  // a Broker-side not-found) says nothing about the handback, so the lease
+  // stays owed and retried — the gate hosted-hook-session already follows.
   const releaseIsSatisfied = (cause: unknown): boolean =>
-    cause instanceof HostedWorkspaceBrokerRejection && cause.status === 404;
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    cause.status === 404 &&
+    cause.code === 'runtime_session_not_found';
 
   // A recovery load may hold the Runtime Session. On the cancellation
   // path, terminal routes hand it back — or the workspace lease stays
@@ -4593,13 +4606,27 @@ export function registerHostedHarnessSessionRoutes(
       // first settle and on a compensating retry alike.
       let unobserved: ReadonlySet<string> | undefined;
       try {
-        const stopped = await stopParkedRuntimeExecutions({
-          session: session.managed,
-          promptId,
-          brokerOptions,
-        });
+        // A retried cancel recomputes the stop from Broker state, but a
+        // record reclaimed between attempts then certifies as
+        // already-stopped. Accumulate the unobserved ids on the Session so
+        // the retry cannot downgrade them to a witnessed stop — including
+        // the ids a stop counted before throwing, which its return value
+        // would have discarded.
+        const carried = new Set(session.recoveryUnobserved?.get(promptId));
+        let stopped: Awaited<ReturnType<typeof stopParkedRuntimeExecutions>>;
+        try {
+          stopped = await stopParkedRuntimeExecutions({
+            session: session.managed,
+            promptId,
+            brokerOptions,
+            carryUnobservedInto: carried,
+          });
+        } finally {
+          if (carried.size > 0)
+            (session.recoveryUnobserved ??= new Map()).set(promptId, carried);
+        }
         const broker = stopped.broker;
-        unobserved = stopped.unobserved;
+        unobserved = carried;
         // Settle the parked executions as cancelled so the terminal record
         // can move the checkpoint past the durable wait instead of wedging
         // the session on its next prompt.
@@ -4662,6 +4689,7 @@ export function registerHostedHarnessSessionRoutes(
         // The refusal stays armed on the retryable failure path, where the
         // coordinator's retry re-drives the same Turn.
         session.recoveredTurn = undefined;
+        session.recoveryUnobserved?.delete(promptId);
         // The original owner's Runtime Session keeps the Workspace lease
         // pinned; the passive takeover adopted it on load. Release only
         // after the terminal record is durable: the release persists
@@ -4761,6 +4789,7 @@ export function registerHostedHarnessSessionRoutes(
               // takeover needs to reconcile the resume.
               session.fileHistoryOwed = promptId;
               session.recoveredTurn = undefined;
+              session.recoveryUnobserved?.delete(promptId);
             } else {
               session.admissions.delete(promptId);
               // The rejected write is ambiguous: it may have committed and
@@ -4788,18 +4817,44 @@ export function registerHostedHarnessSessionRoutes(
               if (settledRecordLanded) {
                 session.fileHistoryOwed = promptId;
                 session.recoveredTurn = undefined;
+                session.recoveryUnobserved?.delete(promptId);
               }
             }
           }
         } else {
-          // Nothing durable moved, so the failure is fully re-drivable —
-          // whether or not a replay already answered 200 while this drive
-          // ran: the first request still gets this retry-inviting 503, and
-          // the coordinator's retry must fall through the replay branch to
-          // the attached-to-unsettled drive instead of meeting a permanent
-          // block. The armed recovery marker keeps the failure visible to a
-          // status poll in the meantime.
-          session.admissions.delete(promptId);
+          // The terminal write may have committed and only lost its
+          // acknowledgement — a settle that answers noop over a prior
+          // attempt's committed record reaches the write with settledDurable
+          // false. Disambiguate exactly like the sibling branch above: a
+          // committed turn.settled means no attached-to-unsettled retry can
+          // ever match again and the settled replay answers every retry
+          // from the watermark, so disarm the marker and keep the admission
+          // — deleting it would wedge the Session on a record that exists.
+          // The file-history half is not owed here: the drop ahead of the
+          // write already ran. Without the event nothing durable moved, so
+          // the failure is fully re-drivable — whether or not a replay
+          // already answered 200 while this drive ran: the first request
+          // still gets this retry-inviting 503, and the coordinator's retry
+          // must fall through the replay branch to the attached-to-unsettled
+          // drive instead of meeting a permanent block. The armed recovery
+          // marker keeps the failure visible to a status poll in the
+          // meantime.
+          const settledRecordLanded = session.managed.authority
+            .eventsInSequenceRange(
+              1,
+              session.managed.authority.committedSequence,
+            )
+            .some(
+              (event) =>
+                event.kind === 'turn.settled' &&
+                event.payload['turnId'] === promptId,
+            );
+          if (settledRecordLanded) {
+            session.recoveredTurn = undefined;
+            session.recoveryUnobserved?.delete(promptId);
+          } else {
+            session.admissions.delete(promptId);
+          }
         }
         if (!res.headersSent) error(res, 503, 'managed_runtime_cancel_failed');
       } finally {

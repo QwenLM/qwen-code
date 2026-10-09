@@ -10,6 +10,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import {
   openManagedSession,
   type ManagedSession,
@@ -1495,6 +1496,109 @@ describe('recoverHostedRuntimeTurn', () => {
       expect(String(response?.['error'])).not.toContain(
         'cancelled with its owner',
       );
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('publishes the journaled unobserved outcome on a compensating retry', async () => {
+    await parkAtAwaitRuntime();
+    // Attempt 1 reads the execution pre-cancel, then its record vanishes
+    // before the first post-cancel poll: the stop counts it unobserved.
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status')
+      .mockResolvedValueOnce({ state: 'executing' })
+      .mockResolvedValue(undefined);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      const first = await stopParkedRuntimeExecutions({
+        session: replacement,
+        promptId: PROMPT_ID,
+        brokerOptions,
+      });
+      expect([...first.unobserved]).toEqual([EXECUTION_ID]);
+      const published: Buffer[] = [];
+      const publishOriginal =
+        LocalManagedSessionResourceStore.prototype.publish;
+      vi.spyOn(
+        LocalManagedSessionResourceStore.prototype,
+        'publish',
+      ).mockImplementation(async function (
+        this: LocalManagedSessionResourceStore,
+        type,
+        bytes,
+      ) {
+        if (type === 'managed-tool-outcome') published.push(bytes);
+        return publishOriginal.call(this, type, bytes);
+      });
+      // Fail the first settle after its journal write: the tool_result is
+      // durable while the checkpoint item stays in_progress.
+      let failCommit = true;
+      const commitOriginal = (
+        LocalManagedSessionAuthority.prototype as unknown as {
+          commitCheckpoint: (
+            this: LocalManagedSessionAuthority,
+            ...args: unknown[]
+          ) => Promise<unknown>;
+        }
+      ).commitCheckpoint;
+      vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'commitCheckpoint' as never,
+      ).mockImplementation(async function (
+        this: LocalManagedSessionAuthority,
+        ...args: unknown[]
+      ) {
+        if (failCommit) {
+          failCommit = false;
+          throw new Error('checkpoint commit rejected');
+        }
+        return commitOriginal.apply(this, args);
+      });
+      await expect(
+        settleParkedTurnCancelled({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          unobserved: first.unobserved,
+        }),
+      ).rejects.toThrow('checkpoint commit rejected');
+      // Attempt 2: the reclaimed record reads as already-stopped to the
+      // fresh stop, so the retry carries an empty unobserved set — but the
+      // outcome it publishes must stay the honest one the journal already
+      // carries, not a witnessed cancellation recomputed from this
+      // attempt's reads.
+      const second = await stopParkedRuntimeExecutions({
+        session: replacement,
+        promptId: PROMPT_ID,
+        brokerOptions,
+      });
+      expect(second.unobserved.size).toBe(0);
+      await settleParkedTurnCancelled({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        unobserved: second.unobserved,
+      });
+      const outcomes = published.map(
+        (bytes) =>
+          JSON.parse(bytes.toString()) as {
+            functionResponse?: { response?: Record<string, unknown> };
+          },
+      );
+      expect(outcomes).toHaveLength(2);
+      for (const outcome of outcomes)
+        expect(outcome.functionResponse?.response?.['executionStatus']).toBe(
+          'unknown',
+        );
+      // The dedup still holds: one durable tool_result total.
+      const journaled = (await replacement.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+      );
+      expect(journaled).toHaveLength(1);
     } finally {
       await replacement.close();
     }

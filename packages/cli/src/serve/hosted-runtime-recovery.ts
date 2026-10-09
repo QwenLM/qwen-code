@@ -291,36 +291,42 @@ export async function settleParkedTurnCancelled(input: {
   if (pending.length === 0) return 'noop';
   const harness = createManagedHarnessHandle(input.session);
   // A write-then-resolve crash window must not journal a tool_result twice
-  // when the cancel retries: collect what is already durable.
-  const journaled = new Set(
-    (await input.session.sink.project())
-      .filter(
-        (entry) =>
-          entry.daemonPromptId === input.promptId &&
-          entry.type === 'tool_result',
-      )
-      .flatMap((entry) => entry.message?.parts ?? [])
-      .map((part) => part.functionResponse?.id)
-      .filter((id): id is string => typeof id === 'string'),
-  );
-  for (const item of pending) {
-    const observed = !input.unobserved?.has(item.executionCallId);
-    const parts = convertToFunctionErrorResponse(
-      item.toolName,
-      item.functionCallId,
-      [],
-      observed
-        ? 'The Runtime execution was cancelled with its owner.'
-        : "The Runtime execution's outcome could not be observed: the Broker fenced the record after losing its owner.",
-    );
-    const response = parts[0]?.functionResponse;
-    if (!response || parts.length !== 1) {
-      throw new Error('Runtime result cannot be represented durably.');
+  // when the cancel retries: collect what is already durable. The durable
+  // parts also pin the outcome a compensating retry publishes — a record
+  // reclaimed between attempts reads as already-stopped to the fresh stop,
+  // so recomputing from this attempt's Broker reads would flip an honestly
+  // unobserved outcome into a witnessed cancellation that contradicts the
+  // journal the checkpoint points at.
+  const journaled = new Map<string, Part[]>();
+  for (const entry of await input.session.sink.project()) {
+    if (entry.daemonPromptId !== input.promptId || entry.type !== 'tool_result')
+      continue;
+    for (const part of entry.message?.parts ?? []) {
+      const id = part.functionResponse?.id;
+      if (typeof id === 'string') journaled.set(id, [part]);
     }
-    response.response = {
-      ...response.response,
-      executionStatus: observed ? 'cancelled' : 'unknown',
-    };
+  }
+  for (const item of pending) {
+    let parts = journaled.get(item.functionCallId);
+    if (parts === undefined) {
+      const observed = !input.unobserved?.has(item.executionCallId);
+      parts = convertToFunctionErrorResponse(
+        item.toolName,
+        item.functionCallId,
+        [],
+        observed
+          ? 'The Runtime execution was cancelled with its owner.'
+          : "The Runtime execution's outcome could not be observed: the Broker fenced the record after losing its owner.",
+      );
+      const response = parts[0]?.functionResponse;
+      if (!response || parts.length !== 1) {
+        throw new Error('Runtime result cannot be represented durably.');
+      }
+      response.response = {
+        ...response.response,
+        executionStatus: observed ? 'cancelled' : 'unknown',
+      };
+    }
     const outcomeRef = await input.session.resources.publish(
       'managed-tool-outcome',
       outcomeBytes(item, parts),
@@ -360,6 +366,11 @@ export async function stopParkedRuntimeExecutions(input: {
   session: ManagedSession;
   promptId: string;
   brokerOptions: HostedWorkspaceBrokerOptions;
+  /** Caller-owned accumulator the counted ids land in as they are counted,
+   * so an attempt that throws mid-stop still carries them — a retried stop
+   * reads a reclaimed record as already-stopped, and without the carry the
+   * retry would certify the stop nobody observed. */
+  carryUnobservedInto?: Set<string>;
 }): Promise<{
   broker: HostedWorkspaceBroker;
   /** Executions accepted as complete only because the Broker fenced the
@@ -389,7 +400,7 @@ export async function stopParkedRuntimeExecutions(input: {
   // the unobserved set instead of being certified as a witnessed stop.
   const stopComplete = (state: { state: string } | undefined): boolean =>
     state === undefined || state.state === 'settled';
-  const unobserved = new Set<string>();
+  const unobserved = input.carryUnobservedInto ?? new Set<string>();
   for (const item of authorization.checkpoint.tools?.items ?? []) {
     if (item.state !== 'in_progress' || item.outcomeSource !== 'runtime')
       continue;
