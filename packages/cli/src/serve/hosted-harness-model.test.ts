@@ -20,6 +20,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import { HostedModelUnavailableError } from './hosted-agent-definition.js';
+import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 
 const state = vi.hoisted(() => ({
   config: undefined as unknown as {
@@ -152,8 +153,12 @@ describe('Hosted Harness model boundary', () => {
       { type: LlmEventType.Content, value: 'hello back' },
       { type: LlmEventType.Finished },
     ]);
+    hooks.getHistory.mockReturnValue([
+      { role: 'model', parts: [{ text: 'hello back' }] },
+    ]);
     await expect(runHostedHarnessTextTurn(input)).resolves.toEqual({
       text: 'hello back',
+      parts: [{ text: 'hello back' }],
       model: 'test-model',
     });
     expect(hooks.unregisterTool).toHaveBeenCalledWith('run_shell_command');
@@ -167,6 +172,81 @@ describe('Hosted Harness model boundary', () => {
     });
   });
 
+  it('returns complete no-tool model Parts without aliasing provider history', async () => {
+    const model = config([
+      { type: LlmEventType.Content, value: 'answer' },
+      { type: LlmEventType.Finished },
+    ]);
+    const parts: Part[] = [
+      { text: 'reasoning', thought: true, thoughtSignature: 'signature' },
+      { text: 'answer' },
+      { inlineData: { mimeType: 'image/png', data: 'aGk=' } },
+    ];
+    model.getHistory.mockReturnValue([{ role: 'model', parts }]);
+    const result = await runHostedHarnessTextTurn(input);
+    expect(result).toEqual({ text: 'answer', parts, model: 'test-model' });
+    result.parts![0]!.text = 'changed';
+    result.parts![2]!.inlineData!.data = 'changed';
+    result.parts!.push({ text: 'extra' });
+    expect(parts).toEqual([
+      { text: 'reasoning', thought: true, thoughtSignature: 'signature' },
+      { text: 'answer' },
+      { inlineData: { mimeType: 'image/png', data: 'aGk=' } },
+    ]);
+  });
+
+  it('omits a thought-only answer and its prompt while retaining a visible answered pair', async () => {
+    const model = config([{ type: LlmEventType.Finished }]);
+    const unanswered = [{ text: 'unanswered' }];
+    const thoughtOnly = [{ text: 'private thought', thought: true }];
+    const answered = [{ text: 'answered' }];
+    const visible = [
+      { text: 'retained thought', thought: true },
+      { text: 'visible answer', thought: false },
+    ];
+    const pairs: Array<['user' | 'assistant', Part[]]> = [
+      ['user', unanswered],
+      ['assistant', thoughtOnly],
+      ['user', answered],
+      ['assistant', visible],
+    ];
+    const history = pairs.map(
+      ([type, parts], index): ChatRecord => ({
+        uuid: `history-${index}`,
+        parentUuid: index === 0 ? null : `history-${index - 1}`,
+        sessionId: input.sessionId,
+        timestamp: '2026-10-09T00:00:00.000Z',
+        type,
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        message: {
+          role: type === 'assistant' ? 'model' : 'user',
+          parts,
+        },
+      }),
+    );
+    await runHostedHarnessTextTurn({ ...input, history });
+    expect(model.setHistory).toHaveBeenCalledWith([
+      { role: 'user', parts: answered },
+      { role: 'model', parts: visible },
+    ]);
+    expect(history[1]!.message!.parts).toEqual(thoughtOnly);
+    expect(history[3]!.message!.parts).toEqual(visible);
+  });
+
+  it.each([
+    { history: [] },
+    { history: [{ role: 'user', parts: [{ text: input.prompt }] }] },
+    { history: [{ role: 'model' }] },
+  ])('refuses unavailable no-tool model history: %j', async ({ history }) => {
+    const model = config([{ type: LlmEventType.Finished }]);
+    model.getHistory.mockReturnValue(history);
+    await expect(runHostedHarnessTextTurn(input)).rejects.toThrow(
+      'Hosted model output is unavailable.',
+    );
+    expect(model.shutdown).toHaveBeenCalledOnce();
+  });
+
   it('rejects a model tool request without executing it', async () => {
     const hooks = config([{ type: LlmEventType.ToolCallRequest }]);
     await expect(runHostedHarnessTextTurn(input)).rejects.toThrow(
@@ -176,7 +256,7 @@ describe('Hosted Harness model boundary', () => {
   });
 
   it('discards abandoned output after a fresh retry or model fallback', async () => {
-    config([
+    const model = config([
       { type: LlmEventType.Content, value: 'first attempt' },
       { type: LlmEventType.Retry, isContinuation: false },
       { type: LlmEventType.Content, value: 'second attempt' },
@@ -184,8 +264,15 @@ describe('Hosted Harness model boundary', () => {
       { type: LlmEventType.Content, value: 'final answer' },
       { type: LlmEventType.Finished },
     ]);
-    await expect(runHostedHarnessTextTurn(input)).resolves.toMatchObject({
+    const parts: Part[] = [
+      { text: 'final reasoning', thought: true },
+      { text: 'final answer' },
+    ];
+    model.getHistory.mockReturnValue([{ role: 'model', parts }]);
+    await expect(runHostedHarnessTextTurn(input)).resolves.toEqual({
       text: 'final answer',
+      parts,
+      model: 'test-model',
     });
   });
 
@@ -565,64 +652,71 @@ describe('Hosted Harness model boundary', () => {
     ).toBe(false);
   });
 
-  it('suppresses both returned text and persisted parts when MessageDisplay hides the answer', async () => {
-    config([
-      { type: LlmEventType.Content, value: 'answer' },
-      { type: LlmEventType.Finished },
-    ]);
-    const hooks = hostedHooks([HookEventName.MessageDisplay]);
-    const getCatalog = hooks.session.getCatalog;
-    let ready = false;
-    vi.spyOn(hooks.session, 'getCatalog').mockImplementation(() =>
-      ready ? getCatalog() : undefined,
-    );
-    vi.mocked(hooks.session.ensureReady).mockImplementation(async () => {
-      ready = true;
-    });
-    const textDeltas = {
-      delta: vi.fn(),
-      retract: vi.fn(async () => undefined),
-    };
-    hooks.fire.mockImplementation(async (event) =>
-      event === HookEventName.MessageDisplay
-        ? { suppressOutput: true }
-        : undefined,
-    );
-    const toolTurn = {
-      execute: vi.fn(),
-      consumeResults: vi.fn(),
-      declarations: vi.fn().mockResolvedValue([]),
-      setPromptHookRunner: vi.fn(),
-    };
-    await expect(
-      runHostedHarnessTextTurn({
-        ...input,
-        hooks: hooks.session,
-        toolTurn,
-        textDeltas,
-      }),
-    ).resolves.toMatchObject({ text: '', parts: [] });
-    expect(textDeltas.delta).not.toHaveBeenCalled();
-    expect(
-      hooks.fire.mock.calls.find(
-        ([event]) => event === HookEventName.MessageDisplay,
-      )?.[2],
-    ).toMatchObject({
-      message_id: `${input.promptId}:0`,
-      displayed_text: 'answer',
-      is_final: true,
-    });
-  });
+  it.each([false, true])(
+    'suppresses text and Parts when MessageDisplay hides the answer (tools=%s)',
+    async (withTools) => {
+      config([
+        { type: LlmEventType.Content, value: 'answer' },
+        { type: LlmEventType.Finished },
+      ]);
+      const hooks = hostedHooks([HookEventName.MessageDisplay]);
+      const getCatalog = hooks.session.getCatalog;
+      let ready = false;
+      vi.spyOn(hooks.session, 'getCatalog').mockImplementation(() =>
+        ready ? getCatalog() : undefined,
+      );
+      vi.mocked(hooks.session.ensureReady).mockImplementation(async () => {
+        ready = true;
+      });
+      const textDeltas = {
+        delta: vi.fn(),
+        retract: vi.fn(async () => undefined),
+      };
+      hooks.fire.mockImplementation(async (event) =>
+        event === HookEventName.MessageDisplay
+          ? { suppressOutput: true }
+          : undefined,
+      );
+      const toolTurn = {
+        execute: vi.fn(),
+        consumeResults: vi.fn(),
+        declarations: vi.fn().mockResolvedValue([]),
+        setPromptHookRunner: vi.fn(),
+      };
+      await expect(
+        runHostedHarnessTextTurn({
+          ...input,
+          hooks: hooks.session,
+          ...(withTools ? { toolTurn } : {}),
+          textDeltas,
+        }),
+      ).resolves.toMatchObject({ text: '', parts: [] });
+      expect(textDeltas.delta).not.toHaveBeenCalled();
+      expect(
+        hooks.fire.mock.calls.find(
+          ([event]) => event === HookEventName.MessageDisplay,
+        )?.[2],
+      ).toMatchObject({
+        message_id: `${input.promptId}:0`,
+        displayed_text: 'answer',
+        is_final: true,
+      });
+    },
+  );
 
   it('buffers discarded Stop drafts until the final answer is accepted', async () => {
     const model = config([]);
     const hooks = hostedHooks([HookEventName.Stop]);
     let attempts = 0;
     model.sendMessageStream.mockImplementation(async function* () {
-      yield {
-        type: LlmEventType.Content,
-        value: ++attempts === 1 ? 'discarded draft' : 'accepted answer',
-      };
+      const text = ++attempts === 1 ? 'discarded draft' : 'accepted answer';
+      model.getHistory.mockReturnValue([
+        {
+          role: 'model',
+          parts: [{ text: `${text} reasoning`, thought: true }, { text }],
+        },
+      ]);
+      yield { type: LlmEventType.Content, value: text };
       yield { type: LlmEventType.Finished };
     });
     let stops = 0;
@@ -637,7 +731,14 @@ describe('Hosted Harness model boundary', () => {
     };
     await expect(
       runHostedHarnessTextTurn({ ...input, hooks: hooks.session, textDeltas }),
-    ).resolves.toMatchObject({ text: 'accepted answer' });
+    ).resolves.toEqual({
+      text: 'accepted answer',
+      parts: [
+        { text: 'accepted answer reasoning', thought: true },
+        { text: 'accepted answer' },
+      ],
+      model: 'test-model',
+    });
     expect(textDeltas.delta).not.toHaveBeenCalled();
     expect(model.sendMessageStream).toHaveBeenCalledTimes(2);
   });

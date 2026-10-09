@@ -17,7 +17,11 @@ let root: string;
 let server: Server;
 let requests: Array<{
   model?: string;
-  messages: Array<{ role: string; content: unknown }>;
+  messages: Array<{
+    role: string;
+    content: unknown;
+    reasoning_content?: string;
+  }>;
   tools?: unknown[];
 }>;
 
@@ -31,7 +35,8 @@ beforeEach(async () => {
     requests.push(body);
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     for (const [delta, finishReason] of [
-      [{ role: 'assistant', content: 'HOSTED_TEXT_OK' }, null],
+      [{ role: 'assistant', reasoning_content: 'HOSTED_REASONING_OK' }, null],
+      [{ content: 'HOSTED_TEXT_OK' }, null],
       [{}, 'stop'],
     ]) {
       res.write(
@@ -119,6 +124,23 @@ it('completes a real hosted no-tool text turn', async () => {
   await expect(turn()).resolves.toMatchObject({ text: 'HOSTED_TEXT_OK' });
   expect(requests).toHaveLength(1);
   expect(requests[0]?.tools ?? []).toEqual([]);
+});
+
+it('retains real provider reasoning Parts for the next no-tool request', async () => {
+  const result = await turn();
+  expect(result.parts).toEqual([
+    { text: 'HOSTED_REASONING_OK', thought: true },
+    { text: 'HOSTED_TEXT_OK' },
+  ]);
+  const assistant = record('assistant', '');
+  assistant.message!.parts = result.parts;
+  await turn([record('user', 'OLD_PROMPT'), assistant]);
+  expect(requests).toHaveLength(2);
+  expect(requests[1]?.messages).toContainEqual({
+    role: 'assistant',
+    content: 'HOSTED_TEXT_OK',
+    reasoning_content: 'HOSTED_REASONING_OK',
+  });
 });
 
 it.each([

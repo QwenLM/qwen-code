@@ -379,7 +379,8 @@ export async function runHostedHarnessTextTurn(input: {
     // history drops an empty assistant record while keeping its prompt. Omit
     // both kinds of unanswered prompt even when later completed turns follow.
     const answered = (entry: Content | undefined): boolean =>
-      entry?.role === 'model' && !!entry.parts?.some((part) => !!part.text);
+      entry?.role === 'model' &&
+      !!entry.parts?.some((part) => !part.thought && !!part.text);
     client
       .getChat()
       .setHistory(
@@ -554,11 +555,16 @@ export async function runHostedHarnessTextTurn(input: {
         suppressDisplay = display?.suppressOutput ?? false;
         if (suppressDisplay) text = '';
       }
-      if (!input.toolTurn) return { text, model: config.getModel() };
       const output = client.getHistory().at(-1);
       if (output?.role !== 'model' || !output.parts)
         throw new Error('Hosted model output is unavailable.');
       const parts = structuredClone(output.parts);
+      if (!input.toolTurn)
+        return {
+          text,
+          parts: suppressDisplay ? [] : parts,
+          model: config.getModel(),
+        };
       const functions = parts.filter((part) => part.functionCall);
       if (functions.length !== calls.length)
         throw new Error('Hosted model call history is inconsistent.');
