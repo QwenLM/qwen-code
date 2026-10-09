@@ -1177,9 +1177,10 @@ or contract version too.
   run, and how to drive the WebView through CDP. Check the Android workflow's
   trigger filters even for web-shell-only changes; report _lane never ran_
   when untriggered, and name any Android behaviour left _Not covered_.
-- **Java-centred PRs** (`packages/sdk-java/`) in the CI lane: the
-  `node:22-bookworm` verify image ships no JDK. Measure `command -v java`
-  first. If it is absent, list the Java side under _Not covered_; when the
+- **Java-centred PRs** (`packages/sdk-java/`) in the CI lane: use the
+  conditionally provisioned toolchain when `QWEN_VERIFY_JAVA=1` (see the
+  environment contract above). Measure `command -v java` first. If the flag
+  is unset or Java is absent, list the Java side under _Not covered_; when the
   central claim lives in Java, the verdict is `inconclusive`, never
   `merge-ready`. Measured example: a sandbox run with no JDK left roughly
   900 Java lines unexecuted (SQL contention, stale release, settlement, a
