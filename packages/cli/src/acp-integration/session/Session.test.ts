@@ -8418,6 +8418,34 @@ describe('Session', () => {
       );
     }
 
+    it.each([false, true])(
+      'keeps ACP rewind available with recording disabled (rewindFiles=%s)',
+      (rewindFiles) => {
+        const history: Content[] = [
+          { role: 'user', parts: [{ text: 'first' }] },
+          { role: 'model', parts: [{ text: 'reply' }] },
+        ];
+        identifyPrompts(history, [0]);
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+          undefined,
+        );
+
+        expect(session.getRewindCutPoint('p1')).toBe(0);
+        expect(session.rewindToTurn(0, { rewindFiles })).toEqual({
+          targetTurnIndex: 0,
+          apiTruncateIndex: 0,
+        });
+        expect(mockChat.truncateHistory).toHaveBeenCalledWith(0);
+        expect(
+          mockFileHistoryService.restoreFromSnapshots,
+        ).toHaveBeenCalledWith(
+          rewindFiles ? [expect.objectContaining({ promptId: 'p1' })] : [],
+        );
+        expect(mockChatRecordingService.rewindRecording).not.toHaveBeenCalled();
+      },
+    );
+
     it('cuts at the checkpoint identity even when a genuine prompt looks like a notification', () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'hello' }] },

@@ -1323,6 +1323,25 @@ describe('ChatRecordingService', () => {
   });
 
   describe('rewindRecording', () => {
+    it('keeps recorded boundaries aligned after a rejected user message', async () => {
+      turn('T0', 'reply T0');
+      svc.recordUserMessage([]);
+      turn('B', 'reply B');
+      turn('C', 'reply C');
+      const records = await flushedAll();
+      const target = records.find((r) => r.message?.parts?.[0]?.text === 'C')!;
+      const parent = records.find(
+        (r) => r.message?.parts?.[0]?.text === 'reply B',
+      )!;
+      const index = svc.getRewindTurnIndex(`legacy-record:${target.uuid}`);
+      expect(index).toBe(2);
+      svc.rewindRecording(index, { truncatedCount: 2 });
+      await svc.flush();
+      expect(writes().findLast((r) => r.subtype === 'rewind')?.parentUuid).toBe(
+        parent.uuid,
+      );
+    });
+
     it.each(['live', 'full restore', 'selective restore'])(
       'resolves legacy boundaries with an invisible ordinary turn through %s',
       async (mode) => {

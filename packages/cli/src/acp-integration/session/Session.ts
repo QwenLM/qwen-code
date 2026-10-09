@@ -4830,7 +4830,7 @@ export class Session implements SessionContext {
       ? (recorder?.getRewindTurnIndex(promptId) ?? -1)
       : -1;
 
-    if (apiTruncateIndex < 0 || recordingTurnIndex < 0) {
+    if (apiTruncateIndex < 0 || (recorder && recordingTurnIndex < 0)) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot rewind to the requested turn. It may have been compressed or does not exist, or its model-history identity is missing or ambiguous.',
@@ -4900,11 +4900,8 @@ export class Session implements SessionContext {
   }
 
   getRewindCutPoint(promptId: string): number {
-    if (
-      (this.config.getChatRecordingService()?.getRewindTurnIndex(promptId) ??
-        -1) < 0
-    )
-      return -1;
+    const recorder = this.config.getChatRecordingService();
+    if (recorder && recorder.getRewindTurnIndex(promptId) < 0) return -1;
     if (
       this.config
         .getFileHistoryService()

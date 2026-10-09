@@ -2339,7 +2339,6 @@ export class ChatRecordingService {
   ): void {
     try {
       this.trackUserDisplayTextForTitle(promptPayload?.displayText);
-      this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
         ...(daemonPromptId ? { daemonPromptId } : {}),
@@ -2348,6 +2347,7 @@ export class ChatRecordingService {
         ...(promptPayload ? { systemPayload: promptPayload } : {}),
         ...(promptId ? { promptId } : {}),
       };
+      this.turnParentUuids.push(record.parentUuid ?? null);
       this.turnPromptIds.push(getRecordRewindId(record));
       this.appendRecord(record);
     } catch (error) {

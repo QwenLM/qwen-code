@@ -97,6 +97,8 @@ model text. It resolves the recorder's complete-branch boundary by that same
 prompt ID: retries can add snapshots without adding recorded user turns, so a
 snapshot index is not a recorder index. The derived association survives full
 and selective cold restore; missing or duplicated recorded identities refuse.
+When chat recording is disabled, no recorded boundary is required; the unique
+snapshot/model association still permits rewind without a recording write.
 Without snapshots, the model's retained turn ordinals cannot safely
 identify the recorder's complete-branch ordinals, so ACP conversation rewind
 refuses rather than guessing. Only the initial ordinary
