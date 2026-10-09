@@ -5,10 +5,21 @@
  */
 
 import { execFile, type ExecFileOptions } from 'node:child_process';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import {
+  lstat,
+  mkdtemp,
+  open,
+  readdir,
+  readFile,
+  rm,
+  type FileHandle,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { estimateTextTokens } from './request-tokenizer/textTokenizer.js';
+import { execPDFCommandFromHandle, pdfDescriptorPath } from './pdf-command.js';
+import { readFileHandleBytes } from './file-read-source.js';
 
 const MAX_PDF_TEXT_OUTPUT_CHARS = 100000;
 const PDF_FULL_TEXT_PAGE_LIMIT = 10;
@@ -112,6 +123,7 @@ function execCommand(
   command: string,
   args: string[],
   options: ExecFileOptions = {},
+  fileHandle?: FileHandle,
 ): Promise<{
   stdout: string;
   stderr: string;
@@ -119,6 +131,8 @@ function execCommand(
   maxBufferExceeded: boolean;
   timedOut: boolean;
 }> {
+  if (fileHandle)
+    return execPDFCommandFromHandle(command, args, fileHandle, options);
   return new Promise((resolve) => {
     execFile(
       command,
@@ -232,7 +246,20 @@ let pdftotextAvailablePromise: Promise<boolean> | undefined;
  * promise is also cached so N concurrent callers (e.g. @-reading a
  * directory of PDFs) don't each spawn their own probe subprocess.
  */
-export async function isPdftotextAvailable(): Promise<boolean> {
+export async function isPdftotextAvailable(
+  fileHandle?: FileHandle,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (fileHandle) {
+    const { code } = await execCommand(
+      'pdftotext',
+      ['-v'],
+      { timeout: 5000, signal },
+      fileHandle,
+    );
+    signal?.throwIfAborted();
+    return code === 0;
+  }
   if (pdftotextAvailable !== undefined) return pdftotextAvailable;
   if (pdftotextAvailablePromise) return pdftotextAvailablePromise;
 
@@ -275,15 +302,24 @@ export function resetPdftotextCache(): void {
  * Returns null if pdfinfo is not available or page count cannot be determined.
  */
 export async function getPDFPageCount(
-  filePath: string,
+  source: string | FileHandle,
+  signal?: AbortSignal,
 ): Promise<number | null> {
   try {
+    const filePath = typeof source === 'string' ? source : pdfDescriptorPath();
     // `--` separates options from positional args so a filename starting
     // with `-` (e.g. `-opw=foo.pdf`) can't be mistaken for an option by
     // poppler's option parser.
-    const { stdout, code } = await execCommand('pdfinfo', ['--', filePath], {
-      timeout: 10000,
-    });
+    const { stdout, code } = await execCommand(
+      'pdfinfo',
+      ['--', filePath],
+      {
+        timeout: 10000,
+        signal,
+      },
+      typeof source === 'string' ? undefined : source,
+    );
+    signal?.throwIfAborted();
     if (code !== 0) {
       return null;
     }
@@ -294,6 +330,7 @@ export async function getPDFPageCount(
     const count = parseInt(match[1]!, 10);
     return isNaN(count) ? null : count;
   } catch {
+    signal?.throwIfAborted();
     return null;
   }
 }
@@ -310,10 +347,13 @@ export type PDFTextResult =
  * @param options Optional page range (1-indexed, inclusive)
  */
 export async function extractPDFText(
-  filePath: string,
+  source: string | FileHandle,
   options?: { firstPage?: number; lastPage?: number; signal?: AbortSignal },
 ): Promise<PDFTextResult> {
-  const available = await isPdftotextAvailable();
+  const fileHandle = typeof source === 'string' ? undefined : source;
+  const filePath = typeof source === 'string' ? source : pdfDescriptorPath();
+  const available = await isPdftotextAvailable(fileHandle, options?.signal);
+  options?.signal?.throwIfAborted();
   if (!available) {
     return {
       success: false,
@@ -335,16 +375,21 @@ export async function extractPDFText(
 
   try {
     const { stdout, stderr, code, maxBufferExceeded, timedOut } =
-      await execCommand('pdftotext', args, {
-        timeout: 30000,
-        // Keep the buffer just above MAX_PDF_TEXT_OUTPUT_CHARS — anything
-        // past that is going to be truncated anyway, and capping the child
-        // prevents unbounded memory use on pathological text-dense PDFs.
-        maxBuffer: MAX_PDF_TEXT_OUTPUT_CHARS * 2,
-        // Caller cancellation kills the subprocess instead of blocking the
-        // tool invocation for up to the 30s timeout.
-        signal: options?.signal,
-      });
+      await execCommand(
+        'pdftotext',
+        args,
+        {
+          timeout: 30000,
+          // Keep the buffer just above MAX_PDF_TEXT_OUTPUT_CHARS — anything
+          // past that is going to be truncated anyway, and capping the child
+          // prevents unbounded memory use on pathological text-dense PDFs.
+          maxBuffer: MAX_PDF_TEXT_OUTPUT_CHARS * 2,
+          // Caller cancellation kills the subprocess instead of blocking the
+          // tool invocation for up to the 30s timeout.
+          signal: options?.signal,
+        },
+        fileHandle,
+      );
 
     // execCommand reports a signal-killed child as timedOut (killed +
     // SIGTERM); check the caller's abort first so a user cancel is not
@@ -441,7 +486,20 @@ let pdftoppmAvailablePromise: Promise<boolean> | undefined;
  * {@link isPdftotextAvailable}: the result and the in-flight probe promise are
  * cached for the process lifetime so concurrent render callers share one probe.
  */
-export async function isPdftoppmAvailable(): Promise<boolean> {
+export async function isPdftoppmAvailable(
+  fileHandle?: FileHandle,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (fileHandle) {
+    const { code } = await execCommand(
+      'pdftoppm',
+      ['-v'],
+      { timeout: 5000, signal },
+      fileHandle,
+    );
+    signal?.throwIfAborted();
+    return code === 0;
+  }
   if (pdftoppmAvailable !== undefined) return pdftoppmAvailable;
   if (pdftoppmAvailablePromise) return pdftoppmAvailablePromise;
 
@@ -509,17 +567,47 @@ function comparePdfPageFilenames(a: string, b: string): number {
  *   render from the start; an `Infinity` `lastPage` renders through the end.
  */
 export async function renderPDFPagesToImages(
-  filePath: string,
-  options?: { firstPage?: number; lastPage?: number },
+  source: string | FileHandle,
+  options?: { firstPage?: number; lastPage?: number; signal?: AbortSignal },
 ): Promise<PDFRenderResult> {
-  const available = await isPdftoppmAvailable();
+  const fileHandle = typeof source === 'string' ? undefined : source;
+  const filePath = typeof source === 'string' ? source : pdfDescriptorPath();
+  const available = await isPdftoppmAvailable(fileHandle, options?.signal);
+  options?.signal?.throwIfAborted();
   if (!available) {
     return { success: false, error: PDF_RENDER_UNAVAILABLE_MESSAGE };
   }
 
   let tempDir: string | undefined;
+  let outputDirectory: FileHandle | undefined;
+  let verifyDirectory: (() => Promise<void>) | undefined;
+  const removeDescriptorOutput = async (directoryPath: string) => {
+    if (!verifyDirectory)
+      throw new Error('PDF output directory ownership could not be verified.');
+    await verifyDirectory();
+    await rm(directoryPath, { recursive: true, force: true });
+  };
   try {
     tempDir = await mkdtemp(join(tmpdir(), 'pdf-render-'));
+    if (fileHandle) {
+      outputDirectory = await open(
+        tempDir,
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      );
+      const original = await outputDirectory.stat();
+      const directoryPath = tempDir;
+      verifyDirectory = async () => {
+        const current = await lstat(directoryPath);
+        if (
+          !current.isDirectory() ||
+          current.dev !== original.dev ||
+          current.ino !== original.ino
+        ) {
+          throw new Error('PDF output directory identity changed.');
+        }
+      };
+      await verifyDirectory();
+    }
     const outputPrefix = join(tempDir, 'page');
 
     const args: string[] = [
@@ -537,9 +625,17 @@ export async function renderPDFPagesToImages(
     // `-` isn't misread as an option by poppler's parser.
     args.push('--', filePath, outputPrefix);
 
-    const { stderr, code, timedOut } = await execCommand('pdftoppm', args, {
-      timeout: PDF_RENDER_TIMEOUT_MS,
-    });
+    const { stderr, code, timedOut } = await execCommand(
+      'pdftoppm',
+      args,
+      {
+        timeout: PDF_RENDER_TIMEOUT_MS,
+        signal: options?.signal,
+      },
+      fileHandle,
+    );
+    options?.signal?.throwIfAborted();
+    await verifyDirectory?.();
 
     if (timedOut) {
       return {
@@ -570,7 +666,11 @@ export async function renderPDFPagesToImages(
     // The temp dir is fresh and holds only this call's output, so reading and
     // numerically sorting whatever pdftoppm produced is robust to its
     // zero-padding width.
-    const entries = (await readdir(tempDir))
+    const names = await readdir(tempDir);
+    if (fileHandle && names.some((name) => !/^page-\d+\.jpg$/i.test(name))) {
+      throw new Error('PDF renderer produced unexpected output entries.');
+    }
+    const entries = names
       .filter((name) => name.toLowerCase().endsWith('.jpg'))
       .sort(comparePdfPageFilenames);
 
@@ -586,7 +686,34 @@ export async function renderPDFPagesToImages(
     let totalBytes = 0;
     let bytesTruncated = false;
     for (const name of entries) {
-      const buffer = await readFile(join(tempDir, name));
+      options?.signal?.throwIfAborted();
+      let buffer: Buffer;
+      if (outputDirectory) {
+        await verifyDirectory?.();
+        const outputPath =
+          process.platform === 'linux'
+            ? `/proc/self/fd/${outputDirectory.fd}/${name}`
+            : join(tempDir, name);
+        const output = await open(
+          outputPath,
+          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+        );
+        try {
+          const stats = await output.stat();
+          if (!stats.isFile())
+            throw new Error('PDF page output is not a regular file.');
+          buffer = await readFileHandleBytes(
+            output,
+            stats.size,
+            options?.signal,
+          );
+        } finally {
+          await output.close();
+        }
+        await verifyDirectory?.();
+      } else {
+        buffer = await readFile(join(tempDir, name));
+      }
       const data = buffer.toString('base64');
       // Always keep the first page; afterwards stop before exceeding the cap so
       // one tool result can't balloon to tens of MB.
@@ -603,6 +730,7 @@ export async function renderPDFPagesToImages(
 
     return { success: true, images, bytesTruncated };
   } catch (e: unknown) {
+    options?.signal?.throwIfAborted();
     return {
       success: false,
       error: `pdftoppm execution failed: ${
@@ -611,8 +739,15 @@ export async function renderPDFPagesToImages(
     };
   } finally {
     if (tempDir) {
-      // Best-effort cleanup; never let a cleanup failure mask the result.
-      await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      if (fileHandle) {
+        try {
+          await removeDescriptorOutput(tempDir);
+        } finally {
+          await outputDirectory?.close();
+        }
+      } else {
+        await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      }
     }
   }
 }

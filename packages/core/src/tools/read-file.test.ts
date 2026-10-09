@@ -19,6 +19,10 @@ import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { runWithToolCallSource } from '../code-mode/tool-call-runtime.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
+import type {
+  FileReadRequest,
+  FileReadSource,
+} from '../utils/file-read-source.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import type { ToolResult } from './tools.js';
@@ -194,6 +198,186 @@ describe('ReadFileTool', () => {
   });
 
   describe('build', () => {
+    it.skipIf(!['linux', 'darwin'].includes(process.platform)).each([
+      ['source.txt', 'ORIGINAL', 'REPLACEMENT', 'ORIGINAL'],
+      [
+        'source.svg',
+        '<svg>ORIGINAL</svg>',
+        '<svg>REPLACEMENT</svg>',
+        'ORIGINAL',
+      ],
+      [
+        'source.ipynb',
+        notebookJson([
+          { cell_type: 'markdown', source: ['ORIGINAL'], metadata: {} },
+        ]),
+        notebookJson([
+          { cell_type: 'markdown', source: ['REPLACEMENT'], metadata: {} },
+        ]),
+        'ORIGINAL',
+      ],
+      [
+        'source.pdf',
+        '%PDF-1.7\nORIGINAL',
+        '%PDF-1.7\nREPLACEMENT',
+        Buffer.from('%PDF-1.7\nORIGINAL').toString('base64'),
+      ],
+      [
+        'source.mp3',
+        'ORIGINAL-AUDIO',
+        'REPLACEMENT-AUDIO',
+        Buffer.from('ORIGINAL-AUDIO').toString('base64'),
+      ],
+      [
+        'source.mp4',
+        'ORIGINAL-VIDEO',
+        'REPLACEMENT-VIDEO',
+        Buffer.from('ORIGINAL-VIDEO').toString('base64'),
+      ],
+    ])(
+      'keeps the actual Standard source through %s processing',
+      async (name, original, replacement, expected) => {
+        const filePath = path.join(tempRootDir, name);
+        await fsp.writeFile(filePath, original);
+        const service = new StandardFileSystemService();
+        const producer = service.withReadFile.bind(service);
+        let borrowed: fsp.FileHandle | undefined;
+        service.withReadFile = async <T>(
+          request: FileReadRequest,
+          operation: (source: FileReadSource) => Promise<T>,
+        ) =>
+          producer(request, async (source) => {
+            if (source.kind !== 'descriptor')
+              throw new Error('expected ordinary descriptor producer');
+            borrowed = source.fileHandle;
+            await fsp.rename(filePath, `${filePath}.original`);
+            await fsp.writeFile(filePath, replacement);
+            return operation(source);
+          });
+        const boundTool = new ReadFileTool(
+          makeConfig({
+            getFileSystemService: () => service,
+            getContentGeneratorConfig: () => ({ modalities: allModalities }),
+          }),
+        );
+        const result = await boundTool
+          .build({ file_path: filePath, ...nullPagination })
+          .execute(abortSignal);
+        expect(JSON.stringify(result.llmContent)).toContain(expected);
+        expect(result.error).toBeUndefined();
+        await expect(borrowed!.stat()).rejects.toMatchObject({ code: 'EBADF' });
+      },
+    );
+
+    it.skipIf(!['linux', 'darwin'].includes(process.platform))(
+      'uses the original PNG for the actual overview renderer',
+      async () => {
+        const filePath = path.join(tempRootDir, 'source.png');
+        await sharp({
+          create: { width: 11, height: 7, channels: 3, background: '#ff0000' },
+        })
+          .png()
+          .toFile(filePath);
+        const service = new StandardFileSystemService();
+        const producer = service.withReadFile.bind(service);
+        service.withReadFile = async <T>(
+          request: FileReadRequest,
+          operation: (source: FileReadSource) => Promise<T>,
+        ) =>
+          producer(request, async (source) => {
+            await fsp.rename(filePath, `${filePath}.original`);
+            await sharp({
+              create: {
+                width: 3,
+                height: 2,
+                channels: 3,
+                background: '#0000ff',
+              },
+            })
+              .png()
+              .toFile(filePath);
+            return operation(source);
+          });
+        const boundTool = new ReadFileTool(
+          makeConfig({
+            getFileSystemService: () => service,
+            getContentGeneratorConfig: () => ({ modalities: allModalities }),
+          }),
+        );
+        const result = await boundTool
+          .build({ file_path: filePath, ...nullPagination })
+          .execute(abortSignal);
+        expect(JSON.stringify(result.llmContent)).toContain(
+          'oriented source: 11x7',
+        );
+        expect(result.error).toBeUndefined();
+      },
+    );
+
+    it('enters the installed producer even when Omni selects pathname delivery', async () => {
+      const filePath = path.join(tempRootDir, 'omni.txt');
+      await fsp.writeFile(filePath, 'ordinary text');
+      const service = new StandardFileSystemService();
+      const producer = vi.spyOn(service, 'withReadFile');
+      const boundTool = new ReadFileTool(
+        makeConfig({
+          getFileSystemService: () => service,
+          isOmniEnabled: () => true,
+        }),
+      );
+      const result = await boundTool
+        .build({ file_path: filePath, ...nullPagination })
+        .execute(abortSignal);
+      expect(producer).toHaveBeenCalledWith(
+        expect.objectContaining({ mediaDelivery: 'omni' }),
+        expect.any(Function),
+      );
+      expect(result.llmContent).toBe('ordinary text');
+    });
+
+    it
+      .skipIf(!['linux', 'darwin'].includes(process.platform))
+      .each(['owner failure', 'late cancellation'])(
+      'invalidates an unreturned read after %s',
+      async (cause) => {
+        const filePath = path.join(tempRootDir, 'owner-result.txt');
+        await fsp.writeFile(filePath, 'content');
+        const service = new StandardFileSystemService();
+        const producer = service.withReadFile.bind(service);
+        const controller = new AbortController();
+        const failure = new Error(cause);
+        let borrowed: fsp.FileHandle | undefined;
+        service.withReadFile = async <T>(
+          request: FileReadRequest,
+          operation: (source: FileReadSource) => Promise<T>,
+        ) => {
+          const result = await producer(request, (source) => {
+            if (source.kind !== 'descriptor') throw new Error('expected fd');
+            borrowed = source.fileHandle;
+            return operation(source);
+          });
+          expect(fileReadCache.check(await fsp.stat(filePath)).state).toBe(
+            'fresh',
+          );
+          if (cause === 'owner failure') throw failure;
+          controller.abort(failure);
+          return result;
+        };
+        const boundTool = new ReadFileTool(
+          makeConfig({ getFileSystemService: () => service }),
+        );
+        await expect(
+          boundTool
+            .build({ file_path: filePath, ...nullPagination })
+            .execute(controller.signal),
+        ).rejects.toBe(failure);
+        expect(fileReadCache.check(await fsp.stat(filePath)).state).toBe(
+          'unknown',
+        );
+        await expect(borrowed!.stat()).rejects.toMatchObject({ code: 'EBADF' });
+      },
+    );
+
     it('advertises audio and video support to the model', () => {
       expect(tool.description).toContain('audio, video');
       expect(tool.description).toContain(
@@ -518,19 +702,25 @@ describe('ReadFileTool', () => {
       );
     });
 
-    it('does not cache a read that returns after cancellation', async () => {
-      const filePath = path.join(tempRootDir, 'late-read.txt');
+    it('does not cache a delegated read that returns after cancellation', async () => {
+      const filePath = path.join(tempRootDir, 'delegated-late-read.txt');
       await fsp.writeFile(filePath, 'content', 'utf-8');
       let release!: (result: { content: string }) => void;
       const response = new Promise<{ content: string }>((resolve) => {
         release = resolve;
       });
+      const service = Object.assign(new StandardFileSystemService(), {
+        withReadFile: undefined,
+      });
       const read = vi
-        .spyOn(StandardFileSystemService.prototype, 'readTextFile')
+        .spyOn(service, 'readTextFile')
         .mockReturnValueOnce(response);
       const recordRead = vi.spyOn(fileReadCache, 'recordRead');
       const controller = new AbortController();
-      const running = tool
+      const delegatedTool = new ReadFileTool(
+        makeConfig({ getFileSystemService: () => service }),
+      );
+      const running = delegatedTool
         .build({ file_path: filePath, offset: 0, limit: 20 })
         .execute(controller.signal)
         .then(
@@ -549,6 +739,76 @@ describe('ReadFileTool', () => {
         read.mockRestore();
       }
     });
+
+    it.skipIf(!['linux', 'darwin'].includes(process.platform))(
+      'does not cache a read that returns after cancellation',
+      async () => {
+        const filePath = path.join(tempRootDir, 'late-read.txt');
+        await fsp.writeFile(filePath, 'content', 'utf-8');
+        let release!: () => void;
+        const response = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const service = new StandardFileSystemService();
+        const producer = service.withReadFile.bind(service);
+        let started = false;
+        let borrowed: fsp.FileHandle | undefined;
+        service.withReadFile = async <T>(
+          request: FileReadRequest,
+          operation: (source: FileReadSource) => Promise<T>,
+        ) =>
+          producer(request, async (source) => {
+            if (source.kind !== 'descriptor')
+              throw new Error('expected descriptor producer');
+            borrowed = source.fileHandle;
+            const originalRead = source.fileHandle.read.bind(source.fileHandle);
+            Object.assign(source.fileHandle, {
+              read: async (
+                buffer: Buffer,
+                offset: number,
+                length: number,
+                position: number,
+              ) => {
+                const result = await originalRead(
+                  buffer,
+                  offset,
+                  length,
+                  position,
+                );
+                started = true;
+                await response;
+                return result;
+              },
+            });
+            return operation(source);
+          });
+        const boundTool = new ReadFileTool(
+          makeConfig({ getFileSystemService: () => service }),
+        );
+        const recordRead = vi.spyOn(fileReadCache, 'recordRead');
+        const controller = new AbortController();
+        const running = boundTool
+          .build({ file_path: filePath, offset: 0, limit: 20 })
+          .execute(controller.signal)
+          .then(
+            (value) => ({ value }),
+            (error: unknown) => ({ error }),
+          );
+        try {
+          await vi.waitFor(() => expect(started).toBe(true));
+          controller.abort();
+          release();
+          expect(await running).toEqual({ error: controller.signal.reason });
+          expect(recordRead).not.toHaveBeenCalled();
+          await expect(borrowed!.stat()).rejects.toMatchObject({
+            code: 'EBADF',
+          });
+        } finally {
+          release();
+          await running;
+        }
+      },
+    );
 
     it('should handle text file with lines exceeding maximum length', async () => {
       const longLine = 'a'.repeat(2500); // Exceeds MAX_LINE_LENGTH_TEXT_FILE (2000)

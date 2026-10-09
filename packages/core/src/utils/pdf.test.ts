@@ -41,7 +41,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 });
 
 import { execFile } from 'node:child_process';
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, rm } from 'node:fs/promises';
 const mockExecFile = vi.mocked(execFile);
 const mockReaddir = vi.mocked(readdir);
 const mockReadFile = vi.mocked(readFile);
@@ -105,6 +105,44 @@ describe('pdf utilities', () => {
     vi.clearAllMocks();
     resetPdftotextCache();
     resetPdftoppmCache();
+  });
+
+  it('propagates page-count cancellation instead of returning unknown', async () => {
+    const controller = new AbortController();
+    const cancelled = new Error('page-count-cancelled');
+    mockExecFile.mockImplementationOnce(
+      (_command: unknown, _args: unknown, options: unknown, cb: unknown) => {
+        expect(options).toMatchObject({ signal: controller.signal });
+        controller.abort(cancelled);
+        (cb as ExecCallback)(cancelled, '', '');
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+    await expect(getPDFPageCount('/test.pdf', controller.signal)).rejects.toBe(
+      cancelled,
+    );
+  });
+
+  it('propagates pathname render cancellation after output cleanup', async () => {
+    const controller = new AbortController();
+    const cancelled = new Error('page-render-cancelled');
+    mockExecResult();
+    mockExecFile.mockImplementationOnce(
+      (_command: unknown, _args: unknown, options: unknown, cb: unknown) => {
+        expect(options).toMatchObject({ signal: controller.signal });
+        controller.abort(cancelled);
+        (cb as ExecCallback)(cancelled, '', '');
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+    await expect(
+      renderPDFPagesToImages('/test.pdf', { signal: controller.signal }),
+    ).rejects.toBe(cancelled);
+    expect(rm).toHaveBeenCalledWith('/tmp/pdf-render-test', {
+      recursive: true,
+      force: true,
+    });
+    expect(mockReaddir).not.toHaveBeenCalled();
   });
 
   describe('PDF budget policy helpers', () => {

@@ -149,6 +149,7 @@ describe('readTextRange', () => {
     const streamBuffers: Buffer[] = [];
     const streamReads: Array<{ position: number; length: number }> = [];
     const fileHandle = {
+      stat: async () => ({ size: original.length }),
       read: vi.fn(
         async (
           buffer: Buffer,
@@ -233,6 +234,7 @@ describe('readTextRange', () => {
     );
     let appended = false;
     const boundedHandle = {
+      stat: () => fh.stat(),
       read: async (
         buffer: Buffer,
         offset: number,
