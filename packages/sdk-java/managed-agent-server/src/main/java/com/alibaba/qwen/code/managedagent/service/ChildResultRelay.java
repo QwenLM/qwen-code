@@ -645,23 +645,34 @@ public class ChildResultRelay {
         if ("intent".equals(execution)) {
             ChildResultRelayStore.TurnLine childTurn = child == null ? null
                     : relayStore.latestTurn(row.tenantId(), child);
-            if (childTurn != null && childTurn.dispatched()) {
-                // The child provably dispatched while the record never
-                // attached: the chain replays dispatch first (intent
-                // allows exactly that successor), then the attach — from
-                // the historical binding row that proves that dispatch
-                // (any state: a retired row still names the identity the
-                // dispatch committed; warmth is never required to rebuild
-                // a record). A Turn whose admission never landed proves
-                // nothing, so a pre-admission failure keeps the honest
-                // never-started pairing instead of hunting a binding that
-                // never existed.
-                RuntimeBindingRecord binding = broker
-                        .findLatestBindingByHarnessSessionAnyState(
-                                row.tenantId(), child);
+            if (childTurn != null && !childTurn.dispatched()
+                    && !childTurn.preAdmissionTerminal()) {
+                // The Turn is enqueued, not failed: a live Turn with an
+                // outstanding outcome shares the undispatched shape with
+                // the terminal one, and a pairing minted ahead of it is
+                // the same false verdict with better timing — the give-up
+                // owes the bounded wait until the coordinator settles the
+                // admission one way or the other.
+                throw new RelayRetry("child Turn admitted but its"
+                        + " admission never landed yet");
+            }
+            RuntimeBindingRecord binding = child == null ? null
+                    : broker.findLatestBindingByHarnessSessionAnyState(
+                            row.tenantId(), child);
+            if ((childTurn != null && childTurn.dispatched())
+                    || binding != null) {
+                // Dispatch evidence of one honest kind or the other: the
+                // proven G3 pair, or the historical binding row — the
+                // reset mark cannot disprove what it proves (G3 withdraws
+                // the mark after a lost reply, and a terminal status never
+                // upgrades that reset to proof of non-admission, R25).
+                // The chain replays dispatch first (intent allows exactly
+                // that successor), then the attach — from the binding's
+                // own identity, warmth never required to rebuild a record.
                 if (binding == null) {
-                    throw new RelayRetry("child physically ran, yet its"
-                            + " binding's own dispatch is not an honest chain");
+                    throw new RelayRetry("child provably dispatched, yet"
+                            + " its binding's own dispatch is not an honest"
+                            + " chain");
                 }
                 Map<String, Object> dispatch = new LinkedHashMap<>();
                 dispatch.put("operationId", UUID.randomUUID().toString());
@@ -675,16 +686,6 @@ public class ChildResultRelay {
                         row.parentSessionId(), dispatch);
                 attachReplay(row, child);
                 return true;
-            }
-            if (childTurn != null && !childTurn.preAdmissionTerminal()) {
-                // The Turn is enqueued, not failed: a live ACCEPTED Turn
-                // shares the undispatched shape with the terminal one,
-                // and a verdict minted ahead of its dispatch outcome is
-                // the same false pairing with better timing — the give-up
-                // owes the bounded wait until the coordinator settles the
-                // admission one way or the other.
-                throw new RelayRetry("child Turn admitted but its"
-                        + " admission never landed yet");
             }
             // Record truth: truly nothing ever dispatched — the
             // `creation_failed` pairing is the lawful verdict here.

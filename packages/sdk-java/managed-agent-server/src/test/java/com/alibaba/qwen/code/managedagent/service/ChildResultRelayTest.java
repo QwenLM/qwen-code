@@ -1010,6 +1010,40 @@ class ChildResultRelayTest {
                 .containsEntry("childSessionId", CHILD);
     }
 
+    // R25: G3's withdrawn mark after a lost reply is a reset, never a
+    // durable negative proof — a terminal CANCELLED Turn whose admission
+    // evidence remains (the historical binding) takes the same dispatch
+    // replay, never a never-started verdict over an unanswered question.
+    @Test
+    void aWithdrawnSubmissionMarkReconcilesFromItsHistoricalBinding() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 63, 0, null, now, now));
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn(
+                "intent");
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "CANCELLED", now + 1L, null, false,
+                        null));
+        RuntimeBindingRecord binding = mock(RuntimeBindingRecord.class);
+        when(binding.getBindingId()).thenReturn("binding-1");
+        when(binding.getGeneration()).thenReturn(7L);
+        when(broker.findLatestBindingByHarnessSessionAnyState(TENANT, CHILD))
+                .thenReturn(binding);
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("dispatch_started", "attach", "fail");
+        assertThat(harness.operations.get(0))
+                .containsEntry("dispatchId", "creation-key")
+                .containsEntry("runtimeBindingId", "binding-1")
+                .containsEntry("generation", "7");
+        assertThat(harness.operations.get(2))
+                .containsEntry("stopReason", "child_failed")
+                .containsEntry("started", true)
+                .containsEntry("childSessionId", CHILD);
+    }
+
     // R23: a Turn whose admission never landed is a pre-admission
     // failure — it proves no dispatch, so the never-started pairing
     // settles named instead of hunting a binding that never existed.
