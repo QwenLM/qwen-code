@@ -2249,6 +2249,13 @@ it('registers a foreground shell capture under the mapped Runtime identity', asy
     new AbortController().signal,
   );
   expect(register).toHaveBeenCalledOnce();
+  // One pair, two axes: the mapped Runtime Session against the execution,
+  // the logical prompt id against the checkpoint's identity. A mapped
+  // promptId here is refused by the store, and the wake Shell's execution
+  // goes unknown.
+  expect(register.mock.calls[0]?.[0]).toMatchObject({
+    reference: { sessionId: 'prompt', promptId: 'arun_x:input' },
+  });
   expect(responses[0]?.functionResponse?.response?.['error']).toBeUndefined();
 });
 

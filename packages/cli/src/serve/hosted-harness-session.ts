@@ -648,6 +648,24 @@ async function hasPendingWakePark(session: HostedSession): Promise<boolean> {
 }
 
 /**
+ * The adopt refusals that mean the wake session is released or mid-release
+ * (RELEASING), never a live one to stop: a cold Broker answers
+ * `runtime_session_not_acquirable` from the persisted row, while the live
+ * Broker that still holds the session in process answers
+ * `runtime_session_not_ready`. Either way only an explicit release can
+ * finish the lease, so neither may fail the aftermath before it.
+ */
+function isReleasedOrReleasingAdoptRefusal(cause: unknown): boolean {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    cause.status === 409 &&
+    ['runtime_session_not_ready', 'runtime_session_not_acquirable'].includes(
+      String(cause.code),
+    )
+  );
+}
+
+/**
  * The full aftermath of a wake turn that died inside its attempt, keyed
  * on the journal and the checkpoint — never on which settle ran before it:
  * its run fails with the execution unknown, a checkpoint parked at
@@ -710,9 +728,10 @@ export async function settleCrashedWakeTurnAftermath(params: {
             // runtime_reconciliation_required. Adopt first, as the
             // passive takeover does — re-acquiring a READY session under
             // this same identity is idempotent server-side, and a 409
-            // runtime_session_not_acquirable refusal is exactly the
-            // already-released (or mid-release) answer: nothing there
-            // remains to stop.
+            // runtime_session_not_acquirable (a cold Broker) or
+            // runtime_session_not_ready (a live Broker still holding the
+            // session in process) refusal is exactly the already-released
+            // (or mid-release) answer: nothing there remains to stop.
             const parkedBroker = await originalRuntimeBroker(
               session.managed,
               turnId,
@@ -723,13 +742,7 @@ export async function settleCrashedWakeTurnAftermath(params: {
             try {
               await parkedBroker.acquire();
             } catch (cause) {
-              if (
-                !(
-                  cause instanceof HostedWorkspaceBrokerRejection &&
-                  cause.status === 409 &&
-                  cause.code === 'runtime_session_not_acquirable'
-                )
-              ) {
+              if (!isReleasedOrReleasingAdoptRefusal(cause)) {
                 throw cause;
               }
               adopted = false;
@@ -785,11 +798,12 @@ export async function settleCrashedWakeTurnAftermath(params: {
         }
         // Release on every pass: the journal cannot say whether an
         // earlier pass's release landed after the checkpoint moved on.
-        // `runtime_session_not_acquirable` on the adopt is NOT proof of
-        // one — a session mid-release (RELEASING) refuses the adopt too,
-        // and only the explicit release below is what completes it; an
-        // already-released session answers that same release idempotently
-        // as the released kind.
+        // A refused adopt is NOT proof of one — a session mid-release
+        // (RELEASING) refuses it too: `runtime_session_not_acquirable` from
+        // a cold Broker, `runtime_session_not_ready` from the live one that
+        // still holds the session in process. Only the explicit release
+        // below completes it; an already-released session answers that
+        // same release idempotently as the released kind.
         if (runtimeItems.length > 0) {
           try {
             broker ??= await originalRuntimeBroker(
@@ -801,13 +815,7 @@ export async function settleCrashedWakeTurnAftermath(params: {
             try {
               await broker.acquire();
             } catch (cause) {
-              if (
-                !(
-                  cause instanceof HostedWorkspaceBrokerRejection &&
-                  cause.status === 409 &&
-                  cause.code === 'runtime_session_not_acquirable'
-                )
-              ) {
+              if (!isReleasedOrReleasingAdoptRefusal(cause)) {
                 throw cause;
               }
             }
