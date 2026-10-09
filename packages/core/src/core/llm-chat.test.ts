@@ -35,6 +35,7 @@ import {
   buildApiHistoryFromConversation,
   findApiHistoryPromptIndex,
   getApiHistoryPromptId,
+  markApiHistoryPrompt,
 } from '../services/session-api-history.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
@@ -263,7 +264,9 @@ describe('LlmChat', async () => {
 
   describe('cancelled recovery history basis', () => {
     it('preserves cancellation when failed setup rolls a new user push back', async () => {
-      chat.setHistory([userText('unfinished')]);
+      const original = userText('unfinished');
+      markApiHistoryPrompt(original, 'client-1');
+      chat.setHistory([original]);
       chat.markLastTurnCancelled();
       const before = chat.getHistory();
       const countBefore = chat.getUserContentPushCount();
@@ -278,10 +281,15 @@ describe('LlmChat', async () => {
           'test-model',
           { message: 'new prompt' },
           'new-prompt',
+          undefined,
+          { promptId: 'client-1' },
         ),
       ).rejects.toThrow('post-push setup failure');
       expect(chat.getHistory()).toEqual(before);
       expect(chat.getUserContentPushCount()).toBe(countBefore);
+      expect(
+        findApiHistoryPromptIndex(chat.getHistoryShallow(), 'client-1'),
+      ).toBe(0);
       expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
       expect(chat.isLastTurnCancelled()).toBe(true);
     });
@@ -1083,6 +1091,27 @@ describe('LlmChat', async () => {
       ).toBe('session########7');
       // No identity supplied (retry, continuation, tool result): unmarked.
       expect(getApiHistoryPromptId(await sendMarked())).toBeUndefined();
+    });
+
+    it('moves retry ownership after a partial model response without duplicating it', async () => {
+      const original = userText('retry me');
+      markApiHistoryPrompt(original, 'client-1');
+      chat.setHistory([original, modelText('partial')]);
+      mockStream(textStream('done'));
+      await drain(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'retry me' },
+          'daemon-2',
+          undefined,
+          { promptId: 'client-1' },
+        ),
+      );
+      const history = chat.getHistoryShallow();
+      const index = findApiHistoryPromptIndex(history, 'client-1');
+      expect(index).toBe(2);
+      expect(getApiHistoryPromptId(history[0]!)).toBeUndefined();
+      expect(history[index]?.parts).toEqual([{ text: 'retry me' }]);
     });
 
     describe('manual plan-exit notices', () => {
@@ -11713,6 +11742,23 @@ describe('LlmChat', async () => {
       }
       return { fastChat, info: fastChat.compressFast().info };
     }
+
+    it.each(['user', 'unknown', undefined] as const)(
+      'keeps cancellation provenance through fast compression (%s)',
+      (reason) => {
+        pinFastCompressionIdleClear();
+        const fastChat = newChat({ history: thoughtHistory() });
+        if (reason) fastChat.markLastTurnCancelled(reason, 'legacy-daemon');
+        expect(fastChat.compressFast().info.compressionStatus).toBe(
+          CompressionStatus.COMPRESSED,
+        );
+        expect(fastChat.getLastTurnCancellationReason()).toBe(reason);
+        expect(fastChat.isLastTurnCancelled()).toBe(reason === 'user');
+        expect(fastChat.getLastTurnCancellationConfirmationId()).toBe(
+          reason === 'unknown' ? 'legacy-daemon' : undefined,
+        );
+      },
+    );
 
     it('replaces history and updates per-chat lastPromptTokenCount on COMPRESSED', async () => {
       mockCompressionService('compressed');

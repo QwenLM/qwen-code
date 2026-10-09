@@ -360,6 +360,7 @@ export interface SessionAgentRun {
     leaseId: string;
     attempt: number;
     expiresAt: number;
+    cancelReason?: 'user';
     /** Highest `HostTurnEventBatch.sequence` accepted for this attempt. */
     lastSequence?: number;
   };
@@ -575,13 +576,14 @@ export interface HostTurnEventBatch {
 
 /**
  * Per-run answer to a lease renewal in the heartbeat response. `cancelled`
- * means the person stopped the run on the coordinator: the Host aborts the
- * turn and does not post a result.
+ * fences the run on the coordinator: the Host aborts the turn and posts no
+ * result. Only explicit `cancelReason: 'user'` certifies a person's Stop.
  */
 export interface HostLeaseStatus {
   runId: string;
   ok: boolean;
   cancelled?: boolean;
+  cancelReason?: 'user' | 'interrupted';
 }
 
 /** Returned in heartbeat / pickup responses. */

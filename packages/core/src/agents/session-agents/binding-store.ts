@@ -150,7 +150,8 @@ function isValidLease(value: unknown): boolean {
       typeof value['leaseId'] === 'string' &&
       typeof value['attempt'] === 'number' &&
       typeof value['expiresAt'] === 'number' &&
-      isOptionalFiniteNumber(value['lastSequence']))
+      isOptionalFiniteNumber(value['lastSequence']) &&
+      (value['cancelReason'] === undefined || value['cancelReason'] === 'user'))
   );
 }
 

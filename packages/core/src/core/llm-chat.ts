@@ -156,7 +156,10 @@ import {
 } from './tool-call-preparation.js';
 import { InvalidStreamError } from './invalid-stream-error.js';
 import type { GoalTurnPermit } from '../goals/goal-protocol.js';
-import { markApiHistoryPrompt } from '../services/session-api-history.js';
+import {
+  markApiHistoryPrompt,
+  moveApiHistoryPromptId,
+} from '../services/session-api-history.js';
 import { isAgentEnvelopeContent } from '../agents/session-agents/envelope.js';
 
 export { InvalidStreamError };
@@ -2964,7 +2967,12 @@ export class LlmChat {
         tokens_after: info.newTokenCount,
       }),
     );
+    const cancellationReason = this.getLastTurnCancellationReason();
+    const confirmationId = this.getLastTurnCancellationConfirmationId();
     this.setHistory(newHistory, this.completedToolCallIds);
+    if (cancellationReason) {
+      this.markLastTurnCancelled(cancellationReason, confirmationId);
+    }
     this.lastPromptTokenCount = adjustedTokenCount;
     this.lastPromptTokenCountIsEstimated = true;
     this.lastCachedContentTokenCount = 0;
@@ -3526,6 +3534,9 @@ export class LlmChat {
       streamDoneResolver!();
       throw error;
     }
+
+    // Setup can roll the push back; transfer retry ownership only after it succeeds.
+    moveApiHistoryPromptId(this.history, currentUserContent!);
 
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;

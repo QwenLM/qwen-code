@@ -9324,6 +9324,38 @@ describe('Session', () => {
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
 
+    it('preserves server-owned identity through an unchanged wire restore and retry', async () => {
+      const original: Content = { role: 'user', parts: [{ text: 'retry me' }] };
+      markApiHistoryPrompt(original, 'client-1');
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([original]);
+      session.restoreHistory(
+        JSON.parse(JSON.stringify([original])) as Content[],
+      );
+      const restored = vi.mocked(mockChat.setHistory).mock.calls.at(-1)![0];
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(restored);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      mockChatRecordingService.recordTurnAttempt.mockResolvedValue(undefined);
+      const request = {
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text' as const, text: 'retry me' }],
+        retry: true,
+      };
+      await session.prompt(request, {
+        version: 1,
+        sessionId: 'test-session-id',
+        promptId: 'daemon-2',
+      });
+      expect(mockChatRecordingService.recordTurnAttempt).toHaveBeenCalledWith(
+        'client-1',
+        'daemon-2',
+      );
+      expect(vi.mocked(mockChat.sendMessageStream).mock.calls[0]?.[4]).toEqual({
+        promptId: 'client-1',
+      });
+    });
+
     it('restores a captured history snapshot', () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },

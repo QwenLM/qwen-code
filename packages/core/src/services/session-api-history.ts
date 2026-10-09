@@ -38,6 +38,38 @@ export function getApiHistoryPromptId(content: Content): string | undefined {
   return (content as IdentifiedContent)[API_HISTORY_PROMPT_ID];
 }
 
+export function restoreApiHistoryPromptIds(
+  current: readonly Content[],
+  restored: Content[],
+): void {
+  for (
+    let index = 0;
+    index < Math.min(current.length, restored.length);
+    index++
+  ) {
+    if (JSON.stringify(current[index]) !== JSON.stringify(restored[index]))
+      break;
+    const promptId = getApiHistoryPromptId(current[index]!);
+    if (promptId && findApiHistoryPromptIndex(current, promptId) === index) {
+      markApiHistoryPrompt(restored[index]!, promptId);
+    }
+  }
+}
+
+export function moveApiHistoryPromptId(
+  history: readonly Content[],
+  current: Content,
+): void {
+  const promptId = getApiHistoryPromptId(current);
+  if (!promptId) return;
+  const previous = history.filter(
+    (entry) => entry !== current && getApiHistoryPromptId(entry) === promptId,
+  );
+  if (previous.length === 1) {
+    delete (previous[0] as IdentifiedContent)[API_HISTORY_PROMPT_ID];
+  }
+}
+
 /** Returns the unique matching entry at or after `startIndex`, or -1. */
 export function findApiHistoryPromptIndex(
   history: readonly Content[],

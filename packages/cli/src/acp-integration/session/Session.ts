@@ -271,7 +271,10 @@ import {
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
-import { getLastApiHistoryPromptId } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import {
+  getLastApiHistoryPromptId,
+  restoreApiHistoryPromptIds,
+} from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import {
   isTodoStopGuardPromptText,
   TODO_STOP_GUARD_PROMPT_PREFIX,
@@ -4917,7 +4920,10 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config.getLlmClient()!.setHistory(structuredClone(history));
+    const client = this.config.getLlmClient()!;
+    const restored = structuredClone(history);
+    restoreApiHistoryPromptIds(client.getChat().getHistoryShallow(), restored);
+    client.setHistory(restored);
     this.clearActiveTodoPlanRevision();
     // Restoring history discards the timeline the active-todo reminder
     // described: clear the chain head so the next turn starts fresh instead

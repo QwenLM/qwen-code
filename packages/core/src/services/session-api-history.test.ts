@@ -13,6 +13,8 @@ import {
   buildApiHistoryFromConversation,
   buildSessionHistoryFromConversation,
   getLastApiHistoryPromptId,
+  getApiHistoryPromptId,
+  restoreApiHistoryPromptIds,
   isLastApiPromptCancelled,
   markApiHistoryPrompt,
 } from './session-api-history.js';
@@ -23,6 +25,41 @@ import {
 } from './api-user-prompt.js';
 
 const permit = { goalId: 'goal', revision: 1, turnId: 'turn' };
+
+describe('wire history ownership', () => {
+  it('restores only the unchanged prefix and leaves edited and newer input unowned', () => {
+    const original: Content[] = [
+      { role: 'user', parts: [{ text: 'first' }] },
+      { role: 'user', parts: [{ text: 'second' }] },
+      { role: 'user', parts: [{ text: 'third' }] },
+    ];
+    original.forEach((entry, index) =>
+      markApiHistoryPrompt(entry, `client-${index}`),
+    );
+    const restored = structuredClone(original);
+    restored[1]!.parts = [{ text: 'edited' }];
+    restored.push({ role: 'user', parts: [{ text: 'new input' }] });
+    restoreApiHistoryPromptIds(original, restored);
+    expect(restored.map(getApiHistoryPromptId)).toEqual([
+      'client-0',
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(getLastApiHistoryPromptId(restored)).toBeUndefined();
+  });
+
+  it('does not certify duplicate source ownership during unchanged restore', () => {
+    const original: Content[] = [
+      { role: 'user', parts: [{ text: 'same' }] },
+      { role: 'user', parts: [{ text: 'same' }] },
+    ];
+    original.forEach((entry) => markApiHistoryPrompt(entry, 'ambiguous'));
+    const restored = structuredClone(original);
+    restoreApiHistoryPromptIds(original, restored);
+    expect(restored.map(getApiHistoryPromptId)).toEqual([undefined, undefined]);
+  });
+});
 
 describe('completed local slash commands', () => {
   function commandRecords(command = '/docs'): ChatRecord[] {
