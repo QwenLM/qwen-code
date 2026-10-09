@@ -731,7 +731,9 @@ class HostedPublicWorkspaceIT {
                     .isEqualTo(pendingBefore);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
                     Long.class, session)).isEqualTo(execBefore);
-            assertThat(modelRequests).hasSize(modelsBefore);
+            // The held Turn accounts for the one request after the
+            // snapshot; the refused submit must have added none itself.
+            assertThat(modelRequests).hasSize(modelsBefore + 1);
             jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR'"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
