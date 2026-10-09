@@ -320,10 +320,12 @@ export interface CompressOptions {
    * with a context-overflow error (#13432). `contextWindowSize` is inferred
    * from the model id, which is exactly the number such an error contradicts
    * (a llama.cpp `-c 262144` endpoint serving an id that resolves to the
-   * 1_000_000 catalog row). When present, reactive sizing runs against the
-   * lower of the two; the proactive threshold gate keeps using the inferred
-   * window. Omitted by callers with no server-reported ceiling, which leaves
-   * sizing unchanged.
+   * 1_000_000 catalog row). When present, reactive sizing for a request that
+   * endpoint will itself receive runs against the lower of the two; a
+   * side-query routed to a different endpoint is sized against that
+   * endpoint's own window instead. The proactive threshold gate keeps using
+   * the inferred window. Omitted by callers with no server-reported ceiling,
+   * which leaves sizing unchanged.
    */
   observedServerCeiling?: number;
 }
@@ -681,11 +683,12 @@ export class ChatCompressionService {
         ) + Math.ceil(systemInstruction.length / CHARS_PER_TOKEN));
     // Window the output budget clamps against: the window of the model that
     // actually receives the side-query. Defaults to the main model's window
-    // (already capped at any server-reported ceiling, #13432); narrowed below
-    // by a distinct compaction model's window when the guard keeps that model
-    // (issue #7960). A distinct model's window can only narrow this — the
-    // observed ceiling stays in force, since the server rejects whatever it
-    // rejects regardless of which model we label the request with (#13432).
+    // (already capped at any server-reported ceiling, #13432); replaced below
+    // by the window of the distinct compaction model that actually receives
+    // the side-query when the guard keeps it (issue #7960). That window may be
+    // larger or smaller than the main model's — a server-reported ceiling
+    // still bounds it, but only when the endpoint that reported it is the one
+    // that will receive the request (#13432).
     let budgetWindow = reactiveContextCeiling;
     // Only check the window when the effective model differs from the main
     // model — warning about the main model being "too small" is confusing
@@ -724,14 +727,28 @@ export class ChatCompressionService {
             .warn(`[chat-compression] ${compactionWarning}`);
           effectiveCompactionModel = config.getModel();
         } else if (window && window > 0) {
-          // Combine, never overwrite: the measured window of the receiving
-          // model can legitimately exceed the server-reported ceiling (#13432),
-          // and the server enforces that ceiling no matter which model we label
-          // the request with — so keep the lower of the two. Absent an observed
-          // ceiling the measured window governs, which is what #7960 requires.
-          budgetWindow = opts.observedServerCeiling
-            ? Math.min(window, opts.observedServerCeiling)
-            : window;
+          // Combine, never overwrite — but only when the endpoint that
+          // reported the ceiling is the one that will receive the side-query.
+          // `observedServerCeiling` came from the server that rejected the
+          // MAIN request; a distinct compaction model can route elsewhere (a
+          // different authType, or a `\0`-pinned declared baseUrl, #12760),
+          // and that server enforces its own limit. Clamping a cross-route
+          // side-query against the main ceiling can floor the budget at 1,
+          // which the truncation guard below then drops on every send — so
+          // the receiving model's measured window governs there, exactly as
+          // it does when no ceiling was observed (#13432, #7960).
+          // Route identity compares the *declared* baseUrl, the same field
+          // the row lookup above matches on (#12760); an unpinned selector
+          // names no endpoint, which reads as same-route.
+          const sameRoute =
+            (resolved.authType === undefined ||
+              resolved.authType === contentGeneratorConfig.authType) &&
+            (compactionEndpoint === undefined ||
+              compactionEndpoint === config.getCurrentModelRegistryBaseUrl?.());
+          budgetWindow =
+            opts.observedServerCeiling && sameRoute
+              ? Math.min(window, opts.observedServerCeiling)
+              : window;
         }
       }
     }
