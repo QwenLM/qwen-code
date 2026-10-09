@@ -19,6 +19,7 @@ import type {
 } from '@google/genai';
 import { createUserContent, FinishReason } from './genai-compat.js';
 import {
+  finalizeToolResponses,
   enforceFunctionResponseBudget,
   isBudgetShrinkablePart,
 } from '../tools/tool-response-finalizer.js';
@@ -73,6 +74,8 @@ import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { clearLoadedSkillTracking } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { resolve as resolvePath } from 'node:path';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { completedToolCallBoundary } from './turn-interruption.js';
@@ -114,6 +117,7 @@ import {
 } from '../services/tokenEstimation.js';
 import {
   microcompactHistory,
+  getFunctionCallIdentity,
   type MicrocompactMeta,
 } from '../services/microcompaction/microcompact.js';
 import {
@@ -2188,16 +2192,6 @@ function stripTrailingSessionStartContextBlock(
   return systemInstruction.slice(0, startIndex);
 }
 
-/**
- * Floor for the pressure-aware tool result budget (#2566), per result. Right
- * below the auto-compaction trigger the computed headroom can be a few tokens,
- * and a budget that small would replace every result with a bare stub;
- * compaction is about to run anyway, so overshooting by this much is the
- * better trade. The shared budget is split across the results it can shorten,
- * so this floor is scaled by their count.
- */
-const MIN_PRESSURE_TOOL_OUTPUT_CHARS = 4_000;
-
 export class LlmChat {
   // A promise to represent the current state of the message being sent to the
   // model.
@@ -3147,22 +3141,33 @@ export class LlmChat {
               batchBudget ?? Number.POSITIVE_INFINITY,
               pressureBudget ?? Number.POSITIVE_INFINITY,
             );
-      if (Number.isFinite(toolOutputBudget) && userContent.parts) {
-        const [guarded] = enforceFunctionResponseBudget(
-          [
-            {
-              callId: 'send-boundary',
-              toolName: 'tool-response-batch',
-              responseParts: userContent.parts,
-            },
-          ],
+      if (
+        Number.isFinite(toolOutputBudget) &&
+        (batchBudget === undefined || batchBudget > 0) &&
+        userContent.parts
+      ) {
+        const entries = userContent.parts.map((part) => ({
+          callId: `send-boundary-${randomUUID()}`,
+          toolName: 'tool-response-batch',
+          responseParts: [part],
+        }));
+        const guarded = await finalizeToolResponses(
+          this.config,
+          entries,
+          undefined,
+          false,
+          false,
           toolOutputBudget,
+          false,
         );
-        if (guarded.responseParts !== userContent.parts) {
+        if (guarded !== entries) {
           debugLogger.warn(
             `Tool response send guard reduced an unfinalized batch to ${toolOutputBudget} characters.`,
           );
-          userContent = { ...userContent, parts: guarded.responseParts };
+          userContent = {
+            ...userContent,
+            parts: guarded.flatMap((entry) => entry.responseParts),
+          };
           // The cut is what goes into history, so anything asserting those
           // results are still resident has to be told — the same invalidation
           // `tryCompress` does for the same reason. A forked chat shares the
@@ -3170,7 +3175,71 @@ export class LlmChat {
           // history slice, so it must not clear either; every other clear in
           // this file carries the same guard (see `isForkedChat`).
           if (!this.isForkedChat) {
-            this.config.getFileReadCache().clear();
+            const cutResults = guarded.flatMap((entry, index) => {
+              const before = entries[index].responseParts[0].functionResponse;
+              const after = entry.responseParts[0].functionResponse;
+              return typeof before?.response?.['output'] === 'string' &&
+                before.response['output'] !== after?.response?.['output']
+                ? [before]
+                : [];
+            });
+            const paths: string[] = [];
+            let unresolvedRead = false;
+            for (const result of cutResults) {
+              const calls = result.id
+                ? this.history.flatMap((content) =>
+                    (content.parts ?? []).flatMap((part) =>
+                      part.functionCall && part.functionCall.id === result.id
+                        ? [part.functionCall]
+                        : [],
+                    ),
+                  )
+                : [];
+              const responseName = canonicalToolName(result.name ?? '');
+              if (
+                !calls.length &&
+                (responseName === ToolNames.READ_FILE ||
+                  responseName === ToolNames.TOOL_CALL)
+              )
+                unresolvedRead = true;
+              for (const call of calls) {
+                const identity = getFunctionCallIdentity(call);
+                if (!identity) {
+                  unresolvedRead = true;
+                  continue;
+                }
+                if (identity.name !== ToolNames.READ_FILE) continue;
+                const filePath = identity.args['file_path'];
+                if (typeof filePath !== 'string' || !filePath)
+                  unresolvedRead = true;
+                else
+                  paths.push(resolvePath(this.config.getTargetDir(), filePath));
+              }
+            }
+            if (paths.length || unresolvedRead) {
+              const fileReadCache = this.config.getFileReadCache();
+              const stats = await Promise.all(
+                paths.map((p) => fs.promises.stat(p).catch(() => undefined)),
+              );
+              for (const stat of stats) {
+                if (!stat || !fileReadCache.markReadEvictedFromHistory(stat))
+                  unresolvedRead = true;
+              }
+              if (unresolvedRead)
+                fileReadCache.markAllReadsEvictedFromHistory();
+              if (paths.length > 0) {
+                try {
+                  await this.config
+                    .getExecutionEnvironment?.()
+                    ?.invalidateReadCache(paths);
+                } catch (error) {
+                  debugLogger.warn(
+                    'Execution cache invalidation after tool-output shrink failed',
+                    error,
+                  );
+                }
+              }
+            }
             clearLoadedSkillTracking(
               this.config.getToolRegistry(),
               'send-boundary tool-output shrink',
@@ -5646,11 +5715,17 @@ export class LlmChat {
       ...this.history.slice(anchor.history.length),
       {
         ...userContent,
-        parts: userContent.parts.flatMap((part) =>
-          isBudgetShrinkablePart(part)
-            ? (getFunctionResponseParts(part) ?? [])
-            : [part],
-        ),
+        parts: enforceFunctionResponseBudget(
+          [
+            {
+              callId: '',
+              toolName: 'tool-response-batch',
+              responseParts: userContent.parts,
+            },
+          ],
+          0,
+          true,
+        )[0].responseParts,
       },
     ];
     const { auto } = computeThresholds(
@@ -5669,13 +5744,7 @@ export class LlmChat {
     const remainingTokens =
       (auto - projectedTokens) / CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR;
     if (remainingTokens <= 0) return undefined;
-    // `chars` covers the whole batch while `baseChars` caps one result, so both
-    // the floor and the comparison against the static budgets scale with the
-    // number of results the shared budget is split across.
-    const chars = Math.max(
-      MIN_PRESSURE_TOOL_OUTPUT_CHARS * shrinkableParts.length,
-      Math.floor(remainingTokens * TOKEN_TO_CHAR_RATIO),
-    );
+    const chars = Math.floor(remainingTokens * TOKEN_TO_CHAR_RATIO);
     return chars < baseChars * shrinkableParts.length ? chars : undefined;
   }
 

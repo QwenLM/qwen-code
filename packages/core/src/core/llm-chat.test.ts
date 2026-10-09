@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type OpenAI from 'openai';
+import { promises as fsPromises, type Stats } from 'node:fs';
 import type {
   Content,
   GenerateContentConfig,
@@ -15,6 +16,7 @@ import type {
 } from '@google/genai';
 import { ApiError } from '@google/genai';
 import { AuthType, type ContentGenerator } from './contentGenerator.js';
+import { getPlanModeSystemReminder } from './prompts.js';
 import {
   LlmChat,
   InvalidStreamError,
@@ -107,6 +109,7 @@ vi.mock('node:fs', () => {
     }),
     existsSync: vi.fn((path: string) => mockFileSystem.has(path)),
     appendFileSync: vi.fn(),
+    promises: { stat: vi.fn() },
   };
 
   return {
@@ -308,7 +311,10 @@ describe('LlmChat', async () => {
       getApprovalMode: vi.fn().mockReturnValue('default'),
       takePendingManualPlanExitNotice: vi.fn().mockReturnValue(undefined),
       restorePendingManualPlanExitNotice: vi.fn(),
-      getFileReadCache: vi.fn().mockReturnValue({ clear: vi.fn() }),
+      getFileReadCache: vi.fn().mockReturnValue({
+        clear: vi.fn(),
+        markAllReadsEvictedFromHistory: vi.fn(),
+      }),
       getRestoreAskUserQuestion: vi.fn().mockReturnValue(false),
     } as unknown as Config;
     setSimulate429(false);
@@ -11889,8 +11895,6 @@ describe('LlmChat', async () => {
     /** A per-tool-layer spill envelope whose recovery pointer sits at the front. */
     const spillEnvelope = (n: number) =>
       `<persisted-output>\nOutput too large (512 KB). Full output saved to: /home/runner/.qwen/tmp/project-temp-dir/shell_${'a'.repeat(12)}${n}.log\nFull output sha256: ${'f'.repeat(64)}\nNote: this file may be cleaned up after 24 hours.\n\nPreview (up to 2100 chars):\n${'p'.repeat(1_900)}\n</persisted-output>`;
-    const SPILL_PATH_PREFIX =
-      'Full output saved to: /home/runner/.qwen/tmp/project-temp-dir/shell_';
     const reportUsage = async (promptTokenCount: number, target = chat) => {
       mockStreamsOnce(
         textStream('ok', {
@@ -11907,10 +11911,6 @@ describe('LlmChat', async () => {
       await sendDrain([result()], 'second');
       expect(resultChars(1)).toBeLessThan(20_000);
       expect(resultChars(1)).toBeLessThan(12_000);
-      // The destroyed middle chars are only worth it if the shrink buys
-      // admission: the send the model receives has to estimate below the auto
-      // trigger. Asserted here only — in the floor band the budget may
-      // legitimately overshoot and the send crosses `auto` anyway.
       expect(
         vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
           ?.precomputedEffectiveTokens,
@@ -11960,9 +11960,7 @@ describe('LlmChat', async () => {
       expect(resultChars(1)).toBeLessThanOrEqual(30_000);
     });
 
-    it('keeps every parallel result whole when the floor covers the batch', async () => {
-      // Floor band: 4,000 characters per result across eight results, so all of
-      // them fit and none is replaced by a bare stub that drops its spill path.
+    it('keeps parallel previews within the headroom even below 4,000 characters per result', async () => {
       await reportUsage(849_500);
       await sendDrain(
         [0, 1, 2, 3, 4, 5, 6, 7].map((n) =>
@@ -11974,15 +11972,14 @@ describe('LlmChat', async () => {
         ),
         'second',
       );
-      // MIN_PRESSURE_TOOL_OUTPUT_CHARS x 8 results: the floor is per result, so
-      // the whole batch fits and every spill pointer survives.
-      expect(resultChars(1)).toBe(32_000);
+      expect(resultChars(1)).toBeLessThanOrEqual(1_333);
       expect(
-        resultOutputs(1).every((output) => output.includes(SPILL_PATH_PREFIX)),
-      ).toBe(true);
+        vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
+          ?.precomputedEffectiveTokens,
+      ).toBeLessThan(850_000);
     });
 
-    it('counts a result carrying media against the per-result floor', async () => {
+    it('charges media before sharing the remaining headroom between previews', async () => {
       await reportUsage(NEAR_AUTO);
       await sendDrain(
         [
@@ -12000,15 +11997,47 @@ describe('LlmChat', async () => {
         ],
         'second',
       );
-      // Only the media payload is charged to the headroom: the text beside it is
-      // shortened like any other result, so both results keep the floor.
-      expect(resultChars(1)).toBe(8_000);
-      expect(resultOutputs(1).map((output) => output.length)).toEqual([
-        4_000, 4_000,
-      ]);
+      expect(resultChars(1)).toBeLessThan(8_000);
+      expect(resultOutputs(1).every((output) => output.length < 4_000)).toBe(
+        true,
+      );
+      expect(
+        vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
+          ?.precomputedEffectiveTokens,
+      ).toBeLessThan(850_000);
     });
 
-    it('invalidates the file read cache when the send guard cuts the batch', async () => {
+    it('keeps a small-window send below auto instead of restoring the static output', async () => {
+      mockGeneratorConfig({ contextWindowSize: 32_768 });
+      await reportUsage(27_000);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBeLessThan(4_000);
+      expect(
+        vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
+          ?.precomputedEffectiveTokens,
+      ).toBeLessThan(27_852.8);
+    });
+
+    it('submits empty preview text when positive headroom is less than one character', async () => {
+      mockGeneratorConfig({ contextWindowSize: 1_000_013 });
+      await reportUsage(849_977);
+      await sendDrain([result()], 'second');
+      expect(resultOutputs(1)).toEqual(['']);
+      expect(resultChars(1)).toBe(0);
+    });
+
+    it.each([Number.POSITIVE_INFINITY, 0])(
+      'keeps a disabled aggregate budget unchanged when adaptive headroom rounds to zero (%s)',
+      async (batchBudget) => {
+        mockGeneratorConfig({ contextWindowSize: 1_000_013 });
+        mockConfig.getToolOutputBatchBudget = () => batchBudget;
+        await reportUsage(849_977);
+        await sendDrain([result()], 'second');
+        expect(resultChars(1)).toBe(20_000);
+      },
+    );
+
+    it('preserves file read rights when the send guard cuts shell output', async () => {
       const clear = vi.fn();
       vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
         clear,
@@ -12016,9 +12045,69 @@ describe('LlmChat', async () => {
       await reportUsage(NEAR_AUTO);
       await sendDrain([result()], 'second');
       expect(resultChars(1)).toBeLessThan(20_000);
-      // The cut is what lands in durable history, so a cached "already read"
-      // verdict for those results would be false.
-      expect(clear).toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+    });
+
+    it('disarms a bridged cut read by inode and falls back for an unknown parallel read', async () => {
+      const stat = { dev: 1, ino: 100 } as Stats;
+      vi.mocked(fsPromises.stat).mockResolvedValue(stat);
+      const markReadEvictedFromHistory = vi.fn().mockReturnValue(true);
+      const markAllReadsEvictedFromHistory = vi.fn();
+      const clear = vi.fn();
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        clear,
+        markReadEvictedFromHistory,
+        markAllReadsEvictedFromHistory,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+      mockStreamsOnce(
+        streamOf(
+          modelChunk(
+            [
+              fnCall(
+                'tool_call',
+                { name: 'read_file', arguments: { file_path: 'cut.txt' } },
+                'read-cut',
+              ),
+            ],
+            undefined,
+            { promptTokenCount: NEAR_AUTO, totalTokenCount: NEAR_AUTO + 10 },
+          ),
+        ),
+        textStream('done'),
+      );
+      await sendDrain('read', 'first');
+      await sendDrain(
+        [
+          fnResponse('tool_call', { output: 'x'.repeat(20_000) }, 'read-cut'),
+          fnResponse('read_file', { output: 'y'.repeat(20_000) }, 'unknown'),
+        ],
+        'second',
+      );
+      expect(resultChars(1)).toBeLessThan(12_000);
+      expect(markReadEvictedFromHistory).toHaveBeenCalledWith(stat);
+      expect(markAllReadsEvictedFromHistory).toHaveBeenCalledOnce();
+      expect(clear).not.toHaveBeenCalled();
+    });
+
+    it('charges the protected plan lifecycle prefix before shrinking appended hook text', async () => {
+      const reminder = getPlanModeSystemReminder(false);
+      await reportUsage(NEAR_AUTO);
+      await sendDrain(
+        [
+          fnResponse(
+            'enter_plan_mode',
+            { output: `${reminder}\n\n${'h'.repeat(20_000)}` },
+            'plan',
+          ),
+        ],
+        'second',
+      );
+      expect(resultOutputs(1)[0]).toMatch(reminder);
+      expect(resultChars(1)).toBeLessThanOrEqual(10_640);
+      expect(
+        vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
+          ?.precomputedEffectiveTokens,
+      ).toBeLessThan(850_000);
     });
 
     it('leaves the file read cache alone when the guard cuts nothing', async () => {
@@ -12057,11 +12146,17 @@ describe('LlmChat', async () => {
         'second',
       );
       // Only `output` is exempt-protected, so the error text is charged to the
-      // same 10,640-char batch budget as a plain 8k result: it is neither held
+      // same shared batch budget as a plain 8k result: it is neither held
       // out of the headroom estimate (which would make the budget 4,000 and
       // stub both parts to 2,000) nor left whole.
-      expect(resultChars(1)).toBe(5_320);
-      expect(resultChars(1) + slotChars(1, 'error')).toBe(10_640);
+      expect(resultChars(1)).toBe(slotChars(1, 'error'));
+      expect(resultChars(1) + slotChars(1, 'error')).toBeLessThanOrEqual(
+        10_640,
+      );
+      expect(
+        vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
+          ?.precomputedEffectiveTokens,
+      ).toBeLessThan(850_000);
     });
 
     it('keeps the tighter of the aggregate budget and the headroom', async () => {

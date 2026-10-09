@@ -97,6 +97,45 @@ describe('tool response finalization', () => {
     expect(JSON.stringify(result[0].responseParts)).not.toContain('Persisted');
   });
 
+  it('persists only shortened tool text at the send boundary and keeps steering and exempt output', async () => {
+    const output = `HEAD${'x'.repeat(8000)}MIDDLE${'y'.repeat(8000)}TAIL`;
+    const entries = [
+      entry('cut', [fnResponse('shell', { output }, 'cut')]),
+      entry('user', [{ text: 'Keep this user instruction.' }]),
+      {
+        ...entry('memory', [
+          fnResponse('search_memory', { output: 'memory' }, 'memory'),
+        ]),
+        toolName: 'search_memory',
+      },
+    ];
+    const result = await finalizeToolResponses(
+      config(200_000),
+      entries,
+      undefined,
+      false,
+      false,
+      500,
+      false,
+    );
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(persist).toHaveBeenCalledWith(
+      'cut',
+      'shell',
+      output,
+      expect.anything(),
+    );
+    const preview = result[0].responseParts[0].functionResponse?.response?.[
+      'output'
+    ] as string;
+    expect(preview.length).toBeLessThanOrEqual(500);
+    expect(preview).toContain('/tmp/cut.txt');
+    expect(preview).not.toContain('MIDDLE');
+    expect(result[1]).toEqual(entries[1]);
+    expect(result[2]).toEqual(entries[2]);
+    expect(boundaryObserveMock).not.toHaveBeenCalled();
+  });
+
   it('leaves a batch within budget unchanged', async () => {
     const entries = [
       entry('small', [
@@ -714,6 +753,38 @@ describe('tool response finalization', () => {
       result[0].responseParts[1].functionResponse?.response?.['output'];
     expect(typeof output).toBe('string');
     expect((output as string).length).toBeLessThanOrEqual(100);
+  });
+
+  it('only an explicit adaptive zero budget empties tool text and preserves user text', async () => {
+    const userText = 'Keep this instruction.';
+    const entries = [
+      entry('send', [
+        { text: userText },
+        fnResponse('shell', { output: 'output', error: 'error' }, 'send'),
+      ]),
+    ];
+
+    expect(enforceFunctionResponseBudget(entries, 0)).toBe(entries);
+    const result = await finalizeToolResponses(
+      config(200_000),
+      entries,
+      undefined,
+      false,
+      false,
+      0,
+      false,
+    );
+    expect(persist).toHaveBeenCalledWith(
+      'send',
+      'shell',
+      'output\n\nerror',
+      expect.anything(),
+    );
+    expect(result[0].responseParts[0].text).toBe(userText);
+    expect(result[0].responseParts[1].functionResponse?.response).toEqual({
+      output: '',
+      error: '',
+    });
   });
 
   it('the send guard preserves an enter_plan_mode lifecycle response', () => {

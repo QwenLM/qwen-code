@@ -191,7 +191,7 @@ function resolveTrackedToolName(name: string): string {
   return match;
 }
 
-function getFunctionCallIdentity(
+export function getFunctionCallIdentity(
   call: NonNullable<Part['functionCall']>,
 ): ToolCallIdentity | undefined {
   if (!call.name) return undefined;

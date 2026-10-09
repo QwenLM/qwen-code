@@ -346,8 +346,14 @@ export function toolResponseTextLength(parts: Part[]): number {
 export function enforceFunctionResponseBudget(
   entries: ToolResponseBudgetEntry[],
   budget: number,
+  allowZeroBudget = false,
 ): ToolResponseBudgetEntry[] {
-  if (!Number.isFinite(budget) || budget <= 0) return entries;
+  if (
+    !Number.isFinite(budget) ||
+    budget < 0 ||
+    (budget === 0 && !allowZeroBudget)
+  )
+    return entries;
   const slots = collectTextSlots(entries, false);
   const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
   if (total <= budget) return entries;
@@ -368,6 +374,8 @@ export async function finalizeToolResponses(
   promptIds?: ReadonlyMap<string, string>,
   observeBoundary = true,
   associateBoundary = false,
+  budgetOverride?: number,
+  includeTopLevelText = true,
 ): Promise<ToolResponseBudgetEntry[]> {
   const shouldAssociateBoundary = observeBoundary && associateBoundary;
   const associatedEntryIndexes = observeBoundary
@@ -403,15 +411,21 @@ export async function finalizeToolResponses(
     );
   };
   const budget =
-    config.getToolOutputBatchBudget?.() ?? Number.POSITIVE_INFINITY;
-  if (!Number.isFinite(budget) || budget <= 0) {
+    budgetOverride ??
+    config.getToolOutputBatchBudget?.() ??
+    Number.POSITIVE_INFINITY;
+  if (
+    !Number.isFinite(budget) ||
+    budget < 0 ||
+    (budget === 0 && budgetOverride === undefined)
+  ) {
     observeUnchangedEntries();
     if (shouldAssociateBoundary)
       associateFinalizerEntries(entries, new Set(entries.keys()));
     return entries;
   }
 
-  const slots = collectTextSlots(entries);
+  const slots = collectTextSlots(entries, includeTopLevelText);
   const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
   if (total <= budget) {
     observeUnchangedEntries();
@@ -518,10 +532,10 @@ export async function finalizeToolResponses(
   if (shouldAssociateBoundary) {
     associateFinalizerEntries(finalized, new Set(finalized.keys()));
   }
-  const finalizedTotal = collectTextSlots(finalized).reduce(
-    (sum, slot) => sum + slot.text.length,
-    0,
-  );
+  const finalizedTotal = collectTextSlots(
+    finalized,
+    includeTopLevelText,
+  ).reduce((sum, slot) => sum + slot.text.length, 0);
   debugLogger.info(
     `Tool response budget (${budget} chars): reduced ${entriesToPersist.size} result(s) from ${total} to ${finalizedTotal} chars.`,
   );
