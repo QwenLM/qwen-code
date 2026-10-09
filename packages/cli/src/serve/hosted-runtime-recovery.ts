@@ -583,14 +583,19 @@ export async function settleInterruptedTurnRuntime(input: {
   // died before answering, or a settle failure afterwards, leaves the
   // retry at a model-start phase with no wait left to detect — yet the
   // dead Turn's runtime session still holds the lease until something
-  // releases it. Every ready verdict whose checkpoint still names the
-  // interrupted Turn therefore hands that session back with it, not only
-  // the wait arm's first pass (F9's retry shape).
+  // releases it. It also survives a Turn that acquired its Workspace
+  // before any checkpoint bound its identity — a release against a
+  // runtime session that never existed answers 404, which the caller's
+  // release already tolerates. Every ready verdict whose trace still
+  // names the interrupted Turn therefore hands that session back with
+  // it, not only the wait arm's first pass (F13's acquire-first window).
   if (
     broker === undefined &&
     input.brokerOptions !== undefined &&
-    authorization.status === 'runnable' &&
-    authorization.checkpoint.identity.turnId === input.promptId
+    (authorization.status === 'initial' ||
+      (authorization.status === 'runnable' &&
+        (authorization.checkpoint.identity.turnId === null ||
+          authorization.checkpoint.identity.turnId === input.promptId)))
   ) {
     broker = new HostedWorkspaceBroker(
       input.brokerOptions,

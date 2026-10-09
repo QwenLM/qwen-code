@@ -872,6 +872,24 @@ describe('managed email outbound', () => {
     expect(lifecycle).toEqual(['remote', 'lock']);
   });
 
+  it('admits a multibyte inbound truncated into the envelope byte line (F2)', async () => {
+    const adapter = make();
+    await adapter.connect();
+    append(raw('cjk', '汉'.repeat(22_000)));
+    await adapter.tick();
+    const event = plane.events.at(-1)!;
+    // The character line stays, and the text the envelope carries now fits
+    // its own byte line with headroom — never a deterministic refuse.
+    expect(event.text.startsWith('汉')).toBe(true);
+    expect(Buffer.byteLength(event.text, 'utf8')).toBeLessThanOrEqual(
+      64 * 1024 - 4096,
+    );
+    // The adapter stayed healthy past the truncated message.
+    plane.outbox = [delivery()];
+    await adapter.tick();
+    expect(sent).toHaveBeenCalledTimes(1);
+  });
+
   it('logs a deterministically refused register as refused, not unanswered', async () => {
     // A 409 register threw "did not answer … re-drives" before the exit:
     // the wording claims the verdict is latency, which it is not (R6).

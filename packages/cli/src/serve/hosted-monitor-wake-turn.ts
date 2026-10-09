@@ -88,7 +88,22 @@ export function createMonitorWakeRunTurn(params: {
     if (params.busy() || session.blocked) return 'busy';
     const attempted = await session.managed.sink.project();
     if (wakeHasPriorAttempt(attempted, turn.turnId)) {
-      const interrupted = await params.settleInterrupted?.(turn, attempted);
+      let interrupted: 'settled' | 'held' | 'busy' | false | undefined;
+      try {
+        interrupted = await params.settleInterrupted?.(turn, attempted);
+      } catch (cause) {
+        // The settle hook classifies its own durable failures; anything
+        // that escapes it — a rejected terminal-record write among them —
+        // shares the transient account: this attempt ends without anything
+        // settled, and the busy retry re-drives next wake (F6).
+        params.writeStderr(
+          'qwen serve: Interrupted channel wake turn ' +
+            turn.turnId +
+            ' could not settle this pass; the next wake attempt drives it again: ' +
+            String(cause),
+        );
+        return 'busy';
+      }
       if (interrupted === 'settled') {
         params.writeStderr(
           'qwen serve: Interrupted channel wake turn ' +

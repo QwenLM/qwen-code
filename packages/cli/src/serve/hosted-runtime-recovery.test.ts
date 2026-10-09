@@ -1683,6 +1683,93 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
+  it('hands the runtime back for a turn that died before its checkpoint bound its identity (F13)', async () => {
+    // The acquire-first window: the tool owned the Workspace before any
+    // checkpoint named the turn — a file-history marker is the durable
+    // trace, and a release against a never-acquired session only ever
+    // answers 404, which the caller already tolerates.
+    const session = await open('boot-1', true);
+    const harness = createManagedHarnessHandle(session);
+    const authority = session.authority;
+    const contentRef = await session.resources.publish(
+      'managed-input',
+      Buffer.from(JSON.stringify([{ type: 'text', text: 'write a file' }])),
+    );
+    const admissionRef = await session.resources.publish(
+      'managed-admission',
+      Buffer.from(JSON.stringify({ promptId: PROMPT_ID, digest: 'x' })),
+    );
+    await authority.submitInput(
+      {
+        operation: 'submitInput',
+        commandId: PROMPT_ID,
+        sessionKey: authority.sessionHeader.sessionKey,
+        contentDigest: DIGEST,
+      },
+      {
+        inputId: PROMPT_ID,
+        turnId: PROMPT_ID,
+        source: 'hosted-harness',
+        contentRef,
+        admissionRef,
+        deadline: null,
+        wakeReason: 'input',
+      },
+    );
+    await harness.ensureRunnable();
+    // The turn answered with its call and died while acquiring the
+    // Workspace — before a checkpoint could name it.
+    await session.sink.write({
+      uuid: 'assistant-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: new Date().toISOString(),
+      type: 'assistant',
+      cwd: root,
+      version: 'hosted-harness/1',
+      daemonPromptId: PROMPT_ID,
+      message: {
+        role: 'assistant',
+        parts: [
+          {
+            functionCall: {
+              id: 'call-1',
+              name: 'write_file',
+              args: { file_path: '0.txt', content: 'x' },
+            },
+          },
+        ],
+      },
+    });
+    await commitHostedFileHistory(session, {
+      schemaVersion: 1,
+      state: { ownerSessionId: SESSION_ID, snapshots: [], files: {} },
+      pendingTurn: PROMPT_ID,
+      pendingUndo: null,
+    });
+    await session.close();
+    resetManagedRuntimeDispatchGatesForTest();
+    const replacement = await open('boot-2', false);
+    try {
+      const runtime = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: false,
+      });
+      expect(runtime.kind).toBe('ready');
+      if (runtime.kind !== 'ready') throw new Error('expected a ready verdict');
+      expect(runtime.broker?.runtimeSessionId).toBe(PROMPT_ID);
+      expect(
+        (await readHostedFileHistory(replacement))?.pendingTurn,
+      ).toBeNull();
+    } finally {
+      await replacement.close();
+    }
+  });
+
   it('hands the runtime back when the settlement itself split across attempts', async () => {
     // The F9 retry shape, verbatim: the first call advanced the wait and
     // died inside the answer writes; the second one's checkpoint is no

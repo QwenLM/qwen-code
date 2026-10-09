@@ -564,6 +564,61 @@ describe('createMonitorWakeRunTurn', () => {
     },
   );
 
+  it('retries when the settle hook itself faults, without latching the Session (F6)', async () => {
+    const { session, lease } = await openWakeSession();
+    try {
+      const access: MonitorWakeTurnSession['session'] = {
+        active: undefined,
+        blocked: false,
+        managed: { sink: session.sink },
+      };
+      await session.sink.write({
+        uuid: 'chin-f6:user',
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: '/workspace',
+        version: 'test',
+        daemonPromptId: 'chin-f6',
+        message: { role: 'user', parts: [{ text: 'channel' }] },
+      } as ChatRecord);
+      const lines: string[] = [];
+      let attempts = 0;
+      const runTurn = createMonitorWakeRunTurn({
+        session: access,
+        sessionId,
+        cwd: '/workspace',
+        executeHostedTurn: async () => {
+          throw new Error('an interrupted turn must not re-drive');
+        },
+        busy: () => access.active !== undefined,
+        needsRecovery,
+        settleInterrupted: async () => {
+          attempts += 1;
+          if (attempts === 1) throw new Error('transport fault');
+          return 'settled';
+        },
+        writeStderr: (line) => {
+          lines.push(line);
+        },
+      });
+      expect(
+        await runTurn({ turnId: 'chin-f6', text: 'x', source: 'channel' }),
+      ).toBe('busy');
+      expect(access.blocked).toBe(false);
+      expect(
+        lines.some((line) => line.includes('could not settle this pass')),
+      ).toBe(true);
+      expect(
+        await runTurn({ turnId: 'chin-f6', text: 'x', source: 'channel' }),
+      ).toBe('settled');
+      expect(attempts).toBe(2);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
+
   it('settles a generic wake failure as an error turn_result and rethrows', async () => {
     const { session, lease } = await openWakeSession();
     try {

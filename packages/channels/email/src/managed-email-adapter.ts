@@ -133,6 +133,12 @@ const MAX_UPLOAD_ATTACHMENT_BYTES = 1_500_000;
  * 32,001 does, so the clamp caps at what the wire admits.
  */
 const MAX_WIRE_TEXT_CHARS = 32_000;
+// The envelope's byte line at the Harness, mirrored locally to keep this
+// package free of core imports (managed-channel-operations.ts:36).
+const ENVELOPE_BYTE_LIMIT = 64 * 1024;
+// Allowance of the envelope's JSON metadata around the text — identity,
+// reply context, subject and attachment listings, plus escaping headroom (F2).
+const TEXT_ENVELOPE_OVERHEAD_BYTES = 4096;
 
 export class ManagedEmailAdapter {
   readonly settings: EmailSettings;
@@ -536,10 +542,7 @@ export class ManagedEmailAdapter {
       state.routes,
       this.store.directory,
     );
-    const text = boundedText(
-      mail.text ?? '',
-      Math.min(this.settings.maxTextLength, MAX_WIRE_TEXT_CHARS),
-    );
+    const text = this.fitInboundText(mail.text ?? '');
     const attachments = mail.attachments
       .slice(0, 16)
       .filter(
@@ -738,10 +741,7 @@ export class ManagedEmailAdapter {
       chatId: sender,
       threadId: route.threadId,
       subject: route.subject,
-      text: boundedText(
-        mail.text ?? '',
-        Math.min(this.settings.maxTextLength, MAX_WIRE_TEXT_CHARS),
-      ),
+      text: this.fitInboundText(mail.text ?? ''),
       attachments: mail.attachments
         .slice(0, 16)
         .filter(
@@ -767,6 +767,25 @@ export class ManagedEmailAdapter {
         subject: route.subject,
       },
     };
+  }
+
+  /**
+   * F2: a multibyte input can sit under the character line yet overflow
+   * the Harness's 64 KiB *byte* envelope at submit. Clamp by bytes with a
+   * code-point cut, mirroring the character cap's own silent slice — so an
+   * in-bound email is admitted truncated instead of refused deterministically.
+   */
+  private fitInboundText(text: string): string {
+    const bounded = boundedText(
+      text,
+      Math.min(this.settings.maxTextLength, MAX_WIRE_TEXT_CHARS),
+    );
+    const byteLimit = ENVELOPE_BYTE_LIMIT - TEXT_ENVELOPE_OVERHEAD_BYTES;
+    if (Buffer.byteLength(bounded, 'utf8') <= byteLimit) return bounded;
+    const bytes = Buffer.from(bounded, 'utf8');
+    let end = byteLimit;
+    while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+    return bytes.subarray(0, end).toString('utf8');
   }
 
   private async reportOrphanedOutbound(): Promise<void> {

@@ -33,6 +33,7 @@ import {
   createHttpManagedSessionStores,
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
   ManagedSessionStoreHttpError,
+  ManagedSessionStoreTransportError,
   type HttpToolPublicationOwner,
   type HttpManagedSessionStores,
   type ManagedSessionLifecycleAuthority,
@@ -4420,9 +4421,14 @@ export function registerHostedHarnessSessionRoutes(
         return error(res, 409, 'channel_generation_stale', message);
       if (message.includes('is not enabled for submission'))
         return error(res, 409, 'channel_adapter_disabled', message);
+      // A record-validation refusal is a deterministic 400; the durable
+      // store's own transient fault classes must not masquerade as one —
+      // they fall through to the retryable 503 underneath (F10).
       if (
         cause instanceof ManagedSessionRecordError &&
-        !(cause instanceof ManagedSessionConflictError)
+        !(cause instanceof ManagedSessionConflictError) &&
+        !(cause instanceof ManagedSessionStoreHttpError) &&
+        !(cause instanceof ManagedSessionStoreTransportError)
       )
         return error(res, 400, 'invalid_channel_operation', message);
       if (
