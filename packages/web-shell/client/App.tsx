@@ -183,6 +183,7 @@ import {
   type WebShellToast,
 } from './components/ToastHost';
 import { TodoPanel } from './components/panels/TodoPanel';
+import { StickyPlanStrip } from './components/panels/StickyPlanStrip';
 import {
   EnvironmentPanel,
   type EnvironmentAgentTask,
@@ -7628,6 +7629,10 @@ export function App({
   const [todoPanelMode, setTodoPanelMode] = useState<'hidden' | 'active'>(
     'hidden',
   );
+  const [stickyPlanCollapsed, setStickyPlanCollapsed] = useState(false);
+  const toggleStickyPlanCollapsed = useCallback(() => {
+    setStickyPlanCollapsed((collapsed) => !collapsed);
+  }, []);
   const nextTodoPanelMode =
     connection.catchingUp ||
     floatingTodos.length === 0 ||
@@ -21740,6 +21745,27 @@ export function App({
                               .filter(Boolean)
                               .join(' ');
 
+                            const floatingPlanOnOpen =
+                              sessionWorkflowEnabled && showFloatingTodos
+                                ? floatingTodosUseSessionWorkflow
+                                  ? openWorkflowInspector
+                                  : openTasksPanel
+                                : undefined;
+                            const floatingPlanHasLiveActivity =
+                              streamingState !== 'idle' ||
+                              sessionHasActivePrompt ||
+                              sessionActiveWorkState === 'active';
+                            const stickyPlanStrip =
+                              showFloatingTodos && floatingTodos.length > 0 ? (
+                                <StickyPlanStrip
+                                  todos={floatingTodos}
+                                  collapsed={stickyPlanCollapsed}
+                                  onToggleCollapsed={toggleStickyPlanCollapsed}
+                                  onOpen={floatingPlanOnOpen}
+                                  hasLiveActivity={floatingPlanHasLiveActivity}
+                                />
+                              ) : null;
+
                             const messageListContent = (
                               <ConversationSearch
                                 key={`${connection.workspaceCwd ?? connection.sessionContext?.kind}:${connection.sessionId}`}
@@ -21931,6 +21957,7 @@ export function App({
                                     style={contentStyle}
                                     className={contentClassName}
                                   >
+                                    {stickyPlanStrip}
                                     {messageList}
                                     {btwPanel}
                                   </div>
@@ -21947,6 +21974,7 @@ export function App({
                                 style={contentStyle}
                                 className={contentClassName}
                               >
+                                {stickyPlanStrip}
                                 {messageList}
                                 {btwPanel}
                               </div>

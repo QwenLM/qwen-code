@@ -1,0 +1,168 @@
+.strip {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 16px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  background: color-mix(in srgb, var(--background) 92%, transparent);
+  color: var(--muted-foreground);
+  backdrop-filter: blur(8px);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.toggle:hover,
+.toggle:focus-visible {
+  color: var(--foreground);
+}
+
+.toggle:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}
+
+.chevron {
+  width: 14px;
+  height: 14px;
+  transition: transform 120ms ease;
+}
+
+.chevronCollapsed {
+  transform: rotate(-90deg);
+}
+
+.progress {
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+span.progress {
+  cursor: default;
+}
+
+button.progress:hover,
+button.progress:focus-visible {
+  color: var(--foreground);
+}
+
+button.progress:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}
+
+.items {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.item {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.loadingIcon {
+  width: 11px;
+  height: 11px;
+  border: 2px solid color-mix(in srgb, var(--agent-blue-500) 24%, transparent);
+  border-top-color: var(--agent-blue-500);
+  border-radius: 50%;
+  animation: stickyPlanSpin 0.8s linear infinite;
+}
+
+.content {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.completed .icon,
+.completed .content {
+  color: var(--muted-foreground);
+}
+
+.completed .content {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(
+    in srgb,
+    var(--muted-foreground) 72%,
+    transparent
+  );
+}
+
+.inProgress .icon,
+.inProgress .content {
+  color: var(--foreground);
+}
+
+.pending .icon,
+.pending .content {
+  color: var(--muted-foreground);
+}
+
+.more {
+  padding-left: 24px;
+  color: color-mix(in srgb, var(--muted-foreground) 80%, transparent);
+  font-size: 12px;
+}
+
+@keyframes stickyPlanSpin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loadingIcon {
+    animation: none;
+  }
+}

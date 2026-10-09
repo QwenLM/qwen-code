@@ -113,6 +113,32 @@ export function getTodoStatusIcon(status: TodoItem['status']): string {
   }
 }
 
+/**
+ * Cap and ordering shared with the CLI's sticky todo panel
+ * (`packages/cli/src/ui/utils/todoSnapshot.ts`), so the pinned strip here and
+ * the terminal panel show the same items in the same order. Mirrored rather
+ * than imported: the two packages do not depend on each other.
+ */
+export const STICKY_TODO_MAX_VISIBLE_ITEMS = 5;
+
+const STICKY_TODO_STATUS_PRIORITY: Record<TodoItem['status'], number> = {
+  in_progress: 0,
+  pending: 1,
+  completed: 2,
+};
+
+export function getOrderedStickyTodos(todos: readonly TodoItem[]): TodoItem[] {
+  return todos
+    .map((todo, index) => ({ todo, index }))
+    .sort(
+      (left, right) =>
+        STICKY_TODO_STATUS_PRIORITY[left.todo.status] -
+          STICKY_TODO_STATUS_PRIORITY[right.todo.status] ||
+        left.index - right.index,
+    )
+    .map(({ todo }) => todo);
+}
+
 export interface FloatingTodosState {
   todos: TodoItem[];
   planId: string | null;
