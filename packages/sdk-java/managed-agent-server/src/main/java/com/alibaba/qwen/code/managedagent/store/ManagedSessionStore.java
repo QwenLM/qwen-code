@@ -722,7 +722,7 @@ public class ManagedSessionStore {
                 activation == null ? head.activationExpiresAt()
                         : fits ? activation.expiresAt() : null,
                 activationHeadRevision, now, tenantId, sessionId);
-        if (toolResults != null) {
+        if (toolResults != null && csiOriginal == null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }
         return new CommitReceipt(revision, request.transactionId(),

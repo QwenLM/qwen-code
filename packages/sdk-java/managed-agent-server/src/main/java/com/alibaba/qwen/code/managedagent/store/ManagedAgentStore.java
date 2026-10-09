@@ -3209,24 +3209,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     private void requireLegacyMutation(String tenantId, String sessionId) {
-        jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
-            String product = connection.getMetaData().getDatabaseProductName();
-            String index = "MySQL".equals(product) || "MariaDB".equals(product)
-                    ? " FORCE INDEX (managed_session_csi_guard_idx)" : "";
-            try (var statement = connection.prepareStatement("SELECT csi_guard FROM managed_agent_session" + index
-                    + " WHERE tenant_id = ? AND session_id = ? AND csi_guard = TRUE FOR UPDATE")) {
-                statement.setQueryTimeout(10);
-                statement.setString(1, tenantId);
-                statement.setString(2, sessionId);
-                try (var rows = statement.executeQuery()) {
-                    if (rows.next()) {
-                        throw new ApiException(HttpStatus.CONFLICT, "csi_managed_mutation_unavailable",
-                                "The private CSI Session does not admit legacy Managed Agent mutations.");
-                    }
-                }
-            }
-            return null;
-        });
+        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
     }
 
     private SessionRecord requireSessionForUpdate(String tenantId,
