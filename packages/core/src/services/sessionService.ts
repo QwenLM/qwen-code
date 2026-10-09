@@ -3007,12 +3007,22 @@ export class SessionService {
   private async readAllRecords(
     filePath: string,
     onIncompleteRead?: () => void,
+    throwOnNonEnoentError = false,
   ): Promise<ChatRecord[]> {
     try {
-      return await jsonl.read<ChatRecord>(filePath, { onIncompleteRead });
+      return await jsonl.read<ChatRecord>(filePath, {
+        onIncompleteRead,
+        ...(throwOnNonEnoentError ? { throwOnNonEnoentError: true } : {}),
+      });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         debugLogger.error('Error reading session file:', error);
+      }
+      if (
+        throwOnNonEnoentError &&
+        (error as NodeJS.ErrnoException).code !== 'ENOENT'
+      ) {
+        throw error;
       }
       return [];
     }
@@ -3054,8 +3064,9 @@ export class SessionService {
    */
   async loadSession(
     sessionId: string,
+    options: { throwOnNonEnoentError?: boolean } = {},
   ): Promise<ResumedSessionData | undefined> {
-    return this.loadSessionFromState(sessionId, 'active');
+    return this.loadSessionFromState(sessionId, 'active', undefined, options);
   }
 
   async readSessionSources(
@@ -3110,7 +3121,7 @@ export class SessionService {
    */
   async loadArchivedSession(
     sessionId: string,
-    options: { maxBytes: number },
+    options: { maxBytes: number; throwOnNonEnoentError?: boolean },
   ): Promise<ResumedSessionData | undefined> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return undefined;
@@ -3135,20 +3146,25 @@ export class SessionService {
       }
       return undefined;
     }
-    return this.loadSessionFromState(sessionId, 'archived', stats);
+    return this.loadSessionFromState(sessionId, 'archived', stats, options);
   }
 
   private async loadSessionFromState(
     sessionId: string,
     state: SessionArchiveState,
     stats?: fs.Stats,
+    options: { throwOnNonEnoentError?: boolean } = {},
   ): Promise<ResumedSessionData | undefined> {
     const filePath = this.getSessionFilePath(sessionId, state);
 
     let sourceReadComplete = true;
-    const records = await this.readAllRecords(filePath, () => {
-      sourceReadComplete = false;
-    });
+    const records = await this.readAllRecords(
+      filePath,
+      () => {
+        sourceReadComplete = false;
+      },
+      options.throwOnNonEnoentError,
+    );
     if (records.length === 0) {
       return;
     }
