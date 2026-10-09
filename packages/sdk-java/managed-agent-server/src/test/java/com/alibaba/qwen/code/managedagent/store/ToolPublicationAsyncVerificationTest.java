@@ -549,23 +549,27 @@ public class ToolPublicationAsyncVerificationTest {
         try (var first = manualVerifier(data); var second = manualVerifier(replacement(Duration.ofMinutes(2), Duration.ofMinutes(1)));
                 var workers = Executors.newFixedThreadPool(2)) {
             var old = workers.submit(first::runOnce);
-            assertThat(bucket.readStarted.await(5, TimeUnit.SECONDS)).isTrue();
-            fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET claim_until = ?, verification_next_at = ?",
-                    Timestamp.valueOf("2000-01-01 00:00:00"), Timestamp.valueOf("2000-01-01 00:00:00"));
-            var successor = workers.submit(second::runOnce);
             try {
-                assertThat(bucket.successorStarted.await(5, TimeUnit.SECONDS)).isTrue();
-                bucket.readRelease.countDown();
-                assertThat(old.get(5, TimeUnit.SECONDS)).isTrue();
-                assertThat(status("takeover").path("state").asText()).isEqualTo("PENDING");
-                assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
-                        .isEqualTo("CANDIDATE");
-                assertThat(fixture.jdbc.queryForObject("SELECT quarantined FROM qwen_tool_publication", Boolean.class)).isFalse();
+                assertThat(bucket.readStarted.await(5, TimeUnit.SECONDS)).isTrue();
+                fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET claim_until = ?, verification_next_at = ?",
+                        Timestamp.valueOf("2000-01-01 00:00:00"), Timestamp.valueOf("2000-01-01 00:00:00"));
+                var successor = workers.submit(second::runOnce);
+                try {
+                    assertThat(bucket.successorStarted.await(5, TimeUnit.SECONDS)).isTrue();
+                    bucket.readRelease.countDown();
+                    assertThat(old.get(5, TimeUnit.SECONDS)).isTrue();
+                    assertThat(status("takeover").path("state").asText()).isEqualTo("PENDING");
+                    assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
+                            .isEqualTo("CANDIDATE");
+                    assertThat(fixture.jdbc.queryForObject("SELECT quarantined FROM qwen_tool_publication", Boolean.class)).isFalse();
+                } finally {
+                    bucket.successorRelease.countDown();
+                }
+                assertThat(successor.get(5, TimeUnit.SECONDS)).isTrue();
             } finally {
                 bucket.readRelease.countDown();
                 bucket.successorRelease.countDown();
             }
-            assertThat(successor.get(5, TimeUnit.SECONDS)).isTrue();
         }
         assertThat(status("takeover").path("state").asText()).isEqualTo("SUCCEEDED");
     }

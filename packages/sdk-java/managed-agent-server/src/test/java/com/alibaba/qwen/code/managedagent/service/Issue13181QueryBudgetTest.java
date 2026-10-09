@@ -1041,14 +1041,17 @@ class Issue13181QueryBudgetTest {
         try (var verifier = new ToolPublicationVerifier(data, 1)) {
             assertThat(verifier.runOnce()).isTrue();
         }
-        assertThat(fixture.ledger.count("update qwen_tool_publication_operation set claim_until")).isGreaterThanOrEqualTo(2);
+        long renewals = fixture.ledger.count("update qwen_tool_publication_operation set claim_until");
+        assertThat(renewals).isGreaterThanOrEqualTo(2);
         assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx")).isZero();
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_head", "for update")).isPositive();
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_head", "for update"))
+                .isGreaterThanOrEqualTo(2 * (renewals + 1));
         fixture.ledger.reset();
         for (int i = 0; i < 12; i++) {
             assertThat(data.operationStatus(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-heartbeat")
                     .path("state").asText()).isEqualTo("SUCCEEDED");
         }
+        assertThat(fixture.ledger.total()).isEqualTo(12);
         assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx")).isZero();
         assertThat(fixture.ledger.count("from qwen_managed_session_journal_head")).isZero();
     }
