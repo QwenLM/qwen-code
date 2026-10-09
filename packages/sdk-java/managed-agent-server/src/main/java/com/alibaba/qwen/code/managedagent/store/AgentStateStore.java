@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
@@ -147,6 +148,20 @@ public interface AgentStateStore {
     Set<String> completedWorkspaceCloses(String tenantId,
             List<String> sessionIds);
 
+    /**
+     * Whether the Session's creator-keyed execution facts hold — the
+     * Registry still backs the binding exactly, its state is ACTIVE, and
+     * the create-command actor keeps OPERATOR or above. This is the
+     * passive-attachment subset the execution authority re-verifies, so
+     * any admission certifying a run under the creator's grants checks it
+     * first.
+     */
+    boolean hasExecutionRegistryFacts(String tenantId, String sessionId);
+
+    /** The given Sessions whose execution facts hold, in one read. */
+    Set<String> sessionsWithExecutionRegistryFacts(String tenantId,
+            java.util.Collection<String> sessionIds);
+
     SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,
             String actorId, String scopedKey, String requestDigest);
 
@@ -164,9 +179,10 @@ public interface AgentStateStore {
      * Admits a controlled same-Workspace cwd change (W2) on a bound Session,
      * or returns the operation the same actor already admitted under the
      * key. The target directory is already normalized and the request digest
-     * already covers it; admission checks the creation actor, the current
-     * grant, the Registry facts, the expected context revision and the busy
-     * barriers in the pinned order of the W2 design.
+     * already covers it; admission checks the read grant, replays under the
+     * key, then the caller's Workspace role, the deployment gate, the
+     * Session state, the creator-keyed Registry facts, the expected context
+     * revision and the busy barriers in the pinned order.
      */
     OperationAdmission beginCwdChangeOperation(String tenantId,
             String sessionId, String actorId, String actorDigest,
@@ -281,6 +297,16 @@ public interface AgentStateStore {
             List<String> sessionIds);
 
     ReplayWindow findReplayWindow(String tenantId, String sessionId);
+
+    /** The Sessions whose Snapshot covers more than their replay floor. */
+    List<ReplayFloorTarget> findReplayFloorTargets(int limit);
+
+    /**
+     * Raises the Session's replay floor, never above the Snapshot's covered
+     * sequence, so a client told to resync can resume from the Snapshot.
+     */
+    ReplayWindow advanceReplayFloor(String tenantId, String sessionId,
+            long floorSequence);
 
     List<MaterializationTarget> findMaterializationTargets(int limit);
 

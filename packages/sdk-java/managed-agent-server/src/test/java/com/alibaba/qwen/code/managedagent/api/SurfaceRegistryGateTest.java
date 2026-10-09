@@ -61,6 +61,16 @@ class SurfaceRegistryGateTest {
         assertThat(mounted).hasSameSizeAs(SurfaceRegistry.values());
     }
 
+    // The acceptance walk keys the dual-purpose events route off its
+    // first capability; that order is EnumSet's ordinal iteration, so the
+    // declaration order of Capability is load-bearing here.
+    @Test
+    void theDualPurposeEventsRouteLeadsWithTurnSubmit() {
+        assertThat(SurfaceRegistry.PUBLIC_TURN_EVENTS.capabilities()
+                .iterator().next())
+                .isEqualTo(SurfaceRegistry.Capability.TURN_SUBMIT);
+    }
+
     @Test
     void capabilityTwinsShareOneRuleClass() {
         Map<SurfaceRegistry.Capability, SurfaceRegistry.RuleClass> classes =

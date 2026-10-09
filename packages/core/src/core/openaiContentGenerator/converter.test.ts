@@ -33,6 +33,7 @@ import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 import { SchemaValidator } from '../../utils/schemaValidator.js';
+import { appendAutoMemoryContext } from '../../memory/request-context.js';
 import {
   content,
   fnCall,
@@ -247,6 +248,42 @@ describe('OpenAIContentConverter', () => {
   /** Same, with strict OpenAI tool-result media splitting (splitToolMedia). */
   const toSplitMessages = (...contents: Content[]) =>
     toMessagesWith({ splitToolMedia: true }, ...contents);
+
+  it.each(['user question', 'tool result'] as const)(
+    'preserves the serialized prefix before the catalog after a %s',
+    (tail) => {
+      const history = [
+        userText('earlier user turn'),
+        ...(tail === 'user question'
+          ? [modelText('earlier answer'), userText('current question')]
+          : exchange('read-1', 'read_file', { content: 'saved notes' })),
+      ];
+      const request = {
+        ...req(...history),
+        config: { systemInstruction: 'stable memory policy' },
+      };
+      const baseline = JSON.stringify(toOpenAI(request));
+
+      for (const catalog of ['CURRENT_ENTRY', 'UPDATED_LONGER_ENTRY']) {
+        const messages = toOpenAI({
+          ...request,
+          contents: appendAutoMemoryContext(history, catalog),
+        });
+        const last = messages.at(-1);
+        expect(last?.role).toBe('user');
+        const parts = wireParts(last);
+        expect(Array.isArray(parts)).toBe(true);
+        expect(parts.at(-1)).toEqual({ type: 'text', text: catalog });
+        expect(JSON.stringify(messages)).not.toContain('"partMetadata"');
+
+        const prefix = messages.slice(0, -1);
+        if (parts.length > 1) {
+          prefix.push({ ...last!, content: parts.slice(0, -1) } as Message);
+        }
+        expect(JSON.stringify(prefix)).toBe(baseline);
+      }
+    },
+  );
 
   const toLlm = (
     choices: unknown[],
