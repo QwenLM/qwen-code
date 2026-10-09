@@ -430,13 +430,12 @@ public class ManagedActionStore {
                 actorKey)) {
             throw forbidden();
         }
-        // The widened OPERATOR arm certifies delivery exactly like the
+        // Every bound admission certifies delivery exactly like the
         // submitter family: the recorded create-command actor must still
         // back execution, so a demoted creator moves an answer to 409
         // rather than letting it be queued where the arbiter can never
-        // reach. Answered under the identity arms, no shape of the bound
-        // Session blocks the caller the record names.
-        if (!admitted && ownerRow.workspaceId() != null
+        // reach — whichever arm admitted the caller.
+        if (ownerRow.workspaceId() != null
                 && !sessions.hasExecutionRegistryFacts(tenantId, sessionId)) {
             throw new ApiException(HttpStatus.CONFLICT, "workspace_unavailable",
                     "Hosted Workspace execution is not available.");

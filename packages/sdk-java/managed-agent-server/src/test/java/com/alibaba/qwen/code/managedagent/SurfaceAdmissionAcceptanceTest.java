@@ -612,42 +612,46 @@ class SurfaceAdmissionAcceptanceTest {
                         .value("action_forbidden"));
     }
 
-    // The widened OPERATOR arm certifies delivery: a demoted creator moves
+    // Both bound admission arms certify delivery: a demoted creator moves
     // an answer to the family's domain 409 at admission instead of a
-    // response queued where the arbiter can never reach, and the restored
-    // creator unblocks the same pending Action for 202.
+    // response queued where the arbiter can never reach — for the role
+    // caller and the recorded create-command actor alike — and the
+    // restored creator unblocks a fresh pending Action for 202.
     @Test
     void respondCertifiesTheCreatorsExecutionFacts() throws Exception {
-        String action = insertAction(tenant, bound);
         String body = "{\"kind\":\"permission\",\"input_revision\":1,"
                 + "\"policy_revision\":\"policy\",\"option_id\":\"allow\"}";
-        jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
-                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
-                + " AND actor_id = ?", tenant,
-                OWNER.getBytes(StandardCharsets.UTF_8));
-        mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
-                        + action + "/responses")
-                        .header(TenantContextFilter.HEADER, tenant)
-                        .header("Idempotency-Key", nextKey())
-                        .principal(actor(tenant, OPERATOR))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error.code")
-                        .value("workspace_unavailable"));
-        jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR'"
-                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
-                + " AND actor_id = ?", tenant,
-                OWNER.getBytes(StandardCharsets.UTF_8));
-        mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
-                        + action + "/responses")
-                        .header(TenantContextFilter.HEADER, tenant)
-                        .header("Idempotency-Key", nextKey())
-                        .principal(actor(tenant, OPERATOR))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isAccepted())
-                .andExpect(jsonPath("$.type").value("action_response"));
+        for (String caller : List.of(OPERATOR, OWNER)) {
+            String action = insertAction(tenant, bound);
+            jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
+                    + " WHERE tenant_id = ? AND workspace_id = 'ws'"
+                    + " AND actor_id = ?", tenant,
+                    OWNER.getBytes(StandardCharsets.UTF_8));
+            mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
+                            + action + "/responses")
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .header("Idempotency-Key", nextKey())
+                            .principal(actor(tenant, caller))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(body))
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.error.code")
+                            .value("workspace_unavailable"));
+            jdbc.update("UPDATE managed_workspace_access"
+                    + " SET role = 'OPERATOR'"
+                    + " WHERE tenant_id = ? AND workspace_id = 'ws'"
+                    + " AND actor_id = ?", tenant,
+                    OWNER.getBytes(StandardCharsets.UTF_8));
+            mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
+                            + action + "/responses")
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .header("Idempotency-Key", nextKey())
+                            .principal(actor(tenant, caller))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(body))
+                    .andExpect(status().isAccepted())
+                    .andExpect(jsonPath("$.type").value("action_response"));
+        }
     }
 
     // The Action-response replay is actor-scoped: a responder whose grant
