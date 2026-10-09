@@ -68,19 +68,6 @@ class WorkspaceMigrationMySqlIT {
     }
 
     @Test
-    void upgradesMain56WithoutChangingAppliedMigrations() {
-        Flyway.configure().dataSource(data).locations("classpath:db/migration").target("56").load().migrate();
-        var applied = jdbc.queryForList("SELECT * FROM flyway_schema_history ORDER BY installed_rank");
-        int lastRank = jdbc.queryForObject("SELECT MAX(installed_rank) FROM flyway_schema_history", Integer.class);
-        Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
-        assertThat(jdbc.queryForList("SELECT * FROM flyway_schema_history"
-                + " WHERE installed_rank <= ? ORDER BY installed_rank", lastRank)).isEqualTo(applied);
-        assertThat(jdbc.queryForList("SELECT version FROM flyway_schema_history"
-                + " WHERE installed_rank > ? AND success = TRUE ORDER BY installed_rank",
-                String.class, lastRank)).containsExactly("57");
-    }
-
-    @Test
     void upgradesBinaryScopeWithoutRewritingOperationEvidence() {
         Flyway.configure().dataSource(data).locations("classpath:db/migration").target("49").load().migrate();
         for (String tenant : new String[] {"Tenant", "tenant"}) {
@@ -267,6 +254,19 @@ class WorkspaceMigrationMySqlIT {
                 }
             });
         }
+    }
+
+    @Test
+    void upgradesMain56WithoutChangingAppliedMigrations() {
+        Flyway.configure().dataSource(data).locations("classpath:db/migration").target("56").load().migrate();
+        var applied = jdbc.queryForList("SELECT * FROM flyway_schema_history ORDER BY installed_rank");
+        int lastRank = jdbc.queryForObject("SELECT MAX(installed_rank) FROM flyway_schema_history", Integer.class);
+        Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
+        assertThat(jdbc.queryForList("SELECT * FROM flyway_schema_history"
+                + " WHERE installed_rank <= ? ORDER BY installed_rank", lastRank)).isEqualTo(applied);
+        assertThat(jdbc.queryForList("SELECT version FROM flyway_schema_history"
+                + " WHERE installed_rank > ? AND success = TRUE ORDER BY installed_rank",
+                String.class, lastRank)).containsExactly("57");
     }
 
     private void seed(String tenant, String session, String state) {
