@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
+  verifyBundledNode,
   verifyBundledRipgrep,
   verifyRuntimeIntegrity,
 } from './runtime-smoke-checks.js';
@@ -48,6 +49,13 @@ function walkFiles(directory) {
   });
 }
 
+export function verifyExtractedRuntime(extractedRoot) {
+  const runtimeRoot = findRuntimeRoot(extractedRoot);
+  const manifest = verifyRuntimeIntegrity(runtimeRoot);
+  verifyBundledRipgrep(runtimeRoot, manifest.target);
+  verifyBundledNode(runtimeRoot);
+}
+
 function smokeInstaller(installer, type) {
   const extractedRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), `qwen-desktop-${type}-smoke-`),
@@ -64,9 +72,7 @@ function smokeInstaller(installer, type) {
         stdio: 'inherit',
       });
     }
-    const runtimeRoot = findRuntimeRoot(extractedRoot);
-    const manifest = verifyRuntimeIntegrity(runtimeRoot);
-    verifyBundledRipgrep(runtimeRoot, manifest.target);
+    verifyExtractedRuntime(extractedRoot);
   } finally {
     fs.rmSync(extractedRoot, { recursive: true, force: true });
   }

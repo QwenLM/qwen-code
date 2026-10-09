@@ -16,6 +16,7 @@ import {
 import {
   findLinuxInstallers,
   findRuntimeRoot,
+  verifyExtractedRuntime,
 } from './smoke-linux-installers.js';
 
 const packageDir = path.resolve(
@@ -663,7 +664,10 @@ function testDesktopReleaseHardening() {
 }
 
 function testImmutableRuntimePatchelf(directory, canSpawnShebang) {
-  if (!canSpawnShebang) return;
+  if (!canSpawnShebang) {
+    console.log('SKIP patchelf wrapper: shebang execution unavailable');
+    return;
+  }
   const wrapper = path.join(
     packageDir,
     'scripts',
@@ -718,6 +722,10 @@ function testImmutableRuntimePatchelf(directory, canSpawnShebang) {
     env,
   });
   assert.equal(skipped.status, 0, skipped.stderr);
+  assert.equal(
+    skipped.stderr,
+    `patchelf-immutable-runtime: skipped --set-rpath on ${runtimeElf}\n`,
+  );
   assert.equal(fs.readFileSync(log, 'utf8'), '');
 
   const readOnly = spawnSync(wrapper, ['--print-rpath', runtimeElf], {
@@ -797,6 +805,7 @@ function testRuntimeSmokeChecks(directory, canSpawnShebang) {
     ['LICENSE', 'license\n'],
     ['NOTICE', 'notice\n'],
     ['node/LICENSE', 'node license\n'],
+    ['node/bin/node', "#!/usr/bin/env sh\nprintf 'v22.0.0\\n'\n"],
     ['lib/cli-entry.js', ''],
     ['lib/web-shell/index.html', '<div id="root"></div>\n'],
     [
@@ -817,6 +826,8 @@ function testRuntimeSmokeChecks(directory, canSpawnShebang) {
     'x64-linux',
     'rg',
   );
+  const node = path.join(runtimeRoot, 'node', 'bin', 'node');
+  fs.chmodSync(node, 0o755);
   fs.chmodSync(ripgrep, 0o755);
   const checksums = Object.fromEntries(
     [...files.keys()].map((relative) => [
@@ -851,6 +862,14 @@ function testRuntimeSmokeChecks(directory, canSpawnShebang) {
   fs.renameSync(hiddenWebShell, webShell);
   fs.writeFileSync(checksumsPath, `${JSON.stringify(checksums)}\n`);
 
+  const hiddenNode = `${node}.missing`;
+  fs.renameSync(node, hiddenNode);
+  assert.throws(
+    () => verifyRuntimeIntegrity(runtimeRoot),
+    /Checksummed runtime file is missing: node\/bin\/node/,
+  );
+  fs.renameSync(hiddenNode, node);
+
   const incompleteManifest = { ...manifest };
   delete incompleteManifest.desktopVersion;
   fs.writeFileSync(
@@ -866,15 +885,39 @@ function testRuntimeSmokeChecks(directory, canSpawnShebang) {
     files.get('manifest.json'),
   );
 
-  fs.writeFileSync(path.join(runtimeRoot, 'NOTICE'), 'mutated\n');
+  fs.writeFileSync(path.join(runtimeRoot, 'LICENSE'), 'mutated license\n');
+  fs.writeFileSync(path.join(runtimeRoot, 'NOTICE'), 'mutated notice\n');
   assert.throws(
     () => verifyRuntimeIntegrity(runtimeRoot),
-    /Bundled runtime checksum mismatch: NOTICE/,
+    /Bundled runtime checksum mismatch: LICENSE, NOTICE/,
   );
+  fs.writeFileSync(path.join(runtimeRoot, 'LICENSE'), files.get('LICENSE'));
   fs.writeFileSync(path.join(runtimeRoot, 'NOTICE'), files.get('NOTICE'));
 
-  if (!canSpawnShebang) return;
-  verifyBundledRipgrep(runtimeRoot, manifest.target);
+  const ripgrepHidden = `${ripgrep}.missing`;
+  fs.renameSync(ripgrep, ripgrepHidden);
+  assert.throws(
+    () => verifyBundledRipgrep(runtimeRoot, manifest.target),
+    /Bundled ripgrep is missing for linux-x64/,
+  );
+  fs.renameSync(ripgrepHidden, ripgrep);
+  assert.throws(
+    () => verifyBundledRipgrep(runtimeRoot, 'linux-x64-musl'),
+    /Unsupported desktop target/,
+  );
+
+  if (!canSpawnShebang) {
+    console.log('SKIP runtime executables: shebang execution unavailable');
+    return;
+  }
+  verifyExtractedRuntime(directory);
+
+  fs.chmodSync(node, 0o644);
+  assert.throws(
+    () => verifyExtractedRuntime(directory),
+    /Bundled runtime node is not runnable/,
+  );
+  fs.chmodSync(node, 0o755);
 
   fs.writeFileSync(ripgrep, "#!/usr/bin/env sh\nprintf 'unexpected\\n'\n");
   assert.throws(
@@ -1028,6 +1071,16 @@ function testRuntimePreparation(directory) {
   ]) {
     fs.writeFileSync(path.join(sourceRoot, 'dist', file), 'test');
   }
+  const sourceRipgrep = path.join(
+    sourceRoot,
+    'dist',
+    'vendor',
+    'ripgrep',
+    'x64-darwin',
+    'rg',
+  );
+  fs.mkdirSync(path.dirname(sourceRipgrep), { recursive: true });
+  fs.writeFileSync(sourceRipgrep, 'test ripgrep');
   // Staging installs the target's pinned packages into a throwaway prefix
   // instead of reading a host node_modules that cannot hold a cross-built
   // target's addon (#11872), so npm is stubbed: it records the argv it is
@@ -1154,6 +1207,21 @@ globalThis.fetch = async (url) => {
     ],
     crypto.createHash('sha256').update('test addon').digest('hex'),
     'the staged prebuild must be checksummed so signing refresh and smoke verification cover it',
+  );
+  const stagedRipgrep = path.join(
+    runtimeDir,
+    'qwen-code',
+    'lib',
+    'vendor',
+    'ripgrep',
+    'x64-darwin',
+    'rg',
+  );
+  assert.equal(fs.readFileSync(stagedRipgrep, 'utf8'), 'test ripgrep');
+  assert.equal(
+    stagedChecksums['lib/vendor/ripgrep/x64-darwin/rg'],
+    crypto.createHash('sha256').update('test ripgrep').digest('hex'),
+    'the target ripgrep binary must be staged and checksummed',
   );
 
   // ...and it has to get there by fetching the TARGET's pinned package, at the

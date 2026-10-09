@@ -10,6 +10,7 @@ if [[ "$#" -eq 3 && "$1" == '--set-rpath' && "$3" == */runtime/qwen-code/* ]]; t
     echo "Runtime ELF is missing: $3" >&2
     exit 1
   fi
+  echo "patchelf-immutable-runtime: skipped $1 on $3" >&2
   exit 0
 fi
 

@@ -44,6 +44,7 @@ export function verifyRuntimeIntegrity(runtimeRoot) {
   const checksums = JSON.parse(
     fs.readFileSync(path.join(runtimeRoot, 'checksums.json'), 'utf8'),
   );
+  const mismatched = [];
   for (const [relative, expected] of Object.entries(checksums)) {
     const file = path.join(runtimeRoot, relative);
     if (!fs.statSync(file, { throwIfNoEntry: false })?.isFile()) {
@@ -53,11 +54,31 @@ export function verifyRuntimeIntegrity(runtimeRoot) {
       .createHash('sha256')
       .update(fs.readFileSync(file))
       .digest('hex');
-    if (actual !== expected) {
-      throw new Error(`Bundled runtime checksum mismatch: ${relative}`);
-    }
+    if (actual !== expected) mismatched.push(relative);
+  }
+  if (mismatched.length > 0) {
+    throw new Error(
+      `Bundled runtime checksum mismatch: ${mismatched.join(', ')}`,
+    );
   }
   return manifest;
+}
+
+export function verifyBundledNode(runtimeRoot) {
+  const nodePath =
+    process.platform === 'win32'
+      ? path.join(runtimeRoot, 'node', 'node.exe')
+      : path.join(runtimeRoot, 'node', 'bin', 'node');
+  const result = spawnSync(nodePath, ['--version'], {
+    encoding: 'utf8',
+    timeout: 15_000,
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(
+      `Bundled runtime node is not runnable: ${result.error?.code ?? result.status}`,
+    );
+  }
+  console.log(`Bundled runtime node ready (${result.stdout.trim()})`);
 }
 
 export function verifyBundledRipgrep(runtimeRoot, target) {
