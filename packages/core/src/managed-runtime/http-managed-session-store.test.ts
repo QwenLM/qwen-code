@@ -3073,7 +3073,7 @@ describe('HTTP Managed Session store', () => {
     });
     const messageRef = await stores.resourceStore.publish(
       'managed-message',
-      Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
+      MESSAGE_BODY,
     );
     // The gate's refusal is a rollbackable non-commit, never the write
     // failure that latches the authority's log shut behind it (R24).
