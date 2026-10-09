@@ -315,9 +315,14 @@ public class ManagedAgentService {
         // The availability half waits below it, so the recorded submit still
         // answers while Workspace files are off — as the create replay does.
         // An admissible Session already proved the actor's authorization, so
-        // the extra reads run only when the full gate would refuse.
+        // the extra reads run only when the full gate would refuse. The one
+        // exception is the tombstone: there the gate's non-creator 409 would
+        // beat the fresh-key 404 below, so the gate waits for the replay arm
+        // — a recorded outcome still answers only to the authorized actor,
+        // and only a fresh key meets the 404.
         boolean admissible = maySubmitWorkspaceTurn(session, actorId);
-        if (!admissible) {
+        boolean tombstone = session.deletedAt() != null;
+        if (!admissible && !tombstone) {
             requireReplayActor(session, actorId);
         }
         // Replay before the harness gate, so a recorded submit still answers
@@ -325,6 +330,9 @@ public class ManagedAgentService {
         Admission replay = replay(tenantId, SUBMIT, idempotencyKey,
                 requestDigest);
         if (replay != null) {
+            if (!admissible && tombstone) {
+                requireReplayActor(session, actorId);
+            }
             dispatch(tenantId, replay, session.workspace() != null);
             return response(replay);
         }
@@ -417,8 +425,16 @@ public class ManagedAgentService {
         // The fresh-key half answers a tombstone 404, as every other
         // Session read does; the recorded rename above is the only outcome
         // that survives the delete.
-        requireSubmitter(requireVisibleSession(tenantId, sessionId),
-                actorId);
+        SessionRecord current = requireVisibleSession(tenantId, sessionId);
+        requireSubmitter(current, actorId);
+        // A row written before the bound was unified can still hold a title
+        // past 256: echoing that stored title back is a no-op rewrite,
+        // tolerated in the row but never forwarded to the Harness — its own
+        // 256-unit client cap is the bound the policy protects.
+        if (title != null && title.length() > 256
+                && title.equals(current.title())) {
+            return new SessionMutationResult<>(publicSession(current), false);
+        }
         String effectiveTitle = validRenameTitle(title);
         SessionMutationCommand command = store.beginSessionMutation(tenantId,
                 RENAME, idempotencyKey, renameDigest(sessionId, title),

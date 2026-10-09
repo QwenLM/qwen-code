@@ -2191,6 +2191,22 @@ class ManagedAgentServerIntegrationTest {
                         + "/title");
         assertThat(title.get("maxLength").asInt()).isEqualTo(256);
         assertThat(title.get("description").asText()).contains("UTF-16");
+        // The one create route carrying a title publishes the same bound:
+        // the contract must not advertise a request the server rejects.
+        JsonNode webShellTitle = OpenApiContract.load()
+                .node("/components/schemas/WebShellCreateRequest/properties"
+                        + "/title");
+        assertThat(webShellTitle.get("maxLength").asInt()).isEqualTo(256);
+        assertThat(webShellTitle.get("description").asText())
+                .contains("UTF-16");
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"idempotencyKey\":\"title-webshell-over\","
+                                + "\"agentId\":\"qwen-code\",\"input\":[],"
+                                + "\"title\":\"" + "t".repeat(257) + "\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_title"));
     }
 
     @Test
@@ -2268,6 +2284,40 @@ class ManagedAgentServerIntegrationTest {
                                 + "\"metadata\":{\"title\":\"\"}}"))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.metadata.title").doesNotExist());
+    }
+
+    // A row written while the create bound was 512 keeps its long title:
+    // the unified 256 policy rejects that title as new input, but echoing
+    // the stored title back is a no-op rewrite rather than a permanent 400
+    // — and the over-bound title is never forwarded to the Harness.
+    @Test
+    void aLegacyOverBoundTitleEchoesBackAsANoOpRewrite() throws Exception {
+        String tenant = "tenant-title-legacy-" + UUID.randomUUID();
+        String sessionId = objectMapper.readTree(mvc.perform(
+                        post("/v1/agents/sessions")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .header("Idempotency-Key", "legacy-title-create")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString()).get("id").asText();
+        String legacyTitle = "t".repeat(300);
+        jdbc.update("UPDATE managed_agent_session SET title = ?"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                legacyTitle, tenant, sessionId);
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"" + legacyTitle + "\"}"), tenant,
+                "legacy-title-echo")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.metadata.title").value(legacyTitle));
+        // A different over-bound title is still new input, still refused.
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"" + "x".repeat(300) + "\"}"), tenant,
+                "legacy-title-other")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_title"));
     }
 
     @Test

@@ -82,13 +82,13 @@ class ManagedAgentWorkspaceReplayTest {
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES (?, ?, ?, TRUE, TRUE)",
+                        + " workspace_id, actor_id, role)"
+                        + " VALUES (?, ?, ?, 'OPERATOR')",
                 tenant, "ws-a",
                 "actor-a".getBytes(StandardCharsets.UTF_8));
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES (?, ?, ?, TRUE, TRUE)",
+                        + " workspace_id, actor_id, role)"
+                        + " VALUES (?, ?, ?, 'OPERATOR')",
                 tenant, "ws-a",
                 "actor-b".getBytes(StandardCharsets.UTF_8));
         return transaction.execute(status -> store
@@ -291,9 +291,9 @@ class ManagedAgentWorkspaceReplayTest {
     // The fresh-key half of the split gate: only a recorded outcome
     // survives the delete. A fresh Idempotency-Key against a tombstone
     // answers 404 on both routes — as every other Session read does — for
-    // the unbound and the bound-creator shapes; the 409s the state and
-    // availability gates below would answer are reserved for live
-    // Sessions.
+    // the unbound, the bound-creator and the bound readable-non-creator
+    // shapes; the 409s the state and availability gates below would answer
+    // are reserved for live Sessions.
     @Test
     void aFreshKeyAgainstADeletedSessionAnswers404() {
         freshDatabase();
@@ -322,6 +322,10 @@ class ManagedAgentWorkspaceReplayTest {
                 "fresh-submit-legacy", legacy, input));
         assertNotFound(() -> service.renameSession(tenant, "actor-a",
                 "fresh-rename-legacy", legacy, "after delete"));
+        // actor-b can read the Workspace but did not create the Session:
+        // the tombstone fence must still beat the non-creator 409.
+        assertNotFound(() -> service.submitTurn(tenant, "actor-b",
+                "fresh-submit-bound-noncreator", bound, input));
     }
 
     private void assertNotFound(ThrowableAssert.ThrowingCallable call) {

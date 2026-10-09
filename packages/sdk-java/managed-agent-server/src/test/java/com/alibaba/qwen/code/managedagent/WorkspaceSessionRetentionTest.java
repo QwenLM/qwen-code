@@ -182,6 +182,15 @@ class WorkspaceSessionRetentionTest {
                 .andExpect(status().isAccepted())).path("id").asText();
         await().untilAsserted(() -> assertThat(store.findOperation(tenant, first, id).orElseThrow().state())
                 .isEqualTo("COMPLETED"));
+        // A migration fence on the Session's storage must not turn the
+        // tombstone's answers into the retryable 409: the fence gates work
+        // the Session could still accept, and a deleted Session accepts
+        // none. The recorded unarchive below keeps answering through it,
+        // while the fresh key meets the same 404 every other read gets.
+        jdbc.update("INSERT INTO qwen_runtime_storage_fence VALUES (?, ?, ?, 'storage', ?)",
+                JdbcRuntimeBindingRepository.storageFenceKey(tenant),
+                JdbcRuntimeBindingRepository.storageFenceKey("storage"),
+                tenant, UUID.randomUUID().toString());
         // Replay-first, like every other mutation path: the recorded
         // success answers its body with the Session as last visible
         // (closed), never a 404 for the later delete — and the tombstone's
@@ -194,6 +203,9 @@ class WorkspaceSessionRetentionTest {
                 .andExpect(jsonPath("$.capabilities.sessionArchive").value(false))
                 .andExpect(jsonPath("$.capabilities.sessionUnarchive").value(false))
                 .andExpect(jsonPath("$.capabilities.sessionDelete").value(false));
+        web("unarchive", tenant, first, "owner", "fenced-fresh")
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("session_not_found"));
         assertThat(count(tenant, first, "session.unarchived")).isEqualTo(2);
     }
 

@@ -460,6 +460,7 @@ export interface components {
             agentId: string;
             /** @description Planned; phase one rejects non-blank values. */
             environmentId?: string | null;
+            /** @description The server enforces the bound in UTF-16 code units (Java String.length()), so an astral character counts as two: a title this schema's code-point maxLength accepts can still exceed the server's 256-unit bound and answer 400 invalid_title. */
             title?: string | null;
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
