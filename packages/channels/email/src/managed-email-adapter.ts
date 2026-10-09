@@ -620,9 +620,13 @@ export class ManagedEmailAdapter {
       const code = (error as { code?: unknown }).code;
       if (
         status === 404 ||
-        (status === 409 && code === 'channel_generation_unregistered')
+        (status === 409 &&
+          (code === 'channel_generation_unregistered' ||
+            code === 'channel_disconnected'))
       ) {
-        // The server lost our registration (a restart, a wipe): that is a
+        // The server lost our registration (a restart, a wipe) or an
+        // unfenced disconnect flipped the instance under this adapter: a
+        // fresh register is the only heal of `connected`, so that is a
         // poll-level claim — re-register before the next drive, never a
         // per-message drop.
         this.registeredGeneration = 0;
@@ -831,7 +835,32 @@ export class ManagedEmailAdapter {
 
   private async pullOutbox(): Promise<void> {
     if (!this.running || !this.state) return;
-    const claimed = await this.controlPlane.claimDeliveries(CLAIM_BATCH);
+    let claimed: ManagedClaimedDelivery[];
+    try {
+      claimed = await this.controlPlane.claimDeliveries(CLAIM_BATCH);
+    } catch (error) {
+      // The claim answers with the same poll-level refusal shape as an
+      // inbound submit: an unfenced disconnect flips the instance under
+      // this adapter, and only a fresh register heals `connected`. Skip
+      // this pull — the next poll's ensureRegistered re-registers and the
+      // claim resumes with it; the claim lease keeps this tick alive
+      // either way (R3-3's outbound half).
+      const status = (error as { status?: unknown }).status;
+      const code = (error as { code?: unknown }).code;
+      if (
+        status === 404 ||
+        (status === 409 &&
+          (code === 'channel_generation_unregistered' ||
+            code === 'channel_disconnected'))
+      ) {
+        this.registeredGeneration = 0;
+        this.log(
+          'Managed email outbox claim was refused as not registered; the next poll re-registers first.',
+        );
+        return;
+      }
+      throw error;
+    }
     for (const delivery of claimed) {
       if (!this.running) return;
       await this.send(delivery);

@@ -430,6 +430,28 @@ describe('managed email inbound', () => {
     expect(plane.events.at(-1)).toMatchObject({ text: 'register forgot' });
   });
 
+  it('re-registers when the control plane reports disconnected, keeping the mail (R3-3)', async () => {
+    // A disconnect answer is the poll-level registration claim too: an
+    // unfenced disconnect flipped the instance under the live adapter, and
+    // only register heals `connected` — dropping the mail as a per-message
+    // deterministic refusal would advance lastUid with nothing left to
+    // re-drive, losing every further inbound until a process restart.
+    const adapter = make();
+    await adapter.connect();
+    plane.submitErrors = [{ status: 409, code: 'channel_disconnected' }];
+    append(raw('waiting', 'disconnect flip'));
+    await adapter.tick();
+    expect(state(adapter).pending).toHaveLength(1);
+    expect(plane.registrations).toEqual([{ accountGeneration: 1 }]);
+    await adapter.tick();
+    expect(plane.registrations).toEqual([
+      { accountGeneration: 1 },
+      { accountGeneration: 1 },
+    ]);
+    expect(state(adapter).pending).toEqual([]);
+    expect(plane.events.at(-1)).toMatchObject({ text: 'disconnect flip' });
+  });
+
   it('truncates to the wire text bound even when the adapter setting is wider', async () => {
     const adapter = make({ maxTextLength: 40_000 });
     await adapter.connect();
@@ -842,6 +864,37 @@ describe('managed email outbound', () => {
       'd-batch-1',
     ]);
     expect(sent).toHaveBeenCalledTimes(3);
+  });
+
+  it('re-registers when the outbox claim reports disconnected, recovering the send (R3-3)', async () => {
+    // claimDeliveries answers the same 409 channel_disconnected; without
+    // the registration reset every tick re-throws from pullOutbox with the
+    // claim lease still proving aliveness, stalling outbound until a
+    // restart heals the instance by chance.
+    const adapter = make();
+    await adapter.connect();
+    plane.outbox = [delivery()];
+    let claimFaults = 1;
+    const original = plane.claimDeliveries.bind(plane);
+    plane.claimDeliveries = async (limit: number) => {
+      if (claimFaults > 0) {
+        claimFaults -= 1;
+        throw Object.assign(new Error('HTTP 409'), {
+          status: 409,
+          code: 'channel_disconnected',
+        });
+      }
+      return original(limit);
+    };
+    await adapter.tick();
+    expect(sent).toHaveBeenCalledTimes(0);
+    expect(plane.registrations).toEqual([{ accountGeneration: 1 }]);
+    await adapter.tick();
+    expect(plane.registrations).toEqual([
+      { accountGeneration: 1 },
+      { accountGeneration: 1 },
+    ]);
+    expect(sent).toHaveBeenCalledTimes(1);
   });
 
   it('completes the remote disconnect while the mailbox is still owned', async () => {
