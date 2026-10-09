@@ -44,6 +44,16 @@ import {
 } from './contentGenerator.js';
 import { BaseLlmClient } from './baseLlmClient.js';
 import { MemoryManager } from '../memory/manager.js';
+import type { CompletedToolOutcome } from '../memory/experience-signals.js';
+import { ToolErrorType } from '../tools/tool-error.js';
+
+const completedOutcome = (callId: string): CompletedToolOutcome => ({
+  callId,
+  executionStatus: 'success',
+  error: undefined,
+  errorType: undefined,
+  resultDisplay: undefined,
+});
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { LlmChat, userContentPushSnapshotKey } from './llm-chat.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
@@ -3891,7 +3901,11 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('clears recently completed tools', async () => {
-      client.recordCompletedToolCall('read_file');
+      client.recordCompletedToolCall(
+        'read_file',
+        undefined,
+        completedOutcome('read'),
+      );
 
       await client.resetChat();
 
@@ -6801,7 +6815,11 @@ Other open files:
         strategy: 'semantic',
       });
 
-      client.recordCompletedToolCall('mcp__ata__article-list-query');
+      client.recordCompletedToolCall(
+        'mcp__ata__article-list-query',
+        undefined,
+        completedOutcome('mcp'),
+      );
 
       await helloTurn('Please answer tersely', 'prompt-id-memory');
 
@@ -9446,10 +9464,9 @@ Other open files:
         resolveFn({ metadata: { touchedSkillFiles: ['skill.md'] } });
       });
 
-      it('should reset toolCallCount when review is already_running and count exceeds threshold', async () => {
+      it('should retain the new window when review is already_running', async () => {
         skipReview('already_running', 'task-inflight');
-        // Counter above the threshold (20) must reset to prevent an
-        // immediate cascade.
+        // The running review's history snapshot predates this new window.
         client['toolCallCount'] = 20 + 5;
 
         await run(
@@ -9457,7 +9474,7 @@ Other open files:
           'prompt-id-autoskill-inflight',
         );
 
-        expect(client['toolCallCount']).toBe(0);
+        expect(client['toolCallCount']).toBe(25);
       });
 
       it('should always reset skillsModifiedInSession after scheduleSkillReview check', async () => {
@@ -9470,6 +9487,33 @@ Other open files:
         );
 
         expect(client['skillsModifiedInSession']).toBe(false);
+      });
+
+      it('suppresses review after an executed skill write is stopped by PostToolUse', async () => {
+        skipReview('skills_modified_in_session');
+        client['toolCallCount'] = 20;
+        client['experienceSignals'].hasSubstantiveWork = true;
+        client.recordCompletedToolCall(
+          'write_file',
+          { file_path: '/test/project/root/.qwen/skills/example/SKILL.md' },
+          {
+            ...completedOutcome('post-hook-write'),
+            error: new Error('PostToolUse stopped'),
+            errorType: ToolErrorType.EXECUTION_DENIED,
+          },
+        );
+
+        await run([{ text: 'done' }], 'post-hook-stop');
+
+        const params = mockMemoryManager.scheduleSkillReview.mock.calls[0][0];
+        expect(params).toEqual(
+          expect.objectContaining({ skillsModified: true, toolCallCount: 20 }),
+        );
+        expect(new MemoryManager().scheduleSkillReview(params)).toEqual({
+          status: 'skipped',
+          skippedReason: 'skills_modified_in_session',
+        });
+        expect(client['pendingExperienceOutcomes'].size).toBe(0);
       });
 
       it('should pass confirmBeforePersist from getAutoSkillConfirmEnabled', async () => {
@@ -9488,13 +9532,252 @@ Other open files:
     });
 
     describe('recordCompletedToolCall', () => {
-      it('should increment toolCallCount on each call', () => {
-        expect(client['toolCallCount']).toBe(0);
-        client.recordCompletedToolCall('read_file');
+      const responsePart = (id: string): Part => ({
+        functionResponse: { id, name: 'read_file', response: {} },
+      });
+
+      it.each(['accepted', 'concurrent-only', 'failed-after-push'] as const)(
+        'records a result only after its own history push (%s)',
+        async (mode) => {
+          let pushCount = 0;
+          installChat({
+            getUserContentPushCount: vi.fn(() => pushCount),
+            getHistoryFunctionResponseIds: vi.fn().mockReturnValue(new Set()),
+          });
+          client.recordCompletedToolCall(
+            'read_file',
+            undefined,
+            completedOutcome('one'),
+          );
+          mockTurnRunFn.mockImplementation((_model, request) => {
+            if (mode !== 'concurrent-only')
+              publishPushSnapshot(request, pushCount);
+            pushCount += 1;
+            return (async function* () {
+              if (mode === 'failed-after-push')
+                throw new Error('provider failed');
+              yield { type: LlmEventType.Content, value: 'Done' };
+            })();
+          });
+          const result = run([responsePart('one')], 'accepted-result', {
+            type: SendMessageType.ToolResult,
+          });
+          if (mode === 'failed-after-push')
+            await expect(result).rejects.toThrow('provider failed');
+          else await result;
+          expect(client['toolCallCount']).toBe(
+            mode === 'concurrent-only' ? 0 : 1,
+          );
+          expect(client['pendingExperienceOutcomes'].size).toBe(
+            mode === 'concurrent-only' ? 1 : 0,
+          );
+        },
+      );
+
+      it.each([
+        [SendMessageType.Steer, true, true],
+        [SendMessageType.Steer, false, true],
+        [SendMessageType.ToolResult, true, false],
+        [SendMessageType.Retry, true, false],
+        [SendMessageType.ToolResult, true, true],
+        [SendMessageType.ToolResult, false, true],
+      ] as const)(
+        'steer evidence requires accepted user content (type=%s accepted=%s user=%s)',
+        async (type, accepted, hasUserSteer) => {
+          let pushCount = 0;
+          installChat({
+            getUserContentPushCount: vi.fn(() => pushCount),
+            getHistoryLength: vi.fn().mockReturnValue(0),
+            stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+          });
+          mockTurnRunFn.mockImplementation((_model, request) => {
+            if (accepted) publishPushSnapshot(request, pushCount);
+            pushCount += 1;
+            return textTurn('Done');
+          });
+          const steerInput: SteerInput = {
+            parts: hasUserSteer ? [{ text: 'change course' }] : [],
+            accept: vi.fn(),
+            restore: vi.fn(),
+          };
+          await run(
+            [...steerInput.parts, { text: 'automated delivery' }],
+            'steer-signal',
+            { type, steerInput },
+          );
+          expect(client['experienceSignals'].userSteer).toBe(
+            accepted && hasUserSteer,
+          );
+          expect(
+            accepted ? steerInput.accept : steerInput.restore,
+          ).toHaveBeenCalledOnce();
+        },
+      );
+
+      it('does not consume a dropped failure using an earlier synthetic response', async () => {
+        await client.addHistory({
+          role: 'user',
+          parts: [responsePart('dropped')],
+        });
+        client.recordCompletedToolCall('read_file', undefined, {
+          ...completedOutcome('dropped'),
+          executionStatus: 'error',
+          error: new Error('late failure'),
+        });
+        client.recordCompletedToolCall(
+          'read_file',
+          undefined,
+          completedOutcome('fresh'),
+        );
+        await client.addHistory({
+          role: 'user',
+          parts: [responsePart('fresh')],
+        });
         expect(client['toolCallCount']).toBe(1);
-        client.recordCompletedToolCall('write_file');
+        expect(client['experienceSignals']).toEqual({
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: false,
+        });
+        expect(client['pendingExperienceOutcomes'].has('dropped')).toBe(true);
+        expect(client['failedExperienceToolNames'].size).toBe(0);
+      });
+
+      it('keeps pending completion evidence across compact chat recreation', async () => {
+        client.recordCompletedToolCall('edit', undefined, {
+          ...completedOutcome('failed'),
+          executionStatus: 'error',
+          error: new Error('failed'),
+        });
+        await client.addHistory({
+          role: 'user',
+          parts: [responsePart('failed')],
+        });
+        client.recordCompletedToolCall(
+          'edit',
+          undefined,
+          completedOutcome('recovered'),
+        );
+        await client.startChat(undefined, SessionStartSource.Compact);
+        expect(client['toolCallCount']).toBe(1);
+        expect(client['failedExperienceToolNames'].has('edit')).toBe(true);
+        expect(client['pendingExperienceOutcomes'].size).toBe(1);
+        await client.addHistory({
+          role: 'user',
+          parts: [responsePart('recovered')],
+        });
+        expect(client['experienceSignals'].retryArc).toBe(true);
         expect(client['toolCallCount']).toBe(2);
       });
+
+      it.each(['clear', 'switch'] as const)(
+        'clears all review state on %s',
+        async (mode) => {
+          client.recordCompletedToolCall(
+            'edit',
+            undefined,
+            completedOutcome('old-pending'),
+          );
+          client['toolCallCount'] = 10;
+          client['experienceSignals'] = {
+            retryArc: true,
+            userSteer: true,
+            hasSubstantiveWork: true,
+          };
+          client['failedExperienceToolNames'].add('edit');
+          if (mode === 'clear') await client.resetChat();
+          else {
+            vi.spyOn(client['config'], 'getSessionId').mockReturnValue(
+              'new-session',
+            );
+            await client.initialize();
+          }
+          expect(client['toolCallCount']).toBe(0);
+          expect(client['experienceSignals']).toEqual({
+            retryArc: false,
+            userSteer: false,
+            hasSubstantiveWork: false,
+          });
+          expect(client['failedExperienceToolNames'].size).toBe(0);
+          expect(client['pendingExperienceOutcomes'].size).toBe(0);
+          expect(client['recordedExperienceCallIds'].size).toBe(0);
+        },
+      );
+
+      it('counts completed calls only after their results are accepted, once', async () => {
+        client.recordCompletedToolCall(
+          'read_file',
+          undefined,
+          completedOutcome('read'),
+        );
+        client.recordCompletedToolCall(
+          'write_file',
+          undefined,
+          completedOutcome('write'),
+        );
+        expect(client['toolCallCount']).toBe(0);
+        const content: Content = {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: { id: 'read', name: 'read_file', response: {} },
+            },
+            {
+              functionResponse: {
+                id: 'write',
+                name: 'write_file',
+                response: {},
+              },
+            },
+          ],
+        };
+        await client.addHistory(content);
+        expect(client['toolCallCount']).toBe(2);
+        await client.addHistory(content);
+        client.recordCompletedToolCall(
+          'read_file',
+          undefined,
+          completedOutcome('read'),
+        );
+        expect(client['toolCallCount']).toBe(2);
+        expect(client['experienceSignals'].hasSubstantiveWork).toBe(true);
+      });
+
+      it.each(['write_file', 'edit'])(
+        'protects local %s mutations independently of post-hook denial',
+        (tool) => {
+          vi.spyOn(client['config'], 'getProjectRoot').mockReturnValue(
+            '/project',
+          );
+          for (const executionStatus of [
+            'success',
+            'error',
+            'not_started',
+            'cancelled',
+            undefined,
+          ] as const) {
+            const response: CompletedToolOutcome = {
+              ...completedOutcome(`${tool}-${executionStatus}`),
+              executionStatus,
+              error: new Error('hook denied'),
+              errorType: ToolErrorType.EXECUTION_DENIED,
+            };
+            const args = {
+              file_path: '/project/.qwen/skills/example/SKILL.md',
+            };
+            client['skillsModifiedInSession'] = false;
+            client.recordCompletedToolCall(tool, args, response);
+            expect(client['skillsModifiedInSession']).toBe(
+              executionStatus === 'success' || executionStatus === 'error',
+            );
+            expect(client['pendingExperienceOutcomes'].size).toBe(0);
+            expect(client['toolCallCount']).toBe(0);
+            client['skillsModifiedInSession'] = false;
+            client.recordCompletedToolCall(tool, args, response);
+            expect(client['skillsModifiedInSession']).toBe(false);
+          }
+        },
+      );
 
       it.each([
         [
@@ -9527,7 +9810,11 @@ Other open files:
         );
         expect(client['skillsModifiedInSession']).toBe(false);
 
-        client.recordCompletedToolCall(tool, args);
+        client.recordCompletedToolCall(
+          tool,
+          args,
+          completedOutcome('skill-write'),
+        );
 
         expect(client['skillsModifiedInSession']).toBe(modified);
       });

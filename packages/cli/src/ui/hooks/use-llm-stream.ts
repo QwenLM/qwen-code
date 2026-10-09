@@ -4929,6 +4929,7 @@ export const useLlmStream = (
           llmClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,
+            tc.response,
           );
         }
         markToolsAsSubmitted(dedupedCallIds);
@@ -5085,6 +5086,7 @@ export const useLlmStream = (
           llmClient?.recordCompletedToolCall(
             toolCall.request.name,
             toolCall.request.args as Record<string, unknown>,
+            toolCall.response,
           );
         }
         dualOutput?.emitToolResult(toolCall.request, toolCall.response);
@@ -5372,6 +5374,7 @@ export const useLlmStream = (
         llmClient?.recordCompletedToolCall(
           toolCall.request.name,
           toolCall.request.args as Record<string, unknown>,
+          toolCall.response,
         );
       }
 
