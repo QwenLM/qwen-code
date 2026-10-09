@@ -33,6 +33,21 @@ class ManagedChildRunRecordContractTest {
             assertEquals(ManagedExtensionRecords.CHILD_STOP_REASONS.get(state),
                     jsonList(reasons.required(state)), state);
         }
+        assertEquals(List.of("childRunId", "childSessionId", "completion",
+                "depth", "inputRef", "kind", "ownerScopeId",
+                "predecessorChildRunId", "resultRef", "resultVersion",
+                "rootSessionId", "run", "stopReason", "stopRequested",
+                "terminalReceiptRef", "workingDirectory", "workspaceMode"),
+                jsonList(fixtures.required("childAgentKeys")));
+        assertEquals(List.of("childRunId", "completion", "depth", "inputRef",
+                "kind", "ownerScopeId", "predecessorChildRunId",
+                "rootSessionId", "workingDirectory", "workspaceMode"),
+                jsonList(fixtures.required("childAgentFixedKeys")));
+        JsonNode agentReasons = fixtures.required("childAgentStopReasons");
+        for (String state : List.of("settled", "failed", "cancelled")) {
+            assertEquals(ManagedExtensionRecords.CHILD_AGENT_STOP_REASONS
+                    .get(state), jsonList(agentReasons.required(state)), state);
+        }
     }
 
     private static List<String> jsonList(JsonNode node) {
@@ -46,10 +61,21 @@ class ManagedChildRunRecordContractTest {
         JsonNode fixtures = fixtures();
         for (JsonNode fixture : fixtures.get("cases")) {
             String domain = fixture.get("domain").textValue();
+            String template = fixture.hasNonNull("template")
+                    ? fixture.get("template").textValue() : domain;
             String id = fixture.get("id").textValue();
             var body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
-            assertEquals("background_shell", body.taskKind());
-            JsonNode record = merge(fixtures.get("templates").get(domain), fixture.get("patch"));
+            JsonNode base = java.util.Objects.requireNonNull(
+                    fixtures.get("templates").get(template),
+                    () -> "case " + id + " names an unknown template");
+            JsonNode record = merge(base, fixture.get("patch"));
+            // The kind the merged record carries decides the task kind, so
+            // each valid case pins its own mapping.
+            if (fixture.get("valid").booleanValue()) {
+                assertEquals("shell".equals(record.get("kind").textValue())
+                        ? "background_shell" : "child_agent",
+                        body.taskKindOf().apply(record), id);
+            }
             if (fixture.get("valid").booleanValue()) {
                 body.require().accept(record);
             } else {
@@ -69,10 +95,15 @@ class ManagedChildRunRecordContractTest {
         JsonNode fixtures = fixtures();
         for (JsonNode fixture : fixtures.get("successors")) {
             String domain = fixture.get("domain").textValue();
-            JsonNode template = fixtures.get("templates").get(domain);
+            String template = fixture.hasNonNull("template")
+                    ? fixture.get("template").textValue() : domain;
+            JsonNode base = java.util.Objects.requireNonNull(
+                    fixtures.get("templates").get(template),
+                    () -> "successor " + fixture.get("id").textValue()
+                            + " names an unknown template");
             assertEquals(fixture.get("valid").booleanValue(),
                     ManagedExtensionProjection.RECORD_BODIES.get(domain).isSuccessor().test(
-                            merge(template, fixture.get("before")), merge(template, fixture.get("after"))),
+                            merge(base, fixture.get("before")), merge(base, fixture.get("after"))),
                     fixture.get("id").textValue());
         }
     }

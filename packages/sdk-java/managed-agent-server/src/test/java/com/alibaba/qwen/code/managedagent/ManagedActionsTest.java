@@ -23,6 +23,11 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -359,6 +364,41 @@ class ManagedActionsTest {
     }
 
     @Test
+    void refusesNewActionResponsesAtTheHttpBoundaryDuringMigration() throws Exception {
+        String tenant = tenant();
+        String session = session(tenant);
+        ActionJournal journal = action(tenant, session, System.currentTimeMillis(), 9007199254740991L);
+        String storage = "storage-" + UUID.randomUUID();
+        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
+                + " display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, ?, 'workspace', ?, ?, 'ACTIVE')",
+                tenant, storage, WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
+                + " VALUES (?, 'workspace', ?, TRUE, TRUE)", tenant, "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        jdbc.update("UPDATE managed_agent_session SET workspace_storage_id = ?, workspace_id = 'workspace',"
+                + " workspace_generation = 1, cwd_relative = '.', context_config_ref = ?, context_revision = 1,"
+                + " workspace_config_ref = ?, workspace_policy_ref = ? WHERE tenant_id = ? AND session_id = ?",
+                storage, WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF, tenant, session);
+        new JdbcRuntimeBindingRepository(jdbc.getDataSource(), new AesGcmSecretProtector("test", new byte[32]))
+                .requestStorageFence(tenant, storage, UUID.randomUUID().toString());
+        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                .header("Idempotency-Key", "fenced-answer").contentType(MediaType.APPLICATION_JSON)
+                .content(response("allow")))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("workspace_unavailable"))
+                .andExpect(jsonPath("$.error.retryable").value(false));
+        assertThat(actions.find(tenant, session, journal.id).orElseThrow().state()).isEqualTo("requested");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?",
+                Long.class, tenant, session)).isZero();
+        jdbc.update("DELETE FROM qwen_runtime_storage_fence WHERE tenant_id = ? AND storage_id = ?", tenant, storage);
+        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                .header("Idempotency-Key", "fenced-answer").contentType(MediaType.APPLICATION_JSON)
+                .content(response("allow"))).andExpect(status().isAccepted());
+    }
+
+    @Test
     void rejectsMalformedActionJournalWithoutProjectingIt() throws Exception {
         for (String field :
                 java.util.List.of(
@@ -393,6 +433,13 @@ class ManagedActionsTest {
             request.put("recordDigest", ExtensionRecordJournal.sha256(changed));
             CommitTransactionRequest invalid =
                     json.treeToValue(request, CommitTransactionRequest.class);
+            // The journal itself now owns event-envelope validation, so an
+            // envelope that is not a well-formed event is refused before
+            // the Action store reads it.
+            String expected =
+                    "version".equals(field)
+                            ? "managed_session_extension_record_rejected"
+                            : "managed_session_action_rejected";
             assertThatThrownBy(
                             () ->
                                     journals.commit(
@@ -402,9 +449,7 @@ class ManagedActionsTest {
                                             invalid))
                     .isInstanceOfSatisfying(
                             ApiException.class,
-                            error ->
-                                    assertThat(error.getCode())
-                                            .isEqualTo("managed_session_action_rejected"));
+                            error -> assertThat(error.getCode()).isEqualTo(expected));
             assertThat(actions.find(tenant, session, action.id)).isEmpty();
         }
     }
@@ -524,7 +569,7 @@ class ManagedActionsTest {
                 call -> {
                     delivered.incrementAndGet();
                     journal.change("decided", call.getArgument(3));
-                    throw new IllegalStateException("answer lost after commit");
+                    throw WorkspaceExecutionStore.unavailable();
                 });
         mvc.perform(
                         auth(post(path(session, journal.id) + "/responses"), tenant, "other")
@@ -655,6 +700,67 @@ class ManagedActionsTest {
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(response("other")))
                 .andExpect(status().isBadRequest());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"permanent", "retryable", "other-code"})
+    void workspaceAdmissionFailureFollowsRetryability(String failure) throws Exception {
+        String tenant = tenant();
+        String session = session(tenant);
+        ActionJournal journal =
+                action(tenant, session, System.currentTimeMillis(), 9007199254740991L);
+        AtomicInteger attempts = new AtomicInteger();
+        boolean terminal = "permanent".equals(failure);
+        responses.put(journal.id, call -> {
+            if (attempts.incrementAndGet() == 1) {
+                throw switch (failure) {
+                    case "permanent" -> WorkspaceExecutionStore.unavailable();
+                    case "retryable" -> WorkspaceExecutionStore.unavailableTransient(
+                            new IllegalStateException("temporary authority failure"));
+                    default -> new RuntimeBrokerException(409, "runtime_unavailable",
+                            "Runtime authority is unavailable.", false);
+                };
+            }
+            journal.change("decided", call.getArgument(3));
+            return null;
+        });
+        try {
+            JsonNode admitted = readAccepted(
+                    auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                            .header("Idempotency-Key", "workspace-refusal")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(response("allow")));
+            String op = admitted.path("id").asText();
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    assertThat(sessions.findOperation(tenant, session, op).orElseThrow().state())
+                            .isEqualTo(terminal ? "FAILED" : "COMPLETED"));
+            assertThat(attempts.get()).isEqualTo(terminal ? 1 : 2);
+            assertThat(actions.find(tenant, session, journal.id).orElseThrow().state())
+                    .isEqualTo(terminal ? "requested" : "decided");
+            assertThat(actions.response(tenant, session, op).errorCode())
+                    .isEqualTo(terminal ? "workspace_unavailable" : null);
+            JsonNode result = read(auth(
+                    get("/v1/agents/sessions/{session}/operations/{op}", session, op), tenant, "owner"));
+            assertThat(result.path("status").asText()).isEqualTo(terminal ? "failed" : "completed");
+            if (terminal) {
+                assertThat(result.path("failure_code").asText()).isEqualTo("workspace_unavailable");
+                assertThat(result.has("action_resolution")).isFalse();
+            }
+            assertThat(OpenApiContract.load()
+                    .validate("/components/schemas/PublicCommandOperation", result)).isEmpty();
+            JsonNode web = read(auth(post("/api/agent/web-shell/v1/operations/query"), tenant, "owner")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content(json.writeValueAsString(Map.of("sessionId", session, "operationId", op))));
+            assertThat(web.path("status").asText()).isEqualTo(terminal ? "failed" : "completed");
+            if (terminal) {
+                assertThat(web.path("failureCode").asText()).isEqualTo("workspace_unavailable");
+                assertThat(web.has("actionResolution")).isFalse();
+            }
+            assertThat(OpenApiContract.load()
+                    .validate("/components/schemas/WebShellCommandOperation", web)).isEmpty();
+        } finally {
+            responses.remove(journal.id);
+        }
     }
 
     @Test

@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { parseManagedRuntimeProviderResult } from './managed-runtime-provider-protocol.js';
+import {
+  parseManagedRuntimeProviderResult,
+  type ManagedWorkspaceContextFile,
+} from './managed-runtime-provider-protocol.js';
 import type {
   RawFileHistoryOperation,
   HostedFileHistoryState,
@@ -29,10 +32,12 @@ import type {
   ManagedHookControl,
   ManagedHookOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
+import type { ManagedSessionLifecycleAuthority } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
 export interface HostedWorkspaceBrokerOptions {
   baseUrl: string;
   token: string;
+  lifecycleAuthority?: () => ManagedSessionLifecycleAuthority | undefined;
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -120,13 +125,40 @@ export class HostedWorkspaceBroker {
     });
   }
 
+  /** The Session's project instruction files, read outside the execution ledger. */
+  async workspaceContext(): Promise<ManagedWorkspaceContextFile[]> {
+    const operation = { kind: 'workspace-context' } as const;
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    return parseManagedRuntimeProviderResult(operation, response['result'], {
+      ...this.identity,
+      turnKind: 'bootstrap',
+    }) as ManagedWorkspaceContextFile[];
+  }
+
   async warm(): Promise<void> {
     await this.request('/runtimes:warm', {});
   }
 
-  async acquire(): Promise<void> {
+  async authorizeLifecycle(): Promise<void> {
+    if (this.options.lifecycleAuthority?.())
+      await this.request('/runtimes:authorize-lifecycle', {});
+  }
+
+  async acquire(expected?: {
+    runtimeBindingId: string;
+    generation: string;
+  }): Promise<void> {
     const response = await this.request('/tool-sessions:acquire', {
       turnKind: 'bootstrap',
+      ...(expected
+        ? {
+            recoveryBindingId: expected.runtimeBindingId,
+            recoveryGeneration: expected.generation,
+          }
+        : {}),
     });
     const scope = object(response['scope']);
     if (
@@ -595,11 +627,20 @@ export class HostedWorkspaceBroker {
     if (!body)
       for (const [key, value] of Object.entries(fields))
         url.searchParams.set(key, String(value));
+    const authority = this.options.lifecycleAuthority?.();
     const response = await fetch(url, {
       method: body ? 'POST' : 'GET',
       headers: {
         Authorization: `Bearer ${this.options.token}`,
         'Content-Type': 'application/json',
+        ...(authority
+          ? {
+              'X-Qwen-Lifecycle-Operation-Id': authority.operationId,
+              'X-Qwen-Lifecycle-Claim-Generation': String(
+                authority.claimGeneration,
+              ),
+            }
+          : {}),
       },
       ...(body ? { body: JSON.stringify(fields) } : {}),
       redirect: 'error',

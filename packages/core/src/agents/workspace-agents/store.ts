@@ -55,6 +55,7 @@ import {
   hostOffersProgram,
   isAgentProgram,
 } from './types.js';
+import type { HostProgramProbe } from '../session-agents/contract.js';
 
 const debug = createDebugLogger('WORKSPACE_AGENTS_STORE');
 
@@ -85,13 +86,14 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
 // Without an explicit mode a new file lands at 0666 & ~umask (0644 on most
 // hosts), readable by any local account; forceMode also heals files written
 // before this was set. Directories get 0700 so the files are not traversable
-// either.
-const STORE_FILE_OPTIONS = {
+// either. Exported for the session-agents binding store, which keeps its
+// files under the same directory with the same modes.
+export const STORE_FILE_OPTIONS = {
   noFollow: true,
   mode: 0o600,
   forceMode: true,
 } as const;
-const STORE_DIR_MODE = 0o700;
+export const STORE_DIR_MODE = 0o700;
 
 const workspaceMutexes = new Map<string, Mutex>();
 const workspaceTransaction = new AsyncLocalStorage<boolean>();
@@ -207,7 +209,9 @@ function isValidAgent(value: unknown): value is WorkspaceAgent {
   const validExecution =
     execution === undefined ||
     (isRecord(execution) &&
-      (execution['mode'] === 'local' ||
+      ((execution['mode'] === 'local' &&
+        (execution['provider'] === undefined ||
+          isAgentProgram(execution['provider']))) ||
         (execution['mode'] === 'managed-host' &&
           Array.isArray(execution['hostIds']) &&
           execution['hostIds'].length > 0 &&
@@ -625,8 +629,63 @@ function isValidAgentHost(value: unknown): value is AgentHost {
     value['providers'].every(isNonEmptyString) &&
     isFiniteTimestamp(value['createdAt']) &&
     (value['lastSeenAt'] === undefined ||
-      isFiniteTimestamp(value['lastSeenAt']))
+      isFiniteTimestamp(value['lastSeenAt'])) &&
+    (value['protocol'] === undefined || isPositiveInteger(value['protocol'])) &&
+    (value['programs'] === undefined ||
+      (Array.isArray(value['programs']) &&
+        value['programs'].every(isValidHostProgramProbe)))
   );
+}
+
+const MAX_PROGRAM_PROBE_TEXT = 200;
+
+function isValidHostProgramProbe(value: unknown): value is HostProgramProbe {
+  return (
+    isRecord(value) &&
+    isAgentProgram(value['program']) &&
+    typeof value['available'] === 'boolean' &&
+    (value['version'] === undefined ||
+      (typeof value['version'] === 'string' &&
+        value['version'].length <= MAX_PROGRAM_PROBE_TEXT)) &&
+    (value['reason'] === undefined ||
+      (typeof value['reason'] === 'string' &&
+        value['reason'].length <= MAX_PROGRAM_PROBE_TEXT))
+  );
+}
+
+/**
+ * A Host's probe as sent over the wire, reduced to the stored shape: one
+ * entry per known program (the last wins), text fields bounded. Undefined
+ * when the value is not a probe list at all.
+ */
+export function normalizeHostProgramProbes(
+  value: unknown,
+): HostProgramProbe[] | undefined {
+  if (!Array.isArray(value) || value.length > 20) return undefined;
+  const byProgram = new Map<HostProgramProbe['program'], HostProgramProbe>();
+  for (const entry of value) {
+    if (!isRecord(entry)) return undefined;
+    const program = entry['program'];
+    const available = entry['available'];
+    if (!isAgentProgram(program) || typeof available !== 'boolean') {
+      return undefined;
+    }
+    const version =
+      typeof entry['version'] === 'string'
+        ? entry['version'].slice(0, MAX_PROGRAM_PROBE_TEXT)
+        : undefined;
+    const reason =
+      typeof entry['reason'] === 'string'
+        ? entry['reason'].slice(0, MAX_PROGRAM_PROBE_TEXT)
+        : undefined;
+    byProgram.set(program, {
+      program,
+      available,
+      ...(version ? { version } : {}),
+      ...(reason ? { reason } : {}),
+    });
+  }
+  return [...byProgram.values()];
 }
 
 function isValidAgentHostsFile(value: unknown): value is AgentHostsFile {
@@ -1527,6 +1586,9 @@ export async function heartbeatAgentHost(
     workspaceCwd: string;
     providers: string[];
     enrollmentToken?: string;
+    /** Protocol v2: the Host's program probe, stored as reported. */
+    programs?: HostProgramProbe[];
+    protocol?: number;
   },
 ): Promise<AgentHostView | undefined> {
   return withWorkspaceLock(projectRoot, async () => {
@@ -1557,12 +1619,20 @@ export async function heartbeatAgentHost(
     const providers = [
       ...new Set(input.providers.map((value) => value.trim())),
     ];
+    const programs =
+      input.programs === undefined
+        ? undefined
+        : normalizeHostProgramProbes(input.programs);
     if (
       !workspaceCwd ||
       workspaceCwd.length > 4_096 ||
-      providers.length === 0 ||
+      // A v2 Host with nothing installed but its probe still checks in; a
+      // v1 Host always names at least its one program.
+      (providers.length === 0 && programs === undefined) ||
       providers.length > 20 ||
-      providers.some((provider) => !provider || provider.length > 80)
+      providers.some((provider) => !provider || provider.length > 80) ||
+      (input.programs !== undefined && programs === undefined) ||
+      (input.protocol !== undefined && !isPositiveInteger(input.protocol))
     ) {
       throw new Error('Invalid Agent Host heartbeat.');
     }
@@ -1570,8 +1640,13 @@ export async function heartbeatAgentHost(
       ...current,
       workspaceCwd,
       providers,
+      ...(programs !== undefined ? { programs } : {}),
+      ...(input.protocol !== undefined ? { protocol: input.protocol } : {}),
       lastSeenAt: Date.now(),
     };
+    // A Host that drops back to v1 must not keep advertising its v2 probe.
+    if (programs === undefined) delete next.programs;
+    if (input.protocol === undefined) delete next.protocol;
     const { enrollment: _used, ...withoutEnrollment } = registry;
     await writeAgentHostsUnlocked(projectRoot, {
       ...(input.enrollmentToken === undefined ? registry : withoutEnrollment),

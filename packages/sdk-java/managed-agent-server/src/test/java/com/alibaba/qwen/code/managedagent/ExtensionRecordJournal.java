@@ -24,7 +24,7 @@ import java.util.function.UnaryOperator;
  * Commits journal transactions to the Session store in the record format the
  * Session authority writes, each carrying one Stage H record revision.
  */
-final class ExtensionRecordJournal {
+public final class ExtensionRecordJournal {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String WRITER = "writer-extension";
     private static final String TOKEN = "extension-writer-token-0123456789";
@@ -39,7 +39,7 @@ final class ExtensionRecordJournal {
     private String lastCommitDigest;
     private int domainEvents;
 
-    ExtensionRecordJournal(ManagedSessionStore store, String tenantId,
+    public ExtensionRecordJournal(ManagedSessionStore store, String tenantId,
             String workspaceId, String sessionId) {
         this.store = store;
         this.tenantId = tenantId;
@@ -48,7 +48,7 @@ final class ExtensionRecordJournal {
     }
 
     /** Acquires the writer and commits the Session's genesis. */
-    ExtensionRecordJournal open() {
+    public ExtensionRecordJournal open() {
         acquire().commit(genesis(
                 "{\"subtype\":\"session_execution_engine\"}\n"
                         + "{\"subtype\":\"managed_session_header_v1\"}\n",
@@ -84,7 +84,7 @@ final class ExtensionRecordJournal {
         return receipt;
     }
 
-    CommitReceipt commit(CommitTransactionRequest request) {
+    public CommitReceipt commit(CommitTransactionRequest request) {
         return store.commit(tenantId, sessionId, TOKEN, request);
     }
 
@@ -122,10 +122,21 @@ final class ExtensionRecordJournal {
                 editRecords, extraEvents, "monitor_run", List.of());
     }
 
-    CommitTransactionRequest requestDomain(String commandId, String domain,
+    public CommitTransactionRequest requestDomain(String commandId, String domain,
             JsonNode body, List<CommitResource> resources, long occurredAt) {
         return request("commitMcpRecord", commandId, bytes(body), occurredAt,
                 event -> { }, records -> records, 0, domain, resources);
+    }
+
+    /**
+     * An ordinary body-less domain commit, open to the same edits as a
+     * Stage H one, as a writer that does not follow the contract would.
+     */
+    CommitTransactionRequest requestOrdinary(String commandId, String domain,
+            JsonNode body, Consumer<ObjectNode> editEvent,
+            UnaryOperator<String> editRecords, int extraEvents) {
+        return request("commitDomainRecord", commandId, bytes(body), 1_000,
+                editEvent, editRecords, extraEvents, domain, List.of());
     }
 
     private CommitTransactionRequest request(String operation, String commandId,
@@ -192,8 +203,9 @@ final class ExtensionRecordJournal {
                 .put("version", 1).put("operationId", commandId)
                 .set("recordRef", recordRef);
         editEvent.accept(event);
-        String records = editRecords.apply(line("managed_session_event_v1",
-                event) + line("managed_session_commit_v1",
+        String records = editRecords.apply(line(sessionId,
+                "managed_session_event_v1", event) + line(sessionId,
+                        "managed_session_commit_v1",
                         JSON.createObjectNode().put("commandId", commandId)));
         String transactionId = "transaction-" + operation + "-" + commandId;
         List<CommitResource> closure = new ArrayList<>(resources);
@@ -210,7 +222,7 @@ final class ExtensionRecordJournal {
     }
 
     /** Advances past a request the store committed. */
-    void committed(CommitTransactionRequest request) {
+    public void committed(CommitTransactionRequest request) {
         journalRevision++;
         sequence = request.lastSequence();
         lastCommitDigest = request.commitDigest();
@@ -234,7 +246,9 @@ final class ExtensionRecordJournal {
         }
     }
 
-    private String line(String subtype, JsonNode body) {
+    /** One record line in the envelope the authority writes; shared by
+     * every test that composes a line, so helpers cannot drift apart. */
+    static String line(String sessionId, String subtype, JsonNode body) {
         ObjectNode record = JSON.createObjectNode()
                 .put("uuid", UUID.randomUUID().toString())
                 .putNull("parentUuid")

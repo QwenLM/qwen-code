@@ -231,6 +231,48 @@ describe('A2A transport', () => {
       },
     });
   });
+
+  it('answers a task for a remote agent as an unsupported operation', async () => {
+    await updateWorkspaceAgents(PROJECT_ROOT, () => [
+      {
+        id: 'ag_lead',
+        name: 'lead',
+        createdAt: 1,
+        execution: { mode: 'managed-host', hostIds: ['ho_1'] },
+      },
+    ]);
+    const { secret } = await issueA2AGrant(PROJECT_ROOT, {
+      callerId: 'share_1',
+      agentId: 'ag_lead',
+    });
+    const response = await request(
+      appFor(
+        true,
+        vi.fn(() => true),
+      ),
+    )
+      .post('/a2a/v1')
+      .set({ ...headers, authorization: `Bearer ${secret}` })
+      .set('A2A-Version', '1.0')
+      .send({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'SendMessage',
+        params: {
+          message: {
+            role: 'ROLE_USER',
+            messageId: 'msg-1',
+            parts: [{ text: 'Inspect the cache.' }],
+          },
+        },
+      });
+
+    expect(response.body.result).toBeUndefined();
+    expect(response.body.error).toMatchObject({
+      code: -32004,
+      message: 'Remote agents cannot take A2A tasks in this build.',
+    });
+  });
 });
 
 it.each(['replaced', 'untrusted', 'disabled'] as const)(

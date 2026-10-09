@@ -32,6 +32,7 @@ import {
   ManagedToolExecutor,
   type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
+import { managedRuntimeLedgerFromEnvironment } from './managed-runtime-ledger.js';
 import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
@@ -213,9 +214,15 @@ export async function startManagedRuntimeAttestationWorker(
     );
   } else {
     registerManagedRuntimeAttestationRoute(app, boot);
+    // A Managed session's host names one ledger per worker incarnation and
+    // sweeps it if the worker dies; a worker that cannot keep it must not
+    // answer a Shell, so a failure here fails the boot.
+    const ledger = managedRuntimeLedgerFromEnvironment(boot.runtimeIncarnation);
+    ledger?.watch();
     executor = ManagedToolExecutor.forWorkspace(
       boot.workspaceCwd,
       boot.runtimeInstanceId,
+      { ledger },
     );
     registerManagedRuntimeToolRoutes(app, boot, executor);
     const mount = new ManagedContextMount(boot.workspaceCwd);
