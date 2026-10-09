@@ -12,7 +12,7 @@
 
 能力表示支持与权限，不保证 Session 空闲。任务、审批、保留 Runtime session、未完成 operation 和 revision CAS 仍由 admission 裁决。operation 查询独立沿用现有读取权限，因此 cwd 权限撤销后，仍有读取权限的调用者可以继续查询已接纳操作。
 
-列表页对 cwd 与 Turn 两类候选 Session 的 Workspace 并集只做一次角色授权批量读取，对两类候选 id 并集只做一次执行 Registry facts 批量读取，各为一条 `IN` 查询。无候选、调用者无 OPERATOR 授权或部署关闭时跳过 facts 查询。启用能力的列表页在一条与二十条 Session 时均为五次查询；既有关闭部署查询预算保持不变。无法提供 Registry facts 的默认 store 实现失败关闭。
+列表页对 cwd 与 Turn 两类候选 Session 的 Workspace 并集只做一次角色授权批量读取，对两类候选 id 并集只做一次执行 Registry facts 批量读取，各为一条 `IN` 查询。无候选、调用者无 OPERATOR 授权或部署关闭时跳过 facts 查询。启用能力的列表页在一条与二十条 Session 时均为五次查询；既有关闭部署查询预算保持不变。
 
 ## 协调与启用门槛
 

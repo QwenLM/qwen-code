@@ -151,16 +151,6 @@ public interface AgentStateStore {
         return false;
     }
 
-    default boolean hasExecutionRegistryFacts(String tenantId, String sessionId) {
-        return sessionsWithExecutionRegistryFacts(tenantId, List.of(sessionId))
-                .contains(sessionId);
-    }
-
-    default Set<String> sessionsWithExecutionRegistryFacts(String tenantId,
-            java.util.Collection<String> sessionIds) {
-        return Set.of();
-    }
-
     default OperationAdmission beginWorkspaceClose(String tenantId, String sessionId,
             String actorId, String actorDigest, String key, String digest, boolean supported) {
         throw new UnsupportedOperationException("Workspace close is unavailable");

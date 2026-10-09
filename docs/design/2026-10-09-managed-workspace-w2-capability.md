@@ -12,7 +12,7 @@ Advertise true only when Workspace files execution is enabled, the Session is AC
 
 The capability promises support and permission, not an idle Session. Turns, approvals, retained Runtime sessions, open operations and revision CAS remain admission decisions. Operation query continues to use its existing read authorization independently of this flag, so a readable admitted operation stays queryable after cwd authority is revoked.
 
-For list pages, one role grant read covers the workspaces of the union of cwd-shaped and Turn-shaped candidates, and the execution Registry facts read covers the union of both id sets, each batched once with an `IN` predicate. Skip the facts query when no candidates survive, the caller holds no OPERATOR grant, or the deployment is disabled. The enabled page has five queries for both one and twenty Sessions; the existing disabled page budget remains unchanged. The default store fails closed if it cannot supply Registry facts.
+For list pages, one role grant read covers the workspaces of the union of cwd-shaped and Turn-shaped candidates, and the execution Registry facts read covers the union of both id sets, each batched once with an `IN` predicate. Skip the facts query when no candidates survive, the caller holds no OPERATOR grant, or the deployment is disabled. The enabled page has five queries for both one and twenty Sessions; the existing disabled page budget remains unchanged.
 
 ## Coordination and release gate
 
