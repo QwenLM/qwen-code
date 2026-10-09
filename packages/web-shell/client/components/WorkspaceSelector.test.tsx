@@ -208,6 +208,58 @@ describe('WorkspaceSelector', () => {
     expect(onSelectWorkspace).not.toHaveBeenCalled();
   });
 
+  it('marks remote options with their host and disambiguates the tooltip', async () => {
+    const element = renderSelector({
+      workspaces: [
+        {
+          id: 'local-one',
+          cwd: '/primary',
+          label: 'qwen-code',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'remote-one',
+          cwd: '/srv/remote',
+          label: 'qwen-code',
+          primary: false,
+          trusted: true,
+          hostOrigin: 'https://b.example:4170',
+        },
+      ],
+      onSelectHostedWorkspace: vi.fn(),
+    });
+    const trigger = element.querySelector('button')!;
+    await act(async () => {
+      trigger.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+
+    const items = [...document.querySelectorAll('[role="menuitemradio"]')];
+    const localEntry = items.find((entry) =>
+      entry.textContent?.includes('qwen-code'),
+    )!;
+    const remoteEntry = items.find((entry) =>
+      entry.textContent?.includes('b.example:4170'),
+    )!;
+    // A remote option shows its host next to the label…
+    expect(remoteEntry.textContent).toContain('b.example:4170');
+    expect(remoteEntry.getAttribute('title')).toBe(
+      'https://b.example:4170 — /srv/remote',
+    );
+    // …while a same-page option stays unadorned, so identical basenames
+    // across hosts stay tell-apart.
+    expect(localEntry.getAttribute('title')).toBe('/primary');
+    expect(
+      items.some(
+        (entry) =>
+          entry !== remoteEntry &&
+          entry.textContent?.includes('b.example:4170'),
+      ),
+    ).toBe(false);
+  });
+
   it('keeps the same-host menu flat without host headers', async () => {
     const element = renderSelector();
     const trigger = element.querySelector('button')!;

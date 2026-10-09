@@ -221,24 +221,39 @@ export function WorkspaceSelector({
                     <HostLabel origin={group.hostOrigin} />
                   </DropdownMenuLabel>
                 )}
-                {group.items.map((workspace) => (
-                  <DropdownMenuRadioItem
-                    key={workspace.id}
-                    value={workspace.id}
-                    disabled={!workspace.trusted}
-                    title={workspace.cwd}
-                  >
-                    <span className="min-w-0 flex-1 truncate">
-                      {workspace.label}
-                    </span>
-                    {!workspace.trusted && (
-                      <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                        <LockIcon />
-                        {t('sidebar.workspaceUntrusted')}
+                {group.items.map((workspace) => {
+                  const remoteHost =
+                    workspace.hostOrigin && workspace.hostOrigin !== pageOrigin
+                      ? workspace.hostOrigin
+                      : undefined;
+                  return (
+                    <DropdownMenuRadioItem
+                      key={workspace.id}
+                      value={workspace.id}
+                      disabled={!workspace.trusted}
+                      title={
+                        remoteHost
+                          ? `${remoteHost} — ${workspace.cwd}`
+                          : workspace.cwd
+                      }
+                    >
+                      <span className="min-w-0 flex-1 truncate">
+                        {workspace.label}
                       </span>
-                    )}
-                  </DropdownMenuRadioItem>
-                ))}
+                      {remoteHost && (
+                        <span className="max-w-[45%] truncate text-xs text-muted-foreground">
+                          {new URL(remoteHost).host}
+                        </span>
+                      )}
+                      {!workspace.trusted && (
+                        <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                          <LockIcon />
+                          {t('sidebar.workspaceUntrusted')}
+                        </span>
+                      )}
+                    </DropdownMenuRadioItem>
+                  );
+                })}
               </Fragment>
             ))}
             {standaloneSelectable && (
