@@ -1363,15 +1363,19 @@ public class ManagedAgentStore implements AgentStateStore {
                 operationId, owner, claimGeneration, now);
         if (updated == 1) {
             // The terminal write also releases the lifecycle claim mirror a
-            // v1 admission raised, the way the completion path's
-            // phase='DRAINING' flip does: nothing will drive this operation
-            // again, so the fence row must not stay admission-closed under a
-            // dead operation's id. retryOperation and blockLifecycleOperation
+            // v1 admission raised: nothing will drive this operation again,
+            // so the fence row must not stay bound to a dead operation's id.
+            // The phase stays LIFECYCLE_ONLY, though — only the completion
+            // path flips it to DRAINING, gated on its effects verification,
+            // and isHarnessDraining (drainHarnessSession's sole precondition)
+            // reads the phase alone: writing DRAINING here would authorize
+            // draining a Session whose worker stop was never verified (review
+            // round 6, R5-5). retryOperation and blockLifecycleOperation
             // deliberately only NULL the lease — a rescheduled operation is
             // still in flight and must stay admission-closed to everyone
-            // else — so the phase flip belongs here alone.
+            // else.
             jdbc.update("UPDATE qwen_runtime_harness_drain SET"
-                            + " phase = 'DRAINING', claim_lease_until = NULL"
+                            + " operation_id = NULL, claim_lease_until = NULL"
                             + " WHERE tenant_key = ? AND harness_key = ? AND"
                             + " tenant_id = ? AND harness_session_id = ? AND"
                             + " operation_id = ? AND phase = 'LIFECYCLE_ONLY'",

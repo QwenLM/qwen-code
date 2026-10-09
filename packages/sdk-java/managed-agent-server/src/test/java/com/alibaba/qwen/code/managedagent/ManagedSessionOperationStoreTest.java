@@ -26,6 +26,8 @@ import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Delivery states of an operation on a store that no worker scans, with a
@@ -35,6 +37,7 @@ class ManagedSessionOperationStoreTest {
     private static final String TENANT = "operation-store";
     private final AtomicLong now = new AtomicLong(1_000);
     private JdbcTemplate jdbc;
+    private JdbcDataSource dataSource;
 
     @Test
     void onlyTheNewestClaimCompletesOrRetries() {
@@ -158,18 +161,26 @@ class ManagedSessionOperationStoreTest {
 
     // A protocol-v1 admission raises a LIFECYCLE_ONLY claim mirror in
     // qwen_runtime_harness_drain, and every rescheduling mutator keeps that
-    // mirror in step. The terminal write must release it too: nothing
-    // drives the failed operation again, so a mirror left LIFECYCLE_ONLY
-    // under the dead operation's id would hold the harness admission closed
-    // forever — drainHarnessSession admits only phase = 'DRAINING' (review
-    // round 5, R5-5).
+    // mirror in step. The terminal write must release the dead operation's
+    // claim on it: nothing drives the failed operation again. The phase
+    // itself stays LIFECYCLE_ONLY — only the completion path writes
+    // DRAINING, gated on its effects verification, and the phase alone is
+    // drainHarnessSession's authorization (isHarnessDraining), so a terminal
+    // fail that flipped it would certify a drain that never happened (review
+    // round 5, R5-5; restated round 6).
     @Test
     void aFailedTerminationReleasesTheLifecycleClaimMirror() {
         ManagedAgentStore store = workspaceStore();
-        String sessionId = store.insertWorkspaceSessionCommand(TENANT,
-                "owner", "create", "digest", "qwen-code", null, null,
-                List.of(), null, new WorkspaceSelection("workspace", "."))
-                .sessionId();
+        // insertWorkspaceSessionCommand resolves the Workspace under a
+        // creation transaction (ManagedWorkspaceRegistry.resolveForCreation
+        // requires one), and this suite builds the store without Spring
+        // proxies, so the call is wrapped explicitly.
+        var transactions = new TransactionTemplate(
+                new DataSourceTransactionManager(dataSource));
+        String sessionId = transactions.execute(ignored ->
+                store.insertWorkspaceSessionCommand(TENANT, "owner", "create",
+                        "digest", "qwen-code", null, null, List.of(), null,
+                        new WorkspaceSelection("workspace", ".")).sessionId());
         String operationId = store.beginWorkspaceLifecycle(TENANT, sessionId,
                 OperationKind.CLOSE, "owner", "a".repeat(64), "close",
                 "digest", true, 1).operation().operationId();
@@ -192,11 +203,16 @@ class ManagedSessionOperationStoreTest {
         assertThat(failed.deliveryState()).isEqualTo("CONFIRMED");
         assertThat(store.requireSession(TENANT, sessionId).status())
                 .isEqualTo("CLOSING");
-        // The mirror flips to the same shape the completion path leaves, so
-        // the drain admission the row exists to gate can proceed.
+        // The mirror releases the dead operation's claim without minting a
+        // drain authorization: the phase stays LIFECYCLE_ONLY, so
+        // isHarnessDraining stays false for a Session whose worker stop was
+        // never verified.
         assertThat(jdbc.queryForObject("SELECT phase FROM"
                         + " qwen_runtime_harness_drain", String.class))
-                .isEqualTo("DRAINING");
+                .isEqualTo("LIFECYCLE_ONLY");
+        assertThat(jdbc.queryForObject("SELECT operation_id FROM"
+                        + " qwen_runtime_harness_drain", String.class))
+                .isNull();
         assertThat(jdbc.queryForObject("SELECT claim_lease_until FROM"
                         + " qwen_runtime_harness_drain", Long.class))
                 .isNull();
@@ -354,7 +370,7 @@ class ManagedSessionOperationStoreTest {
     }
 
     private ManagedAgentStore store(ManagedAgentProperties properties) {
-        JdbcDataSource dataSource = new JdbcDataSource();
+        dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:operation-store-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         Flyway.configure().dataSource(dataSource)

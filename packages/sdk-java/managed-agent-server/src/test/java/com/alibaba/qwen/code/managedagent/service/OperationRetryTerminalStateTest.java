@@ -28,6 +28,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -1429,6 +1430,45 @@ class OperationRetryTerminalStateTest {
         verify(actions).complete(eq(claimed), anyString(),
                 eq("managed_capability_mismatch"), isNull(), eq(false),
                 anyLong());
+        verify(sessions, never()).retryOperation(anyString(), anyString(),
+                anyString(), anyString(), anyLong(), anyLong(), anyBoolean());
+        verify(sessions, never()).retryOperation(anyString(), anyString(),
+                anyString(), anyString(), anyLong(), anyLong());
+    }
+
+    // A non-retryable workspace_unavailable completes the delivery with
+    // the broker's own code and stays java_durable (harnessConfirmed =
+    // false): the Workspace authority refused before the Harness was ever
+    // asked, so the record must not claim a harness_confirmed admission
+    // (review round 6, R6-1).
+    @Test
+    void aWorkspaceUnavailableCompletesTerminallyWithoutHarnessConfirmation()
+            throws Exception {
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        OperationRecord claimed = actionOperation(1);
+        JsonNode body = actionBody();
+        when(sessions.claimOperation(eq("tenant"), eq("session"),
+                eq("op-action"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(actions.response("tenant", "session", "op-action")).thenReturn(
+                new ManagedActionStore.Response("action-1", body, null,
+                        null));
+        when(actions.find("tenant", "session", "action-1")).thenReturn(
+                Optional.of(new ManagedActionStore.Action("action-1",
+                        "requested", body, null, null)));
+        doThrow(WorkspaceExecutionStore.unavailable()).when(harness)
+                .resolveAction("tenant", "session", "action-1", body);
+
+        ActionResponseCoordinator coordinator = new ActionResponseCoordinator(
+                sessions, actions, harness,
+                CoordinatorTestSupport.directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties());
+        coordinator.dispatch("tenant", "session", "op-action");
+
+        verify(actions).complete(eq(claimed), anyString(),
+                eq("workspace_unavailable"), isNull(), eq(false), anyLong());
         verify(sessions, never()).retryOperation(anyString(), anyString(),
                 anyString(), anyString(), anyLong(), anyLong(), anyBoolean());
         verify(sessions, never()).retryOperation(anyString(), anyString(),

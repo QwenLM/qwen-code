@@ -196,9 +196,13 @@ default backoff the claims span about five minutes when attempts fail fast (a
 generation error rejects immediately, and a blocked journal answers every
 attempt with `503` at once) and about twice that when each attempt consumes
 the full Harness request timeout. When the budget is spent, the operation
-still releases the Runtime binding best-effort — along settle()'s routing,
-which for a delete of an already closed bound Session is no call at all —
-and terminates `failed` with the settle's failure
+still attempts the Runtime binding's release along settle()'s routing — for
+a delete of an already closed bound Session no call at all, and for a
+protocol-v1 Session only when its lifecycle effects already settled: the
+workspace close admits only a `DRAINING` drain fence, so a Session whose
+fence never left `LIFECYCLE_ONLY` keeps its binding, and the terminal write
+clears the dead operation's claim on the fence without minting that drain
+authorization — and terminates `failed` with the settle's failure
 code, so a Session whose settle can never succeed still reaches a terminal
 state instead of looping forever: the Session keeps its pending status, no
 `session.closed` is appended, and no completion is certified. Two conditions

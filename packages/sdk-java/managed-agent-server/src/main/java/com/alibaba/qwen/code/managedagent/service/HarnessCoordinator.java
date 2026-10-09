@@ -1000,9 +1000,20 @@ public class HarnessCoordinator {
     // whose submission was attempted: cancelAdmittedTurn's attach-and-cancel
     // sequence without its CANCELLING precondition — the fail() caller
     // terminates the Turn, so the cancel must land before failTurn clears
-    // the dispatch owner.
+    // the dispatch owner. The epoch precondition stays, though: the cancel
+    // is session-scoped and aborts whichever Turn the Harness is running on
+    // the Session, so only a recorded admission proves that execution is
+    // this Turn's — a bare submission mark can belong to a Turn the daemon
+    // refused while another Turn is live (R6-3). The row is re-read rather
+    // than trusted from the claim-time record: the admission the mark
+    // precedes may have landed after the claim (R4-1).
     private void cancelAdmittedTurnBeforeTerminalFail(TurnRecord turn) {
         try {
+            TurnRecord current = store.findTurn(turn.tenantId(),
+                    turn.sessionId(), turn.turnId()).orElse(null);
+            if (current == null || current.harnessEventEpoch() == null) {
+                return;
+            }
             SessionRecord session = store.requireSession(turn.tenantId(),
                     turn.sessionId());
             if (session.workspace() != null

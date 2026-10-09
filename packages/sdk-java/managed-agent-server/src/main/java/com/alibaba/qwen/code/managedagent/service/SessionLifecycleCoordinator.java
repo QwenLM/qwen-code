@@ -285,8 +285,12 @@ public class SessionLifecycleCoordinator {
                             // A v1 operation never takes the v0 drain route:
                             // requestHarnessDrain would flip the fence row to
                             // DRAINING without the lifecycle store's claim
-                            // checks, and failOperation's terminal write is
-                            // what releases that mirror below.
+                            // checks. The close below proceeds only when the
+                            // settle path already flipped the fence to
+                            // DRAINING — a fence still LIFECYCLE_ONLY refuses
+                            // it, and failOperation's terminal write below
+                            // clears the dead operation's claim on the mirror
+                            // without minting that authorization (R5-5).
                             runtimeWarmer.closeWorkspace(tenantId, sessionId)
                                     .toCompletableFuture().join();
                         }

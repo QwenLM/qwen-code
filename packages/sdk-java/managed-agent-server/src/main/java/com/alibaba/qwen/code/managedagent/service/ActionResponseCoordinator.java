@@ -222,7 +222,10 @@ public class ActionResponseCoordinator {
             if (error instanceof RuntimeBrokerException failure
                     && !failure.isRetryable()
                     && "workspace_unavailable".equals(failure.getCode())) {
-                actions.complete(op, owner, failure.getCode(), null, clock.millis());
+                // Not harness_confirmed: the Workspace authority refused
+                // before the Harness was ever asked.
+                actions.complete(op, owner, failure.getCode(), null, false,
+                        clock.millis());
                 return;
             }
             long delay =
