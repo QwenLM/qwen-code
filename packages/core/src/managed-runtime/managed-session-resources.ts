@@ -73,7 +73,7 @@ export class LocalManagedSessionResourceStore
     const resourceId = randomUUID();
     const directory = path.join(this.root, safeKind);
     const pending = path.join(directory, `.${resourceId}.pending`);
-     
+
     const target = path.join(directory, resourceId);
     await mkdir(directory, { recursive: true });
 
