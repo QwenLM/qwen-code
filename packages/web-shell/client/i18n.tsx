@@ -919,6 +919,12 @@ const EN: Messages = {
   'session.recovery.continue': 'Continue execution',
   'session.recovery.continuing': 'Continuing…',
   'session.recovery.failed': 'Could not continue the conversation.',
+  'session.recovery.resumeWhenAvailable': 'Resume when available',
+  'session.recovery.cancelWait': 'Cancel waiting',
+  'session.recovery.waiting': (v) =>
+    `Waiting for model availability. Next attempt: ${v?.time ?? ''}.`,
+  'session.recovery.waitExpired':
+    'Waiting stopped after six hours. Continue manually when the model is available.',
   'session.archived': 'This conversation is archived',
   'session.archivedDescription':
     'Unarchive it before opening the conversation.',
@@ -5210,6 +5216,11 @@ const ZH: Messages = {
   'session.recovery.continue': '继续执行',
   'session.recovery.continuing': '正在继续…',
   'session.recovery.failed': '无法继续此会话。',
+  'session.recovery.resumeWhenAvailable': '可用时继续',
+  'session.recovery.cancelWait': '取消等待',
+  'session.recovery.waiting': (v) =>
+    `等待模型恢复可用。下次尝试：${v?.time ?? ''}。`,
+  'session.recovery.waitExpired': '等待已满六小时。模型可用后，请手动继续。',
   'session.archived': '该会话已归档',
   'session.archivedDescription': '需要先取消归档，才能打开该会话。',
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',
