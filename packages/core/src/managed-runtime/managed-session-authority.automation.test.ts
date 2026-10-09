@@ -56,6 +56,7 @@ const sessionKey = {
   workspaceId: 'workspace-1',
   sessionId,
 };
+const foreignKey = { ...sessionKey, sessionId: otherSessionId };
 
 interface Harness {
   readonly runtimeBaseDir: string;
@@ -245,6 +246,50 @@ describe('managed session authority automation enablement', () => {
     });
   });
 
+  it('fences the operation.replayed answer to the committing Session and journals the honored ref', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const body = openBody(await prompt(harness));
+      const receipt = await commitSchedule(authority, body);
+      const request = {
+        domain: 'schedule' as const,
+        recordId: body.scheduleId,
+        revision: receipt.revision,
+        recordRef: receipt.recordRef,
+      };
+      // A caller describing the committed ref otherwise is honored — but
+      // the marker journals the authoritative ref, not the caller's.
+      const before = authority.committedSequence;
+      const replayed = await authority.commitOperationReplayed(
+        command('replay-1', body),
+        {
+          ...request,
+          recordRef: {
+            ...receipt.recordRef,
+            byteLength: receipt.recordRef.byteLength + 1,
+          },
+        },
+        TRUSTED,
+      );
+      expect(replayed.committedSequence).toBe(before + 1);
+      const markers = authority
+        .eventsInSequenceRange(before + 1, authority.committedSequence)
+        .filter((event) => event.kind === 'operation.replayed');
+      expect(markers).toHaveLength(1);
+      expect(markers[0]!.payload['recordRef']).toEqual(receipt.recordRef);
+      // The landed command identity replayed under another Session's key
+      // never answers from this log: it falls through to the same fence
+      // the sibling replay paths use.
+      await expect(
+        authority.commitOperationReplayed(
+          { ...command('replay-1', body), sessionKey: foreignKey },
+          request,
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/command session key does not match this session/);
+    });
+  });
+
   it('gates the target mode on every revision, not only the first', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
@@ -366,6 +411,14 @@ describe('managed session authority automation runs', () => {
       expect(authority.extensionRecordsInDomain('automation_run')).toHaveLength(
         1,
       );
+      // A fresh command identity re-claiming the same occurrence is a
+      // second claim: the committed run answers it, never a no-op revision.
+      await expect(
+        commitRun(authority, claim, 2, { commandId: 'claim-again' }),
+      ).rejects.toThrow(/meets the committed run/);
+      expect(authority.extensionRecordsInDomain('automation_run')).toHaveLength(
+        1,
+      );
     });
   });
 
@@ -433,6 +486,10 @@ describe('managed session authority automation runs', () => {
         { input: request },
       );
       expect(receipt.revision).toBe(2);
+      // One transaction spans exactly the three events: splitting the
+      // record commit from the input commit would move lastSequence.
+      expect(receipt.receipt.firstSequence).toBe(before + 1);
+      expect(receipt.receipt.lastSequence).toBe(before + 3);
       const events = authority.eventsInSequenceRange(
         before + 1,
         authority.committedSequence,

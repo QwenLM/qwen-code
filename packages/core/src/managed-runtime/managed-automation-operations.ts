@@ -37,6 +37,8 @@ import {
 export const MANAGED_AUTOMATION_LIMITS = Object.freeze({
   /** The raw prompt bound; the real budget is the final input's. */
   maxPromptBytes: 64 * 1024,
+  /** The largest instant `Date` can render; `firedAt` beyond it unwedges no run. */
+  maxFiredAtMs: 8_640_000_000_000_000,
   /**
    * The bound of the wrapped execution input, matching the inline
    * resource bound of the hosted Session store (`http-managed-session-store.ts`'s
@@ -116,10 +118,6 @@ export function automationRunIdOfInput(inputId: string): string | undefined {
     : undefined;
 }
 
-export function manualOccurrenceKey(commandId: string): string {
-  return `manual:${assertNoSeparator(commandId, 'commandId')}`;
-}
-
 /** The definition fields a request carries, before they are pinned. */
 export interface AutomationDefinition {
   readonly goal: string;
@@ -186,6 +184,10 @@ export function assertAutomationDefinition(
   if (typeof prompt !== 'string' || prompt.length === 0) {
     fail('Automation definition prompt must be non-empty text.');
   }
+  const goal = record['goal'] ?? defaults.goal;
+  if (typeof goal !== 'string') {
+    fail('Automation definition goal must be non-empty text.');
+  }
   if (
     Buffer.byteLength(prompt, 'utf8') > MANAGED_AUTOMATION_LIMITS.maxPromptBytes
   ) {
@@ -199,7 +201,7 @@ export function assertAutomationDefinition(
     'Automation definition catchUp',
   );
   const definition: AutomationDefinition = {
-    goal: (record['goal'] ?? defaults.goal) as string,
+    goal,
     cron: (record['cron'] ?? defaults.cron) as string,
     timezone: (record['timezone'] ?? defaults.timezone) as string,
     prompt,
@@ -564,6 +566,15 @@ export function automationTurnText(params: {
   readonly firedAt: number;
   readonly prompt: string;
 }): string {
+  if (
+    !Number.isSafeInteger(params.firedAt) ||
+    params.firedAt < 0 ||
+    params.firedAt > MANAGED_AUTOMATION_LIMITS.maxFiredAtMs
+  ) {
+    fail(
+      `Automation run firedAt must be an epoch instant between 0 and ${MANAGED_AUTOMATION_LIMITS.maxFiredAtMs}.`,
+    );
+  }
   return [
     `Scheduled automation: ${cleanLine(params.schedule.goal) || params.schedule.scheduleId}`,
     `Automation ID: ${params.schedule.scheduleId}`,
@@ -595,7 +606,7 @@ export function automationInputBudgetBytes(
 ): number {
   const scheduleId = `asch_${'0'.repeat(32)}`;
   // The latest representable instant, whose ISO text is longest.
-  const firedAt = 8_640_000_000_000_000;
+  const firedAt = MANAGED_AUTOMATION_LIMITS.maxFiredAtMs;
   // Escapes maximally under JSON: control chars cost six bytes each.
   const occurrenceKey = '\u0001'.repeat(512);
   return encodeAutomationInputEnvelope({

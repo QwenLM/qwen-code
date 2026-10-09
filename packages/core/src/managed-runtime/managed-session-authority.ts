@@ -1686,10 +1686,16 @@ export class LocalManagedSessionAuthority {
     actor: ManagedSessionActor,
   ): Promise<ManagedSessionCommitReceipt> {
     return this.runSerial(async () => {
-      const replayed = this.committedExtensionOperation(
-        command.operation,
-        command.commandId,
-      );
+      // The replay answer belongs to this Session's own command log: a
+      // command keyed to another Session falls through to
+      // assertCommandWritable's fence, the way the sibling replay paths
+      // (replayedDomain, replayedExtension) already do.
+      const replayed = managedSessionKeysEqual(
+        command.sessionKey,
+        this.sessionKey,
+      )
+        ? this.committedExtensionOperation(command.operation, command.commandId)
+        : undefined;
       if (replayed !== undefined) {
         return replayed.kind === 'record'
           ? replayed.result.receipt
@@ -1725,7 +1731,10 @@ export class LocalManagedSessionAuthority {
               domain: request.domain,
               recordId: request.recordId,
               revision: request.revision,
-              recordRef: request.recordRef,
+              // The authoritative ref of the honored revision, not the
+              // caller's: the guard above proves resourceId and digest,
+              // and the marker must answer the ref the record carries.
+              recordRef: record.recordRef,
             },
           },
         ],
@@ -1958,6 +1967,16 @@ export class LocalManagedSessionAuthority {
         reject(
           'Automation run id must be derived from its definition and occurrence.',
         );
+      }
+    }
+    if (domain === 'automation_run' && previous !== undefined) {
+      // A claim-shaped revision against a run the chain already holds is a
+      // second claim of that occurrence: the committed run answers it, not
+      // a no-op revision that shifts every later step's number (decision
+      // 2). Generic replay by command id never reaches this branch.
+      const run = parseAutomationRunRecord(parsed.record);
+      if (run.run.state === 'admitted') {
+        reject('A second claim of one occurrence meets the committed run.');
       }
     }
     if (domain === 'mcp_configuration') {

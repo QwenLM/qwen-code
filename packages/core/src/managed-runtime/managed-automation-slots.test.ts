@@ -66,6 +66,12 @@ describe('automation slots contract', () => {
       });
     }
     expect(resolvesTimezone('Mars/Olympus_Mons')).toBe(false);
+    // ICU resolves these short ids; the production evaluator's acceptance
+    // set (`ZoneId.getAvailableZoneIds()`) refuses them, so the contract
+    // names what the production side knows.
+    for (const short of ['EST', 'HST', 'MST']) {
+      expect(resolvesTimezone(short)).toBe(false);
+    }
   });
 
   it('replays every shared slot case', () => {
@@ -99,6 +105,22 @@ describe('automation slots contract', () => {
       ).toEqual(expected);
     }
   });
+
+  it('answers the exact offset for an instant with a sub-minute fraction', () => {
+    // `formatToParts` carries no seconds; the subtraction must align to
+    // the minute or a trailing fraction over 30 s biases the offset.
+    expect(wallClock(at('2026-07-01T12:00:45Z'), 'UTC').offsetMinutes).toBe(0);
+    expect(
+      wallClock(at('2026-07-01T12:00:45Z'), 'Asia/Shanghai').offsetMinutes,
+    ).toBe(480);
+    expect(
+      wallClock(at('2026-07-01T12:00:45Z'), 'America/New_York').offsetMinutes,
+    ).toBe(-240);
+    expect(
+      wallClock(at('2026-07-01T12:00:45Z'), 'Australia/Lord_Howe')
+        .offsetMinutes,
+    ).toBe(630);
+  });
 });
 
 describe('automation slots evaluator', () => {
@@ -124,6 +146,15 @@ describe('automation slots evaluator', () => {
       '*/0 * * * *',
       '5-5 * * * *',
       '9-5 * * * *',
+      // Atoms the H6a grammar and the Java evaluator both shape-refuse;
+      // `Number()` would have coerced half of each into a firing set.
+      ' * * * *',
+      '-5 * * * *',
+      '5/2/3 * * * *',
+      '1-2-3 * * * *',
+      '5.0 * * * *',
+      '1e1 * * * *',
+      '0x5 * * * *',
     ]) {
       expect(() => compileCron(expression)).toThrow(ManagedSessionRecordError);
     }

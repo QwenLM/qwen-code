@@ -21,7 +21,6 @@ import {
   automationTurnText,
   decodeAutomationInputEnvelope,
   encodeAutomationInputEnvelope,
-  manualOccurrenceKey,
   scheduleOpenBody,
   scheduleRetireBody,
   scheduleRevisionBody,
@@ -90,11 +89,6 @@ describe('automation identities', () => {
     expect(automationRunIdOfInput('mon-1:notify:3')).toBeUndefined();
     expect(automationRunIdOfInput(runId)).toBeUndefined();
   });
-
-  it('keys a manual run by its command', () => {
-    expect(manualOccurrenceKey('key-1')).toBe('manual:key-1');
-    expect(() => manualOccurrenceKey('')).toThrow(/non-empty/);
-  });
 });
 
 describe('automation definitions', () => {
@@ -120,6 +114,9 @@ describe('automation definitions', () => {
       [{ cron: '0 24 * * *' }, /cron hour field values/],
       [{ timezone: 'Mars/Olympus Mons' }, /timezone/],
       [{ goal: '' }, /goal/],
+      [{ goal: 5 }, /goal/],
+      [{ goal: null }, /goal/],
+      [{ goal: undefined }, /goal/],
       [{ goal: 'x'.repeat(4097) }, /goal exceeds 4096 UTF-8 bytes/],
       [{ catchUp: 'bounded' }, /catchUpLimit/],
       [{ catchUp: 'none', catchUpLimit: 2 }, /catchUpLimit/],
@@ -137,6 +134,15 @@ describe('automation definitions', () => {
     expect(() => assertAutomationDefinition(null)).toThrow(
       ManagedSessionRecordError,
     );
+    // A body with no `goal` at all must answer with the typed contract
+    // error, not a raw TypeError out of the byte measurement.
+    expect(() =>
+      assertAutomationDefinition({
+        cron: '0 2 * * *',
+        timezone: 'UTC',
+        prompt: 'p',
+      }),
+    ).toThrow(ManagedSessionRecordError);
   });
 
   it('fills a revision from the previous definition', () => {
@@ -150,6 +156,11 @@ describe('automation definitions', () => {
   it('digests the content in a fixed order, prompt by bytes', () => {
     const digest = automationDefinitionDigest(definition);
     expect(digest).toMatch(/^[0-9a-f]{64}$/);
+    // The pre-image pinned in full: persisted definition digests break the
+    // moment a key order or the prompt-by-bytes rule drifts.
+    expect(digest).toBe(
+      '9f43e063972de382f61a046970f9129f4bc4687d37fadb4ceb00cf3885987d95',
+    );
     expect(automationDefinitionDigest({ ...definition })).toBe(digest);
     expect(
       automationDefinitionDigest({ ...definition, prompt: 'Run the build!' }),
@@ -316,6 +327,14 @@ describe('automation run bodies', () => {
 });
 
 describe('automation input envelope and turn text', () => {
+  it('pins the model-facing control sentence', () => {
+    // The Legacy scheduled-run sentence, byte-pinned: core cannot import
+    // the CLI's copy, so the parity the frame claims lives here.
+    expect(AUTOMATION_RUN_INSTRUCTION).toBe(
+      'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.',
+    );
+  });
+
   it('round-trips the envelope and refuses a broken one', () => {
     const envelope = {
       automationRunId: automationRunId('asch_1', 'manual:key-1'),
@@ -340,6 +359,38 @@ describe('automation input envelope and turn text', () => {
     expect(() => decodeAutomationInputEnvelope(Buffer.from('nope'))).toThrow(
       /JSON/,
     );
+  });
+
+  it('refuses a firedAt the turn text cannot render', () => {
+    const base = {
+      schedule: {
+        scheduleId: 'asch_1',
+        goal: 'g',
+        cron: '0 2 * * *',
+        timezone: 'UTC',
+      },
+      occurrenceKey: 'schedule:2026-03-08T07:00:00Z',
+      trigger: 'scheduled' as const,
+      prompt: 'Run it.',
+    };
+    // The largest instant Date renders is still framed.
+    expect(() =>
+      automationTurnText({
+        ...base,
+        firedAt: MANAGED_AUTOMATION_LIMITS.maxFiredAtMs,
+      }),
+    ).not.toThrow();
+    // One past it must answer with the typed contract error, not a raw
+    // RangeError from `new Date(...).toISOString()`.
+    expect(() =>
+      automationTurnText({
+        ...base,
+        firedAt: MANAGED_AUTOMATION_LIMITS.maxFiredAtMs + 1,
+      }),
+    ).toThrow(ManagedSessionRecordError);
+    expect(() =>
+      automationTurnText({ ...base, firedAt: Number.MAX_SAFE_INTEGER }),
+    ).toThrow(ManagedSessionRecordError);
   });
 
   it('frames the prompt like a Legacy scheduled run', () => {

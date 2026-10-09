@@ -53,9 +53,14 @@ function fail(message: string): never {
   throw new ManagedSessionRecordError(message);
 }
 
+// Exactly the atoms the H6a contract grammar and the Java evaluator
+// accept: ASCII digits only, one optional range part, one optional step.
+const CRON_ATOM = /^(?:\*|[0-9]{1,10}(?:-[0-9]{1,10})?)(?:\/[0-9]{1,10})?$/;
+
 function values(field: string, min: number, max: number): Set<number> {
   const set = new Set<number>();
   for (const atom of field.split(',')) {
+    if (!CRON_ATOM.test(atom)) fail(`cron atom ${atom} is malformed.`);
     const [base, stepText] = atom.split('/');
     const step = stepText === undefined ? 1 : Number(stepText);
     let from: number;
@@ -154,8 +159,14 @@ function formatter(timeZone: string): Intl.DateTimeFormat {
   return cached;
 }
 
+// ICU resolves these three short ids, but `ZoneId.getAvailableZoneIds()`
+// — the production evaluator's acceptance set — refuses them. A full
+// host-tz sweep found no other divergence between the two authorities.
+const JAVA_UNKNOWN_ZONES = new Set(['EST', 'HST', 'MST']);
+
 /** Whether the host's tz database resolves the zone name. */
 export function resolvesTimezone(timeZone: string): boolean {
+  if (JAVA_UNKNOWN_ZONES.has(timeZone)) return false;
   try {
     formatter(timeZone);
     return true;
@@ -176,6 +187,10 @@ export function wallClock(instantMs: number, timeZone: string): WallClock {
   const hour = parts['hour']! % 24;
   const minute = parts['minute']!;
   const localMs = Date.UTC(year, month - 1, day, hour, minute);
+  // `localMs` drops the sub-minute fraction `formatToParts` never carries,
+  // so the subtraction must align to the same minute or a trailing
+  // fraction over 30 s biases the offset by one minute.
+  const aligned = Math.floor(instantMs / MINUTE_MS) * MINUTE_MS;
   return Object.freeze({
     year,
     month,
@@ -183,7 +198,7 @@ export function wallClock(instantMs: number, timeZone: string): WallClock {
     hour,
     minute,
     weekday: new Date(localMs).getUTCDay(),
-    offsetMinutes: Math.round((localMs - instantMs) / MINUTE_MS),
+    offsetMinutes: Math.round((localMs - aligned) / MINUTE_MS),
   });
 }
 

@@ -1232,7 +1232,22 @@ function assertPayloadRules(
       return;
     }
     case 'operation.replayed': {
-      assertEnum(payload['domain'], MANAGED_SESSION_DOMAINS, `${at}.domain`);
+      const domain = assertEnum(
+        payload['domain'],
+        MANAGED_SESSION_DOMAINS,
+        `${at}.domain`,
+      );
+      const recordRef = payload[
+        'recordRef'
+      ] as unknown as ManagedSessionDurableRef;
+      if (recordRef.kind !== `managed-${domain}`) {
+        fail(`${at}.recordRef.kind must be managed-${domain}.`);
+      }
+      if (recordRef.schemaVersion !== MANAGED_SESSION_DOMAIN_RECORD_VERSION) {
+        fail(
+          `${at}.recordRef.schemaVersion must be ${MANAGED_SESSION_DOMAIN_RECORD_VERSION}.`,
+        );
+      }
       return;
     }
     case 'input.accepted':
