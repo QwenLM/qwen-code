@@ -371,6 +371,52 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
+  it.each([
+    ['en', false, 'Input preview: 9000 bytes.'],
+    ['en', true, 'Input preview truncated. Full input: 9000 bytes.'],
+    ['zh-CN', false, '输入预览：9000 字节。'],
+    ['zh-CN', true, '输入预览已截断，完整输入共 9000 字节。'],
+  ] as const)(
+    'shows a literal Action preview and accessible notice (%s, truncated=%s)',
+    async (language, truncated, notice) => {
+      // Leading space: the card must not trim the preview it renders.
+      const text = ' {"toolName":"run_shell_command","input":{"command":"<b>😀';
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          capabilities: { canSend: false, canCancel: false, actions: true },
+        }),
+      );
+      provider = {
+        ...provider,
+        actions: {
+          listPending: vi.fn().mockResolvedValue([
+            {
+              ...pendingAction,
+              toolName: 'run_shell_command',
+              inputPreview: { text, truncated, byteLength: 9000 },
+            },
+          ]),
+          respond: vi.fn(),
+        },
+      };
+      await render('s1', language);
+      const card = container.querySelector('[data-testid="managed-approval"]')!;
+      expect(card.querySelector('pre')?.textContent).toBe(text);
+      expect(card.querySelector('pre b')).toBeNull();
+      expect(card.textContent).toContain(notice);
+      expect(card.textContent).not.toContain('Tool arguments are unavailable');
+      const status = card.querySelector('p[role="status"]')!;
+      expect(status.textContent).toBe(notice);
+      expect(
+        card
+          .querySelector('[role="alertdialog"]')!
+          .getAttribute('aria-describedby')
+          ?.split(' '),
+      ).toContain(status.id);
+      expect(document.getElementById(status.id)).toBe(status);
+    },
+  );
+
   it('offers a direct retry when pending approvals could not be loaded', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('s1', {
@@ -854,6 +900,34 @@ describe('ManagedSessionsPage', () => {
       expect.objectContaining({ idempotencyKey: expect.any(String) }),
     );
   });
+
+  it.each([true, false])(
+    'lets the creator cancel a running bound Turn when workspaceTurns is %s',
+    async (workspaceTurns) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('bound', {
+          phase: 'tool_running',
+          workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+          capabilities: {
+            canSend: false,
+            canCancel: true,
+            ...(workspaceTurns ? { workspaceTurns: true } : {}),
+          },
+        }),
+      );
+      await render('bound');
+
+      // Without workspaceTurns the composer stays hidden, but Cancel does not.
+      expect(container.querySelector('textarea') !== null).toBe(workspaceTurns);
+      await click('Cancel turn');
+
+      expect(mocks.client.cancel).toHaveBeenCalledWith(
+        'bound',
+        'p1',
+        expect.objectContaining({ clientId: expect.any(String) }),
+      );
+    },
+  );
 
   async function click(label: string) {
     const button = [...container.querySelectorAll('button')].find(

@@ -405,6 +405,22 @@ function ManagedSessionsContent({
   const active =
     summary &&
     !['created', 'completed', 'failed', 'cancelled'].includes(summary.phase);
+  // Cancel authority differs from submit authority: the creator may stop a
+  // running bound Turn after the Workspace stops admitting new work, so the
+  // control is not tied to the composer and the server's 409 is the gate.
+  const cancelButton =
+    cancellationEnabled &&
+    summary?.capabilities.canCancel &&
+    summary.activeTurnId ? (
+      <Button
+        type="button"
+        variant="outline"
+        disabled={busy}
+        onClick={() => void cancel()}
+      >
+        {t('managed.cancel')}
+      </Button>
+    ) : null;
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
       {/* The uncertain-request row unmounts on the Discard click itself, so
@@ -647,7 +663,14 @@ function ManagedSessionsContent({
                   role="status"
                   className="text-sm text-muted-foreground"
                 >
-                  {t('managed.approval.argumentsUnavailable')}
+                  {approvals.action?.inputPreview
+                    ? t(
+                        approvals.action.inputPreview.truncated
+                          ? 'managed.approval.previewTruncated'
+                          : 'managed.approval.previewComplete',
+                        { bytes: approvals.action.inputPreview.byteLength },
+                      )
+                    : t('managed.approval.argumentsUnavailable')}
                 </p>
               )}
             </div>
@@ -725,18 +748,7 @@ function ManagedSessionsContent({
                       {t('managed.newRequired')}
                     </span>
                   )}
-                {cancellationEnabled &&
-                  summary?.capabilities.canCancel &&
-                  summary.activeTurnId && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      disabled={busy}
-                      onClick={() => void cancel()}
-                    >
-                      {t('managed.cancel')}
-                    </Button>
-                  )}
+                {cancelButton}
                 <Button
                   type="submit"
                   disabled={
@@ -754,7 +766,11 @@ function ManagedSessionsContent({
                 </Button>
               </div>
             </form>
-          ) : null}
+          ) : (
+            cancelButton && (
+              <div className="flex shrink-0 justify-end">{cancelButton}</div>
+            )
+          )}
           {outputTarget &&
             outputTarget.sessionId === sessionId &&
             sessionId &&

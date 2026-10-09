@@ -125,7 +125,10 @@ import {
   validateMaxSessionTurns,
   type Config,
 } from '../../config/config.js';
-import { isTeammate } from '../../agents/team/identity.js';
+import {
+  isTeammate,
+  runOutsideTeammateIdentity,
+} from '../../agents/team/identity.js';
 import { isSubagentLikeExecutionContext } from '../../agents/runtime/subagent-plan-tool-policy.js';
 import {
   buildAgentTranscriptAttach,
@@ -141,6 +144,7 @@ import type {
   BackgroundSlotReservation,
   ResidentBackgroundAgent,
 } from '../../agents/background-tasks.js';
+import { FOREGROUND_MODEL_SLOT_WAIT_CANCELLED } from '../../agents/background-tasks.js';
 import { buildModelIdContext, resolveModelId } from '../../utils/modelId.js';
 import type { AuthOverrides } from '../../models/content-generator-config.js';
 import {
@@ -155,6 +159,7 @@ import {
   type BundledReferenceSurface,
   toolSearchBridgeSentence,
 } from '../../skills/bundled-reference.js';
+import { isDirectToolBridgeAvailable } from '../tool-search.js';
 
 const EXTERNAL_USAGE_NOTICE =
   '\n\n[External executor token usage and cost are unavailable.]';
@@ -796,6 +801,10 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
    * cannot make two refreshes disagree about where the reference lives.
    */
   private readonly delegationSurface: BundledReferenceSurface;
+  // list_agents is excluded for subagents and teammates, whose registries can
+  // still list it. Decided once for the context that builds this instance, so
+  // a refresh fired from another scope cannot flip the description.
+  private readonly listAgentsReachable = isTopLevelSession() && !isTeammate();
 
   constructor(private readonly config: Config) {
     // Initialize with a basic schema first
@@ -922,10 +931,14 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
       this.availableSubagents = BuiltinAgentRegistry.getBuiltinAgents();
       this.updateDescriptionAndSchema();
     } finally {
-      // Update the client with the new tools
+      // Update the client with the new tools. A teammate's derived Config
+      // resolves to the leader's client, and a schema such as send_message's
+      // reads the ambient teammate scope, so rebuilding here inside a
+      // teammate's context would write the teammate view into the leader's
+      // declarations.
       const llmClient = this.config.getLlmClient();
       if (llmClient) {
-        await llmClient.setTools();
+        await runOutsideTeammateIdentity(() => llmClient.setTools());
       }
     }
   }
@@ -969,6 +982,14 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     const delegationSection = buildAgentDelegationSection(
       this.delegationSurface,
     );
+    const registry = this.config.getToolRegistry?.();
+    const rosterDiscovery =
+      this.listAgentsReachable &&
+      registry &&
+      isDirectToolBridgeAvailable(registry) &&
+      registry.getAllToolNames().includes(ToolNames.LIST_AGENTS)
+        ? `In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)}\n\n`
+        : '';
     const baseDescription = `${AGENT_DESCRIPTION_FIRST_LINE}
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
@@ -1003,9 +1024,7 @@ ${todoGuidance}- Delegate only concrete, bounded tasks that can run independentl
 
 ## Working with background agents
 
-In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)}
-
-**Don't peek.** Do not read or tail a background agent's output file while it runs. You get a completion notification; trust it. Reading the transcript mid-flight pulls the agent's tool noise into your context, which defeats the point of delegating.
+${rosterDiscovery}**Don't peek.** Do not read or tail a background agent's output file while it runs. You get a completion notification; trust it. Reading the transcript mid-flight pulls the agent's tool noise into your context, which defeats the point of delegating.
 
 **Don't race.** After launching a background agent, you know nothing about what it found. Never fabricate or predict its results in any format — not as prose, summary, or structured output. The notification arrives as a user-role message in a later turn; it is never something you write yourself. If the user asks a follow-up before the notification lands, tell them the agent is still running — give status, not a guess.
 
@@ -1522,6 +1541,29 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     if (updateOutput) {
       updateOutput(this.currentDisplay);
     }
+  }
+
+  /**
+   * Resolve a sub-agent's model selector (omitted / "inherit" / "fast" /
+   * modelId / authType:modelId) against the current config. Shared by the
+   * background and foreground reservation paths so the resolution and its
+   * `buildModelIdContext` wiring live in exactly one place.
+   */
+  private resolveSubagentModel(modelSelector?: string) {
+    return resolveModelId(modelSelector, buildModelIdContext(this.config));
+  }
+
+  /**
+   * Human-readable "how many are ahead" phrase for a slot-wait display, shared
+   * by the background and foreground wait messages so the two paths cannot
+   * drift on the queue-count wording.
+   */
+  private formatSlotQueueText(count: number): string {
+    return count === 0
+      ? 'no agents ahead'
+      : count === 1
+        ? '1 already queued'
+        : `${count} already queued`;
   }
 
   private registerOwnedMonitorNotifications(
@@ -2825,7 +2867,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     let backgroundSlotReservationConsumed = false;
     // Concrete model ID the sub-agent will run with, resolved from its model
     // selector once subagentConfig is loaded. Used to enforce per-model
-    // background-agent concurrency caps (agents.maxParallelAgentsByModel).
+    // concurrency caps (agents.maxParallelAgentsByModel) on both the
+    // background and the top-level foreground launch paths.
     let subagentModelId: string | undefined;
     let subagentRuntimeAuthOverrides: AuthOverrides | undefined;
     const releaseBackgroundSlotReservation = () => {
@@ -3017,12 +3060,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // Resolve the concrete model the sub-agent (or fork) will run with so the
           // registry can apply a per-model cap. `subagentConfig.model` is a
           // selector (omitted/"inherit"/"fast"/modelId/authType:modelId);
-          // resolveModelId maps it to the actual model ID, falling back to the
-          // parent's current model when the sub-agent inherits (forks always
+          // resolveSubagentModel maps it to the actual model ID, falling back to
+          // the parent's current model when the sub-agent inherits (forks always
           // inherit, since FORK_AGENT has no model selector).
-          const resolvedSubagentModel = resolveModelId(
+          const resolvedSubagentModel = this.resolveSubagentModel(
             subagentConfig.model,
-            buildModelIdContext(this.config),
           );
           subagentModelId = resolvedSubagentModel?.modelId;
           subagentModelId ??= this.config.getModel();
@@ -3046,13 +3088,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           backgroundOwnerId,
         );
         if (!backgroundSlotReservation) {
-          const queuedCount = registry.getQueuedCount();
-          const queueText =
-            queuedCount === 0
-              ? 'no agents ahead'
-              : queuedCount === 1
-                ? '1 already queued'
-                : `${queuedCount} already queued`;
+          const queueText = this.formatSlotQueueText(registry.getQueuedCount());
           this.updateDisplay(
             {
               status: 'running',
@@ -3073,6 +3109,92 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           },
           updateOutput,
         );
+      } else if (
+        !isFork &&
+        isTopLevelSession() &&
+        subagentConfig.executor === undefined
+      ) {
+        // Foreground top-level sub-agents previously bypassed the per-model
+        // concurrency cap entirely: the cap lived only in the background
+        // reservation path, so a skill (e.g. /batch) or any single message
+        // issuing multiple Agent calls could fan out N concurrent foreground
+        // agents on a low-capacity model and exhaust its VRAM. Reserve a
+        // per-model slot here so `agents.maxParallelAgentsByModel` bounds
+        // foreground launches too. The claim is a foreground claim: it counts
+        // toward the model's cap (shared with background launches) but is
+        // excluded from the global background budget and owner-scoped
+        // notifications, so a synchronous foreground run never consumes
+        // background capacity nor blocks behind background agents on other
+        // models. Released by the existing foreground `finally` / outer
+        // `catch` via releaseBackgroundSlotReservation(). Gated on a
+        // configured per-model cap so uncapped models keep their current
+        // behavior, and on top-level launches so a nested agent never waits
+        // on a slot its own parent holds. Interactive forks are excluded:
+        // their detached body returns a placeholder with no release site on
+        // this path, so capping them would leak the slot.
+        subagentModelId =
+          this.resolveSubagentModel(subagentConfig.model)?.modelId ??
+          this.config.getModel();
+        const fgRegistry = this.config.getBackgroundTaskRegistry();
+        const perModelCap = fgRegistry.resolvePerModelCap(subagentModelId);
+        if (perModelCap !== undefined) {
+          backgroundSlotReservation = fgRegistry.tryReserveForegroundModelSlot(
+            subagentModelId,
+            backgroundOwnerId,
+          );
+          if (!backgroundSlotReservation) {
+            const claimed =
+              fgRegistry.getClaimedModelSlotCount(subagentModelId);
+            const aheadText = this.formatSlotQueueText(
+              fgRegistry.getForegroundQueuedCount(),
+            );
+            debugLogger.debug(
+              `[AgentTool] Foreground launch queued behind per-model cap ` +
+                `on ${subagentModelId} (cap=${perModelCap}, ` +
+                `claimed=${claimed}, ${aheadText}).`,
+            );
+            this.updateDisplay(
+              {
+                status: 'running' as const,
+                terminateReason: `Waiting for a model slot (${claimed}/${perModelCap} in use, ${aheadText}).`,
+              },
+              updateOutput,
+            );
+            try {
+              backgroundSlotReservation =
+                await fgRegistry.waitForForegroundModelSlot(
+                  signal,
+                  subagentModelId,
+                  backgroundOwnerId,
+                );
+            } catch (waitError) {
+              if (
+                waitError instanceof Error &&
+                waitError.message === FOREGROUND_MODEL_SLOT_WAIT_CANCELLED
+              ) {
+                // The user cancelled while the foreground launch was queued.
+                // Report a clean cancellation, not a background-subsystem
+                // failure, so the model does not retry it.
+                this.updateDisplay(
+                  { status: 'cancelled' as const, terminateReason: undefined },
+                  updateOutput,
+                );
+                return {
+                  llmContent: FOREGROUND_MODEL_SLOT_WAIT_CANCELLED,
+                  returnDisplay: {
+                    ...this.currentDisplay!,
+                    status: 'cancelled' as const,
+                  },
+                };
+              }
+              throw waitError;
+            }
+            this.updateDisplay(
+              { status: 'running' as const, terminateReason: undefined },
+              updateOutput,
+            );
+          }
+        }
       }
 
       // ── Optional worktree isolation (Phase 1: provision) ──────────

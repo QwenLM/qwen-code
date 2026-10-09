@@ -45,6 +45,8 @@ import {
   HostedWorkspaceToolTurn,
   HostedToolRecoveryRequiredError,
   HOSTED_WORKSPACE_FILE_TOOLS,
+  HOSTED_WORKSPACE_SHELL_TOOLS,
+  HOSTED_INPUT_PREVIEW_TOOLS,
   type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -59,6 +61,8 @@ import * as stdio from '../utils/stdioHelpers.js';
 
 const broker = vi.hoisted(() => ({
   fileHistory: vi.fn(),
+  authorizeLifecycle: vi.fn(),
+  workspaceContext: vi.fn(),
   warm: vi.fn(),
   acquire: vi.fn(),
   prepare: vi.fn(),
@@ -82,6 +86,8 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   HostedWorkspaceBroker: class {
     readonly runtimeSessionId = 'prompt';
     fileHistory = broker.fileHistory;
+    authorizeLifecycle = broker.authorizeLifecycle;
+    workspaceContext = broker.workspaceContext;
     warm = broker.warm;
     acquire = broker.acquire;
     prepare = broker.prepare;
@@ -147,9 +153,7 @@ function createTurn(
       },
       waiters,
     },
-    undefined,
-    undefined,
-    hooks,
+    { hooks },
   );
 }
 const calls = ['read_file', 'edit'].map((name, index) => ({
@@ -170,6 +174,7 @@ beforeEach(async () => {
   vi.resetAllMocks();
   expectWritesStopped = false;
   for (const method of [
+    broker.authorizeLifecycle,
     broker.warm,
     broker.acquire,
     broker.cancel,
@@ -212,6 +217,7 @@ beforeEach(async () => {
   });
   harness = createManagedHarnessHandle(session);
   await harness.ensureRunnable();
+  broker.workspaceContext.mockResolvedValue([]);
   broker.prepare.mockImplementation(async () => randomUUID());
   broker.execute.mockResolvedValue({
     executionStatus: 'success',
@@ -952,8 +958,7 @@ it('offers glob only under the /2 Workspace profiles', async () => {
           : undefined,
         undefined,
         undefined,
-        undefined,
-        profile,
+        { profile },
       ).declarations(signal)
     ).map((tool) => tool.name);
   const file = ['read_file', 'write_file', 'edit'];
@@ -984,8 +989,7 @@ function createSearchTurn() {
     undefined,
     undefined,
     undefined,
-    undefined,
-    'hosted-workspace-files/2',
+    { profile: 'hosted-workspace-files/2' },
   );
 }
 
@@ -1097,6 +1101,28 @@ it('normalizes a glob pattern and path before dispatch', async () => {
   expect(broker.release).toHaveBeenCalledOnce();
 });
 
+it('dispatches an ordinary brace pattern unchanged', async () => {
+  // `*.{ts,tsx}` is ordinary input: expansion must not refuse it.
+  turn = createSearchTurn();
+  const call = {
+    ...calls[0],
+    name: 'glob',
+    args: { pattern: 'src/*.{ts,tsx}' },
+  };
+  await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const payload = JSON.parse(broker.execute.mock.calls[0][1]);
+  expect(payload).toEqual({
+    toolName: 'glob',
+    input: { pattern: 'src/*.{ts,tsx}' },
+  });
+  await turn.consumeResults();
+  await turn.finish();
+});
 it('treats a blank glob path as omitted and still dispatches', async () => {
   // The declaration marks `path` optional; an explicit blank must not read
   // as a traversal refusal (which would also poison every valid sibling
@@ -1221,6 +1247,238 @@ it('truncates an oversized glob result to a fitting prefix with a narrowing hint
   expect(broker.release).toHaveBeenCalledOnce();
 });
 
+function contextSlot() {
+  return {
+    value: undefined as string | undefined,
+    read() {
+      return this.value;
+    },
+    write(context: string) {
+      this.value = context;
+    },
+    invalidate() {
+      this.value = undefined;
+    },
+  };
+}
+
+function turnWithContext(
+  slot: ReturnType<typeof contextSlot>,
+  prompt = 'prompt',
+) {
+  return new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    prompt,
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    { context: slot },
+  );
+}
+
+it('assembles two instruction files as two sections, separated and in order', async () => {
+  // Both files non-blank is the ordinary Workspace shape, and the only one
+  // where the section separator and the prompt order are observable at all:
+  // a single section makes `.join()` a no-op.
+  const slot = contextSlot();
+  broker.workspaceContext.mockResolvedValue([
+    { name: 'QWEN.md', text: '# Project Rules\n' },
+    { name: 'AGENTS.md', text: 'never touch prod' },
+  ]);
+  turn = turnWithContext(slot);
+  await turn.execute(
+    [calls[0]],
+    [parts[0]],
+    'model',
+    new AbortController().signal,
+  );
+  expect(slot.value).toBe(
+    '--- Context from: QWEN.md ---\n# Project Rules\n--- End of Context from: QWEN.md ---\n\n--- Context from: AGENTS.md ---\nnever touch prod\n--- End of Context from: AGENTS.md ---',
+  );
+  await turn.consumeResults();
+  await turn.finish();
+});
+
+it('reads Workspace instructions once, outside the execution ledger', async () => {
+  const slot = contextSlot();
+  broker.workspaceContext.mockResolvedValue([
+    { name: 'QWEN.md', text: '# Project Rules\nAlways test.\n' },
+    { name: 'AGENTS.md', text: '   ' },
+  ]);
+  turn = turnWithContext(slot);
+  await turn.execute(
+    [calls[0]],
+    [parts[0]],
+    'model',
+    new AbortController().signal,
+  );
+  expect(slot.value).toBe(
+    '--- Context from: QWEN.md ---\n# Project Rules\nAlways test.\n--- End of Context from: QWEN.md ---',
+  );
+  expect(broker.workspaceContext).toHaveBeenCalledOnce();
+  // The context read reserves no execution: only the model's call does.
+  expect(broker.prepare).toHaveBeenCalledOnce();
+  expect(broker.execute).toHaveBeenCalledOnce();
+  await turn.consumeResults();
+  await turn.finish();
+
+  const second = turnWithContext(slot, 'prompt-2');
+  await second.execute(
+    [{ ...calls[0], callId: 'call-next' }],
+    [
+      {
+        functionCall: {
+          id: 'call-next',
+          name: 'read_file',
+          args: { file_path: 'file.txt' },
+        },
+      },
+    ],
+    'model',
+    new AbortController().signal,
+  );
+  await second.consumeResults();
+  await second.finish();
+  // The fetched context is reused: no further context reads.
+  expect(broker.workspaceContext).toHaveBeenCalledOnce();
+});
+
+it('latches an empty context when the Workspace has no instruction files', async () => {
+  const slot = contextSlot();
+  turn = turnWithContext(slot);
+  await turn.execute(
+    [calls[0]],
+    [parts[0]],
+    'model',
+    new AbortController().signal,
+  );
+  expect(slot.read()).toBe('');
+  await turn.consumeResults();
+  await turn.finish();
+});
+
+it('populates the context slot on a recovery acquisition with an empty attachment', async () => {
+  // A takeover builds a fresh attachment whose slot is undefined: the
+  // recovery acquire must read under the latch alone, or the recovered turn
+  // drives the model with no project instructions.
+  const slot = contextSlot();
+  broker.workspaceContext.mockResolvedValue([
+    { name: 'AGENTS.md', text: 'never touch prod' },
+  ]);
+  turn = turnWithContext(slot);
+  await turn.resumeCommittedResults(new AbortController().signal);
+  expect(slot.value).toBe(
+    '--- Context from: AGENTS.md ---\nnever touch prod\n--- End of Context from: AGENTS.md ---',
+  );
+  expect(broker.workspaceContext).toHaveBeenCalledOnce();
+  await turn.finish();
+});
+
+it('does not latch the context slot when the turn is aborted during the read', async () => {
+  // Writing `''` after an abort would pin "no Workspace context" for the
+  // Session's whole attached life — the retry gate reads `undefined` as
+  // "not fetched yet", so the slot must stay undefined.
+  const slot = contextSlot();
+  const controller = new AbortController();
+  broker.workspaceContext.mockImplementation(async () => {
+    controller.abort();
+    return [];
+  });
+  turn = turnWithContext(slot);
+  await turn
+    .execute([calls[0]], [parts[0]], 'model', controller.signal)
+    .catch(() => undefined);
+  await turn.finish().catch(() => undefined);
+  expect(broker.workspaceContext).toHaveBeenCalledOnce();
+  expect(slot.read()).toBeUndefined();
+});
+
+it('cancels a turn without waiting for a stalled Workspace context read', async () => {
+  const slot = contextSlot();
+  const write = vi.spyOn(slot, 'write');
+  const controller = new AbortController();
+  const reason = new Error('cancelled during Workspace context read');
+  broker.workspaceContext.mockImplementation(() => new Promise(() => {}));
+  turn = turnWithContext(slot);
+  const settled = vi.fn();
+  const outcome = turn
+    .execute([calls[0]], [parts[0]], 'model', controller.signal)
+    .catch((cause: unknown) => cause);
+  void outcome.then(settled);
+  await vi.waitFor(() =>
+    expect(broker.workspaceContext).toHaveBeenCalledOnce(),
+  );
+  controller.abort(reason);
+  await vi.waitFor(() => expect(settled).toHaveBeenCalledOnce(), {
+    timeout: 1_000,
+  });
+  expect(await outcome).toBe(reason);
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(write).not.toHaveBeenCalled();
+  expect(slot.read()).toBeUndefined();
+  await turn.finish();
+  expect(broker.release).toHaveBeenCalledOnce();
+});
+
+it.each([
+  ['QWEN.md', true],
+  ['AGENTS.md', true],
+  ['docs/QWEN.md', false],
+  ['file.txt', false],
+] as const)(
+  'an edit of %s invalidates the cached Workspace context: %s',
+  async (file, stale) => {
+    const slot = contextSlot();
+    slot.value = 'cached rules';
+    turn = turnWithContext(slot);
+    const call = { ...calls[1], args: { ...calls[1].args, file_path: file } };
+    await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    await turn.consumeResults();
+    await turn.finish();
+    // Only the Session-root instruction files are read, so only they stale it.
+    expect(slot.value).toBe(stale ? undefined : 'cached rules');
+    // The slot already held text, so this turn did not read again.
+    expect(broker.workspaceContext).not.toHaveBeenCalled();
+  },
+);
+
+it('never blocks a turn when the Workspace context read fails', async () => {
+  const log = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  const slot = contextSlot();
+  broker.workspaceContext.mockRejectedValue(new Error('Broker transport down'));
+  turn = turnWithContext(slot);
+  const responses = await turn.execute(
+    [calls[0]],
+    [parts[0]],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response).toMatchObject({
+    output: 'original result',
+  });
+  expect(slot.value).toBeUndefined();
+  // The stderr line is the only signal of Broker/worker skew (design doc,
+  // Deployment and rollout).
+  expect(log).toHaveBeenCalledWith(
+    expect.stringContaining('Hosted Workspace context read failed'),
+  );
+  // Nothing was reserved, so nothing needs cancelling.
+  expect(broker.cancel).not.toHaveBeenCalled();
+  await turn.consumeResults();
+  await turn.finish();
+});
 it.each([
   ['file-first', false],
   ['file-last-with-shell', true],
@@ -1392,11 +1650,16 @@ it.each(['workspace_busy', 'workspace_unavailable'])(
   async (code) => {
     const refusal = new HostedWorkspaceBrokerRejection(409, code);
     broker.acquire.mockRejectedValueOnce(refusal);
-    await expect(turn.resumeCommittedResults()).rejects.toBe(refusal);
+    // Both production callers hand recovery the turn's AbortSignal, so the
+    // fast classified refusal has to survive a live signal instead of turning
+    // into a queue wait.
+    await expect(
+      turn.resumeCommittedResults(new AbortController().signal),
+    ).rejects.toBe(refusal);
     await expect(turn.finish()).resolves.toBeUndefined();
     expect(broker.prepare).not.toHaveBeenCalled();
     expect(broker.release).not.toHaveBeenCalled();
-    await turn.resumeCommittedResults();
+    await turn.resumeCommittedResults(new AbortController().signal);
     expect(broker.acquire).toHaveBeenCalledTimes(2);
   },
 );
@@ -1585,7 +1848,9 @@ it.each(['files', 'shell', 'mcp'])(
       undefined,
       undefined,
       profile === 'mcp'
-        ? (mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession)
+        ? {
+            mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+          }
         : undefined,
     );
     const declarations = await described.declarations(
@@ -1654,7 +1919,9 @@ it.each(['refresh', 'warmup'] as const)(
       undefined,
       undefined,
       undefined,
-      mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      {
+        mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      },
     );
     const abort = new AbortController();
     const reason = new Error('cancelled test turn');
@@ -1673,6 +1940,9 @@ it.each(['refresh', 'warmup'] as const)(
 );
 
 it('keeps native file tools in the MCP profile on their existing shared runtime', async () => {
+  // MCP turns are outside the Workspace-context slice: a slot handed to one
+  // must never trigger the read.
+  const slot = contextSlot();
   const mcp = {
     broker: { ...broker, runtimeSessionId: 'mcp:session' },
     ensureReady: async () => undefined,
@@ -1690,7 +1960,10 @@ it('keeps native file tools in the MCP profile on their existing shared runtime'
     undefined,
     undefined,
     undefined,
-    mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    {
+      mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      context: slot,
+    },
   );
   await mcpTurn.execute(calls, parts, 'model', new AbortController().signal);
   await mcpTurn.consumeResults();
@@ -1698,6 +1971,8 @@ it('keeps native file tools in the MCP profile on their existing shared runtime'
   expect(broker.execute).toHaveBeenCalledTimes(2);
   expect(broker.fileHistory).not.toHaveBeenCalled();
   expect(broker.release).not.toHaveBeenCalled();
+  expect(broker.workspaceContext).not.toHaveBeenCalled();
+  expect(slot.value).toBeUndefined();
 });
 
 it('executes against the declarations actually advertised before a catalog replacement', async () => {
@@ -1720,7 +1995,9 @@ it('executes against the declarations actually advertised before a catalog repla
     undefined,
     undefined,
     undefined,
-    mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    {
+      mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    },
   );
   expect(
     (await mcpTurn.declarations(new AbortController().signal)).at(-1)?.name,
@@ -2207,7 +2484,8 @@ it('asks before an edit in default mode and runs the batch once the owner allows
     (await session.resources.read(action.optionsRef!)).toString(),
   );
   expect(options).toEqual({
-    v: 1,
+    v: 2,
+    inputRef: (await checkpoint()).approval!.invocationRef,
     requestId,
     turnId: 'prompt',
     functionCallId: 'call-1',
@@ -2355,7 +2633,9 @@ it.each(['allow', 'deny'])(
       undefined,
       undefined,
       { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
-      mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      {
+        mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      },
     );
     const call = { ...calls[0], name: 'mcp_echo', args: { text: 'hello' } };
     const running = turn.execute(
@@ -2367,6 +2647,15 @@ it.each(['allow', 'deny'])(
     const requestId = await requested();
     expect(broker.prepare).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
+    const options = JSON.parse(
+      (
+        await session.resources.read(
+          session.authority.action(requestId)!.optionsRef!,
+        )
+      ).toString(),
+    );
+    expect(options.v).toBe(1);
+    expect(options).not.toHaveProperty('inputRef');
     const approvedRef = (await checkpoint()).approval!.invocationRef!;
     const approved = (await session.resources.read(approvedRef)).toString();
     expiresAt = 2;
@@ -2407,7 +2696,7 @@ it.each(['allow', 'deny'])(
   },
 );
 
-it('asks one call at a time in the model order', async () => {
+it('binds successive approvals for the same tool to their own inputs', async () => {
   const batch = [
     {
       ...calls[1],
@@ -2415,7 +2704,11 @@ it('asks one call at a time in the model order', async () => {
       callId: 'call-0',
       args: { file_path: 'new.txt', content: 'new' },
     },
-    calls[1],
+    {
+      ...calls[1],
+      name: 'write_file',
+      args: { file_path: 'second.txt', content: 'second' },
+    },
   ];
   turn = createTurn(false, { mode: 'default' });
   const running = turn.execute(
@@ -2428,6 +2721,14 @@ it('asks one call at a time in the model order', async () => {
   );
   const first = await requested(1);
   expect(actionIds()).toEqual([first]);
+  const firstOptions = JSON.parse(
+    (
+      await session.resources.read(session.authority.action(first)!.optionsRef!)
+    ).toString(),
+  );
+  expect(firstOptions.inputRef).toEqual(
+    (await checkpoint()).approval!.invocationRef,
+  );
   await resolveHostedAction(session, waiters, first, answer('allow'));
   const second = await requested(2);
   const options = JSON.parse(
@@ -2437,7 +2738,23 @@ it('asks one call at a time in the model order', async () => {
       )
     ).toString(),
   );
-  expect(options).toMatchObject({ functionCallId: 'call-1', toolName: 'edit' });
+  expect(options).toMatchObject({
+    v: 2,
+    functionCallId: 'call-1',
+    toolName: 'write_file',
+    inputRef: (await checkpoint()).approval!.invocationRef,
+  });
+  expect(options.inputRef).not.toEqual(firstOptions.inputRef);
+  for (const [ref, input] of [
+    [firstOptions.inputRef, batch[0].args],
+    [options.inputRef, batch[1].args],
+  ] as const) {
+    const captured = JSON.parse((await session.resources.read(ref)).toString());
+    expect(JSON.parse(captured.payloadJson)).toEqual({
+      toolName: 'write_file',
+      input,
+    });
+  }
   await resolveHostedAction(session, waiters, second, answer('deny'));
   const responses = await running;
   expect(broker.execute).toHaveBeenCalledOnce();
@@ -2889,9 +3206,20 @@ it('asks before Shell in auto-edit mode and runs the edit when Shell is denied',
   );
   const requestId = await requested();
   const action = session.authority.action(requestId)!;
+  const options = JSON.parse(
+    (await session.resources.read(action.optionsRef!)).toString(),
+  );
+  expect(options).toMatchObject({
+    v: 2,
+    functionCallId: 'call-1',
+    toolName: 'run_shell_command',
+  });
   expect(
-    JSON.parse((await session.resources.read(action.optionsRef!)).toString()),
-  ).toMatchObject({ functionCallId: 'call-1', toolName: 'run_shell_command' });
+    JSON.parse(
+      JSON.parse((await session.resources.read(options.inputRef)).toString())
+        .payloadJson,
+    ).input,
+  ).toMatchObject({ command: 'rm -rf build' });
   expect(broker.registerPublisher).toHaveBeenCalledOnce();
   await resolveHostedAction(session, waiters, requestId, answer('deny'));
   const responses = await running;
@@ -2903,6 +3231,21 @@ it('asks before Shell in auto-edit mode and runs the edit when Shell is denied',
     undefined,
     'The Session owner denied this tool call, so it was not run.',
   ]);
+});
+
+it('admits exactly the declared native tools to the version 2 input preview', () => {
+  // The Java reader admits a closed set. A name missing on either side degrades
+  // to "Tool arguments are unavailable for this approval." with no error, so the
+  // set is pinned here and each name must still be a declared native tool.
+  expect(HOSTED_INPUT_PREVIEW_TOOLS).toEqual([
+    'read_file',
+    'write_file',
+    'edit',
+    'run_shell_command',
+  ]);
+  const declared = HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name);
+  for (const name of HOSTED_INPUT_PREVIEW_TOOLS)
+    expect(declared).toContain(name);
 });
 
 it('writes nothing once the Turn blocks during an answer', async () => {
@@ -3420,10 +3763,25 @@ it('runs PreToolUse after approval and asks again for changed arguments', async 
   expect(fire.mock.calls.map(([event]) => event)).toEqual([
     HookEventName.PermissionRequest,
   ]);
+  const original = (await checkpoint()).approval!.invocationRef!;
   await resolveHostedAction(session, waiters, first, answer('allow'));
   const second = await requested(2);
   expect(second).not.toBe(first);
   const revised = (await checkpoint()).approval!.invocationRef!;
+  expect(revised).not.toEqual(original);
+  for (const [requestId, inputRef] of [
+    [first, original],
+    [second, revised],
+  ] as const) {
+    const options = JSON.parse(
+      (
+        await session.resources.read(
+          session.authority.action(requestId)!.optionsRef!,
+        )
+      ).toString(),
+    );
+    expect(options).toMatchObject({ v: 2, inputRef });
+  }
   expect(
     JSON.parse(
       JSON.parse((await session.resources.read(revised)).toString())
@@ -4501,12 +4859,10 @@ function backgroundTurnRig(
     { owner, captureBytes: 1024 * 1024 },
     undefined,
     undefined,
-    undefined,
-    undefined,
-    undefined,
-    orchestrator as never,
-    undefined,
-    options.lane,
+    {
+      childRuns: orchestrator as never,
+      backgroundLane: options.lane,
+    },
   );
   return { order, orchestrator, turn, lane: options.lane };
 }
@@ -4658,18 +5014,18 @@ function monitorTurnRig(
     { owner, captureBytes: 1024 * 1024 },
     opts.lane !== undefined ? undefined : options,
     undefined,
-    undefined,
-    undefined,
-    undefined,
+
     {
-      admit: async () => {},
-      dispatchStarted: async () => {},
-      attach: async () => {},
-      settleFailed: async () => {},
-      record: () => undefined,
-    } as never,
-    monitors as never,
-    opts.lane,
+      childRuns: {
+        admit: async () => {},
+        dispatchStarted: async () => {},
+        attach: async () => {},
+        settleFailed: async () => {},
+        record: () => undefined,
+      } as never,
+      monitors: monitors as never,
+      backgroundLane: opts.lane,
+    },
   );
   return { order, monitors, options: opts.lane ?? options, turn };
 }
@@ -4964,18 +5320,17 @@ describe('hosted Monitor admission arm', () => {
       } as never,
       undefined,
       undefined,
-      undefined,
-      undefined,
-      undefined,
+
       {
-        admit: async () => undefined,
-        dispatchStarted: async () => undefined,
-        attach: async () => undefined,
-        settleFailed: async () => undefined,
-        record: () => undefined,
-        settleExited: async () => undefined,
-      } as never,
-      undefined,
+        childRuns: {
+          admit: async () => undefined,
+          dispatchStarted: async () => undefined,
+          attach: async () => undefined,
+          settleFailed: async () => undefined,
+          record: () => undefined,
+          settleExited: async () => undefined,
+        } as never,
+      },
     );
     const result = await bare.execute(
       [shellCall],
@@ -5044,11 +5399,7 @@ describe('hosted Monitor admission arm', () => {
       } as never,
       undefined,
       undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      monitors,
+      { monitors },
     );
     (bare as unknown as { publisher: unknown }).publisher = publisher;
     const resume = (
@@ -5075,11 +5426,6 @@ describe('hosted Monitor admission arm', () => {
         resources: {} as never,
         assertWritable: async () => {},
       } as never,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
       undefined,
       undefined,
     );
@@ -5111,12 +5457,7 @@ describe('hosted Monitor admission arm', () => {
       } as never,
       undefined,
       undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      { record: () => undefined } as never,
-      undefined,
+      { monitors: { record: () => undefined } as never },
     );
     const result = await bare.execute(
       [call],
