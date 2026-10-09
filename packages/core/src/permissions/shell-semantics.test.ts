@@ -677,14 +677,14 @@ describe('extractShellOperationsAcrossCommand', () => {
 });
 
 describe('dual quote readings for backslash payloads (#12246 review)', () => {
-  it("pins the ANSI-C escape regime: $'…' spans process escapes (#R1-2)", () => {
+  it("pins the ANSI-C escape regime: $'…' spans process escapes (#12246-R1-2)", () => {
     // bash reads $'a\' ; rm -rf src/keepme' as ONE printf argument (the \'
     // is an escaped quote in ANSI-C); the bash-accurate reading must not
     // split at that `;`. Neither reading may publish the phantom rm op.
     expect(across(`printf $'a\\' ; rm -rf src/keepme'`)).toEqual([]);
   });
 
-  it('escalates quoting-artifact cd targets to cwdUnknown instead of a phantom cwd (#R1-3)', () => {
+  it('escalates quoting-artifact cd targets to cwdUnknown instead of a phantom cwd (#12246-R1-3)', () => {
     // The bash reading re-segments correctly but the cd target `x\;cd /etc`
     // is a quoting artifact no real directory has; it must not become a
     // concrete cwd writes are attributed to.
@@ -698,29 +698,37 @@ describe('dual quote readings for backslash payloads (#12246 review)', () => {
     });
   });
 
-  it('threads the reading through a bash -lc wrapper (#R1-5)', () => {
+  it('threads the reading through a bash -lc wrapper (#12246-R1-5)', () => {
     const unwrapped = across(
       `cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json`,
     );
     const wrapped = across(
       `bash -lc "cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json'"`,
     );
-    expect(wrapped).toEqual(unwrapped);
+    // The unwrapped scan ends balanced, so its write keeps the trusted
+    // attribution; the wrapped inner payload ends in an open quote, which
+    // routes it through the merge branch where the collision now unions the
+    // escalation flags instead of dropping them (#12280 R2-3).
+    expect(unwrapped).toEqual([write(REPO_SETTINGS)]);
+    expect(wrapped).toEqual([uncertainWrite(REPO_SETTINGS)]);
   });
 
   it.each([
     [`echo 'a\\' # trailing && touch /tmp/x`],
     [`echo 'a\\' # trailing | touch /tmp/x`],
-  ])('pins the union op set for the comment-shape row %s (#R1-6)', (cmd) => {
-    // bash runs only the echo (the `#` opens a comment); neither quote
-    // reading models comments, so the bash reading splits at the `&&`/`|`
-    // and emits a phantom touch op. The phantom is pre-existing (the union
-    // walk at the merge base produced the same op), and comment modeling
-    // belongs to the #11882 umbrella.
-    expect(across(cmd)).toEqual([write('/tmp/x')]);
-  });
+  ])(
+    'pins the union op set for the comment-shape row %s (#12246-R1-6)',
+    (cmd) => {
+      // bash runs only the echo (the `#` opens a comment); neither quote
+      // reading models comments, so the bash reading splits at the `&&`/`|`
+      // and emits a phantom touch op. The phantom is pre-existing (the union
+      // walk at the merge base produced the same op), and comment modeling
+      // belongs to the #11882 umbrella.
+      expect(across(cmd)).toEqual([write('/tmp/x')]);
+    },
+  );
 
-  it('keeps a hard deny for a command that is unbalanced under the bash reading (#R1-11)', () => {
+  it('keeps a hard deny for a command that is unbalanced under the bash reading (#12246-R1-11)', () => {
     // bash rejects `cd '.qwen\'; echo x > settings.json'` with an
     // unterminated quote — nothing executes. The bash reading splits at the
     // `;` and reports the write (the escape-everywhere reading keeps one
@@ -902,7 +910,7 @@ describe('R1 review round: comment desync, union-merge cwd, artifact spans', () 
   // bash's reading treats as a quoted blob. A comment anywhere the scanners
   // do not model forces the merge walk too; gating on the open quote alone
   // drops the write and the deny rule never sees it (#12280 R1-1).
-  it('merges the write a comment apostrophe balances away from the bash scan (#R1-1)', () => {
+  it('merges the write a comment apostrophe balances away from the bash scan (#12280-R1-1)', () => {
     expect(
       across(
         `cd .qwen ; echo 'a\\' ; echo x > one.txt ; echo done # note '\necho {} > settings.json # trailing '`,
@@ -914,7 +922,7 @@ describe('R1 review round: comment desync, union-merge cwd, artifact spans', () 
   // re-walking under the escape-everywhere reading alone from the original
   // cwd loses the `cd sub` and publishes a phantom /repo/f next to the real
   // /repo/sub/f (#12280 R1-5).
-  it('merge walk keeps the bash-found cd boundaries (#R1-5)', () => {
+  it('merge walk keeps the bash-found cd boundaries (#12280-R1-5)', () => {
     expect(
       across(`echo y > g ; echo 'a\\' ; cd sub ; echo x > f # note '`),
     ).toEqual([write('/repo/g'), write('/repo/sub/f')]);
@@ -926,7 +934,7 @@ describe('R1 review round: comment desync, union-merge cwd, artifact spans', () 
   // require a metacharacter in the word; without one it became a trusted
   // static cwd and the write was published under a phantom /repo/x path with
   // no cwd-unknown flags (#12280 R1-3).
-  it('escalates a cd target only the union split produces (#R1-3)', () => {
+  it('escalates a cd target only the union split produces (#12280-R1-3)', () => {
     expect(
       across(
         `cd 'x\\'';echo ' & cd sub ; echo # note '\necho {} > docs/plan.md`,
@@ -939,12 +947,88 @@ describe('R1 review round: comment desync, union-merge cwd, artifact spans', () 
   // artifact; only a finer cut strictly inside the segment's span marks one.
   // Substring containment escalated these genuine directories and lost the
   // concrete paths a deny rule cites (#12280 R1-2).
-  it('resolves a genuine directory whose text contains a sibling segment (#R1-2)', () => {
+  it('resolves a genuine directory whose text contains a sibling segment (#12280-R1-2)', () => {
     expect(
       across(`cd '/opt/R&D\\tools' ; ls ; echo {} > settings.json`),
     ).toEqual([dir('/opt/R&D/tools'), write('/opt/R&D/tools/settings.json')]);
     expect(
       across(`cd 'C:\\build\\R&D' && build && echo {} > settings.json`),
     ).toEqual([write('C:/build/R&D/settings.json')]);
+  });
+});
+
+describe('R2 review round: comment-continuation desync, merge flag union', () => {
+  // The segment splitter suppresses `\<newline>` as a continuation even
+  // where the backslash sits inside a `#` comment, but bash ends the comment
+  // at the newline regardless. Emitting that newline from the comment cut
+  // glued the next line's first word onto the `cd` operand list (tokenize
+  // splits on space/tab only), so a `cd` bash really performs de-resolved
+  // to cwdUnknown and a hard deny dropped to an ask. The cut now stops at
+  // such a comment, leaving the remainder as the separate command bash
+  // sees (#12280 R2-2).
+  it.each([
+    'cd .qwen # note \\\necho x ; echo {} > settings.json',
+    'cd .qwen # note \\\\\\\necho x ; echo {} > settings.json',
+    'cd .qwen # note \\\n\techo x ; echo {} > settings.json',
+    'cd .qwen # note \\\n  && echo {} > settings.json',
+    'pushd .qwen # note \\\necho x ; echo {} > settings.json',
+  ])(
+    'keeps the cd resolution when a comment ends in backslashes: `%s` (#12280-R2-2)',
+    (command) => {
+      expect(across(command)).toEqual([write(REPO_SETTINGS)]);
+    },
+  );
+
+  // The merge branch runs only where the bash scan cannot be trusted to
+  // have seen the whole command, so a key collision there must not drop the
+  // losing copy's escalation flags; the bash copy still wins attribution
+  // (#12280 R2-3).
+  it('keeps the escalation flags when a merge collision drops the extra copy (#12280-R2-3)', () => {
+    expect(across(`echo done # note 'a\\''\ncd 'x\\' ; touch f`)).toEqual([
+      uncertainWrite('/repo/f'),
+    ]);
+  });
+
+  // bash reads the `\'` inside `'a\'` as literal, so its scan closes the
+  // single quote early and the later `"` opens a double quote that never
+  // closes: the `; echo x > f` tail sits inside what bash treats as a quoted
+  // blob (bash itself refuses the whole line, verified against /bin/bash).
+  // The other reading closes the single quote at `b'` and still sees the
+  // write, and the merge must keep it (#12280 R2-7).
+  it('merges the write hidden behind an unterminated double quote (#12280-R2-7)', () => {
+    expect(across(`echo y > g ; echo 'a\\' ; echo "b' ; echo x > f`)).toEqual([
+      write('/repo/g'),
+      write('/repo/f'),
+    ]);
+  });
+
+  // A `cd` target is only trusted when the analysis can show bash enters
+  // exactly that directory. Glob and tilde spellings expand at runtime, an
+  // erased process substitution under-counts the operands (bash fails the
+  // cd with too many arguments), and an option word bash rejects leaves the
+  // shell where it started (#12280 R2-1).
+  it.each([
+    ['cd * ; echo {} > .qwen/settings.json', REPO_SETTINGS],
+    ['cd su* ; echo {} > settings.json', '/repo/settings.json'],
+    ['cd {a,b} ; echo {} > settings.json', '/repo/settings.json'],
+    ['cd ~- ; echo {} > settings.json', '/repo/settings.json'],
+    ['cd -x ; echo {} > .qwen/settings.json', REPO_SETTINGS],
+    ['cd backup >(tee log) ; cd sub ; echo {} > f', '/repo/sub/f'],
+  ])(
+    'escalates a cd bash does not provably perform: `%s` (#12280-R2-1)',
+    (command, expectedPath) => {
+      expect(across(command)).toEqual([uncertainWrite(expectedPath)]);
+    },
+  );
+
+  // bash really does swallow the operand into the comment and perform a bare
+  // `cd` (to $HOME) here; what the guard must never publish is the raw
+  // newline inside a path (#12280 R2-2).
+  it('publishes no raw-newline path for the operand-swallowing comment (#12280-R2-2)', () => {
+    const result = across('cd # note \\\nsub ; echo {} > settings.json');
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ virtualTool: 'write_file' });
+    expect(result[0]!.filePath).not.toContain('\n');
+    expect(result[0]!.cwdUnknown).toBeUndefined();
   });
 });
