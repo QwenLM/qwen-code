@@ -96,6 +96,14 @@ backfill original authority. Current upgrade checks include main V53/V54,
 request-only V55 and activation V56, preserving old rows, checksums and null
 native grants.
 
+The later merge with main `e6e2c9efd` includes published V55 channel instances.
+A compiled Flyway schema test reproduces the duplicate V55 before repair. Keep
+that published migration and renumber only the three unpublished CSI migrations
+to V56/V57/V58 without changing their SQL bytes or order. Clean stale target
+resources before building and verify the complete source/packaged inventory and
+upgrade sequence through V58. Earlier unpublished databases still require a
+separate explicit migration strategy and are not backfilled by this change.
+
 Root Session creation writes both creator and owner actor keys using main's
 same original actor bytes, plus the CSI request pin when privately constructed.
 Current CSI fixtures use main's OPERATOR/READER role semantics; historical

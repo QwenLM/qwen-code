@@ -792,6 +792,13 @@ V55/V56/V57，SQL 字节不变；首个原生候选的 V55 grant migration 现�
 turn 持久落定之后。Migration 与验证要求见完整双语 lifecycle-main 集成设计。
 这些集成检查不开放冷恢复或物理门禁。
 
+后续与 main `e6e2c9efd` 合并，保留其已发布的 V55 channel instance migration。
+实际已编译 Flyway schema test 复现了它与未发布 CSI request migration 的
+V55 冲突。仅将三个 Draft CSI 文件顺延为 V56/V57/V58，SQL 字节和顺序完全
+保持；已发布 V53/V54/V55 不变。全新构建清理旧 target resource，并校验完整
+migration inventory、打包字节及截至 V58 的升级序列。更早未发布编号的数据库
+仍不支持自动升级。本次 migration 修复不代表实现或验收 C4、C6、C8 或完整 K2。
+
 ### 7.5 当前提交的真实冷拒绝基线 B0
 
 2026-10-09 对 `e8f11063463f846ab807764ede8e9aad272204f2` 完成一次全新自有 MySQL 冷重启。原 Read、Write、Edit 三项 SQL success 与 receipt 已持久化；最后 Edit receipt revision 23 已提交、message/resolve 尚未交付时，仅终止注册旧 Main/Hosted，保留原 worker、DB 与文件实例。新 Main/Hosted 使用原 request/session/prompt，等待数据库自然过期后重入。最早 native writer acquire 返回 409 `csi_original_writer_unavailable`；Hosted attach 的 503 `csi_operation_unavailable` 是独立包装结果。

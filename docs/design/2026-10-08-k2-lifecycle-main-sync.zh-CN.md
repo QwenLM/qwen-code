@@ -79,6 +79,12 @@ V53/V54/V55 改为 V55/V56/V57，SQL 字节与顺序不变。已经应用更早�
 包含 main V53/V54、仅 request 的 V55 和 activation V56，保留旧行、checksum
 和 native grant 的 NULL。
 
+后续与 main `e6e2c9efd` 合并包含已发布的 V55 channel instance migration。
+已编译 Flyway schema test 在修复前复现 V55 重复。保留该已发布 migration，
+只把三个未发布 CSI migration 顺延为 V56/V57/V58，SQL 字节与顺序不变。
+构建前清理旧 target resource，验证完整 source/packaged inventory 及截至
+V58 的升级序列。更早未发布编号的数据库仍需独立明确迁移方案，本次不回填。
+
 Root Session 创建同时用 main 的同一原始 actor 字节写 creator 与 owner key，
 私有构造时另写 CSI request pin。当前 CSI fixture 使用 main 的
 OPERATOR/READER role 语义；历史 migration fixture 保留旧 schema 字段。

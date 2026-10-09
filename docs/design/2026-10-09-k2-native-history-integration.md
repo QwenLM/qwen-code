@@ -1020,6 +1020,15 @@ occurs after durable completed-turn settlement through the shared runner.
 See the paired lifecycle-main integration design for migration and validation
 requirements. None of these integration checks opens cold or physical gates.
 
+The subsequent merge with main `e6e2c9efd` preserves its published V55 channel
+instance migration. An actual compiled Flyway schema test reproduced a duplicate
+V55 with the unpublished CSI request migration. Only the three Draft CSI files
+move to V56/V57/V58, with identical SQL bytes and order; published V53/V54/V55
+remain unchanged. Fresh builds remove stale target resources and verify the
+complete migration inventory, packaged bytes and upgrade sequence through V58.
+Earlier unpublished-number databases remain outside automatic upgrade support.
+This migration repair does not implement or accept C4, C6, C8 or full K2.
+
 ### 7.5 Genuine current-head cold refusal baseline B0
 
 On 2026-10-09, one fresh owned MySQL cold restart ran on `e8f11063463f846ab807764ede8e9aad272204f2`. The original Read, Write and Edit SQL success results and receipts were durable. After final Edit receipt revision 23 committed but before its message/resolve was delivered, only the registered old Main/Hosted were killed; the original worker, DB and file instance remained. New Main/Hosted reentered the original request/session/prompt after natural database expiry. The earliest native writer acquire returned 409 `csi_original_writer_unavailable`; Hosted attach separately wrapped it as 503 `csi_operation_unavailable`.
