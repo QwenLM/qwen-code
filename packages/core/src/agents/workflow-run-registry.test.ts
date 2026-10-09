@@ -9,6 +9,10 @@ import { describe, it, expect, vi } from 'vitest';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import {
+  TASK_NOTIFICATION_CLOSE,
+  TASK_NOTIFICATION_OPEN,
+} from '../utils/xml.js';
+import {
   AgentEventEmitter,
   AgentEventType,
   type AgentApprovalRequestEvent,
@@ -1778,6 +1782,15 @@ describe('WorkflowRunRegistry', () => {
 
     r.setCompletionCallback(undefined);
     expect(r.hasCompletionCallback()).toBe(false);
+  });
+
+  it('anchors a real completion in the shared task-notification tags', () => {
+    const { r, entry, text } = background('wf_envelope');
+    r.complete(entry.runId, 'ok', 1_000);
+
+    const modelText = text();
+    expect(modelText.startsWith(TASK_NOTIFICATION_OPEN)).toBe(true);
+    expect(modelText.endsWith(TASK_NOTIFICATION_CLOSE)).toBe(true);
   });
 
   // A backgrounded run's notification lands in a later turn, after the handle
