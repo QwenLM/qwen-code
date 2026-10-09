@@ -31,7 +31,10 @@ import {
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
-import { computeInitialTurnFromHistory } from './session-turn-state.js';
+import {
+  collectSessionTurnState,
+  computeInitialTurnFromHistory,
+} from './session-turn-state.js';
 import type { Content, Part } from '@google/genai';
 import type { FileDiff, McpAppResultDisplay } from '../tools/tools.js';
 import {
@@ -1320,6 +1323,71 @@ describe('ChatRecordingService', () => {
   });
 
   describe('rewindRecording', () => {
+    it.each(['live', 'full restore', 'selective restore'])(
+      'resolves legacy boundaries with an invisible ordinary turn through %s',
+      async (mode) => {
+        let records: ChatRecord[];
+        if (mode === 'live') {
+          turn('A', 'reply A');
+          svc.recordUserMessage([
+            { inlineData: { mimeType: 'image/png', data: 'image' } },
+          ]);
+          reply('reply image');
+          turn('C', 'reply C');
+          turn('D', 'reply D');
+          records = await flushedAll();
+        } else {
+          records = resumedChain(
+            null,
+            ['a', 'user', 'A'],
+            ['ra', 'assistant', 'reply A'],
+            [
+              'image',
+              'user',
+              '',
+              {
+                message: {
+                  role: 'user',
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'image' } },
+                  ],
+                },
+              },
+            ],
+            ['ri', 'assistant', 'reply image'],
+            ['c', 'user', 'C'],
+            ['rc', 'assistant', 'reply C'],
+            ['d', 'user', 'D'],
+            ['rd', 'assistant', 'reply D'],
+          );
+          if (mode === 'full restore') {
+            svc.rebuildTurnBoundaries(records);
+          } else {
+            const state = collectSessionTurnState(records, 'test-session-id');
+            svc = new ChatRecordingService(mockConfig, undefined, false, {
+              lastCompletedUuid: 'rd',
+              turnParentUuids: state.turnParentUuids,
+              turnPromptIds: state.turnPromptIds,
+            });
+          }
+        }
+        const target = records.find(
+          (r) => r.message?.parts?.[0]?.text === 'D',
+        )!;
+        const parent = records.find(
+          (r) => r.message?.parts?.[0]?.text === 'reply C',
+        )!;
+        const key = `legacy-record:${target.uuid}`;
+        expect(svc.getRewindTurnIndex(key)).toBe(3);
+        svc.rewindRecording(svc.getRewindTurnIndex(key), { truncatedCount: 2 });
+        await svc.flush();
+        expect(
+          writes().findLast((r) => r.subtype === 'rewind')?.parentUuid,
+        ).toBe(parent.uuid);
+        expect(svc.getRewindTurnIndex(key)).toBe(-1);
+      },
+    );
+
     it.each(['live', 'full restore', 'selective restore'])(
       'resolves prompt boundaries through %s without counting automatic records',
       async (mode) => {

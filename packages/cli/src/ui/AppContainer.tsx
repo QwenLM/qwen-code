@@ -4260,7 +4260,9 @@ export const AppContainer = (props: AppContainerProps) => {
         const needsConversation =
           option === 'conversation' || option === 'both';
         const llmClient = needsConversation ? config.getLlmClient() : null;
+        const recordingService = config.getChatRecordingService();
         let apiTruncateIndex = -1;
+        let recordingTurnIndex = -1;
         let conversationSkippedNoClient = false;
         if (needsConversation) {
           if (!llmClient) {
@@ -4304,6 +4306,27 @@ export const AppContainer = (props: AppContainerProps) => {
                 return;
               }
               return;
+            }
+            if (recordingService) {
+              const rewindId =
+                userItem.type === 'user'
+                  ? (userItem.promptId ?? userItem.rewindId)
+                  : undefined;
+              recordingTurnIndex = rewindId
+                ? recordingService.getRewindTurnIndex(rewindId)
+                : -1;
+              if (recordingTurnIndex < 0) {
+                historyManager.addItem(
+                  {
+                    type: 'error',
+                    text: t('Rewind failed: {{error}}', {
+                      error: 'This turn has no unique recorded boundary.',
+                    }),
+                  },
+                  Date.now(),
+                );
+                return;
+              }
             }
           }
         }
@@ -4408,8 +4431,8 @@ export const AppContainer = (props: AppContainerProps) => {
             Date.now(),
           );
 
-          config.getChatRecordingService()?.rewindRecording(
-            targetTurnIndex,
+          recordingService?.rewindRecording(
+            recordingTurnIndex,
             { truncatedCount: effectiveLength - truncatedUi.length },
             !hasRestoreFailure
               ? config

@@ -87,6 +87,11 @@ an ordinary user record's key. Their text cannot move a linked target's cut.
 The compatibility check must include the genuine placeholder-text prompt that
 previously stayed in model history after the visible turn was removed.
 
+Ink resolves the recorded boundary independently by the same source key, not
+the visible turn count. An ordinary image-only record may have no visible user
+row but must not shift the retained recording branch. Missing or duplicated
+recorded associations refuse before mutation when recording is enabled.
+
 ACP selects targets by their snapshot identity, not a second classification of
 model text. It resolves the recorder's complete-branch boundary by that same
 prompt ID: retries can add snapshots without adding recorded user turns, so a

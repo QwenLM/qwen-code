@@ -85,7 +85,10 @@ import {
   type BranchPoint,
   type BranchToolCallIdentity,
 } from './branch-points.js';
-import { getApiHistoryPromptId } from './session-api-history.js';
+import {
+  getApiHistoryPromptId,
+  getRecordRewindId,
+} from './session-api-history.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
@@ -2337,7 +2340,6 @@ export class ChatRecordingService {
     try {
       this.trackUserDisplayTextForTitle(promptPayload?.displayText);
       this.turnParentUuids.push(this.lastRecordUuid);
-      this.turnPromptIds.push(promptId);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
         ...(daemonPromptId ? { daemonPromptId } : {}),
@@ -2346,6 +2348,7 @@ export class ChatRecordingService {
         ...(promptPayload ? { systemPayload: promptPayload } : {}),
         ...(promptId ? { promptId } : {}),
       };
+      this.turnPromptIds.push(getRecordRewindId(record));
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
@@ -3237,7 +3240,7 @@ export class ChatRecordingService {
         // Reconstructed histories can start mid-chain; the persisted edge is
         // the source of truth, not the previous item in this sliced list.
         this.turnParentUuids.push(record.parentUuid ?? null);
-        this.turnPromptIds.push(record.promptId);
+        this.turnPromptIds.push(getRecordRewindId(record));
       }
     }
     // Ensure lastRecordUuid points to the end of the reconstructed chain.

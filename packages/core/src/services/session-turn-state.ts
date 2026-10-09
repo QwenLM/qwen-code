@@ -5,6 +5,7 @@
  */
 
 import type { ChatRecord } from './chatRecordingService.js';
+import { getRecordRewindId } from './session-api-history.js';
 
 export interface SessionTurnState {
   initialTurn: number;
@@ -98,9 +99,7 @@ export function getSessionTurnRecordHint(
     ...(turnParentUuid !== undefined
       ? {
           turnParentUuid,
-          ...(typeof record.promptId === 'string'
-            ? { turnPromptId: record.promptId }
-            : {}),
+          turnPromptId: getRecordRewindId(record),
         }
       : {}),
     ...(typeof backgroundTask?.taskId === 'string'
