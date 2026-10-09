@@ -57,7 +57,7 @@ export function ManagedSessionCwdControl({
   const control = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [path, setPath] = useState('');
-  const [basis, setBasis] = useState<{ cwd: string; revision: number }>();
+  const [basis, setBasis] = useState<{ revision: number }>();
   const workspace = summary.workspace;
   const revision = workspace?.contextRevision;
   const capable =
@@ -99,7 +99,7 @@ export function ManagedSessionCwdControl({
                   ? (cwd.target ?? workspace.cwdRelative)
                   : workspace.cwdRelative,
               );
-              setBasis({ cwd: workspace.cwdRelative, revision: revision! });
+              setBasis({ revision: revision! });
               setOpen(true);
             }}
           >
@@ -182,12 +182,7 @@ export function ManagedSessionCwdControl({
                   type="button"
                   variant="outline"
                   disabled={!capable || Boolean(reason)}
-                  onClick={() =>
-                    setBasis({
-                      cwd: workspace.cwdRelative,
-                      revision: revision!,
-                    })
-                  }
+                  onClick={() => setBasis({ revision: revision! })}
                 >
                   {t('managed.cwd.useCurrent')}
                 </Button>

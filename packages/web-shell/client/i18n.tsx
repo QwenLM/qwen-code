@@ -200,7 +200,7 @@ const EN: Messages = {
   'managed.cwd.unconfirmed':
     'The directory change is not confirmed yet. Continue confirming the original request.',
   'managed.cwd.unconfirmedForbidden':
-    'Your account cannot confirm this change. Its result remains unconfirmed.',
+    'Your account cannot confirm this change. Its result remains unconfirmed, and sending stays blocked until the server settles it or you open a new tab.',
   'managed.cwd.busy':
     'Finish the active task, approval or unconfirmed request before changing directory.',
   'managed.cwd.invalid': 'The directory is invalid or cannot be accessed.',
@@ -4481,7 +4481,7 @@ const ZH: Messages = {
   'managed.cwd.confirm': '继续确认',
   'managed.cwd.unconfirmed': '目录切换结果尚未确认，请继续确认原请求。',
   'managed.cwd.unconfirmedForbidden':
-    '当前账号无权确认此操作，切换结果仍待确认。',
+    '当前账号无权确认此操作，切换结果仍待确认；在服务器给出最终结果或新开标签页之前，发送将保持禁用。',
   'managed.cwd.busy': '请先完成正在执行的任务、审批或未确认请求，再切换目录。',
   'managed.cwd.invalid': '目录无效或无法访问。',
   'managed.cwd.conflict': '当前目录已变化，请检查后重新提交。',
