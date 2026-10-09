@@ -48,7 +48,7 @@ workspace registry/access 行没有任何生产置备路径 —— 今天只有�
 - **OPERATOR** —— READER 加「可操作但不可删除」：提交与取消 Turn、改名、变更 cwd、在 Workspace 上创建 Session、回答其 Action（审批）。这修复被阻塞的审批交接。
 - **OWNER** —— OPERATOR 加生命周期：close、archive、unarchive、delete。
 
-拒绝契约按 #12867：无读授权 → `404`；有读但操作权限不足 → `403`，按族命名（`session_operation_forbidden`、`action_forbidden`）。submitter 族的 `409 workspace_unavailable` 特例被移除（第 6 节）。
+拒绝契约按 #12867：无读授权 → `404`；有读但操作权限不足 → `403`，按族命名（`session_operation_forbidden`、`action_forbidden`）。submitter 族的 `409 workspace_unavailable` 特例被移除（第 5 节）。
 
 ### D2 —— 角色属于 Workspace 绑定
 
@@ -77,7 +77,7 @@ ALTER TABLE managed_workspace_access
 
 复合语句按仓内迁移先例（V7、V12、V24、V40）拆成每动作一条；`role` 以无默认值到达，像布尔省略时一样响亮失败，先回填每一既有行再设 `NOT NULL`，`CHAR_LENGTH` 钉则抵消 utf8mb4 的 PAD-SPACE 等值把 `'READER '` 存成 `READER`。先删除无可读行再回填，才使这次改动对每一个可达授权行都只是改名。`role` 是唯一存储词表；不双写。`WorkspaceAccess` 枚举变为 `NONE / READER / OPERATOR / OWNER`（READ→READER、CREATE→OPERATOR）；`OWNER` 蕴含 `OPERATOR` 蕴含 `READER`。每个 store 读取点（`canRead`、`findReadable`、`listReadable`、`canCreateSession`、`resolveForCreation`、`authorizePassiveAttachment`、SSE 读授权复查、list 路由的 SQL 过滤）保持当前判定不变，布尔由 `role` 重新推导 —— 这是一次行为不可见的内部改动，由现有测试套件钉住。`NONE` 不可存储（CHECK 排除它）；它保留为「无行」的领域值。
 
-授权置备保持带外，与今天两个布尔的置备方式一致：fixture/部署 SQL 写行；本切片不出现 HTTP 授权管理路由（第 7 节）。
+授权置备保持带外，与今天两个布尔的置备方式一致：fixture/部署 SQL 写行；本切片不出现 HTTP 授权管理路由（第 6 节）。
 
 ### D3 —— Session 记录持有 owner，默认为其创建者
 
@@ -106,13 +106,13 @@ owner 的更新路径（移交命令）是建在此列之上的后续切片，�
 | Artifacts（元数据）                                                   | actor + `can_read`                               | actor + READER —— 不变                                               |
 | Artifact 内容字节                                                     | actor + 读 + 部署策略                            | actor + READER + 策略 —— 不变                                        |
 | Workspace 发现 list/get                                               | actor，按 `can_read` 过滤                        | actor，按角色 ≥ READER 过滤 —— 不变                                  |
-| Legacy（未绑定）Session 路由                                          | 租户级                                           | 租户级 —— 不变（第 7 节）                                            |
+| Legacy（未绑定）Session 路由                                          | 租户级                                           | 租户级 —— 不变（第 6 节）                                            |
 | Agent 定义                                                            | 租户级                                           | 租户级 —— 不变                                                       |
 | 内部 store / tool-publication 路由                                    | writer HMAC，无 actor                            | 不变                                                                 |
 
 所有重读授权的在线行为（SSE 读授权复查、artifact 流中重验、执行期 `authorizePassiveAttachment`）按 `role` 以相同阈值查询，撤销因此保持今天的含义。
 
-在绑定臂上，submitter 族与 cwd 变更还要额外担保 Session 的「创建者键」执行事实成立 —— Registry 仍精确支撑该绑定并处于 ACTIVE，且 Workspace 创建命令记录的 actor 保持 OPERATOR 及以上，因为被准入的工作以该 actor 的授权执行（执行授权复查的是同一条 join）。这些事实失效时按族给出域名级 `409 workspace_unavailable`，在准入时同步拒绝，而不是让一个注定失败的 Turn 异步落空。cwd 操作的结算复查的是记录的创建者键事实，而不是发起调用方的授权 —— 准入之后才降级发起者本人不会改变结算结果（操作行只存 `actor_digest` 而非 actor 键，没有可复查发起者的存储）；W2 设计里「准入后撤销授权仍阻止变更」一句的适用范围限定为该记录 actor。
+在绑定臂上，submitter 族与 cwd 变更还要额外担保 Session 的「创建者键」执行事实成立 —— Registry 仍精确支撑该绑定并处于 ACTIVE，且 Workspace 创建命令记录的 actor 保持 OPERATOR 及以上，因为被准入的工作以该 actor 的授权执行（执行授权复查的是同一条 join）。这些事实失效时按族给出域名级 `409 workspace_unavailable`，在准入时同步拒绝，而不是让一个注定失败的 Turn 异步落空。cwd 操作的结算同时复查记录的创建者键事实与 V54 持久化的发起者角色 —— 准入之后降级任何一个 actor 都以 `workspace_unavailable` 失败（V54 前的存量行没有发起者键，仍只按创建者键事实结算）；这正是 W2 设计「准入后撤销授权仍阻止变更」在放宽后的准入下应有的形态。
 
 ### D5 —— 版本化 surface 注册表
 
@@ -155,7 +155,7 @@ A ∥ B 是安全的：文件不相交（A 纯新增；B 改 store 侧）。C �
 与 issue 一致，外加其中点名的显式延后：
 
 - Legacy（未绑定）Session 本切片保持租户级。收紧它们（自 V40 起它们也记录创建者）跟进为 #13618；把 R1 扩到 legacy 会让本切片的爆炸半径翻倍，却修不好任何一个被点名的产品阻塞。
-- 没有移交命令：`owner_actor_key` 与其触发的角色校验在此落地；移交操作（幂等命令、仅 owner 准入、审计事件）是独立切片，跟进为 #13617。
+- 没有移交命令：`owner_actor_key` 与其触发的角色校验在此落地；移交操作（幂等命令、仅 owner 准入、审计事件）是独立切片，跟进为 #13617。注意 owner 列驱动的是哪些族：生命周期与 Action 回答以它为键，submit、cancel、rename、cwd 变更与执行本身仍以创建命令 actor 为键（执行授权的 join 点名的是创建命令 actor），因此移交切片还必须决定传输是重指创建命令、还是重键执行授权 —— 或接受新 owner 邻着一个不可用 Session 的状态。
 - submitter 族命令幂等键不含 actor 项：操作台账自 D4 起按 actor 限定键，但 `managed_agent_command` 本切片保持 `(tenant_id, operation, idempotency_key)` 域 —— 按 actor 限定它（同时不破坏并发插入所依赖的唯一索引去重形态）跟进为 #13619。
 - 没有 HTTP 授权管理路由（`actor_manager` 置备）：workspace 授权今天经带外置备到达，本切片用 `role` 列扩展同一通道。若部署方需要 HTTP 管理的授权，那是独立的控制面切片，并自带过期语义 —— 授权行随 workspace 绑定生死，从不随某个 Session。
 - 不改变 `AuthenticatedTenantActor` 的供给方式，不给 SIGNED 模式加声明，不动 `java_durable` 准入，不含容量上限，不含 F 阶段故障门禁。
@@ -172,7 +172,7 @@ A ∥ B 是安全的：文件不相交（A 纯新增；B 改 store 侧）。C �
 - [ ] 每条已实现的公开、WebShell 与内部路由都出现在 `SurfaceRegistry` 中；已实现路由缺注册条目 —— 或为已删路由留的腐旧条目 —— 使构建失败（R2）。
 - [ ] 逐规则类探针矩阵在两个面上通过，含 404-低于读者 / 403-低于操作者的契约（R2，#12867 语义）。
 - [ ] Workspace 上的第二个 OPERATOR 能在公开路由与 WebShell 路由上回答一条待答审批（R1 被阻塞行为之一）。
-- [ ] `owner_actor_key` 存在，新绑定与 legacy 创建都默认写入创建者，并驱动原先每个创建者校验（移交词表就绪；命令本身为后续）（R1 被阻塞行为之二的存储半）。
+- [ ] `owner_actor_key` 存在，新绑定与 legacy 创建都默认写入创建者，并驱动原先每个创建者校验（移交词表就绪；命令本身为后续）：本 PR 后生命周期与回答以它为键，submit/cancel/rename/cwd 与执行仍以创建命令 actor 为键，移交重键形态由 #13617 决定（R1 被阻塞行为之二的存储半）。
 - [ ] 契约 v1.34 记录角色、拒绝归一与能力广告规则；OpenAPI changelog 点名它们。
 - [ ] managed-agent-server 全套测试在 H2 上绿；runner 提供 MySQL 时 `mysql-integration` profile 绿。
 

@@ -100,7 +100,7 @@ Three roles, ordered NONE < READER < OPERATOR < OWNER, with the meaning
 The refusal contract is #12867's: no read grant → `404`; read but insufficient
 operate → `403`, named per family (`session_operation_forbidden`,
 `action_forbidden`). The `409 workspace_unavailable` anomaly on the submitter
-family is removed (section 6).
+family is removed (section 5).
 
 ### D2 — roles belong to the Workspace binding
 
@@ -155,7 +155,7 @@ remains the domain value for "no row".
 
 Grant provisioning stays out-of-band, exactly as the booleans are provisioned
 today: fixture/deployment SQL writes rows; no HTTP grant-management route
-appears in this slice (section 7).
+appears in this slice (section 6).
 
 ### D3 — the Session record keeps an owner, defaulting to its creator
 
@@ -204,7 +204,7 @@ map to OPERATOR, creators map to owner):
 | Artifacts (metadata)                                                      | actor + `can_read`                              | actor + READER — unchanged                                            |
 | Artifact content bytes                                                    | actor + read + deployment policy                | actor + READER + policy — unchanged                                   |
 | Workspace discovery list/get                                              | actor, filtered by `can_read`                   | actor, filtered by role ≥ READER — unchanged                          |
-| Legacy (unbound) Session routes                                           | tenant-wide                                     | tenant-wide — unchanged (section 7)                                   |
+| Legacy (unbound) Session routes                                           | tenant-wide                                     | tenant-wide — unchanged (section 6)                                   |
 | Agent definitions                                                         | tenant-scoped                                   | tenant-scoped — unchanged                                             |
 | Internal store / tool-publication routes                                  | writer HMAC, no actor                           | unchanged                                                             |
 
@@ -219,12 +219,13 @@ Workspace create command keeps OPERATOR or above, because the admitted work
 executes under that actor's grants (the execution authority re-verifies the
 same join). Their failure is the family's domain `409
 workspace_unavailable`, answered synchronously at admission rather than as
-an asynchronously failing Turn. A cwd operation's settlement re-verifies
-the recorded creator-keyed facts, never the initiating caller's grant, so
-an operation admitted before the initiator's own demotion commits (the
-operation row stores `actor_digest`, not the actor key, so no initiator
-re-check exists to revoke into); the W2 design's "grant revoked after
-admission still blocks the change" is scoped to the recorded actor.
+an asynchronously failing Turn. A cwd operation's settlement re-verifies both the recorded
+creator-keyed facts and the V54-persisted initiator's role, so an
+operation fails with `workspace_unavailable` when either actor is
+demoted after admission (pre-V54 rows carry no initiator key and settle
+on the creator-keyed facts alone); that is the W2 design's "grant
+revoked after admission still blocks the change", now covering the
+widened admission.
 
 ### D5 — the versioned surface registry
 
@@ -325,7 +326,13 @@ Same as the issue's, plus the explicit deferrals named there:
   named product block.
 - No handover command: `owner_actor_key` and the role checks it trips land
   here; the transfer operation (idempotent command, owner-only admission,
-  audit event) is its own slice, tracked as #13617.
+  audit event) is its own slice, tracked as #13617. Note which families the
+  owner column drives: lifecycle and Action respond key on it, while
+  submit, cancel, rename, cwd change and execution itself stay
+  create-command-keyed (the execution authority's join names the
+  create-command actor), so the handover slice must also decide whether
+  the transfer re-points the create command or re-keys execution — or
+  accepts a Session that is inoperable for its new owner.
 - No actor term in the submitter-family command idempotency key: the
   operation ledger is actor-scoped since D4, but `managed_agent_command`
   keeps its `(tenant_id, operation, idempotency_key)` domain this slice —
@@ -376,8 +383,10 @@ Same as the issue's, plus the explicit deferrals named there:
       public route and the WebShell route (R1's blocked behaviour #1).
 - [ ] `owner_actor_key` exists, defaults to creator on new bound and legacy
       creations, and drives every former creator check (vocabulary for
-      handover ready; the command itself is follow-up) (R1's blocked
-      behaviour #2, storage half).
+      handover ready; the command itself is follow-up): lifecycle and
+      respond key on it after this PR, while submit/cancel/rename/cwd and
+      execution stay on the create-command actor until #13617 decides the
+      transfer's re-keying (R1's blocked behaviour #2, storage half).
 - [ ] Contract v1.34 documents the roles, the refusal normalisation and the
       capability-advertisement rule; the OpenAPI changelog names them.
 - [ ] Full managed-agent-server suite green on H2; `mysql-integration`

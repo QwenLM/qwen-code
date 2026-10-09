@@ -506,14 +506,12 @@ class ManagedCwdChangeOperationTest {
         assertFailed(fixture, revokedId, revokedOp, "workspace_unavailable");
     }
 
-    // The settlement re-verifies the creator-keyed facts the admission
-    // certified, so an admitted operation is grandfathered past a demotion
-    // of only its initiator: the W2 revocation guard keys on the
-    // create-command actor, and the actor key of the initiator is not
-    // persisted on the operation (actor_digest only), so no initiator
-    // re-check exists to revoke into.
+    // V54: settlement re-checks the persisted initiator — an operation
+    // admitted before only its initiator's demotion fails with the W2
+    // guard's own code, and the directory never moves; a demoted creator
+    // hits the creator-keyed rung for the same outcome.
     @Test
-    void settlementKeepsAnAdmittedChangeWhenOnlyTheInitiatorDropped() {
+    void settlementFailsAnAdmittedChangeWhenOnlyTheInitiatorDropped() {
         Fixture fixture = fixture(true);
         String sessionId = fixture.createBoundSession(TENANT, WS);
         fixture.grant(TENANT, WS, "operator-colleague", "OPERATOR");
@@ -523,16 +521,59 @@ class ManagedCwdChangeOperationTest {
         assertThat(admitted.replayed()).isFalse();
         OperationRecord claimed = claim(fixture, sessionId,
                 admitted.operation().operationId(), "owner");
+        String kept = fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getCwdRelative();
         fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
                         + " 'READER' WHERE tenant_id = ? AND"
                         + " workspace_id = ? AND actor_id = ?", TENANT, WS,
                 "operator-colleague".getBytes(
                         java.nio.charset.StandardCharsets.UTF_8));
+        // The arrange step must land, or the settle assertion below is
+        // satisfied without ever exercising the initiator rung.
+        assertThat(fixture.jdbc.queryForObject("SELECT role FROM"
+                        + " managed_workspace_access WHERE tenant_id = ? AND"
+                        + " workspace_id = ? AND actor_id = ?", String.class,
+                TENANT, WS, "operator-colleague".getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8)))
+                .isEqualTo("READER");
         CwdChangeOutcome outcome = settle(fixture, sessionId,
                 claimed.operationId(), "owner", claimed.claimGeneration());
-        assertThat(outcome.completed()).isTrue();
+        assertThat(outcome.completed()).isFalse();
+        assertThat(outcome.failureCode()).isEqualTo("workspace_unavailable");
         assertThat(fixture.store.requireSession(TENANT, sessionId)
-                .workspace().getCwdRelative()).isEqualTo("services/b");
+                .workspace().getCwdRelative()).isEqualTo(kept);
+    }
+
+    // Full revocation of the initiator's row fails the same way.
+    @Test
+    void settlementFailsAnAdmittedChangeWhenTheInitiatorsRowIsDeleted() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        fixture.grant(TENANT, WS, "operator-colleague", "OPERATOR");
+        OperationAdmission admitted = begin(fixture, sessionId, "key",
+                "digest", "services/b", 1, "operator-colleague",
+                "digest-operator");
+        OperationRecord claimed = claim(fixture, sessionId,
+                admitted.operation().operationId(), "owner");
+        String kept = fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getCwdRelative();
+        fixture.jdbc.update("DELETE FROM managed_workspace_access"
+                        + " WHERE tenant_id = ? AND workspace_id = ? AND"
+                        + " actor_id = ?", TENANT, WS,
+                "operator-colleague".getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8));
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_workspace_access WHERE tenant_id = ? AND"
+                        + " workspace_id = ? AND actor_id = ?", Integer.class,
+                TENANT, WS, "operator-colleague".getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8)))
+                .isZero();
+        CwdChangeOutcome outcome = settle(fixture, sessionId,
+                claimed.operationId(), "owner", claimed.claimGeneration());
+        assertThat(outcome.completed()).isFalse();
+        assertThat(outcome.failureCode()).isEqualTo("workspace_unavailable");
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getCwdRelative()).isEqualTo(kept);
     }
 
     @Test

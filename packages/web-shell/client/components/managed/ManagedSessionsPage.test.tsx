@@ -547,6 +547,56 @@ describe('ManagedSessionsPage', () => {
     expect(respond).toHaveBeenCalledTimes(1);
   });
 
+  it('re-probes a role-based refusal through the check-again affordance', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    const respond = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+    provider = {
+      ...provider,
+      actions: {
+        listPending: vi.fn().mockResolvedValue([pendingAction]),
+        respond,
+      },
+    };
+    await render('s1');
+    const allow = () =>
+      Array.from(container.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Yes, allow once'),
+      ) as HTMLButtonElement;
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(allow().disabled).toBe(true);
+    const alert = container.querySelector('[role="alert"]') as HTMLElement;
+    expect(alert?.textContent).toContain(
+      "Only the Session's owner or a Workspace operator can answer this approval.",
+    );
+    // The latched refusal got its own re-probe affordance, rendered with no
+    // `loadError` in play, so a grant raised while the page is open can stick.
+    const again = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Retry loading approvals'),
+    ) as HTMLButtonElement;
+    expect(again).toBeTruthy();
+    await act(async () => {
+      again.click();
+      await flush();
+    });
+    expect(allow().disabled).toBe(false);
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps the next approval of the same Session unanswerable after a role-based refusal', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('s1', {

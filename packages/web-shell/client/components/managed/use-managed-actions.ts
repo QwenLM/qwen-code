@@ -266,19 +266,15 @@ export function useManagedActions(
 
   const retry = useCallback(() => {
     loadFailures.current = 0;
-    // The role row the refusal was decided from can be raised while the
-    // page stays open, so an explicit retry re-probes instead of keeping
-    // the card disabled for the life of the mount.
-    setForbiddenSessions((current) => {
-      if (sessionId === undefined || !current.has(sessionId)) {
-        return current;
-      }
-      const next = new Set(current);
-      next.delete(sessionId);
-      return next;
-    });
+    // One explicit retry re-probes every refusal latched this mount: the
+    // role row each of them was decided from can be raised while the page
+    // stays open, and the refused Session is not necessarily the selected
+    // one.
+    setForbiddenSessions((current) =>
+      current.size === 0 ? current : new Set(),
+    );
     setRevision((value) => value + 1);
-  }, [sessionId]);
+  }, []);
 
   return {
     action,

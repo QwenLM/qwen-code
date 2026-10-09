@@ -211,7 +211,11 @@ public class ManagedAgentStore implements AgentStateStore {
                     additiveLong(result, "result_context_revision"),
                     result.getString("error_code"),
                     hasColumn(result, "lifecycle_protocol_version")
-                            ? result.getInt("lifecycle_protocol_version") : 0);
+                            ? result.getInt("lifecycle_protocol_version") : 0,
+                    // NULL on a pre-V54 operation: those operations settle
+                    // against the creator-keyed facts alone.
+                    hasColumn(result, "actor_key")
+                            ? result.getBytes("actor_key") : null);
     private final RowMapper<OperationTarget> operationTargetMapper =
             (result, row) -> new OperationTarget(
                     result.getString("tenant_id"),
@@ -1026,14 +1030,17 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " actor_digest, idempotency_key, request_digest,"
                         + " state, admission_stage, delivery_state,"
                         + " session_status_before, target_cwd_relative,"
-                        + " expected_context_revision, available_at,"
-                        + " created_at, updated_at) VALUES"
+                        + " expected_context_revision, actor_key,"
+                        + " available_at, created_at, updated_at) VALUES"
                         + " (?, ?, ?, ?, ?, ?, ?, 'PENDING', 'JAVA_DURABLE',"
-                        + " 'PENDING', ?, ?, ?, ?, ?, ?)",
+                        + " 'PENDING', ?, ?, ?, ?, ?, ?, ?)",
                 tenantId, sessionId, operationId,
                 OperationKind.CWD_CHANGE.name(), actorDigest, idempotencyKey,
                 requestDigest, session.status(), targetCwdRelative,
-                expectedContextRevision, now, now, now);
+                expectedContextRevision,
+                actorId == null ? null
+                        : ManagedWorkspaceRegistry.actorKey(tenantId, actorId),
+                now, now, now);
         return new OperationAdmission(findOperation(tenantId, sessionId,
                 operationId).orElseThrow(), false);
     }
@@ -1082,7 +1089,8 @@ public class ManagedAgentStore implements AgentStateStore {
                 || hasRetainedRuntimeSession(tenantId, sessionId)) {
             failure = "session_context_busy";
         } else if (!hasExecutionRegistryFacts(session.tenantId(),
-                session.sessionId())) {
+                session.sessionId()) || !initiatorKeepsOperate(session,
+                operation)) {
             failure = "workspace_unavailable";
         }
         if (failure != null) {
@@ -1141,6 +1149,25 @@ public class ManagedAgentStore implements AgentStateStore {
                 owner, claimGeneration, now) == 1;
     }
 
+    // The initiator, persisted at V54 admission: settlement fails when the
+    // operating actor no longer holds OPERATOR — revoking one in-flight
+    // initiator stops only their own admitted change, as the W2 guard
+    // intends. A pre-V54 (NULL key) row settles on the creator-keyed facts
+    // alone.
+    private boolean initiatorKeepsOperate(SessionRecord session,
+            OperationRecord operation) {
+        if (operation.actorKey() == null) {
+            return true;
+        }
+        List<String> roles = jdbc.queryForList("SELECT role FROM"
+                        + " managed_workspace_access WHERE tenant_id = ? AND"
+                        + " workspace_id = ? AND actor_id = ?",
+                String.class, session.tenantId(),
+                session.workspace().getWorkspaceId(), operation.actorKey());
+        return !roles.isEmpty() && WorkspaceAccess.valueOf(roles.getFirst())
+                .atLeast(WorkspaceAccess.OPERATOR);
+    }
+
     private void requireCwdChangeRegistryFacts(SessionRecord session) {
         if (!hasExecutionRegistryFacts(session.tenantId(),
                 session.sessionId())) {
@@ -1170,10 +1197,7 @@ public class ManagedAgentStore implements AgentStateStore {
         if (sessionIds.isEmpty()) {
             return Set.of();
         }
-        String placeholders = String.join(", ",
-                java.util.Collections.nCopies(sessionIds.size(), "?"));
-        List<Object> arguments = new java.util.ArrayList<>(
-                sessionIds.size() + 1);
+        List<Object> arguments = new ArrayList<>(sessionIds.size() + 1);
         arguments.add(tenantId);
         arguments.addAll(sessionIds);
         List<String> rows = jdbc.query("SELECT s.session_id FROM"
@@ -1186,14 +1210,14 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " a.tenant_id = r.tenant_id AND a.workspace_id ="
                         + " r.workspace_id AND a.actor_id = c.actor_id"
                         + " WHERE s.tenant_id = ? AND s.session_id IN ("
-                        + placeholders + ") AND"
+                        + placeholders(sessionIds.size()) + ") AND"
                         + " r.workspace_generation = s.workspace_generation"
                         + " AND r.storage_id = s.workspace_storage_id AND"
                         + " r.state = 'ACTIVE' AND a.role IN ('OPERATOR',"
                         + " 'OWNER')",
                 (row, index) -> row.getString("session_id"),
                 arguments.toArray());
-        return new java.util.HashSet<>(rows);
+        return new HashSet<>(rows);
     }
 
     private boolean hasOpenOperation(String tenantId, String sessionId) {

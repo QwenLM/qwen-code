@@ -57,26 +57,6 @@ public class ManagedActionStore {
                 sessionId);
     }
 
-    // The responder gate: the Session's recorded owner (owner_actor_key,
-    // falling back to the creator records for pre-V40 Sessions) answers,
-    // and so does any actor holding OPERATOR on the Session's Workspace —
-    // the approval handoff the roles vocabulary exists for. An anonymous
-    // open-mode Session with neither an owner record nor a create command
-    // stays tenant-owned, matching its read semantics.
-    public void requireOwner(String tenantId, String sessionId, String actorId) {
-        byte[] key = actorScopeKey(tenantId, actorId);
-        OwnerRow session = ownerRow(tenantId, sessionId);
-        if (ownerIdentityAdmits(tenantId, sessionId, session, key)) {
-            return;
-        }
-        // A bound Session without an owner record answers through the
-        // Workspace role arm alone.
-        if (workspaceOperatorAdmits(tenantId, session, key)) {
-            return;
-        }
-        throw forbidden();
-    }
-
     // The caller's registry key, or null for an anonymous caller; an actor
     // id the key cannot encode is a scope violation, not a refusal.
     private static byte[] actorScopeKey(String tenantId, String actorId) {
@@ -449,6 +429,17 @@ public class ManagedActionStore {
         if (!admitted && !workspaceOperatorAdmits(tenantId, ownerRow,
                 actorKey)) {
             throw forbidden();
+        }
+        // The widened OPERATOR arm certifies delivery exactly like the
+        // submitter family: the recorded create-command actor must still
+        // back execution, so a demoted creator moves an answer to 409
+        // rather than letting it be queued where the arbiter can never
+        // reach. Answered under the identity arms, no shape of the bound
+        // Session blocks the caller the record names.
+        if (!admitted && ownerRow.workspaceId() != null
+                && !sessions.hasExecutionRegistryFacts(tenantId, sessionId)) {
+            throw new ApiException(HttpStatus.CONFLICT, "workspace_unavailable",
+                    "Hosted Workspace execution is not available.");
         }
         WorkspaceMigrationAdmission.requireSessionOpen(jdbc, tenantId, sessionId);
         String sessionStatus = jdbc.queryForObject("SELECT status FROM managed_agent_session"

@@ -793,19 +793,43 @@ class Issue13181QueryBudgetTest {
                             new WorkspaceSelection(workspace, ".")))
                     .sessionId());
         }
+        // An eighth session whose creator has no access row at all — the
+        // caller stays OPERATOR while its creator's grant is gone, the
+        // shape the executable conjunct alone must refuse on.
+        fixture.jdbc.update("INSERT INTO managed_workspace_access"
+                + " (tenant_id, workspace_id, actor_id, role) VALUES (?,"
+                + " 'workspace', ?, 'OPERATOR')", tenant,
+                "ghost".getBytes(StandardCharsets.UTF_8));
+        ids.add(fixture.tx.execute(status -> fixture.store
+                .insertWorkspaceSessionCommand(tenant, "ghost",
+                        "ws-ghost-" + UUID.randomUUID(), "digest",
+                        "qwen-code", null, "w-ghost", List.of(), null,
+                        new WorkspaceSelection("workspace", ".")))
+                .sessionId());
+        fixture.jdbc.update("DELETE FROM managed_workspace_access"
+                + " WHERE tenant_id = ? AND workspace_id = 'workspace'"
+                + " AND actor_id = ?", tenant,
+                "ghost".getBytes(StandardCharsets.UTF_8));
         // One session is closed: the shape gate fences it. The workspace2
         // grant then drops to READER: its session exercises the role term.
+        // Only "other", creator of indices 4 and 5, drops with "actor"
+        // keeping OPERATOR, so those two Sessions fail the creator-keyed
+        // facts while the caller's own role is intact.
         fixture.jdbc.update("UPDATE managed_agent_session SET status ="
                 + " 'CLOSED' WHERE tenant_id = ? AND session_id = ?", tenant,
                 ids.get(3));
         fixture.jdbc.update("UPDATE managed_workspace_access SET"
                 + " role = 'READER' WHERE tenant_id = ? AND workspace_id"
                 + " = 'workspace2'", tenant);
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+                + " 'READER' WHERE tenant_id = ? AND workspace_id ="
+                + " 'workspace' AND actor_id = ?", tenant,
+                "other".getBytes(StandardCharsets.UTF_8));
         fixture.ledger.reset();
         var page = fixture.service.listWebShellSessions(tenant, "actor",
                 null, 20).data();
-        assertThat(page).hasSize(7);
-        System.out.println("[issue-13181] listWebShellSessions(7 mixed"
+        assertThat(page).hasSize(8);
+        System.out.println("[issue-13181] listWebShellSessions(8 mixed"
                 + " role rows): " + fixture.ledger.summary());
         // Page + latest turns + the close batch + the grant batch across
         // both workspaces + the execution-facts batch over the
@@ -815,13 +839,30 @@ class Issue13181QueryBudgetTest {
                 .isEqualTo(1);
         assertThat(fixture.ledger.count("from managed_agent_session s join"
                 + " managed_workspace_registry")).isEqualTo(1);
-        // workspaceTurns holds exactly for ACTIVE sessions on a workspace
-        // where the caller's role is OPERATOR or above, whatever the
-        // Session's creator.
+        // workspaceTurns holds exactly for ACTIVE sessions whose caller
+        // holds OPERATOR or above on the Workspace AND whose creator still
+        // holds the execution-registry facts — the two conjuncts split at
+        // indices 4, 5 and 7.
         for (var row : page) {
             int index = ids.indexOf(row.sessionId());
             assertThat(row.capabilities().workspaceTurns())
-                    .isEqualTo(index != 3 && index != 6);
+                    .isEqualTo(index != 3 && index != 6 && index != 4
+                            && index != 5 && index != 7);
+        }
+
+        // A caller whose only grant is READER pays no facts read at all,
+        // the zero-query shape the removed creator chain provided.
+        fixture.jdbc.update("INSERT INTO managed_workspace_access"
+                + " (tenant_id, workspace_id, actor_id, role) VALUES (?,"
+                + " 'workspace', ?, 'READER')", tenant,
+                "reader-only".getBytes(StandardCharsets.UTF_8));
+        fixture.ledger.reset();
+        var readerPage = fixture.service.listWebShellSessions(tenant,
+                "reader-only", null, 20).data();
+        assertThat(fixture.ledger.count("from managed_agent_session s join"
+                + " managed_workspace_registry")).isZero();
+        for (var row : readerPage) {
+            assertThat(row.capabilities().workspaceTurns()).isFalse();
         }
     }
 

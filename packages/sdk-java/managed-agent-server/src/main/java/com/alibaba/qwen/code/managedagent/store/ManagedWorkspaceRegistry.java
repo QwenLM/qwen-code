@@ -115,7 +115,6 @@ public class ManagedWorkspaceRegistry {
             String workspaceId) {
         return accessOf(tenantId, actorId, workspaceId).canRead();
     }
-    }
 
     public List<WorkspaceSummary> listReadable(String tenantId,
             String actorId, String afterId, int limit) {
@@ -195,7 +194,7 @@ public class ManagedWorkspaceRegistry {
         List<ReadableGrant> rows = jdbc.query(
                 "SELECT r.workspace_id, r.workspace_generation,"
                         + " r.storage_id, r.state, a.role"
-                        + " FROM managed_workspace_registry r
+                        + " FROM managed_workspace_registry r"
                         + " JOIN managed_workspace_access a ON"
                         + " a.tenant_id = r.tenant_id"
                         + " AND a.workspace_id = r.workspace_id"

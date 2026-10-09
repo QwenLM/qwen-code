@@ -239,6 +239,7 @@ public class ManagedAgentService {
             dispatch(tenantId, replay);
             return response(replay);
         }
+        requireSubmitterFacts(session, actorId);
         requireHarness();
         String payloadDigest = SubmitHarnessTurn.computePayloadDigest(input);
         Admission admission;
@@ -315,6 +316,7 @@ public class ManagedAgentService {
                         sessionId), true);
             }
         }
+        requireSubmitterFacts(subject, actorId);
         SessionMutationCommand command = store.beginSessionMutation(tenantId,
                 RENAME, idempotencyKey, requestDigest, sessionId,
                 SessionMutationKind.RENAME);
@@ -671,10 +673,13 @@ public class ManagedAgentService {
                         : submitterGrants(tenantId, actorId, grantWorkspaces);
         // The admission conjunct this mirrors: the caller's role above,
         // and the creator-keyed execution facts of each submit-shaped
-        // Session, batched exactly like the close state.
+        // Session, batched exactly like the close state — skipped when the
+        // grant read already proved nothing on the page can be submitted,
+        // the zero-query shape the removed creator chain provided.
+        boolean operatorGrant = grants.values().stream().anyMatch(
+                ManagedWorkspaceRegistry.ReadableGrant::canCreateSession);
         Set<String> executable =
-                shaped.isEmpty() || actorId == null || actorId.isEmpty()
-                        ? Set.of()
+                shaped.isEmpty() || !operatorGrant ? Set.of()
                         : store.sessionsWithExecutionRegistryFacts(tenantId,
                                 shaped);
         return sessions.stream()
@@ -866,15 +871,27 @@ public class ManagedAgentService {
     }
 
     // Later Turns of a Workspace-bound Session run under the creator's
-    // Workspace grants (WorkspaceExecutionStore.authorize), so admission
-    // certifies two conjuncts: the caller holds OPERATOR, and the
-    // Session's creator-keyed execution facts still hold. The command
-    // family's replay is NOT actor-scoped (#13619), so the mutable role
-    // and fact refusals run before the replay: a role revoked after
-    // admission meets the refusal below rather than another caller's
-    // recorded key. Everyone else keeps the refusal requireLegacyWorkspace
-    // names. Cancelling has its own, narrower rule (requireCanceller).
+    // Workspace grants (WorkspaceExecutionStore.authorize), so new-work
+    // admission certifies two conjuncts: the caller holds OPERATOR
+    // (requireSubmitterRole), and the Session's creator-keyed execution
+    // facts still hold (requireSubmitterFacts). The command family's
+    // replay is NOT actor-scoped (#13619), so the role gate runs before
+    // the replay: below-OPERATOR never reaches a recorded key. The facts
+    // gate follows the replay: it certifies new work only, so a recorded
+    // completed outcome always answers — a Workspace re-registration, a
+    // DRAINING row or a creator demotion must not retire it. Cancelling
+    // has its own, narrower rule (requireCanceller).
     private void requireSubmitterRole(SessionRecord session,
+            String actorId) {
+        if (session.workspace() != null
+                && !workspaces.accessOf(session.tenantId(), actorId,
+                        session.workspace().getWorkspaceId())
+                        .atLeast(WorkspaceAccess.OPERATOR)) {
+            requireLegacyWorkspace(session, actorId);
+        }
+    }
+
+    private void requireSubmitterFacts(SessionRecord session,
             String actorId) {
         if (session.workspace() != null
                 && !maySubmitWorkspaceTurn(session, actorId)) {

@@ -73,6 +73,7 @@ class HostedPublicWorkspaceIT {
     // Sessions whose first approval was answered by the operator who is not
     // the Session owner, proving R1's second-operator handoff.
     private final java.util.Set<String> operatorAnswered = new java.util.HashSet<>();
+    private final java.util.Set<String> fixedAnswered = new java.util.HashSet<>();
 
     @Test
     @Timeout(150)
@@ -645,7 +646,10 @@ class HostedPublicWorkspaceIT {
             // The headline widening end to end: a Workspace OPERATOR who is
             // not the Session creator submits a later Turn and it actually
             // executes, then cancels and renames — while the creator keeps
-            // OPERATOR, so the creator-keyed execution facts hold.
+            // OPERATOR, so the creator-keyed execution facts hold. The pivot
+            // reset makes the bound directory the only place this Turn can
+            // write, or the decoy's default would pass unnoticed.
+            Files.writeString(roots.get(index).resolve("child/proof.txt"), "x");
             int beforeOperator = modelRequests.size();
             String operatorTurn = request("POST", "/v1/agents/sessions/" + session + "/events", later,
                     "operator2-later-" + workspace, "operator2", 202).path("turn_id").asText();
@@ -666,12 +670,15 @@ class HostedPublicWorkspaceIT {
             assertThat(modelRequests).hasSize(beforeOperator + 4);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
                     Long.class, session)).isEqualTo(executions * 3);
+            assertThat(Files.readString(roots.get(index).resolve("child/proof.txt"))).isEqualTo("after");
+            assertThat(decoy.resolve("child/proof.txt")).doesNotExist();
 
             int beforeHold = modelRequests.size();
             String heldByOperator = request("POST", "/v1/agents/sessions/" + session + "/events", hold,
                     "operator2-hold-" + workspace, "operator2", 202).path("turn_id").asText();
             await().atMost(Duration.ofSeconds(35)).until(() -> modelRequests.size() > beforeHold);
-            request("POST", "/v1/agents/sessions/" + session + "/events", cancel,
+            request("POST", "/v1/agents/sessions/" + session + "/events",
+                    Map.of("type", "agent.session.cancel", "turn_id", heldByOperator),
                     "operator2-cancel-" + workspace, "operator2", 202);
             await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
                     "SELECT status FROM managed_agent_turn WHERE session_id = ? AND turn_id = ?",
@@ -681,9 +688,10 @@ class HostedPublicWorkspaceIT {
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
                     Long.class, session)).isEqualTo(executions * 3);
 
-            assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename,
+            Map<String, Object> operatorRename = Map.of("title", "Operator renamed " + workspace);
+            assertThat(request("PATCH", "/v1/agents/sessions/" + session, operatorRename,
                     "operator2-rename-" + workspace, "operator2", 200).path("metadata").path("title").asText())
-                    .isEqualTo("Renamed " + workspace);
+                    .isEqualTo("Operator renamed " + workspace);
 
             // Admission also certifies the creator-keyed execution facts:
             // demote only the creator, and the second OPERATOR's submit is
@@ -695,12 +703,29 @@ class HostedPublicWorkspaceIT {
             long execBefore = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution"
                     + " WHERE harness_session_id = ?", Long.class, session);
             int modelsBefore = modelRequests.size();
+            // A held Turn started while the creator was OPERATOR; after the
+            // demotion it is what the cancel exemption must abort.
+            int beforeExemptHold = modelRequests.size();
+            String exemptHeld = request("POST", "/v1/agents/sessions/" + session + "/events", hold,
+                    "operator2-exempt-hold-" + workspace, "operator2", 202).path("turn_id").asText();
+            await().atMost(Duration.ofSeconds(35)).until(() -> modelRequests.size() > beforeExemptHold);
             jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
             assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
                     "operator2-blocked-" + workspace, "operator2", 409).path("error").path("code").asText())
                     .isEqualTo("workspace_unavailable");
+            // Cancellation needs role and shape alone: even with the
+            // creator-keyed facts failed, the operator still aborts the
+            // running Turn.
+            request("POST", "/v1/agents/sessions/" + session + "/events",
+                    Map.of("type", "agent.session.cancel", "turn_id", exemptHeld),
+                    "operator2-exempt-cancel-" + workspace, "operator2", 202);
+            await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                    "SELECT status FROM managed_agent_turn WHERE session_id = ? AND turn_id = ?",
+                    String.class, session, exemptHeld)).isEqualTo("CANCELLED"));
+            heldReply.countDown();
+            heldReply = new CountDownLatch(1);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
                     + " WHERE tenant_id = ? AND command_status = 'PENDING'", Long.class, tenant))
                     .isEqualTo(pendingBefore);
@@ -711,7 +736,7 @@ class HostedPublicWorkspaceIT {
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
         }
-        assertThat(modelRequests).hasSize(approvals ? 16 : 28);
+        assertThat(modelRequests).hasSize(approvals ? 16 : 30);
         assertThat(modelFailure.get()).isNull();
         Map<String, Object> denied = Map.of("agent_id", "qwen-code", "workspace", Map.of("workspace_id", "workspace-0"),
                 "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")));
@@ -744,7 +769,7 @@ class HostedPublicWorkspaceIT {
         assertUnavailable(request("POST", "/v1/agents/sessions", denied, "unsupported", "actor", 409));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?",
                 Integer.class, tenant)).isEqualTo(2);
-        assertThat(modelRequests).hasSize(approvals ? 16 : 28);
+        assertThat(modelRequests).hasSize(approvals ? 16 : 30);
     }
 
     private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) {
@@ -847,8 +872,13 @@ class HostedPublicWorkspaceIT {
             assertThat(request("POST", route, body, id, "reader", 403).at("/error/code").asText()).isEqualTo("action_forbidden");
             // The first approval of each session is answered by a second
             // OPERATOR who is not the Session owner (R1's handoff); the
-            // rest by the owner, so both responder paths stay covered.
-            String responder = operatorAnswered.add(session) ? "operator2" : "actor";
+            // rest by the owner, so both responder paths stay covered. The
+            // set records ONLY the chosen responder, so collapsing the
+            // ternary to the owner empties it instead of staying full.
+            String responder = fixedAnswered.add(session) ? "operator2" : "actor";
+            if ("operator2".equals(responder)) {
+                operatorAnswered.add(session);
+            }
             JsonNode operation = request("POST", route, body, id, responder, 202);
             String op = operation.path(web ? "operationId" : "id").asText();
             JsonNode replay = request("POST", route, body, id, responder, 202);

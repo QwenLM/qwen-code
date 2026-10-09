@@ -15,6 +15,7 @@ import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.Capability;
 import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.RuleClass;
 import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.Surface;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.api.ToolPublicationController;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
@@ -138,6 +139,13 @@ class SurfaceAdmissionAcceptanceTest {
     @Autowired
     private WriterCredentialPolicy credentials;
 
+    private static final String RESPOND_BODY =
+            "{\"kind\":\"permission\",\"input_revision\":1,"
+                    + "\"policy_revision\":\"policy\",\"option_id\":\"allow\"}";
+
+    @Autowired
+    private AgentStateStore store;
+
     private final String tenant = "acc-" + UUID.randomUUID();
     private final AtomicInteger keys = new AtomicInteger();
     private String bound;
@@ -257,15 +265,22 @@ class SurfaceAdmissionAcceptanceTest {
                 if (status == 200) {
                     // The 200 pins filtering, not just the status: the
                     // bound row must stay invisible while the legacy rows
-                    // the tenant owns still list.
+                    // the tenant owns still list — an empty page would
+                    // satisfy the negative half with the filter removed.
                     assertThat(strangers.getResponse().getContentAsString())
                             .as("%s leaks the bound Session to a stranger",
                                     entry.routeKey())
-                            .doesNotContain(bound);
+                            .doesNotContain(bound)
+                            .as("%s drops the legacy rows for a stranger",
+                                    entry.routeKey())
+                            .contains(legacy);
                     assertThat(anonymous.getResponse().getContentAsString())
                             .as("%s leaks the bound Session anonymously",
                                     entry.routeKey())
-                            .doesNotContain(bound);
+                            .doesNotContain(bound)
+                            .as("%s drops the legacy rows anonymously",
+                                    entry.routeKey())
+                            .contains(legacy);
                 }
             }
             case READER_ACTOR -> {
@@ -597,6 +612,92 @@ class SurfaceAdmissionAcceptanceTest {
                         .value("action_forbidden"));
     }
 
+    // The widened OPERATOR arm certifies delivery: a demoted creator moves
+    // an answer to the family's domain 409 at admission instead of a
+    // response queued where the arbiter can never reach, and the restored
+    // creator unblocks the same pending Action for 202.
+    @Test
+    void respondCertifiesTheCreatorsExecutionFacts() throws Exception {
+        String action = insertAction(tenant, bound);
+        String body = "{\"kind\":\"permission\",\"input_revision\":1,"
+                + "\"policy_revision\":\"policy\",\"option_id\":\"allow\"}";
+        jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
+                + " AND actor_id = ?", tenant,
+                OWNER.getBytes(StandardCharsets.UTF_8));
+        mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
+                        + action + "/responses")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", nextKey())
+                        .principal(actor(tenant, OPERATOR))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code")
+                        .value("workspace_unavailable"));
+        jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
+                + " AND actor_id = ?", tenant,
+                OWNER.getBytes(StandardCharsets.UTF_8));
+        mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
+                        + action + "/responses")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", nextKey())
+                        .principal(actor(tenant, OPERATOR))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.type").value("action_response"));
+    }
+
+    // The Action-response replay is actor-scoped: a responder whose grant
+    // drops between admission and a retry still resolves the recorded
+    // answer, while a fresh key meets the ordinary 403.
+    @Test
+    void aDemotedResponderStillReplaysTheirAdmittedAnswer() throws Exception {
+        String action = insertAction(tenant, bound);
+        String key = "respond-replay-1";
+        String body = "{\"kind\":\"permission\",\"input_revision\":1,"
+                + "\"policy_revision\":\"policy\",\"option_id\":\"allow\"}";
+        var first = mvc.perform(post("/v1/agents/sessions/" + bound
+                        + "/actions/" + action + "/responses")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", key)
+                        .principal(actor(tenant, OPERATOR))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isAccepted()).andReturn();
+        String operationId = JSON.readTree(first.getResponse()
+                .getContentAsString()).path("id").asText();
+        jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
+                + " AND actor_id = ?", tenant,
+                OPERATOR.getBytes(StandardCharsets.UTF_8));
+        mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
+                        + action + "/responses")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", key)
+                        .principal(actor(tenant, OPERATOR))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.replayed").value(true))
+                .andExpect(jsonPath("$.id").value(operationId));
+        mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
+                        + action + "/responses")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", nextKey())
+                        .principal(actor(tenant, OPERATOR))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("action_forbidden"));
+        jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
+                + " AND actor_id = ?", tenant,
+                OPERATOR.getBytes(StandardCharsets.UTF_8));
+    }
+
     @Test
     void actionRespondOnLegacyRefusesTheNonOwnerWithTheFamilyCode()
             throws Exception {
@@ -741,6 +842,108 @@ class SurfaceAdmissionAcceptanceTest {
                         .value("artifact_not_found"));
     }
 
+    // The owner column, not the creator column, decides: with the two
+    // deliberately different for once, lifecycle and respond both follow
+    // owner_actor_key, and the original creator is refused.
+    @Test
+    void theOwnerColumnTakesPrecedenceOverTheCreator() throws Exception {
+        String scratch = createSession(tenant, OWNER, true);
+        jdbc.update("UPDATE managed_agent_session SET owner_actor_key = ?"
+                + " WHERE tenant_id = ? AND session_id = ?",
+                new com.alibaba.qwen.code.runtimebroker.managedworkspace
+                        .WorkspaceActor(tenant, OWNER_RANK).getActorId()
+                        .getBytes(StandardCharsets.UTF_8),
+                tenant, scratch);
+        assertThat(store.hasExecutionRegistryFacts(tenant, scratch)).isTrue();
+        mvc.perform(post("/v1/agents/sessions/" + scratch + "/actions/"
+                        + insertAction(tenant, scratch) + "/responses")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", nextKey())
+                        .principal(actor(tenant, OWNER_RANK))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(RESPOND_BODY))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.type").value("action_response"));
+        mvc.perform(post("/v1/agents/sessions/" + scratch + "/close")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", nextKey())
+                        .principal(actor(tenant, OWNER)))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code")
+                        .value("session_operation_forbidden"));
+    }
+
+    // The narrowed tenant-owned fall-through is unbound-only: a bound
+    // Session with no owner record answers through the create-command
+    // actor recorded for it, or through the Workspace role arm with the
+    // creator-keyed facts — and with no create command at all it is
+    // inoperable, whichever arm admitted the caller.
+    @Test
+    void aBoundSessionWithNoOwnerRecordAnswersThroughItsRecordedArms()
+            throws Exception {
+        String withCommand = createSession(tenant, OWNER, true);
+        jdbc.update("UPDATE managed_agent_session SET owner_actor_key ="
+                + " NULL, creator_actor_key = NULL WHERE tenant_id = ? AND"
+                + " session_id = ?", tenant, withCommand);
+        mvc.perform(post("/v1/agents/sessions/" + withCommand + "/actions/"
+                        + insertAction(tenant, withCommand) + "/responses")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", nextKey())
+                        .principal(actor(tenant, READER))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(RESPOND_BODY))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("action_forbidden"));
+        mvc.perform(post("/v1/agents/sessions/" + withCommand + "/actions/"
+                        + insertAction(tenant, withCommand) + "/responses")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", nextKey())
+                        .principal(actor(tenant, OPERATOR))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(RESPOND_BODY))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.type").value("action_response"));
+
+        String noCommand = createSession(tenant, OWNER, true);
+        String action = insertAction(tenant, noCommand);
+        jdbc.update("UPDATE managed_agent_session SET owner_actor_key ="
+                + " NULL, creator_actor_key = NULL WHERE tenant_id = ? AND"
+                + " session_id = ?", tenant, noCommand);
+        jdbc.update("DELETE FROM managed_workspace_create_command"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, noCommand);
+        mvc.perform(post("/v1/agents/sessions/" + noCommand + "/actions/"
+                        + action + "/responses")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", nextKey())
+                        .principal(actor(tenant, READER))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(RESPOND_BODY))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("action_forbidden"));
+        mvc.perform(post("/v1/agents/sessions/" + noCommand + "/actions/"
+                        + action + "/responses")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", nextKey())
+                        .principal(actor(tenant, OPERATOR))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(RESPOND_BODY))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code")
+                        .value("workspace_unavailable"));
+    }
+
+    // The OWNER rank satisfies the creator-keyed destination conjunct of a
+    // Session it created — the opposite direction of the caller-rank arm.
+    // The walk's HTTP cells cannot reach the facts (no files opt-in), so
+    // the store is the witness.
+    @Test
+    void anOwnerRankCreatorSatisfiesTheExecutionFacts() throws Exception {
+        String boundRank = createSession(tenant, OWNER_RANK, true);
+        assertThat(store.sessionsWithExecutionRegistryFacts(tenant,
+                        List.of(boundRank)))
+                .contains(boundRank);
+    }
+
     @Test
     void internalWriterRoutesEnforceTheSessionCredential() throws Exception {
         String session = createSession(tenant, OWNER, true);
@@ -840,11 +1043,33 @@ class SurfaceAdmissionAcceptanceTest {
     void publicationTokenDecidesThroughTheStoredGrantComparison()
             throws Exception {
         String real = PublicationJournalFixture.PUBLICATION_TOKEN;
-        String bogus = real.substring(0, 8) + "AAAA" + real.substring(12);
+        // "BBBB" because the fixture token is forty-three "A"s — a probe
+        // must actually differ.
+        String bogus = real.substring(0, 8) + "BBBB" + real.substring(12);
+        // An OPEN clone of pub-1's row so only the grant-token comparison
+        // can fail this call — the fenced original's state term absorbs
+        // every token.
+        var row = jdbc.queryForMap("SELECT * FROM qwen_tool_publication"
+                + " WHERE publication_id = 'pub-1' AND session_id = '"
+                + ARTIFACT_SESSION + "'");
+        List<String> publicationColumns = new ArrayList<>(row.keySet());
+        Object[] values = publicationColumns.stream().map(col ->
+                        "publication_id".equals(col) ? "pub-open"
+                                : "state".equals(col) ? "OPEN"
+                                : "execution_key".equals(col)
+                                        ? "b".repeat(64)
+                                : "capture_id".equals(col) ? "pub-open-cap"
+                                                        : row.get(col))
+                .toArray();
+        jdbc.update("INSERT INTO qwen_tool_publication ("
+                        + String.join(", ", publicationColumns) + ") VALUES ("
+                        + String.join(", ", java.util.Collections.nCopies(
+                                publicationColumns.size(), "?")) + ")",
+                values);
         MvcResult result = mvc.perform(post(
                         "/internal/managed-tool-publications/v1/sessions/"
                                 + ARTIFACT_SESSION
-                                + "/publications/pub-1/segments/stdout/0")
+                                + "/publications/pub-open/segments/stdout/0")
                         .header(TenantContextFilter.HEADER, ARTIFACT_TENANT)
                         .header("X-Qwen-Tool-Publication-Token", bogus)
                         .header("X-Qwen-Tool-Publication-Operation", "op-x")

@@ -454,9 +454,10 @@ then trusted as the actor for the request's tenant. It is disabled by default;
 never enable it where untrusted clients can reach the server.
 
 `QWEN_MANAGED_AGENT_APPROVAL_MODE` defaults to `yolo`. In `default` and
-`auto-edit`, the Session's recorded owner or any Workspace operator can list,
-inspect and answer pending permission
-Actions through the public API or WebShell. Responses are durable, idempotent
+`auto-edit`, any caller with a read grant on the bound Workspace can list and
+inspect pending permission Actions through the public API or WebShell;
+answering one needs the Session's recorded owner or a caller holding OPERATOR
+or above, and that read grant as well. Responses are durable, idempotent
 operations; their final result follows the committed Harness decision.
 `QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT` defaults to `10m` and accepts `1s` to `24h`.
 The approval mode is pinned at Session creation and must be confirmed by the
@@ -560,8 +561,8 @@ curl -sS -X POST \
 directory. The change is same-Workspace only and requires the caller's OPERATOR
 role plus the Session's creator-keyed execution facts (the registry still backs
 the binding and stays `ACTIVE`, and the recorded create actor keeps OPERATOR or
-above; the settlement re-verifies the recorded actor's grants, so an operation
-admitted before the initiator's own role dropped commits), an idle
+above; the V54-persisted initiator is re-checked at settlement the same way, so
+demoting either actor fails the operation with `workspace_unavailable`), an idle
 Session (`409 session_context_busy` while a Turn or another operation is open)
 and a matching `expected_context_revision` (`409 context_revision_conflict`
 otherwise); a retry with the same key returns the original operation even after
@@ -738,8 +739,9 @@ does not provide physical isolation or recovery after worker-only death.
 Public bound Turn admission is limited to the opt-in initial file Turn described
 in G0 above and to later Turns submitted by any caller holding OPERATOR on the
 Workspace under the same opt-in while the Session's creator-keyed execution
-facts hold (the per-caller `workspaceTurns` capability flag mirrors that same
-rule); such a caller may also cancel the Session's running Turns and rename the
+facts hold (the WebShell adapter's per-caller `workspaceTurns` capability
+flag mirrors that same rule; the public surface publishes no such flag);
+such a caller may also cancel the Session's running Turns and rename the
 Session. Later Turns run
 under the creator's Workspace grants, so an actor without a read grant keeps the
 existing `session_not_found` invisibility, a readable actor below OPERATOR is
@@ -829,8 +831,11 @@ history remain on their saved identities. The marker is a continuity check,
 not a backup or protection against a malicious same-UID writer. See the
 [W1 design](../../../docs/design/2026-09-29-managed-workspace-w1-recovery.md).
 Hosted Workspace cold-load validation is always enabled, independently of the Java mount-guard option. Omitted tool profile and Shell `captureBytes` use the saved definition; supplied values must match exactly. Saved approval settings remain pinned. Integrity checks run before new model work or Broker prepare/execute and cover retained private resources plus complete remote Shell output, including pages, segments and empty-stream seals. Preserve O2 recovery of original `results_ready`, consumed-final and `not_started` receipts. An incomplete receipt may produce a blocked ACK or original-history repair before load is refused, so refusal does not promise zero journal writes or ACKs. Restore validation uses a fixed committed cut, and continuation still requires current writer ownership and authorization. Missing old resources or unsupported recovery domains block loading. Passive Harness loading does not implement unknown-execution cleanup; use original Broker execution identities. Rollback to old binaries requires entry points to remain stopped because those binaries ignore the fence columns. Public
-Workspace next-turn admission for the Session's creator under the G0 opt-in
-described above has landed; public Workspace resume still requires product-route
+Workspace next-turn admission for any caller holding OPERATOR on the bound
+Workspace, while the Session's creator-keyed execution facts hold, under the G0 opt-in
+described above has landed; public Workspace resume still requires
+product-route integration, and this internal guard is not a public resume
+capability yet.
 integration, and this internal guard is not a public resume capability yet.
 
 Build the container from the repository root:

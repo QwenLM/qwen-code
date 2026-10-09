@@ -19,16 +19,24 @@ Workspace binding, not complete Workspace execution support. G0 requires no UI
 changes; the follow-up's only UI changes are enabling the creator's composer and
 its Cancel control.
 
-A follow-up admits later Turns for the Session's creator under the same opt-in,
-and lets the creator cancel a running Turn, which the Hosted Harness aborts and
-settles through the original Runtime identities. Execution authorizes every
-Turn against the creator's Workspace grants, so any other actor, and every
-deployment without the opt-in, keeps the existing refusal:
-`workspace_unavailable` when the actor can read the Workspace,
-`session_not_found` when they cannot. The creator may also rename the Session.
-Admitting new work requires the creator's create grant on an `ACTIVE`
-Workspace at the generation and storage the Session was bound to, so a
-re-registration refuses submit and rename before any command is written.
+A follow-up (the actor-roles enforcement of
+`2026-10-07-managed-agent-actor-roles.md`, contract v1.34) admits later Turns
+for any caller holding OPERATOR on the bound Workspace under the same opt-in,
+while the Session's creator-keyed execution facts hold (the registry still
+backs the binding, state is ACTIVE, and the actor recorded by the Workspace
+create command keeps OPERATOR or above), and lets such a caller cancel a
+running Turn — cancelling aborts work that is already running and needs the
+caller's role and shape alone, since the delivery re-checks no grants. The
+Hosted Harness aborts the Turn and settles through the original Runtime
+identities. Execution authorizes every Turn against the creator's recorded
+Workspace create command, so the refusal contract is `session_not_found`
+without a Workspace read grant, `403 session_operation_forbidden` for a
+readable actor below OPERATOR, and `409 workspace_unavailable` for an
+admitted OPERATOR whose shape or creator-keyed facts fail — or for a
+deployment without the opt-in. Such a caller may also rename the Session.
+Admitting new work requires the facts conjunct as well, so a demotion of
+the recorded creator or a re-registration refuses submit and rename before
+any command is written.
 Cancelling only aborts work already running: while the deployment still enables
 Workspace files, the creator who can still read the Workspace may cancel even
 after the create grant is revoked, the Workspace starts draining or it is

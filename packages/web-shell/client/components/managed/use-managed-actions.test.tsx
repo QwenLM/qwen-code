@@ -458,6 +458,15 @@ describe('useManagedActions', () => {
 
     hook.rerender({ sessionId: 'session-1' });
     expect(hook.latest?.respondForbidden).toBe(true);
+
+    // An explicit retry re-probes the latched Session too — it is not
+    // selected right now, yet its role row can have been raised meanwhile.
+    await act(async () => {
+      hook.latest!.retry();
+    });
+    hook.rerender({ sessionId: 'session-2' });
+    hook.rerender({ sessionId: 'session-1' });
+    expect(hook.latest?.respondForbidden).toBe(false);
   });
 
   it('restores the retry budget when the reader is withdrawn and back', async () => {
