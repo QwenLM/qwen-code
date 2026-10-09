@@ -342,10 +342,19 @@ public class ManagedExtensionRecordStore {
         JsonNode named = record.get("childSessionId");
         String namedId = named == null || named.isNull() ? null
                 : named.textValue();
-        require(lineage.isEmpty() ? namedId == null
-                : lineage.size() == 1 && lineage.getFirst().equals(namedId),
-                "Child run " + recordId + "'s never-started verdict does"
-                        + " not name the Session its creation minted.");
+        boolean lawfullyNamed = lineage.isEmpty() ? namedId == null
+                : lineage.size() == 1 && lineage.getFirst().equals(namedId);
+        if (!lawfullyNamed) {
+            // Its own refusal code, not the generic record rejection:
+            // the Hosted writer must classify this as a rollbackable
+            // non-commit (an authority kept alive for the corrected
+            // retry), never as a write failure that latches the parent's
+            // Session log shut behind it.
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "child_run_lineage_minted",
+                    "Child run " + recordId + "'s never-started verdict does"
+                            + " not name the Session its creation minted.");
+        }
     }
 
     boolean hasNewLifecycleDispatch(String tenantId, String sessionId, byte[] bytes,

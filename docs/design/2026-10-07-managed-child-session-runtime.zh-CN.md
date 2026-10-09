@@ -132,6 +132,11 @@ H4b 交付该流水线的 child-agent 部分:
 2. **give-up 用历史 binding 证据重放修复链。** 终态调合只需要 dispatch 身份,不需要回暖,因此 `reconcileAttach` 的物理 child 修复也改读 `findLatestBindingByHarnessSessionAnyState`——已 RELEASED 的行仍指名那次 dispatch 提交了什么;记录在恢复前 binding 已退役的已执行 child,现在可结算,不再把预算楔死在一个永不会回来的 READY 答案上。
 3. **Turn 只经 G3 派发对证明启动。** `TurnLine` 携带 `submission_attempted` 与 `harness_event_epoch`,relay 的物理运行探针与级联的 started 判定都改读 `dispatched()`(有其一即为真)。在暖机、create/load 或提交之前就被协调器失败的 Turn 是 pre-admission 失败,什么都不证明——它结算指名的 never-started 配对,而不是去猎杀一个从未存在的 binding(R23 把父级留在 CLOSING 的正是这个楔子)。
 
+## 修订(2026-10-09,R24 评审轮)
+
+1. **可运行的 Turn 拦住 never-started 判定(relay)。** `!dispatched()` 对等的既是 coordinator 尚在等待的活 `ACCEPTED` Turn,也是终态的 pre-admission 失败——抢在 coordinator 有结论之前落判决,就是换个好时机的同一个假配对:在无法关闭的主机上,give-up 对一个随后被协调器认领、提交并真正跑完的 Turn 提交了 `creation_failed`。relay 现对任何既不 `dispatched()` 也不 `preAdmissionTerminal()`(既无派发对且非 FAILED/CANCELLED)的 Turn 一律有界延迟。级联不需要对称分支:已有活动 Turn 的 close 录取在同一窗口本就继续值守(active-Turn 拒绝处 `continue`,下一轮 walk 结算终态真相)。
+2. **闸的拒绝在线路上是可回滚的非提交。** verdict/mint 闸改用专属 `child_run_lineage_minted` 码而非通用记录拒绝,HTTP 客户端把它(409)映射为 `ManagedSessionCommitRejectedError`——authority 对该类直接重抛、不落 `writeFailure` 闩,relay 修正后的具名重试得以在同一个常驻父 authority 上提交,而不是撞上「先前失败后 Session 日志停写」。线程级不变量随代码落位:专属码在 H2 判定表、MySQL IT 与 TS 客户端套件三端钉住(一次性 409 → 类型化拒绝、`writesStopped` 为假、修正重试提交)。
+
 ## 后续工作
 
 | 切片   | 范围                                                                                                                  |

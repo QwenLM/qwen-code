@@ -91,11 +91,16 @@ class ManagedExtensionRecordVerdictReconcileTest {
         plantLineage(parent, "child-unnamed");
         assertThatThrownBy(() -> records.reconcileNeverStartedVerdict(
                 TENANT, parent, "child_run", "run-1", verdict(null)))
-                .isInstanceOfSatisfying(ApiException.class,
-                        error -> org.assertj.core.api.Assertions
-                                .assertThat(error.getMessage()).contains(
-                                        "does not name the Session its"
-                                                + " creation minted"));
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    // The wire code the Hosted writer classifies as a
+                    // rollbackable non-commit (R24) — never the generic
+                    // record rejection that latches write failures.
+                    org.assertj.core.api.Assertions.assertThat(error
+                            .getCode()).isEqualTo("child_run_lineage_minted");
+                    org.assertj.core.api.Assertions.assertThat(error
+                            .getMessage()).contains("does not name the"
+                                    + " Session its creation minted");
+                });
     }
 
     @Test
@@ -104,7 +109,10 @@ class ManagedExtensionRecordVerdictReconcileTest {
         plantLineage(parent, "child-mis");
         assertThatThrownBy(() -> records.reconcileNeverStartedVerdict(
                 TENANT, parent, "child_run", "run-1", verdict("child-other")))
-                .isInstanceOf(ApiException.class);
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> org.assertj.core.api.Assertions
+                                .assertThat(error.getCode()).isEqualTo(
+                                        "child_run_lineage_minted"));
     }
 
     @Test
@@ -115,6 +123,9 @@ class ManagedExtensionRecordVerdictReconcileTest {
                 .doesNotThrowAnyException();
         assertThatThrownBy(() -> records.reconcileNeverStartedVerdict(
                 TENANT, parent, "child_run", "run-1", verdict("child-ghost")))
-                .isInstanceOf(ApiException.class);
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> org.assertj.core.api.Assertions
+                                .assertThat(error.getCode()).isEqualTo(
+                                        "child_run_lineage_minted"));
     }
 }

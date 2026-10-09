@@ -43,6 +43,16 @@ public class ChildResultRelayStore {
         public boolean dispatched() {
             return submissionAttempted || harnessEventEpoch != null;
         }
+
+        /** Whether this Turn is the terminal pre-admission failure: an
+         * undispatched, terminally failed (or cancelled) admission. A
+         * live enqueued ACCEPTED Turn shares `!dispatched()` with it —
+         * only the terminal half may ever settle a never-started
+         * verdict (R24's runnable-Turn guard). */
+        public boolean preAdmissionTerminal() {
+            return ("FAILED".equals(status) || "CANCELLED".equals(status))
+                    && !dispatched();
+        }
     }
 
     // delivery_state is null on the shell kind, so a child_run row with a

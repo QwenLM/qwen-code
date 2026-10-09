@@ -676,6 +676,16 @@ public class ChildResultRelay {
                 attachReplay(row, child);
                 return true;
             }
+            if (childTurn != null && !childTurn.preAdmissionTerminal()) {
+                // The Turn is enqueued, not failed: a live ACCEPTED Turn
+                // shares the undispatched shape with the terminal one,
+                // and a verdict minted ahead of its dispatch outcome is
+                // the same false pairing with better timing — the give-up
+                // owes the bounded wait until the coordinator settles the
+                // admission one way or the other.
+                throw new RelayRetry("child Turn admitted but its"
+                        + " admission never landed yet");
+            }
             // Record truth: truly nothing ever dispatched — the
             // `creation_failed` pairing is the lawful verdict here.
             return false;

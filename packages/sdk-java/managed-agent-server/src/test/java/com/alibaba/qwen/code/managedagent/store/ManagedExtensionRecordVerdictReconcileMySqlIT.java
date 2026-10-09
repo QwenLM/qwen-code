@@ -87,7 +87,10 @@ class ManagedExtensionRecordVerdictReconcileMySqlIT {
                     assertThatThrownBy(() -> records
                             .reconcileNeverStartedVerdict(TENANT, parent,
                                     "child_run", runId, verdict(null)))
-                            .isInstanceOf(ApiException.class);
+                            .isInstanceOfSatisfying(ApiException.class,
+                                    error -> org.assertj.core.api.Assertions
+                                            .assertThat(error.getCode())
+                                            .isEqualTo("child_run_lineage_minted"));
                 } finally {
                     gate.rollback();
                     mint.rollback();

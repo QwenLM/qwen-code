@@ -970,6 +970,46 @@ class ChildResultRelayTest {
                 .containsEntry("childSessionId", CHILD);
     }
 
+    // R24: a live ACCEPTED Turn shares the undispatched shape with the
+    // terminal pre-admission failure — the give-up owes the bounded wait
+    // until the coordinator settles the admission, never a verdict
+    // minted ahead of it.
+    @Test
+    void anEnqueuedTurnDefersTheVerdictUntilItSettles() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 63, 0, null, now, now));
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn(
+                "intent");
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "ACCEPTED", null, null, false, null));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("binding");
+        assertThat(row.get().attempts()).isEqualTo(64);
+        assertThat(harness.operations).isEmpty();
+        verify(childCloses, never()).admitChildClose(anyString(),
+                anyString(), anyString(), anyString());
+        // The coordinator settles the admission as a pre-admission
+        // failure: the named never-started pairing commits then.
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "FAILED", now + 1L,
+                        "workspace_unavailable", false, null));
+        RelayRow parked = row.get();
+        row.set(new RelayRow(parked.tenantId(), parked.parentSessionId(),
+                parked.childRunId(), parked.creationKey(),
+                parked.childSessionId(), parked.state(), parked.claimedBy(),
+                now + 30_000, parked.attempts(), 0, parked.lastError(),
+                parked.createdAt(), now));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
+        assertThat(harness.operations.get(0))
+                .containsEntry("stopReason", "creation_failed")
+                .containsEntry("started", false)
+                .containsEntry("childSessionId", CHILD);
+    }
+
     // R23: a Turn whose admission never landed is a pre-admission
     // failure — it proves no dispatch, so the never-started pairing
     // settles named instead of hunting a binding that never existed.
