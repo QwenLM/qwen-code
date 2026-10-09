@@ -138,6 +138,35 @@ function pressKey(target: Element, key: string): void {
 }
 
 describe('ToolApproval accessibility', () => {
+  it('shows a compact approval diff with original file line numbers', () => {
+    const oldLines = Array.from(
+      { length: 200 },
+      (_, i) => `fixture_line_${i + 1}`,
+    );
+    const newLines = [...oldLines];
+    newLines[99] = 'changed_line_100';
+    render(false, {
+      ...request,
+      content: [
+        {
+          type: 'diff',
+          path: 'example.txt',
+          oldText: `${oldLines.join('\n')}\n`,
+          newText: `${newLines.join('\n')}\n`,
+        },
+      ],
+    });
+    const diff = container!.querySelector('[aria-label="File diff"]')!;
+    expect(diff.children).toHaveLength(9);
+    expect(diff.textContent).toContain('@@ -97,7 +97,7 @@');
+    expect(diff.textContent).toContain('fixture_line_100');
+    expect(diff.textContent).toContain('changed_line_100');
+    expect(diff.textContent).toContain('fixture_line_97');
+    expect(diff.textContent).toContain('fixture_line_103');
+    expect(diff.textContent).not.toContain('fixture_line_200');
+    expect(optionButtons()).toHaveLength(2);
+  });
+
   it.each([false, true])(
     'preserves edit approval changes and warnings (host owns preview: %s)',
     (hostOwnsEditDiffPreview) => {

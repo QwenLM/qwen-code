@@ -2811,6 +2811,29 @@ describe('tool output logic', () => {
     );
   });
 
+  it('bounds pending content diffs while keeping completed content diffs', () => {
+    const oldLines = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[99] = 'updated line 100';
+    const content: ACPToolCall['content'] = [
+      {
+        type: 'diff',
+        oldText: oldLines.join('\n'),
+        newText: newLines.join('\n'),
+      },
+    ];
+    for (const status of ['pending', 'in_progress'] as const) {
+      const diff = extractDiff(makeTool({ toolName: 'edit', status, content }));
+      expect(diff).toContain('@@ -97,7 +97,7 @@');
+      expect(diff).toContain('-line 100\n+updated line 100');
+      expect(diff).not.toContain('line 200');
+      expect(diff.split('\n')).toHaveLength(9);
+    }
+    expect(
+      extractDiff(makeTool({ toolName: 'edit', status: 'completed', content })),
+    ).toBe(buildUnifiedDiff(oldLines.join('\n'), newLines.join('\n')));
+  });
+
   it('uses a typed file-diff preview without raw output', () => {
     expect(
       extractDiff(

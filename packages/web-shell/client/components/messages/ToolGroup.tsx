@@ -26,7 +26,10 @@ import {
 import { SubAgentPanel } from './tools/SubAgentPanel';
 import { ParallelAgentsGroup } from './tools/ParallelAgentsGroup';
 import { DiffView } from './tools/DiffView';
-import { buildUnifiedDiff } from '../../utils/unifiedDiff';
+import {
+  buildContextBoundedDiff,
+  buildUnifiedDiff,
+} from '../../utils/unifiedDiff';
 import { ShellToolOutput } from './tools/ShellToolOutput';
 import {
   extractTodosFromToolCall,
@@ -179,7 +182,11 @@ export function extractDiff(tool: ACPToolCall): string {
   if (tool.content) {
     const diffBlock = tool.content.find((b) => b.type === 'diff');
     if (diffBlock && diffBlock.type === 'diff') {
-      return buildUnifiedDiff(diffBlock.oldText || '', diffBlock.newText || '');
+      const buildDiff =
+        tool.status === 'pending' || tool.status === 'in_progress'
+          ? buildContextBoundedDiff
+          : buildUnifiedDiff;
+      return buildDiff(diffBlock.oldText || '', diffBlock.newText || '');
     }
   }
 

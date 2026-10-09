@@ -25,7 +25,7 @@ import {
   type SessionContentGenerator,
 } from './AssistantMessage';
 import styles from './ToolApproval.module.css';
-import { buildUnifiedDiff } from '../../utils/unifiedDiff';
+import { buildContextBoundedDiff } from '../../utils/unifiedDiff';
 import { DiffView } from './tools/DiffView';
 import { useWebShellCustomization } from '../../customization';
 
@@ -559,7 +559,7 @@ export function ToolApproval({
                 diff:
                   tooManyChars || tooManyLines
                     ? OMITTED
-                    : buildUnifiedDiff(oldText, newText),
+                    : buildContextBoundedDiff(oldText, newText),
               };
             }),
     [request.content, hostOwnsEditDiffPreview],

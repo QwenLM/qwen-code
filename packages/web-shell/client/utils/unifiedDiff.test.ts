@@ -1,5 +1,113 @@
 import { describe, expect, it } from 'vitest';
-import { buildUnifiedDiff, parseUnifiedDiff } from './unifiedDiff';
+import {
+  buildContextBoundedDiff,
+  buildUnifiedDiff,
+  parseUnifiedDiff,
+} from './unifiedDiff';
+
+describe('buildContextBoundedDiff', () => {
+  it('shows a middle edit with three context lines and original line numbers', () => {
+    const oldLines = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[99] = 'updated line 100';
+    const parsed = parseUnifiedDiff(
+      buildContextBoundedDiff(oldLines.join('\n'), newLines.join('\n')),
+    );
+    expect(parsed).toMatchObject({ additions: 1, deletions: 1 });
+    expect(parsed.lines).toHaveLength(9);
+    expect(parsed.lines[0].content).toBe('@@ -97,7 +97,7 @@');
+    expect(parsed.lines[1]).toMatchObject({ content: 'line 97', oldLine: 97 });
+    expect(parsed.lines[4]).toMatchObject({
+      type: 'del',
+      content: 'line 100',
+      oldLine: 100,
+    });
+    expect(parsed.lines[5]).toMatchObject({
+      type: 'add',
+      content: 'updated line 100',
+      newLine: 100,
+    });
+    expect(parsed.lines.at(-1)).toMatchObject({ content: 'line 103' });
+  });
+
+  it('separates distant changes and preserves shifted line numbers', () => {
+    const oldLines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines.splice(24, 1);
+    newLines.splice(4, 0, 'inserted');
+    const parsed = parseUnifiedDiff(
+      buildContextBoundedDiff(oldLines.join('\n'), newLines.join('\n')),
+    );
+    expect(parsed).toMatchObject({ additions: 1, deletions: 1 });
+    expect(parsed.lines.filter((line) => line.type === 'header')).toHaveLength(
+      2,
+    );
+    expect(parsed.lines.find((line) => line.type === 'add')).toMatchObject({
+      content: 'inserted',
+      newLine: 5,
+    });
+    expect(parsed.lines.find((line) => line.type === 'del')).toMatchObject({
+      content: 'line 25',
+      oldLine: 25,
+    });
+    expect(parsed.lines.map((line) => line.content)).not.toContain('line 15');
+    expect(parsed.lines.at(-1)).toMatchObject({
+      content: 'line 28',
+      oldLine: 28,
+      newLine: 28,
+    });
+  });
+
+  it('merges overlapping context windows without duplicating changes', () => {
+    const oldLines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[5] = 'first change';
+    newLines[9] = 'second change';
+    const parsed = parseUnifiedDiff(
+      buildContextBoundedDiff(oldLines.join('\n'), newLines.join('\n')),
+    );
+    expect(parsed).toMatchObject({ additions: 2, deletions: 2 });
+    expect(parsed.lines.filter((line) => line.type === 'header')).toHaveLength(
+      1,
+    );
+    expect(
+      parsed.lines.filter((line) => line.content === 'line 8'),
+    ).toHaveLength(1);
+  });
+
+  it('trims common ends before applying the LCS memory cap', () => {
+    const oldLines = Array.from({ length: 600 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[299] = 'updated';
+    const parsed = parseUnifiedDiff(
+      buildContextBoundedDiff(oldLines.join('\n'), newLines.join('\n')),
+    );
+    expect(parsed).toMatchObject({ additions: 1, deletions: 1 });
+    expect(parsed.lines).toHaveLength(9);
+    expect(parsed.lines[0].content).toBe('@@ -297,7 +297,7 @@');
+  });
+
+  it('preserves blank content and zero-length hunk coordinates', () => {
+    expect(buildContextBoundedDiff('', 'created\n')).toBe(
+      '@@ -0,0 +1,1 @@\n+created',
+    );
+    expect(buildContextBoundedDiff('removed\n', '')).toBe(
+      '@@ -1,1 +0,0 @@\n-removed',
+    );
+    expect(
+      parseUnifiedDiff(buildContextBoundedDiff('a\n\n', 'a\n')),
+    ).toMatchObject({
+      additions: 0,
+      deletions: 1,
+      lines: [
+        { type: 'header' },
+        { type: 'context', content: 'a', oldLine: 1, newLine: 1 },
+        { type: 'del', content: '', oldLine: 2 },
+      ],
+    });
+    expect(buildContextBoundedDiff('a\n', 'a\n')).toBe('');
+  });
+});
 
 describe('parseUnifiedDiff', () => {
   it('tracks hunks without confusing file-like content for headers', () => {
