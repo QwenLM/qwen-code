@@ -2267,6 +2267,9 @@ describe('computeResumedPromptCountSeed', () => {
             `s########${turn}`,
             'other-session########99',
             's########invalid',
+            `s########${'9'.repeat(400)}`,
+            's########9007199254740992',
+            `s########${Number.MAX_SAFE_INTEGER}`,
           ].map((promptId) => ({
             promptId,
             timestamp: '2026-10-08T00:00:00.000Z',

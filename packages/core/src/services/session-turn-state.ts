@@ -156,7 +156,9 @@ function parseSessionPromptTurn(
   const promptIdPrefix = `${sessionId}########`;
   if (!promptId.startsWith(promptIdPrefix)) return undefined;
   const suffix = promptId.slice(promptIdPrefix.length);
-  return /^\d+$/.test(suffix) ? Number(suffix) : undefined;
+  if (!/^\d+$/.test(suffix)) return undefined;
+  const turn = Number(suffix);
+  return Number.isSafeInteger(turn + 1) ? turn : undefined;
 }
 
 function isUserPromptRecord(record: ChatRecord): boolean {
