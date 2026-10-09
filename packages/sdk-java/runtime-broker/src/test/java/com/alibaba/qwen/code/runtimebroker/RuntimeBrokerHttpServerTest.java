@@ -163,6 +163,33 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
+    void privateRecoveryReadRejectsIncompleteOrNonIntegralInstalledOwner() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            Map<String, Object> body = new HashMap<>(Map.of("protocolVersion", 1, "requestId", "read",
+                    "harnessSessionId", "harness", "runtimeSessionId", "runtime", "promptId", "prompt", "batchId", "batch"));
+            Map<String, Object> owner = Map.of("writerId", "writer", "writerGeneration", 2, "activationId", "activation", "activationEpoch", 3);
+            for (String field : owner.keySet()) {
+                var missing = new HashMap<>(owner);
+                missing.remove(field);
+                body.put("recoveryOwner", missing);
+                assertEquals(400, fixture.post("/executions:read-batch", body).statusCode());
+            }
+            for (Object invalid : List.of(0, -1, 1.5, "2", 9007199254740992L)) {
+                for (String field : List.of("writerGeneration", "activationEpoch")) {
+                    var changed = new HashMap<>(owner);
+                    changed.put(field, invalid);
+                    body.put("recoveryOwner", changed);
+                    assertEquals(400, fixture.post("/executions:read-batch", body).statusCode());
+                }
+            }
+            body.put("recoveryOwner", "owner");
+            assertEquals(400, fixture.post("/executions:read-batch", body).statusCode());
+            assertEquals(0, fixture.transport.executions.get());
+            assertFalse(fixture.executions.hasActiveByRuntimeSession("runtime"));
+        }
+    }
+
+    @Test
     void unsupportedOperationsNeverDispatchOrClaimResolution() throws Exception {
         try (Fixture fixture = new Fixture()) {
             HttpResponse<String> acquired = fixture.post("/tool-sessions:acquire", Map.of(

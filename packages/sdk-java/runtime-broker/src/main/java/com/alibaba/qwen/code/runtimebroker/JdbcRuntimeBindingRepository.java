@@ -350,6 +350,11 @@ public final class JdbcRuntimeBindingRepository
 
     Map<String, Object> readCsiBatch(RuntimeSessionRepository sessions, ToolExecutionRepository executions,
             RuntimeBindingRecord hint, String promptId, String batchId) {
+        return readCsiBatch(sessions, executions, hint, promptId, batchId, null);
+    }
+
+    Map<String, Object> readCsiBatch(RuntimeSessionRepository sessions, ToolExecutionRepository executions,
+            RuntimeBindingRecord hint, String promptId, String batchId, Map<String, Object> recoveryOwner) {
         requireCsiRepositories(sessions, executions);
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
             var admission = JdbcCsiActivationAdmission.lockForReservation(connection, hint, this);
@@ -363,7 +368,11 @@ public final class JdbcRuntimeBindingRepository
             if (runtime.getState() != RuntimeSessionRecord.State.READY) {
                 throw new RuntimeBrokerException(409, "runtime_admission_closed", "Original CSI Runtime Session is not ready", false);
             }
-            var result = CsiNativeToolReservation.read(connection, original, admission.prefix(), resources, promptId, batchId);
+            if (recoveryOwner != null) {
+                admission.head().requireRecoveryOwner(recoveryOwner);
+                JdbcCsiActivationAdmission.requireRecoveryTail(connection, original, admission.head());
+            }
+            var result = CsiNativeToolReservation.read(connection, original, admission.prefix(), resources, promptId, batchId, recoveryOwner != null);
             admission.head().requireCurrentTime(connection);
             return result;
         });

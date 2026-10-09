@@ -75,21 +75,30 @@ public final class JdbcCsiExecutionAdmission {
 
     static void verifyColdReceipts(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             JdbcCsiActivationAdmission.NativeHead head) throws SQLException {
-        var members = receiptMembers(connection, original, head, head.prefix());
-        require(!members.isEmpty() && head.prefix().receipts().keySet().equals(members.stream()
-                .map(ToolExecutionRecord::getExecutionCallId).collect(java.util.stream.Collectors.toSet())));
+        var members = receiptMembers(connection, original, head, head.prefix(), true);
+        require(!members.isEmpty());
         for (var member : members) {
             require(member.getState() == ToolExecutionRecord.State.SETTLED && !member.isCancelRequested()
                     && member.getResult() != null && member.getAuthorizedDispatchGeneration() != null
                     && java.util.Set.of("success", "error").contains(member.getExecutionStatus()));
+            var ref = JSON.valueToTree(member.getReference());
+            var call = head.prefix().batches().get(id(ref, "batchId")).batch().calls()
+                    .get((int) number(ref.get("ordinal")));
+            CsiNativeActivationProof.convertedResult(JSON.valueToTree(member.getResult()), call);
         }
     }
 
     private static List<ToolExecutionRecord> receiptMembers(Connection connection,
             JdbcCsiFilesRetirementGuard.Original original, JdbcCsiActivationAdmission.NativeHead head,
             CsiNativeActivationProof.Prefix prefix) throws SQLException {
+        return receiptMembers(connection, original, head, prefix, false);
+    }
+
+    private static List<ToolExecutionRecord> receiptMembers(Connection connection,
+            JdbcCsiFilesRetirementGuard.Original original, JdbcCsiActivationAdmission.NativeHead head,
+            CsiNativeActivationProof.Prefix prefix, boolean recovery) throws SQLException {
         CsiNativeToolReservation.requireReady(connection, original);
-        var members = CsiNativeToolReservation.complete(connection, original, prefix, CsiNativeToolReservation.inventory(connection, original));
+        var members = CsiNativeToolReservation.complete(connection, original, prefix, CsiNativeToolReservation.inventory(connection, original), recovery);
         for (var member : members) {
             grant(connection, original, member, head);
         }

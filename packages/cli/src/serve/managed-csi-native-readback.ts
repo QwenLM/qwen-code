@@ -174,41 +174,16 @@ export function readCsiNativeResponse(
       const prepared = evidence['preparedRef'];
       if (prepared !== null)
         add(required, ref(prepared, 'managed-file_history'));
-      const grant = closed(evidence['grant'], [
-        'protocolVersion',
-        'runtimeBindingId',
-        'bindingGeneration',
-        'authorizedBindingVersion',
-        'executionCallId',
-        'dispatchGeneration',
-        'authorizationRevision',
-        'authorizationSequence',
-        'executionReference',
-        'intent',
-        'checkpointRef',
-        'preparedRef',
-        'identity',
-        'context',
-        'installedContext',
-      ]);
+      const grant = readCsiNativeGrant(evidence['grant']);
       ensure(
-        grant['protocolVersion'] === 1 &&
-          grant['executionCallId'] === request.subject &&
+        grant['executionCallId'] === request.subject &&
           isDeepStrictEqual(grant['executionReference'], reference) &&
           isDeepStrictEqual(grant['preparedRef'], prepared),
       );
-      id(grant['runtimeBindingId']);
-      for (const field of [
-        'bindingGeneration',
-        'authorizedBindingVersion',
-        'dispatchGeneration',
-      ])
-        ensure(isCanonicalDecimalText(grant[field]));
       for (const field of ['authorizationRevision', 'authorizationSequence']) {
         const count = counter(evidence[field]);
         ensure(
-          count > 0 &&
-            count === counter(grant[field]) &&
+          count === grant[field] &&
             count <=
               counter(
                 head[
@@ -219,15 +194,6 @@ export function readCsiNativeResponse(
       }
       for (const field of ['identity', 'context', 'installedContext'])
         ensure(isDeepStrictEqual(grant[field], body[field]));
-      const intent = closed(grant['intent'], ['revision', 'sequence']);
-      ensure(
-        counter(intent['revision']) > 0 &&
-          counter(intent['sequence']) > 0 &&
-          counter(intent['revision']) <
-            counter(grant['authorizationRevision']) &&
-          counter(intent['sequence']) < counter(grant['authorizationSequence']),
-      );
-      ref(grant['checkpointRef'], 'managed-checkpoint');
       const bytes = resources(evidence['resources'], required);
       if (prepared === null) {
         const input = object(
@@ -254,9 +220,60 @@ export function readCsiNativeResponse(
   return structuredClone(body) as unknown as CsiNativeReadbackResponse;
 }
 
+export function readCsiNativeGrant(value: unknown): Record<string, unknown> {
+  const grant = closed(value, [
+    'protocolVersion',
+    'runtimeBindingId',
+    'bindingGeneration',
+    'authorizedBindingVersion',
+    'executionCallId',
+    'dispatchGeneration',
+    'authorizationRevision',
+    'authorizationSequence',
+    'executionReference',
+    'intent',
+    'checkpointRef',
+    'preparedRef',
+    'identity',
+    'context',
+    'installedContext',
+  ]);
+  ensure(grant['protocolVersion'] === 1);
+  commonContext(grant);
+  id(grant['runtimeBindingId']);
+  id(grant['executionCallId']);
+  execution(
+    grant['executionReference'],
+    object(grant['identity'])['sessionId'],
+  );
+  for (const field of [
+    'bindingGeneration',
+    'authorizedBindingVersion',
+    'dispatchGeneration',
+  ])
+    ensure(isCanonicalDecimalText(grant[field]));
+  for (const field of ['authorizationRevision', 'authorizationSequence'])
+    ensure(counter(grant[field]) > 0);
+  const intent = closed(grant['intent'], ['revision', 'sequence']);
+  ensure(
+    counter(intent['revision']) > 0 &&
+      counter(intent['sequence']) > 0 &&
+      counter(intent['revision']) < counter(grant['authorizationRevision']) &&
+      counter(intent['sequence']) < counter(grant['authorizationSequence']),
+  );
+  ref(grant['checkpointRef'], 'managed-checkpoint');
+  if (grant['preparedRef'] !== null)
+    ref(grant['preparedRef'], 'managed-file_history');
+  return grant;
+}
+
 function common(value: Record<string, unknown>): void {
   ensure(value['protocolVersion'] === 1);
   uuid(value['requestId']);
+  commonContext(value);
+}
+
+function commonContext(value: Record<string, unknown>): void {
   const identity = closed(value['identity'], [
     'profile',
     'sessionId',

@@ -4,12 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { convertManagedRuntimeToolResult } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-tool-response.js';
+import { publishHostedCsiReceipt } from './hosted-csi-tool-evidence.js';
+import {
+  readCsiRecoveryResult,
+  readHostedCsiRecoveryBatch,
+  type CsiRecoveryOwner,
+} from './hosted-csi-recovery-batch.js';
 import { parseManagedCsiFileJson } from './managed-csi-file-envelope.js';
 import {
   commitHostedCsiHistory,
@@ -41,6 +49,7 @@ export async function recoverHostedCsiReceipts(
   broker: HostedWorkspaceBrokerOptions,
   promptId: string,
   text: string,
+  owner?: CsiRecoveryOwner,
 ): Promise<Part[]> {
   const authority = session.authority;
   const events = authority.eventsInSequenceRange(
@@ -75,79 +84,187 @@ export async function recoverHostedCsiReceipts(
   );
   if (items.length === 0)
     throw new Error('Original CSI receipt batch is unavailable.');
-  const harness = createManagedHarnessHandle(session);
   const projected = await session.sink.project();
-  let parentUuid = projected.at(-1)?.uuid ?? null;
-  const responses: Part[] = [];
+  const batchId = items[0].modelMessageId;
+  const batchIndex = projected.findIndex((record) => record.uuid === batchId);
+  const batch = projected[batchIndex];
+  if (
+    !batch ||
+    batch.type !== 'assistant' ||
+    batch.daemonPromptId !== promptId ||
+    !Array.isArray(batch.message?.parts) ||
+    typeof batch.model !== 'string' ||
+    new Set(items.map((item) => item.executionCallId)).size !== items.length ||
+    new Set(items.map((item) => item.functionCallId)).size !== items.length ||
+    items.some(
+      (item, index) =>
+        item.modelMessageId !== batchId ||
+        item.consumed ||
+        !['in_progress', 'settled'].includes(item.state) ||
+        (index > 0 && item.ordinal <= items[index - 1].ordinal),
+    )
+  )
+    throw new Error('Original CSI assistant batch differs.');
+  const originalParts = batch.message.parts as Part[];
+  const functions = originalParts.flatMap((part, partIndex) =>
+    part.functionCall ? [{ call: part.functionCall, partIndex }] : [],
+  );
   for (const item of items) {
-    const receipts = events.filter(
+    const original = functions[item.ordinal];
+    if (
+      !original ||
+      original.partIndex !== item.partIndex ||
+      original.call.id !== item.functionCallId ||
+      original.call.name !== item.toolName
+    )
+      throw new Error('Original CSI accepted function differs.');
+  }
+  const receiptEvents = items.map((item) =>
+    events.filter(
       (event) =>
         event.kind === 'tool.receipt' &&
         event.payload['executionCallId'] === item.executionCallId,
-    );
-    if (receipts.length !== 1)
-      throw new Error('Original CSI receipt is unavailable.');
-    const ref = assertManagedSessionDurableRef(
-      receipts[0].payload['toolOutcomeRef'],
-      'original CSI outcome',
-    );
-    if (ref.kind !== 'managed-tool-outcome')
+    ),
+  );
+  if (receiptEvents.some((receipts) => receipts.length > 1))
+    throw new Error('Original CSI receipt is ambiguous.');
+  const missing = receiptEvents.some((receipts) => receipts.length === 0);
+  if (missing && !owner)
+    throw new Error('Original CSI installed recovery owner is required.');
+  const recovered = missing
+    ? await readHostedCsiRecoveryBatch(
+        session,
+        broker,
+        promptId,
+        items,
+        originalParts,
+        owner!,
+      )
+    : undefined;
+  const planned: Array<{
+    item: (typeof items)[number];
+    ref: ReturnType<typeof assertManagedSessionDurableRef> | null;
+    outcome: Buffer;
+    record: ChatRecord;
+    exists: boolean;
+    parts: Part[];
+  }> = [];
+  let parentUuid: string | null = batchId;
+  let existingCount = 0;
+  const ids = new Set(projected.map((record) => record.uuid));
+  for (const [index, item] of items.entries()) {
+    const receipts = receiptEvents[index];
+    const ref =
+      receipts.length === 1
+        ? assertManagedSessionDurableRef(
+            receipts[0].payload['toolOutcomeRef'],
+            'original CSI outcome',
+          )
+        : null;
+    if (ref && ref.kind !== 'managed-tool-outcome')
       throw new Error('Original CSI outcome kind differs.');
-    const outcome = object(
-      parseManagedCsiFileJson(await session.resources.read(ref), 64 * 1024),
-    );
+    const savedBytes = ref ? await session.resources.read(ref) : null;
+    const outcome = savedBytes
+      ? object(parseManagedCsiFileJson(savedBytes, 64 * 1024))
+      : {
+          schemaVersion: 1,
+          executionCallId: item.executionCallId,
+          envelope: recovered!.get(item.executionCallId),
+          history: {
+            messageId: randomUUID(),
+            timestamp: new Date().toISOString(),
+            model: batch.model,
+            parts: convertManagedRuntimeToolResult(
+              item.toolName,
+              item.functionCallId,
+              recovered!.get(item.executionCallId)!,
+              undefined,
+            ),
+          },
+        };
     const history = object(outcome['history']);
+    const result = readCsiRecoveryResult(outcome['envelope']);
+    const parts = convertManagedRuntimeToolResult(
+      item.toolName,
+      item.functionCallId,
+      result,
+      undefined,
+    );
     if (
+      !isDeepStrictEqual(
+        Object.keys(outcome).sort(),
+        ['schemaVersion', 'executionCallId', 'envelope', 'history'].sort(),
+      ) ||
+      !isDeepStrictEqual(
+        Object.keys(history).sort(),
+        ['messageId', 'timestamp', 'model', 'parts'].sort(),
+      ) ||
+      outcome['schemaVersion'] !== 1 ||
       outcome['executionCallId'] !== item.executionCallId ||
       typeof history['messageId'] !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        history['messageId'],
+      ) ||
       typeof history['timestamp'] !== 'string' ||
-      typeof history['model'] !== 'string' ||
-      !Array.isArray(history['parts'])
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(
+        history['timestamp'],
+      ) ||
+      !Number.isFinite(Date.parse(history['timestamp'])) ||
+      history['model'] !== batch.model ||
+      !isDeepStrictEqual(history['parts'], parts) ||
+      (recovered &&
+        !isDeepStrictEqual(result, recovered.get(item.executionCallId)))
     )
       throw new Error('Original CSI outcome identity differs.');
-    const parts = history['parts'] as Part[];
+    if (
+      item.state === 'settled' &&
+      (!ref || !isDeepStrictEqual(item.outcomeRef, ref))
+    )
+      throw new Error('Original CSI tool checkpoint differs.');
+    const record: ChatRecord = {
+      ...authority.recordEnvelope,
+      sessionId: authority.sessionHeader.sessionKey.sessionId,
+      uuid: history['messageId'],
+      timestamp: history['timestamp'],
+      parentUuid,
+      type: 'tool_result',
+      daemonPromptId: promptId,
+      model: history['model'],
+      message: { role: 'user', parts },
+    };
     const existing = projected.find(
-      (record) => record.uuid === history['messageId'],
+      (candidate) => candidate.uuid === record.uuid,
     );
     if (existing) {
       if (
-        !isDeepStrictEqual(existing, {
-          ...authority.recordEnvelope,
-          sessionId: authority.sessionHeader.sessionKey.sessionId,
-          uuid: history['messageId'],
-          timestamp: history['timestamp'],
-          parentUuid: existing.parentUuid,
-          type: 'tool_result',
-          daemonPromptId: promptId,
-          model: history['model'],
-          message: { role: 'user', parts },
-        })
+        existingCount !== index ||
+        !isDeepStrictEqual(existing, record) ||
+        projected[batchIndex + 1 + index]?.uuid !== record.uuid
       )
         throw new Error('Original CSI tool message differs.');
-    } else {
-      const record: ChatRecord = {
-        ...authority.recordEnvelope,
-        sessionId: authority.sessionHeader.sessionKey.sessionId,
-        uuid: history['messageId'],
-        timestamp: history['timestamp'],
-        parentUuid,
-        type: 'tool_result',
-        daemonPromptId: promptId,
-        model: history['model'],
-        message: { role: 'user', parts },
-      };
-      await session.sink.write(record);
-      parentUuid = record.uuid;
+      existingCount++;
+    } else if (ids.has(record.uuid)) {
+      throw new Error('Original CSI history identity is reused.');
     }
-    if (item.state === 'in_progress')
-      await harness.resolveAwaitRuntime(item.executionCallId, ref);
-    else if (
-      item.state !== 'settled' ||
-      !isDeepStrictEqual(item.outcomeRef, ref)
+    ids.add(record.uuid);
+    const outcomeBytes = savedBytes ?? Buffer.from(JSON.stringify(outcome));
+    if (
+      outcomeBytes.length > 64 * 1024 ||
+      Buffer.byteLength(JSON.stringify(record)) > 64 * 1024
     )
-      throw new Error('Original CSI tool checkpoint differs.');
-    responses.push(...parts);
+      throw new Error('Complete CSI result exceeds the durable Session limit.');
+    planned.push({
+      item,
+      ref,
+      outcome: outcomeBytes,
+      record,
+      exists: existing !== undefined,
+      parts,
+    });
+    parentUuid = record.uuid;
   }
+  if (projected.length !== batchIndex + 1 + existingCount)
+    throw new Error('Original CSI tool message chain differs.');
   const latest = authority.domainRecord('file_history');
   if (!latest) throw new Error('Original CSI file history is unavailable.');
   const saved = object(
@@ -156,6 +273,22 @@ export async function recoverHostedCsiReceipts(
       64 * 1024,
     ),
   );
+  // No durable repair happens before the complete original batch passes preflight.
+  const harness = createManagedHarnessHandle(session);
+  const responses: Part[] = [];
+  for (const plan of planned) {
+    const ref =
+      plan.ref ??
+      (await publishHostedCsiReceipt(
+        session,
+        plan.item.executionCallId,
+        plan.outcome,
+      ));
+    if (!plan.exists) await session.sink.write(plan.record);
+    if (plan.item.state === 'in_progress')
+      await harness.resolveAwaitRuntime(plan.item.executionCallId, ref);
+    responses.push(...plan.parts);
+  }
   if (saved['preparation'] !== null) {
     const observation = await requestHostedCsiHistory(
       broker,

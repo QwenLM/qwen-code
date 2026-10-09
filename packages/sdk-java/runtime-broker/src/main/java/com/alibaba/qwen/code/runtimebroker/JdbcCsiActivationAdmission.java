@@ -349,23 +349,39 @@ public final class JdbcCsiActivationAdmission {
             History history) throws SQLException {
         original.requireAdmission();
         var prefix = history.prefix();
-        require(history.activation() != null && prefix.input() != null && prefix.pendingBatch() != null
+        require(history.activation() != null);
+        requireRecoveryTail(connection, original,
+                new NativeHead(history.revision(), history.sequence(), history.digest(), prefix,
+                        0, history.activation().expiresAt(), history.activation()));
+    }
+
+    static void requireRecoveryTail(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            NativeHead head) throws SQLException {
+        var prefix = head.prefix();
+        require(prefix.input() != null && prefix.pendingBatch() != null
                 && prefix.input().noDeadline()
                 && prefix.batches().size() == 1 && prefix.checkpoint() != null && prefix.attempt() != null
                 && "output_committed".equals(prefix.attempt().stage())
                 && !prefix.assistantCommitted() && prefix.stream() == null
                 && java.util.Set.of("await_runtime", "results_ready").contains(
                         prefix.checkpoint().state().path("continuation").path("phase").textValue()));
-        JdbcCsiExecutionAdmission.verifyColdReceipts(connection, original,
-                new NativeHead(history.revision(), history.sequence(), history.digest(), prefix,
-                        0, history.activation().expiresAt()));
+        JdbcCsiExecutionAdmission.verifyColdReceipts(connection, original, head);
     }
 
     public record NativeHead(long revision, long sequence, String digest, CsiNativeActivationProof.Prefix prefix,
-            long writerExpiresAt, long activationExpiresAt) {
+            long writerExpiresAt, long activationExpiresAt, CsiNativeActivationProof.Activation activation) {
         public void requireCurrentTime(Connection connection) throws SQLException {
             long now = JdbcRepositorySupport.databaseNowPrecise(connection).toEpochMilli();
             require(writerExpiresAt > now && activationExpiresAt > now);
+        }
+
+        void requireRecoveryOwner(Map<String, Object> owner) {
+            var value = JSON.valueToTree(owner);
+            CsiNativeActivationProof.closed(value, java.util.Set.of("writerId", "writerGeneration", "activationId", "activationEpoch"));
+            require(activation.workerId().equals(CsiNativeActivationProof.id(value, "writerId"))
+                    && activation.writerGeneration() == CsiNativeActivationProof.number(value.get("writerGeneration"))
+                    && activation.activationId().equals(CsiNativeActivationProof.id(value, "activationId"))
+                    && activation.epoch() == CsiNativeActivationProof.number(value.get("activationEpoch")));
         }
     }
 
@@ -385,11 +401,12 @@ public final class JdbcCsiActivationAdmission {
                 var history = history(connection, original, head.getLong("journal_revision"),
                         head.getLong("committed_sequence"), head.getString("last_commit_digest"), head.getString("writer_id"));
                 require(history.activation() != null && head.getLong("activation_epoch") == history.activation().epoch()
+                        && history.activation().activationId().equals(head.getString("activation_id"))
                         && head.getLong("writer_generation") == history.activation().writerGeneration()
                         && head.getString("writer_id").equals(history.activation().workerId()));
                 var result = new NativeHead(head.getLong("journal_revision"), head.getLong("committed_sequence"),
                         head.getString("last_commit_digest"), history.prefix(),
-                        head.getTimestamp("writer_lease_until").toInstant().toEpochMilli(), history.activation().expiresAt());
+                        head.getTimestamp("writer_lease_until").toInstant().toEpochMilli(), history.activation().expiresAt(), history.activation());
                 result.requireCurrentTime(connection);
                 return result;
             }

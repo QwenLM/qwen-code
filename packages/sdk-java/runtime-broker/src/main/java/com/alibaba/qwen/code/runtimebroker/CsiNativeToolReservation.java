@@ -85,7 +85,13 @@ final class CsiNativeToolReservation {
 
     static List<ToolExecutionRecord> complete(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources) throws SQLException {
+        return complete(connection, original, prefix, resources, false);
+    }
+
+    static List<ToolExecutionRecord> complete(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, boolean recovery) throws SQLException {
         List<ToolExecutionRecord> result = new ArrayList<>();
+        long recoveryByteCount = 0;
         Set<String> calls = new HashSet<>();
         Set<String> ordinals = new HashSet<>();
         Set<String> toolCalls = new HashSet<>();
@@ -103,6 +109,11 @@ final class CsiNativeToolReservation {
                 try (ResultSet rows = statement.executeQuery()) {
                     while (rows.next()) {
                         require(result.size() < LIMIT);
+                        if (recovery) {
+                            recoveryByteCount += recoveryBytes(rows.getString("result_json")).length
+                                    + recoveryBytes(rows.getString("native_authorization_json")).length;
+                            require(recoveryByteCount <= 8 * 1024 * 1024);
+                        }
                         JsonNode stored = CsiNativeActivationProof.readObject(utf8(rows.getString("reference_json")));
                         ToolExecutionRecord execution = JdbcToolExecutionRepository.mapExecution(rows);
                         JsonNode ref = JSON.valueToTree(execution.getReference());
@@ -178,25 +189,59 @@ final class CsiNativeToolReservation {
     static Map<String, Object> read(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, String promptId, String batchId)
             throws SQLException {
+        return read(connection, original, prefix, resources, promptId, batchId, false);
+    }
+
+    static Map<String, Object> read(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, String promptId, String batchId,
+            boolean recovery) throws SQLException {
         require(prefix.input() != null && promptId.equals(prefix.input().inputId()) && prefix.pendingBatch() != null
                 && batchId.equals(prefix.pendingBatch().messageId()));
         List<Map<String, Object>> members = new ArrayList<>();
-        for (ToolExecutionRecord execution : complete(connection, original, prefix, resources)) {
+        long responseByteCount = 0;
+        for (ToolExecutionRecord execution : complete(connection, original, prefix, resources, recovery)) {
             JsonNode ref = JSON.valueToTree(execution.getReference());
             if (!batchId.equals(id(ref, "batchId"))) {
                 continue;
             }
-            members.add(Map.of("executionCallId", execution.getExecutionCallId(),
+            var member = new java.util.LinkedHashMap<String, Object>(Map.of("executionCallId", execution.getExecutionCallId(),
                     "state", execution.getState().name().toLowerCase(java.util.Locale.ROOT),
                     "reference", execution.getReference(),
                     "inputBytesBase64", Base64.getEncoder().encodeToString(bytesFor(connection, original, prefix, resources, execution.getExecutionCallId(), batchId, ref.path("inputRef"), "managed-tool-input")),
                     "toolDefinitionBytesBase64", Base64.getEncoder().encodeToString(bytesFor(connection, original, prefix, resources, execution.getExecutionCallId(), batchId, ref.path("toolDefinitionRef"), "managed-tool-definition"))));
+            if (recovery) {
+                try (PreparedStatement statement = statement(connection,
+                        "SELECT execution_call_id, result_json, native_authorization_json FROM qwen_tool_execution WHERE execution_call_id_hash = ? FOR UPDATE")) {
+                    statement.setString(1, JdbcRepositorySupport.valueKey(execution.getExecutionCallId()));
+                    try (ResultSet row = statement.executeQuery()) {
+                        require(row.next() && execution.getExecutionCallId().equals(row.getString(1)));
+                        member.put("resultBytesBase64", Base64.getEncoder().encodeToString(recoveryBytes(row.getString(2))));
+                        member.put("authorizationBytesBase64", Base64.getEncoder().encodeToString(recoveryBytes(row.getString(3))));
+                        require(!row.next());
+                    }
+                }
+            }
+            if (recovery) {
+                responseByteCount += JsonCodec.encode(member).length + 1;
+                require(responseByteCount <= 8 * 1024 * 1024);
+            }
+            members.add(member);
         }
         members.sort(java.util.Comparator.comparingInt(member -> ((Number) ((Map<?, ?>) member.get("reference")).get("ordinal")).intValue()));
         String session = original.request().getIsolationKey();
-        return Map.of("protocolVersion", 1, "harnessSessionId", session, "runtimeSessionId", session,
+        var result = Map.of("protocolVersion", 1, "harnessSessionId", session, "runtimeSessionId", session,
                 "promptId", promptId, "batchId", batchId, "runtimeBindingId", original.bindingId(),
                 "bindingGeneration", Long.toString(original.generation()), "members", List.copyOf(members));
+        require(!recovery || JsonCodec.encode(result).length <= 8 * 1024 * 1024);
+        return result;
+    }
+
+    static byte[] recoveryBytes(String saved) {
+        require(saved != null);
+        byte[] bytes = utf8(saved);
+        require(bytes.length > 0 && bytes.length <= 64 * 1024);
+        CsiNativeActivationProof.readObject(bytes);
+        return bytes;
     }
 
     static void qualify(JdbcCsiFilesRetirementGuard.Original original, CsiNativeActivationProof.Prefix prefix,

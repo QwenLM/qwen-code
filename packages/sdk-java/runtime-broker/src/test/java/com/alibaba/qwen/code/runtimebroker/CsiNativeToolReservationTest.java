@@ -32,6 +32,36 @@ class CsiNativeToolReservationTest {
             "binding", 1, RuntimeBindingRecord.State.READY, false, 1, 2L);
 
     @Test
+    void recoveryStoredBytesAreBoundedBeforeParsingAndRejectAmbiguousJson() {
+        String exact = "{\"text\":\"" + "x".repeat(65525) + "\"}";
+        assertEquals(65536, CsiNativeToolReservation.recoveryBytes(exact).length);
+        for (String value : new String[] {exact + " ", "{} {}", "{\"x\":1,\"x\":1}", "", "{\"x\":\"\ud800\"}"}) {
+            assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.recoveryBytes(value));
+        }
+        assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.recoveryBytes(null));
+    }
+
+    @Test
+    void recoveryOwnerMatchesTheInstalledActivationRatherThanTheOldCheckpoint() {
+        var activation = new CsiNativeActivationProof.Activation(SESSION, PROMPT, JSON.createObjectNode(), 60000,
+                Long.MAX_VALUE, 0, 2, 3);
+        var head = new JdbcCsiActivationAdmission.NativeHead(1, 1, "digest", CsiNativeActivationProof.Prefix.empty(),
+                Long.MAX_VALUE, Long.MAX_VALUE, activation);
+        Map<String, Object> owner = Map.of("writerId", PROMPT, "writerGeneration", 3, "activationId", SESSION, "activationEpoch", 2);
+        assertDoesNotThrow(() -> head.requireRecoveryOwner(owner));
+        for (String field : owner.keySet()) {
+            var changed = new HashMap<>(owner);
+            changed.put(field, field.endsWith("Id") ? BATCH : 1);
+            assertThrows(RuntimeException.class, () -> head.requireRecoveryOwner(changed));
+            changed.remove(field);
+            assertThrows(RuntimeException.class, () -> head.requireRecoveryOwner(changed));
+        }
+        var extra = new HashMap<>(owner);
+        extra.put("checkpointId", BATCH);
+        assertThrows(RuntimeException.class, () -> head.requireRecoveryOwner(extra));
+    }
+
+    @Test
     void tupleValidationRetainsObservedNonUuidFunctionIdsAndFullPartPositions() throws Exception {
         JsonNode parts = capturedParts();
         var prefix = prefix(parts);

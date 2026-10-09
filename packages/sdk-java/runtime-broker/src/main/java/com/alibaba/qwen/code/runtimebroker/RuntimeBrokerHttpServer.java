@@ -378,7 +378,21 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
 
     private void readBatch(HttpExchange exchange) throws IOException {
         Map<String, Object> body = requestBody(exchange, "private batch read", true);
-        if (!body.keySet().equals(Set.of("protocolVersion", "requestId", "harnessSessionId", "runtimeSessionId", "promptId", "batchId"))) {
+        var fields = new java.util.HashSet<>(Set.of("protocolVersion", "requestId", "harnessSessionId", "runtimeSessionId", "promptId", "batchId"));
+        if (body.containsKey("recoveryOwner")) {
+            fields.add("recoveryOwner");
+            var owner = JsonCodec.parseObject(JsonCodec.encode(body.get("recoveryOwner")), "private recovery owner");
+            if (!owner.keySet().equals(Set.of("writerId", "writerGeneration", "activationId", "activationEpoch"))
+                    || !(owner.get("writerGeneration") instanceof Number generation) || generation.longValue() <= 0
+                    || !(owner.get("activationEpoch") instanceof Number epoch) || epoch.longValue() <= 0
+                    || !generation.toString().matches("[1-9][0-9]{0,15}") || generation.longValue() > 9007199254740991L
+                    || !epoch.toString().matches("[1-9][0-9]{0,15}") || epoch.longValue() > 9007199254740991L) {
+                throw new RuntimeBrokerException(400, "runtime_broker_invalid_request", "Private recovery owner fields are invalid", false);
+            }
+            JsonCodec.requiredString(owner, "writerId", "private recovery owner");
+            JsonCodec.requiredString(owner, "activationId", "private recovery owner");
+        }
+        if (!body.keySet().equals(fields)) {
             throw new RuntimeBrokerException(400, "runtime_broker_invalid_request", "Private batch read fields are invalid", false);
         }
         requireProtocol(body);
@@ -386,7 +400,8 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         complete(exchange, service.readCsiBatch(JsonCodec.requiredString(body, "harnessSessionId", "private batch read"),
                 JsonCodec.requiredString(body, "runtimeSessionId", "private batch read"),
                 JsonCodec.requiredString(body, "promptId", "private batch read"),
-                JsonCodec.requiredString(body, "batchId", "private batch read")), Function.identity());
+                JsonCodec.requiredString(body, "batchId", "private batch read"), body.containsKey("recoveryOwner")
+                        ? JsonCodec.parseObject(JsonCodec.encode(body.get("recoveryOwner")), "private recovery owner") : null), Function.identity());
     }
 
     private static byte[] inlineBytes(Map<String, Object> body, String field) {

@@ -5,6 +5,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -14,6 +15,7 @@ import {
   openManagedSession,
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { parseHarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
@@ -24,6 +26,10 @@ import * as history from './hosted-csi-file-history.js';
 import type { CsiFileHistoryObservation } from './managed-csi-file-history-protocol.js';
 import { recoverHostedCsiReceipts } from './hosted-csi-cold-recovery.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import {
+  computeManagedContextDigest,
+  type ManagedContextBinding,
+} from './managed-workspace-binding.js';
 import { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-record-sink.js';
 
 let root: string;
@@ -701,4 +707,347 @@ it('repairs a durable receipt before the model gate without new execution or mes
   expect(managed.authority.committedSequence).toBe(after);
   expect(await successor.sink.project()).toEqual(repaired);
   expect(paths).toEqual(originalRequests);
+});
+
+async function missingReceiptFixture() {
+  // Local journal and synthetic stored results only; actual SQL takeover is verified separately.
+  const text = 'Original missing receipt prompt';
+  await history.commitInitialHostedCsiHistory(managed, {
+    state: { ownerSessionId: sessionId, snapshots: [], files: {} },
+    backupDirectory: {
+      volumeDevice: '1',
+      volumeInode: '2',
+      directoryDevice: '1',
+      directoryInode: '3',
+    },
+    retainedBackups: [],
+  });
+  const contentRef = await managed.resources.publish(
+    'managed-input',
+    Buffer.from(JSON.stringify([{ type: 'text', text }])),
+  );
+  const admissionRef = await managed.resources.publish(
+    'managed-admission',
+    Buffer.from('{}'),
+  );
+  await managed.authority.submitInput(
+    {
+      operation: 'submitInput',
+      commandId: promptId,
+      sessionKey: managed.authority.sessionHeader.sessionKey,
+      contentDigest: contentRef.digest,
+    },
+    {
+      inputId: promptId,
+      turnId: promptId,
+      source: 'hosted-harness',
+      contentRef,
+      admissionRef,
+      deadline: null,
+      wakeReason: 'input',
+    },
+  );
+  let parentUuid: string | null = null;
+  commit.mockImplementation(
+    async (
+      type: 'assistant' | 'tool_result',
+      parts: Part[],
+      model: string,
+      identity?: { uuid: string; timestamp: string },
+    ) => {
+      const record: ChatRecord = {
+        ...managed.authority.recordEnvelope,
+        sessionId,
+        parentUuid,
+        uuid: type === 'assistant' ? batchId : identity!.uuid,
+        timestamp: identity?.timestamp ?? new Date().toISOString(),
+        type,
+        daemonPromptId: promptId,
+        model,
+        message: { role: type === 'assistant' ? 'model' : 'user', parts },
+      };
+      await managed.sink.write(record);
+      parentUuid = record.uuid;
+      return record.uuid;
+    },
+  );
+  const originalFetch = vi.mocked(fetch).getMockImplementation()!;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
+    const route = new URL(String(url)).pathname;
+    if (route.endsWith(':start')) {
+      const id = route.split('/').at(-1)!.slice(0, -6);
+      const member = members.find((value) => value['executionCallId'] === id)!;
+      member['state'] = 'settled';
+      member['resultBytesBase64'] = Buffer.from(
+        JSON.stringify({
+          executionStatus: 'success',
+          responseParts: [{ text: `owned result ${id}` }],
+        }),
+      ).toString('base64');
+      if (id === members.at(-1)!['executionCallId']) {
+        paths.push(route);
+        throw new Error('Terminal result answer lost after storage');
+      }
+    }
+    return originalFetch(url, options);
+  });
+  const first = batch().calls[0];
+  const calls = [
+    first,
+    { ...first, callId: 'refused', args: { file_path: '../outside' } },
+    { ...first, callId: 'read-second', args: { file_path: 'second.txt' } },
+    { ...first, callId: 'read-third', args: { file_path: 'third.txt' } },
+  ];
+  const parts: Part[] = [
+    { text: 'Original thought', thought: true },
+    ...calls.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+  ];
+  await expect(
+    turn.execute(calls, parts, 'unit-model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  const before = await managed.sink.project();
+  expect(before.filter((record) => record.type === 'tool_result')).toHaveLength(
+    2,
+  );
+  const events = managed.authority.eventsInSequenceRange(
+    1,
+    managed.authority.committedSequence,
+  );
+  const checkpoint = events.find(
+    (event) =>
+      event.kind === 'checkpoint.committed' &&
+      event.sequence >
+        Math.max(
+          ...events
+            .filter((candidate) => candidate.kind === 'tool.intent')
+            .map((candidate) => candidate.sequence),
+        ),
+  )!;
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL(
+        './contracts/managed-csi-native-readback-v1.fixtures.json',
+        import.meta.url,
+      ),
+      'utf8',
+    ),
+  ).valid.find((value: { name: string }) => value.name === 'execute-read-only')
+    .response.evidence.grant;
+  const nameBytes = createHash('md5').update(sessionId).digest();
+  nameBytes[6] = (nameBytes[6] & 0x0f) | 0x30;
+  nameBytes[8] = (nameBytes[8] & 0x3f) | 0x80;
+  const nameHex = nameBytes.toString('hex');
+  const operationId = `${nameHex.slice(0, 8)}-${nameHex.slice(8, 12)}-${nameHex.slice(12, 16)}-${nameHex.slice(16, 20)}-${nameHex.slice(20)}`;
+  for (const member of members) {
+    const grant = structuredClone(fixture);
+    grant.runtimeBindingId = bindingId;
+    grant.bindingGeneration = '1';
+    grant.executionCallId = member['executionCallId'];
+    grant.executionReference = member['reference'];
+    grant.identity.sessionId = sessionId;
+    grant.context.tenantId = 'unit-tenant';
+    grant.context.workspaceId = 'unit-workspace';
+    Object.assign(grant.installedContext, { sessionId, operationId });
+    Object.assign(grant.installedContext.binding, {
+      tenantId: 'unit-tenant',
+      workspaceId: 'unit-workspace',
+    });
+    grant.installedContext.contextDigest = computeManagedContextDigest(
+      grant.installedContext.binding as ManagedContextBinding,
+    );
+    grant.authorizationSequence = checkpoint.sequence;
+    grant.authorizationRevision = checkpoint.sequence;
+    const intent = events.find(
+      (event) =>
+        event.kind === 'tool.intent' &&
+        event.payload['executionCallId'] === member['executionCallId'],
+    )!;
+    grant.intent = { sequence: intent.sequence, revision: intent.sequence };
+    grant.checkpointRef = checkpoint.payload['stateRef'];
+    member['authorizationBytesBase64'] = Buffer.from(
+      JSON.stringify(grant),
+    ).toString('base64');
+  }
+  const writerId = randomUUID();
+  const activation = await managed.authority.installActivation({
+    activationId: randomUUID(),
+    workerId: writerId,
+    leaseDurationMs: 60000,
+  });
+  const successor = {
+    ...managed,
+    activation,
+    sink: new ManagedSessionRecordSink(
+      managed.authority,
+      managed.resources,
+      () => ({ class: 'harness', activation }),
+    ),
+  };
+  const owner = {
+    bindingId,
+    generation: '1',
+    writerId,
+    writerGeneration: 2,
+    activationId: activation.activationId,
+    activationEpoch: activation.epoch,
+  };
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
+    paths.push(new URL(String(url)).pathname);
+    const body = JSON.parse(String(options?.body));
+    expect(body.recoveryOwner).toEqual({
+      writerId: owner.writerId,
+      writerGeneration: 2,
+      activationId: owner.activationId,
+      activationEpoch: owner.activationEpoch,
+    });
+    return new Response(
+      JSON.stringify({
+        protocolVersion: 1,
+        harnessSessionId: sessionId,
+        runtimeSessionId: sessionId,
+        promptId,
+        batchId,
+        runtimeBindingId: bindingId,
+        bindingGeneration: '1',
+        members,
+      }),
+    );
+  });
+  return { successor, owner, text, before };
+}
+
+it('repairs the absent receipt from the original settled batch and reuses its first durable identity after interruption', async () => {
+  const { successor, owner, text, before } = await missingReceiptFixture();
+  const write = successor.sink.write.bind(successor.sink);
+  const interruption = vi
+    .spyOn(successor.sink, 'write')
+    .mockRejectedValueOnce(new Error('Repair message answer lost'));
+  const starts = paths.filter((route) => route.endsWith(':start')).length;
+  await expect(
+    recoverHostedCsiReceipts(
+      successor,
+      { baseUrl: 'http://127.0.0.1:8080', token: 'unit-broker' },
+      promptId,
+      text,
+      owner,
+    ),
+  ).rejects.toThrow('Repair message answer lost');
+  const receipts = managed.authority
+    .eventsInSequenceRange(1, managed.authority.committedSequence)
+    .filter((event) => event.kind === 'tool.receipt');
+  expect(receipts).toHaveLength(3);
+  const lastOutcome = JSON.parse(
+    (
+      await managed.resources.read(
+        assertManagedSessionDurableRef(
+          receipts.at(-1)!.payload['toolOutcomeRef'],
+          'unit original receipt',
+        ),
+      )
+    ).toString(),
+  );
+  interruption.mockImplementation(write);
+  const reads = paths.filter((route) =>
+    route.endsWith('/executions:read-batch'),
+  ).length;
+  const response = await recoverHostedCsiReceipts(
+    successor,
+    { baseUrl: 'http://127.0.0.1:8080', token: 'unit-broker' },
+    promptId,
+    text,
+  );
+  expect(response.map((part) => part.functionResponse?.id)).toEqual([
+    'provider-read',
+    'read-second',
+    'read-third',
+  ]);
+  const after = await successor.sink.project();
+  expect(after.slice(0, before.length)).toEqual(before);
+  expect(after.at(-1)?.uuid).toBe(lastOutcome.history.messageId);
+  expect(after.at(-1)?.parentUuid).toBe(before.at(-1)?.uuid);
+  expect(paths.filter((route) => route.endsWith(':start'))).toHaveLength(
+    starts,
+  );
+  expect(
+    paths.filter((route) => route.endsWith('/executions:read-batch')),
+  ).toHaveLength(reads);
+  const sequence = managed.authority.committedSequence;
+  await recoverHostedCsiReceipts(
+    successor,
+    { baseUrl: 'http://127.0.0.1:8080', token: 'unit-broker' },
+    promptId,
+    text,
+  );
+  expect(managed.authority.committedSequence).toBe(sequence);
+});
+
+it.each(['resultBytesBase64', 'authorizationBytesBase64'])(
+  'refuses a corrupt late %s before publishing or repairing any member',
+  async (field) => {
+    const { successor, owner, text, before } = await missingReceiptFixture();
+    members.at(-1)![field] = Buffer.from('{} {}').toString('base64');
+    const sequence = managed.authority.committedSequence;
+    await expect(
+      recoverHostedCsiReceipts(
+        successor,
+        { baseUrl: 'http://127.0.0.1:8080', token: 'unit-broker' },
+        promptId,
+        text,
+        owner,
+      ),
+    ).rejects.toThrow();
+    expect(managed.authority.committedSequence).toBe(sequence);
+    expect(await successor.sink.project()).toEqual(before);
+  },
+);
+
+it.each([
+  'grant identity',
+  'missing member',
+  'oversized stored result',
+  'oversized complete outcome',
+  'unsupported state',
+])('refuses %s before any durable repair', async (failure) => {
+  const { successor, owner, text, before } = await missingReceiptFixture();
+  const member = members.at(-1)!;
+  if (failure === 'grant identity') {
+    const grant = JSON.parse(
+      Buffer.from(
+        String(member['authorizationBytesBase64']),
+        'base64',
+      ).toString(),
+    );
+    grant.executionCallId = 'unrelated-execution';
+    member['authorizationBytesBase64'] = Buffer.from(
+      JSON.stringify(grant),
+    ).toString('base64');
+  } else if (failure === 'missing member') members.pop();
+  else if (failure === 'unsupported state') member['state'] = 'unknown';
+  else
+    member['resultBytesBase64'] = Buffer.from(
+      JSON.stringify({
+        executionStatus: 'success',
+        responseParts: [
+          {
+            text: 'x'.repeat(
+              failure === 'oversized stored result' ? 65536 : 64000,
+            ),
+          },
+        ],
+      }),
+    ).toString('base64');
+  const sequence = managed.authority.committedSequence;
+  await expect(
+    recoverHostedCsiReceipts(
+      successor,
+      { baseUrl: 'http://127.0.0.1:8080', token: 'unit-broker' },
+      promptId,
+      text,
+      owner,
+    ),
+  ).rejects.toThrow();
+  expect(managed.authority.committedSequence).toBe(sequence);
+  expect(await successor.sink.project()).toEqual(before);
 });

@@ -649,7 +649,9 @@ Main transport、保留 worker、原 ledgers 和共享 Harness，不另建公开
 
 #### 6.8.4 receipt 缺失前的合格 SETTLED 结果
 
-状态：提议，实现及新鲜 C4 验收尚待完成。当前冷准入要求所有原 receipt；因此原最后一条 SQL execution 已结算、但 Hosted 尚未收到其终态结果响应时会拒绝。
+状态：候选实现已允许具备原始资格的 SETTLED 成员缺失 receipt；新鲜 C4 正向验收仍待完成。基线 `ca75a90014bb6c92e9c1a06dcdbdb9c01b8613b5` 在新建自有 MySQL 8.4.11 完成 Flyway 53–58 后复现该缺口：最后 Main GET 返回包含 settled 结果的 200，在交付 Hosted 前扣留响应；已有两个 receipt/message，最后 receipt/message/resolve 不存在。只终止已登记原 owner 并等待自然过期后，实际 native acquire 返回 409 `csi_native_execution_unavailable`，该事务前后全部 57 表精确相同。原三条 execution/result/grant 行以及 execute/effect 观察保持一致。producer 在完整 auditor 前 exit 1，原因是 observer 跨 JVM 逐字节比较启动请求序列化；完整 JSON 值与其它帧字段均相等，仅顶层 key 顺序不同。该 aggregate 继续保留为失败，只提供已复现的拒绝证据，不能当作正向恢复验收。
+
+候选实现与 live tool turn 共享原 accepted-input 规范化及 atomic receipt publication。新 cold reader 使用已安装 successor fence，对原 result/grant 做严格有界解码，并在任何写入前验证整个 batch。receipt-complete 路径不增加 batch read。本地中断回归核验新耐久 receipt 在重试时保留首次身份，但不验收 C5 进程断点或完整 K2。
 
 保留专用 cold writer 与 successor install 资格检查。每个相关成员仍须为 SETTLED，具有完整原 success/error 结果、原持久 immutable native grant 且未取消。将每个已存在 receipt 与同一 SQL 结果核对；允许明确缺失的 receipt，但不能把它当作 execution 不存在。保留原单个 pending batch、首个模型输出、完整 resource/reference inventory、无 deadline prompt 与数据库自然过期约束。PREPARED、执行中、UNKNOWN、遗漏/孤儿成员及不支持的 continuation，仍须在 writer authority 改变前拒绝。
 

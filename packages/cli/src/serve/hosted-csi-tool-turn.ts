@@ -13,7 +13,6 @@ import { convertManagedRuntimeToolResult } from '@qwen-code/qwen-code-core/manag
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
-import { normalizeWorkspaceRelativePath } from '@qwen-code/qwen-code-core/managed-runtime/managed-workspace-relative-path.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type {
   HostedToolTurn,
@@ -35,54 +34,16 @@ import type {
   CsiHistoryPreparation,
 } from './managed-csi-file-history-protocol.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  acceptedCsiToolInput,
+  publishHostedCsiReceipt,
+} from './hosted-csi-tool-evidence.js';
 import { requireClosedHostedCsiHistory } from './hosted-csi-cold-recovery.js';
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('Original CSI batch is unavailable.');
   return value as Record<string, unknown>;
-}
-
-function acceptedInput(call: ToolCallRequestInfo): Record<string, unknown> {
-  const input = object(structuredClone(call.args));
-  for (const value of Object.values(input)) {
-    if (typeof value === 'string') encodeURIComponent(value);
-  }
-  const required =
-    call.name === 'read_file'
-      ? ['file_path']
-      : call.name === 'write_file'
-        ? ['file_path', 'content']
-        : call.name === 'edit'
-          ? ['file_path', 'old_string', 'new_string']
-          : [];
-  const optional =
-    call.name === 'read_file'
-      ? ['offset', 'limit']
-      : call.name === 'edit'
-        ? ['replace_all']
-        : [];
-  if (
-    required.length === 0 ||
-    required.some((key) => typeof input[key] !== 'string') ||
-    Object.keys(input).some(
-      (key) => ![...required, ...optional].includes(key),
-    ) ||
-    ['offset', 'limit'].some(
-      (key) =>
-        Object.hasOwn(input, key) &&
-        (!Number.isSafeInteger(input[key]) ||
-          (input[key] as number) > Number.MAX_SAFE_INTEGER - 1 ||
-          (input[key] as number) < (key === 'limit' ? 1 : 0)),
-    ) ||
-    (Object.hasOwn(input, 'replace_all') &&
-      typeof input['replace_all'] !== 'boolean')
-  )
-    throw new Error('CSI file input is invalid.');
-  input['file_path'] = normalizeWorkspaceRelativePath(
-    (input['file_path'] as string).trim(),
-  );
-  return input;
 }
 
 export class HostedCsiToolTurn implements HostedToolTurn {
@@ -147,7 +108,7 @@ export class HostedCsiToolTurn implements HostedToolTurn {
           throw new Error('Original CSI function identity differs.');
         let input: Record<string, unknown>;
         try {
-          input = acceptedInput(call);
+          input = acceptedCsiToolInput(call);
         } catch {
           continue;
         }
@@ -419,33 +380,10 @@ export class HostedCsiToolTurn implements HostedToolTurn {
           throw new Error(
             'Complete CSI result exceeds the durable Session limit.',
           );
-        const outcomeRef = await this.session.resources.publish(
-          'managed-tool-outcome',
+        const outcomeRef = await publishHostedCsiReceipt(
+          this.session,
+          invocation.executionCallId,
           outcome,
-        );
-        await authority.appendExecutionEvent(
-          {
-            operation: 'recordToolResult',
-            commandId: invocation.executionCallId,
-            sessionKey: authority.sessionHeader.sessionKey,
-            contentDigest: outcomeRef.digest,
-          },
-          (sequence) => ({
-            v: 1,
-            sequence,
-            eventId: `tool-receipt:${invocation.executionCallId}`,
-            sessionKey: authority.sessionHeader.sessionKey,
-            kind: 'tool.receipt',
-            occurredAt: Date.now(),
-            payload: {
-              executionCallId: invocation.executionCallId,
-              toolOutcomeRef: outcomeRef,
-              resultRef: null,
-              resources: [],
-              historyRevision: sequence,
-            },
-          }),
-          { class: 'trusted_entry' },
         );
         await this.commit('tool_result', converted, model, identity);
         lastResultMessageId = identity.uuid;

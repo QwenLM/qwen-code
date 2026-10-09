@@ -438,7 +438,13 @@ export function registerHostedCsiSessionRoutes(
           const digest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
           const managed = owner.session!.managed;
           const resumed = owner.recovering
-            ? await recoverHostedCsiReceipts(managed, broker, promptId, text)
+            ? await recoverHostedCsiReceipts(managed, broker, promptId, text, {
+                bindingId: owner.admission!.bindingId,
+                generation: owner.admission!.generation,
+                ...(await owner.stores!.publication.owner()),
+                activationId: managed.activation.activationId,
+                activationEpoch: managed.activation.epoch,
+              })
             : undefined;
           if (!resumed) {
             const contentRef = await managed.resources.publish(
