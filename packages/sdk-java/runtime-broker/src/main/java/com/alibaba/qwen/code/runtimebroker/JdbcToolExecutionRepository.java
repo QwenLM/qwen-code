@@ -38,8 +38,9 @@ public final class JdbcToolExecutionRepository
 
     public JdbcToolExecutionRepository(DataSource dataSource, JdbcRuntimeBindingRepository csiBindings) {
         this.dataSource = JdbcRepositorySupport.requireDataSource(dataSource);
-        if (csiBindings != null && !csiBindings.usesDataSource(this.dataSource))
+        if (csiBindings != null && !csiBindings.usesDataSource(this.dataSource)) {
             throw new IllegalArgumentException("CSI continuation requires the same DataSource");
+        }
         this.csiBindings = csiBindings;
     }
 

@@ -108,11 +108,13 @@ final class CsiNativeToolReservation {
                         byte[] definition = bytesFor(connection, original, prefix, resources, batchId, ref.path("toolDefinitionRef"), "managed-tool-definition");
                         qualifyRelated(original, prefix, execution, input, definition);
                         var frozen = prefix.fileHistory() == null ? null : prefix.fileHistory().batches().get(batchId);
-                        if (frozen != null) require(frozen.invocations().stream().anyMatch(invocation ->
-                                execution.getExecutionCallId().equals(id(invocation, "executionCallId"))
-                                        && canonical(ref).equals(canonical(CsiNativeActivationProof.historyExecutionReference(
-                                                original.request(), JSON.createObjectNode().put("promptId", id(ref, "promptId"))
-                                                        .put("batchId", batchId), invocation)))));
+                        if (frozen != null) {
+                            require(frozen.invocations().stream().anyMatch(invocation ->
+                                    execution.getExecutionCallId().equals(id(invocation, "executionCallId"))
+                                            && canonical(ref).equals(canonical(CsiNativeActivationProof.historyExecutionReference(
+                                                    original.request(), JSON.createObjectNode().put("promptId", id(ref, "promptId"))
+                                                            .put("batchId", batchId), invocation)))));
+                        }
                         require(calls.add(batchId + "\u0000" + id(ref, "functionCallId"))
                                 && ordinals.add(batchId + "\u0000" + number(ref.get("ordinal")))
                                 && toolCalls.add(execution.getToolCallId()));
@@ -299,7 +301,9 @@ final class CsiNativeToolReservation {
             CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, String batchId, JsonNode ref, String kind)
             throws SQLException {
         var frozen = prefix.fileHistory() == null ? null : prefix.fileHistory().batches().get(batchId);
-        if (frozen == null) return bytes(resources, ref, kind);
+        if (frozen == null) {
+            return bytes(resources, ref, kind);
+        }
         require(frozen.invocations().stream().anyMatch(invocation ->
                 canonical(invocation.path("inputRef")).equals(canonical(ref))
                         || canonical(invocation.path("toolDefinitionRef")).equals(canonical(ref))));
@@ -353,7 +357,9 @@ final class CsiNativeToolReservation {
                 for (String field : List.of("inputRef", "toolDefinitionRef")) {
                     JsonNode ref = invocation.path(field);
                     bytes(resources, ref, text(ref, "kind"));
-                    if (!promoted.add(id(ref, "resourceId"))) continue;
+                    if (!promoted.add(id(ref, "resourceId"))) {
+                        continue;
+                    }
                     try (PreparedStatement statement = statement(connection,
                             "UPDATE qwen_managed_session_resource SET state = 'REFERENCED'"
                                     + " WHERE session_scope_key = ? AND resource_id = ? AND state = 'PUBLISHED'")) {

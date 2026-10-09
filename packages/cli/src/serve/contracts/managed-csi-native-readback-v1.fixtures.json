@@ -517,12 +517,9 @@
               },
               "dispatchMode": "deferred"
             },
-            "intentRef": {
-              "resourceId": "00000000-0000-4000-8000-000000000013",
-              "kind": "managed-tool-intent",
-              "schemaVersion": 1,
-              "byteLength": 22,
-              "digest": "f8d4c77bfb170cfd9be5653febe0c3c23781492dc0c3c1936df6b3b8aa2f47ac"
+            "intent": {
+              "revision": 7,
+              "sequence": 15
             },
             "checkpointRef": {
               "resourceId": "00000000-0000-4000-8000-000000000012",
@@ -766,12 +763,9 @@
               },
               "dispatchMode": "deferred"
             },
-            "intentRef": {
-              "resourceId": "00000000-0000-4000-8000-000000000013",
-              "kind": "managed-tool-intent",
-              "schemaVersion": 1,
-              "byteLength": 22,
-              "digest": "f8d4c77bfb170cfd9be5653febe0c3c23781492dc0c3c1936df6b3b8aa2f47ac"
+            "intent": {
+              "revision": 7,
+              "sequence": 15
             },
             "checkpointRef": {
               "resourceId": "00000000-0000-4000-8000-000000000012",
@@ -2578,12 +2572,9 @@
               },
               "dispatchMode": "deferred"
             },
-            "intentRef": {
-              "resourceId": "00000000-0000-4000-8000-000000000013",
-              "kind": "managed-tool-intent",
-              "schemaVersion": 1,
-              "byteLength": 22,
-              "digest": "f8d4c77bfb170cfd9be5653febe0c3c23781492dc0c3c1936df6b3b8aa2f47ac"
+            "intent": {
+              "revision": 7,
+              "sequence": 15
             },
             "checkpointRef": {
               "resourceId": "00000000-0000-4000-8000-000000000012",
@@ -2817,12 +2808,9 @@
               },
               "dispatchMode": "deferred"
             },
-            "intentRef": {
-              "resourceId": "00000000-0000-4000-8000-000000000013",
-              "kind": "managed-tool-intent",
-              "schemaVersion": 1,
-              "byteLength": 22,
-              "digest": "f8d4c77bfb170cfd9be5653febe0c3c23781492dc0c3c1936df6b3b8aa2f47ac"
+            "intent": {
+              "revision": 7,
+              "sequence": 15
             },
             "checkpointRef": {
               "resourceId": "00000000-0000-4000-8000-000000000012",
@@ -3072,12 +3060,9 @@
               },
               "dispatchMode": "deferred"
             },
-            "intentRef": {
-              "resourceId": "00000000-0000-4000-8000-000000000013",
-              "kind": "managed-tool-intent",
-              "schemaVersion": 1,
-              "byteLength": 22,
-              "digest": "f8d4c77bfb170cfd9be5653febe0c3c23781492dc0c3c1936df6b3b8aa2f47ac"
+            "intent": {
+              "revision": 7,
+              "sequence": 15
             },
             "checkpointRef": {
               "resourceId": "00000000-0000-4000-8000-000000000012",
@@ -3327,12 +3312,9 @@
               },
               "dispatchMode": "deferred"
             },
-            "intentRef": {
-              "resourceId": "00000000-0000-4000-8000-000000000013",
-              "kind": "managed-tool-intent",
-              "schemaVersion": 1,
-              "byteLength": 22,
-              "digest": "f8d4c77bfb170cfd9be5653febe0c3c23781492dc0c3c1936df6b3b8aa2f47ac"
+            "intent": {
+              "revision": 7,
+              "sequence": 15
             },
             "checkpointRef": {
               "resourceId": "00000000-0000-4000-8000-000000000012",
@@ -3576,12 +3558,9 @@
               },
               "dispatchMode": "deferred"
             },
-            "intentRef": {
-              "resourceId": "00000000-0000-4000-8000-000000000013",
-              "kind": "managed-tool-intent",
-              "schemaVersion": 1,
-              "byteLength": 22,
-              "digest": "f8d4c77bfb170cfd9be5653febe0c3c23781492dc0c3c1936df6b3b8aa2f47ac"
+            "intent": {
+              "revision": 7,
+              "sequence": 15
             },
             "checkpointRef": {
               "resourceId": "00000000-0000-4000-8000-000000000012",
@@ -3819,12 +3798,9 @@
               },
               "dispatchMode": "deferred"
             },
-            "intentRef": {
-              "resourceId": "00000000-0000-4000-8000-000000000013",
-              "kind": "managed-tool-intent",
-              "schemaVersion": 1,
-              "byteLength": 22,
-              "digest": "f8d4c77bfb170cfd9be5653febe0c3c23781492dc0c3c1936df6b3b8aa2f47ac"
+            "intent": {
+              "revision": 7,
+              "sequence": 15
             },
             "checkpointRef": {
               "resourceId": "00000000-0000-4000-8000-000000000012",
@@ -3906,5 +3882,210 @@
     "{\"counter\":1e0}",
     "{\"counter\":-0}",
     "{\"counter\":0.5}"
+  ],
+  "intentLocatorCases": [
+    {
+      "name": "minimum original position",
+      "intent": {
+        "revision": 1,
+        "sequence": 1
+      },
+      "accepted": true
+    },
+    {
+      "name": "last position before authorization",
+      "intent": {
+        "revision": 7,
+        "sequence": 15
+      },
+      "accepted": true
+    },
+    {
+      "name": "older original position",
+      "intent": {
+        "revision": 2,
+        "sequence": 9
+      },
+      "accepted": true
+    },
+    {
+      "name": "null locator",
+      "intent": null,
+      "accepted": false
+    },
+    {
+      "name": "missing revision",
+      "intent": {
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "missing sequence",
+      "intent": {
+        "revision": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "extra locator field",
+      "intent": {
+        "revision": 1,
+        "sequence": 1,
+        "resourceId": "extra"
+      },
+      "accepted": false
+    },
+    {
+      "name": "resource-shaped locator",
+      "intent": {
+        "resourceId": "00000000-0000-4000-8000-000000000013",
+        "kind": "managed-tool-intent",
+        "schemaVersion": 1,
+        "byteLength": 22,
+        "digest": "f8d4c77bfb170cfd9be5653febe0c3c23781492dc0c3c1936df6b3b8aa2f47ac"
+      },
+      "accepted": false
+    },
+    {
+      "name": "revision zero",
+      "intent": {
+        "revision": 0,
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "revision negative",
+      "intent": {
+        "revision": -1,
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "revision string",
+      "intent": {
+        "revision": "1",
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "revision fraction",
+      "intent": {
+        "revision": 1.5,
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "revision unsafe",
+      "intent": {
+        "revision": 9007199254740992,
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "revision boolean",
+      "intent": {
+        "revision": true,
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "revision equal to authorization",
+      "intent": {
+        "revision": 8,
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "revision after authorization",
+      "intent": {
+        "revision": 9,
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "sequence zero",
+      "intent": {
+        "revision": 1,
+        "sequence": 0
+      },
+      "accepted": false
+    },
+    {
+      "name": "sequence negative",
+      "intent": {
+        "revision": 1,
+        "sequence": -1
+      },
+      "accepted": false
+    },
+    {
+      "name": "sequence string",
+      "intent": {
+        "revision": 1,
+        "sequence": "1"
+      },
+      "accepted": false
+    },
+    {
+      "name": "sequence fraction",
+      "intent": {
+        "revision": 1,
+        "sequence": 1.5
+      },
+      "accepted": false
+    },
+    {
+      "name": "sequence unsafe",
+      "intent": {
+        "revision": 1,
+        "sequence": 9007199254740992
+      },
+      "accepted": false
+    },
+    {
+      "name": "sequence boolean",
+      "intent": {
+        "revision": 1,
+        "sequence": true
+      },
+      "accepted": false
+    },
+    {
+      "name": "sequence equal to authorization",
+      "intent": {
+        "revision": 1,
+        "sequence": 16
+      },
+      "accepted": false
+    },
+    {
+      "name": "sequence after authorization",
+      "intent": {
+        "revision": 1,
+        "sequence": 17
+      },
+      "accepted": false
+    },
+    {
+      "name": "maximum safe position before authorization",
+      "intent": {
+        "revision": 9007199254740990,
+        "sequence": 9007199254740990
+      },
+      "authorization": {
+        "revision": 9007199254740991,
+        "sequence": 9007199254740991
+      },
+      "accepted": true
+    }
   ]
 }

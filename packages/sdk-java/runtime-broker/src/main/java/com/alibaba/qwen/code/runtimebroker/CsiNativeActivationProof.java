@@ -338,8 +338,9 @@ public final class CsiNativeActivationProof {
         ObjectNode result = JSON.createObjectNode().put("sessionId", original.getIsolationKey())
                 .put("promptId", id(preparation, "promptId")).put("batchId", id(preparation, "batchId"))
                 .put("dispatchMode", "deferred");
-        for (String field : List.of("callId", "functionCallId", "partIndex", "ordinal", "inputRef", "toolDefinitionRef"))
+        for (String field : List.of("callId", "functionCallId", "partIndex", "ordinal", "inputRef", "toolDefinitionRef")) {
             result.set(field, invocation.get(field));
+        }
         result.set("argsDigest", invocation.get("requestDigest"));
         return result;
     }
@@ -365,7 +366,9 @@ public final class CsiNativeActivationProof {
             var input = CsiNativeToolReservation.qualifyContent(original, batch, ref, text(invocation, "requestDigest"),
                     reference(invocation.path("inputRef"), "managed-tool-input", resources),
                     reference(invocation.path("toolDefinitionRef"), "managed-tool-definition", resources));
-            if (!"read_file".equals(text(invocation, "toolName"))) paths.add(text(input, "file_path"));
+            if (!"read_file".equals(text(invocation, "toolName"))) {
+                paths.add(text(input, "file_path"));
+            }
             result.add(invocation.deepCopy());
         }
         require(!paths.isEmpty() && preparation.path("paths").isArray()
@@ -374,16 +377,18 @@ public final class CsiNativeActivationProof {
     }
 
     private static void sameObservation(JsonNode left, JsonNode right) {
-        for (String field : List.of("state", "backupDirectory", "retainedBackups"))
+        for (String field : List.of("state", "backupDirectory", "retainedBackups")) {
             require(canonical(left.path(field)).equals(canonical(right.path(field))));
+        }
     }
 
     private static void preparedObservation(JsonNode intent, JsonNode prepared, String prompt, JsonNode paths) {
         require(canonical(intent.path("backupDirectory")).equals(canonical(prepared.path("backupDirectory"))));
         Map<String, JsonNode> pins = new HashMap<>();
         prepared.path("retainedBackups").forEach(pin -> pins.put(text(pin, "name"), pin));
-        for (JsonNode pin : intent.path("retainedBackups"))
+        for (JsonNode pin : intent.path("retainedBackups")) {
             require(canonical(pin).equals(canonical(pins.get(text(pin, "name")))));
+        }
         JsonNode before = intent.path("state");
         JsonNode after = prepared.path("state");
         var tracked = new HashSet<String>();
@@ -398,8 +403,9 @@ public final class CsiNativeActivationProof {
         JsonNode snapshots = after.path("snapshots");
         boolean extend = !oldSnapshots.isEmpty() && prompt.equals(oldSnapshots.get(oldSnapshots.size() - 1).path("promptId").textValue());
         require(snapshots.size() == oldSnapshots.size() + (extend ? 0 : 1));
-        for (int index = 0; index < oldSnapshots.size() - (extend ? 1 : 0); index++)
+        for (int index = 0; index < oldSnapshots.size() - (extend ? 1 : 0); index++) {
             require(canonical(oldSnapshots.get(index)).equals(canonical(snapshots.get(index))));
+        }
         JsonNode last = snapshots.get(snapshots.size() - 1);
         require(prompt.equals(id(last, "promptId")));
         JsonNode backups = last.path("trackedFileBackups");
@@ -415,9 +421,12 @@ public final class CsiNativeActivationProof {
         for (String path : tracked) {
             JsonNode backup = backups.path(path);
             JsonNode fingerprint = after.path("files").get(path);
-            if (extend && before.path("files").has(path)) continue;
-            if (fingerprint.isNull()) require(backup.path("backupFileName").isNull());
-            else {
+            if (extend && before.path("files").has(path)) {
+                continue;
+            }
+            if (fingerprint.isNull()) {
+                require(backup.path("backupFileName").isNull());
+            } else {
                 require(backup.path("backupFileName").isTextual());
                 JsonNode pin = pins.get(backup.path("backupFileName").textValue());
                 require(pin != null && ("sha256:" + text(pin, "digest")).equals(text(fingerprint, "digest"))

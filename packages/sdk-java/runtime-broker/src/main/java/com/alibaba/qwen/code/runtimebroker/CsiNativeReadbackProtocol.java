@@ -129,7 +129,7 @@ public final class CsiNativeReadbackProtocol {
                 var grant = map(evidence.get("grant"));
                 closed(grant, Set.of("protocolVersion", "runtimeBindingId", "bindingGeneration", "authorizedBindingVersion",
                         "executionCallId", "dispatchGeneration", "authorizationRevision", "authorizationSequence",
-                        "executionReference", "intentRef", "checkpointRef", "preparedRef", "identity", "context", "installedContext"));
+                        "executionReference", "intent", "checkpointRef", "preparedRef", "identity", "context", "installedContext"));
                 require(counter(grant.get("protocolVersion")) == 1 && same(grant.get("executionCallId"), request.get("subject"))
                         && same(grant.get("executionReference"), reference) && same(grant.get("preparedRef"), prepared));
                 id(grant.get("runtimeBindingId"));
@@ -144,7 +144,11 @@ public final class CsiNativeReadbackProtocol {
                 for (String field : List.of("identity", "context", "installedContext")) {
                     require(same(grant.get(field), value.get(field)));
                 }
-                ref(grant.get("intentRef"), "managed-tool-intent");
+                var intent = map(grant.get("intent"));
+                closed(intent, Set.of("revision", "sequence"));
+                require(counter(intent.get("revision")) > 0 && counter(intent.get("sequence")) > 0
+                        && counter(intent.get("revision")) < counter(grant.get("authorizationRevision"))
+                        && counter(intent.get("sequence")) < counter(grant.get("authorizationSequence")));
                 ref(grant.get("checkpointRef"), "managed-checkpoint");
                 Map<String, byte[]> bytes = resources(evidence.get("resources"), required);
                 if (prepared == null) {

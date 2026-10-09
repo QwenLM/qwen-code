@@ -106,12 +106,15 @@ draining、替换或移除的 authority 一律拒绝。旧签名响应、调用�
 
 新私有 grant 严格包含 `protocolVersion: 1`、`runtimeBindingId`、`bindingGeneration`、
 `authorizedBindingVersion`、`executionCallId`、`dispatchGeneration`、
-`authorizationRevision`、`authorizationSequence`、`executionReference`、`intentRef`、
+`authorizationRevision`、`authorizationSequence`、`executionReference`、`intent`、
 `checkpointRef`、`preparedRef`、`identity`、`context`、`installedContext`。
 generation 与 binding-version counter 使用规范的正无符号十进制字符串；原生
 revision 和 sequence 使用安全正整数。execution reference 是原始十一字段
-reference。intent/checkpoint ref 是原生 tool intent 和完整 dispatch checkpoint，
-不是 worker preparation 准入。prepared 可空规则与所有重复字段必须匹配响应和
+reference。`intent` 严格包含 `revision` 和 `sequence`，定位原 journal 中唯一的
+原生 `tool.intent`。两者均为安全正整数，分别严格小于 `authorizationRevision`
+和 `authorizationSequence`：完整 dispatch checkpoint 是更晚的 transaction。
+该定位不是资源 reference，不向响应资源闭包添加资源。`checkpointRef` 是原始
+完整 dispatch checkpoint，不是 worker preparation 准入。prepared 可空规则与所有重复字段必须匹配响应和
 原始合格 authorization。dispatch 授权时持久保存这份确切的联合证据；现有仅含
 两个 dispatch-generation/binding-version 列的 marker 不足。共享 Java/CLI codec 已实现此 wire shape；
 不可变 grant 持久化、execute 准入和 worker 执行消费者仍未实现。通用 Tool-v3
@@ -311,6 +314,49 @@ authorization marker 前拒绝已 claim 的私有 call。拒绝不证明执行�
 下一 model attempt 先完成，再调用 `consumeResults`。仅在完整 results-ready 闭合后
 允许该 attempt，同时保留未消费义务。若等待 consumption 才准入用于消费的同一
 attempt，会使正常 continuation 死锁。
+
+### 6.4 原工具 intent 与纯 Read 会员冻结
+
+对 `606d33529176aa139cf1c5d94b88d97b5f37832c` 的调查发现，execute codec
+要求一个没有生产调用者发布的 `managed-tool-intent` 资源。实际 authority 的
+`appendExecutionEvent` 将 `tool.intent` 追加到原 journal，仅返回 commit receipt，
+没有资源 reference 或 journal revision。仅将实验性 execute grant 改为上述闭合
+journal 定位。Prepare evidence 的 `intentRef` 与 `FileHistory.FrozenBatch.intentRef`
+仍是原始 `managed-file_history` 资源，两者含义不变。codec 修正不开放 execute
+readback、claim、authorization、worker 文件效果或结果消费。
+
+原生 replay 已知每个原 transaction 的 revision 和每个 event 的 sequence。
+在 replay 得到的 Prefix 中派生 execution 到 intent 的位置，不新建持久 intent
+ledger。fresh acceptance 与 replay 共用校验器。授权时在同一加锁 Connection 中
+定位唯一原事件，匹配其 activation、Session key、execution ID、assistant batch、
+本地 ordinal、原始 input 与 declaration。将该位置持久保存在不可变联合 grant
+中。worker 重新读回时对原 journal 验证已保存的位置，不能用调用方位置、当前
+head 或重新生成的 grant 替代。
+
+修改 batch 已通过 schema-2 history intent 冻结完整接受会员。纯 Read batch 必须
+在首个原生 `tool.intent` 时冻结：在划分当前 batch 前，锁住完整原资源 inventory、
+固定 READY Runtime Session 和全部相关 SQL execution rows。要求当前全部会员是
+原始 PREPARED allocation，没有 dispatch marker、取消或 terminal/UNKNOWN 状态。
+该 assistant batch 一旦存在任何 native intent，拒绝新 allocation，允许确切原
+reservation 重试。原 execution rows 保留不可变身份与 reference，无需复制会员
+或建立第二个 ledger。
+
+每个 native intent 在同一 journal transaction 中仅验证和关联自身确切的原 input
+与 declaration，提升此前未引用的纯 Read 资源。尚未进入 intent 的纯 Read 会员
+字节保持原 allocation 的 PUBLISHED；已
+进入的会员必须是 REFERENCED 并关联其确切原 intent revision。修改 history 的
+关联继续保留原 history revision。不能泛化为接受两种状态，不能将未触及会员关联
+到其他 intent。dispatch 前，完整 `await_runtime` checkpoint 必须强等三个集合：
+原当前 batch SQL 会员、唯一 native intents、checkpoint 新增加的 pending items。
+原 pending items 保持不变，按真实 Harness producer 的
+`max(request.ordinal, nextOrdinal)` 派生累计 ordinal，保留 refusal gaps。不能过滤
+cancelled、not-started、UNKNOWN 或 terminal 会员来缩小成功集合。
+
+这是下一步原生接线设计，不是已实现会员或执行证据。先实现 native intent/checkpoint
+校验与同 Connection preflight，再实现不可变 authorization；随后接通有限 worker
+executor、原 outcomes、result messages、results-ready 与 consumption。十一字段
+continuation、冷恢复与退休门禁仍须完成。公开 selector 保持关闭，设计使用标准
+Kubernetes 与 CSI，不要求 Alibaba ACK。
 
 ## 7. 验证与验收
 

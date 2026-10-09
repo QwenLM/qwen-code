@@ -184,7 +184,7 @@ export function readCsiNativeResponse(
         'authorizationRevision',
         'authorizationSequence',
         'executionReference',
-        'intentRef',
+        'intent',
         'checkpointRef',
         'preparedRef',
         'identity',
@@ -219,7 +219,14 @@ export function readCsiNativeResponse(
       }
       for (const field of ['identity', 'context', 'installedContext'])
         ensure(isDeepStrictEqual(grant[field], body[field]));
-      ref(grant['intentRef'], 'managed-tool-intent');
+      const intent = closed(grant['intent'], ['revision', 'sequence']);
+      ensure(
+        counter(intent['revision']) > 0 &&
+          counter(intent['sequence']) > 0 &&
+          counter(intent['revision']) <
+            counter(grant['authorizationRevision']) &&
+          counter(intent['sequence']) < counter(grant['authorizationSequence']),
+      );
       ref(grant['checkpointRef'], 'managed-checkpoint');
       const bytes = resources(evidence['resources'], required);
       if (prepared === null) {

@@ -76,7 +76,9 @@ public final class JdbcCsiActivationAdmission {
 
     private static void requireHistoryIdentity(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             CsiNativeActivationProof.Prefix prefix, JdbcRuntimeBindingRepository bindings) throws SQLException {
-        if (prefix.fileHistory() == null) return;
+        if (prefix.fileHistory() == null) {
+            return;
+        }
         require(bindings != null);
         var binding = bindings.findByIdForUpdate(connection, original.bindingId());
         require(binding != null && binding.getRequest().equals(original.request())
@@ -214,8 +216,9 @@ public final class JdbcCsiActivationAdmission {
             String resourceId = CsiNativeActivationProof.id(ref, "resourceId");
             JsonNode candidate = candidates.get(resourceId);
             require(candidate != null);
-            for (String field : List.of("resourceId", "kind", "schemaVersion", "byteLength", "digest"))
+            for (String field : List.of("resourceId", "kind", "schemaVersion", "byteLength", "digest")) {
                 require(CsiNativeActivationProof.canonical(ref.get(field)).equals(CsiNativeActivationProof.canonical(candidate.get(field))));
+            }
             needed.add(resourceId);
             byte[] bytes = candidate.path("bytesBase64").isNull() ? null
                     : java.util.Base64.getDecoder().decode(candidate.path("bytesBase64").textValue());

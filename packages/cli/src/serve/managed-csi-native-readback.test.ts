@@ -62,6 +62,51 @@ describe('private CSI native readback', () => {
       ).toThrow();
     });
   }
+  for (const value of fixtures.valid.filter(
+    (candidate: { name: string }) =>
+      candidate.name === 'execute' || candidate.name === 'execute-read-only',
+  )) {
+    for (const locator of fixtures.intentLocatorCases) {
+      it(`${value.name} ${locator.accepted ? 'accepts' : 'refuses'} ${locator.name}`, () => {
+        const changed = structuredClone(value.response);
+        changed.evidence.grant.intent = locator.intent;
+        if (locator.authorization) {
+          changed.head.revision = locator.authorization.revision;
+          changed.head.sequence = locator.authorization.sequence;
+          for (const target of [changed.evidence, changed.evidence.grant]) {
+            target.authorizationRevision = locator.authorization.revision;
+            target.authorizationSequence = locator.authorization.sequence;
+          }
+        }
+        const read = () =>
+          readCsiNativeResponse(changed, readCsiNativeRequest(value.request));
+        if (locator.accepted) expect(read()).toEqual(changed);
+        else expect(read).toThrow();
+      });
+    }
+    it(`${value.name} refuses the legacy resource grant field`, () => {
+      const changed = structuredClone(value.response);
+      changed.evidence.grant.intentRef = fixtures.intentLocatorCases.find(
+        (candidate: { name: string }) =>
+          candidate.name === 'resource-shaped locator',
+      ).intent;
+      delete changed.evidence.grant.intent;
+      expect(() =>
+        readCsiNativeResponse(changed, readCsiNativeRequest(value.request)),
+      ).toThrow();
+    });
+    it(`${value.name} refuses a duplicate locator key before validation`, () => {
+      const bytes = Buffer.from(
+        JSON.stringify(value.response).replace(
+          '"intent":{"revision":7,',
+          '"intent":{"revision":1,"revision":7,',
+        ),
+      );
+      expect(() =>
+        parseManagedCsiFileJson(bytes, CSI_NATIVE_RESPONSE_LIMIT),
+      ).toThrow();
+    });
+  }
   it('refuses duplicates, noncanonical counters and request overflow before decoding', () => {
     for (const value of fixtures.invalidJson)
       expect(() =>

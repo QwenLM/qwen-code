@@ -128,12 +128,16 @@ An action-specific evidence object closes the union:
 The new private grant has exactly `protocolVersion: 1`, `runtimeBindingId`,
 `bindingGeneration`, `authorizedBindingVersion`, `executionCallId`,
 `dispatchGeneration`, `authorizationRevision`, `authorizationSequence`,
-`executionReference`, `intentRef`, `checkpointRef`, `preparedRef`, `identity`,
+`executionReference`, `intent`, `checkpointRef`, `preparedRef`, `identity`,
 `context`, `installedContext`. Generation and binding-version counters are
 canonical positive unsigned decimal strings; native revision and sequence are
 safe positive integers. The execution reference is the original eleven-field
-reference. Intent and checkpoint refs are the original native tool intent and
-complete dispatch checkpoint, not worker-preparation admission. The nullable
+reference. `intent` has exactly `revision` and `sequence`, the original journal
+position of the unique native `tool.intent`. Both are safe positive integers
+strictly below `authorizationRevision` and `authorizationSequence`, respectively:
+the complete dispatch checkpoint is a later transaction. It is not a resource
+reference and does not add a resource to the response closure. `checkpointRef`
+is the original complete dispatch checkpoint, not worker-preparation admission. The nullable
 prepared rule and all repeated fields must agree with the response and original
 qualified authorization. Persist this exact joined authorization evidence when
 authorizing dispatch; an existing two-column dispatch-generation/binding-version
@@ -392,6 +396,62 @@ the existing producer order: the next model attempt completes before
 `consumeResults`. Permit that attempt only after complete results-ready closure,
 retaining its unconsumed obligation. Waiting for consumption before allowing
 that same attempt would deadlock the legitimate continuation.
+
+### 6.4 Original tool intent and read-only membership freeze
+
+Investigation at `606d33529176aa139cf1c5d94b88d97b5f37832c` found that the
+execute codec required a `managed-tool-intent` resource which no production
+caller publishes. The actual authority's `appendExecutionEvent` appends
+`tool.intent` to the original journal and returns a commit receipt, without a
+resource reference or journal revision. Correct only the experimental execute
+grant to use the closed journal locator above. Prepare evidence's `intentRef`
+and `FileHistory.FrozenBatch.intentRef` remain original `managed-file_history`
+resources; neither changes meaning. The codec correction does not open execute
+readback, claim, authorization, worker effects or result consumption.
+
+Native replay already knows each original transaction's revision and each
+event's sequence. Derive execution-to-intent positions in the replayed Prefix,
+not in a new persisted intent ledger. Fresh acceptance and replay must share
+the validator. At authorization, use the same locked Connection to locate the
+unique original event and match its activation, Session key, execution ID,
+assistant batch, local ordinal, original input and declaration. Persist that
+position inside the immutable joined grant. Fresh worker readback qualifies
+the saved position against the original journal; a caller position, current
+head or reminted grant cannot replace it.
+
+A mutating batch already freezes its complete accepted membership through
+schema-2 history intent. A read-only batch must freeze at its first native
+`tool.intent`: lock the complete original resource inventory, fixed READY
+Runtime Session and all related SQL execution rows before partitioning the
+current batch. Require all its members to be original PREPARED allocations,
+with no dispatch markers, cancellation or terminal/UNKNOWN state. Once any
+native intent exists for this assistant batch, refuse new allocations while
+allowing an exact original reservation retry. Original execution rows retain
+their immutable identity and references; no membership copy or second ledger
+is necessary.
+
+Each native intent qualifies and associates only its exact original input and
+declaration in the same journal transaction, promoting previously unreferenced
+read-only resources. Bytes for a read-only member without an
+intent remain PUBLISHED at their original allocation; bytes for an entered
+member must be REFERENCED and associated with that member's exact original
+intent revision. Mutating history associations retain their original history
+revision. Do not accept both states generically or associate untouched members
+with a different intent. Before dispatch, the complete `await_runtime`
+checkpoint must match all three sets: original current-batch SQL members,
+unique native intents and newly added pending checkpoint items. Keep previous
+pending items intact and derive cumulative ordinals using the actual Harness
+producer's `max(request.ordinal, nextOrdinal)`, preserving refusal gaps. A
+cancelled, not-started, UNKNOWN or terminal member cannot be filtered out to
+make the successful set smaller.
+
+This is the next native integration design, not implemented membership or
+execution evidence. Implement native intent/checkpoint validation and
+same-Connection preflight before immutable authorization; then connect the
+finite worker executor, original outcomes, result messages, results-ready and
+consumption. The eleven-field continuation, cold recovery and retirement gates
+remain required. Public selectors remain closed; the design uses standard
+Kubernetes and CSI and does not require Alibaba ACK.
 
 ## 7. Validation and acceptance
 
