@@ -217,7 +217,15 @@ test('Settings adds a verified computer and returns to Connections @smoke', asyn
   await page.getByLabel('Daemon address').fill(REMOTE_ORIGIN);
   await page.getByRole('button', { name: 'Add connection' }).click();
 
-  await expect(page).toHaveURL(new URL('/settings', sourceUrl).href);
+  // `?fanout=` names the hosts this document may reach; the shell keeps it in
+  // the URL so the next load's CSP still covers them, so compare without it.
+  await expect
+    .poll(() => {
+      const landed = new URL(page.url());
+      landed.searchParams.delete('fanout');
+      return landed.href;
+    })
+    .toBe(new URL('/settings', sourceUrl).href);
   await expect(
     page
       .getByRole('navigation', { name: 'Settings' })
@@ -351,7 +359,11 @@ test('cancelling returns to the exact source tab @smoke', async ({
   await expect(
     page.getByRole('button', { name: 'Add workspace', exact: true }),
   ).toBeVisible();
-  expect(new URL(page.url()).search).toBe('');
+  // `?fanout=` outlives the flow by design (it keeps the next load's CSP
+  // covering the saved hosts), so only the resume marker must be gone.
+  const residualParams = new URL(page.url()).searchParams;
+  residualParams.delete('fanout');
+  expect(residualParams.toString()).toBe('');
   expect(
     remote.requests.filter(
       (request) => request.method === 'POST' && request.path === '/workspaces',
