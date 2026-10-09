@@ -7,7 +7,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
- * H4b: the JDBC side of the child result relay — its V53 ledger plus the
+ * H4b: the JDBC side of the child result relay — its V54 ledger plus the
  * small reads the worker needs (pending child-agent rows over the
  * delivery-pending index, launch bodies and envelopes from the Session
  * resource store, the child turn line, and the terminal result content).
