@@ -67,10 +67,16 @@ describe('web-shell ru locale', () => {
     for (const value of [
       'ru',
       'ru-ru',
+      'ru_ru',
       'russian',
       'русский',
       'RU',
       ' RU-RU ',
+      // Region-qualified Russian must not fall through to en.
+      'ru-UA',
+      'ru-KZ',
+      'ru-BY',
+      'ru-MD',
     ]) {
       expect(normalizeLanguage(value)).toBe('ru');
     }
@@ -80,13 +86,21 @@ describe('web-shell ru locale', () => {
     expect(normalizeLanguage('zh-cn')).toBe('zh-CN');
     expect(normalizeLanguage('zh_cn')).toBe('zh-CN');
     // Unrelated locales still collapse to en (fr, ja, … are not shipped).
-    expect(normalizeLanguage('ru-anything-else')).toBe('en');
     expect(normalizeLanguage('fr-FR')).toBe('en');
+    expect(normalizeLanguage('ja-JP')).toBe('en');
     expect(normalizeLanguage(undefined)).toBe('en');
   });
 
-  it('maps daemon language settings to ru, underscore form included', () => {
-    for (const value of ['ru', 'ru-ru', 'ru_ru', 'russian', 'русский', 'RU']) {
+  it('maps daemon language settings to ru, underscore and region forms included', () => {
+    for (const value of [
+      'ru',
+      'ru-ru',
+      'ru_ru',
+      'russian',
+      'русский',
+      'RU',
+      'ru-UA',
+    ]) {
       expect(languageSettingToWebShellLanguage(value)).toBe('ru');
     }
     expect(languageSettingToWebShellLanguage('zh')).toBe('zh-CN');
@@ -130,6 +144,19 @@ describe('web-shell ru locale', () => {
     expect(t('goals.count', { count: 5 })).toBe('5 активных целей');
     expect(t('goals.count', { count: 11 })).toBe('11 активных целей');
     expect(t('goals.count', { count: 21 })).toBe('21 активная цель');
+  });
+
+  it('renders goals.dropped with the session count and the right plural', () => {
+    const t = getTranslator('ru');
+    expect(t('goals.dropped', { count: 3 })).toBe(
+      '3 сеанса не удалось достичь — цели, которые они выполняли, отсутствуют в этом списке.',
+    );
+    expect(t('goals.dropped', { count: 5 })).toBe(
+      '5 сеансов не удалось достичь — цели, которые они выполняли, отсутствуют в этом списке.',
+    );
+    expect(t('goals.dropped', { count: 1 })).toBe(
+      '1 сеанс не удалось достичь — цели, которые они выполняли, отсутствуют в этом списке.',
+    );
   });
 
   it('renders the Goal card from the ru catalog, not from EN', () => {

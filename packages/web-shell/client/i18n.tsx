@@ -8389,7 +8389,7 @@ const RU: Messages = {
   'goals.running': 'Работает',
   'goals.idle': 'Ожидание',
   'goals.dropped': (v) =>
-    `не удалось достичь ${ruPlural(v?.count, 'сеанс', 'сеанса', 'сеансов')} — цели, которые они выполняли, отсутствуют в этом списке.`,
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'сеанс', 'сеанса', 'сеансов')} не удалось достичь — цели, которые они выполняли, отсутствуют в этом списке.`,
   'goals.notYetEvaluated': 'ещё не оценено',
   'goals.openSessionHint': 'Открыть сессию этой цели',
   'goals.error.emptyCondition': 'Введите условие для цели.',
@@ -8439,12 +8439,10 @@ export function normalizeLanguage(
   if (normalized === 'zh' || normalized === 'zh-cn' || normalized === 'zh_cn') {
     return 'zh-CN';
   }
-  if (
-    normalized === 'ru' ||
-    normalized === 'ru-ru' ||
-    normalized === 'russian' ||
-    normalized === 'русский'
-  ) {
+  // Prefix match: ru, region-qualified ru (ru-RU, ru-UA, ru-KZ, …) and the
+  // underscore form all resolve to the partial ru catalog — region-qualified
+  // Russian speakers must not fall through to en.
+  if (normalized.startsWith('ru') || normalized === 'русский') {
     return 'ru';
   }
   return 'en';
@@ -8469,12 +8467,9 @@ export function languageSettingToWebShellLanguage(
   ) {
     return 'zh-CN';
   }
-  if (
-    normalized === 'ru' ||
-    normalized === 'ru-ru' ||
-    normalized === 'russian' ||
-    normalized === 'русский'
-  ) {
+  // Same prefix match as normalizeLanguage: region-qualified settings
+  // (ru-UA, …) map to the partial ru catalog instead of an unknown setting.
+  if (normalized.startsWith('ru') || normalized === 'русский') {
     return 'ru';
   }
   if (
