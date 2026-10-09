@@ -1939,14 +1939,16 @@ export function WebShellSidebar({
     const nonLive = displayedWorkspaces.filter(
       (entry) => entry.kind !== 'live',
     );
-    const pinned = nonLive.filter((entry) => entry.isPinned);
-    const unpinned = nonLive.filter((entry) => !entry.isPinned);
+    const primary = nonLive.filter((entry) => entry.primary);
+    const secondary = nonLive.filter((entry) => !entry.primary);
+    const pinned = secondary.filter((entry) => entry.isPinned);
+    const unpinned = secondary.filter((entry) => !entry.isPinned);
     pinned.sort((a, b) => {
       const aTime = a.pinnedAt ? new Date(a.pinnedAt).getTime() : 0;
       const bTime = b.pinnedAt ? new Date(b.pinnedAt).getTime() : 0;
       return bTime - aTime;
     });
-    return [...pinned, ...unpinned];
+    return [...primary, ...pinned, ...unpinned];
   }, [displayedWorkspaces]);
   const resolveSessionWorkspaceScope = useCallback(
     (session: DaemonSessionSummary): SessionWorkspaceScope => {

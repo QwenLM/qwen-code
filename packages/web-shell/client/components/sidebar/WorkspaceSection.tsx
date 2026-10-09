@@ -848,6 +848,8 @@ export function WorkspaceSection({
               {workspace.isPinned && (
                 <span
                   className={styles.pinBadge}
+                  role="img"
+                  aria-label={t('sidebar.pinnedWorkspace')}
                   title={t('sidebar.pinnedWorkspace')}
                 >
                   📌

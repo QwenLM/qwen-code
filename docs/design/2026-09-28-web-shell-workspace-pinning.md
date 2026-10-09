@@ -12,7 +12,7 @@ Let Web Shell users pin important workspaces to the top of the sidebar so they a
 - `/capabilities` workspaces entries include `registrationIds`, `isPinned` (boolean, always present when feature is advertised), and `pinnedAt` (ISO-8601, present only when pinned) when `workspace_pinning` is advertised; when the tag is absent, those fields are omitted entirely.
 - `workspace_pinning` capability tag advertises support; clients preflight-check this before showing UI.
 - Web Shell sidebar shows a "Pin" menu item only on rows that have persistent registration records AND the daemon advertises `workspace_pinning`.
-- Pinned workspaces sort above all unpinned workspaces in the sidebar; within the pinned group, sort by pin time descending (most recently pinned first). The unpinned group preserves the daemon catalog order.
+- Pinned workspaces sort above all unpinned non-primary workspaces in the sidebar; the primary workspace always remains at the top regardless of pin state. Within the pinned group, sort by pin time descending (most recently pinned first). The unpinned group preserves the daemon catalog order.
 - Pin state is stored in the existing workspace registration store snapshot under a new `pinnedAts: Record<string, string>` field keyed by stable registration id.
 - Schema version remains 1; older daemons silently drop the additive `pinnedAts` field (data loss risk documented below).
 
