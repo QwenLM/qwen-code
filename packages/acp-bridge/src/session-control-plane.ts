@@ -381,10 +381,11 @@ function standaloneWorkingDirectoryMissingError(): RequestError {
 }
 
 /**
- * Only the daemon's authenticated channel-worker path can populate the
- * user-facing display projection. Every other source echoes its prompt content
- * verbatim. Single source of truth for the echo, pending-entry text, and child
- * metadata so their `''`/undefined semantics cannot drift apart.
+ * Channel display text comes from the authenticated worker or an explicit
+ * submission declaration. It never grants channel-turn classification. Every
+ * other source echoes its prompt content verbatim. Single source of truth for
+ * the echo, pending-entry text, and child metadata so their `''`/undefined
+ * semantics cannot drift apart.
  */
 function getChannelPromptDisplayText(
   entry: Pick<SessionEntry, 'sourceType'>,
@@ -11033,9 +11034,14 @@ export function createSessionControlPlane(
           );
         }
       }
+      const declaredChannelDisplayText =
+        context?.channelPrompt !== true &&
+        typeof context?.submittedPrompt === 'string'
+          ? context.submittedPrompt
+          : undefined;
       const channelDisplayText = getChannelPromptDisplayText(
         entry,
-        context?.promptDisplayText,
+        context?.promptDisplayText ?? declaredChannelDisplayText,
       );
       const pendingText =
         channelDisplayText === undefined
