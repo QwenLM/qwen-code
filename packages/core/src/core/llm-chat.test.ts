@@ -11960,10 +11960,19 @@ describe('LlmChat', async () => {
       expect(resultChars(1)).toBeLessThanOrEqual(30_000);
     });
 
-    it('keeps parallel previews within the headroom even below 4,000 characters per result', async () => {
+    it('keeps parallel previews below the real compaction gate without a per-result floor', async () => {
       await reportUsage(849_500);
+      vi.mocked(chat.tryCompress).mockRestore();
+      const firePreCompactEvent = vi
+        .fn()
+        .mockRejectedValue(new Error('unexpected real PreCompact admission'));
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        firePreCompactEvent,
+        isManaged: () => true,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+      const compress = vi.spyOn(ChatCompressionService.prototype, 'compress');
       await sendDrain(
-        [0, 1, 2, 3, 4, 5, 6, 7].map((n) =>
+        Array.from({ length: 8 }, (_, n) =>
           fnResponse(
             'shell',
             { output: `${spillEnvelope(n)}${'x'.repeat(18_000)}` },
@@ -11972,11 +11981,10 @@ describe('LlmChat', async () => {
         ),
         'second',
       );
+      const pending = compress.mock.calls.at(-1)?.[1];
+      expect(pending?.precomputedEffectiveTokens).toBeLessThan(850_000);
+      expect(firePreCompactEvent).not.toHaveBeenCalled();
       expect(resultChars(1)).toBeLessThanOrEqual(1_333);
-      expect(
-        vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
-          ?.precomputedEffectiveTokens,
-      ).toBeLessThan(850_000);
     });
 
     it('charges media before sharing the remaining headroom between previews', async () => {

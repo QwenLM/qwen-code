@@ -3122,19 +3122,34 @@ export class LlmChat {
       // gap where `lastPromptTokenCount === 0` and the gate would otherwise
       // see only the stale prior-turn count (0).
       let userContent = createUserContent(params.message);
-      // One pass over the batch: the tighter of the aggregate guard and the
-      // pressure budget (#2566), so a result is never cut twice. A non-finite
-      // aggregate budget is the documented "disabled" sentinel, so it has to
-      // stay non-finite all the way to the `Number.isFinite` gate — taking
-      // `Math.min` with the pressure budget would run the pass the operator
-      // turned off.
+      const { auto, hard } = computeThresholds(
+        contextWindowForClamp,
+        this.config.getAutoCompactThreshold(),
+      );
+      const imageTokenEstimate = resolveSlimmingConfig(
+        this.config.getChatCompression(),
+      ).imageTokenEstimate;
+      // A reported prompt count already covers history. Only restored or
+      // inherited history without that count needs the char/4 estimate; its
+      // possible under-count is covered by reactive overflow recovery below.
+      const estimatePendingPrompt = (pending: Content) =>
+        estimatePromptTokens(
+          this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
+          pending,
+          this.lastPromptTokenCount,
+          this.lastOutputTokenCount,
+          imageTokenEstimate,
+        );
+      // A non-finite aggregate budget disables the whole send guard. Both
+      // candidates below start from the original parts, so a result is never
+      // cut twice.
       const batchBudget = this.config.getToolOutputBatchBudget?.();
       const pressureBudget = this.pressureToolOutputBudget(
         userContent,
         requestRouteKey,
         contextWindowForClamp,
       );
-      const toolOutputBudget =
+      let toolOutputBudget =
         batchBudget !== undefined && !Number.isFinite(batchBudget)
           ? batchBudget
           : Math.min(
@@ -3151,6 +3166,39 @@ export class LlmChat {
           toolName: 'tool-response-batch',
           responseParts: [part],
         }));
+        if (
+          pressureBudget !== undefined &&
+          pressureBudget < (batchBudget ?? Number.POSITIVE_INFINITY)
+        ) {
+          const preview = enforceFunctionResponseBudget(
+            entries,
+            toolOutputBudget,
+            true,
+          );
+          if (
+            preview !== entries &&
+            estimatePendingPrompt({
+              ...userContent,
+              parts: preview.flatMap((entry) => entry.responseParts),
+            }) >= auto
+          ) {
+            const aggregateBudget = batchBudget ?? Number.POSITIVE_INFINITY;
+            const aggregatePreview = enforceFunctionResponseBudget(
+              entries,
+              aggregateBudget,
+            );
+            // Keep full results if compaction will run anyway and the
+            // aggregate-only request stays below hard. Persist only the
+            // selected budget, never an unused preview.
+            if (
+              estimatePendingPrompt({
+                ...userContent,
+                parts: aggregatePreview.flatMap((entry) => entry.responseParts),
+              }) < hard
+            )
+              toolOutputBudget = aggregateBudget;
+          }
+        }
         const guarded = await finalizeToolResponses(
           this.config,
           entries,
@@ -3253,7 +3301,7 @@ export class LlmChat {
       // this send instead of waiting for the API to reject the request as too
       // large.
       //
-      // We compute `effectiveTokens` ONCE here and pass it through to
+      // We pass the selected candidate's `effectiveTokens` through to
       // tryCompress → service.compress so the cheap-gate doesn't redo the
       // estimation (which involves another `getHistory(true)` clone). This
       // reuse also fixes a per-config-knob inconsistency: previously the
@@ -3267,32 +3315,7 @@ export class LlmChat {
       // failures fall through to reactive overflow after a few strikes.
       // Thresholds gate on the full window: the output clamp guarantees the
       // response fits, so nothing needs to be pre-reserved for it.
-      const { hard } = computeThresholds(
-        contextWindowForClamp,
-        this.config.getAutoCompactThreshold(),
-      );
-      const imageTokenEstimate = resolveSlimmingConfig(
-        this.config.getChatCompression(),
-      ).imageTokenEstimate;
-      // When lastPromptTokenCount > 0, estimatePromptTokens uses the
-      // API-authoritative previous prompt count + the previous response's
-      // output token count + a tiny estimate of just the new user message.
-      // It does NOT touch the history at all in that branch, so skip the
-      // costly `getHistory(true)` clone on the steady-state path.
-      // The lastPromptTokenCount=0 branch (first send after --continue
-      // restore / subagent inheritance) walks history with a char/4
-      // heuristic that can under-count by ~15-20K tokens; the reactive
-      // overflow recovery path inside the async iterator below (the
-      // `getContextLengthExceededInfo` → `tryCompress` → RETRY branch)
-      // is the documented safety net when this under-count causes
-      // hard-rescue to miss.
-      const effectiveTokens = estimatePromptTokens(
-        this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
-        userContent,
-        this.lastPromptTokenCount,
-        this.lastOutputTokenCount,
-        imageTokenEstimate,
-      );
+      const effectiveTokens = estimatePendingPrompt(userContent);
       const isHardTier = effectiveTokens >= hard;
       const shouldForceFromHard =
         !exactRoute &&
