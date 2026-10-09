@@ -1981,28 +1981,25 @@ export class NativeLspService {
           },
         );
 
-        if (response && typeof response === 'object') {
-          const responseObj = response as Record<string, unknown>;
-          const items = responseObj['items'];
-          if (Array.isArray(items)) {
-            for (const item of items) {
-              const normalized = this.normalizer.normalizeDiagnostic(
-                item,
-                name,
-              );
-              if (normalized) {
-                allDiagnostics.push(normalized);
-              }
-            }
+        const items =
+          response && typeof response === 'object'
+            ? (response as Record<string, unknown>)['items']
+            : undefined;
+        if (!Array.isArray(items)) {
+          throw new Error('Invalid diagnostic report: expected an items array');
+        }
+        for (const item of items) {
+          const normalized = this.normalizer.normalizeDiagnostic(item, name);
+          if (!normalized) {
+            throw new Error('Invalid diagnostic report: malformed diagnostic');
           }
+          allDiagnostics.push(normalized);
         }
       } catch (error) {
         if (error instanceof LspDocumentScopeError) throw error;
-        // Fall back to cached diagnostics from publishDiagnostics notifications
-        // This is handled by the notification handler if implemented
-        debugLogger.warn(
-          `LSP textDocument/diagnostic failed for ${name}:`,
-          error,
+        throw new Error(
+          `LSP textDocument/diagnostic failed for ${name}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
         );
       }
     }
@@ -2079,40 +2076,59 @@ export class NativeLspService {
           },
         );
 
-        if (response && typeof response === 'object') {
-          const responseObj = response as Record<string, unknown>;
-          const items = responseObj['items'];
-          if (Array.isArray(items)) {
-            const directories = this.workspaceContext.getDirectories();
-            const scopeCache = new Map<string, boolean>();
-            for (const item of items) {
-              if (results.length >= limit) {
-                break;
-              }
-              if (++scanned > scanLimit) {
-                throw new WorkspaceResultScanLimitError(scanLimit);
-              }
-              const normalized = this.normalizer.normalizeFileDiagnostics(
-                item,
-                name,
-              );
-              if (
-                normalized &&
-                normalized.diagnostics.length > 0 &&
-                this.isCurrentWorkspaceDocument(
-                  normalized.uri,
-                  directories,
-                  scopeCache,
-                )
-              ) {
-                results.push(normalized);
-              }
-            }
+        const items =
+          response && typeof response === 'object'
+            ? (response as Record<string, unknown>)['items']
+            : undefined;
+        if (!Array.isArray(items)) {
+          throw new Error('Invalid diagnostic report: expected an items array');
+        }
+        const directories = this.workspaceContext.getDirectories();
+        const scopeCache = new Map<string, boolean>();
+        for (const item of items) {
+          if (results.length >= limit) {
+            break;
           }
+          if (++scanned > scanLimit) {
+            throw new WorkspaceResultScanLimitError(scanLimit);
+          }
+          const report =
+            item && typeof item === 'object'
+              ? (item as Record<string, unknown>)
+              : undefined;
+          const uri = report?.['uri'];
+          if (
+            typeof uri !== 'string' ||
+            !this.isCurrentWorkspaceDocument(uri, directories, scopeCache)
+          ) {
+            continue;
+          }
+          const fileItems = report?.['items'];
+          if (!Array.isArray(fileItems)) {
+            throw new Error(
+              `Invalid diagnostic report for ${uri}: expected an items array`,
+            );
+          }
+          const normalized = this.normalizer.normalizeFileDiagnostics(
+            item,
+            name,
+          );
+          if (
+            !normalized ||
+            normalized.diagnostics.length !== fileItems.length
+          ) {
+            throw new Error(
+              `Invalid diagnostic report for ${uri}: malformed diagnostic`,
+            );
+          }
+          if (normalized.diagnostics.length > 0) results.push(normalized);
         }
       } catch (error) {
         if (error instanceof WorkspaceResultScanLimitError) throw error;
-        debugLogger.warn(`LSP workspace/diagnostic failed for ${name}:`, error);
+        throw new Error(
+          `LSP workspace/diagnostic failed for ${name}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
       }
 
       if (results.length >= limit) {

@@ -1192,6 +1192,10 @@ export class LspServerManager {
           references: { dynamicRegistration: false },
           documentSymbol: { dynamicRegistration: false },
           codeAction: { dynamicRegistration: false },
+          diagnostic: {
+            dynamicRegistration: false,
+            relatedDocumentSupport: false,
+          },
         },
         workspace: {
           workspaceFolders: true,

@@ -6,7 +6,6 @@
 
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getLanguageFromFilePath } from '../utils/language-detection.js';
 import { isSubpath } from '../utils/paths.js';
 import { resolveWorkspacePath } from '../utils/workspaceContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -79,8 +78,7 @@ export function isLspDocumentApplicable(
     config.languages.some(
       (language) =>
         !Object.hasOwn(LANGUAGE_ID_TO_EXTENSIONS, language.toLowerCase()),
-    ) ||
-    (extension === '' && getLanguageFromFilePath(filePath) === undefined)
+    ) || extension === ''
   );
 }
 

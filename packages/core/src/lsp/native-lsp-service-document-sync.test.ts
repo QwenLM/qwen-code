@@ -98,6 +98,12 @@ function createConnection() {
             },
           ];
         }
+        if (
+          method === 'textDocument/diagnostic' ||
+          method === 'workspace/diagnostic'
+        ) {
+          return { kind: 'full', items: [] };
+        }
         return method === 'textDocument/hover' ? { contents: text } : [];
       },
     ),
@@ -562,6 +568,125 @@ describe('NativeLspService disk document synchronization', () => {
     });
   }
 
+  describe.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+    '%s diagnostic report failures',
+    (operation) => {
+      const queryDiagnostics = (): Promise<unknown[]> =>
+        operation === 'diagnostics'
+          ? service.diagnostics(uri)
+          : service.workspaceDiagnostics();
+
+      it.each([
+        undefined,
+        null,
+        [],
+        {},
+        { items: null },
+        { items: 'invalid' },
+        { error: { code: -32601, message: 'Method not found' } },
+        { kind: 'unchanged', resultId: 'unknown' },
+      ])(
+        'rejects an invalid report %j instead of claiming clean',
+        async (report) => {
+          connection.request.mockResolvedValue(report);
+          await expect(run(queryDiagnostics())).rejects.toThrow(
+            'Invalid diagnostic report',
+          );
+        },
+      );
+
+      it.each(['Method not found', 'request timeout', 'connection closed'])(
+        'shows %s as a tool failure instead of a clean result',
+        async (message) => {
+          connection.request.mockRejectedValue(new Error(message));
+          const result = await execute(lspTool(), {
+            operation,
+            filePath: file,
+          });
+          for (const content of [result.llmContent, result.returnDisplay]) {
+            expect(content).toContain('failed');
+            expect(content).toContain('test');
+            expect(content).toContain(message);
+            expect(content).not.toContain('No diagnostics found');
+          }
+        },
+      );
+
+      it('accepts a successful empty report as clean', async () => {
+        connection.request.mockResolvedValue({ kind: 'full', items: [] });
+        expect(await run(queryDiagnostics())).toEqual([]);
+      });
+
+      it('does not return partial diagnostics when another server fails', async () => {
+        const other = createConnection();
+        other.request.mockRejectedValue(new Error('Method not found'));
+        useHandles([
+          ['test', handle],
+          [
+            'other',
+            {
+              ...handle,
+              config: { ...handle.config, name: 'other' },
+              connection: other,
+            },
+          ],
+        ]);
+        connection.request.mockResolvedValue({
+          kind: 'full',
+          items:
+            operation === 'diagnostics'
+              ? [{ range, message: 'Value expected', severity: 1 }]
+              : [
+                  {
+                    uri,
+                    kind: 'full',
+                    items: [{ range, message: 'Value expected', severity: 1 }],
+                  },
+                ],
+        });
+        await expect(run(queryDiagnostics())).rejects.toThrow('other');
+      });
+    },
+  );
+
+  it.each([
+    { kind: 'unchanged', resultId: 'unknown' },
+    { kind: 'full' },
+    { kind: 'full', items: null },
+    { kind: 'full', items: [null] },
+    { kind: 'full', items: [{ range, message: '' }] },
+  ])('refuses an invalid in-scope workspace file report %j', async (report) => {
+    connection.request.mockResolvedValue({
+      items: [
+        { uri, kind: 'full', items: [{ range, message: 'earlier error' }] },
+        { uri, ...report },
+      ],
+    });
+    const result = await execute(lspTool(), {
+      operation: 'workspaceDiagnostics',
+    });
+    for (const content of [result.llmContent, result.returnDisplay]) {
+      expect(content).toContain('Invalid diagnostic report');
+      expect(content).toContain('test');
+      expect(content).not.toContain('No diagnostics found');
+      expect(content).not.toContain('earlier error');
+    }
+  });
+
+  it('accepts a successful empty in-scope workspace file report', async () => {
+    connection.request.mockResolvedValue({
+      items: [{ uri, kind: 'full', items: [] }],
+    });
+    expect(await workspaceDiagnostics()).toEqual([]);
+  });
+
+  it('refuses malformed document diagnostics instead of silently dropping them', async () => {
+    connection.request.mockResolvedValue({ kind: 'full', items: [null] });
+    await expect(run(service.diagnostics(uri))).rejects.toThrow(
+      'Invalid diagnostic report: malformed diagnostic',
+    );
+  });
+
   const queryMethods = [
     'definitions',
     'references',
@@ -750,6 +875,13 @@ describe('NativeLspService disk document synchronization', () => {
       ['protobuf', 'main.proto'],
       ['elixir', 'main.exs'],
       ['json', 'main.jsonc'],
+      ['json', '.prettierrc'],
+      ['json', '.eslintrc'],
+      ['json', '.babelrc'],
+      ['typescript', '.tsconfig'],
+      ['json', '.editorconfig'],
+      ['json', '.gitignore'],
+      ['json', 'Dockerfile'],
       ['shellscript', 'main.zsh'],
       ['solidity', 'main.sol'],
       ['scss', 'main.scss'],
@@ -776,6 +908,48 @@ describe('NativeLspService disk document synchronization', () => {
           'textDocument/diagnostic',
           { textDocument: { uri: target } },
         );
+      },
+    );
+
+    it.each(['absent', 'empty', 'explicit'])(
+      'keeps extensionless dispatch scope-checked with %s mapping',
+      async (mapping) => {
+        handle.config.languages = ['json'];
+        handle.config.extensionToLanguage =
+          mapping === 'absent'
+            ? undefined
+            : mapping === 'empty'
+              ? {}
+              : { json: 'json' };
+        const [, target] = addFile('.prettierrc', '{}');
+
+        if (mapping === 'explicit') {
+          await expect(run(service.diagnostics(target))).rejects.toThrow(
+            'No ready LSP server matches document',
+          );
+          expect(connection.send).not.toHaveBeenCalled();
+          expect(connection.request).not.toHaveBeenCalled();
+        } else {
+          await run(service.diagnostics(target));
+          expect(connection.send).toHaveBeenCalledWith(
+            didOpen('{}', 1, target, 'json'),
+          );
+          expect(connection.request).toHaveBeenCalledWith(
+            'textDocument/diagnostic',
+            { textDocument: { uri: target } },
+          );
+        }
+
+        const outside = pathToFileURL(
+          path.join(path.dirname(directory), '.prettierrc'),
+        ).toString();
+        connection.send.mockClear();
+        connection.request.mockClear();
+        await expect(run(service.diagnostics(outside))).rejects.toThrow(
+          'outside the current workspace directories',
+        );
+        expect(connection.send).not.toHaveBeenCalled();
+        expect(connection.request).not.toHaveBeenCalled();
       },
     );
 
@@ -973,7 +1147,11 @@ describe('NativeLspService disk document synchronization', () => {
         handle.config.workspaceFolder = sub;
         if (language === 'typescript') {
           vi.mocked(manager.warmupTypescriptServer).mockRestore();
-          connection.request.mockResolvedValue({ message: 'No Project' });
+          connection.request.mockImplementation(async (method) =>
+            method === 'workspace/diagnostic'
+              ? { items: [] }
+              : { message: 'No Project' },
+          );
         }
 
         await run(service.workspaceSymbols('main'));
@@ -1187,7 +1365,7 @@ describe('NativeLspService disk document synchronization', () => {
                       .uri,
                   ),
                 }
-              : [],
+              : { items: [] },
           );
           expect((await hover(extraUri))?.contents).toBe('extra');
           const parked = `${extra}-parked`;
@@ -3404,25 +3582,25 @@ describe('NativeLspService disk document synchronization', () => {
     },
   );
 
-  it('preserves the existing workspace diagnostics request failure handling', async () => {
+  it('reports unsupported workspace diagnostics instead of an empty result', async () => {
     await hover();
     const error = new Error('unsupported workspace pull diagnostics');
     connection.request.mockRejectedValue(error);
-    expect(await workspaceDiagnostics()).toEqual([]);
-    expect(logger.warn).toHaveBeenLastCalledWith(
-      'LSP workspace/diagnostic failed for test:',
-      error,
-    );
+    await expect(workspaceDiagnostics()).rejects.toMatchObject({
+      message:
+        'LSP workspace/diagnostic failed for test: unsupported workspace pull diagnostics',
+      cause: error,
+    });
   });
 
-  it('preserves the existing diagnostics request failure handling', async () => {
+  it('reports unsupported document diagnostics instead of an empty result', async () => {
     const error = new Error('unsupported pull diagnostics');
     connection.request.mockRejectedValue(error);
-    expect(await run(service.diagnostics(uri))).toEqual([]);
-    expect(logger.warn).toHaveBeenLastCalledWith(
-      'LSP textDocument/diagnostic failed for test:',
-      error,
-    );
+    await expect(run(service.diagnostics(uri))).rejects.toMatchObject({
+      message:
+        'LSP textDocument/diagnostic failed for test: unsupported pull diagnostics',
+      cause: error,
+    });
   });
 
   it('does not issue a document request on an initial read failure', async () => {

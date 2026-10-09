@@ -28,7 +28,8 @@ transport. Workspace edits use the same fresh containment check as reads.
    TypeScript includes JavaScript and module extensions, and versioned clangd
    names admit C. No display-language-name inversion or `.mm` special case.
 4. Only an absent or empty `extensionToLanguage` permits scope-checked legacy
-   dispatch for unknown configured languages and undetected extensionless filenames.
+   dispatch for unknown configured languages and all extensionless filenames,
+   regardless of display-language detection.
    Non-empty maps match extensions, with an optional leading dot, not filenames;
    `Gemfile` and `Makefile` cannot be expressed as keys. A map whose extensions
    match no files disables routing for that server. Known languages still reject unknown non-empty

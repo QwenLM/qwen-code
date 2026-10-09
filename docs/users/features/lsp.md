@@ -131,7 +131,7 @@ Example:
 
 ### Server Routing and Workspace Scope
 
-File queries only use ready servers applicable to the document. Without an explicit extension map, known LSP language identifiers use built-in extension sets. TypeScript includes JavaScript and `.mts`/`.cts`/`.mjs`/`.cjs` files. Only when `extensionToLanguage` is absent or empty do unknown configured language identifiers and unrecognized extensionless filenames retain legacy dispatch after workspace/root checks; known languages still reject unknown non-empty extensions and unrelated file types. For strict routing of custom languages, configure `extensionToLanguage`.
+File queries only use ready servers applicable to the document. Without an explicit extension map, known LSP language identifiers use built-in extension sets. TypeScript includes JavaScript and `.mts`/`.cts`/`.mjs`/`.cjs` files. Only when `extensionToLanguage` is absent or empty do unknown configured language identifiers and all extensionless filenames (including recognized dotfiles such as `.prettierrc`) retain legacy dispatch after workspace/root checks; known languages still reject unknown non-empty extensions and unrelated file types. For strict routing of custom languages, configure `extensionToLanguage`.
 
 A non-empty `extensionToLanguage` replaces, rather than extends, the built-in extension set. Adding only `.c` therefore excludes `.cpp`, `.h`, and every other omitted extension. List every extension you need. Keys are extensions (a leading dot is optional), not filenames: extensionless names such as `Gemfile` or `Makefile` cannot be expressed as keys and are not routed by a non-empty map. A map whose extensions match no files disables all routing for that server. Remove the map to restore legacy extensionless dispatch. A `cpp` configuration without a map recognizes C for `clangd`, `clangd.exe`, and numeric versions such as `clangd-18` or `clangd-19.1`; arbitrary wrappers are not assumed to support C.
 
@@ -280,7 +280,7 @@ Parameters:
 
 #### File Diagnostics
 
-Get diagnostic messages (errors, warnings) for a file.
+Get diagnostic messages (errors, warnings) for a file. The client advertises pull-diagnostic support and requests a current report. Unsupported requests, transport failures, and invalid reports are shown as `LSP diagnostics failed`, not as a clean file. Push-only diagnostic servers without pull support are not supported by this operation.
 
 ```
 Operation: diagnostics
@@ -290,7 +290,7 @@ Parameters:
 
 #### Workspace Diagnostics
 
-Get all diagnostic messages across the workspace.
+Get all diagnostic messages across the workspace. Servers must support `workspace/diagnostic`; document pull support alone is not sufficient. A request failure is shown as `LSP workspace diagnostics failed`, not as an empty workspace. Diagnostics already returned by another server do not hide that failure.
 
 ```
 Operation: workspaceDiagnostics
