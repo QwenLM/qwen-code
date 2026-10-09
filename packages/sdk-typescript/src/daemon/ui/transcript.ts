@@ -5,6 +5,7 @@
  */
 
 import type {
+  DaemonEmbeddedResource,
   DaemonPromptCancelledTranscriptBlock,
   DaemonResourceLink,
   DaemonShellTranscriptBlock,
@@ -407,12 +408,13 @@ function applyDaemonTranscriptEvent(
       const bytesBefore = estimateBlockBytes(block);
       if (event.meta) block.meta = { ...block.meta, ...event.meta };
       const resources = block.embeddedResources ?? [];
-      const serializedResource = JSON.stringify(event.resource);
+      const retained = boundEmbeddedResourceText(next, block, event.resource);
+      const serializedResource = JSON.stringify(retained);
       const duplicate = resources.some(
         (resource) => JSON.stringify(resource) === serializedResource,
       );
       if (!duplicate) {
-        block.embeddedResources = [...resources, cloneJsonLike(event.resource)];
+        block.embeddedResources = [...resources, cloneJsonLike(retained)];
       }
       block.updatedAt = next.now;
       if (event.eventId !== undefined) block.eventId = event.eventId;
@@ -2439,6 +2441,33 @@ function truncateText(
   if (text.length <= MAX_TEXT_BLOCK_LENGTH) return text;
   reportTextTruncation(state, blockId, sourceRecordIds);
   return truncateTextAtLimit(text);
+}
+
+/**
+ * Bounds one embedded resource's text like the sibling text-block paths: the
+ * live echo caps block count only, and retention trimming never evicts the
+ * newest block, so an unbounded resource text would pin the store above
+ * `maxRetainedBytes`. The shared suffix marks the cut; uri, mimeType and
+ * metadata survive.
+ */
+function boundEmbeddedResourceText(
+  state: DaemonTranscriptState,
+  block: DaemonTextTranscriptBlock,
+  resource: DaemonEmbeddedResource,
+): DaemonEmbeddedResource {
+  if (resource.resource.text.length <= MAX_TEXT_BLOCK_LENGTH) return resource;
+  return {
+    ...resource,
+    resource: {
+      ...resource.resource,
+      text: truncateText(
+        state,
+        block.id,
+        block.sourceRecordIds,
+        resource.resource.text,
+      ),
+    },
+  };
 }
 
 function reportTextTruncation(

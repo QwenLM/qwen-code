@@ -311,6 +311,39 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
 
     expect(svc.readLastRecordUuid(file)).toBe('boundary-final');
   });
+
+  it('returns the uuid of a last record larger than the tail window', () => {
+    // A prompt carrying ~200 KiB of journaled embedded resources lands as a
+    // single JSONL line far beyond TAIL_READ_SIZE. While that turn is still
+    // the file's last line (in flight, or the process died before any
+    // assistant record), a fixed tail window opens inside the record, the
+    // partial segment is discarded, no complete line remains, and
+    // renameSession anchors custom_title.parentUuid at null — severing the
+    // chain on resume although the record is on disk. The reader widens the
+    // window until a complete line fits.
+    const record = {
+      ...recordFor('oversized-last', 'user', null),
+      systemPayload: {
+        displayText: '',
+        hookContext: '',
+        embeddedResources: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'context://example/large',
+              mimeType: 'text/plain',
+              text: 'x'.repeat(200 * 1024),
+            },
+          },
+        ],
+      },
+    };
+    const line = JSON.stringify(record);
+    expect(Buffer.byteLength(line, 'utf8')).toBeGreaterThan(64 * 1024);
+    const file = writeJsonl('oversized-last.jsonl', `${line}\n`);
+
+    expect(svc.readLastRecordUuid(file)).toBe('oversized-last');
+  });
 });
 
 describe('SessionService lifecycle maintenance', () => {

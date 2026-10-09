@@ -115,6 +115,38 @@ describe('daemon embedded text resources', () => {
     );
   });
 
+  it('bounds retained resource text so one echo cannot pin the store over budget', () => {
+    // The live echo caps block count only, and retention trimming never
+    // evicts the newest block, so an unbounded resource text would hold the
+    // store above maxRetainedBytes with no eviction able to reclaim it.
+    const maxRetainedBytes = 1024 * 1024;
+    const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+    const oversized = normalizeDaemonEvent(
+      frame({
+        type: 'resource',
+        resource: {
+          uri: 'context://example/large',
+          mimeType: 'text/plain',
+          text: 'x'.repeat(4 * 1024 * 1024),
+        },
+      }),
+    )[0]!;
+    store.dispatch(oversized);
+
+    const snapshot = store.getSnapshot();
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(1);
+    const retained = block.embeddedResources![0]!;
+    expect(retained.resource.uri).toBe('context://example/large');
+    expect(retained.resource.mimeType).toBe('text/plain');
+    expect(retained.resource.text.length).toBeLessThanOrEqual(100_000);
+    expect(retained.resource.text).toContain('[truncated]');
+  });
+
   it('reconstructs the active branch from persisted user records', () => {
     const record = (
       uuid: string,
