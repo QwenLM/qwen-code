@@ -107,6 +107,11 @@ function activeUrlOrigin(): string {
 
 function applyFocusToUrl(target: FocusHostTarget): void {
   const url = new URL(window.location.href);
+  // The previous host's session surface dies here: keeping /session/<id>
+  // (or a workspace param) from another daemon loads a session that does
+  // not exist on the new host ("workspace not found", 400s).
+  url.searchParams.delete('workspace');
+  url.searchParams.delete('context');
   if (target.origin === pageOrigin()) {
     url.searchParams.delete('daemon');
   } else {
@@ -114,11 +119,10 @@ function applyFocusToUrl(target: FocusHostTarget): void {
   }
   if (target.workspaceId) {
     url.searchParams.set('workspace', target.workspaceId);
-  } else {
-    url.searchParams.delete('workspace');
   }
-  // A focused switch always leaves the previous host's session surface.
-  url.searchParams.delete('context');
+  if (url.pathname.startsWith('/session/')) {
+    url.pathname = '/';
+  }
   window.history.replaceState(window.history.state, '', url);
 }
 

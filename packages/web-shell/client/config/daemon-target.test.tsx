@@ -75,6 +75,26 @@ describe('DaemonTargetProvider (#13727)', () => {
     ]);
   });
 
+  it('clears the session route when a focused switch has no session of its own', () => {
+    const ref = mountController();
+    window.history.replaceState(
+      null,
+      '',
+      '/session/local-s?daemon=' +
+        encodeURIComponent('https://focus.example') +
+        '&fanout=https%3A%2F%2Falpha.example',
+    );
+    act(() => {
+      ref.current?.focusHost({ origin: 'https://alpha.example' });
+    });
+    const url = new URL(window.location.href);
+    // A stale session from the old host must not be loaded on the new one.
+    expect(url.pathname).toBe('/');
+    expect(url.searchParams.get('daemon')).toBe('https://alpha.example');
+    expect(url.searchParams.get('workspace')).toBeNull();
+    expect(url.searchParams.get('context')).toBeNull();
+  });
+
   it('drops the daemon param when focusing the page origin', () => {
     const ref = mountController();
     act(() => {

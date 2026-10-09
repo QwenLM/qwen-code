@@ -200,11 +200,15 @@ function getDevelopmentManagedAgentProvider():
 }
 
 /**
- * Interactive provider bound to the focused host (#13727): `key` remounts
- * the subtree on a focused-host switch — the isolation class of the old
- * full-page switch without a document reload, since the controller already
- * rewrote `?daemon=` in place. The boot token only applies to the boot
- * origin; any other host must authenticate through its own per-origin token.
+ * Interactive provider bound to the focused host (#13727): key-remount on a
+ * focused-host switch. Cheaper alternatives leak the old host's session
+ * context into the new one (a stale workspace cwd renders "workspace not
+ * found"); only a remount clears the whole connection surface today.
+ * Smooth in-context swapping is multi-provider phase 2 — the controller
+ * already rewrites `?daemon=` in place, so this shows a short connecting
+ * transition instead of a document flash. The boot token only applies to
+ * the boot origin; any other host must authenticate through its own
+ * per-origin token.
  */
 function FocusedDaemonWorkspaceProvider({
   bootToken,
