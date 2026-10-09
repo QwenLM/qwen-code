@@ -1388,7 +1388,12 @@ export class HostedWorkspaceToolTurn {
           validationError,
           input,
           isShell,
-          inputDigest: isShell ? managedToolDigest(input) : undefined,
+          // H3: the publication evidence chain pins the canonical input
+          // digest for Monitor calls exactly like Shell calls.
+          inputDigest:
+            isShell || call.name === 'monitor'
+              ? managedToolDigest(input)
+              : undefined,
           mcp: mcpInput !== undefined,
           ...encoded,
           argsDigest: `sha256:${managedToolDigest(input)}`,
@@ -1902,7 +1907,10 @@ export class HostedWorkspaceToolTurn {
                 sessionId: this.promptId,
                 promptId: this.promptId,
                 callId: request.runtimeCallId,
-                argsDigest: request.inputDigest!,
+                // The worker replays the v3 dispatch reference verbatim, so
+                // registration must use the same prefixed args digest —
+                // never the bare inputDigest used by the legacy prepare.
+                argsDigest: request.argsDigest,
               },
               capture: {
                 tenantId: authority.sessionHeader.sessionKey.tenantId,
@@ -3562,12 +3570,23 @@ export class HostedWorkspaceToolTurn {
       if (this.hookStopReason)
         await this.harness.settleHookStoppedRuntimeContinuation();
       else await this.harness.settleConsumedRuntimeContinuation();
-      if (!this.mcp && !this.hooks) await this.broker.release();
+      // H3: release is close semantics — its sweep stops any background run
+      // the Session still hosts. A turn that leaves one live holds the
+      // Runtime instead; the Session's ordered close drains it.
+      if (!this.mcp && !this.hooks && !this.hasLiveBackgroundWork())
+        await this.broker.release();
       this.acquired = false;
     } catch (cause) {
       this.uncertain = true;
       throw new HostedToolRecoveryRequiredError(cause);
     }
+  }
+
+  private hasLiveBackgroundWork(): boolean {
+    return (
+      (this.shell?.publisher?.hasUnfinishedBackground?.() ?? false) ||
+      (this.backgroundLane?.publisher?.hasUnfinishedBackground?.() ?? false)
+    );
   }
 
   // The publisher lives on the Session across turns, so a turn's close

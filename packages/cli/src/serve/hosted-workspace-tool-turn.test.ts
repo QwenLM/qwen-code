@@ -5181,6 +5181,12 @@ describe('hosted Monitor admission arm', () => {
         monitoring: true,
       },
     });
+    // Same identity rule as the background Shell: the registered reference
+    // is the v3 dispatch reference the worker replays at prepare (#13532 A4).
+    expect(
+      (register.mock.calls[0]![0] as { reference: { argsDigest: string } })
+        .reference.argsDigest,
+    ).toBe(broker.prepareV3.mock.calls[0]![1]);
     expect(rig.options.monitorLoops?.has('monitor-execution')).toBe(true);
   });
 
@@ -5656,12 +5662,61 @@ it('registers the Session capture lane for a background turn in publication mode
       background: true,
     },
   });
+  // The registered reference must be exactly the v3 dispatch reference the
+  // worker replays at prepare — the prefixed argsDigest handed to
+  // prepareV3, never the bare inputDigest of the legacy prepare (#13532 A4).
+  expect(
+    (register.mock.calls[0]![0] as { reference: { argsDigest: string } })
+      .reference.argsDigest,
+  ).toBe(broker.prepareV3.mock.calls[0]![1]);
   expect(rig.orchestrator.calls.map(([name]) => name)).toEqual([
     'admit',
     'dispatchStarted',
     'attach',
   ]);
   expect(order2).toEqual(['settleAttached:shell-execution']);
+});
+
+// #13532 A5: a turn that leaves a live background run must NOT release the
+// Runtime Session at finish — the release sweep is close semantics and stops
+// the run. Once nothing live remains, the same finish releases again.
+it('holds the Runtime release at turn finish while a background run is live', async () => {
+  const { call, parts } = backgroundCall();
+  const detached: ToolResultEnvelope = {
+    executionStatus: 'success',
+    responseParts: [
+      {
+        text: 'Background shell started under unit qwen-bg-rt. It keeps running after this result and holds its Runtime until it exits; read its status and output through the task surface.',
+      },
+    ],
+    capture: {
+      captureStatus: 'detached',
+      captureReason: null,
+      manifest: null,
+      previewTruncated: false,
+      deliveryStatus: 'pending',
+    },
+  };
+  const live = { value: true };
+  const lane: HostedShellTurnOptions = {
+    resources: {} as never,
+    assertWritable: async () => undefined,
+    publisher: {
+      start: async () => ({
+        url: 'http://127.0.0.1:9/lane',
+        token: 'lane-token',
+      }),
+      register: vi.fn(),
+      settleAttached: async () => undefined,
+      hasUnfinishedBackground: () => live.value,
+      close: async () => undefined,
+    } as never,
+  };
+  const rig = backgroundTurnRig(detached, { lane });
+  turn = rig.turn;
+  await turn.execute([call], parts, 'model', new AbortController().signal);
+  await turn.finish();
+  expect(broker.release).not.toHaveBeenCalled();
 });
 
 it('answers a retried accept from the journal without minting a rerun', async () => {

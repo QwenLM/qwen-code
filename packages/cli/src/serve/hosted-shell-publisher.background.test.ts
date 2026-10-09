@@ -430,6 +430,49 @@ it('runs the background exit leg: revise, seal, settle as one evidence', async (
   ).toHaveLength(0);
 });
 
+// #13532 A5: the turn's finish consults this predicate to hold the Runtime
+// release while a background run is live; it must flip exactly at the
+// capture's terminal envelope, never earlier.
+it('holds hasUnfinishedBackground until the terminal envelope lands', async () => {
+  const r = await rig();
+  expect(publisher!.hasUnfinishedBackground()).toBe(false);
+  const request = backgroundRequest(r.key, '1');
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-a',
+    request.reference.sessionId,
+  );
+  expect(publisher!.hasUnfinishedBackground()).toBe(true);
+  const prepared = await r.registry.prepare(
+    backgroundRequest(r.key, '1') as Parameters<
+      ManagedShellPublisherRegistry['prepare']
+    >[0],
+  );
+  prepared.sink.setStarted(1);
+  await prepared.sink.write('stdout', Buffer.from('tick'));
+  // Bytes flowing change nothing: only the terminal envelope ends the hold.
+  expect(publisher!.hasUnfinishedBackground()).toBe(true);
+  prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: 'tick',
+    error: null,
+    aborted: false,
+    exitCode: 0,
+    signal: null,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  await prepared.sink.finish('stdout', true);
+  await prepared.sink.finish('stderr', true);
+  const envelope = await prepared.sink.finalize(
+    'success',
+    [{ text: 'ok' }],
+    undefined,
+  );
+  await r.registry.accept(prepared.identity, envelope);
+  expect(publisher!.hasUnfinishedBackground()).toBe(false);
+});
+
 it('melds a monitor watch through one terminal step only after its start receipt', async () => {
   const r = await rig();
   const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
