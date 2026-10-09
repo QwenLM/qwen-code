@@ -1471,12 +1471,23 @@ describe('applyAutoModeDecision — blocked:destructive-command escalation', () 
   const fingerprint = 'shell:git-reset-hard';
 
   it('hard-blocks the first destructive denial without falling back', () => {
-    // Escalation must not fire early: one denial is below every cap.
-    const { result } = apply(destructive(), counters(0, 0, 0, 0), fingerprint);
+    // Escalation must not fire early: one denial is below every cap. This is
+    // also the only assertion that reads the counters persisted on the
+    // non-escalating path, which is the accumulation the escalation is
+    // evaluated against on the next denial.
+    const { result, setAutoModeDenialState } = apply(
+      destructive(),
+      counters(0, 0, 0, 0),
+      fingerprint,
+    );
     expect(result.kind).toBe('blocked');
     if (result.kind === 'blocked') {
       expect(result.reason).toBe('classifier_blocked');
     }
+    expect(setAutoModeDenialState).toHaveBeenCalledWith({
+      ...counters(1, 0, 1, 0),
+      pendingManualRetryFingerprint: fingerprint,
+    });
   });
 
   it('arms the exact-action manual retry on a destructive denial', () => {

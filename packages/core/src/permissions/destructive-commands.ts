@@ -9,7 +9,9 @@
  * non-deterministic and can fail due to API unavailability, timeout, or poor
  * judgment on ambiguous prompts like "clean up the git state". This module
  * provides deterministic regex-based blocking that cannot be bypassed by
- * classifier failures.
+ * classifier failures on the denying call itself: the block is hard until
+ * denial tracking reaches the consecutive-block or session-total cap, at which
+ * point `applyAutoModeDecision` falls back to manual approval instead.
  *
  * Only applies in AUTO mode — YOLO mode is an explicit opt-out of all guards.
  */
@@ -181,7 +183,9 @@ export function clearSessionCommits(): void {
 /**
  * Check whether a shell command is destructively blocked by the deterministic
  * guard. Runs before the L5.3 classifier — failures here are hard blocks
- * regardless of classifier availability.
+ * regardless of classifier availability, until denial tracking reaches the
+ * consecutive-block or session-total cap; at a cap `applyAutoModeDecision`
+ * falls back to manual approval instead.
  *
  * @param command - The raw shell command string
  * @param userPrompt - The user's most recent prompt text
