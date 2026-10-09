@@ -687,8 +687,9 @@ Therefore a read-only evidence match cannot be reported as genuine cold Hosted
 recovery. That delivery must qualify the original durable tail before a fenced
 writer/activation transition, recover each original receipt's fixed message
 identity, and resume the existing Harness model loop without a new tool dispatch.
-The local candidate implementing this transition is described in section 6.8.1;
-its independent cold acceptance remains pending.
+The implementation of this transition is described in section 6.8.1. Section
+7.7 verifies its receipt-complete C1 continuation in a bounded local run;
+remaining cold cuts and target-cluster acceptance remain pending.
 Ordinary load's legacy history parser and recovery path remain unchanged.
 
 The snapshot exporter requires actual MySQL/InnoDB consistent read-only snapshots.
@@ -714,10 +715,11 @@ qualification requirements; no new cloud resources are authorized by this design
 
 #### 6.8.1 Qualified live-session writer recovery
 
-Status: implemented as a local candidate; genuine cold takeover is not accepted. The
-first delivery targets the original finite file batch after all SQL executions
-and immutable receipts settle but before the final message/resolve closes.
-Additional cold cuts below remain part of the required work.
+Status: implemented; the receipt-complete continuation passed the bounded local
+C1 observation on `6d304d299ff09c920d455bc9562960e39b8c7815`, as recorded in
+section 7.7. This delivery targets the original finite file batch after all SQL
+executions and immutable receipts settle but before the final message/resolve
+closes. Additional cold cuts below remain required; this does not accept full K2.
 
 Keep the existing private Main text entry, original request/session and exact
 prompt. On a new Main process, reconcile and attest the original provisioned
@@ -994,7 +996,7 @@ On 2026-10-09, one fresh owned MySQL cold restart ran on `e8f11063463f846ab80776
 
 There was no model2, repeated tool execution or new journal result. Original execution/grant/result bytes, 23 transactions, 27 resources and 49 references were preserved. The dynamic schema contained 54 tables and 699 columns; 53/54 tables were identical from cut to refusal, with only explicitly recorded original binding reconciliation. Counts are 1 actual behavior group, 27 observer checks and 20 offline predicates; the latter two are not additional behavior groups.
 
-The report and 201 evidence files were sealed. Root independently verified 264 source/doc/test pins, 4 products plus the SDK, 44 PID/group absence checks, 11 closed ports and removal of the owned temporary directory before releasing the window. This is bounded local software refusal evidence. Positive cold recovery, target Linux CSI, physical release and full K2 remain unaccepted; the first positive candidate requires a separate window for this design.
+The report and 201 evidence files were sealed. Root independently verified 264 source/doc/test pins, 4 products plus the SDK, 44 PID/group absence checks, 11 closed ports and removal of the owned temporary directory before releasing the window. This run provides bounded local software refusal evidence, without positive cold, target Linux CSI, physical release or full K2 acceptance. The subsequent separate positive C1 window is recorded in section 7.7.
 
 ### 7.6 Local cold candidate checks
 
@@ -1002,4 +1004,77 @@ The first local candidate implements the receipt-complete writer claim, successo
 
 The exact offline Java sequence completed Broker 19 suites/78 tests and Agent 39 suites/778 tests with no failures/errors/skips, followed by successful forced package/install and Checkstyle/SpotBugs checks. The original post-test observer failed on an incorrect standalone SDK path; its error was preserved and only the offline package bridge inspection was corrected, with no Maven rerun. Root independently verified 107 sealed evidence files, 12 unchanged candidate source/doc/test paths, 1179 compiled-class pins, 4 whole embedded package bridges, 3 installed package bridges and 8 PID/group absence checks before releasing that window. A root inspector's same absent-path assumption was separately preserved and corrected read-only.
 
-These are candidate build and regression checks. The required native review workflow is unavailable in this Codex session; no independent review approval or maintainer approval is asserted. Positive cold acceptance still requires the separate fresh MySQL C1 window. Its C7 subset must capture actual 200 responses for the original receipt transaction including atomic outcome publication and for writer renewal, then resend those same request bytes after takeover. They constitute two mutation predicates; the transaction/publication replay is one combined predicate. The standalone tool-result-content/page/manifest publication endpoint is not exercised by this inline CSI outcome producer and remains unqualified. None of these checks completes all eight cold cuts, physical retirement, safe reuse or full K2.
+These are candidate build and regression checks. The required native review workflow is unavailable in this Codex session; no independent review approval or maintainer approval is asserted. The separate fresh MySQL C1 window and its C7 subset are recorded below. That subset captures actual 200 responses for the original receipt transaction including atomic outcome publication and for writer renewal, then resends those same request bytes after takeover. They constitute two mutation predicates; the transaction/publication replay is one combined predicate. The standalone tool-result-content/page/manifest publication endpoint is not exercised by this inline CSI outcome producer and remains unqualified. None of these checks completes all eight cold cuts, physical retirement, safe reuse or full K2.
+
+### 7.7 Bounded positive C1 and two C7 predicates
+
+On 2026-10-09, one fresh owned MySQL run used the clean committed candidate
+`6d304d299ff09c920d455bc9562960e39b8c7815`. The original mixed assistant
+accepted ordinals 0/2/3 and refused ordinal 1. All three original executions,
+immutable grants, success results and receipts were durable. The final Edit
+receipt committed at revision/sequence 23; its response was held before delivery,
+leaving the final result message and resolve absent. Only the registered old
+Main and Hosted were SIGKILLed. The original worker, database, adapter, provider,
+listeners, runtime, boot/handle and file instance stayed live until cleanup.
+
+Fifty-eight read-only samples of the original database clock established natural
+writer and activation expiry. No SQL changed expiry or supplied positive rows.
+Fresh Main/Hosted processes reentered the exact original prompt bytes. Writer
+generation and installed activation epoch advanced 1→2. The native journal
+advanced revision 23→34 and committed sequence 23→35. Original execution rows,
+grant/result strings, all three receipts and fixed result identities remained
+unchanged. The missing Edit message was repaired at sequence 25, its checkpoint
+resolved at 26 and the original prepared history closed at 27. The second model
+attempt started at 28, output committed at 30, results consumed at 31, the final
+assistant committed at 32, turn checkpoint at 33, turn event at 34 and idle
+checkpoint at 35. Actual model2 retained the original four-call assistant,
+refusal gap and exact accepted result Parts. There were two completed model
+requests, no model3, no new bind/prepare/execute and no repeated file effect.
+Working and backup bytes/device/inode and the original five mutating worker I/O
+operations were conserved.
+
+Two original complete request wire buffers were each observed as valid 200
+before the old owner exited, then replayed byte-for-byte after takeover. The
+original receipt transaction with its atomic outcome publication and the original
+writer renewal each returned 409 `managed_session_writer_conflict`. Each refused
+request conserved every row and column of all 54 tables, the 699-column schema,
+files and worker requests/I/O. Atomic receipt/publication is one combined
+predicate; the standalone publication endpoint was absent and is not qualified.
+
+Positive continuation separately permits only observed resource verification and
+original binding reconciliation metadata. Twelve original resources advanced
+`last_verified_at`, with actual successful original tenant/session/workspace GET
+evidence and original database time bounds. Every other original resource column,
+original journal transaction and resource reference stayed exact. The binding
+changed only the six recorded reconciliation columns, with both reconciliation
+generations +1 and record version +4 under the actual same-origin attestation
+sequence and database bounds. These exceptions never apply to the C7 refusals.
+Twenty-nine observer snapshots used one owned MySQL/InnoDB read-only consistent
+Connection each. Their observed REPEATABLE READ/read-only/autocommit semantics
+qualify the observer, not production READ COMMITTED or warmed-REPEATABLE-READ
+contention.
+
+All three recorded compile/producer/offline-audit commands exited 0; the
+independent audit passed 237 predicates. These are one behavior group, not 237
+additional runs. Root independently checked the original rows/events, 315 sealed
+artifacts, 414 source/observer/dependency pins plus 4 product pins, 3908 closing
+selected inputs and 14 historical references before releasing the window.
+Recorded Node loads matched their load-before bytes at termination: 2123 unique
+paths comprised 474 prelaunch-pinned paths and 1649 with load-before/terminal
+comparison only. This does not claim prelaunch closure of the entire Node
+dependency graph. Original report-inspector assumptions about a SQL column and
+the Node audit shape were preserved and corrected read-only; no producer rerun
+or original evidence replacement followed.
+
+The owned database and restricted user were dropped, MySQL shutdown exited 0,
+22 registered process groups passed 44 PID/group absence checks, all 11 ports
+closed and the owned temporary data/socket directory was removed. Root released
+the source/product observation window after these independent checks.
+
+This accepts a bounded local C1 and two C7 mutation predicates only. MockMvc
+transport, synthetic Kubernetes/attestation, Darwin mount/descriptor adaptation
+and deterministic SSE model responses remain limitations. Other cold cuts,
+standalone publication, production isolation contention, aggregate DRAINED,
+physical writer/descendant termination, CSI NodeUnpublish, atomic RELEASED,
+safe volume reuse, target Linux/cloud and public CSI selection remain pending.
+Native independent review and maintainer approval also remain pending.

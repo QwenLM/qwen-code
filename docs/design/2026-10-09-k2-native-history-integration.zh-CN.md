@@ -527,8 +527,8 @@ UNKNOWN 执行不能因为 process 或 Pod 消失而变成可重试。prepared �
 语法。因此只读证据匹配不能被报告为真正的 Hosted 冷恢复。该交付必须先校验原始持久尾部，
 再执行带 fencing 的 writer/activation 转移，按照各原始 receipt 的固定消息身份恢复，
 并在不重新派发工具的前提下继续既有 Harness 模型循环。第 6.8.1 节描述实现此转移的本地候选，
-独立冷验收仍待完成。普通 load 的 legacy history parser
-与恢复路径保持不变。
+第 7.7 节在有界本地运行中验证了 receipt-complete C1 续接；其余冷窗口与目标集群
+验收仍待完成。普通 load 的 legacy history parser 与恢复路径保持不变。
 
 snapshot exporter 要求真实 MySQL/InnoDB 一致的只读快照。此前的 H2 软件贯通运行
 不能赋予该消费者资格。验证使用新的自有本地 MySQL 数据库与原始 logical retirement cut，
@@ -547,9 +547,10 @@ reader，不能重建 grant 或 result。正向和拒绝组覆盖混合/多批�
 
 #### 6.8.1 合格的存活 Session writer 冷恢复
 
-状态：已实现本地候选；真正的冷接管尚未验收。首项交付针对所有 SQL execution 与不可变
-receipt 已落定、最后 message/resolve 尚未收口的原有限文件批次。下方其他冷恢复窗口
-仍属于必须完成的工作。
+状态：已实现；receipt-complete 续接在 `6d304d299ff09c920d455bc9562960e39b8c7815`
+上通过了第 7.7 节记录的有界本地 C1 观察。此交付针对所有 SQL execution 与不可变 receipt
+已落定、最后 message/resolve 尚未收口的原有限文件批次。下方其他冷窗口仍须完成，
+这不代表完整 K2 验收。
 
 保留既有私有 Main text 入口、原始 request/session 和准确 prompt。新 Main 进程重新
 核对并 attest 原 provisioned handle 与 READY Runtime Session，不创建新 Pod、worker、
@@ -767,7 +768,7 @@ turn 持久落定之后。Migration 与验证要求见完整双语 lifecycle-mai
 
 未出现 model2、重复工具执行或新 journal 结果。完整原 execution/grant/result、23 个 transaction、27 个 resource、49 个 reference 保持；动态 schema 为 54 表、699 列，53/54 表在 cut 到 refusal 期间相同，binding 仅发生明确记录的原实例 reconciliation。计数为 1 个实际行为组、27 个 observer 检查、20 个离线谓词；不把后两者累计为新行为组。
 
-原报告和 201 个证据文件已封存。root 独立验证 264 个 source/doc/test pin、4 个 product 和 SDK、44 次 PID/group 缺席检查、11 个关闭端口、原临时目录清理后解除本轮 freeze。这是有界本地软件拒绝基线；正向冷恢复、目标 Linux CSI、物理释放与完整 K2 仍未验收。首个正向候选必须另建窗口验证本节设计。
+原报告和 201 个证据文件已封存。root 独立验证 264 个 source/doc/test pin、4 个 product 和 SDK、44 次 PID/group 缺席检查、11 个关闭端口、原临时目录清理后解除本轮 freeze。本运行提供有界本地软件拒绝证据，不赋予正向冷恢复、目标 Linux CSI、物理释放或完整 K2 资格。随后独立的正向 C1 窗口记录在第 7.7 节。
 
 ### 7.6 本地冷恢复候选检查
 
@@ -775,4 +776,57 @@ turn 持久落定之后。Migration 与验证要求见完整双语 lifecycle-mai
 
 准确离线 Java 顺序完成 Broker 19 suites/78 tests、Agent 39 suites/778 tests，零 failure/error/skip；强制 package/install 和 Checkstyle/SpotBugs 检查通过。测试后的原 observer 因 standalone SDK 路径错误失败，原错误保留；仅修正离线 package bridge 核验，没有重跑 Maven。root 独立验证 107 个封存证据文件、12 个不变 candidate source/doc/test 路径、1179 个 compiled-class pin、4 个整包 embedded bridge、3 个 installed package bridge 与 8 次 PID/group 缺席检查后释放窗口。root inspector 对同一缺席路径的错误假设也另行保留，仅只读修正。
 
-这些是候选构建与回归检查。本 Codex 会话缺少必需的原生 review workflow 工具，不声称独立 review 或 maintainer approval 通过。正向冷验收仍需独立全新 MySQL C1 窗口。其 C7 子集必须捕获原 receipt transaction（含原子 outcome publication）与 writer renewal 的实际 200，接管后原样重发相同请求字节。这是两个 mutation 谓词；transaction/publication replay 是一个合并谓词。此 inline CSI outcome producer 不使用独立 tool-result-content/page/manifest publication 入口，该入口仍未验收。这些检查不完成全部八个冷窗口、物理退休、安全复用或完整 K2。
+这些是候选构建与回归检查。本 Codex 会话缺少必需的原生 review workflow 工具，不声称独立 review 或 maintainer approval 通过。独立全新 MySQL C1 窗口及其 C7 子集记录如下。该子集捕获原 receipt transaction（含原子 outcome publication）与 writer renewal 的实际 200，接管后原样重发相同请求字节。这是两个 mutation 谓词；transaction/publication replay 是一个合并谓词。此 inline CSI outcome producer 不使用独立 tool-result-content/page/manifest publication 入口，该入口仍未验收。这些检查不完成全部八个冷窗口、物理退休、安全复用或完整 K2。
+
+### 7.7 有界正向 C1 与两个 C7 谓词
+
+2026-10-09，一次全新自有 MySQL 运行使用干净已提交候选
+`6d304d299ff09c920d455bc9562960e39b8c7815`。原混合 assistant 接纳 ordinal 0/2/3、
+拒绝 ordinal 1；三份原 execution、不可变 grant、success result 和 receipt 均已持久化。
+最后 Edit receipt 提交在 revision/sequence 23；响应在交付前被保留，最后结果消息和
+resolve 尚未出现。仅 SIGKILL 已注册旧 Main 与 Hosted；原 worker、数据库、adapter、
+provider、listener、runtime、boot/handle 和文件实例一直保留到清理。
+
+原数据库时钟的 58 次只读采样证明 writer 与 activation 自然过期，未通过 SQL 改写过期时间
+或提供正向行。新 Main/Hosted 使用原 prompt 的准确字节重入，writer generation 与已安装
+activation epoch 均 1→2，原生 journal revision 23→34、committed sequence 23→35。
+原 execution 行、grant/result 字符串、三份 receipt 和固定结果身份均未改变。缺失 Edit
+消息在 sequence 25 修补，checkpoint 在 26 resolve，原 prepared history 在 27 收口。
+第二模型 attempt 在 28 开始，output 在 30 提交，31 消费结果，32 提交最终 assistant，
+33 提交 turn checkpoint，34 提交 turn event，35 提交 idle checkpoint。实际 model2
+保留原四 call assistant、拒绝缺口和准确 accepted result Parts。模型请求仅两个且均完成，
+没有 model3、新 bind/prepare/execute 或重复文件效果；工作/备份 bytes、device、inode
+及原五次 mutating worker I/O 均保持。
+
+两份原完整请求 wire buffer 在旧 owner 退出前分别观察到合法 200，接管后逐字节重放。
+原 receipt transaction 及其原子 outcome publication、原 writer renewal 分别返回
+409 `managed_session_writer_conflict`。每次拒绝均保持全部 54 表每行每列、699 列 schema、
+文件和 worker 请求/I/O。原子 receipt/publication 只计一个合并谓词；未出现独立 publication
+入口调用，不赋予该入口资格。
+
+正向续接另仅允许已观察的 resource verification 与原 binding reconciliation metadata。
+十二份原 resource 的 `last_verified_at` 递增，具有原 tenant/session/workspace 的真实
+成功 GET 证据及原数据库时间界限。所有其余原 resource 列、原 journal transaction 和
+resource reference 均准确保持。binding 仅改变六项已记录 reconciliation 列；在真实
+同源 attestation 顺序和数据库界限下，两项 reconciliation generation 各 +1、record
+version +4。这些例外绝不适用于 C7 拒绝。二十九次 observer snapshot 各使用一条自有
+MySQL/InnoDB 只读 consistent Connection；其真实 REPEATABLE READ/read-only/autocommit
+语义仅赋予 observer 资格，不证明生产 READ COMMITTED 或预热 REPEATABLE READ 竞争。
+
+记录的 compile/producer/offline-audit 三条命令均 exit 0，独立审计通过 237 项谓词；
+这是一个行为组，不是另加 237 次运行。root 在解除窗口前独立检查原行/事件、315 项封存
+artifact、414 个 source/observer/dependency pin 加 4 个 product pin、3908 个 closing
+selected input 和 14 份历史引用。记录的 Node load 与终止时字节均吻合：2123 个唯一
+路径含 474 个 prelaunch pin，另 1649 个仅有 load-before/terminal 比较；不声称整个 Node
+依赖图事前闭包。原报告 inspector 对 SQL 列名和 Node audit 形状的错误假设均保留，
+仅只读修正，没有重跑 producer 或替换原证据。
+
+自有数据库和受限用户已删除，MySQL shutdown exit 0；22 个已注册进程组通过 44 次
+PID/group 缺席检查，11 个端口全部关闭，自有临时 data/socket 目录已删除。root 在独立
+验证后解除 source/product 观察窗口。
+
+此轮仅接受有界本地 C1 和两个 C7 mutation 谓词。MockMvc transport、合成 Kubernetes/
+attestation、Darwin mount/descriptor 适配和确定性 SSE 模型响应仍是限制。其他冷窗口、
+独立 publication、生产 isolation 竞争、聚合 DRAINED、物理 writer/后代终止、CSI
+NodeUnpublish、原子 RELEASED、安全卷复用、目标 Linux/云和公开 CSI 选择仍待完成。
+原生独立 review 与 maintainer approval 也仍待完成。
