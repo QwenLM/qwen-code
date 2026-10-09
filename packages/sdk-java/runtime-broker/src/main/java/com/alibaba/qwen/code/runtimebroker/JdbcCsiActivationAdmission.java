@@ -163,9 +163,23 @@ public final class JdbcCsiActivationAdmission {
         if (!CsiNativeActivationProof.hasActivation(parsed)) {
             original.requireAdmission();
             require(!first && history.activation().expiresAt() > now);
-            CsiNativeActivationProof.advance(parsed, metadata, original.request(), writerId,
-                    history.genesis(), history.activation(), previousSequence, history.prefix(),
+            var next = CsiNativeActivationProof.advance(parsed, metadata, original.request(), writerId,
+                    history.genesis(), history.activation(), previousRevision, previousSequence, history.prefix(),
                     ref -> resource(connection, original, ref, previousRevision + 1));
+            String operation = metadata.path("operation").textValue();
+            boolean dispatchCheckpoint = "commitCheckpoint".equals(operation)
+                    && history.prefix().checkpoint() != null && next.checkpoint().state().path("tools").path("items").size()
+                            > history.prefix().checkpoint().state().path("tools").path("items").size();
+            if ("toolIntent".equals(operation) || dispatchCheckpoint) {
+                var inventory = CsiNativeToolReservation.inventory(connection, original);
+                CsiNativeToolReservation.requireReady(connection, original);
+                CsiNativeToolReservation.qualifyNativeBatch(next,
+                        CsiNativeToolReservation.complete(connection, original, next, inventory), dispatchCheckpoint);
+            }
+            if (!next.receipts().isEmpty()) {
+                JdbcCsiExecutionAdmission.verifyReceipts(connection, original,
+                        lockNativeHead(connection, original), next);
+            }
             require(history.activation().expiresAt() > JdbcRepositorySupport.databaseNowPrecise(connection).toEpochMilli());
             return;
         }
@@ -196,10 +210,11 @@ public final class JdbcCsiActivationAdmission {
         }
     }
 
-    public static void preflightFileHistory(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+    public static void preflightCommit(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             JsonNode metadata, List<JsonNode> records, long previousRevision, long previousSequence,
             String previousDigest, String writerId) throws SQLException {
-        require("commitFileHistory".equals(metadata.path("operation").textValue()));
+        String operation = CsiNativeActivationProof.text(metadata, "operation");
+        require(java.util.Set.of("commitFileHistory", "toolIntent", "commitCheckpoint").contains(operation));
         original.requireAdmission();
         History history = history(connection, original, previousRevision, previousSequence, previousDigest, writerId);
         require(history.activation() != null);
@@ -232,9 +247,15 @@ public final class JdbcCsiActivationAdmission {
         };
         var parsed = CsiNativeActivationProof.transaction(records, metadata, original.request(), history.lastUuid());
         var next = CsiNativeActivationProof.advance(parsed, metadata, original.request(), writerId,
-                history.genesis(), history.activation(), previousSequence, history.prefix(), reader);
+                history.genesis(), history.activation(), previousRevision, previousSequence, history.prefix(), reader);
         require(needed.equals(candidates.keySet()));
-        CsiNativeToolReservation.preflightHistory(connection, original, history.prefix(), next, inventory);
+        if ("commitFileHistory".equals(operation)) {
+            CsiNativeToolReservation.preflightHistory(connection, original, history.prefix(), next, inventory);
+        } else if ("toolIntent".equals(operation) || history.prefix().checkpoint() != null
+                && next.checkpoint().state().path("tools").path("items").size()
+                        > history.prefix().checkpoint().state().path("tools").path("items").size()) {
+            CsiNativeToolReservation.preflightNative(connection, original, history.prefix(), next, inventory, operation);
+        }
         require(history.activation().expiresAt() > JdbcRepositorySupport.databaseNowPrecise(connection).toEpochMilli());
     }
 
@@ -279,7 +300,20 @@ public final class JdbcCsiActivationAdmission {
 
     public static void requireReplay(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             long revision, long sequence, String digest, String writerId) throws SQLException {
-        history(connection, original, revision, sequence, digest, writerId);
+        var history = history(connection, original, revision, sequence, digest, writerId);
+        if (!history.prefix().intents().isEmpty()) {
+            var inventory = CsiNativeToolReservation.inventory(connection, original);
+            CsiNativeToolReservation.requireReady(connection, original);
+            var executions = CsiNativeToolReservation.complete(connection, original, history.prefix(), inventory);
+            if (history.prefix().receipts().isEmpty() && history.prefix().pendingBatch() != null
+                    && executions.stream().allMatch(execution -> execution.getState() == ToolExecutionRecord.State.PREPARED
+                            && execution.getDispatchGeneration() == 0)) {
+                CsiNativeToolReservation.qualifyNativeBatch(history.prefix(), executions,
+                        "await_runtime".equals(history.prefix().checkpoint().state().path("continuation").path("phase").textValue()));
+            }
+            JdbcCsiExecutionAdmission.verifyReceipts(connection, original,
+                    lockNativeHead(connection, original), history.prefix());
+        }
     }
 
     static CsiNativeActivationProof.Prefix requireLive(Connection connection, JdbcCsiFilesRetirementGuard.Original original)
@@ -373,7 +407,7 @@ public final class JdbcCsiActivationAdmission {
                                         ref -> resource(connection, original, ref, rowRevision));
                             } else {
                                 prefix = CsiNativeActivationProof.advance(transaction, metadata,
-                                        original.request(), writerId, genesis, activation, sequence, prefix,
+                                        original.request(), writerId, genesis, activation, rowRevision - 1, sequence, prefix,
                                         ref -> resource(connection, original, ref, rowRevision));
                             }
                             lastUuid = transaction.lastRecordUuid();

@@ -69,7 +69,7 @@ public final class CsiNativeActivationProof {
     public record Attempt(String attemptId, JsonNode routeRef, JsonNode checkpointRef, JsonNode route, String stage) {
     }
 
-    public record Stream(String messageId, long firstSequence, long nextOrdinal, String text) {
+    public record Stream(String messageId, long firstSequence, String text) {
     }
 
     public record FunctionCall(String id, String name, JsonNode args, int partIndex, int ordinal) {
@@ -81,7 +81,7 @@ public final class CsiNativeActivationProof {
     public record OriginalBatch(String promptId, PendingBatch batch) {
     }
 
-    public record FrozenBatch(JsonNode intentRef, JsonNode preparedRef, List<JsonNode> invocations, long intentSequence) {
+    public record FrozenBatch(JsonNode intentRef, JsonNode preparedRef, List<JsonNode> invocations, long intentSequence, long preparedSequence) {
         public FrozenBatch {
             invocations = List.copyOf(invocations);
         }
@@ -93,15 +93,24 @@ public final class CsiNativeActivationProof {
         }
     }
 
+    public record ToolIntent(JsonNode payload, long revision, long sequence, String inputDigest) {
+    }
+
+    public record ToolReceipt(JsonNode ref, JsonNode body, long revision, long sequence, long messageSequence) {
+    }
+
     public record Prefix(Input input, Checkpoint checkpoint, String lastMessageId, Attempt attempt,
             boolean assistantCommitted, Stream stream, Set<String> usedIds, PendingBatch pendingBatch,
-            Map<String, OriginalBatch> batches, FileHistory fileHistory) {
+            Map<String, OriginalBatch> batches, FileHistory fileHistory, Map<String, ToolIntent> intents, Map<String, ToolReceipt> receipts,
+            long nextDeltaOrdinal) {
         public Prefix {
             batches = Map.copyOf(batches);
+            intents = Map.copyOf(intents);
+            receipts = Map.copyOf(receipts);
         }
 
         public static Prefix empty() {
-            return new Prefix(null, null, null, null, false, null, Set.of(), null, Map.of(), null);
+            return new Prefix(null, null, null, null, false, null, Set.of(), null, Map.of(), null, Map.of(), Map.of(), 0);
         }
 
         public String checkpointResourceId() {
@@ -210,7 +219,7 @@ public final class CsiNativeActivationProof {
 
     public static Prefix advance(Transaction transaction, JsonNode metadata,
             RuntimeProvisionRequest original, String writerId, Genesis genesis, Activation activation,
-            long previousSequence, Prefix previous, Function<JsonNode, byte[]> resources) {
+            long previousRevision, long previousSequence, Prefix previous, Function<JsonNode, byte[]> resources) {
         require(activation != null && writerId.equals(activation.workerId())
                 && writerId.equals(text(metadata, "writerId"))
                 && number(metadata.get("writerGeneration")) == 1 && number(metadata.get("activationEpoch")) == 1);
@@ -219,15 +228,26 @@ public final class CsiNativeActivationProof {
                 require(previous.input() == null && previous.pendingBatch() == null);
                 Input input = input(transaction, metadata, original, activation, previousSequence, resources);
                 yield new Prefix(input, previous.checkpoint(), previous.lastMessageId(), null, false,
-                        null, useId(previous, input.inputId()), null, previous.batches(), previous.fileHistory());
+                        null, useId(previous, input.inputId()), null, previous.batches(), previous.fileHistory(), previous.intents(), previous.receipts(), 0);
             }
             case "commitCheckpoint" -> {
-                require(previous.checkpoint() == null);
-                yield new Prefix(previous.input(), validatedInitialCheckpoint(transaction, metadata, original,
-                        writerId, genesis, activation, previousSequence, resources), previous.lastMessageId(),
-                        previous.attempt(), previous.assistantCommitted(), previous.stream(), previous.usedIds(),
-                        previous.pendingBatch(), previous.batches(), previous.fileHistory());
+                Checkpoint checkpoint = previous.checkpoint() == null
+                        ? validatedInitialCheckpoint(transaction, metadata, original, writerId, genesis, activation,
+                                previousSequence, resources)
+                        : id(metadata, "commandId").startsWith("harness:await_runtime:")
+                                && undispatched(previous)
+                                ? dispatchCheckpoint(transaction, metadata, original, activation, previousSequence, previous, resources)
+                                : resultCheckpoint(transaction, metadata, original, activation, previousSequence, previous, resources);
+                boolean ready = "results_ready".equals(checkpoint.state().path("continuation").path("phase").textValue())
+                        && previous.pendingBatch() != null;
+                yield new Prefix(previous.input(), checkpoint, previous.lastMessageId(),
+                        ready ? null : previous.attempt(), previous.assistantCommitted(), previous.stream(), previous.usedIds(),
+                        ready ? null : previous.pendingBatch(), previous.batches(), previous.fileHistory(), previous.intents(), previous.receipts(), previous.nextDeltaOrdinal());
             }
+            case "recordToolResult" -> receipt(transaction, metadata, original, activation,
+                    previousRevision, previousSequence, previous, resources);
+            case "toolIntent" -> toolIntent(transaction, metadata, original, activation,
+                    previousRevision, previousSequence, previous, resources);
             case "commitMessage" -> message(transaction, metadata, original, genesis, activation,
                     previousSequence, previous, resources);
             case "hostedModelAttempt" -> attempt(transaction, metadata, original, activation,
@@ -240,6 +260,390 @@ public final class CsiNativeActivationProof {
                     previousSequence, previous, resources);
             default -> throw invalid();
         };
+    }
+
+    private static boolean undispatched(Prefix prefix) {
+        if (prefix.pendingBatch() == null) {
+            return false;
+        }
+        for (JsonNode item : prefix.checkpoint().state().path("tools").path("items")) {
+            if (prefix.pendingBatch().messageId().equals(item.path("modelMessageId").textValue())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static Prefix receipt(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
+            Activation activation, long previousRevision, long previousSequence, Prefix previous,
+            Function<JsonNode, byte[]> resources) {
+        conversation(previous);
+        require(previous.pendingBatch() != null && transaction.events().size() == 1
+                && "await_runtime".equals(previous.checkpoint().state().path("continuation").path("phase").textValue())
+                && metadata.path("latestCheckpointResourceId").isNull());
+        JsonNode event = transaction.events().getFirst();
+        closed(event, Set.of("v", "sequence", "eventId", "sessionKey", "kind", "occurredAt", "payload"));
+        key(event.path("sessionKey"), original);
+        require(number(event.get("v")) == 1 && number(event.get("sequence")) == previousSequence + 1
+                && "tool.receipt".equals(text(event, "kind")) && time(event.get("occurredAt")) < activation.expiresAt());
+        JsonNode payload = event.path("payload");
+        closed(payload, Set.of("executionCallId", "toolOutcomeRef", "resultRef", "resources", "historyRevision"));
+        String execution = id(payload, "executionCallId");
+        var intent = previous.intents().get(execution);
+        require(intent != null && previous.pendingBatch().messageId().equals(id(intent.payload(), "batchId"))
+                && !previous.receipts().containsKey(execution) && execution.equals(id(metadata, "commandId"))
+                && ("tool-receipt:" + execution).equals(id(event, "eventId"))
+                && payload.path("resultRef").isNull() && payload.path("resources").isArray() && payload.path("resources").isEmpty()
+                && number(payload.get("historyRevision")) == previousSequence + 1);
+        JsonNode ref = payload.path("toolOutcomeRef");
+        byte[] bytes = reference(ref, "managed-tool-outcome", resources);
+        require(bytes.length <= 64 * 1024 && text(ref, "digest").equals(text(metadata, "contentDigest")));
+        JsonNode body = readObject(bytes);
+        closed(body, Set.of("schemaVersion", "executionCallId", "envelope", "history"));
+        require(number(body.get("schemaVersion")) == 1 && execution.equals(id(body, "executionCallId")));
+        JsonNode history = body.path("history");
+        closed(history, Set.of("messageId", "timestamp", "model", "parts"));
+        uuid(id(history, "messageId"));
+        try {
+            Instant.parse(text(history, "timestamp"));
+        } catch (java.time.DateTimeException error) {
+            throw invalid();
+        }
+        require(previous.attempt() != null && text(previous.attempt().route(), "model").equals(text(history, "model")));
+        var call = previous.pendingBatch().calls().get((int) number(intent.payload().get("ordinal")));
+        require(canonical(convertedResult(body.path("envelope"), call)).equals(canonical(history.path("parts"))));
+        Map<String, ToolReceipt> receipts = new HashMap<>(previous.receipts());
+        receipts.put(execution, new ToolReceipt(ref.deepCopy(), body.deepCopy(), previousRevision + 1, previousSequence + 1, 0));
+        return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(), previous.attempt(),
+                previous.assistantCommitted(), previous.stream(), useId(previous, id(history, "messageId")),
+                previous.pendingBatch(), previous.batches(), previous.fileHistory(), previous.intents(), receipts, previous.nextDeltaOrdinal());
+    }
+
+    static JsonNode convertedResult(JsonNode result, FunctionCall call) {
+        closed(result, result.has("error") ? Set.of("executionStatus", "responseParts", "error")
+                : Set.of("executionStatus", "responseParts"));
+        String status = text(result, "executionStatus");
+        require(Set.of("success", "error").contains(status) && result.path("responseParts").isArray());
+        List<String> texts = new ArrayList<>();
+        var media = JSON.createArrayNode();
+        for (JsonNode part : result.path("responseParts")) {
+            if (part.has("text")) {
+                closed(part, part.has("type") ? Set.of("type", "text") : Set.of("text"));
+                require(!part.has("type") || "text".equals(part.path("type").textValue()));
+                require(part.path("text").isTextual());
+                texts.add(part.path("text").textValue());
+            } else {
+                String field = part.has("inlineData") ? "inlineData" : "fileData";
+                closed(part, Set.of(field));
+                JsonNode value = part.path(field);
+                closed(value, Set.of("mimeType", field.equals("inlineData") ? "data" : "fileUri"));
+                text(value, "mimeType");
+                text(value, field.equals("inlineData") ? "data" : "fileUri");
+                media.add(part);
+            }
+        }
+        String output = texts.isEmpty() ? result.path("responseParts").size() == 1 ? "" : "Tool execution succeeded."
+                : String.join("\n", texts);
+        ObjectNode function = JSON.createObjectNode().put("id", call.id()).put("name", call.name());
+        ObjectNode response = function.putObject("response").put("executionStatus", status);
+        if ("success".equals(status)) {
+            response.put("output", output);
+        } else {
+            String fallback = result.has("error") ? text(result.path("error"), "message") : "Runtime tool " + status + ".";
+            response.put("error", !CsiNativeToolReservation.trim(output).isEmpty() && !"Tool execution succeeded.".equals(output) ? output : fallback);
+        }
+        if (result.has("error")) {
+            JsonNode error = result.path("error");
+            closed(error, error.has("type") ? Set.of("message", "type") : Set.of("message"));
+            text(error, "message");
+            if (error.has("type")) {
+                text(error, "type");
+            }
+            response.set("runtimeError", error);
+        }
+        if (!media.isEmpty()) {
+            function.set("parts", media);
+        }
+        return JSON.createArrayNode().add(JSON.createObjectNode().set("functionResponse", function));
+    }
+
+    private static Prefix toolMessage(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
+            Genesis genesis, Activation activation, long previousSequence, Prefix previous,
+            Function<JsonNode, byte[]> resources) {
+        require(previous.pendingBatch() != null && transaction.events().size() == 1
+                && metadata.path("latestCheckpointResourceId").isNull()
+                && genesis.definitionDigest().equals(text(metadata, "contentDigest")));
+        JsonNode event = transaction.events().getFirst();
+        JsonNode payload = harnessEvent(event, "message.committed", original, activation, previousSequence + 1);
+        closed(payload, Set.of("messageId", "role", "contentRef", "parentMessageId"));
+        String messageId = id(payload, "messageId");
+        require("tool_result".equals(text(payload, "role")) && ("message:" + messageId).equals(id(event, "eventId"))
+                && ("recorder:" + messageId).equals(id(metadata, "commandId")));
+        var entry = previous.receipts().entrySet().stream().filter(item ->
+                messageId.equals(item.getValue().body().path("history").path("messageId").textValue()))
+                .findFirst().orElseThrow(CsiNativeActivationProof::invalid);
+        var receipt = entry.getValue();
+        require(receipt.messageSequence() == 0 && receipt.sequence() < previousSequence + 1);
+        JsonNode record = messageBody(payload.path("contentRef"), resources);
+        closed(record, Set.of("uuid", "parentUuid", "sessionId", "timestamp", "type", "cwd", "version", "daemonPromptId", "message", "model"));
+        chatRecord(record, original);
+        JsonNode history = receipt.body().path("history");
+        require(messageId.equals(id(record, "uuid")) && "tool_result".equals(text(record, "type"))
+                && previous.input().inputId().equals(id(record, "daemonPromptId"))
+                && Objects.equals(previous.lastMessageId(), nullableId(payload, "parentMessageId"))
+                && Objects.equals(previous.lastMessageId(), nullableId(record, "parentUuid"))
+                && text(history, "timestamp").equals(text(record, "timestamp")) && text(history, "model").equals(text(record, "model")));
+        closed(record.path("message"), Set.of("role", "parts"));
+        require("user".equals(text(record.path("message"), "role"))
+                && canonical(history.path("parts")).equals(canonical(record.path("message").path("parts"))));
+        Map<String, ToolReceipt> receipts = new HashMap<>(previous.receipts());
+        receipts.put(entry.getKey(), new ToolReceipt(receipt.ref(), receipt.body(), receipt.revision(), receipt.sequence(), previousSequence + 1));
+        return new Prefix(previous.input(), previous.checkpoint(), messageId, previous.attempt(), false,
+                previous.stream(), previous.usedIds(), previous.pendingBatch(), previous.batches(), previous.fileHistory(), previous.intents(), receipts, previous.nextDeltaOrdinal());
+    }
+
+    private static Checkpoint resultCheckpoint(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
+            Activation activation, long previousSequence, Prefix previous, Function<JsonNode, byte[]> resources) {
+        conversation(previous);
+        require(transaction.events().size() == 1);
+        JsonNode event = transaction.events().getFirst();
+        JsonNode payload = harnessEvent(event, "checkpoint.committed", original, activation, previousSequence + 1);
+        closed(payload, Set.of("checkpointId", "coveredSequence", "previousCheckpointId", "stateRef", "boundary"));
+        String checkpointId = "ckpt-" + (previousSequence + 1);
+        JsonNode prior = previous.checkpoint().state();
+        String predecessor = id(prior.path("identity"), "checkpointId");
+        require(checkpointId.equals(id(event, "eventId")) && checkpointId.equals(id(payload, "checkpointId"))
+                && number(payload.get("coveredSequence")) == previousSequence && predecessor.equals(id(payload, "previousCheckpointId")));
+        JsonNode ref = payload.path("stateRef");
+        JsonNode state = readObject(reference(ref, "managed-checkpoint", resources));
+        require(id(ref, "resourceId").equals(id(metadata, "latestCheckpointResourceId"))
+                && text(ref, "digest").equals(text(metadata, "contentDigest")));
+        ObjectNode expected = prior.deepCopy();
+        ((ObjectNode) expected.path("identity")).put("checkpointId", checkpointId).put("coveredSequence", previousSequence)
+                .put("previousCheckpointId", predecessor);
+        ((ObjectNode) expected.path("resume")).put("throughSequence", previousSequence);
+        String phase = text(prior.path("continuation"), "phase");
+        String command;
+        if ("await_runtime".equals(phase)) {
+            var pending = new ArrayList<JsonNode>();
+            for (JsonNode item : prior.path("tools").path("items")) {
+                var receipt = previous.receipts().get(id(item, "executionCallId"));
+                if ("in_progress".equals(item.path("state").textValue()) && receipt != null && receipt.messageSequence() > 0) {
+                    pending.add(item);
+                }
+            }
+            require(pending.size() == 1);
+            String execution = id(pending.getFirst(), "executionCallId");
+            var receipt = previous.receipts().get(execution);
+            for (JsonNode item : expected.path("tools").path("items")) {
+                if (execution.equals(id(item, "executionCallId"))) {
+                    ((ObjectNode) item).put("state", "settled").set("outcomeRef", receipt.ref());
+                }
+            }
+            boolean all = true;
+            for (JsonNode item : expected.path("tools").path("items")) {
+                all &= "settled".equals(item.path("state").textValue());
+            }
+            phase = all ? "results_ready" : "await_runtime";
+            ((ObjectNode) expected.path("continuation")).put("phase", phase);
+            for (JsonNode binding : expected.path("runtime").path("bindings")) {
+                if (execution.equals(id(binding, "executionCallId"))) {
+                    require("dispatch".equals(text(binding, "state")));
+                    ((ObjectNode) binding).put("state", "settled");
+                }
+            }
+            command = "harness:" + phase + ":" + activation.activationId() + ":" + execution + ":" + previousSequence;
+        } else {
+            require("results_ready".equals(phase) && previous.pendingBatch() == null && previous.attempt() != null
+                    && "output_committed".equals(previous.attempt().stage()));
+            boolean consume = id(metadata, "commandId").startsWith("harness:results_consumed:");
+            boolean changed = false;
+            for (JsonNode item : expected.path("tools").path("items")) {
+                require("settled".equals(text(item, "state")));
+                var receipt = previous.receipts().get(id(item, "executionCallId"));
+                require(receipt != null && receipt.messageSequence() > 0 && receipt.messageSequence() <= previousSequence
+                        && canonical(receipt.ref()).equals(canonical(item.path("outcomeRef"))));
+                if (consume && !item.path("consumed").booleanValue()) {
+                    ((ObjectNode) item).put("consumed", true);
+                    changed = true;
+                } else {
+                    require(consume || item.path("consumed").booleanValue());
+                }
+            }
+            if (consume) {
+                require(changed && !previous.assistantCommitted()
+                        && canonical(previous.attempt().checkpointRef()).equals(canonical(previous.checkpoint().ref())));
+                command = "harness:results_consumed:" + activation.activationId() + ":" + previousSequence;
+            } else {
+                require(previous.assistantCommitted());
+                phase = "turn_settled";
+                ((ObjectNode) expected.path("continuation")).put("phase", phase);
+                command = "harness:turn_settled:" + activation.activationId() + ":" + previousSequence;
+            }
+        }
+        require(command.equals(id(metadata, "commandId"))
+                && ("await_runtime".equals(phase) ? "durable_wait".equals(payload.path("boundary").textValue()) : payload.path("boundary").isNull())
+                && number(state.path("identity").get("schemaVersion")) == 1
+                && number(state.path("identity").get("coveredSequence")) == previousSequence
+                && number(state.path("resume").get("throughSequence")) == previousSequence
+                && number(state.path("resume").get("initialTurn")) == number(prior.path("resume").get("initialTurn"))
+                && canonical(expected).equals(canonical(state)));
+        for (JsonNode item : state.path("tools").path("items")) {
+            number(item.get("ordinal"));
+            number(item.get("partIndex"));
+        }
+        number(state.path("attempt").get("budgetConsumed"));
+        checkpointResources(state, resources);
+        return new Checkpoint(ref.deepCopy(), state.deepCopy());
+    }
+
+    private static Prefix toolIntent(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
+            Activation activation, long previousRevision, long previousSequence, Prefix previous,
+            Function<JsonNode, byte[]> resources) {
+        conversation(previous);
+        require(previous.pendingBatch() != null && previous.attempt() != null
+                && "output_committed".equals(previous.attempt().stage()) && !previous.assistantCommitted()
+                && previous.stream() == null && transaction.events().size() == 1
+                && metadata.path("latestCheckpointResourceId").isNull()
+                && previousRevision > 0 && previousRevision < MAX_SAFE);
+        JsonNode event = transaction.events().getFirst();
+        JsonNode payload = harnessEvent(event, "tool.intent", original, activation, previousSequence + 1);
+        closed(payload, Set.of("executionCallId", "batchId", "ordinal", "toolDefinitionRef", "argsRef", "outcomeSource"));
+        String execution = id(payload, "executionCallId");
+        String batchId = id(payload, "batchId");
+        long ordinal = number(payload.get("ordinal"));
+        var batch = previous.batches().get(batchId);
+        require(batch != null && previous.pendingBatch().messageId().equals(batchId)
+                && batch.promptId().equals(previous.input().inputId()) && ordinal < batch.batch().calls().size()
+                && "runtime".equals(text(payload, "outcomeSource")) && !previous.intents().containsKey(execution)
+                && ("tool-intent:" + execution).equals(id(event, "eventId"))
+                && ("tool-intent:" + execution).equals(id(metadata, "commandId"))
+                && text(payload.path("argsRef"), "digest").equals(text(metadata, "contentDigest")));
+        for (var saved : previous.intents().values()) {
+            if (batchId.equals(id(saved.payload(), "batchId"))) {
+                require(number(saved.payload().get("ordinal")) < ordinal);
+            }
+        }
+        byte[] input = reference(payload.path("argsRef"), "managed-tool-input", resources);
+        byte[] definition = reference(payload.path("toolDefinitionRef"), "managed-tool-definition", resources);
+        require(!id(payload.path("argsRef"), "resourceId").equals(id(payload.path("toolDefinitionRef"), "resourceId")));
+        var content = CsiNativeToolReservation.content(original, batch.batch().calls().get((int) ordinal), input, definition);
+        var frozen = previous.fileHistory() == null ? null : previous.fileHistory().batches().get(batchId);
+        if (frozen == null) {
+            require("read_file".equals(batch.batch().calls().get((int) ordinal).name()));
+        } else {
+            require(frozen.preparedRef() != null && frozen.invocations().stream().anyMatch(invocation ->
+                    execution.equals(id(invocation, "executionCallId")) && ordinal == number(invocation.get("ordinal"))
+                            && canonical(payload.path("argsRef")).equals(canonical(invocation.path("inputRef")))
+                            && canonical(payload.path("toolDefinitionRef")).equals(canonical(invocation.path("toolDefinitionRef")))
+                            && ("sha256:" + content.digest()).equals(text(invocation, "requestDigest"))));
+        }
+        Map<String, ToolIntent> intents = new HashMap<>(previous.intents());
+        intents.put(execution, new ToolIntent(payload.deepCopy(), previousRevision + 1, previousSequence + 1, content.digest()));
+        return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(), previous.attempt(),
+                previous.assistantCommitted(), previous.stream(), previous.usedIds(), previous.pendingBatch(),
+                previous.batches(), previous.fileHistory(), intents, previous.receipts(), previous.nextDeltaOrdinal());
+    }
+
+    private static Checkpoint dispatchCheckpoint(Transaction transaction, JsonNode metadata,
+            RuntimeProvisionRequest original, Activation activation, long previousSequence, Prefix previous,
+            Function<JsonNode, byte[]> resources) {
+        conversation(previous);
+        require(previous.pendingBatch() != null && transaction.events().size() == 1);
+        var prior = previous.checkpoint().state();
+        String phase = text(prior.path("continuation"), "phase");
+        require(Set.of("before_model", "turn_settled", "results_ready", "await_runtime").contains(phase) && prior.path("approval").isNull());
+        var priorItems = prior.path("tools").isNull() ? JSON.createArrayNode() : prior.path("tools").path("items");
+        Set<String> recorded = new HashSet<>();
+        long nextOrdinal = 0;
+        for (JsonNode item : priorItems) {
+            require(recorded.add(id(item, "executionCallId")));
+            nextOrdinal = Math.max(nextOrdinal, number(item.get("ordinal")) + 1);
+        }
+        List<ToolIntent> pending = previous.intents().values().stream().filter(intent ->
+                previous.pendingBatch().messageId().equals(id(intent.payload(), "batchId"))
+                        && !recorded.contains(id(intent.payload(), "executionCallId")))
+                .sorted(java.util.Comparator.comparingLong(ToolIntent::sequence)).toList();
+        require(!pending.isEmpty());
+        JsonNode event = transaction.events().getFirst();
+        JsonNode payload = harnessEvent(event, "checkpoint.committed", original, activation, previousSequence + 1);
+        closed(payload, Set.of("checkpointId", "coveredSequence", "previousCheckpointId", "stateRef", "boundary"));
+        String checkpointId = "ckpt-" + (previousSequence + 1);
+        String predecessor = id(prior.path("identity"), "checkpointId");
+        String executions = String.join(",", pending.stream().map(intent -> id(intent.payload(), "executionCallId")).toList());
+        require(checkpointId.equals(id(event, "eventId")) && checkpointId.equals(id(payload, "checkpointId"))
+                && number(payload.get("coveredSequence")) == previousSequence
+                && predecessor.equals(id(payload, "previousCheckpointId")) && "durable_wait".equals(text(payload, "boundary"))
+                && ("harness:await_runtime:" + activation.activationId() + ":" + executions + ":" + previousSequence)
+                        .equals(id(metadata, "commandId")));
+        JsonNode ref = payload.path("stateRef");
+        JsonNode state = readObject(reference(ref, "managed-checkpoint", resources));
+        require(id(ref, "resourceId").equals(id(metadata, "latestCheckpointResourceId"))
+                && text(ref, "digest").equals(text(metadata, "contentDigest")));
+        ObjectNode expected = prior.deepCopy();
+        ((ObjectNode) expected.path("identity")).put("checkpointId", checkpointId).put("coveredSequence", previousSequence)
+                .put("previousCheckpointId", predecessor).put("activationId", activation.activationId())
+                .put("turnId", previous.input().inputId()).put("promptId", previous.input().inputId());
+        ((ObjectNode) expected.path("resume")).put("throughSequence", previousSequence);
+        expected.set("continuation", JSON.createObjectNode().put("phase", "await_runtime").set("pendingEventIds", JSON.createArrayNode()));
+        expected.putNull("approval");
+        var batch = previous.batches().get(previous.pendingBatch().messageId());
+        ToolIntent first = pending.getFirst();
+        var firstCall = batch.batch().calls().get((int) number(first.payload().get("ordinal")));
+        if (prior.path("attempt").isNull()) {
+            ObjectNode attempt = expected.putObject("attempt").put("attemptId", batch.batch().messageId())
+                    .put("outputState", "output_committed").put("budgetConsumed", 0);
+            attempt.set("routeRef", first.payload().path("argsRef"));
+            for (String field : List.of("capabilityRef", "samplingRef", "usageRef")) {
+                attempt.putNull(field);
+            }
+        }
+        ObjectNode tools = expected.putObject("tools").put("batchId", prior.path("tools").isNull()
+                ? "batch-" + firstCall.id() : id(prior.path("tools"), "batchId"));
+        var items = tools.putArray("items");
+        priorItems.forEach(items::add);
+        var bindings = expected.putObject("runtime").putArray("bindings");
+        if (!prior.path("runtime").isNull()) {
+            prior.path("runtime").path("bindings").forEach(bindings::add);
+        }
+        for (ToolIntent intent : pending) {
+            long localOrdinal = number(intent.payload().get("ordinal"));
+            var call = batch.batch().calls().get((int) localOrdinal);
+            long ordinal = Math.max(localOrdinal, nextOrdinal);
+            require(ordinal < MAX_SAFE);
+            nextOrdinal = ordinal + 1;
+            String execution = id(intent.payload(), "executionCallId");
+            items.addObject().put("functionCallId", call.id()).put("toolName", call.name())
+                    .put("executionCallId", execution).put("modelMessageId", batch.batch().messageId())
+                    .put("partIndex", call.partIndex()).put("ordinal", ordinal).put("inputDigest", intent.inputDigest())
+                    .put("outcomeSource", "runtime").put("state", "in_progress").putNull("outcomeRef").put("consumed", false);
+            bindings.addObject().put("executionCallId", execution).put("invocationBindingId", execution)
+                    .put("capabilityVersion", CsiFilesRetirementProfile.CAPABILITY_DIGEST)
+                    .put("policyVersion", CsiFilesRetirementProfile.POLICY_REF).putNull("mediaVersion")
+                    .put("state", "dispatch").putNull("progressCursor");
+        }
+        require(number(state.path("identity").get("schemaVersion")) == 1
+                && number(state.path("identity").get("coveredSequence")) == previousSequence
+                && number(state.path("resume").get("throughSequence")) == previousSequence
+                && number(state.path("resume").get("initialTurn")) == number(prior.path("resume").get("initialTurn"))
+                && canonical(expected).equals(canonical(state)));
+        for (JsonNode item : state.path("tools").path("items")) {
+            number(item.get("ordinal"));
+            number(item.get("partIndex"));
+        }
+        if (prior.path("attempt").isNull()) {
+            require(number(state.path("attempt").get("budgetConsumed")) == 0);
+        }
+        checkpointResources(state, resources);
+        return new Checkpoint(ref.deepCopy(), state.deepCopy());
+    }
+
+    private static void checkpointResources(JsonNode node, Function<JsonNode, byte[]> resources) {
+        if (node.isObject() && node.has("resourceId")) {
+            reference(node, text(node, "kind"), resources);
+        } else if (node.isContainerNode()) {
+            node.forEach(child -> checkpointResources(child, resources));
+        }
     }
 
     private static Prefix fileHistory(Transaction transaction, JsonNode metadata,
@@ -296,8 +700,15 @@ public final class CsiNativeActivationProof {
                     && body.path("state").path("files").isEmpty() && body.path("retainedBackups").isEmpty());
         } else {
             conversation(previous);
-            require(previous.pendingBatch() != null && !previous.assistantCommitted() && previous.stream() == null);
+            require(!previous.assistantCommitted() && previous.stream() == null);
             JsonNode preparation = body.path("preparation");
+            if (preparation.isNull()) {
+                resultHistory(previous, body, command, previousSequence);
+                return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(), previous.attempt(),
+                        previous.assistantCommitted(), previous.stream(), useId(previous, id(projection, "uuid")),
+                        null, previous.batches(), new FileHistory(ref.deepCopy(), body.deepCopy(), frozen), previous.intents(), previous.receipts(), previous.nextDeltaOrdinal());
+            }
+            require(previous.pendingBatch() != null);
             String stage = text(preparation, "stage");
             closed(preparation, "prepared".equals(stage)
                     ? Set.of("stage", "turnId", "promptId", "batchId", "invocations", "paths", "intentRef")
@@ -308,10 +719,11 @@ public final class CsiNativeActivationProof {
                     && batchId.equals(id(preparation, "batchId")));
             if ("intent".equals(stage)) {
                 require(command.equals("csi-file-history:intent:" + batchId)
-                        && previous.fileHistory().body().path("preparation").isNull() && !frozen.containsKey(batchId));
+                        && previous.fileHistory().body().path("preparation").isNull() && !frozen.containsKey(batchId)
+                        && previous.intents().values().stream().noneMatch(intent -> batchId.equals(id(intent.payload(), "batchId"))));
                 sameObservation(previous.fileHistory().body(), body);
                 List<JsonNode> invocations = historyInvocations(original, previous.batches().get(batchId), preparation, resources);
-                frozen.put(batchId, new FrozenBatch(ref.deepCopy(), null, invocations, previousSequence + 1));
+                frozen.put(batchId, new FrozenBatch(ref.deepCopy(), null, invocations, previousSequence + 1, 0));
             } else {
                 require("prepared".equals(stage) && command.equals("csi-file-history:prepared:" + batchId));
                 var saved = frozen.get(batchId);
@@ -326,12 +738,58 @@ public final class CsiNativeActivationProof {
                 require(canonical(unchanged).equals(canonical(intent.path("preparation"))));
                 historyInvocations(original, previous.batches().get(batchId), preparation, resources);
                 preparedObservation(intent, body, prompt, preparation.path("paths"));
-                frozen.put(batchId, new FrozenBatch(saved.intentRef(), ref.deepCopy(), saved.invocations(), saved.intentSequence()));
+                frozen.put(batchId, new FrozenBatch(saved.intentRef(), ref.deepCopy(), saved.invocations(), saved.intentSequence(), previousSequence + 1));
             }
         }
         return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(), previous.attempt(),
                 previous.assistantCommitted(), previous.stream(), useId(previous, id(projection, "uuid")),
-                previous.pendingBatch(), previous.batches(), new FileHistory(ref.deepCopy(), body.deepCopy(), frozen));
+                previous.pendingBatch(), previous.batches(), new FileHistory(ref.deepCopy(), body.deepCopy(), frozen), previous.intents(), previous.receipts(), previous.nextDeltaOrdinal());
+    }
+
+    private static void resultHistory(Prefix previous, JsonNode body, String command, long previousSequence) {
+        JsonNode prepared = previous.fileHistory().body();
+        JsonNode preparation = prepared.path("preparation");
+        require("prepared".equals(preparation.path("stage").textValue()) && previous.pendingBatch() == null
+                && previous.attempt() == null
+                && previous.input().inputId().equals(id(preparation, "promptId"))
+                && "results_ready".equals(previous.checkpoint().state().path("continuation").path("phase").textValue()));
+        String batchId = id(preparation, "batchId");
+        var frozen = previous.fileHistory().batches().get(batchId);
+        require(command.equals("csi-file-history:result:" + batchId) && frozen != null
+                && canonical(frozen.preparedRef()).equals(canonical(previous.fileHistory().ref())));
+        Set<String> expected = new HashSet<>();
+        frozen.invocations().forEach(invocation -> require(expected.add(id(invocation, "executionCallId"))));
+        Set<String> actual = new HashSet<>();
+        for (JsonNode item : previous.checkpoint().state().path("tools").path("items")) {
+            require("settled".equals(item.path("state").textValue()));
+            if (!batchId.equals(item.path("modelMessageId").textValue())) {
+                continue;
+            }
+            String execution = id(item, "executionCallId");
+            var receipt = previous.receipts().get(execution);
+            require(actual.add(execution) && !item.path("consumed").booleanValue()
+                    && receipt != null && receipt.messageSequence() > 0 && receipt.messageSequence() <= previousSequence
+                    && canonical(receipt.ref()).equals(canonical(item.path("outcomeRef"))));
+        }
+        require(expected.equals(actual));
+        for (String field : List.of("backupDirectory", "retainedBackups")) {
+            require(canonical(prepared.path(field)).equals(canonical(body.path(field))));
+        }
+        JsonNode before = prepared.path("state");
+        JsonNode after = body.path("state");
+        require(canonical(before.path("snapshots")).equals(canonical(after.path("snapshots"))));
+        Set<String> paths = new HashSet<>();
+        preparation.path("paths").forEach(path -> paths.add(path.textValue()));
+        Set<String> beforeKeys = new HashSet<>();
+        Set<String> afterKeys = new HashSet<>();
+        before.path("files").fieldNames().forEachRemaining(beforeKeys::add);
+        after.path("files").fieldNames().forEachRemaining(afterKeys::add);
+        require(beforeKeys.equals(afterKeys) && beforeKeys.containsAll(paths));
+        before.path("files").fields().forEachRemaining(entry -> {
+            if (!paths.contains(entry.getKey())) {
+                require(canonical(entry.getValue()).equals(canonical(after.path("files").get(entry.getKey()))));
+            }
+        });
     }
 
     public static JsonNode historyExecutionReference(RuntimeProvisionRequest original, JsonNode preparation, JsonNode invocation) {
@@ -470,15 +928,20 @@ public final class CsiNativeActivationProof {
         require(bytes.length > 0 && bytes.length <= 3072
                 && sha256(bytes).equals(text(metadata, "contentDigest")));
         Stream prior = previous.stream();
-        long ordinal = prior == null ? 0 : prior.nextOrdinal();
+        long ordinal = previous.nextDeltaOrdinal();
+        // A retry before the first delta resets the Hosted stream without
+        // emitting a retraction; assistant commits otherwise retain its ordinal.
+        if (prior == null && ("assistant-delta:" + turnId + ":" + messageId + ":0").equals(id(metadata, "commandId"))) {
+            ordinal = 0;
+        }
         String commandId = "assistant-delta:" + turnId + ":" + messageId + ":" + ordinal;
         require(commandId.equals(id(metadata, "commandId"))
                 && commandId.equals(id(transaction.events().getFirst(), "eventId"))
                 && (prior == null || messageId.equals(prior.messageId())));
         Stream stream = new Stream(messageId, prior == null ? previousSequence + 1 : prior.firstSequence(),
-                ordinal + 1, (prior == null ? "" : prior.text()) + fragment);
+                (prior == null ? "" : prior.text()) + fragment);
         return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(), previous.attempt(),
-                false, stream, prior == null ? useId(previous, messageId) : previous.usedIds(), null, previous.batches(), previous.fileHistory());
+                false, stream, prior == null ? useId(previous, messageId) : previous.usedIds(), null, previous.batches(), previous.fileHistory(), previous.intents(), previous.receipts(), ordinal + 1);
     }
 
     private static Prefix retract(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
@@ -496,7 +959,7 @@ public final class CsiNativeActivationProof {
                 && sha256(utf8(stream.messageId() + ":" + stream.firstSequence()))
                         .equals(text(metadata, "contentDigest")));
         return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(), previous.attempt(),
-                false, null, previous.usedIds(), null, previous.batches(), previous.fileHistory());
+                false, null, previous.usedIds(), null, previous.batches(), previous.fileHistory(), previous.intents(), previous.receipts(), 0);
     }
 
     static byte[] utf8(String text) {
@@ -529,6 +992,9 @@ public final class CsiNativeActivationProof {
             Genesis genesis, Activation activation, long previousSequence, Prefix previous,
             Function<JsonNode, byte[]> resources) {
         conversation(previous);
+        if ("tool_result".equals(transaction.events().getFirst().path("payload").path("role").textValue())) {
+            return toolMessage(transaction, metadata, original, genesis, activation, previousSequence, previous, resources);
+        }
         require(previous.pendingBatch() == null && transaction.events().size() == 1
                 && metadata.path("latestCheckpointResourceId").isNull()
                 && genesis.definitionDigest().equals(text(metadata, "contentDigest")));
@@ -609,7 +1075,7 @@ public final class CsiNativeActivationProof {
         }
         return new Prefix(input, previous.checkpoint(), messageId, previous.attempt(), !user && calls.isEmpty(),
                 null, !user && previous.stream() != null ? previous.usedIds() : useId(previous, messageId),
-                batch, batches, previous.fileHistory());
+                batch, batches, previous.fileHistory(), previous.intents(), previous.receipts(), previous.nextDeltaOrdinal());
     }
 
     private static JsonNode messageBody(JsonNode ref, Function<JsonNode, byte[]> resources) {
@@ -688,7 +1154,10 @@ public final class CsiNativeActivationProof {
                 .equals(canonical(previous.checkpoint().state())));
         Set<String> ids = previous.usedIds();
         if ("started".equals(stage)) {
-            require(previous.attempt() == null && payload.path("usageRef").isNull());
+            require(previous.attempt() == null && payload.path("usageRef").isNull()
+                    && (previous.fileHistory() == null || previous.fileHistory().body().path("preparation").isNull())
+                    && (previous.checkpoint().state().path("tools").isNull()
+                            || "results_ready".equals(previous.checkpoint().state().path("continuation").path("phase").textValue())));
             ids = useId(previous, attemptId);
         } else {
             require(previous.attempt() != null && "started".equals(previous.attempt().stage())
@@ -701,7 +1170,7 @@ public final class CsiNativeActivationProof {
         }
         return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(),
                 new Attempt(attemptId, routeRef.deepCopy(), checkpointRef.deepCopy(), route.deepCopy(), stage), false,
-                previous.stream(), ids, null, previous.batches(), previous.fileHistory());
+                previous.stream(), ids, null, previous.batches(), previous.fileHistory(), previous.intents(), previous.receipts(), previous.nextDeltaOrdinal());
     }
 
     private static void usage(JsonNode usage, JsonNode route, String stage) {
@@ -789,13 +1258,24 @@ public final class CsiNativeActivationProof {
                 .put("activationId", activation.activationId()).put("turnId", turnId).put("promptId", turnId)
                 .put("previousCheckpointId", previousId);
         ((ObjectNode) expected.path("resume")).put("throughSequence", previousSequence);
+        expected.set("continuation", JSON.createObjectNode().put("phase", "before_model")
+                .set("pendingEventIds", JSON.createArrayNode()));
+        for (String field : List.of("attempt", "tools", "runtime", "approval")) {
+            expected.putNull(field);
+        }
+        ObjectNode output = expected.putObject("output");
+        output.putNull("llmContentRef").putNull("physicalStatus").putNull("hookResultRef");
+        output.set("mediaRefs", JSON.createArrayNode());
+        output.set("parentHistory", previous.checkpoint().state().path("output").path("parentHistory"));
+        require(previous.checkpoint().state().path("tools").isNull()
+                || completed && "turn_settled".equals(previous.checkpoint().state().path("continuation").path("phase").textValue()));
         require(number(state.path("identity").get("schemaVersion")) == 1
                 && number(state.path("identity").get("coveredSequence")) == previousSequence
                 && number(state.path("resume").get("throughSequence")) == previousSequence
                 && number(state.path("resume").get("initialTurn")) == 0
                 && canonical(expected).equals(canonical(state)));
         return new Prefix(null, new Checkpoint(stateRef.deepCopy(), state.deepCopy()), previous.lastMessageId(),
-                null, false, null, useId(previous, id(result, "uuid")), null, previous.batches(), previous.fileHistory());
+                null, false, null, useId(previous, id(result, "uuid")), null, previous.batches(), previous.fileHistory(), previous.intents(), previous.receipts(), 0);
     }
 
     private static Input input(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,

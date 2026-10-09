@@ -45,6 +45,7 @@ class CsiNativeFileHistoryTest {
         assertEquals(intent.fileHistory().ref(), frozen.intentRef());
         assertEquals(result.fileHistory().ref(), frozen.preparedRef());
         assertEquals(15, frozen.intentSequence());
+        assertEquals(20, frozen.preparedSequence());
         assertEquals(initial.fileHistory().body().path("backupDirectory"), result.fileHistory().body().path("backupDirectory"));
         assertThrows(RuntimeException.class, () -> commit(result, prepared(result), 20));
     }
@@ -99,6 +100,106 @@ class CsiNativeFileHistoryTest {
                 commit(previous, retry, 14).fileHistory().body().path("preparation"));
     }
 
+    @Test
+    void nativeIntentsUseActualRevisionAndRequireOriginalPreparedMutation() throws Exception {
+        var before = conversation(initial());
+        var invocation = preparation().path("invocations").get(1);
+        var prefix = before;
+        assertThrows(RuntimeException.class, () -> nativeIntent(prefix, invocation, 13, 19));
+        var historyIntent = commit(before, body(before, preparation()), 14);
+        var prepared = commit(historyIntent, prepared(historyIntent), 19);
+        var items = prepared.fileHistory().batches().get(BATCH).invocations();
+        var first = nativeIntent(prepared, items.getFirst(), 13, 19);
+        assertEquals(14, first.intents().get("unit-execution-0").revision());
+        assertEquals(20, first.intents().get("unit-execution-0").sequence());
+        assertEquals(items.getFirst().path("requestDigest").textValue().substring(7),
+                first.intents().get("unit-execution-0").inputDigest());
+        assertThrows(RuntimeException.class, () -> nativeIntent(first, items.getFirst(), 14, 20));
+        var second = nativeIntent(first, items.get(1), 14, 20);
+        assertThrows(RuntimeException.class, () -> nativeIntent(second, items.getFirst(), 15, 21));
+        ObjectNode changed = items.get(2).deepCopy();
+        changed.set("inputRef", items.getFirst().path("inputRef"));
+        assertThrows(RuntimeException.class, () -> nativeIntent(second, changed, 15, 21));
+        var complete = nativeIntent(second, items.get(2), 15, 21);
+        assertEquals(3, complete.intents().size());
+        assertEquals(prepared.fileHistory(), complete.fileHistory());
+    }
+
+    @Test
+    void closesOnlyCompleteResultHistoryAndPreservesRetainedPreimages() throws Exception {
+        var before = conversation(initial());
+        var intent = commit(before, body(before, preparation()), 14);
+        var prepared = commit(intent, prepared(intent), 19);
+        var ready = resultReady(prepared);
+        String changedPath = prepared.fileHistory().body().path("preparation").path("paths").get(0).textValue();
+        ObjectNode result = body(ready, null);
+        result.put("operationId", "csi-file-history:result:" + BATCH);
+        ((ObjectNode) result.path("state").path("files")).set(changedPath,
+                JSON.valueToTree(Map.of("digest", "sha256:" + "a".repeat(64), "mode", 420)));
+        var closed = commit(ready, result, 40);
+        assertEquals(JSON.nullNode(), closed.fileHistory().body().path("preparation"));
+        assertEquals(prepared.fileHistory().batches(), closed.fileHistory().batches());
+        assertEquals(prepared.fileHistory().body().path("state").path("snapshots"),
+                closed.fileHistory().body().path("state").path("snapshots"));
+        for (String fault : List.of("missing", "consumed", "receipt", "parent", "backup", "keys", "snapshot")) {
+            ObjectNode state = ready.checkpoint().state().deepCopy();
+            ObjectNode changed = result.deepCopy();
+            Map<String, CsiNativeActivationProof.ToolReceipt> receipts = new HashMap<>(ready.receipts());
+            switch (fault) {
+                case "missing" -> ((ArrayNode) state.path("tools").path("items")).remove(0);
+                case "consumed" -> ((ObjectNode) state.path("tools").path("items").get(0)).put("consumed", true);
+                case "receipt" -> receipts.remove("unit-execution-0");
+                case "parent" -> ((ObjectNode) changed.path("record")).put("parentUuid", USER);
+                case "backup" -> ((ObjectNode) changed.path("backupDirectory")).put("directoryInode", "99");
+                case "keys" -> ((ObjectNode) changed.path("state").path("files")).remove(changedPath);
+                default -> ((ObjectNode) changed.path("state").path("snapshots").get(0)).put("promptId", "foreign");
+            }
+            mirror(changed);
+            var altered = new CsiNativeActivationProof.Prefix(ready.input(),
+                    new CsiNativeActivationProof.Checkpoint(ready.checkpoint().ref(), state), ready.lastMessageId(), ready.attempt(),
+                    false, null, ready.usedIds(), null, ready.batches(), ready.fileHistory(), ready.intents(), receipts, ready.nextDeltaOrdinal());
+            assertThrows(RuntimeException.class, () -> commit(altered, changed, 40), fault);
+        }
+        assertThrows(RuntimeException.class, () -> commit(prepared, result, 40));
+    }
+
+    private CsiNativeActivationProof.Prefix resultReady(CsiNativeActivationProof.Prefix prepared) {
+        ObjectNode state = JSON.createObjectNode();
+        state.putObject("continuation").put("phase", "results_ready");
+        ArrayNode items = state.putObject("tools").putArray("items");
+        Map<String, CsiNativeActivationProof.ToolReceipt> receipts = new HashMap<>();
+        for (var invocation : prepared.fileHistory().batches().get(BATCH).invocations()) {
+            String execution = invocation.path("executionCallId").textValue();
+            JsonNode ref = publish("managed-tool-outcome", "{}".getBytes(StandardCharsets.UTF_8));
+            items.addObject().put("executionCallId", execution).put("modelMessageId", BATCH)
+                    .put("state", "settled").put("consumed", false).set("outcomeRef", ref);
+            receipts.put(execution, new CsiNativeActivationProof.ToolReceipt(ref, JSON.createObjectNode(), 30, 30, 31));
+        }
+        return new CsiNativeActivationProof.Prefix(prepared.input(), new CsiNativeActivationProof.Checkpoint(JSON.createObjectNode(), state),
+                UUID.randomUUID().toString(), null, false, null, prepared.usedIds(), null, prepared.batches(),
+                prepared.fileHistory(), prepared.intents(), receipts, prepared.nextDeltaOrdinal());
+    }
+
+    private CsiNativeActivationProof.Prefix nativeIntent(CsiNativeActivationProof.Prefix previous, JsonNode invocation,
+            long revision, long sequence) {
+        String execution = invocation.path("executionCallId").textValue();
+        ObjectNode event = JSON.createObjectNode().put("v", 1).put("sequence", sequence + 1)
+                .put("eventId", "tool-intent:" + execution).put("kind", "tool.intent").put("occurredAt", 1000);
+        event.set("sessionKey", JSON.valueToTree(Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", OWNER)));
+        event.set("subject", JSON.valueToTree(Map.of("type", "activation", "scopeId", "activation", "activationId", "activation", "epoch", 1)));
+        ObjectNode payload = event.putObject("payload").put("executionCallId", execution).put("batchId", BATCH)
+                .put("ordinal", invocation.path("ordinal").longValue()).put("outcomeSource", "runtime");
+        payload.set("argsRef", invocation.path("inputRef"));
+        payload.set("toolDefinitionRef", invocation.path("toolDefinitionRef"));
+        ObjectNode metadata = JSON.createObjectNode().put("operation", "toolIntent").put("commandId", "tool-intent:" + execution)
+                .put("writerId", "worker").put("writerGeneration", 1).put("activationEpoch", 1)
+                .put("contentDigest", invocation.path("inputRef").path("digest").textValue());
+        metadata.putNull("latestCheckpointResourceId");
+        return CsiNativeActivationProof.advance(new CsiNativeActivationProof.Transaction(List.of(event), "unit-envelope"),
+                metadata, original, "worker", null, activation, revision, sequence, previous,
+                ref -> resources.get(ref.path("resourceId").textValue()));
+    }
+
     private CsiNativeActivationProof.Prefix initial() throws Exception {
         return commit(CsiNativeActivationProof.Prefix.empty(), body(CsiNativeActivationProof.Prefix.empty(), null), 1);
     }
@@ -112,7 +213,7 @@ class CsiNativeFileHistoryTest {
                 new CsiNativeActivationProof.Checkpoint(JSON.createObjectNode(), JSON.createObjectNode()), USER,
                 new CsiNativeActivationProof.Attempt("unit-attempt", JSON.createObjectNode(), JSON.createObjectNode(),
                         JSON.createObjectNode().put("model", "unit-model"), "output_committed"),
-                false, null, Set.of(USER), null, Map.of(), initial.fileHistory());
+                false, null, Set.of(USER), null, Map.of(), initial.fileHistory(), Map.of(), Map.of(), 0);
         ObjectNode record = JSON.createObjectNode().put("uuid", BATCH).put("parentUuid", USER)
                 .put("sessionId", OWNER).put("timestamp", "2026-10-09T00:00:00.000Z").put("type", "assistant")
                 .put("cwd", "/workspace").put("version", "hosted-harness/1").put("daemonPromptId", PROMPT)
@@ -129,7 +230,7 @@ class CsiNativeFileHistoryTest {
         metadata.putNull("latestCheckpointResourceId");
         return CsiNativeActivationProof.advance(new CsiNativeActivationProof.Transaction(List.of(event), "unit-envelope"),
                 metadata, original, "worker", new CsiNativeActivationProof.Genesis("a".repeat(64), "unit-definition", "unit-root", USER),
-                activation, 13, before, ref -> resources.get(ref.path("resourceId").textValue()));
+                activation, metadata.path("expectedJournalRevision").longValue(), 13, before, ref -> resources.get(ref.path("resourceId").textValue()));
     }
 
     private ObjectNode preparation() throws Exception {
@@ -213,7 +314,7 @@ class CsiNativeFileHistoryTest {
                 .put("writerId", "worker").put("writerGeneration", 1).put("activationEpoch", 1).put("contentDigest", digest(body));
         metadata.putNull("latestCheckpointResourceId");
         return CsiNativeActivationProof.advance(new CsiNativeActivationProof.Transaction(List.of(event), "unit-envelope"),
-                metadata, original, "worker", null, activation, sequence, previous,
+                metadata, original, "worker", null, activation, metadata.path("expectedJournalRevision").longValue(), sequence, previous,
                 ref -> resources.get(ref.path("resourceId").textValue()));
     }
 

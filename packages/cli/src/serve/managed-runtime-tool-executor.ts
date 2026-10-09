@@ -204,6 +204,7 @@ export class ManagedToolUnavailableError extends Error {
 /** The admitted tools, keyed by name, over one configuration. */
 export interface ManagedToolSet {
   readonly retainedFileHistory?: RetainedFileHistoryStorage;
+  readonly fileHistory?: ManagedRuntimeFileHistory;
   /**
    * The session the tools run as. A shell they start sees it as
    * QWEN_CODE_SESSION_ID, with that session's project directory.
@@ -512,7 +513,15 @@ export class ManagedToolExecutor {
         throw new ManagedToolUnavailableError(
           'File history Workspace is unavailable.',
         );
-      let history = this.fileHistories.get(sessionId);
+      const existingHistory = this.fileHistories.get(sessionId);
+      let history = tools.fileHistory ?? existingHistory;
+      if (
+        tools.fileHistory &&
+        (tools.fileHistory.ownerSessionId !== ownerSessionId ||
+          tools.fileHistory.directory !== tools.directory ||
+          (existingHistory && existingHistory !== tools.fileHistory))
+      )
+        throw new ManagedToolConflictError('File history binding conflicts.');
       if (operation.action === 'bind') {
         if (!history) {
           history = new ManagedRuntimeFileHistory(
@@ -546,6 +555,7 @@ export class ManagedToolExecutor {
         throw new ManagedToolConflictError(
           'File history is not bound to this Workspace.',
         );
+      this.fileHistories.set(sessionId, history);
       if (operation.action === 'prepare') {
         mutationStarted = true;
         await history.prepare(operation.promptId, operation.paths);
@@ -2129,12 +2139,24 @@ export class ManagedToolExecutor {
           return invocation.execute(entry.controller.signal);
         });
       };
-      const history = this.fileHistories.get(entry.reference.sessionId);
-      let result: ToolResult;
+      const registeredHistory = this.fileHistories.get(
+        entry.reference.sessionId,
+      );
+      const history = tools.fileHistory ?? registeredHistory;
+      const mutating = [WriteFileTool.Name, EditTool.Name].includes(
+        entry.toolName,
+      );
       if (
-        history &&
-        [WriteFileTool.Name, EditTool.Name].includes(entry.toolName)
-      ) {
+        (history &&
+          (history.directory !== tools.directory ||
+            (tools.fileHistory &&
+              history.ownerSessionId !== entry.reference.sessionId) ||
+            (registeredHistory && registeredHistory !== history))) ||
+        (mutating && tools.retainedFileHistory && !tools.fileHistory)
+      )
+        throw new ManagedToolConflictError('File history binding conflicts.');
+      let result: ToolResult;
+      if (history && mutating) {
         let outcome: { result: ToolResult } | { error: unknown };
         let invoked = false;
         try {

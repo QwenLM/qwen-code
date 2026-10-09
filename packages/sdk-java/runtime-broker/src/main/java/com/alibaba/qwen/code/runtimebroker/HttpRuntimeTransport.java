@@ -186,6 +186,20 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     }
 
     @Override
+    public CompletionStage<Map<String, Object>> csiFileExecute(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> boot,
+            ContextBinding binding, String executionId) {
+        if (lease == null || seed == null || !seed.matches(lease)
+                || !ManagedCsiFilesProtocol.selects(request) || client.followRedirects() != HttpClient.Redirect.NEVER) {
+            throw new IllegalArgumentException("Original CSI execution must bind the lease.");
+        }
+        var expected = CsiNativeReadbackProtocol.executeRequest(boot, request, binding, executionId);
+        return post(lease, CsiNativeReadbackProtocol.EXECUTE_PATH,
+                encodeToolRequest(expected, CsiNativeReadbackProtocol.REQUEST_LIMIT), 64 * 1024,
+                seed.getGatewayIncarnation()).thenApply(bytes -> CsiNativeReadbackProtocol.executeResult(bytes, expected));
+    }
+
+    @Override
     public CompletionStage<Map<String, Object>> acknowledgeCsi(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> boot, Map<String, Object> expectedPod, Map<String, Object> request,
             Map<String, Object> expectedCaptureIdentity) {

@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS qwen_tool_execution (
     loss_evidence_id VARCHAR(512),
     authorized_dispatch_generation BIGINT,
     authorized_binding_version BIGINT,
+    native_authorization_json LONGTEXT,
     CONSTRAINT uq_tool_execution_idempotency
         UNIQUE (idempotency_key_hash),
     INDEX idx_tool_execution_session

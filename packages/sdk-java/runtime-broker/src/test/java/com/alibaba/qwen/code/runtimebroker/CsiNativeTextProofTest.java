@@ -117,7 +117,7 @@ class CsiNativeTextProofTest {
         ObjectNode changedRef = (ObjectNode) manifestRef;
         changedRef.put("byteLength", manifestBytes.length).put("digest", CsiNativeActivationProof.sha256(manifestBytes));
         String manifestId = changedRef.path("resourceId").textValue();
-        rejected(() -> CsiNativeActivationProof.advance(tx, request(27), original, writer, genesis, activation,
+        rejected(() -> CsiNativeActivationProof.advance(tx, request(27), original, writer, genesis, activation, request(27).path("expectedJournalRevision").longValue(),
                 request(27).path("expectedCommittedSequence").longValue(), prefix(27), ref -> {
                     String resourceId = ref.path("resourceId").textValue();
                     return first.equals(resourceId) ? broken : manifestId.equals(resourceId) ? manifestBytes : reader.apply(ref);
@@ -130,12 +130,12 @@ class CsiNativeTextProofTest {
         for (JsonNode event : complete.events()) {
             var split = new CsiNativeActivationProof.Transaction(List.of(event), complete.lastRecordUuid());
             rejected(() -> CsiNativeActivationProof.advance(split, request(8), original, writer, genesis,
-                    activation, 8, prefix(8), reader));
+                    activation, request(8).path("expectedJournalRevision").longValue(), 8, prefix(8), reader));
         }
         ObjectNode standalone = request(8).deepCopy();
         standalone.put("operation", "commitCheckpoint");
         rejected(() -> CsiNativeActivationProof.advance(complete, standalone, original, writer, genesis,
-                activation, 8, prefix(8), reader));
+                activation, standalone.path("expectedJournalRevision").longValue(), 8, prefix(8), reader));
     }
 
     private void mutatedBody(int index, String field, java.util.function.Consumer<ObjectNode> change) throws IOException {
@@ -152,7 +152,7 @@ class CsiNativeTextProofTest {
         }
         String changedId = ref.path("resourceId").textValue();
         // Derived semantic negative: original transaction framing was parsed before changing its body/ref.
-        rejected(() -> CsiNativeActivationProof.advance(tx, metadata, original, writer, genesis, activation,
+        rejected(() -> CsiNativeActivationProof.advance(tx, metadata, original, writer, genesis, activation, metadata.path("expectedJournalRevision").longValue(),
                 metadata.path("expectedCommittedSequence").longValue(), prefix(index),
                 candidate -> changedId.equals(candidate.path("resourceId").textValue()) ? bytes : reader.apply(candidate)));
     }
@@ -168,7 +168,7 @@ class CsiNativeTextProofTest {
     private CsiNativeActivationProof.Prefix advance(int index, CsiNativeActivationProof.Prefix prefix,
             Function<JsonNode, byte[]> resources) {
         return CsiNativeActivationProof.advance(transaction(index), request(index), original, writer, genesis,
-                activation, request(index).path("expectedCommittedSequence").longValue(), prefix, resources);
+                activation, request(index).path("expectedJournalRevision").longValue(), request(index).path("expectedCommittedSequence").longValue(), prefix, resources);
     }
 
     private CsiNativeActivationProof.Transaction transaction(int index) {

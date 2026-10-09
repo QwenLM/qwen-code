@@ -571,9 +571,9 @@ public class ManagedSessionStore {
         long revision = increment(head.journalRevision(),
                 "journal revision");
         String scopeKey = sessionScopeKey(tenantId, sessionId);
-        if (csiOriginal != null && "commitFileHistory".equals(request.operation())) {
+        if (csiOriginal != null && java.util.Set.of("commitFileHistory", "toolIntent", "commitCheckpoint").contains(request.operation())) {
             jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
-                JdbcCsiActivationAdmission.preflightFileHistory(connection, csiOriginal, CSI_JSON.valueToTree(request),
+                JdbcCsiActivationAdmission.preflightCommit(connection, csiOriginal, CSI_JSON.valueToTree(request),
                         com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.records(validated.recordBytes()),
                         head.journalRevision(), head.committedSequence(), head.lastCommitDigest(), head.writerId());
                 return null;

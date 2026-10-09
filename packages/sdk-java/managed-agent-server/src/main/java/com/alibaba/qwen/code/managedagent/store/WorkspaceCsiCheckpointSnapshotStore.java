@@ -260,7 +260,10 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
         var budget = new InventoryBudget();
         ObjectNode result = json.createObjectNode().put("format", INVENTORY_FORMAT);
         result.set("originalCSI", context.csi());
-        result.set("scope", json.valueToTree(scope));
+        result.set("scope", json.createObjectNode().put("tenantId", scope.getTenantId())
+                .put("workspaceId", scope.getWorkspaceId()).put("workspaceGeneration", scope.getWorkspaceGeneration())
+                .put("canonicalCwd", scope.getCanonicalCwd()).put("capabilityDigest", scope.getCapabilityDigest())
+                .put("isolationClass", scope.getIsolationClass()));
         result.put("isolationKey", runtime.getRequest().getIsolationKey());
         Set<String> sessionIds = new TreeSet<>();
         if (runtime.getRequest().getIsolationKey() != null) {
@@ -414,7 +417,8 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
         return "execution_call_id_hash,execution_call_id,idempotency_key_hash,idempotency_key,binding_id,runtime_generation,"
                 + "harness_session_id,runtime_session_id,runtime_session_key,turn_id,tool_call_id,request_digest,reference_json,"
                 + "execution_state,execution_status,result_json,last_sequence,cancel_requested,dispatch_owner,dispatch_lease_until,"
-                + "dispatch_generation,record_version,settled_at,abandoned_at,loss_evidence_id,authorized_dispatch_generation,authorized_binding_version";
+                + "dispatch_generation,record_version,settled_at,abandoned_at,loss_evidence_id,authorized_dispatch_generation,"
+                + "authorized_binding_version,native_authorization_json";
     }
 
     private ObjectNode execution(Map<String, Object> row) {

@@ -3561,9 +3561,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant) {
-        if (JdbcCsiFilesRetirementGuard.isProfile(context.binding().getRequest().getScope())) {
+        if (JdbcCsiFilesRetirementGuard.isProfile(context.binding().getRequest().getScope())
+                && (payload == null || !Set.of("read_file", "write_file", "edit").contains(String.valueOf(payload.get("toolName"))) || grant != null)) {
             throw new RuntimeBrokerException(501, "csi_file_dispatch_unavailable",
-                    "Private CSI dispatch requires original native intent and checkpoint authorization.", false);
+                    "Private CSI dispatch requires an original finite file payload.", false);
         }
         if (!prepared.isCancelRequested()) {
             bindingRepository.requireHarnessAdmission(context.session().getScope(), context.session().getHarnessSessionId(), null);
@@ -3635,7 +3636,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         CompletionStage<Map<String, Object>> invocation = grant == null
                 ? safeStage(() -> payload == null
                         ? transport.execute(context.lease(), context.session(), executing.getReference())
-                        : transport.execute(context.lease(), context.session(), dispatchReference(executing), payload))
+                        : transport.execute(context.lease(), context.session(),
+                                dispatchReference(executing, context.binding().getRequest().getScope()), payload))
                 : safeStage(() -> transport.executeV3(context.lease(), context.session(),
                         executing.getReference(), payload, capture(grant)))
                         .handle((answer, error) -> {
@@ -3786,7 +3788,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 && capture.get("manifest") == null;
     }
 
-    private static Map<String, Object> dispatchReference(ToolExecutionRecord record) {
+    private static Map<String, Object> dispatchReference(ToolExecutionRecord record, RuntimeScope scope) {
+        if (JdbcCsiFilesRetirementGuard.isProfile(scope)) {
+            Map<String, Object> reference = new LinkedHashMap<>(record.getReference());
+            reference.put("executionCallId", record.getExecutionCallId());
+            return Map.copyOf(reference);
+        }
         if (!Integer.valueOf(3).equals(record.getReference().get("runtimeProtocol"))) {
             return record.getReference();
         }

@@ -14,6 +14,8 @@ import {
   openManagedSession,
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { parseHarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { HostedCsiToolTurn } from './hosted-csi-tool-turn.js';
@@ -73,6 +75,8 @@ beforeEach(async () => {
     activationLeaseDurationMs: 60000,
     create: { definitionRef, rootSnapshotRef, createdBy: 'hosted-harness' },
   });
+  const harness = createManagedHarnessHandle(managed);
+  await harness.ensureRunnable();
   commit.mockReset().mockResolvedValue(batchId);
   turn = new HostedCsiToolTurn(
     managed,
@@ -80,6 +84,8 @@ beforeEach(async () => {
     { bindingId, generation: '1' },
     promptId,
     commit,
+    harness,
+    () => true,
   );
   await turn.declarations(new AbortController().signal);
   requests = [];
@@ -91,6 +97,29 @@ beforeEach(async () => {
     const body = JSON.parse(String(options?.body)) as Record<string, unknown>;
     expect(body['harnessSessionId']).toBe(sessionId);
     expect(body['runtimeSessionId']).toBe(sessionId);
+    if (route.endsWith(':start')) {
+      const id = route.split('/').at(-1)!.slice(0, -6);
+      const member = members.find((item) => item['executionCallId'] === id)!;
+      const wrapper = JSON.parse(
+        Buffer.from(String(member['inputBytesBase64']), 'base64').toString(),
+      );
+      expect(body['payloadJson']).toBe(wrapper.payloadJson);
+      return new Response(
+        JSON.stringify({
+          protocolVersion: 1,
+          harnessSessionId: sessionId,
+          runtimeSessionId: sessionId,
+          executionCallId: id,
+          status: {
+            state: 'settled',
+            result: {
+              executionStatus: 'success',
+              responseParts: [{ text: `owned result ${id}` }],
+            },
+          },
+        }),
+      );
+    }
     if (route.endsWith('/executions:prepare')) {
       requests.push(body);
       members.push({
@@ -327,7 +356,7 @@ it('refuses a changed complete-read identity while preserving the original assis
   expect(commit).toHaveBeenCalledTimes(1);
 });
 
-it('commits actual initial, intent and prepared domain receipts before refusing dispatch', async () => {
+it('closes prepared history after the complete mixed batch and before returning model results with labelled broker/worker seams', async () => {
   // Original local authority; the assistant callback, broker rows and worker observation are explicit seams.
   const initial: CsiFileHistoryObservation = {
     state: { ownerSessionId: sessionId, snapshots: [], files: {} },
@@ -342,10 +371,12 @@ it('commits actual initial, intent and prepared domain receipts before refusing 
   const first = await history.commitInitialHostedCsiHistory(managed, initial);
   expect(first.revision).toBe(1);
   expect(first.receipt.replayed).toBe(false);
+  let preparedObservation: CsiFileHistoryObservation | undefined;
   const control = vi
     .spyOn(history, 'requestHostedCsiHistory')
     .mockImplementation(async (_broker, _key, operation) => {
-      if (operation.action === 'snapshot') return initial;
+      if (operation.action === 'snapshot')
+        return preparedObservation ?? initial;
       expect(operation.action).toBe('prepare');
       if (operation.action !== 'prepare')
         throw new Error('Unexpected operation');
@@ -366,7 +397,7 @@ it('commits actual initial, intent and prepared domain receipts before refusing 
       ]);
       expect(original.record.parentUuid).toBe(batchId);
       const timestamp = new Date().toISOString();
-      return {
+      preparedObservation = {
         ...initial,
         state: {
           ...initial.state,
@@ -391,28 +422,29 @@ it('commits actual initial, intent and prepared domain receipts before refusing 
           ],
         },
       };
+      return preparedObservation;
     });
   const { calls, parts } = batch();
-  let refusal: unknown;
-  try {
-    await turn.execute(
-      calls,
-      parts,
-      'unit-model',
-      new AbortController().signal,
-    );
-  } catch (error) {
-    refusal = error;
-  }
-  expect(refusal).toBeInstanceOf(HostedToolRecoveryRequiredError);
-  expect((refusal as Error).cause).toMatchObject({
-    message: 'CSI native tool intent and dispatch remain closed.',
-  });
-  expect(control).toHaveBeenCalledTimes(2);
+  const responses = await turn.execute(
+    calls,
+    parts,
+    'unit-model',
+    new AbortController().signal,
+  );
+  expect(responses).toHaveLength(3);
+  expect(control).toHaveBeenCalledTimes(3);
   const latest = managed.authority.domainRecord('file_history')!;
-  expect(latest.revision).toBe(3);
-  const prepared = JSON.parse(
+  expect(latest.revision).toBe(4);
+  const resultHistory = JSON.parse(
     (await managed.resources.read(latest.recordRef)).toString(),
+  );
+  expect(resultHistory.preparation).toBeNull();
+  expect(resultHistory.operationId).toBe(`csi-file-history:result:${batchId}`);
+  expect(resultHistory.record.parentUuid).toBe(
+    commit.mock.calls.at(-1)![3].uuid,
+  );
+  const prepared = JSON.parse(
+    (await managed.resources.read(resultHistory.previousRecordRef)).toString(),
   );
   expect(prepared.preparation.stage).toBe('prepared');
   expect(prepared.preparation.intentRef).toEqual(prepared.previousRecordRef);
@@ -430,9 +462,104 @@ it('commits actual initial, intent and prepared domain receipts before refusing 
     `csi-file-history:prepared:${batchId}`,
   );
   expect(replay.revision).toBe(3);
-  expect(replay.recordRef).toEqual(latest.recordRef);
+  expect(replay.recordRef).toEqual(resultHistory.previousRecordRef);
   expect(replay.receipt.replayed).toBe(true);
   expect(
     paths.some((path) => path.includes('start') || path.includes('execute')),
-  ).toBe(false);
+  ).toBe(true);
+  expect(
+    parseHarnessCheckpointV1((await managed.authority.readCheckpointState())!)
+      .continuation.phase,
+  ).toBe('results_ready');
+});
+
+it('records complete broker results and tool history before explicit Harness consumption with a labelled broker seam', async () => {
+  const { calls } = batch();
+  const second = {
+    ...calls[0],
+    callId: 'second-read',
+    args: { file_path: 'other.txt' },
+  };
+  const refused = {
+    ...calls[0],
+    callId: 'refused-read',
+    args: { file_path: '../outside.txt' },
+  };
+  const readCalls = [calls[0], refused, second];
+  const parts: Part[] = readCalls.map((call) => ({
+    functionCall: { id: call.callId, name: call.name, args: call.args },
+  }));
+  const responses = await turn.execute(
+    readCalls,
+    parts,
+    'unit-model',
+    new AbortController().signal,
+  );
+  expect(responses.map((part) => part.functionResponse?.id)).toEqual([
+    calls[0].callId,
+    second.callId,
+  ]);
+  const checkpoint = parseHarnessCheckpointV1(
+    (await managed.authority.readCheckpointState())!,
+  );
+  expect(checkpoint.continuation).toEqual({
+    phase: 'results_ready',
+    pendingEventIds: [],
+  });
+  expect(checkpoint.identity).toMatchObject({ turnId: promptId, promptId });
+  expect(checkpoint.tools?.batchId).toBe('batch-provider-read');
+  expect(checkpoint.tools?.items.map((item) => item.executionCallId)).toEqual([
+    'unit-execution-1',
+    'unit-execution-2',
+  ]);
+  expect(checkpoint.attempt).toMatchObject({
+    attemptId: batchId,
+    routeRef:
+      members[0]['reference'] &&
+      (members[0]['reference'] as Record<string, unknown>)['inputRef'],
+  });
+  expect(checkpoint.resume.fileHistoryRef).toBeNull();
+  for (const [index, item] of checkpoint.tools!.items.entries()) {
+    expect(item).toMatchObject({
+      ordinal: index === 0 ? 0 : 2,
+      modelMessageId: batchId,
+      partIndex: index === 0 ? 0 : 2,
+      state: 'settled',
+      consumed: false,
+      inputDigest: (requests[index]['requestDigest'] as string).slice(7),
+    });
+    const outcome = JSON.parse(
+      (await managed.resources.read(item.outcomeRef!)).toString(),
+    );
+    expect(outcome).toMatchObject({
+      schemaVersion: 1,
+      executionCallId: `unit-execution-${index + 1}`,
+      envelope: {
+        executionStatus: 'success',
+        responseParts: [{ text: `owned result unit-execution-${index + 1}` }],
+      },
+      history: { model: 'unit-model', parts: [responses[index]] },
+    });
+    expect(commit).toHaveBeenNthCalledWith(
+      index + 2,
+      'tool_result',
+      [responses[index]],
+      'unit-model',
+      { uuid: outcome.history.messageId, timestamp: outcome.history.timestamp },
+    );
+  }
+  expect(checkpoint.runtime?.bindings).toHaveLength(2);
+  expect(paths.filter((route) => route.endsWith(':start'))).toHaveLength(2);
+  expect(paths.some((route) => /acknowledge|release/.test(route))).toBe(false);
+  await turn.consumeResults();
+  expect(
+    parseHarnessCheckpointV1(
+      (await managed.authority.readCheckpointState())!,
+    ).tools?.items.every((item) => item.consumed),
+  ).toBe(true);
+  await turn.finish();
+  expect(
+    parseHarnessCheckpointV1((await managed.authority.readCheckpointState())!)
+      .continuation.phase,
+  ).toBe('turn_settled');
 });

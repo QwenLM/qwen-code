@@ -39,7 +39,11 @@ import {
 import { validateManagedCsiPodIdentity } from './managed-csi-envelope.js';
 import { ManagedCsiMount } from './managed-csi-mount.js';
 import { composeManagedCsiFiles } from './managed-csi-file-composer.js';
-import { readCurrentCsiNative } from './managed-csi-native-readback.js';
+import {
+  readCsiNativeRequest,
+  readCurrentCsiNative,
+} from './managed-csi-native-readback.js';
+import { ManagedToolExecutor } from './managed-runtime-tool-executor.js';
 import {
   CSI_FILE_HISTORY_PATH,
   readCsiFileHistoryEnvelope,
@@ -99,6 +103,11 @@ export async function startManagedCsiFileWorker(
   };
   const canInstall = () =>
     !closed && retirementId === undefined && mount.isAvailable;
+  const executor = new ManagedToolExecutor(async (reference) =>
+    canInstall() && reference.sessionId === boot.identity.sessionId
+      ? composition?.tools
+      : undefined,
+  );
   const app = express();
   app.disable('x-powered-by');
   const refuse = (res: Response, code = 'managed_csi_identity_conflict') =>
@@ -357,6 +366,166 @@ export async function startManagedCsiFileWorker(
     handleManagedRuntimeJsonError,
   );
   app.post(
+    `${MANAGED_CSI_FILE_PREFIX}/execute`,
+    ...middleware,
+    async (req: Request, res: Response) => {
+      try {
+        const request = readCsiNativeRequest(req.body);
+        const installed = installations.installation(boot.identity.sessionId);
+        if (
+          boot.version !== 5 ||
+          request.action !== 'execute' ||
+          typeof request.subject !== 'string' ||
+          !installed ||
+          !binding ||
+          bindIdentity !== JSON.stringify(installed) ||
+          !isDeepStrictEqual(request.identity, boot.identity) ||
+          !isDeepStrictEqual(
+            request.context,
+            createManagedContextAttestationResponse(boot.context),
+          ) ||
+          !isDeepStrictEqual(request.installedContext, installed) ||
+          !canInstall()
+        )
+          throw new Error();
+        const originalBinding = binding;
+        const result = await track(
+          Promise.resolve().then(async () => {
+            await originalBinding;
+            if (!canInstall() || !composition) throw new Error();
+            const current = await readCurrentCsiNative(
+              boot,
+              installed,
+              'execute',
+              request.subject,
+            );
+            if (!canInstall()) throw new Error();
+            const evidence = current.evidence;
+            const reference = evidence['executionReference'] as Record<
+              string,
+              unknown
+            >;
+            const inputRef = reference['inputRef'] as { resourceId: string };
+            const input = (
+              evidence['resources'] as Array<{
+                reference: { resourceId: string };
+                bytesBase64: string;
+              }>
+            ).find(
+              (resource) =>
+                resource.reference.resourceId === inputRef.resourceId,
+            );
+            if (!input) throw new Error();
+            const wrapper = parseManagedCsiFileJson(
+              Buffer.from(input.bytesBase64, 'base64'),
+              64 * 1024,
+            ) as Record<string, unknown>;
+            const payloadJson = wrapper['payloadJson'];
+            if (typeof payloadJson !== 'string') throw new Error();
+            const payload = parseManagedCsiFileJson(
+              Buffer.from(payloadJson),
+              64 * 1024,
+            ) as Record<string, unknown>;
+            const toolName = payload['toolName'];
+            if (
+              !['read_file', 'write_file', 'edit'].includes(String(toolName)) ||
+              reference['argsDigest'] !==
+                `sha256:${createHash('sha256').update(payloadJson).digest('hex')}` ||
+              !canInstall()
+            )
+              throw new Error();
+            const preparedRef = evidence['preparedRef'] as {
+              resourceId: string;
+            } | null;
+            if (preparedRef !== null) {
+              const preparedResource = (
+                evidence['resources'] as Array<{
+                  reference: { resourceId: string };
+                  bytesBase64: string;
+                }>
+              ).find(
+                (resource) =>
+                  resource.reference.resourceId === preparedRef.resourceId,
+              );
+              if (!preparedResource) throw new Error();
+              const preparedBody = parseManagedCsiFileJson(
+                Buffer.from(preparedResource.bytesBase64, 'base64'),
+                64 * 1024,
+              ) as Record<string, unknown>;
+              const preparation = preparedBody['preparation'] as Record<
+                string,
+                unknown
+              >;
+              const intentRef = preparation['intentRef'] as {
+                resourceId: string;
+              };
+              const saved = preparations.get(intentRef.resourceId);
+              const invocation = (
+                preparation['invocations'] as Array<Record<string, unknown>>
+              ).find((item) => item['executionCallId'] === request.subject);
+              if (
+                preparedBody['schemaVersion'] !== 2 ||
+                preparedBody['profile'] !== boot.identity.profile ||
+                preparedBody['runtimeSessionId'] !== boot.identity.sessionId ||
+                preparation['stage'] !== 'prepared' ||
+                preparation['promptId'] !== reference['promptId'] ||
+                preparation['batchId'] !== reference['batchId'] ||
+                !saved ||
+                !invocation ||
+                invocation['toolName'] !== toolName ||
+                invocation['requestDigest'] !== reference['argsDigest'] ||
+                [
+                  'callId',
+                  'functionCallId',
+                  'partIndex',
+                  'ordinal',
+                  'inputRef',
+                  'toolDefinitionRef',
+                ].some(
+                  (field) =>
+                    !isDeepStrictEqual(invocation[field], reference[field]),
+                ) ||
+                !isDeepStrictEqual(saved.reference, intentRef) ||
+                !isDeepStrictEqual(
+                  await saved.observation,
+                  readCsiFileHistoryObservation(
+                    {
+                      state: preparedBody['state'],
+                      backupDirectory: preparedBody['backupDirectory'],
+                      retainedBackups: preparedBody['retainedBackups'],
+                    },
+                    boot.identity.sessionId,
+                  ),
+                ) ||
+                !canInstall()
+              )
+                throw new Error();
+            } else if (toolName !== 'read_file') {
+              throw new Error();
+            }
+            return executor.execute(
+              {
+                sessionId: reference['sessionId'] as string,
+                promptId: reference['promptId'] as string,
+                callId: reference['callId'] as string,
+                argsDigest: reference['argsDigest'] as string,
+              },
+              toolName as string,
+              payload['input'] as Record<string, unknown>,
+            );
+          }),
+        );
+        const response = { ...request, state: 'settled', result };
+        if (closed || Buffer.byteLength(JSON.stringify(response)) > 64 * 1024)
+          throw new Error();
+        res.json(response);
+      } catch {
+        refuse(res, 'managed_csi_execution_unavailable');
+      }
+    },
+    handleManagedRuntimeJsonError,
+  );
+  app.post(
     `${MANAGED_CSI_FILE_PREFIX}/drain`,
     ...middleware,
     async (req: Request, res: Response) => {
@@ -398,7 +567,10 @@ export async function startManagedCsiFileWorker(
     ownedManagedRuntimeRouteGate(app, [
       ...MANAGED_CSI_FILE_ROUTES,
       ...(boot.version === 5
-        ? [{ method: 'POST', path: CSI_FILE_HISTORY_PATH }]
+        ? [
+            { method: 'POST', path: CSI_FILE_HISTORY_PATH },
+            { method: 'POST', path: `${MANAGED_CSI_FILE_PREFIX}/execute` },
+          ]
         : []),
     ]),
   );
@@ -421,11 +593,12 @@ export async function startManagedCsiFileWorker(
         }),
       ]);
       const joined = await Promise.allSettled([...operations]);
+      const executed = await Promise.allSettled([executor.close()]);
       const retained = await Promise.allSettled([
         composition ? composition.close() : mount.close(),
       ]);
-      const errors = [...results, ...joined, ...retained].flatMap((result) =>
-        result.status === 'rejected' ? [result.reason] : [],
+      const errors = [...results, ...joined, ...executed, ...retained].flatMap(
+        (result) => (result.status === 'rejected' ? [result.reason] : []),
       );
       if (errors.length)
         throw new AggregateError(

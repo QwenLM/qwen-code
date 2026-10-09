@@ -311,6 +311,9 @@ public final class JdbcToolExecutionRepository
                 updateExecution(connection, unknown);
                 return null;
             }
+            if (continuation != null) {
+                JdbcCsiExecutionAdmission.requireDispatch(connection, continuation.original(), current);
+            }
             ToolExecutionRecord claimed = current.withDispatch(ownerId,
                     JdbcRepositorySupport.leaseUntil(now, duration),
                     current.getDispatchGeneration() + 1,
@@ -482,6 +485,7 @@ public final class JdbcToolExecutionRepository
         var runtime = JdbcRuntimeSessionRepository.selectSession(connection, original.request().getScope(),
                 hint.getRuntimeSessionId(), true);
         original.requireSession(runtime);
+        JdbcCsiExecutionAdmission.verifyRelated(connection, original);
         return new CsiContinuation(original, seal, runtime);
     }
 
@@ -501,7 +505,8 @@ public final class JdbcToolExecutionRepository
             JdbcCsiActivationAdmission.requireExecution(original, execution);
             RuntimeAdmission.requireSession(runtime, execution);
             if (!"deferred".equals(execution.getReference().get("dispatchMode"))
-                    || !execution.getReference().keySet().equals(Set.of("dispatchMode", "sessionId", "promptId", "callId", "argsDigest"))
+                    || !execution.getReference().keySet().equals(Set.of("dispatchMode", "sessionId", "promptId", "callId", "argsDigest",
+                            "batchId", "functionCallId", "partIndex", "ordinal", "inputRef", "toolDefinitionRef"))
                     || !execution.getRequestDigest().matches("sha256:[0-9a-f]{64}")) {
                 throw csiContinuationUnavailable();
             }

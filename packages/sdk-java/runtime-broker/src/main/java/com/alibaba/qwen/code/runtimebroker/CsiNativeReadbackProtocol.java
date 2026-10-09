@@ -14,6 +14,7 @@ import java.util.UUID;
 /** Current original evidence, never a reusable execution capability. */
 public final class CsiNativeReadbackProtocol {
     public static final String PATH = "/internal/runtime-broker/csi/v1/native:read";
+    public static final String EXECUTE_PATH = ManagedCsiFilesProtocol.PREFIX + "/execute";
     public static final int REQUEST_LIMIT = 16 * 1024;
     public static final int RESPONSE_LIMIT = 8 * 1024 * 1024;
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -27,6 +28,41 @@ public final class CsiNativeReadbackProtocol {
             "csi-files-retirement-tools/1\u0000csi-files-retirement-policy/1".getBytes(StandardCharsets.UTF_8));
 
     private CsiNativeReadbackProtocol() {
+    }
+
+    public static Map<String, Object> executeRequest(Map<String, Object> boot, RuntimeProvisionRequest original,
+            ContextBinding binding, String executionId) {
+        var result = new LinkedHashMap<>(bindRequest(boot, original, binding, UUID.randomUUID().toString()));
+        result.put("action", "execute");
+        result.put("subject", executionId);
+        return request(result);
+    }
+
+    public static Map<String, Object> executeResult(byte[] bytes, Map<String, Object> request) {
+        request(request);
+        require("execute".equals(request.get("action")));
+        var value = ManagedCsiFilesProtocol.parse(bytes, 64 * 1024);
+        var fields = new HashSet<>(REQUEST);
+        fields.addAll(Set.of("state", "result"));
+        closed(value, fields);
+        for (String field : REQUEST) {
+            require(same(value.get(field), request.get(field)));
+        }
+        require("settled".equals(value.get("state")));
+        var result = map(value.get("result"));
+        closed(result, result.containsKey("error") ? Set.of("executionStatus", "responseParts", "error")
+                : Set.of("executionStatus", "responseParts"));
+        require(Set.of("success", "error", "cancelled", "not_started").contains(result.get("executionStatus")));
+        list(result.get("responseParts"));
+        if (result.containsKey("error")) {
+            var error = map(result.get("error"));
+            closed(error, error.containsKey("type") ? Set.of("message", "type") : Set.of("message"));
+            string(error.get("message"));
+            if (error.containsKey("type")) {
+                string(error.get("type"));
+            }
+        }
+        return BrokerValues.immutableMap(result);
     }
 
     public static Map<String, Object> request(byte[] bytes) {

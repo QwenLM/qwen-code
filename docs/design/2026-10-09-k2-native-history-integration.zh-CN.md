@@ -8,10 +8,11 @@
 boot-5/handle-3 authority 传播依赖已通过有界软件验证。当前候选实现连接了
 lease 认证的 bind/prepare 读回、原生 schema-2 initial/intent/prepared 接受、
 原始资源的精确提升与关联、retained worker preparation 以及私有 Hosted 调用者。
-聚焦测试覆盖了这些组件。2026-10-09 的独立有界软件运行已将实际 producer
-贯通至持久 prepared，使用第 7.1 节明确列出的 seam；平台与完整 K2 验收仍开放。原始 native tool intent/checkpoint、
-execution grant、执行与完成保持关闭。明确的 Broker dispatch 和 JDBC authorization
-拒绝保留了该边界。
+独立有界软件运行先观察到实际 preparation，随后观察到完整 Read 正向链路，包括两份
+原始 SETTLED/success 结果、第二次真实模型调用、消费和 Turn 落定。新的 Read/Write/Edit
+混合运行还观察到真实文件效果、原始 preimage 保留、结果历史收口、第二次模型消费和
+Turn 落定。精确派发重放没有重复 I/O，改变 payload 被拒绝。剩余失败测试组、平台、冷恢复、物理退休、公开
+选择及完整 K2 验收继续开放；软件 fixture 证据不能解除这些门禁。
 本设计细化
 [原生文件执行设计](2026-10-07-k2-native-file-execution.zh-CN.md)与
 [原始批次预留设计](2026-10-08-k2-native-batch-reservation.zh-CN.md)
@@ -20,12 +21,13 @@ execution grant、执行与完成保持关闭。明确的 Broker dispatch 和 JD
 ## 1. 当前缺口与要求的结果
 
 已提交基线的私有 Hosted 调用者在完整原始 assistant 和已接受 Read/Write/Edit
-分配之后停止。当前候选在 input 前增加 initial history，并连接完整 intent 与原始
+分配之后停止。前一 preparation 增量在 input 前增加 initial history，并连接完整 intent 与原始
 资源提升、worker preparation、持久 prepared 历史，然后以需要恢复的状态停止。
 原生新提交与历史回放共享 history validator；same-Connection preflight 在
 `commitResources` 前校验完整转换，最终接受校验原始关联。boot 5 增加 retained
-composer/history 路由；boot 4 仍只用于构造。tool intent、execution grant、执行器
-及结果消费调用者仍未连接。
+composer/history 路由；boot 4 仍只用于构造。当前候选连接 native intent、execution
+grant、worker 执行器及结果消费调用者。已观察 Read 与 Read/Write/Edit 混合正向链路；
+剩余拒绝组、冷恢复与退休消费者仍未完成。
 
 连接一条原始链路：READY Session 与已安装上下文 → 保留的空历史绑定 → 包含全部
 已接受成员的原生 schema-2 intent → worker 读取当前原始证据并准备保留备份 →
@@ -117,7 +119,8 @@ reference。`intent` 严格包含 `revision` 和 `sequence`，定位原 journal 
 完整 dispatch checkpoint，不是 worker preparation 准入。prepared 可空规则与所有重复字段必须匹配响应和
 原始合格 authorization。dispatch 授权时持久保存这份确切的联合证据；现有仅含
 两个 dispatch-generation/binding-version 列的 marker 不足。共享 Java/CLI codec 已实现此 wire shape；
-不可变 grant 持久化、execute 准入和 worker 执行消费者仍未实现。通用 Tool-v3
+当前候选也连接不可变 grant 持久化、原生 execute 准入和 retained worker 执行消费者，
+详见第 6.5–6.7 节。通用 Tool-v3
 grant 不提供该证明。
 
 每个 resource entry 严格包含 `reference`、`bytesBase64`；reference 使用既有闭合
@@ -295,8 +298,8 @@ prompt 的下一 batch 扩充最后 snapshot。prepared 校验保留其 prompt I
 pin 字节完全不变，包括已跟踪路径不需要新 preimage 的情形。当前 file fingerprint
 仅能通过已验证的执行/完成链改变，preparation 不能虚构这些效果。
 
-此 preparation 交付以持久 prepared blocker 结束。纯 Read batch 也保持关闭，直到
-完整 intent/checkpoint/grant 准入存在。在公开 Broker 入口路径与 JDBC mutation
+前一 preparation-only 交付以持久 prepared blocker 结束。下面保留该交付的
+dispatch 拒绝边界；第 6.5–6.7 节描述已连接完整 intent/checkpoint/grant 准入的当前候选。在公开 Broker 入口路径与 JDBC mutation
 边界明确拒绝没有该 grant 的私有 dispatch authorization/start/execute。在已调查的
 基线中，`authorizeDispatch` 只验证原始 READY/session/activation，不关联 native
 tool intent 或 dispatch checkpoint。真实的十一字段 allocation 已在 claim 处以
@@ -352,11 +355,194 @@ reservation 重试。原 execution rows 保留不可变身份与 reference，无
 `max(request.ordinal, nextOrdinal)` 派生累计 ordinal，保留 refusal gaps。不能过滤
 cancelled、not-started、UNKNOWN 或 terminal 会员来缩小成功集合。
 
-这是下一步原生接线设计，不是已实现会员或执行证据。先实现 native intent/checkpoint
-校验与同 Connection preflight，再实现不可变 authorization；随后接通有限 worker
-executor、原 outcomes、result messages、results-ready 与 consumption。十一字段
-continuation、冷恢复与退休门禁仍须完成。公开 selector 保持关闭，设计使用标准
-Kubernetes 与 CSI，不要求 Alibaba ACK。
+当前候选已实现原生 intent/checkpoint 校验与同 Connection preflight，再建立不可变
+authorization，并连接有限 worker executor、原 outcomes、result messages、results-ready
+与 consumption。下文记录有界 Read 和混合批次证据；剩余失败组、冷恢复与退休门禁仍须
+完成。公开 selector 保持关闭，设计使用标准 Kubernetes 与 CSI，不要求 Alibaba ACK。
+
+### 6.5 原生意图与完整 dispatch 检查点交付
+
+状态：已实现，是第 6.6–6.7 节有界 Read 和混合批次验证的前置步骤。原生 intent 与
+`await_runtime` 校验原始 grant 与有限 worker 执行；冷恢复和退休仍关闭。
+
+将私有 Hosted callback 已有的 live Harness 传入工具回合。完整原预约 readback
+以及变更批次 schema-2 prepared history 完成后，按 local ordinal 为每个接受会员
+追加一个原 `tool.intent`。使用原 execution ID、assistant UUID batch、input 和
+完整 advertised declaration 引用。authority command/event ID 均为
+`tool-intent:${executionCallId}`，content digest 是 input 资源 digest。闭合 payload
+仅有 `executionCallId`、`batchId`、`ordinal`、`toolDefinitionRef`、`argsRef` 和
+`outcomeSource: runtime`。
+
+在 native replay 中派生每个意图的实际 revision 和 sequence。fresh acceptance
+传原 previous revision，replay 传 `rowRevision - 1`，不得从 sequence 猜 revision。
+Prefix 保留派生 event payload 与合格 input digest，不持久化第二套会员账本。
+纯校验按 local ordinal 匹配原 assistant call 与原 input/declaration bytes，不能
+编造 SQL call UUID 或十一字段 reference；这些联接属于同 Connection SQL 预检。
+
+资源关联前锁完整 inventory、固定 READY Session 以及所有状态的全部 related
+execution rows。首意图前校验当前完整批次。一旦存在原 intent 就拒绝新分配，仍允许
+原 allocation 精确重试。变更批次必须已有原 prepared history，input/declaration
+仍通过原 history association 读取。只读批次仅晋升 entered member 的两个资源，
+关联其实际 intent revision；unentered member 保持 PUBLISHED。预约 API 此前允许
+会员共享资源，但实际 Hosted producer 每会员 publish 独立 ID；只读首意图前明确
+拒绝任何跨会员共享，且必须先检查整批再晋升。不得放宽通用资源验收。
+
+使用实际 `commitAwaitRuntimeBatch` producer 一次提交完整批次。binding 的
+`attemptId`、`modelMessageId` 为原 assistant UUID，`invocationBindingId` 为
+execution ID，`routeRef` 为原 input ref，`inputDigest` 为原 request digest 去掉
+`sha256:`。使用已有私有 capability digest 与 `csi-files-retirement-policy/1`，
+media version 和 progress cursor 均为 null。不接受空批次或编造的 checkpoint。
+
+按原 previous state 与实际 Harness 算法验证完整九组 checkpoint。identity 只更新
+checkpoint、predecessor、covered sequence、activation 与 prompt/turn；resume
+仅更新 `throughSequence`，包括 initial null `fileHistoryRef` 在内均继承；output
+与 followUp 不变。continuation 为 `await_runtime`，approval 为 null。保留已有
+attempt，否则使用首 pending assistant UUID/input ref fallback。保留全部旧
+items/bindings，再追加当前完整集合。首次 `tools.batchId` 为
+`batch-${first functionCallId}`，不同于 assistant UUID。累积 ordinal 按
+`max(request.ordinal, nextOrdinal)` 派生，保留本地拒绝造成的缺口。新 items 为
+in_progress、outcome null、consumed=false；新 bindings 为 dispatch、cursor null。
+SQL 当前会员、唯一原生 intents 和新增 checkpoint items 必须相等，不能遗漏
+cancelled/UNKNOWN/terminal rows。
+
+同 command 重试必须先重放原 journal，再校验完整当前 SQL/resource 资格，然后返回
+原 receipt。资源晋升、引用关联、journal transaction 与 head 在同 Connection
+原子提交。阻塞锁后重新核对数据库 writer/activation 时间。下文已连接私有
+dispatch/execute/outcome/result 消费者；冷恢复与退休门禁仍关闭。
+
+本次验收要求全新实际 Hosted 到原 store 链到达完整 native intent/checkpoint，
+保留原始 SQL/resource/journal 证据，验证精确重试、事务拒绝/回滚、普通 Read 回归
+与自有资源清理。H2/Darwin seams 仅是有界软件证据；真实 MySQL 锁竞争、Linux CSI
+及目标集群验收仍是独立开放要求。
+
+### 6.6 首个验收点：真实 Read 执行与消费
+
+状态：已观察有界软件 Read 正向链路。原始 producer 完成两次 Read、不可变 grant、
+SETTLED/success SQL、outcome/receipt/tool 消息、第二次真实模型调用、结果消费与
+Turn 落定。第 7.2 节后续混合运行和有界负向组补充了精确 dispatch 重试与拒绝证据；
+剩余失败覆盖、完整 K2 和新的云上资格仍开放。
+上面的原生 intent/checkpoint 接线是内部前置步骤。
+首个验收点是一次实际 Hosted Read 完成授权、有限 worker I/O、原始 SQL 落定、不可变
+outcome/receipt、tool-result 消息、results-ready、后续模型继续、消费和 Turn 落定。
+Write/Edit 和冷恢复随后沿同一贯通路径推进；物理退休和公开选择继续保持现有门禁。
+
+两条生产 schema 路径都必须创建原始执行授权列：独立 Broker schema 和 Agent Server
+的 Flyway 迁移。首轮候选在派发前暴露 Agent 迁移遗漏；V55 添加可空列，不为任何
+已有执行生成授权或改变其状态。
+
+在写入原始授权标记的同一事务中，将一份不可变原生授权 JSON 持久化在原始
+ToolExecution 行。它由重放后的原生意图、完整原始 dispatch 检查点、完整 SQL 成员和
+不可变输入/声明字节、固定 READY Runtime Session、原始 binding/version 和安装上下文
+共同导出。固定原始检查点的 journal 位置，即使后续部分结果推进了 head 也不改变。
+重试不能从新 head 导出授权。首个已验证 Read 路径使用完全只读批次；包含变更的混合
+批次必须使用第 6.7 节固定的原始 prepared-history 执行消费者。
+
+worker 的私有 execute 请求仅携带原始 execution ID 和预期安装身份。新鲜、认证的
+原生回读返回持久化授权和原始资源字节。在使用有限 executor 前，重新检查本地 seal 和
+已绑定组合，比较原始输入摘要，并在保留 executor 中合流相同执行。操作在第一次 await
+前登记并保留结果；普通 ACK 和 Session release 不能清除它们。拒绝、传输丢失或超大输出
+留下未落定 blocker，不能伪造结果或创建替代调用。
+
+重放的文本 stream 遵循既有 Hosted producer。assistant 消息 commit 清除当前消息身份，
+但在模型轮次间保留 ordinal。可见 retraction 将它归零；新消息首个 delta 之前的重试也可能
+在不产生持久 retraction 的情况下归零。因此，新消息首个 delta 接受零或原始累积 ordinal；
+同一消息后续 delta 必须严格递增。command/event 相等性、消息身份、内容摘要及最终累积
+文本仍保持准确。计数器由原始重放导出，不持久化到新 ledger。
+
+实际 Hosted producer 将完整原始内联 Runtime 结果与模型响应记录在同一不可变 outcome。
+SQL 验收在同一 Connection 联结原始 SETTLED 行与持久化授权。原生 receipt 先于准确的
+原始 tool-result 消息和实际 Harness 结果检查点。检查点保留其他所有组和旧成员；仅合格
+成员和 binding 落定。所有结果提交后才能开始下一次模型尝试。结果仅在该后续尝试完成后
+变为 consumed，遵循实际 Hosted producer 顺序。SQL SETTLED 行本身不能授权消费或
+Turn 落定。
+
+验证复用已有基线，聚焦新增的 Read 行为、准确身份/原始结果、必要的拒绝联结和普通本地
+回归。H2、确定性模型输入和 Darwin mount 替身必须报告为软件覆盖，不能算作
+MySQL/Linux CSI 或云上 K2 验收。
+
+### 6.7 Write/Edit 执行与 prepared history 收口
+
+状态：实现已接通，并已通过有界真实混合批次软件验证。原 Main-owned transport 起初
+仍有只读 guard，使 Write 在 worker I/O 前被拒绝；已修正这一准确消费者。
+新的运行观察到 Read、Write、Edit 原始 SQL SETTLED/success、result-history 收口、
+第二次模型消费及 Turn 落定。精确 start 重放复用原结果且没有 I/O，改变 payload 被拒绝。
+第 7.2 节记录五个有界负向组，包括 prepared 字节损坏、post-history 观察失败和真实
+逻辑 seal。响应丢失及更广泛的失败覆盖仍未获得资格。
+接通此消费者前已通过有界 Read 正向继续链。
+已接受的混合批次保留全部原始 Read/Write/Edit 成员，包括本地拒绝造成的 ordinal 缺口；
+不能因接通变更而遗漏 Read 成员或重新分配调用。
+
+不可变授权为变更批次固定原始 frozen prepared-history 引用。重放导出 prepared 事件的
+sequence 及其唯一原始 commit revision；资源资格使用该 revision，不能使用后来的
+工具意图、dispatch 或当前 head revision。各 input/declaration 保留自己的原始关联。
+后续成员改变工作文件后，grant 与准确执行引用仍保留同一 prepared 引用。
+不另建授权或 history ledger。
+
+准备与执行必须使用已绑定 worker composition 内的同一 retained ManagedRuntimeFileHistory
+实例。仅保留 storage、缺少该 history 实例的 worker 在 invoke 前拒绝。首次 I/O 前联结
+不可变 prepared body 与原始缓存 preparation observation，再由既有 history 执行路径
+检查 preimage 并串行变更。不能要求后续每个成员的新鲜全 Workspace 观察仍等于旧 preimage：
+第一个合法变更已改变这些文件。相同 execution 重试合流 retained executor，不能重复
+Write 或 Edit。响应丢失或执行后的 history 更新失败保持 UNKNOWN/未落定，直到原始结果
+获得资格。
+
+所有原始 receipt 和 tool-result 消息提交、实际 Harness 达到 results_ready 后，Hosted
+获取 result history snapshot，在第二次模型尝试前提交
+`csi-file-history:result:${batchId}`。结果投影的 parent 是最后一个原始 tool-result UUID。
+preparation 变为 null；backup directory、retained backups、snapshot identity 与
+file-key 集合保持固定。只有原始 prepared mutation plan 中路径的 fingerprint 可以变化。
+同 Connection 准入联结完整原始 SQL 成员、持久 grant、原始 result、receipt、message 和
+results-ready checkpoint；initial history 与 result history 是不同转移。
+未收口的 preparation 阻止下一次模型尝试。
+
+验收要求真实 Write/Edit 效果与原始 preimage、完整混合批次消费、result-history 收口、
+第二次真实模型请求包含原始结果，以及 Turn 落定。重复 dispatch 不重复 I/O。变化的 prepared
+字节、遗漏成员、响应丢失、post-history 失败，以及 prepare/dispatch 前 seal 都必须保持
+blocker。helper fixture 或手动插入 idle snapshot 不能证明此门禁通过。
+
+### 6.8 冷恢复证据与退休消费者
+
+状态：导出保留已实现；native retirement 资格与真正冷恢复仍计划中。一轮自有 MySQL
+运行复现了四份导出都遗漏原始 `native_authorization_json`，以及非持久化字段
+`lifecycleAuthority:null` 导致更早的 inventory scope conflict。exporter 现在通过
+既有 JSON row encoder 导出原始授权列，并且仅输出原持久化的六个 placement 字段。
+它不重建 authority，也不放宽 scope reader。原始 file-checkpoint reader 仍仅接受
+旧五字段引用、仅 converted 结果的 outcome 与 schema1 history。
+因此，新的 native settled 行不能借用该 reader 的旧验收作为证明。
+
+完整执行导出保留原始不可变 native authorization JSON。保留原始 result 和全部相关
+session、publication、receipt、checkpoint、ACK 与
+operation 行；不能从 snapshot 的最新 head 重建 grant。native file-checkpoint 分支
+必须校验准确十一字段引用、原始 grant 与 input/declaration/history 关联、完整批次成员、
+含原始 result 和固定 history 的 outcome、原始 receipt、准确 tool-result 消息，以及
+consumed/settled checkpoint 链。它支持 schema2 history，并保留 legacy 记录的既有分支。
+缺字段、分页不完整、未知状态、损坏字节或预算耗尽均产生 unresolved 观察，不能部分成功。
+
+冷恢复首先分类原始持久链。SETTLED 执行复用原始结果与 receipt，不再次 invoke 工具；
+UNKNOWN 执行不能因为 process 或 Pod 消失而变成可重试。prepared 变更保留原始 backup
+和执行身份，直到原始效果/结果获得资格。恢复证据本身不授权替代 worker 或物理卷交接。
+
+当前私有 Hosted initializer 要求新 authority、writer generation 1 和 activation epoch 1。
+原始 Store 拒绝过期的 CSI writer；native history 重放也固定原始 writer，尚无 takeover
+语法。因此只读证据匹配不能被报告为真正的 Hosted 冷恢复。该交付必须先校验原始持久尾部，
+再执行带 fencing 的 writer/activation 转移，按照各原始 receipt 的固定消息身份恢复，
+并在不重新派发工具的前提下继续既有 Harness 模型循环。普通 load 的 legacy history parser
+与恢复路径保持不变。
+
+snapshot exporter 要求真实 MySQL/InnoDB 一致的只读快照。此前的 H2 软件贯通运行
+不能赋予该消费者资格。验证使用新的自有本地 MySQL 数据库与原始 logical retirement cut，
+不从已清理 fixture 重建正向 SQL，也不放宽 engine 检查。
+
+应用收口仍要求完整原始 inventory 与不可变 cut 后每个 writer/lifecycle operation 落定。
+只有独立可信证据证明准确原始 writer/后代终止及每项 CSI NodeUnpublish，才能赋予物理
+退休资格。聚合 DRAINED、原子 RELEASED 与同卷安全复用仍是独立门禁。
+实现该转移前必须选定并审查 stop/unpublish 权威；Pod 消失、租约过期、NodeNotReady 或
+普通 HTTP release 都不充分。既有 operator 清理不是该权威。
+
+验收须从真实 consumed Read/Write/Edit Turn 后的新鲜原生 snapshot 开始，再重启证据
+reader，不能重建 grant 或 result。正向和拒绝组覆盖混合/多批次、不完整 inventory、变化的
+原始引用、结果响应丢失与 UNKNOWN 成员。真实 MySQL isolation 和 Linux CSI/目标集群
+退休仍是独立资格要求；此设计不授权创建新云资源。
 
 ## 7. 验证与验收
 
@@ -403,6 +589,44 @@ controller/store 的 MockMvc transaction/HTTP adapter、确定性模型 SSE、�
 这是有界软件 preparation 证据，不是真实 MySQL isolation/锁竞争、物理 Linux CSI、
 目标集群或完整 K2 验收。之前的失败运行单独保留：缺少 no-store 响应 header 和
 错误的混合 assistant history guard 都已复现、修复并加入回归后，才完成本轮成功
-运行。不可变 grant、执行、结果消费、冷恢复、writer cut 和物理退休仍是下一批交付。
+运行。在该 preparation head，不可变 grant、执行、结果消费、冷恢复、writer cut 和物理
+退休仍是下一批交付。
 原生 review 所需 foreground workflow 工具不可用，因此该审查仍待完成；继续保持
 Draft 和 maintainer review。
+
+### 7.2 已观察的原生执行与导出增量，2026-10-09
+
+后续私有 producer 通过既有 Hosted Harness 循环完成 Read 和混合 Read/Write/Edit。
+原始 intent 先于完整 dispatch checkpoint；每个原始 SQL 执行取得不可变授权，以原始
+result 落定，并提交含固定消息身份的 outcome。原始 receipt、tool-result 消息和 resolve
+checkpoint 先于 result history、第二次模型请求、consumed checkpoint 和落定 Turn。
+第二次请求包含全部原始结果。Traversal Read 被拒绝，已接受混合 ordinal 保留 0/2/3。
+精确 start 重放返回原始结果，没有新 I/O；变化的 payload 被拒绝。
+
+混合运行创建 17 字节文件，将原文件改为 32 字节，并保留真实 29 字节 preimage。
+随后一轮自有 MySQL 8.4.11 运行观察到同样完整的三执行/模型链，然后调用原始 logical
+retirement begin 和精确重试。它暴露两个 exporter 缺陷：遗漏原始 native 授权，以及
+额外的 null authority scope 字段。窄修复后，一轮新的自有 MySQL 运行在四份导出中
+保留每个原始 grant 对象，并输出原六字段 scope。新的 inventory reader 观察到恰好三个
+SETTLED 成员，每个仍为 `original_file_execution_conflict`；三个独立 file reader
+保留同样拒绝。导出和读取前后全部 53 张原 SQL 表不变。这只证明导出保留，不证明
+native 恢复或物理退休。
+
+五个有界负向 producer 组覆盖变化的 prepared readback 字节、遗漏批次成员、
+post-history 观察失败，以及 history prepare 前和 dispatch 前的真实 worker seal。
+前两组明确使用 wire fault fixture。post-history fault 在真实 Write 效果后发生，
+对应 SQL 执行保持 UNKNOWN 且没有 result，不启动第二次模型。第一个 seal 拒绝
+history prepare，保留 PREPARED 成员。dispatch seal 先异步受理 start，然后 worker
+和 poll 拒绝，原始 Read 变成 UNKNOWN，没有工作文件 I/O。两个 seal 都报告
+DRAINING/BLOCKED 且没有 physical release。此前有关 stream ordinal、result
+checkpoint 选择、异步栈名称和同步 start 预期的观察器失败保留；ignored observer
+修正仅对保留原输出离线核验，不算额外 producer 运行。
+
+这些运行使用自有真实文件和实际 Java/Node 产品。MySQL 运行使用新的自有 server、
+database 和受限 user。Kubernetes metadata/pre-provision attestation、Darwin 上的
+Linux mount/fd mapping、确定性模型 SSE 和 MockMvc HTTP/transaction adapter 仍为
+明确 fixture seam。自有 worker、server、database/user、端口和临时根已清理并独立
+核验。MySQL 串行 producer/export 观察不证明并发 READ COMMITTED 或预热
+REPEATABLE READ 竞争。新的 Linux CSI、目标集群资格、真正 cold takeover、
+全部 writer 收口、聚合 DRAINED、可信物理 stop/NodeUnpublish、RELEASED 和安全
+复用仍开放；原生 review 和 maintainer 范围审查仍待完成。

@@ -8,6 +8,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
+import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
+import { convertManagedRuntimeToolResult } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-tool-response.js';
+import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { normalizeWorkspaceRelativePath } from '@qwen-code/qwen-code-core/managed-runtime/managed-workspace-relative-path.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
@@ -89,6 +93,12 @@ export class HostedCsiToolTurn implements HostedToolTurn {
     private readonly runtime: { bindingId: string; generation: string },
     private readonly promptId: string,
     private readonly commit: HostedTurnCommit,
+    private readonly harness: ManagedHarnessHandle,
+    private readonly messageFitsInline: (
+      type: 'assistant' | 'tool_result',
+      parts: Part[],
+      model: string,
+    ) => boolean,
   ) {}
 
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
@@ -290,7 +300,177 @@ export class HostedCsiToolTurn implements HostedToolTurn {
           `csi-file-history:prepared:${batchId}`,
         );
       }
-      throw new Error('CSI native tool intent and dispatch remain closed.');
+      if (invocations.length === 0)
+        throw new Error('Original CSI batch has no accepted members.');
+      const authority = this.session.authority;
+      const activation = this.session.activation;
+      for (const invocation of invocations) {
+        signal.throwIfAborted();
+        await authority.appendExecutionEvent(
+          {
+            operation: 'toolIntent',
+            commandId: `tool-intent:${invocation.executionCallId}`,
+            sessionKey: authority.sessionHeader.sessionKey,
+            contentDigest: invocation.inputRef.digest,
+          },
+          (sequence) => ({
+            v: 1,
+            sequence,
+            eventId: `tool-intent:${invocation.executionCallId}`,
+            sessionKey: authority.sessionHeader.sessionKey,
+            kind: 'tool.intent',
+            occurredAt: Date.now(),
+            subject: {
+              type: 'activation',
+              scopeId: activation.activationId,
+              ...activation,
+            },
+            payload: {
+              executionCallId: invocation.executionCallId,
+              batchId,
+              ordinal: invocation.ordinal,
+              toolDefinitionRef: invocation.toolDefinitionRef,
+              argsRef: invocation.inputRef,
+              outcomeSource: 'runtime',
+            },
+          }),
+          { class: 'harness', activation },
+        );
+      }
+      signal.throwIfAborted();
+      await this.harness.commitAwaitRuntimeBatch(
+        invocations.map((invocation) => ({
+          functionCallId: invocation.functionCallId,
+          toolName: invocation.toolName,
+          executionCallId: invocation.executionCallId,
+          invocationBindingId: invocation.executionCallId,
+          capabilityVersion: CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
+          policyVersion: 'csi-files-retirement-policy/1',
+          mediaVersion: null,
+          modelMessageId: batchId,
+          partIndex: invocation.partIndex,
+          ordinal: invocation.ordinal,
+          inputDigest: invocation.requestDigest.slice(7),
+          progressCursor: null,
+          attemptId: batchId,
+          routeRef: invocation.inputRef,
+        })),
+        { turnId: this.promptId, promptId: this.promptId },
+      );
+      const executor = new HostedWorkspaceBroker(
+        this.broker,
+        authority.sessionHeader.sessionKey,
+        sessionId,
+      );
+      const responses: Part[] = [];
+      let lastResultMessageId: string | null = null;
+      for (const invocation of invocations) {
+        signal.throwIfAborted();
+        const reservation = reservations.find(
+          (item) => object(item['reference'])['callId'] === invocation.callId,
+        )!;
+        const wrapper = object(
+          JSON.parse(
+            Buffer.from(
+              reservation['inputBytesBase64'] as string,
+              'base64',
+            ).toString('utf8'),
+          ),
+        );
+        const result = await executor.execute(
+          invocation.executionCallId,
+          wrapper['payloadJson'] as string,
+          signal,
+        );
+        if (
+          result.executionStatus !== 'success' &&
+          result.executionStatus !== 'error'
+        )
+          throw new Error('CSI execution did not provide a complete result.');
+        const converted = convertManagedRuntimeToolResult(
+          invocation.toolName,
+          invocation.functionCallId,
+          result,
+          undefined,
+        );
+        const identity = {
+          uuid: randomUUID(),
+          timestamp: new Date().toISOString(),
+        };
+        const outcome = Buffer.from(
+          JSON.stringify({
+            schemaVersion: 1,
+            executionCallId: invocation.executionCallId,
+            envelope: result,
+            history: {
+              messageId: identity.uuid,
+              timestamp: identity.timestamp,
+              model,
+              parts: converted,
+            },
+          }),
+        );
+        if (
+          outcome.length >
+            HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes ||
+          !this.messageFitsInline('tool_result', converted, model)
+        )
+          throw new Error(
+            'Complete CSI result exceeds the durable Session limit.',
+          );
+        const outcomeRef = await this.session.resources.publish(
+          'managed-tool-outcome',
+          outcome,
+        );
+        await authority.appendExecutionEvent(
+          {
+            operation: 'recordToolResult',
+            commandId: invocation.executionCallId,
+            sessionKey: authority.sessionHeader.sessionKey,
+            contentDigest: outcomeRef.digest,
+          },
+          (sequence) => ({
+            v: 1,
+            sequence,
+            eventId: `tool-receipt:${invocation.executionCallId}`,
+            sessionKey: authority.sessionHeader.sessionKey,
+            kind: 'tool.receipt',
+            occurredAt: Date.now(),
+            payload: {
+              executionCallId: invocation.executionCallId,
+              toolOutcomeRef: outcomeRef,
+              resultRef: null,
+              resources: [],
+              historyRevision: sequence,
+            },
+          }),
+          { class: 'trusted_entry' },
+        );
+        await this.commit('tool_result', converted, model, identity);
+        lastResultMessageId = identity.uuid;
+        await this.harness.resolveAwaitRuntime(
+          invocation.executionCallId,
+          outcomeRef,
+        );
+        responses.push(...converted);
+      }
+      if (paths.size > 0) {
+        signal.throwIfAborted();
+        const observed = await requestHostedCsiHistory(
+          this.broker,
+          authority.sessionHeader.sessionKey,
+          { kind: 'csi-file-history', version: 1, action: 'snapshot' },
+        );
+        signal.throwIfAborted();
+        await commitHostedCsiHistory(
+          this.session,
+          observed,
+          null,
+          lastResultMessageId,
+          `csi-file-history:result:${batchId}`,
+        );
+      }
+      return responses;
     } catch (cause) {
       throw new HostedToolRecoveryRequiredError(cause);
     }
@@ -388,12 +568,16 @@ export class HostedCsiToolTurn implements HostedToolTurn {
   }
 
   async consumeResults(): Promise<void> {
-    throw new HostedToolRecoveryRequiredError(
-      'CSI native results remain closed.',
-    );
+    try {
+      await this.harness.consumeRuntimeResults();
+    } catch (cause) {
+      throw new HostedToolRecoveryRequiredError(cause);
+    }
   }
 
-  async finish(): Promise<void> {}
+  async finish(): Promise<void> {
+    await this.harness.settleConsumedRuntimeContinuation();
+  }
 
   async close(): Promise<void> {}
 }

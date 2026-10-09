@@ -401,6 +401,37 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
     }
 
     @Test
+    void exportsOnlyOriginalPersistedPlacementScopeFields() {
+        var inventory = store.exportRetirementInventory(retirementId);
+        var expected = JSON.createObjectNode().put("tenantId", "tenant").put("workspaceId", "workspace")
+                .put("workspaceGeneration", "1").put("canonicalCwd", "/workspace")
+                .put("capabilityDigest", "sha256:" + "a".repeat(64)).put("isolationClass", "session");
+        assertThat(inventory.path("scope")).isEqualTo(expected);
+        expected.fields().forEachRemaining(field -> assertThat(inventory.path("runtimeSessions").get(0).path(field.getKey()))
+                .isEqualTo(field.getValue()));
+    }
+
+    @Test
+    void preservesNullableNativeAuthorizationFromTheOriginalExecutionColumn() {
+        assertThat(store.exportOriginalExecution(retirementId, "execution").path("originalExecution")
+                .get("nativeAuthorization")).isEqualTo(JSON.nullNode());
+        assertThat(store.exportRetirementInventory(retirementId).path("executions").get(0)
+                .get("nativeAuthorization")).isEqualTo(JSON.nullNode());
+        // Column mapping fixture; this document does not qualify native execution.
+        var original = JSON.createObjectNode().put("schemaVersion", 1).put("authorizationRevision", "13");
+        original.putObject("intentLocator").put("revision", "7").put("sequence", "11");
+        jdbc.update("UPDATE qwen_tool_execution SET native_authorization_json = ? WHERE execution_call_id = 'execution'",
+                original.toString());
+        var rowsBefore = jdbc.queryForList("SELECT * FROM qwen_tool_execution");
+        assertThat(store.exportOriginalExecution(retirementId, "execution").path("originalExecution")
+                .path("nativeAuthorization")).isEqualTo(original);
+        assertThat(store.exportRetirementInventory(retirementId).path("executions").get(0)
+                .path("nativeAuthorization")).isEqualTo(original);
+        assertThat(jdbc.queryForList("SELECT * FROM qwen_tool_execution")).isEqualTo(rowsBefore);
+        assertThat(source.statements).allMatch(sql -> sql.startsWith("SELECT") && !sql.contains("FOR UPDATE"));
+    }
+
+    @Test
     void enumeratesEveryExecutionStateAndReleasedSessionBeyondFirstPage() {
         for (int index = 0; index < 101; index++) {
             var row = copyRow("qwen_tool_execution");

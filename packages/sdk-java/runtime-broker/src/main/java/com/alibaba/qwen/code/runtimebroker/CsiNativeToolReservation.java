@@ -44,6 +44,10 @@ final class CsiNativeToolReservation {
     private CsiNativeToolReservation() {
     }
 
+    static String trim(String value) {
+        return JS_TRIM.matcher(value).replaceAll("");
+    }
+
     static Map<String, Resource> inventory(Connection connection, JdbcCsiFilesRetirementGuard.Original original)
             throws SQLException {
         Map<String, Resource> result = new HashMap<>();
@@ -104,9 +108,13 @@ final class CsiNativeToolReservation {
                         JsonNode ref = JSON.valueToTree(execution.getReference());
                         require(canonical(stored).equals(canonical(ref)));
                         String batchId = id(ref, "batchId");
-                        byte[] input = bytesFor(connection, original, prefix, resources, batchId, ref.path("inputRef"), "managed-tool-input");
-                        byte[] definition = bytesFor(connection, original, prefix, resources, batchId, ref.path("toolDefinitionRef"), "managed-tool-definition");
+                        byte[] input = bytesFor(connection, original, prefix, resources, execution.getExecutionCallId(), batchId, ref.path("inputRef"), "managed-tool-input");
+                        byte[] definition = bytesFor(connection, original, prefix, resources, execution.getExecutionCallId(), batchId, ref.path("toolDefinitionRef"), "managed-tool-definition");
                         qualifyRelated(original, prefix, execution, input, definition);
+                        var intent = prefix.intents().get(execution.getExecutionCallId());
+                        if (intent != null) {
+                            qualifyIntent(execution, intent);
+                        }
                         var frozen = prefix.fileHistory() == null ? null : prefix.fileHistory().batches().get(batchId);
                         if (frozen != null) {
                             require(frozen.invocations().stream().anyMatch(invocation ->
@@ -131,6 +139,9 @@ final class CsiNativeToolReservation {
                                 id(JSON.valueToTree(execution.getReference()), "batchId"))).count() == entry.getValue().invocations().size());
                     }
                 }
+                for (String executionId : prefix.intents().keySet()) {
+                    require(result.stream().anyMatch(execution -> executionId.equals(execution.getExecutionCallId())));
+                }
                 return List.copyOf(result);
             }
         }
@@ -145,8 +156,8 @@ final class CsiNativeToolReservation {
         for (ToolExecutionRecord execution : existing) {
             if (execution.getIdempotencyKey().equals(candidate.getIdempotencyKey())) {
                 require(execution.sameRequest(candidate)
-                        && Arrays.equals(input, bytesFor(connection, original, prefix, resources, id(ref, "batchId"), ref.path("inputRef"), "managed-tool-input"))
-                        && Arrays.equals(definition, bytesFor(connection, original, prefix, resources, id(ref, "batchId"), ref.path("toolDefinitionRef"), "managed-tool-definition")));
+                        && Arrays.equals(input, bytesFor(connection, original, prefix, resources, execution.getExecutionCallId(), id(ref, "batchId"), ref.path("inputRef"), "managed-tool-input"))
+                        && Arrays.equals(definition, bytesFor(connection, original, prefix, resources, execution.getExecutionCallId(), id(ref, "batchId"), ref.path("toolDefinitionRef"), "managed-tool-definition")));
                 return execution;
             }
             JsonNode saved = JSON.valueToTree(execution.getReference());
@@ -156,7 +167,8 @@ final class CsiNativeToolReservation {
                     && !execution.getToolCallId().equals(candidate.getToolCallId())
                     && !execution.getExecutionCallId().equals(candidate.getExecutionCallId()));
         }
-        require(prefix.fileHistory() == null || !prefix.fileHistory().batches().containsKey(id(ref, "batchId")));
+        require((prefix.fileHistory() == null || !prefix.fileHistory().batches().containsKey(id(ref, "batchId")))
+                && prefix.intents().values().stream().noneMatch(intent -> id(ref, "batchId").equals(id(intent.payload(), "batchId"))));
         store(connection, original, resources, ref.path("inputRef"), input);
         store(connection, original, resources, ref.path("toolDefinitionRef"), definition);
         JdbcToolExecutionRepository.insertExecution(connection, candidate);
@@ -177,8 +189,8 @@ final class CsiNativeToolReservation {
             members.add(Map.of("executionCallId", execution.getExecutionCallId(),
                     "state", execution.getState().name().toLowerCase(java.util.Locale.ROOT),
                     "reference", execution.getReference(),
-                    "inputBytesBase64", Base64.getEncoder().encodeToString(bytesFor(connection, original, prefix, resources, batchId, ref.path("inputRef"), "managed-tool-input")),
-                    "toolDefinitionBytesBase64", Base64.getEncoder().encodeToString(bytesFor(connection, original, prefix, resources, batchId, ref.path("toolDefinitionRef"), "managed-tool-definition"))));
+                    "inputBytesBase64", Base64.getEncoder().encodeToString(bytesFor(connection, original, prefix, resources, execution.getExecutionCallId(), batchId, ref.path("inputRef"), "managed-tool-input")),
+                    "toolDefinitionBytesBase64", Base64.getEncoder().encodeToString(bytesFor(connection, original, prefix, resources, execution.getExecutionCallId(), batchId, ref.path("toolDefinitionRef"), "managed-tool-definition"))));
         }
         members.sort(java.util.Comparator.comparingInt(member -> ((Number) ((Map<?, ?>) member.get("reference")).get("ordinal")).intValue()));
         String session = original.request().getIsolationKey();
@@ -240,13 +252,25 @@ final class CsiNativeToolReservation {
         reference(ref.path("inputRef"), "managed-tool-input", ignored -> inputBytes);
         reference(ref.path("toolDefinitionRef"), "managed-tool-definition", ignored -> definitionBytes);
         require(!id(ref.path("inputRef"), "resourceId").equals(id(ref.path("toolDefinitionRef"), "resourceId")));
+        var content = content(original, call, inputBytes, definitionBytes);
+        String digest = "sha256:" + content.digest();
+        require(digest.equals(text(ref, "argsDigest")) && digest.equals(requestDigest));
+        return content.normalized();
+    }
+
+    record Content(ObjectNode normalized, String digest) {
+    }
+
+    static Content content(RuntimeProvisionRequest original, CsiNativeActivationProof.FunctionCall call,
+            byte[] inputBytes, byte[] definitionBytes) {
+        require(inputBytes != null && inputBytes.length <= 64 * 1024
+                && definitionBytes != null && definitionBytes.length <= 64 * 1024);
+        String session = original.getIsolationKey();
         JsonNode wrapper = CsiNativeActivationProof.readObject(inputBytes);
         closed(wrapper, Set.of("harnessSessionId", "runtimeSessionId", "payloadJson"));
         require(session.equals(id(wrapper, "harnessSessionId")) && session.equals(id(wrapper, "runtimeSessionId"))
                 && wrapper.path("payloadJson").isTextual());
         byte[] payloadBytes = utf8(wrapper.path("payloadJson").textValue());
-        String digest = "sha256:" + sha256(payloadBytes);
-        require(digest.equals(text(ref, "argsDigest")) && digest.equals(requestDigest));
         JsonNode payload = CsiNativeActivationProof.readObject(payloadBytes);
         closed(payload, Set.of("toolName", "input"));
         require(call.name().equals(text(payload, "toolName")));
@@ -260,7 +284,7 @@ final class CsiNativeToolReservation {
             }
         }
         require(expected != null && canonical(expected).equals(canonical(definition)));
-        return normalized;
+        return new Content(normalized, sha256(payloadBytes));
     }
 
     private static ObjectNode normalizedInput(String name, JsonNode args) {
@@ -285,7 +309,7 @@ final class CsiNativeToolReservation {
         }
         require(!args.has("replace_all") || args.path("replace_all").isBoolean());
         ObjectNode result = args.deepCopy();
-        result.put("file_path", WorkspaceRelativePath.normalize(JS_TRIM.matcher(args.path("file_path").textValue()).replaceAll("")));
+        result.put("file_path", WorkspaceRelativePath.normalize(trim(args.path("file_path").textValue())));
         return result;
     }
 
@@ -298,11 +322,21 @@ final class CsiNativeToolReservation {
     }
 
     private static byte[] bytesFor(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
-            CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, String batchId, JsonNode ref, String kind)
+            CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, String executionId, String batchId, JsonNode ref, String kind)
             throws SQLException {
         var frozen = prefix.fileHistory() == null ? null : prefix.fileHistory().batches().get(batchId);
         if (frozen == null) {
-            return bytes(resources, ref, kind);
+            var intent = prefix.intents().get(executionId);
+            if (intent == null) {
+                return bytes(resources, ref, kind);
+            }
+            Resource resource = resources.get(id(ref, "resourceId"));
+            require(resource != null && "REFERENCED".equals(resource.state) && "MYSQL_INLINE".equals(resource.storage)
+                    && resource.inlineOnly && id(ref, "resourceId").equals(resource.commandId)
+                    && canonical(ref).equals(canonical(resource.ref)));
+            byte[] associated = JdbcCsiActivationAdmission.resource(connection, original, ref, intent.revision());
+            require(Arrays.equals(resource.bytes, associated));
+            return reference(ref, kind, ignored -> associated);
         }
         require(frozen.invocations().stream().anyMatch(invocation ->
                 canonical(invocation.path("inputRef")).equals(canonical(ref))
@@ -323,6 +357,95 @@ final class CsiNativeToolReservation {
         return reference(ref, text(ref, "kind"), ignored -> resource.bytes);
     }
 
+    private static void qualifyIntent(ToolExecutionRecord execution, CsiNativeActivationProof.ToolIntent intent) {
+        JsonNode ref = JSON.valueToTree(execution.getReference());
+        JsonNode payload = intent.payload();
+        require(execution.getExecutionCallId().equals(id(payload, "executionCallId"))
+                && id(ref, "batchId").equals(id(payload, "batchId"))
+                && number(ref.get("ordinal")) == number(payload.get("ordinal"))
+                && canonical(ref.path("inputRef")).equals(canonical(payload.path("argsRef")))
+                && canonical(ref.path("toolDefinitionRef")).equals(canonical(payload.path("toolDefinitionRef")))
+                && ("sha256:" + intent.inputDigest()).equals(execution.getRequestDigest()));
+    }
+
+    static void requireReady(Connection connection, JdbcCsiFilesRetirementGuard.Original original) throws SQLException {
+        JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
+        RuntimeSessionRecord session = JdbcRuntimeSessionRepository.selectSession(connection,
+                original.request().getScope(), original.request().getIsolationKey(), true);
+        original.requireSession(session);
+        require(session.getState() == RuntimeSessionRecord.State.READY);
+    }
+
+    static void qualifyNativeBatch(CsiNativeActivationProof.Prefix prefix, List<ToolExecutionRecord> executions, boolean checkpoint) {
+        require(prefix.pendingBatch() != null);
+        String batchId = prefix.pendingBatch().messageId();
+        List<ToolExecutionRecord> members = executions.stream().filter(execution ->
+                batchId.equals(id(JSON.valueToTree(execution.getReference()), "batchId"))).toList();
+        require(!members.isEmpty());
+        var frozen = prefix.fileHistory() == null ? null : prefix.fileHistory().batches().get(batchId);
+        Set<String> resourceIds = new HashSet<>();
+        for (ToolExecutionRecord execution : members) {
+            require(execution.getState() == ToolExecutionRecord.State.PREPARED && execution.getDispatchGeneration() == 0
+                    && !execution.isCancelRequested() && execution.getDispatchOwner() == null && execution.getDispatchLeaseUntil() == null
+                    && execution.getResult() == null && execution.getExecutionStatus() == null && execution.getLastSequence() == 0
+                    && execution.getSettledAt() == null && execution.getAbandonedAt() == null && execution.getLossEvidenceId() == null
+                    && execution.getAuthorizedBindingVersion() == null && execution.getAuthorizedDispatchGeneration() == null);
+            JsonNode ref = JSON.valueToTree(execution.getReference());
+            if (frozen == null) {
+                var batch = prefix.batches().get(batchId);
+                require("read_file".equals(batch.batch().calls().get((int) number(ref.get("ordinal"))).name())
+                        && resourceIds.add(id(ref.path("inputRef"), "resourceId"))
+                        && resourceIds.add(id(ref.path("toolDefinitionRef"), "resourceId")));
+            }
+            var intent = prefix.intents().get(execution.getExecutionCallId());
+            if (checkpoint) {
+                require(intent != null);
+            }
+            if (intent != null) {
+                qualifyIntent(execution, intent);
+            }
+        }
+        if (frozen != null) {
+            require(frozen.preparedRef() != null && members.size() == frozen.invocations().size());
+        }
+        long entered = prefix.intents().values().stream().filter(intent -> batchId.equals(id(intent.payload(), "batchId"))).count();
+        require(entered <= members.size() && (!checkpoint || entered == members.size()));
+    }
+
+    static void preflightNative(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            CsiNativeActivationProof.Prefix previous, CsiNativeActivationProof.Prefix next,
+            Map<String, Resource> resources, String operation) throws SQLException {
+        requireReady(connection, original);
+        List<ToolExecutionRecord> executions = complete(connection, original, previous, resources);
+        qualifyNativeBatch(next, executions, "commitCheckpoint".equals(operation));
+        if ("toolIntent".equals(operation)) {
+            var added = next.intents().entrySet().stream().filter(entry -> !previous.intents().containsKey(entry.getKey())).toList();
+            require(added.size() == 1);
+            var intent = added.getFirst().getValue();
+            var execution = executions.stream().filter(member -> added.getFirst().getKey().equals(member.getExecutionCallId()))
+                    .findFirst().orElseThrow(CsiNativeToolReservation::invalid);
+            qualifyIntent(execution, intent);
+            String batchId = id(intent.payload(), "batchId");
+            if (previous.fileHistory() == null || !previous.fileHistory().batches().containsKey(batchId)) {
+                for (String field : List.of("argsRef", "toolDefinitionRef")) {
+                    JsonNode ref = intent.payload().path(field);
+                    bytes(resources, ref, text(ref, "kind"));
+                    promote(connection, original, ref);
+                }
+            }
+        }
+    }
+
+    private static void promote(Connection connection, JdbcCsiFilesRetirementGuard.Original original, JsonNode ref) throws SQLException {
+        try (PreparedStatement statement = statement(connection,
+                "UPDATE qwen_managed_session_resource SET state = 'REFERENCED'"
+                        + " WHERE session_scope_key = ? AND resource_id = ? AND state = 'PUBLISHED'")) {
+            statement.setString(1, scope(original));
+            statement.setString(2, id(ref, "resourceId"));
+            require(statement.executeUpdate() == 1);
+        }
+    }
+
     static void preflightHistory(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             CsiNativeActivationProof.Prefix previous, CsiNativeActivationProof.Prefix next, Map<String, Resource> resources)
             throws SQLException {
@@ -334,7 +457,20 @@ final class CsiNativeToolReservation {
         List<ToolExecutionRecord> executions = complete(connection, original, previous, resources);
         JsonNode preparation = next.fileHistory().body().path("preparation");
         if (preparation.isNull()) {
-            require(executions.isEmpty());
+            if (previous.fileHistory() == null) {
+                require(executions.isEmpty());
+            } else {
+                String batchId = id(previous.fileHistory().body().path("preparation"), "batchId");
+                var intended = previous.fileHistory().batches().get(batchId);
+                require(intended != null && intended.preparedRef() != null);
+                List<ToolExecutionRecord> members = executions.stream().filter(execution ->
+                        batchId.equals(execution.getReference().get("batchId"))).toList();
+                require(members.size() == intended.invocations().size());
+                for (var member : members) {
+                    require(member.getState() == ToolExecutionRecord.State.SETTLED && !member.isCancelRequested()
+                            && member.getResult() != null && previous.receipts().containsKey(member.getExecutionCallId()));
+                }
+            }
             return;
         }
         String batchId = id(preparation, "batchId");

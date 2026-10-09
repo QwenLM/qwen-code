@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.CsiFileHistoryProtocol;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeReadbackProtocol;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiActivationAdmission;
+import com.alibaba.qwen.code.runtimebroker.JdbcCsiExecutionAdmission;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
@@ -39,7 +40,7 @@ import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-/** Original private Session readback and context installation; no native execution grant. */
+/** Original private Session context, readback and qualified finite file execution. */
 public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, RuntimeTransport {
     private static final ObjectMapper JSON = new ObjectMapper().enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
     private final JdbcTemplate jdbc;
@@ -253,9 +254,9 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
                 }
             }
             head.requireCurrentTime(original);
-            if (!"bind".equals(action) && !"prepare".equals(action)) {
-                throw new RuntimeBrokerException(501, "csi_native_execution_unavailable",
-                        "Original native execution grants are not connected.", false);
+            if ("execute".equals(action)) {
+                evidence = JdbcCsiExecutionAdmission.readExecution(original, guard, head,
+                        (String) requestBody.get("subject"), expected);
             }
             var response = new LinkedHashMap<>(expected);
             response.remove("subject");
@@ -328,6 +329,41 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
     public CompletionStage<Map<String, Object>> execute(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> reference) {
         return CompletableFuture.failedFuture(unavailable());
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> execute(RuntimeLease lease, RuntimeSession session,
+            Map<String, Object> reference, Map<String, Object> payload) {
+        try {
+            if (reference == null || !(reference.get("executionCallId") instanceof String executionId)
+                    || payload == null || !("read_file".equals(payload.get("toolName"))
+                            || "write_file".equals(payload.get("toolName")) || "edit".equals(payload.get("toolName")))) {
+                throw unavailable();
+            }
+            Admission before = admission(lease, session, false);
+            var binding = before.binding();
+            var boot = WorkspaceCsiRuntimeIdentity.boot(binding);
+            var request = CsiNativeReadbackProtocol.executeRequest(boot, binding.getRequest(), before.context(), executionId);
+            var nativeRead = readNative(lease.getToken(), request);
+            var evidence = (Map<?, ?>) nativeRead.get("evidence");
+            var expectedRef = new LinkedHashMap<>(WorkspaceCsiRuntimeIdentity.map(evidence.get("executionReference")));
+            expectedRef.put("executionCallId", executionId);
+            if (!jsonSame(reference, expectedRef)) {
+                throw unavailable();
+            }
+            return delegate.csiFileExecute(lease, binding.getRequest(), binding.getProvisionSeed(), boot,
+                    before.context(), executionId).thenApply(result -> {
+                        Admission after = admission(lease, session, false);
+                        if (binding.getVersion() != after.binding().getVersion()
+                                || !binding.getResourceHandle().equals(after.binding().getResourceHandle())
+                                || !before.context().equals(after.context())) {
+                            throw unavailable();
+                        }
+                        return result;
+                    });
+        } catch (RuntimeException failure) {
+            return CompletableFuture.failedFuture(failure);
+        }
     }
 
     @Override

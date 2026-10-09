@@ -455,13 +455,15 @@ export function registerHostedCsiSessionRoutes(
             text,
             abort,
             historyMode: 'settled',
-            createToolTurn: (_harness, commit) =>
+            createToolTurn: (harness, commit, messageFitsInline) =>
               new HostedCsiToolTurn(
                 managed,
                 broker,
                 owner.admission!,
                 promptId,
                 commit,
+                harness,
+                messageFitsInline,
               ),
           });
         } catch (cause) {

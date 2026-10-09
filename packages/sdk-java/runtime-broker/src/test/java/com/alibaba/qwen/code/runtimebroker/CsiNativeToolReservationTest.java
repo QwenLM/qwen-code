@@ -128,7 +128,7 @@ class CsiNativeToolReservationTest {
         var batches = new HashMap<>(first.batches());
         batches.putAll(next.batches());
         var combined = new CsiNativeActivationProof.Prefix(next.input(), next.checkpoint(), next.lastMessageId(),
-                next.attempt(), next.assistantCommitted(), next.stream(), next.usedIds(), next.pendingBatch(), batches, next.fileHistory());
+                next.attempt(), next.assistantCommitted(), next.stream(), next.usedIds(), next.pendingBatch(), batches, next.fileHistory(), Map.of(), Map.of(), next.nextDeltaOrdinal());
         var current = tuple(combined, 0);
         assertEquals(prior.execution().getReference().get("functionCallId"), current.execution().getReference().get("functionCallId"));
         assertDoesNotThrow(() -> CsiNativeToolReservation.qualifyRelated(original, combined,
@@ -169,7 +169,7 @@ class CsiNativeToolReservationTest {
             var batches = new HashMap<>(first.batches());
             batches.putAll(next.batches());
             var combined = new CsiNativeActivationProof.Prefix(next.input(), null, next.lastMessageId(), null,
-                    false, null, Set.of(), next.pendingBatch(), batches, next.fileHistory());
+                    false, null, Set.of(), next.pendingBatch(), batches, next.fileHistory(), Map.of(), Map.of(), next.nextDeltaOrdinal());
             for (int index = 0; index < 3; index++) {
                 prepare(connection, combined, tuple(combined, index));
             }
@@ -291,6 +291,93 @@ class CsiNativeToolReservationTest {
         }
     }
 
+    @Test
+    void readonlyIntentPromotesOnlyEnteredResourcesAndKeepsExactRetryWithoutLateAllocation() throws Exception {
+        var parts = capturedParts();
+        ((ObjectNode) parts.get(3).path("functionCall")).put("name", "read_file")
+                .set("args", parts.get(2).path("functionCall").path("args"));
+        var prefix = prefix(parts);
+        var first = tuple(prefix, 0);
+        var second = tuple(prefix, 1);
+        try (Connection connection = connection()) {
+            originalSession(connection);
+            prepare(connection, prefix, first);
+            prepare(connection, prefix, second);
+            var entered = entered(prefix, first, 99, 20);
+            CsiNativeToolReservation.preflightNative(connection, original, prefix, entered,
+                    CsiNativeToolReservation.inventory(connection, original), "toolIntent");
+            assertEquals(2, published(connection));
+            associationTables(connection);
+            var inventory = CsiNativeToolReservation.inventory(connection, original);
+            assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, entered, inventory));
+            try (var statement = connection.createStatement()) {
+                statement.executeUpdate("INSERT INTO qwen_managed_session_resource_ref SELECT session_scope_key, tenant_id, workspace_id, session_id, resource_id, 99 FROM qwen_managed_session_resource WHERE state = 'REFERENCED'");
+            }
+            assertEquals(2, CsiNativeToolReservation.complete(connection, original, entered, inventory).size());
+            assertEquals(first.execution().getExecutionCallId(), CsiNativeToolReservation.prepare(connection, original,
+                    entered, inventory, first.execution(), first.input(), first.definition()).getExecutionCallId());
+            assertThrows(RuntimeException.class, () -> prepare(connection, entered, tuple(entered, 2)));
+            var all = CsiNativeToolReservation.complete(connection, original, entered, inventory);
+            assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.qualifyNativeBatch(entered, all, true));
+            try (var statement = connection.createStatement()) {
+                statement.executeUpdate("UPDATE qwen_managed_session_resource_ref SET journal_revision = 100");
+            }
+            assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, entered, inventory));
+        }
+    }
+
+    @Test
+    void readonlyFreezeRefusesSharedResourcesOrMixedMutationBeforeAnyPromotion() throws Exception {
+        var parts = capturedParts();
+        ((ObjectNode) parts.get(3).path("functionCall")).put("name", "read_file")
+                .set("args", parts.get(2).path("functionCall").path("args"));
+        var prefix = prefix(parts);
+        var first = tuple(prefix, 0);
+        var second = tuple(prefix, 1);
+        Map<String, Object> shared = new HashMap<>(second.execution().getReference());
+        for (String field : List.of("inputRef", "toolDefinitionRef", "argsDigest")) {
+            shared.put(field, first.execution().getReference().get(field));
+        }
+        var reused = new Tuple(copy(second.execution(), shared), first.input(), first.definition());
+        try (Connection connection = connection()) {
+            originalSession(connection);
+            prepare(connection, prefix, first);
+            prepare(connection, prefix, reused);
+            var entered = entered(prefix, first, 99, 20);
+            assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.preflightNative(connection, original,
+                    prefix, entered, CsiNativeToolReservation.inventory(connection, original), "toolIntent"));
+            assertEquals(2, published(connection));
+        }
+        var mixed = prefix(capturedParts());
+        var read = tuple(mixed, 0);
+        var write = tuple(mixed, 1);
+        try (Connection connection = connection()) {
+            originalSession(connection);
+            prepare(connection, mixed, read);
+            prepare(connection, mixed, write);
+            var entered = entered(mixed, read, 99, 20);
+            assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.preflightNative(connection, original,
+                    mixed, entered, CsiNativeToolReservation.inventory(connection, original), "toolIntent"));
+            assertEquals(4, published(connection));
+        }
+    }
+
+    private static CsiNativeActivationProof.Prefix entered(CsiNativeActivationProof.Prefix prefix, Tuple tuple,
+            long revision, long sequence) {
+        JsonNode ref = JSON.valueToTree(tuple.execution().getReference());
+        ObjectNode payload = JSON.createObjectNode().put("executionCallId", tuple.execution().getExecutionCallId())
+                .put("batchId", ref.path("batchId").textValue()).put("ordinal", ref.path("ordinal").longValue())
+                .put("outcomeSource", "runtime");
+        payload.set("argsRef", ref.path("inputRef"));
+        payload.set("toolDefinitionRef", ref.path("toolDefinitionRef"));
+        var intents = new HashMap<>(prefix.intents());
+        intents.put(tuple.execution().getExecutionCallId(), new CsiNativeActivationProof.ToolIntent(payload, revision, sequence,
+                tuple.execution().getRequestDigest().substring(7)));
+        return new CsiNativeActivationProof.Prefix(prefix.input(), prefix.checkpoint(), prefix.lastMessageId(), prefix.attempt(),
+                prefix.assistantCommitted(), prefix.stream(), prefix.usedIds(), prefix.pendingBatch(), prefix.batches(),
+                prefix.fileHistory(), intents, prefix.receipts(), prefix.nextDeltaOrdinal());
+    }
+
     private void originalSession(Connection connection) throws Exception {
         JdbcRuntimeSessionRepository.insertSession(connection, new RuntimeSessionRecord(
                 new RuntimeSession(SESSION, SESSION, "bootstrap", request.getScope()), "binding", 1,
@@ -317,10 +404,10 @@ class CsiNativeToolReservationTest {
         }
         JsonNode ref = JSON.valueToTree(ref("managed-file_history", "{}".getBytes(StandardCharsets.UTF_8)));
         var batch = new CsiNativeActivationProof.FrozenBatch(ref, null,
-                new ArrayList<>(JSON.convertValue(invocations, new com.fasterxml.jackson.core.type.TypeReference<List<JsonNode>>() {})), 15);
+                new ArrayList<>(JSON.convertValue(invocations, new com.fasterxml.jackson.core.type.TypeReference<List<JsonNode>>() {})), 15, 0);
         return new CsiNativeActivationProof.Prefix(prefix.input(), prefix.checkpoint(), prefix.lastMessageId(), prefix.attempt(),
                 prefix.assistantCommitted(), prefix.stream(), prefix.usedIds(), prefix.pendingBatch(), prefix.batches(),
-                new CsiNativeActivationProof.FileHistory(ref, JSON.createObjectNode().set("preparation", preparation), Map.of(BATCH, batch)));
+                new CsiNativeActivationProof.FileHistory(ref, JSON.createObjectNode().set("preparation", preparation), Map.of(BATCH, batch)), Map.of(), Map.of(), prefix.nextDeltaOrdinal());
     }
 
     private static void associationTables(Connection connection) throws Exception {
@@ -379,7 +466,7 @@ class CsiNativeToolReservationTest {
         var batch = new CsiNativeActivationProof.PendingBatch(batchId, JSON.createObjectNode(), calls);
         return new CsiNativeActivationProof.Prefix(new CsiNativeActivationProof.Input(prompt, "unit", "user", true),
                 null, batchId, null, false, null, Set.of(), batch,
-                Map.of(batchId, new CsiNativeActivationProof.OriginalBatch(prompt, batch)), null);
+                Map.of(batchId, new CsiNativeActivationProof.OriginalBatch(prompt, batch)), null, Map.of(), Map.of(), 0);
     }
 
     private static Tuple tuple(CsiNativeActivationProof.Prefix prefix, int ordinal) throws Exception {

@@ -79,6 +79,7 @@ export async function composeManagedCsiFiles(options: {
           directory,
           workspaceRoot: directory,
           retainedFileHistory: storage,
+          fileHistory: history,
           admitsDirectory: (candidate) => candidate === directory,
           isActive: () =>
             !closed &&

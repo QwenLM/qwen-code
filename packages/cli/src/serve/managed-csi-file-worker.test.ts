@@ -5,6 +5,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { Server } from 'node:http';
 import os from 'node:os';
@@ -451,6 +452,210 @@ describe('boot5 history HTTP ownership with labelled readback/composer seams', (
       >);
     return { observe, historyPrepare, close, compose };
   }
+
+  it('uses fresh original Read input on the private execute route with labelled authority/executor seams', async () => {
+    mockMountFixture();
+    retainedHistory(csiHistoryPreparationFixture());
+    const sample = structuredClone(nativeFixture.valid[3]);
+    const payloadJson = JSON.stringify({
+      toolName: 'read_file',
+      input: { file_path: 'note.txt', offset: 0 },
+    });
+    const bytes = Buffer.from(
+      JSON.stringify({
+        harnessSessionId: candidate.identity.sessionId,
+        runtimeSessionId: candidate.identity.sessionId,
+        payloadJson,
+      }),
+    );
+    const evidence = sample.response.evidence;
+    evidence.executionReference.argsDigest = `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`;
+    evidence.executionReference.inputRef.byteLength = bytes.length;
+    evidence.executionReference.inputRef.digest = createHash('sha256')
+      .update(bytes)
+      .digest('hex');
+    evidence.grant.executionReference = structuredClone(
+      evidence.executionReference,
+    );
+    evidence.resources[0] = {
+      reference: evidence.executionReference.inputRef,
+      bytesBase64: bytes.toString('base64'),
+    };
+    const native = vi
+      .spyOn(nativeReadback, 'readCurrentCsiNative')
+      .mockResolvedValueOnce(nativeFixture.valid[0].response)
+      .mockResolvedValueOnce(sample.response)
+      .mockRejectedValue(new Error('Original authorization changed'));
+    const result = {
+      executionStatus: 'success' as const,
+      responseParts: [{ text: 'owned Read result' }],
+    };
+    const execute = vi
+      .spyOn(ManagedToolExecutor.prototype, 'execute')
+      .mockResolvedValue(result);
+    await start();
+    expect((await history('bind')).status).toBe(200);
+    const response = await send('execute', sample.request);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ...sample.request,
+      state: 'settled',
+      result,
+    });
+    const reference = sample.response.evidence.executionReference;
+    const wrapper = JSON.parse(
+      Buffer.from(
+        sample.response.evidence.resources[0].bytesBase64,
+        'base64',
+      ).toString(),
+    );
+    expect(execute).toHaveBeenCalledExactlyOnceWith(
+      {
+        sessionId: reference.sessionId,
+        promptId: reference.promptId,
+        callId: reference.callId,
+        argsDigest: reference.argsDigest,
+      },
+      'read_file',
+      JSON.parse(wrapper.payloadJson).input,
+    );
+    expect((await send('execute', sample.request)).status).toBe(409);
+    expect(native).toHaveBeenLastCalledWith(
+      candidate,
+      installed,
+      'execute',
+      sample.request.subject,
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['write_file', 'edit'])(
+    'requires the cached original preparation for %s and keeps it after earlier file changes with labelled seams',
+    async (toolName) => {
+      mockMountFixture();
+      const preparation = csiHistoryPreparationFixture();
+      const retained = retainedHistory(preparation);
+      const index = toolName === 'write_file' ? 1 : 2;
+      const references = preparation.response.evidence['members'] as Array<
+        Record<string, unknown>
+      >;
+      const reference = references[index];
+      const preparedBody = {
+        schemaVersion: 2,
+        profile: candidate.identity.profile,
+        runtimeSessionId: candidate.identity.sessionId,
+        ...preparation.observation,
+        preparation: {
+          ...preparation.preparation,
+          stage: 'prepared',
+          intentRef: preparation.intentRef,
+        },
+      };
+      const bytes = Buffer.from(JSON.stringify(preparedBody));
+      const preparedRef = {
+        resourceId: randomUUID(),
+        kind: 'managed-file_history',
+        schemaVersion: 1,
+        byteLength: bytes.length,
+        digest: createHash('sha256').update(bytes).digest('hex'),
+      };
+      const request = {
+        ...nativeFixture.valid[3].request,
+        subject: preparation.preparation.invocations[index].executionCallId,
+      };
+      const response = {
+        ...nativeFixture.valid[3].response,
+        subject: request.subject,
+        evidence: {
+          ...nativeFixture.valid[3].response.evidence,
+          executionReference: reference,
+          preparedRef,
+          resources: [
+            ...(
+              preparation.response.evidence['resources'] as Array<{
+                reference: { resourceId: string };
+                bytesBase64: string;
+              }>
+            ).filter((resource) =>
+              [
+                preparation.preparation.invocations[index].inputRef.resourceId,
+                preparation.preparation.invocations[index].toolDefinitionRef
+                  .resourceId,
+              ].includes(resource.reference.resourceId),
+            ),
+            { reference: preparedRef, bytesBase64: bytes.toString('base64') },
+          ],
+        },
+      };
+      vi.spyOn(nativeReadback, 'readCurrentCsiNative').mockImplementation(
+        async (_boot, _installed, action) =>
+          (action === 'bind'
+            ? nativeFixture.valid[0].response
+            : action === 'prepare'
+              ? preparation.response
+              : response) as unknown as Awaited<
+            ReturnType<typeof nativeReadback.readCurrentCsiNative>
+          >,
+      );
+      const execute = vi
+        .spyOn(ManagedToolExecutor.prototype, 'execute')
+        .mockResolvedValue({
+          executionStatus: 'success',
+          responseParts: [{ text: 'owned result' }],
+        });
+      await start();
+      expect((await history('bind')).status).toBe(200);
+      expect((await send('execute', request)).status).toBe(409);
+      expect(execute).not.toHaveBeenCalled();
+      expect((await prepare(preparation.intentRef)).status).toBe(200);
+      retained.observe.mockRejectedValue(
+        new Error('Later working files already changed'),
+      );
+      expect((await send('execute', request)).status).toBe(200);
+      expect(execute).toHaveBeenCalledExactlyOnceWith(
+        {
+          sessionId: reference['sessionId'],
+          promptId: reference['promptId'],
+          callId: reference['callId'],
+          argsDigest: reference['argsDigest'],
+        },
+        toolName,
+        toolName === 'write_file'
+          ? { file_path: 'new.txt', content: 'new bytes' }
+          : { file_path: 'existing.txt', old_string: 'a', new_string: 'b' },
+      );
+    },
+  );
+
+  it('seals during fresh execution readback and joins it before closing without starting I/O', async () => {
+    mockMountFixture();
+    const retained = retainedHistory(csiHistoryPreparationFixture());
+    const sample = nativeFixture.valid[3];
+    let resume!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const native = vi
+      .spyOn(nativeReadback, 'readCurrentCsiNative')
+      .mockResolvedValueOnce(nativeFixture.valid[0].response)
+      .mockImplementation(async () => {
+        await paused;
+        return sample.response;
+      });
+    const execute = vi.spyOn(ManagedToolExecutor.prototype, 'execute');
+    await start();
+    expect((await history('bind')).status).toBe(200);
+    const request = send('execute', sample.request).catch(() => undefined);
+    await vi.waitFor(() => expect(native).toHaveBeenCalledTimes(2));
+    const closing = worker!.close();
+    expect(retained.close).not.toHaveBeenCalled();
+    resume();
+    await closing;
+    await request;
+    worker = undefined;
+    expect(execute).not.toHaveBeenCalled();
+    expect(retained.close).toHaveBeenCalledTimes(1);
+  });
 
   it('joins the original prepare promise and derives mutation paths from fresh native evidence', async () => {
     mockMountFixture();

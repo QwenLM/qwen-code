@@ -10,11 +10,15 @@ boot-5/handle-3 authority propagation dependency has passed bounded software
 verification. The current candidate connects lease-authenticated bind/prepare
 readback, native schema-2 initial/intent/prepared acceptance, exact original
 resource promotion and association, retained worker preparation, and the private
-Hosted caller. Focused tests cover these components. On 2026-10-09 an independent bounded
-software run connected the actual producer through durable prepared, under the
-explicit seams in section 7.1; platform and full K2 acceptance remain open. Original native tool intents/checkpoints, execution grants,
-execution and completion remain closed. Explicit Broker dispatch and JDBC
-authorization refusals preserve that boundary.
+Hosted caller. Independent bounded software runs observed actual preparation and
+then the complete Read positive chain, including two original SETTLED/success
+results, a second actual model call, consumption and turn settlement. A fresh
+mixed Read/Write/Edit run also observed actual file effects, retained preimages,
+result-history closure, second-model consumption and turn settlement. Exact
+dispatch replay did not repeat I/O and changed payloads were refused. Remaining
+failure groups, platform, cold recovery, physical retirement, public selection and
+full K2 acceptance remain open; software fixture evidence cannot qualify those
+gates.
 It refines the remaining connected composition in the [native file execution design](2026-10-07-k2-native-file-execution.md)
 and [original batch reservation design](2026-10-08-k2-native-batch-reservation.md).
 The full K2 objective, proposal #12380 and tracker #13395 remain open.
@@ -22,14 +26,17 @@ The full K2 objective, proposal #12380 and tracker #13395 remain open.
 ## 1. Current gap and required result
 
 The submitted baseline private Hosted caller stops after the complete original
-assistant and accepted Read/Write/Edit allocations. The current candidate adds
+assistant and accepted Read/Write/Edit allocations. The preceding preparation increment adds
 initial history before input, complete intent and original resource promotion,
 worker preparation and durable prepared history. It then stops with recovery
 required. Native fresh acceptance and historical replay share the history
 validator; same-Connection preflight qualifies the entire transition before
 `commitResources`, and final acceptance verifies original associations. Boot 5
 adds a retained composer/history route; boot 4 stays construction-only. Tool
-intents, execution grants, executor and result-consumption callers remain absent.
+intents, execution grants, executor and result-consumption callers are connected
+in the current candidate. Read and mixed Read/Write/Edit positive chains are
+observed; remaining refusal groups, cold recovery and retirement consumers remain
+open.
 
 Connect one original chain: READY Session and installed context → retained empty
 history bind → native schema-2 intent with the entire accepted batch → worker
@@ -142,8 +149,9 @@ prepared rule and all repeated fields must agree with the response and original
 qualified authorization. Persist this exact joined authorization evidence when
 authorizing dispatch; an existing two-column dispatch-generation/binding-version
 marker alone is insufficient. Shared Java/CLI codecs now implement this wire
-shape; immutable grant persistence, execute admission and the worker execution
-consumer remain unimplemented. Generic Tool-v3 grants do not provide this proof.
+shape. The current candidate also connects immutable grant persistence, native
+execute admission and the retained worker execution consumer as described in
+sections 6.5–6.7. Generic Tool-v3 grants do not provide this proof.
 
 Each resource entry has exactly `reference` and `bytesBase64`. References use
 existing closed resource metadata. A resource appears once, all listed resources
@@ -372,8 +380,9 @@ unchanged, including when an already tracked path needs no new preimage. Current
 file fingerprints may change only through the qualified execution/completion
 chain; preparation cannot invent those effects.
 
-The preparation delivery stops with a durable prepared blocker. Read-only
-batches remain closed until full intent/checkpoint/grant admission exists.
+The preceding preparation-only delivery stopped with a durable prepared blocker.
+Its dispatch refusal boundary is recorded below; sections 6.5–6.7 describe the
+current candidate that connects full intent/checkpoint/grant admission.
 Explicitly refuse private dispatch authorization/start/execute in both public
 Broker entry paths and the JDBC mutation boundary while that grant is absent.
 At the investigated baseline, `authorizeDispatch` checked original
@@ -445,13 +454,261 @@ producer's `max(request.ordinal, nextOrdinal)`, preserving refusal gaps. A
 cancelled, not-started, UNKNOWN or terminal member cannot be filtered out to
 make the successful set smaller.
 
-This is the next native integration design, not implemented membership or
-execution evidence. Implement native intent/checkpoint validation and
-same-Connection preflight before immutable authorization; then connect the
+The current candidate implements this intent/checkpoint validation and
+same-Connection preflight before immutable authorization, then connects the
 finite worker executor, original outcomes, result messages, results-ready and
-consumption. The eleven-field continuation, cold recovery and retirement gates
-remain required. Public selectors remain closed; the design uses standard
+consumption. Bounded Read and mixed-batch evidence is described below; remaining
+failure qualification, cold recovery and retirement gates remain required. Public selectors remain closed; the design uses standard
 Kubernetes and CSI and does not require Alibaba ACK.
+
+### 6.5 Native intent and complete dispatch checkpoint delivery
+
+Status: implemented as a prerequisite of the bounded Read and mixed-batch
+verification in sections 6.6–6.7. Native intent and `await_runtime` qualify the
+original grant and finite worker execution; cold recovery and retirement remain
+closed.
+
+Pass the existing live Harness supplied to the private Hosted callback into the
+tool turn. After the complete original reservation readback and, for a mutating
+batch, schema-2 prepared history, append one original `tool.intent` per accepted
+member in local ordinal order. Use the original execution ID, assistant UUID
+batch, input and advertised declaration references. The authority command and
+event ID are `tool-intent:${executionCallId}`; its content digest is the input
+resource digest. The closed payload contains only `executionCallId`, `batchId`,
+`ordinal`, `toolDefinitionRef`, `argsRef` and `outcomeSource: runtime`.
+
+Derive each intent's actual revision and sequence during native replay. Pass the
+original previous revision into fresh acceptance and `rowRevision - 1` into
+replay; do not infer revisions from sequences. Keep the derived event payload
+and qualified input digest in Prefix, without persisting a membership copy.
+Pure validation matches the original assistant call at its local ordinal and
+raw input/declaration bytes. It must not fabricate the SQL call UUID or an
+eleven-field reference; those joins belong to the same-Connection SQL preflight.
+
+Before resource association, lock the complete inventory, fixed READY Session
+and all related execution rows in every state. Qualify the entire current batch
+before its first intent. New allocation is refused once any original intent
+exists; an exact original allocation retry remains valid. A mutating batch must
+already have original prepared history and continues reading input/declaration
+bytes through its original history association. For a read-only batch, only the
+entered member's two resources are promoted and associated with its actual
+intent revision. Unentered members remain PUBLISHED. The reservation API
+previously allowed shared member resources, although the actual Hosted producer
+publishes separate IDs; reject any cross-member sharing for a read-only batch
+before its first promotion. Never broaden generic resource acceptance.
+
+Submit one complete batch with the actual `commitAwaitRuntimeBatch` producer.
+Binding `attemptId` and `modelMessageId` use the original assistant UUID;
+`invocationBindingId` uses the execution ID, `routeRef` the original input ref,
+and `inputDigest` the original request digest without `sha256:`. Use the existing
+private capability digest and `csi-files-retirement-policy/1`; media version and
+progress cursor stay null. No empty batch or fabricated checkpoint is accepted.
+
+Validate the complete nine-group checkpoint against the original previous
+state and actual Harness algorithm. Identity updates checkpoint, predecessor,
+covered sequence, activation and prompt/turn only. Resume changes only
+`throughSequence`, preserving even the initial null `fileHistoryRef`; output
+and followUp are unchanged. Continuation is `await_runtime`, approval null.
+Preserve the previous attempt or use the first pending assistant UUID/input ref
+fallback. Preserve all previous items/bindings and append the full current set.
+The first `tools.batchId` is `batch-${first functionCallId}`, distinct from the
+assistant UUID. Derive cumulative ordinals with `max(request.ordinal,
+nextOrdinal)` and preserve local refusal gaps. New items are in_progress with
+null outcomes and consumed=false; new bindings are dispatch with null cursors.
+The SQL current membership, unique original intents and newly added checkpoint
+items must be equal; cancelled/UNKNOWN/terminal rows cannot be omitted.
+
+Identical-command retry replays the original journal and rechecks complete
+current SQL/resource qualification before returning its original receipt.
+Resource promotion, reference associations, journal transaction and head commit
+remain atomic on the same Connection. Database writer/activation time is
+rechecked after blocking locks. Private dispatch/execute/outcome/result consumers
+are connected below; cold-recovery and retirement gates remain closed.
+
+Acceptance for this delivery requires a fresh actual Hosted-to-original-store
+run reaching complete native intent/checkpoint, original raw SQL/resource and
+journal evidence, exact retries and transactional refusal/rollback cases,
+ordinary Read regression and owned cleanup. H2 and Darwin seams remain bounded
+software evidence; real MySQL lock competition, Linux CSI and target-cluster
+qualification remain separate open requirements.
+
+### 6.6 First acceptance: actual Read execution and consumption
+
+Status: the bounded software Read positive chain is observed. The original
+producer completed both Reads, immutable grants and SETTLED/success SQL,
+outcomes/receipts/tool messages, a second actual model call, consumed results
+and turn settlement. The later mixed run and bounded negative groups in section
+7.2 add exact dispatch retry and refusal evidence; remaining failure coverage,
+complete K2 and new cloud qualification remain open. The native intent/checkpoint
+work above is an internal prerequisite. The first acceptance
+point is one actual Hosted Read completing authorization, finite worker I/O,
+original SQL settlement, immutable outcome/receipt, tool-result message,
+results-ready, subsequent model continuation, consumption and turn settlement.
+Write/Edit and cold recovery follow this connected path; physical retirement and
+public selectors retain their existing gates.
+
+Both production schema paths must create the original execution authorization
+column: the standalone Broker schema and Agent Server's Flyway migration.
+The first candidate exposed a missing Agent migration before dispatch; V55 adds
+the nullable column without granting or changing any existing execution.
+
+Persist one immutable native authorization JSON on the original ToolExecution
+row in the same transaction that writes the original authorization markers.
+Derive it from the replayed native intent, complete original dispatch checkpoint,
+full SQL membership and immutable input/declaration bytes, fixed READY Runtime
+Session, original binding/version and installed context. Pin the original
+checkpoint's journal position, including when later partial results advance the
+head. Never derive a retry grant from the new head. The first verified Read path
+used an entirely read-only batch. Mixed mutating batches require the fixed
+original prepared-history execution consumer in section 6.7.
+
+The worker's private execute request supplies only the original execution ID
+and expected installed identity. A fresh authenticated native readback returns
+the persisted grant and original resource bytes. Before finite executor use,
+recheck the local seal and bound composition, compare the original input digest,
+and join identical executions in the retained executor. Track the operation
+before its first await and retain results; ordinary ACK and Session release
+cannot clear them. Refusal, lost transport or oversized output leaves an
+unsettled blocker, never a fabricated result or replacement invocation.
+
+The replayed text stream follows the existing Hosted producer. Assistant message
+commit clears the current message identity but preserves the ordinal across
+model rounds. A visible retraction resets it; a retry before the new message's
+first delta can also reset it without emitting a durable retraction. A new
+message therefore accepts either zero or the carried original ordinal; later
+deltas of that same message must increment strictly. Command/event equality,
+message identity, content digest and the final accumulated text remain exact.
+The counter is derived in the original replay, not persisted in a new ledger.
+
+The actual Hosted producer records the complete raw inline Runtime result and
+its model response in one immutable outcome. SQL acceptance joins the original
+SETTLED row and persisted grant on the same Connection. The native receipt then
+precedes the exact original tool-result message and actual Harness results
+checkpoint. The checkpoint preserves every other group and older item; only the
+qualified member and binding settle. All results must be committed before the
+next model attempt starts. Results become consumed only after that subsequent
+attempt completes, matching the actual Hosted producer order. A SQL SETTLED row
+alone cannot authorize consumption or turn settlement.
+
+Validation reuses the established baseline and concentrates on this new Read
+behavior, exact identities/raw results, necessary refused joins and ordinary
+local regression. H2, deterministic model input and Darwin mount seams must be
+reported as software coverage, not MySQL/Linux CSI or cloud K2 acceptance.
+
+### 6.7 Write/Edit execution and closing prepared history
+
+Status: connected implementation with bounded actual mixed-batch software
+verification. The original Main-owned transport initially retained a Read-only
+guard and refused Write before worker I/O; that exact consumer was corrected.
+The fresh run observed original SQL SETTLED/success for Read, Write and Edit,
+result-history closure, second-model consumption and turn settlement. Its exact
+start replay reused the original result without I/O, and changed payloads were
+refused. Section 7.2 records five bounded negative groups, including prepared-byte
+corruption, a post-history observation failure and real logical seals. Lost
+responses and broader failure coverage remain unqualified. The bounded Read positive continuation passed before
+enabling this consumer. An accepted mixed batch must preserve
+all original Read/Write/Edit members, including ordinal gaps caused by local
+refusals; mutation support cannot omit the Read members or allocate replacements.
+
+The immutable authorization pins the original frozen prepared-history reference
+for a mutating batch. Replay derives the prepared event sequence and its unique
+original commit revision; resource qualification uses that revision, not the
+later tool-intent, dispatch or current-head revision. Each input/declaration
+retains its own original association. The grant and exact execution reference
+keep the same prepared reference after later members change working files.
+No second authorization/history ledger is introduced.
+
+Preparation and execution must use the same retained ManagedRuntimeFileHistory
+instance in the bound worker composition. A worker with retained storage but
+without that history instance must refuse before invoke. Before the first I/O,
+join the immutable prepared body and original cached preparation observation,
+then let the existing history execution path check preimages and serialize
+mutations. Do not compare each later member against a fresh whole-workspace
+observation of the old preimages: the first legitimate mutation changes those
+files. Exact repeated executions join the retained executor and cannot apply
+the write or edit twice. Lost response or failed post-execution history remains
+UNKNOWN/unsettled until the original result is established.
+
+After every original receipt and tool-result message commits and the actual
+Harness reaches results_ready, Hosted obtains the result history snapshot and
+commits `csi-file-history:result:${batchId}` before the second model attempt.
+The result projection's parent is the last original tool-result UUID.
+Its preparation becomes null, while backup directory, retained backups,
+snapshot identity and file-key set remain fixed. Only fingerprints for paths
+in the original prepared mutation plan may change. Same-Connection admission
+joins the complete original SQL membership, persisted grants, raw results,
+receipts, messages and results-ready checkpoint; initial history and result
+history are distinct transitions. An unclosed preparation blocks the next
+model attempt.
+
+Acceptance requires actual Write and Edit effects and original preimages,
+complete mixed-batch consumption, result-history closure, a second real model
+request containing the original results and a settled turn. Repeated dispatch
+must not repeat I/O. Changed prepared bytes, omitted members, response loss,
+post-history failure and seals before prepare/dispatch must remain blockers.
+Neither helper fixtures nor a manually inserted idle snapshot qualify this gate.
+
+### 6.8 Cold evidence and retirement consumers
+
+Status: export preservation implemented; native retirement qualification and
+genuine cold recovery remain planned. An owned MySQL run reproduced omission of
+the original `native_authorization_json` from all four exports and an earlier
+inventory scope conflict caused by an unpersisted `lifecycleAuthority:null`.
+The exporter now includes the original authorization column through its existing
+JSON row encoder and emits only the six original persisted placement fields.
+It does not reconstruct authority or weaken the scope reader. The original
+file-checkpoint reader still accepts only the older five-field reference,
+converted-only outcome and schema1 history. A new native settled row therefore
+cannot reuse that reader's older acceptance as proof.
+
+The complete execution export preserves the original immutable native
+authorization JSON. Preserve the
+original raw result and every related session, publication, receipt, checkpoint,
+ACK and operation row; no grant may be reconstructed from the snapshot's latest
+head. The native file-checkpoint branch must validate the exact eleven-field
+reference, original grant and input/declaration/history associations, complete
+batch membership, raw-result outcome with its pinned history, original receipt,
+exact tool-result message and consumed/settled checkpoint chain. It supports
+schema2 history and preserves the established legacy branch for legacy records.
+Missing fields, incomplete pagination, unknown states, corrupt bytes and budget
+exhaustion produce unresolved observations, never partial success.
+
+Cold recovery first classifies the original durable chain. SETTLED executions
+reuse their original results and receipts and never reinvoke a tool; UNKNOWN
+executions cannot become retryable because the process or Pod disappeared.
+Prepared mutations retain their original backup and execution identity until
+the original effect/result can be qualified. Restoring evidence alone does not
+authorize a replacement worker or physical volume handoff.
+
+The current private Hosted initializer requires a new authority, writer generation
+1 and activation epoch 1. The original Store refuses an expired CSI writer;
+native history replay also pins the original writer and has no takeover grammar.
+Therefore a read-only evidence match cannot be reported as genuine cold Hosted
+recovery. That delivery must qualify the original durable tail before a fenced
+writer/activation transition, recover each original receipt's fixed message
+identity, and resume the existing Harness model loop without a new tool dispatch.
+Ordinary load's legacy history parser and recovery path remain unchanged.
+
+The snapshot exporter requires actual MySQL/InnoDB consistent read-only snapshots.
+The earlier H2 connected software run cannot qualify this consumer. Verification
+uses a new owned local MySQL database and original logical retirement cut, without
+rebuilding positive SQL from a cleaned fixture or weakening the engine check.
+
+Application closure still requires the complete original inventory and every
+writer/lifecycle operation to settle after the immutable cut. Only separate
+trusted evidence of the exact original writer/descendant termination and each
+CSI NodeUnpublish may qualify physical retirement. The aggregate DRAINED,
+atomic RELEASED and safe same-volume reuse transitions remain separate gates.
+The stop/unpublish authority must be selected and reviewed before implementing
+that transition; Pod disappearance, lease expiry, NodeNotReady or ordinary
+HTTP release are insufficient. Existing operator cleanup is not that authority.
+
+Acceptance must use a fresh original native snapshot after a genuine consumed
+Read/Write/Edit turn, then restart the evidence reader without recreating grants
+or results. Positive and refusal cases cover mixed/multiple batches, incomplete
+inventory, changed original refs, lost result responses and UNKNOWN members.
+Real MySQL isolation and Linux CSI/target-cluster retirement remain separate
+qualification requirements; no new cloud resources are authorized by this design.
 
 ## 7. Validation and acceptance
 
@@ -510,7 +767,58 @@ not real MySQL isolation/lock competition, physical Linux CSI, target-cluster or
 full K2 qualification. Previous failed runs are preserved separately: a missing
 no-store response header and an incorrect mixed-assistant history guard were
 reproduced, repaired and covered by regressions before this successful run.
-Immutable grants, execution, result consumption, cold recovery, writer cut and
-physical retirement remain the next deliveries. Native review remains pending
+At that preparation head, immutable grants, execution, result consumption,
+cold recovery, writer cut and physical retirement remained the next deliveries.
+Native review remains pending
 because the required foreground workflow tool is unavailable; Draft and
 maintainer review remain mandatory.
+
+### 7.2 Observed native execution and export increment, 2026-10-09
+
+The subsequent private producer completes Read and mixed Read/Write/Edit through
+the ordinary Hosted Harness loop. Original intents precede the full dispatch
+checkpoint. Each original SQL execution receives its immutable authorization,
+settles with its raw result and commits an outcome with a fixed message identity.
+Original receipts, tool-result messages and resolve checkpoints precede the
+result history, second model request, consumed checkpoint and settled turn.
+The second request contains all original results. A traversal Read is refused
+while the accepted mixed ordinals remain 0/2/3. Exact start replay returns the
+original result without new I/O; a changed payload is refused.
+
+The mixed run writes a new 17-byte file, changes the original file to 32 bytes
+and retains its actual 29-byte preimage. A subsequent owned MySQL 8.4.11 run
+observes the same complete three-execution/model chain, then invokes the original
+logical retirement begin and exact retry. It exposes two exporter defects:
+missing original native authorization and the additional null authority scope
+field. After the narrow exporter repair, one fresh owned MySQL run preserves
+every original grant object in all four exports and emits the original six-field
+scope. Fresh inventory reading observes exactly the three SETTLED members, each
+with `original_file_execution_conflict`; the three standalone file readers
+preserve that same refusal. All 53 original SQL tables remain unchanged across
+exports and readers. This qualifies export preservation, not native recovery
+or physical retirement.
+
+Five bounded negative producer groups cover modified prepared readback bytes,
+an omitted batch member, a post-history observation failure and real worker seals
+before history prepare and before dispatch. The first two are explicit wire
+fault fixtures. The post-history fault occurs after the actual Write effect and
+leaves its SQL execution UNKNOWN without a result; it never starts the second
+model. The first seal refuses history prepare while retaining PREPARED members.
+The dispatch seal permits asynchronous start acceptance, then the worker and
+poll refuse and the original Read becomes UNKNOWN; no working-file I/O occurs.
+Both seals report DRAINING/BLOCKED and no physical release. Earlier observer
+failures concerning stream ordinal, result-checkpoint selection, async stack
+names and synchronous start expectations remain recorded; corrections to
+ignored observers are audited against retained original output and are not
+additional producer runs.
+
+These runs use owned real files and actual Java/Node products. The MySQL runs use
+a fresh owned server, database and restricted user. Kubernetes metadata and
+pre-provision attestation, Linux mount/fd mapping on Darwin, deterministic model
+SSE and the MockMvc HTTP/transaction adapter remain explicit fixture seams.
+Owned workers, servers, database/users, ports and temporary roots are cleaned up
+and independently checked. MySQL serialized producer/export observations do not
+prove concurrent READ COMMITTED/warmed REPEATABLE READ races. Fresh Linux CSI,
+target-cluster qualification, genuine cold takeover, all-writer closure,
+aggregate DRAINED, trusted physical stop/NodeUnpublish, RELEASED and safe reuse
+remain open. Native review and maintainer scope review remain pending.
