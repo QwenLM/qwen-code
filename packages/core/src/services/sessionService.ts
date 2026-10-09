@@ -572,6 +572,16 @@ function joinTextParts(parts: readonly unknown[]): string {
  */
 const TAIL_READ_SIZE = 64 * 1024;
 
+/**
+ * Hard ceiling on readLastRecordUuid's widening tail window. Must stay above
+ * the largest single record the writers can legitimately journal (journaled
+ * embedded resources plus the record's own message parts) or the
+ * oversized-record recovery regresses; without it a corrupt tail with no
+ * uuid-bearing line escalates into a whole-file read that re-parses every
+ * line at every doubling.
+ */
+const MAX_TAIL_WINDOW_SIZE = 4 * 1024 * 1024;
+
 const readGoalStateObjective: MatchingRecordFieldReader = (record) => {
   if (typeof record !== 'object' || record === null) {
     return { matched: false, value: undefined };
@@ -2229,7 +2239,7 @@ export class SessionService {
   /**
    * Reads the UUID of the last record in a session JSONL file.
    * Uses a tail-read strategy for efficiency, doubling the window from EOF
-   * when no complete record fits inside it.
+   * when no complete record fits inside it, up to MAX_TAIL_WINDOW_SIZE.
    *
    * Each physical line is routed through `jsonl.parseLineTolerant` so a
    * `}{`-glued tail line (#3606 corruption shape) still yields its records
@@ -2248,7 +2258,9 @@ export class SessionService {
       // record's line), and a window that opens inside such a record holds
       // no complete line — returning null then makes renameSession anchor
       // custom_title.parentUuid at null and severs the chain on resume.
-      // Double the window from EOF until a complete record fits.
+      // Double the window from EOF until a complete record fits, giving up
+      // at MAX_TAIL_WINDOW_SIZE rather than escalating into a whole-file
+      // re-parse.
       let windowSize = TAIL_READ_SIZE;
       while (true) {
         const readStart = Math.max(0, fileSize - windowSize);
@@ -2305,12 +2317,24 @@ export class SessionService {
         if (found !== null) {
           return found;
         }
-        if (readStart === 0) {
+        if (readStart === 0 || windowSize >= MAX_TAIL_WINDOW_SIZE) {
+          // renameSession writes custom_title.parentUuid from this value, so
+          // name which give-up path produced the null (window exhausted to
+          // the file start vs ceiling hit) — a severed chain is otherwise
+          // indistinguishable from an empty file.
+          debugLogger.warn(
+            `readLastRecordUuid: no uuid-bearing record in ${filePath} ` +
+              `(fileSize=${fileSize}, windowSize=${windowSize}, ` +
+              `reachedFileStart=${readStart === 0}); caller will anchor at null`,
+          );
           return null;
         }
         windowSize *= 2;
       }
-    } catch {
+    } catch (error) {
+      debugLogger.warn(
+        `readLastRecordUuid: failed to read ${filePath}: ${error}`,
+      );
       return null;
     } finally {
       if (fd !== undefined) {

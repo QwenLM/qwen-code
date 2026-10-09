@@ -264,9 +264,12 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
     // reconstructHistory would truncate the chain on resume.
     const file = writeJsonl('big-tail.jsonl', `${giantLine('real-last')}\n`);
 
-    // "real-last" lies before the tail window and cannot be recovered; the
-    // critical assertion is the absence of the false positive.
-    expect(svc.readLastRecordUuid(file)).not.toBe('fake-from-payload');
+    // The window widens until the ~160 KB line fits whole, so "real-last"
+    // IS recovered; the assertion that matters is that the nested payload
+    // trojan is never surfaced as the top-level uuid. An exact `toBe` (not
+    // `not.toBe`) also pins the widening itself: a fixed TAIL_READ_SIZE
+    // window returns null here.
+    expect(svc.readLastRecordUuid(file)).toBe('real-last');
   });
 
   it('returns the final complete record uuid when a giant partial precedes it in the tail', () => {
@@ -309,7 +312,16 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
       `${prevRecord}\n${finalRecord}\n`,
     );
 
-    expect(svc.readLastRecordUuid(file)).toBe('boundary-final');
+    const readSpy = vi.spyOn(fs, 'readSync');
+    try {
+      expect(svc.readLastRecordUuid(file)).toBe('boundary-final');
+      // One window read plus the 1-byte boundary peek: a second window read
+      // means the peek guard was lost and the widening loop re-read the
+      // whole file for a boundary-aligned tail.
+      expect(readSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      readSpy.mockRestore();
+    }
   });
 
   it('returns the uuid of a last record larger than the tail window', () => {
@@ -343,6 +355,45 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
     const file = writeJsonl('oversized-last.jsonl', `${line}\n`);
 
     expect(svc.readLastRecordUuid(file)).toBe('oversized-last');
+  });
+
+  it('returns the head uuid when an unrecoverable tail fills the tail window', () => {
+    // renameSession anchors custom_title.parentUuid at the last recoverable
+    // record: with a corrupt tail the head record keeps the chain intact up
+    // to it. The pre-widening reader returned null here and severed the
+    // chain instead.
+    const garbage = `${'x'.repeat(4096)}\n`.repeat(40);
+    const file = writeJsonl('corrupt-tail-head.jsonl', `${R1}\n${garbage}`);
+
+    expect(svc.readLastRecordUuid(file)).toBe('u1');
+  });
+
+  it('gives up at the tail-window ceiling instead of escalating to a whole-file read', () => {
+    // A post-crash garbage flood with no uuid-bearing line: without the
+    // ceiling the doubling loop re-reads and re-parses the whole file at
+    // every step, stalling renameSession on the daemon route.
+    const MAX_TAIL_WINDOW_SIZE = 4 * 1024 * 1024;
+    const garbage = `${'y'.repeat(4096)}\n`.repeat(1100);
+    const file = writeJsonl('huge-garbage-tail.jsonl', garbage);
+    expect(fs.statSync(file).size).toBeGreaterThan(MAX_TAIL_WINDOW_SIZE);
+
+    const readSpy = vi.spyOn(fs, 'readSync');
+    try {
+      expect(svc.readLastRecordUuid(file)).toBeNull();
+      const requestedLengths = readSpy.mock.calls.map(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (call) => (call as any[])[3] as number,
+      );
+      expect(Math.max(...requestedLengths)).toBeLessThanOrEqual(
+        MAX_TAIL_WINDOW_SIZE,
+      );
+      // The probe must reach the ceiling before giving up — a fixed-window
+      // reader would also satisfy the length cap while never recovering the
+      // oversized records this loop exists for.
+      expect(requestedLengths).toContain(MAX_TAIL_WINDOW_SIZE);
+    } finally {
+      readSpy.mockRestore();
+    }
   });
 });
 

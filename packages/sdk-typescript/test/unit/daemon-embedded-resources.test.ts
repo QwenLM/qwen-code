@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { DaemonEvent } from '../../src/daemon/types.js';
 import { projectChatRecordsToDaemonTranscript } from '../../src/daemon/transcript.js';
 import { normalizeDaemonEvent } from '../../src/daemon/ui/normalizer.js';
@@ -101,13 +101,25 @@ describe('daemon embedded text resources', () => {
     const changed = normalizeDaemonEvent(
       frame({ ...resource, _meta: { selection: 'updated' } }),
     )[0]!;
-    store.dispatch([original, original, changed]);
+    const differentText = normalizeDaemonEvent(
+      frame({
+        ...resource,
+        resource: { ...resource.resource, text: '{"items":["other"]}' },
+      }),
+    )[0]!;
+    store.dispatch([original, original, changed, differentText]);
     const [block] = store.getSnapshot().blocks;
     expect(block).toMatchObject({
       kind: 'user',
       embeddedResources: [
         resource,
         { ...resource, _meta: { selection: 'updated' } },
+        // Same uri and _meta as the first entry, but distinct text: a
+        // uri-keyed merge must not collapse it.
+        {
+          ...resource,
+          resource: { ...resource.resource, text: '{"items":["other"]}' },
+        },
       ],
     });
     expect(store.getSnapshot().retainedBytes).toBe(
@@ -120,7 +132,12 @@ describe('daemon embedded text resources', () => {
     // evicts the newest block, so an unbounded resource text would hold the
     // store above maxRetainedBytes with no eviction able to reclaim it.
     const maxRetainedBytes = 1024 * 1024;
-    const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxRetainedBytes,
+      onTruncation,
+    });
     const oversized = normalizeDaemonEvent(
       frame({
         type: 'resource',
@@ -145,6 +162,130 @@ describe('daemon embedded text resources', () => {
     expect(retained.resource.mimeType).toBe('text/plain');
     expect(retained.resource.text.length).toBeLessThanOrEqual(100_000);
     expect(retained.resource.text).toContain('[truncated]');
+    // The cut must be reported: the offline projection derives its
+    // completeness verdict from this callback, so a silent bound would
+    // export a truncated session as `complete: true`.
+    expect(onTruncation).toHaveBeenCalledWith({
+      kind: 'text',
+      blockId: block.id,
+      sourceRecordIds: ['r1'],
+    });
+  });
+
+  it('bounds the whole retained resource so a non-text payload cannot pin the store over budget', () => {
+    // The open index signature admits a large `blob` or vendor key beside an
+    // empty text at either level; trimming never evicts the newest block, so
+    // without a whole-object bound either one pins the store above budget
+    // for the rest of the session.
+    const maxRetainedBytes = 1024 * 1024;
+    const shapes: Array<{
+      content: Record<string, unknown>;
+      uri: string;
+      droppedKey: string;
+      droppedAt: 'resource' | 'top';
+    }> = [
+      {
+        content: {
+          type: 'resource',
+          resource: {
+            uri: 'context://example/blob',
+            mimeType: 'application/octet-stream',
+            text: '',
+            blob: 'x'.repeat(4 * 1024 * 1024),
+          },
+          _meta: { selection: 'current' },
+        },
+        uri: 'context://example/blob',
+        droppedKey: 'blob',
+        droppedAt: 'resource',
+      },
+      {
+        content: {
+          type: 'resource',
+          resource: {
+            uri: 'context://example/vendor',
+            mimeType: 'text/plain',
+            text: 'small',
+          },
+          _meta: { selection: 'current' },
+          vendorExtension: 'x'.repeat(4 * 1024 * 1024),
+        },
+        uri: 'context://example/vendor',
+        droppedKey: 'vendorExtension',
+        droppedAt: 'top',
+      },
+    ];
+    for (const { content, uri, droppedKey, droppedAt } of shapes) {
+      const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+      store.dispatch(normalizeDaemonEvent(frame(content))[0]!);
+      const snapshot = store.getSnapshot();
+      expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+      const block = snapshot.blocks.find((b) => b.kind === 'user');
+      if (!block || block.kind !== 'user') {
+        throw new Error('expected one retained user block');
+      }
+      const retained = block.embeddedResources![0]!;
+      // The skeleton keeps the display fields and the replay contract's
+      // _meta; the oversized non-text payload is dropped.
+      expect(retained.resource.uri).toBe(uri);
+      expect(retained._meta).toEqual({ selection: 'current' });
+      if (droppedAt === 'resource') {
+        expect(retained.resource).not.toHaveProperty(droppedKey);
+      } else {
+        expect(retained).not.toHaveProperty(droppedKey);
+      }
+    }
+  });
+
+  it('keeps oversized resources whose texts differ past the truncation point as separate entries', () => {
+    // Both payloads truncate to the same 100k prefix; dedup must compare the
+    // incoming untruncated text, or the second resource silently vanishes.
+    const store = createDaemonTranscriptStore({ now: 1 });
+    const sharedPrefix = 'x'.repeat(120 * 1024);
+    const oversized = (tail: string) =>
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: {
+            uri: 'context://example/large',
+            mimeType: 'text/plain',
+            text: `${sharedPrefix}${tail}`,
+          },
+        }),
+      )[0]!;
+    store.dispatch([oversized('AAAA'), oversized('BBBB')]);
+
+    const block = store.getSnapshot().blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(2);
+    expect(
+      block.embeddedResources!.map((entry) => entry.resource.text.length),
+    ).toEqual([100_000, 100_000]);
+  });
+
+  it('clones retained resources so a newer snapshot never aliases the previous one', () => {
+    const store = createDaemonTranscriptStore({ now: 1 });
+    store.dispatch(normalizeDaemonEvent(frame(resource))[0]!);
+    const first = store.getSnapshot();
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({ ...resource, _meta: { selection: 'updated' } }),
+      )[0]!,
+    );
+    const second = store.getSnapshot();
+
+    const secondBlock = second.blocks.find((b) => b.kind === 'user');
+    if (!secondBlock || secondBlock.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    secondBlock.embeddedResources![0]!.resource.text = 'CONSUMER-MUTATED';
+
+    const firstBlock = first.blocks.find((b) => b.kind === 'user');
+    expect(firstBlock).toMatchObject({
+      embeddedResources: [{ resource: { text: '{"items":["example"]}' } }],
+    });
   });
 
   it('reconstructs the active branch from persisted user records', () => {
