@@ -40,6 +40,7 @@ import {
   MANAGED_SESSION_LIMITS,
   MANAGED_SESSION_MINIMUM_READER,
   ManagedSessionRecordError,
+  assertManagedSessionChildContinuationEnabled,
   assertManagedSessionChildRunKindEnabled,
   assertManagedSessionChannelAdapterEnabled,
   assertManagedSessionDigest,
@@ -83,6 +84,10 @@ import {
   parseChildAcceptance,
   type ChildAcceptance,
 } from './managed-child-acceptance-record.js';
+import {
+  parseSessionMessage,
+  type SessionMessage,
+} from './managed-session-message-record.js';
 import {
   ManagedSessionCommitRejectedError,
   managedSessionActivationStateFrom,
@@ -447,6 +452,8 @@ export class LocalManagedSessionAuthority {
     }
   >();
   private readonly hookDefinitionPins = new Map<string, string>();
+  /** Each continued predecessor's latest continuation, by child run id (H4d). */
+  private readonly childContinuations = new Map<string, string>();
   /**
    * The Stage H record resources an opened log replayed, and the resources
    * they reference, each read and verified once. Resources are immutable by
@@ -1468,9 +1475,11 @@ export class LocalManagedSessionAuthority {
         // The one domain carries two capabilities with independent gates
         // (H3's shell, H4's child agent), so its admission is per kind,
         // decided from the parsed body.
-        assertManagedSessionChildRunKindEnabled(
-          parseChildRun(parsed.record).kind,
-        );
+        const child = parseChildRun(parsed.record);
+        assertManagedSessionChildRunKindEnabled(child.kind);
+        if (child.kind !== 'shell' && child.predecessorChildRunId !== null) {
+          assertManagedSessionChildContinuationEnabled();
+        }
       }
       await this.verifyExtensionResources(request.domain, parsed.record);
       await this.assertChannelRouteAdmittable(request.domain, parsed);
@@ -1483,6 +1492,25 @@ export class LocalManagedSessionAuthority {
           throw new ManagedSessionConflictError(message);
         },
       );
+      if (request.domain === 'session_message') {
+        // H4d: a receipt and the input that carries its message are one
+        // fact, so a redelivery that finds the receipt can never add a
+        // second input. Checked after the chain rules, so a different
+        // message under a taken id answers as the conflict it is.
+        const message = parsed.record as SessionMessage;
+        const opening =
+          message.direction === 'inbound' &&
+          this.extensionRecord(request.domain, parsed.recordId) === undefined;
+        if (
+          opening
+            ? request.input?.inputId !== message.inputId
+            : request.input !== undefined
+        ) {
+          throw new ManagedSessionConflictError(
+            'An inbound session message opens together with its input, and no other revision carries one.',
+          );
+        }
+      }
       // Refused before publishing, so a retry loop leaves no body behind.
       this.assertCommandWritable(command);
       this.assertExpectedSequence(command);
@@ -1945,6 +1973,122 @@ export class LocalManagedSessionAuthority {
         }
       }
     }
+    if (domain === 'child_run' && previous === undefined) {
+      // H4d's continueChildRun: a continuation opens a new run after a
+      // completed one of this Session, in its scope, tree, workspace and
+      // definition, and a predecessor is continued at most once, so the
+      // chain stays linear. A continuation proven never to have started
+      // left the predecessor untouched, so it releases it.
+      const child = parseChildRun(parsed.record);
+      if (child.kind !== 'shell' && child.predecessorChildRunId !== null) {
+        const named = this.extensionRecord(
+          'child_run',
+          child.predecessorChildRunId,
+        );
+        const predecessor =
+          named === undefined ? undefined : parseChildRun(named.record);
+        if (predecessor === undefined || predecessor.kind !== child.kind) {
+          reject(
+            'Child continuation must name a child run of this Session of its own kind.',
+          );
+        }
+        if (predecessor.stopReason !== 'completed') {
+          reject(
+            'Child continuation must follow a run that completed with its result.',
+          );
+        }
+        if (predecessor.stopRequested) {
+          reject(
+            'Child continuation cannot revive a run whose stop was requested.',
+          );
+        }
+        if (
+          predecessor.ownerScopeId !== child.ownerScopeId ||
+          predecessor.rootSessionId !== child.rootSessionId ||
+          predecessor.depth !== child.depth ||
+          predecessor.workspaceMode !== child.workspaceMode ||
+          predecessor.workingDirectory !== child.workingDirectory ||
+          JSON.stringify(predecessor.run.definition) !==
+            JSON.stringify(child.run.definition)
+        ) {
+          reject(
+            "Child continuation must keep its predecessor's scope, tree, workspace and definition.",
+          );
+        }
+        const continued = this.childContinuations.get(
+          child.predecessorChildRunId,
+        );
+        const sibling =
+          continued === undefined
+            ? undefined
+            : this.extensionRecord('child_run', continued)!.run;
+        if (
+          sibling !== undefined &&
+          sibling.execution !== 'not_started_proven'
+        ) {
+          reject(
+            'Child continuation must name a predecessor no other run continues.',
+          );
+        }
+      }
+    }
+    if (domain === 'session_message') {
+      // H4d: each journal proves what it holds. The records in the parent's
+      // journal bind to its child run; a child's own lineage lives with the
+      // control plane, whose store checks the other two routes.
+      const message = parsed.record as SessionMessage;
+      const self = this.sessionKey.sessionId;
+      if (
+        message.direction === 'outbound' &&
+        message.senderSessionId !== self
+      ) {
+        reject('Outbound session message must be sent by this Session.');
+      }
+      if (message.direction === 'inbound' && message.targetSessionId !== self) {
+        reject('Inbound session message must be addressed to this Session.');
+      }
+      if (
+        (message.direction === 'outbound') ===
+        (message.route === 'to_child')
+      ) {
+        const named = this.extensionRecord('child_run', message.childRunId);
+        const child =
+          named === undefined ? undefined : parseChildRun(named.record);
+        if (child === undefined || child.kind === 'shell') {
+          reject(
+            'Session message must name a child Session run of this Session.',
+          );
+        }
+        if (message.direction === 'inbound') {
+          // Before the attach the parent cannot tell its child's Session
+          // yet: the delivery waits, it is not a forgery.
+          if (child.childSessionId === null) {
+            reject(
+              'Session message from a child arrives only once its run attached.',
+            );
+          }
+          if (message.senderSessionId !== child.childSessionId) {
+            reject(
+              'Session message from a child must come from the Session its run attached.',
+            );
+          }
+        } else {
+          if (previous === undefined && isTerminalRunState(child.run.state)) {
+            reject(
+              'Session message to a child must name a run that has not ended.',
+            );
+          }
+          if (
+            message.targetSessionId !== null &&
+            message.targetSessionId !== child.childSessionId
+          ) {
+            reject(
+              'Session message to a child must target the Session its run attached.',
+            );
+          }
+        }
+      }
+    }
     if (previous === undefined) {
       if (!body.isStart(parsed.record)) {
         reject(
@@ -2041,6 +2185,15 @@ export class LocalManagedSessionAuthority {
           hookDefinitionPinKey(pin),
           pin.definitionDigest,
         );
+      }
+      if (domain === 'child_run') {
+        const child = parseChildRun(parsed.record);
+        if (child.kind !== 'shell' && child.predecessorChildRunId !== null) {
+          this.childContinuations.set(
+            child.predecessorChildRunId,
+            child.childRunId,
+          );
+        }
       }
     }
     const committed = Object.freeze({
@@ -2174,6 +2327,8 @@ export class LocalManagedSessionAuthority {
     } else if (domain === 'child_acceptance') {
       const acceptance = parseChildAcceptance(record);
       refs = [acceptance.contentRef, acceptance.terminalReceiptRef];
+    } else if (domain === 'session_message') {
+      refs = [parseSessionMessage(record).contentRef];
     } else if (domain === 'monitor_run') {
       const monitor = parseMonitorRun(record);
       refs = [

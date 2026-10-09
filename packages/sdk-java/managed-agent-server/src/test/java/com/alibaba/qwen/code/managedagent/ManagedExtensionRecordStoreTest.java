@@ -598,7 +598,7 @@ class ManagedExtensionRecordStoreTest {
     }
 
     /** Commits a child agent through its settled result. */
-    private static void settleChildAgentChain(String sessionId,
+    static void settleChildAgentChain(String sessionId,
             String completion, ExtensionRecordJournal journal,
             CommitResource inputResource, CommitResource resultResource,
             CommitResource receiptResource) {
@@ -609,7 +609,7 @@ class ManagedExtensionRecordStoreTest {
 
     /** Commits a child Session run through its settled result, each body
      * shaped into its kind by {@code shape}. */
-    private static void settleChildSessionChain(String sessionId,
+    static void settleChildSessionChain(String sessionId,
             String completion, ExtensionRecordJournal journal,
             CommitResource inputResource, CommitResource resultResource,
             CommitResource receiptResource,
@@ -666,7 +666,7 @@ class ManagedExtensionRecordStoreTest {
         return body;
     }
 
-    private static ObjectNode childAgent(String sessionId, String completion,
+    static ObjectNode childAgent(String sessionId, String completion,
             String state, String execution, String runtimeBinding,
             CommitResource inputResource) {
         ObjectNode body = JsonNodeFactory.instance.objectNode();
@@ -835,7 +835,7 @@ class ManagedExtensionRecordStoreTest {
                 hookRef(seg2));
         return delivery;
     }
-    private static ObjectNode childRun(String state, String execution,
+    static ObjectNode childRun(String state, String execution,
             String runtimeBinding, CommitResource argsResource) {
         ObjectNode body = JsonNodeFactory.instance.objectNode();
         body.put("kind", "shell");
@@ -1640,7 +1640,7 @@ class ManagedExtensionRecordStoreTest {
                 Base64.getEncoder().encodeToString(bytes));
     }
 
-    private static void commitDomain(ExtensionRecordJournal journal, String commandId,
+    static void commitDomain(ExtensionRecordJournal journal, String commandId,
             String domain, JsonNode record, List<CommitResource> resources) {
         CommitTransactionRequest request = journal.requestDomain(commandId, domain, record, resources, 1000);
         journal.commit(request);
@@ -1727,12 +1727,12 @@ class ManagedExtensionRecordStoreTest {
                 "extension-writer-token-0123456789").bytes()).isEqualTo("[]".getBytes(StandardCharsets.UTF_8));
     }
 
-    private static CommitResource hookResource(String id, String kind, byte[] bytes) {
+    static CommitResource hookResource(String id, String kind, byte[] bytes) {
         return new CommitResource(id, kind, 1, bytes.length, ExtensionRecordJournal.sha256(bytes),
                 Base64.getEncoder().encodeToString(bytes));
     }
 
-    private static ObjectNode hookRef(CommitResource resource) {
+    static ObjectNode hookRef(CommitResource resource) {
         return JsonNodeFactory.instance.objectNode().put("resourceId", resource.resourceId()).put("kind", resource.kind())
                 .put("schemaVersion", resource.schemaVersion()).put("byteLength", resource.byteLength()).put("digest", resource.digest());
     }

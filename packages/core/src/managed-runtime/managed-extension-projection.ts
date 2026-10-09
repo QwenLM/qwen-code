@@ -62,6 +62,11 @@ import {
   isChildAcceptanceSuccessor,
   parseChildAcceptance,
 } from './managed-child-acceptance-record.js';
+import {
+  isSessionMessageStart,
+  isSessionMessageSuccessor,
+  parseSessionMessage,
+} from './managed-session-message-record.js';
 
 // H0c of #12827: how the Session authority keys, chains and projects the
 // Stage H records of managed-extension-record/1. The shared fixtures in
@@ -237,6 +242,15 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     },
     isStart: isAutomationRunStart,
     isSuccessor: isAutomationRunSuccessor,
+  }),
+  session_message: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseSessionMessage(value);
+      return { record, recordId: record.messageId, run: record.run };
+    },
+    isStart: isSessionMessageStart,
+    isSuccessor: isSessionMessageSuccessor,
   }),
 });
 

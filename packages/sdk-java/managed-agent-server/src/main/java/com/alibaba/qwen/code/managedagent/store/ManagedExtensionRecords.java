@@ -1670,7 +1670,7 @@ public final class ManagedExtensionRecords {
         return value.longValueExact();
     }
 
-    private static void digest(JsonNode node, String label) {
+    static void digest(JsonNode node, String label) {
         require(node != null && node.isTextual()
                 && DIGEST.matcher(node.textValue()).matches(),
                 () -> label + " must be a lowercase SHA-256 hex digest");
