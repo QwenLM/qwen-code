@@ -701,10 +701,14 @@ describe('Hosted Harness model boundary', () => {
     const hooks = hostedHooks([HookEventName.Stop]);
     let attempts = 0;
     model.sendMessageStream.mockImplementation(async function* () {
-      yield {
-        type: LlmEventType.Content,
-        value: ++attempts === 1 ? 'discarded draft' : 'accepted answer',
-      };
+      const text = ++attempts === 1 ? 'discarded draft' : 'accepted answer';
+      model.getHistory.mockReturnValue([
+        {
+          role: 'model',
+          parts: [{ text: `${text} reasoning`, thought: true }, { text }],
+        },
+      ]);
+      yield { type: LlmEventType.Content, value: text };
       yield { type: LlmEventType.Finished };
     });
     let stops = 0;
@@ -719,7 +723,14 @@ describe('Hosted Harness model boundary', () => {
     };
     await expect(
       runHostedHarnessTextTurn({ ...input, hooks: hooks.session, textDeltas }),
-    ).resolves.toMatchObject({ text: 'accepted answer' });
+    ).resolves.toEqual({
+      text: 'accepted answer',
+      parts: [
+        { text: 'accepted answer reasoning', thought: true },
+        { text: 'accepted answer' },
+      ],
+      model: 'test-model',
+    });
     expect(textDeltas.delta).not.toHaveBeenCalled();
     expect(model.sendMessageStream).toHaveBeenCalledTimes(2);
   });

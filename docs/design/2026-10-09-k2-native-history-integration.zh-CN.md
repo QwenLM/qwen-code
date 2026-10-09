@@ -427,7 +427,7 @@ outcome/receipt、tool-result 消息、results-ready、后续模型继续、消�
 Write/Edit 和冷恢复随后沿同一贯通路径推进；物理退休和公开选择继续保持现有门禁。
 
 两条生产 schema 路径都必须创建原始执行授权列：独立 Broker schema 和 Agent Server
-的 Flyway 迁移。首轮候选在派发前暴露 Agent 迁移遗漏；V57 添加可空列，不为任何
+的 Flyway 迁移。首轮候选在派发前暴露 Agent 迁移遗漏；V58 添加可空列，不为任何
 已有执行生成授权或改变其状态。
 
 在写入原始授权标记的同一事务中，将一份不可变原生授权 JSON 持久化在原始
@@ -753,10 +753,10 @@ resource inventory 不得有原生 input、declaration、outcome 或 file-histor
 
 ### 7.4 当前 main migration 与 child admission 边界
 
-与 main `5ddd43815` 集成保留已发布的 Workspace role V53 和 child lineage
-V54。仅 Draft CSI request、activation 和 native grant migration 使用
-V55/V56/V57，SQL 字节不变；首个原生候选的 V55 grant migration 现为 V57。
-更早未发布编号数据库不自动升级或回填。Root 私有创建保留原 creator/owner actor
+与 main 集成保留已发布的 Workspace role V53、child lineage V54 和
+channel instance binding V55。仅 Draft CSI request、activation 和 native
+grant migration 使用 V56/V57/V58，SQL 字节不变；首个原生候选的 V55 grant
+migration 现为 V58。更早未发布编号数据库不自动升级或回填。Root 私有创建保留原 creator/owner actor
 字节与 request pin；公开 child admission 在 Service 操作前和 Store 锁定事务内
 拒绝 CSI parent。普通 child consumption 仍通过共享 runner，发生在 completed
 turn 持久落定之后。Migration 与验证要求见完整双语 lifecycle-main 集成设计。
