@@ -453,7 +453,7 @@ export interface ServeOptions {
  */
 export interface HostedHarnessCapabilities {
   readonly lifecycleProtocolVersion?: 1;
-  readonly titleProtocolVersion?: 1 | 2;
+  readonly titleProtocolVersion?: 1;
   readonly protocolVersions: {
     readonly current: 1;
     readonly supported: readonly [1];

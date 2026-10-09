@@ -773,11 +773,6 @@ class ManagedWorkspaceAdmissionTest {
                     }
 
                     @Override
-                    public boolean supportsTitleRetirement() {
-                        return true;
-                    }
-
-                    @Override
                     public void rename(String tenantId, String sessionId,
                             String title) {
                     }
@@ -879,11 +874,6 @@ class ManagedWorkspaceAdmissionTest {
 
                     @Override
                     public boolean supportsFencedTitles() {
-                        return true;
-                    }
-
-                    @Override
-                    public boolean supportsTitleRetirement() {
                         return true;
                     }
 
@@ -1390,11 +1380,6 @@ class ManagedWorkspaceAdmissionTest {
 
             @Override
             public boolean supportsFencedTitles() {
-                return true;
-            }
-
-            @Override
-            public boolean supportsTitleRetirement() {
                 return true;
             }
 

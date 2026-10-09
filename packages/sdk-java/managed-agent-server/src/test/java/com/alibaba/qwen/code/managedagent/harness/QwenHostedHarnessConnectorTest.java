@@ -24,7 +24,6 @@ import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
 import com.alibaba.qwen.code.daemon.PromptReceipt;
 import com.alibaba.qwen.code.daemon.SessionCreationOutcomeUnknownException;
-import com.alibaba.qwen.code.daemon.SessionTitleRetirement;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
@@ -52,7 +51,6 @@ import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
-import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -87,26 +85,6 @@ class QwenHostedHarnessConnectorTest {
         verify(client, never()).loadSession(any());
         verify(client, never()).createSession(any());
         verify(client, never()).updateSessionTitle(any(), any(), anyLong());
-    }
-
-    @Test
-    void retirementCapabilityRequiresVersionTwoWithoutAttachingOrSendingAMutation() {
-        HostedHarnessClient client = mock(HostedHarnessClient.class);
-        HostedHarnessCapabilities versionOne = mock(HostedHarnessCapabilities.class);
-        HostedHarnessCapabilities versionTwo = mock(HostedHarnessCapabilities.class);
-        when(versionOne.getTitleProtocolVersion()).thenReturn(1);
-        when(versionTwo.getTitleProtocolVersion()).thenReturn(2);
-        when(client.capabilities()).thenReturn(versionOne, versionTwo, versionTwo)
-                .thenThrow(new IllegalStateException("HostedHarnessClient is closed"));
-        QwenHostedHarnessConnector connector = connector(client);
-
-        assertThat(connector.supportsTitleRetirement()).isFalse();
-        assertThat(connector.supportsTitleRetirement()).isTrue();
-        assertThat(connector.supportsFencedTitles()).isTrue();
-        assertThat(connector.supportsTitleRetirement()).isFalse();
-        verify(client, never()).loadSession(any());
-        verify(client, never()).createSession(any());
-        verify(client, never()).retireSessionTitle(any(), anyLong());
     }
 
     @Test
@@ -931,31 +909,6 @@ class QwenHostedHarnessConnectorTest {
         connector.rename("tenant-a", SESSION_ID, "a new title");
 
         verify(alive).updateSessionTitle(any(), any());
-    }
-
-    @ParameterizedTest
-    @NullSource
-    @ValueSource(strings = {"retained"})
-    void retirementUsesTheResolvedClientAndReturnsItsBootWithTheRetainedTitle(String title) {
-        Object[] fixture = refetchFixture();
-        QwenHostedHarnessConnector connector = (QwenHostedHarnessConnector) fixture[0];
-        HostedHarnessClient dead = (HostedHarnessClient) fixture[1];
-        HostedHarnessClient alive = (HostedHarnessClient) fixture[2];
-        SessionTitleRetirement receipt = mock(SessionTitleRetirement.class);
-        when(receipt.getTitle()).thenReturn(title);
-        HostedHarnessClient replacement = mock(HostedHarnessClient.class);
-        when(alive.retireSessionTitle(any(), anyLong())).thenAnswer(invocation -> {
-            ReflectionTestUtils.setField(connector, "client", replacement);
-            return receipt;
-        });
-
-        HarnessConnector.TitleRetirement retired = connector.retireRename("tenant-a", SESSION_ID, 7);
-
-        assertThat(retired.title()).isEqualTo(title);
-        assertThat(retired.bootId()).isEqualTo(BOOT_ID);
-        verify(alive).retireSessionTitle(any(), org.mockito.ArgumentMatchers.eq(7L));
-        verify(dead, never()).retireSessionTitle(any(), anyLong());
-        verifyNoInteractions(replacement);
     }
 
     // A stale cached ref used against an already-adopted client drops only

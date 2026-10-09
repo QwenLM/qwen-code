@@ -68,14 +68,9 @@ public class SessionRenameCoordinator {
             var session = store.requireSession(delivery.tenantId(), delivery.sessionId());
             var attachment = harness.createOrLoad(delivery.tenantId(), delivery.sessionId(),
                     session.harnessBootId() != null, true);
-            if ("RETIRING".equals(delivery.state())) {
-                var receipt = harness.retireRename(delivery.tenantId(), delivery.sessionId(), delivery.revision());
-                store.completeRenameRetirement(delivery, owner, receipt.title(), receipt.bootId());
-            } else {
-                harness.rename(delivery.tenantId(), delivery.sessionId(), delivery.title(), delivery.revision());
-                store.completeSessionRename(delivery.tenantId(), delivery.idempotencyKey(), delivery.sessionId(),
-                        delivery.title(), attachment.bootId(), delivery.revision());
-            }
+            harness.rename(delivery.tenantId(), delivery.sessionId(), delivery.title(), delivery.revision());
+            store.completeSessionRename(delivery.tenantId(), delivery.idempotencyKey(), delivery.sessionId(),
+                    delivery.title(), attachment.bootId(), delivery.revision());
         } catch (RuntimeException failure) {
             try {
                 store.abandonSessionRename(delivery.tenantId(), delivery.idempotencyKey(), delivery.sessionId(), delivery.revision(), owner);

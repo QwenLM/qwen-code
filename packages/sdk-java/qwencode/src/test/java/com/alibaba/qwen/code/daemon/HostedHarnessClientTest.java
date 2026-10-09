@@ -29,8 +29,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
-import org.junit.jupiter.params.provider.NullSource;
-import org.junit.jupiter.params.provider.ValueSource;
 import java.util.stream.Stream;
 
 class HostedHarnessClientTest {
@@ -976,14 +974,13 @@ class HostedHarnessClientTest {
         assertEquals(0, writes.get());
     }
 
-    @ParameterizedTest
-    @ValueSource(ints = {1, 2})
-    void sendsAndChecksTheDurableTitleRevision(int titleProtocolVersion) {
+    @Test
+    void sendsAndChecksTheDurableTitleRevision() {
         createSessionRoute();
         server.removeContext("/capabilities");
         server.createContext("/capabilities", exchange -> sendJson(exchange, 200,
                 capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
-                        "\"hostedHarness\":{\"titleProtocolVersion\":" + titleProtocolVersion + ","), false));
+                        "\"hostedHarness\":{\"titleProtocolVersion\":1,"), false));
         AtomicReference<String> body = new AtomicReference<>();
         server.createContext("/session/" + SESSION_ID + "/title", exchange -> {
             body.set(readBody(exchange));
@@ -994,73 +991,6 @@ class HostedHarnessClientTest {
             client.updateSessionTitle(createSession(client), "A", 7);
         }
         assertTrue(body.get().contains("\"managedRenameRevision\":\"7\""));
-    }
-
-    @Test
-    void refusesTitleRetirementBeforeSendingToAVersionOneHarness() {
-        createSessionRoute();
-        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
-                "\"hostedHarness\":{\"titleProtocolVersion\":1,"));
-        AtomicInteger writes = new AtomicInteger();
-        server.createContext("/session/" + SESSION_ID + "/title/retire", exchange -> {
-            writes.incrementAndGet();
-            sendSessionJson(exchange, 200, titleRetirementJson("null"));
-        });
-        try (HostedHarnessClient client = newClient()) {
-            HarnessSessionRef session = createSession(client);
-            assertThrows(DaemonProtocolException.class, () -> client.retireSessionTitle(session, 7));
-        }
-        assertEquals(0, writes.get());
-    }
-
-    @ParameterizedTest
-    @NullSource
-    @ValueSource(strings = {"retained"})
-    void retiresTheExactTitleRevisionAndReturnsTheRetainedTitle(String retainedTitle) {
-        createSessionRoute();
-        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
-                "\"hostedHarness\":{\"titleProtocolVersion\":2,"));
-        AtomicReference<String> body = new AtomicReference<>();
-        server.createContext("/session/" + SESSION_ID + "/title/retire", exchange -> {
-            assertPrivateHeaders(exchange, true);
-            body.set(readBody(exchange));
-            sendSessionJson(exchange, 200, titleRetirementJson(JsonSupport.encode(retainedTitle)));
-        });
-        try (HostedHarnessClient client = newClient()) {
-            SessionTitleRetirement receipt = client.retireSessionTitle(createSession(client), 7);
-            assertEquals(retainedTitle, receipt.getTitle());
-        }
-        assertEquals(Map.of("managedRenameRevision", "7"), JsonSupport.parseObject(body.get(), "retirement request"));
-    }
-
-    @ParameterizedTest
-    @MethodSource("invalidTitleRetirementReceipts")
-    void refusesUnconfirmedTitleRetirementReceipts(String receipt) {
-        createSessionRoute();
-        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
-                "\"hostedHarness\":{\"titleProtocolVersion\":2,"));
-        server.createContext("/session/" + SESSION_ID + "/title/retire",
-                exchange -> sendSessionJson(exchange, 200, receipt));
-        try (HostedHarnessClient client = newClient()) {
-            HarnessSessionRef session = createSession(client);
-            assertThrows(DaemonProtocolException.class, () -> client.retireSessionTitle(session, 7));
-        }
-    }
-
-    private static Stream<String> invalidTitleRetirementReceipts() {
-        String valid = titleRetirementJson("null");
-        return Stream.of(valid.replace(SESSION_ID, PROMPT_ID),
-                valid.replace("\"managedRenameRevision\":\"7\"", "\"managedRenameRevision\":\"8\""),
-                valid.replace("\"managedRenameRevision\":\"7\"", "\"managedRenameRevision\":7"),
-                valid.replace("\"persisted\":true", "\"persisted\":false"),
-                valid.replace("\"retired\":true", "\"retired\":false"),
-                valid.replace(",\"title\":null", ""),
-                titleRetirementJson("7"));
-    }
-
-    private static String titleRetirementJson(String title) {
-        return "{\"sessionId\":\"" + SESSION_ID + "\",\"managedRenameRevision\":\"7\","
-                + "\"persisted\":true,\"retired\":true,\"title\":" + title + "}";
     }
 
     @Test

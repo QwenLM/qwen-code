@@ -395,16 +395,12 @@ public class ManagedAgentService {
                 return new SessionMutationResult<>(getPublicSession(tenantId,
                         sessionId), true);
             }
-            if ("RETIRED".equals(existing.status())) {
-                throw new ApiException(HttpStatus.CONFLICT, "session_title_retired",
-                        "The Session title request was safely retired; use a new idempotency key.");
-            }
         }
         requireSubmitter(tenantId, actorId, sessionId);
         requireHarness();
-        if (!harness.supportsFencedTitles() || !harness.supportsTitleRetirement()) {
+        if (!harness.supportsFencedTitles()) {
             throw dependencyUnavailable("hosted_harness_unavailable",
-                    "The Hosted Harness must support title protocol version 2.");
+                    "The Hosted Harness must support title protocol version 1.");
         }
         SessionMutationCommand command = store.beginSessionRename(tenantId,
                 idempotencyKey, requestDigest, sessionId, effectiveTitle);
@@ -416,11 +412,6 @@ public class ManagedAgentService {
             if (delivery == null) {
                 throw dependencyUnavailable("hosted_harness_unavailable",
                         "The Session title is already being delivered.");
-            }
-            if ("RETIRING".equals(delivery.state())) {
-                store.retryRename(delivery, owner, renameClock.millis());
-                throw new ApiException(HttpStatus.CONFLICT, "session_operation_active",
-                        "The Session title retirement must finish before another rename.");
             }
             try {
                 SessionRecord session = store.requireSession(tenantId, sessionId);

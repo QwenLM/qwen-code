@@ -635,9 +635,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         if (revision < 1) {
             throw new IllegalArgumentException("title revision must be positive");
         }
-        int titleProtocolVersion = capabilities().getTitleProtocolVersion();
-        if (titleProtocolVersion != 1 && titleProtocolVersion != 2) {
-            throw new DaemonProtocolException("Hosted Harness title protocol version 1 or 2 is required");
+        if (capabilities().getTitleProtocolVersion() != 1) {
+            throw new DaemonProtocolException("Hosted Harness title protocol version 1 is required");
         }
         updateSessionTitle(session, title, Long.valueOf(revision));
     }
@@ -673,44 +672,6 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new DaemonProtocolException(
                     "Hosted Harness did not persist the Session title");
         }
-    }
-
-    public SessionTitleRetirement retireSessionTitle(HarnessSessionRef session, long revision) {
-        if (revision < 1) {
-            throw new IllegalArgumentException("title revision must be positive");
-        }
-        if (capabilities().getTitleProtocolVersion() != 2) {
-            throw new DaemonProtocolException("Hosted Harness title protocol version 2 is required");
-        }
-        HarnessSessionRef ref = requireSessionRef(session);
-        String operation = "POST /session/:id/title/retire";
-        HttpSupport.Response response = sendMutation(
-                sessionPath(ref.getHarnessSessionId()) + "/title/retire",
-                Map.of("managedRenameRevision", Long.toString(revision)),
-                ref.getHarnessClientId(), operation);
-        DaemonClient.requireStatus(response, 200, operation);
-        Map<String, Object> json = JsonSupport.parseObject(
-                response.getBody(), "Hosted Harness title retirement response");
-        String responseSessionId = parseWireUuid(
-                JsonSupport.requiredString(json, "sessionId", "title retirement"),
-                "title retirement.sessionId");
-        if (!ref.getHarnessSessionId().equals(responseSessionId)) {
-            throw new DaemonProtocolException(
-                    "Hosted Harness title retirement response sessionId does not match");
-        }
-        if (!Long.toString(revision).equals(
-                JsonSupport.requiredString(json, "managedRenameRevision", "title retirement"))) {
-            throw new DaemonProtocolException("Hosted Harness title retirement revision does not match");
-        }
-        if (!JsonSupport.requiredBoolean(json, "persisted", "title retirement")
-                || !JsonSupport.requiredBoolean(json, "retired", "title retirement")) {
-            throw new DaemonProtocolException(
-                    "Hosted Harness did not persist the Session title retirement");
-        }
-        if (!json.containsKey("title")) {
-            throw new DaemonProtocolException("Hosted Harness title retirement response title is missing");
-        }
-        return new SessionTitleRetirement(JsonSupport.optionalString(json, "title"));
     }
 
     public void closeSession(HarnessSessionRef session) {

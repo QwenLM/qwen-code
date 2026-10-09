@@ -6,8 +6,6 @@ import org.junit.jupiter.params.provider.CsvSource;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import org.junit.jupiter.params.ParameterizedTest;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
@@ -536,7 +534,6 @@ class ManagedSessionLifecycleTest {
         HarnessConnector controlled = mock(HarnessConnector.class);
         doReturn(true).when(controlled).isAvailable();
         doReturn(true).when(controlled).supportsFencedTitles();
-        doReturn(true).when(controlled).supportsTitleRetirement();
         doReturn(new HarnessConnector.Attachment("boot")).when(controlled)
                 .createOrLoad(anyString(), anyString(), anyBoolean(), anyBoolean());
         DaemonHttpException refusal = mock(DaemonHttpException.class);
@@ -638,100 +635,6 @@ class ManagedSessionLifecycleTest {
             assertThat(store.findCommand(tenant, "RENAME_SESSION", "rename").orElseThrow().status()).isEqualTo("FAILED");
             store.completeSessionRename(tenant, "rename", sessionId, "new title", FixtureHarness.BOOT_ID, current.revision());
             assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("new title");
-        } finally {
-            harness.setAvailable(true);
-        }
-    }
-
-    @Test
-    void exhaustedRenameRetiresOnlyAfterRemoteFenceAndReconcilesLostWrite() throws Exception {
-        String tenant = tenant();
-        String sessionId = emptySession(tenant);
-        String title = "requested title";
-        String digest = new RequestDigests().digest(java.util.Map.of("sessionId", sessionId, "title", title));
-        harness.setAvailable(false);
-        try {
-            var command = store.beginSessionRename(tenant, "retire", digest, sessionId, title);
-            HarnessConnector controlled = mock(HarnessConnector.class);
-            doReturn(true).when(controlled).isAvailable();
-            doReturn(new HarnessConnector.Attachment("boot")).when(controlled)
-                    .createOrLoad(anyString(), anyString(), anyBoolean(), anyBoolean());
-            doThrow(new RuntimeBrokerException(409, "workspace_unavailable", "refused", false))
-                    .when(controlled).rename(anyString(), anyString(), anyString(), anyLong());
-            doThrow(new IllegalStateException("retirement reply lost"))
-                    .doReturn(new HarnessConnector.TitleRetirement("remote accepted", "boot"))
-                    .when(controlled).retireRename(tenant, sessionId, command.renameRevision());
-            var executor = mock(java.util.concurrent.ExecutorService.class);
-            doAnswer(invocation -> { ((Runnable) invocation.getArgument(0)).run(); return null; })
-                    .when(executor).execute(org.mockito.ArgumentMatchers.any(Runnable.class));
-            var properties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
-            properties.getDispatch().setRetryInitialDelay(java.time.Duration.ZERO);
-            properties.getDispatch().setRetryMaxDelay(java.time.Duration.ZERO);
-            var coordinator = new com.alibaba.qwen.code.managedagent.service.SessionRenameCoordinator(
-                    store, controlled, executor, java.time.Clock.systemUTC(), properties);
-            for (int attempt = 0; attempt < 8; attempt++) coordinator.recover();
-            assertThat(store.deliverableRenames(Long.MAX_VALUE)).anySatisfy(delivery -> {
-                assertThat(delivery.sessionId()).isEqualTo(sessionId);
-                assertThat(delivery.state()).isEqualTo("RETIRING");
-            });
-            assertThatThrownBy(() -> store.beginSessionRename(tenant, "new", "new-digest", sessionId, "new"))
-                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("session_operation_active"));
-            assertThatThrownBy(() -> store.completeSessionRename(tenant, "retire", sessionId, title, "boot", command.renameRevision()))
-                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("session_mutation_superseded"));
-            coordinator.recover();
-            assertThatThrownBy(() -> store.beginOperation(tenant, sessionId, OperationKind.CLOSE, "", "close", "close-digest"))
-                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("session_operation_active"));
-            // Reconstruct the coordinator: the SQL phase survives a process restart.
-            new com.alibaba.qwen.code.managedagent.service.SessionRenameCoordinator(
-                    store, controlled, executor, java.time.Clock.systemUTC(), properties).recover();
-            org.mockito.Mockito.verify(controlled, org.mockito.Mockito.times(8))
-                    .rename(tenant, sessionId, title, command.renameRevision());
-            org.mockito.Mockito.verify(controlled, org.mockito.Mockito.times(2))
-                    .retireRename(tenant, sessionId, command.renameRevision());
-            assertThat(store.deliverableRenames(Long.MAX_VALUE)).noneMatch(delivery -> delivery.sessionId().equals(sessionId));
-            assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("remote accepted");
-            assertThat(store.findCommand(tenant, "RENAME_SESSION", "retire").orElseThrow().status()).isEqualTo("RETIRED");
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event WHERE tenant_id = ? AND session_id = ?"
-                    + " AND event_type = 'session.update.retired'", Integer.class, tenant, sessionId)).isEqualTo(1);
-            ManagedAgentService subject = new ManagedAgentService(store, new RequestDigests(), null, controlled, null);
-            assertThatThrownBy(() -> subject.renameSession(tenant, null, "retire", sessionId, title))
-                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("session_title_retired"));
-            assertThatThrownBy(() -> store.completeSessionRename(tenant, "retire", sessionId, title, "boot", command.renameRevision()))
-                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("session_mutation_superseded"));
-            assertThat(store.beginOperation(tenant, sessionId, OperationKind.CLOSE, "", "close", "close-digest").replayed()).isFalse();
-        } finally {
-            harness.setAvailable(true);
-        }
-    }
-
-    @Test
-    void retirementLeaseTakeoverAndTenantFenceProtectTerminalState() throws Exception {
-        String tenant = tenant();
-        String sessionId = emptySession(tenant);
-        harness.setAvailable(false);
-        try {
-            var command = store.beginSessionRename(tenant, "retire", "digest", sessionId, "title");
-            jdbc.update("UPDATE managed_session_rename_delivery SET attempt_count = 8 WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
-            var candidate = new StoreModels.RenameDelivery(tenant, sessionId, "retire", "title", command.renameRevision(), 8);
-            var old = store.claimRename(candidate, "old", java.time.Duration.ofSeconds(30)).orElseThrow();
-            assertThat(old.state()).isEqualTo("RETIRING");
-            jdbc.update("UPDATE managed_session_rename_delivery SET lease_until = 0 WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
-            assertThatThrownBy(() -> store.completeRenameRetirement(old, "old", "wrong", "boot"))
-                    .isInstanceOf(ApiException.class);
-            var current = store.claimRename(candidate, "new", java.time.Duration.ofSeconds(30)).orElseThrow();
-            store.retryRename(old, "old", 0);
-            assertThatThrownBy(() -> store.completeRenameRetirement(current, "old", "wrong", "boot"))
-                    .isInstanceOf(ApiException.class);
-            var wrongTenant = new StoreModels.RenameDelivery(tenant + "-other", sessionId, "retire", "title", command.renameRevision(), 8, "RETIRING");
-            assertThatThrownBy(() -> store.completeRenameRetirement(wrongTenant, "new", "wrong", "boot"))
-                    .isInstanceOf(ApiException.class);
-            assertThat(store.completeRenameRetirement(current, "new", null, "boot").title()).isNull();
-            var newer = store.beginSessionRename(tenant, "new-key", "new-digest", sessionId, "later");
-            assertThat(newer.renameRevision()).isGreaterThan(command.renameRevision());
-            assertThatThrownBy(() -> store.completeRenameRetirement(current, "new", "wrong", "boot"))
-                    .isInstanceOf(ApiException.class);
-            store.completeSessionRename(tenant, "new-key", sessionId, "later", "boot", newer.renameRevision());
-            assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("later");
         } finally {
             harness.setAvailable(true);
         }

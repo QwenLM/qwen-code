@@ -1343,36 +1343,6 @@ export class LocalManagedSessionAuthority {
     assertManagedSessionDomainEnabled(domain);
   }
 
-  async retireSessionTitle(
-    command: ManagedSessionCommand,
-    revision: string,
-    actor: ManagedSessionActor,
-  ): Promise<{ title: string | null }> {
-    const store = this.resources;
-    if (store === undefined) {
-      throw new ManagedSessionRecordError(
-        'a resource store is required to retire a Session title.',
-      );
-    }
-    const committed = await this.commitDomainRecord(
-      command,
-      {
-        domain: 'session_metadata',
-        content: { managedRenameRetiredRevision: revision },
-      },
-      actor,
-    );
-    const retained = JSON.parse(
-      (await store.read(committed.recordRef)).toString('utf8'),
-    ) as Record<string, unknown>;
-    return {
-      title:
-        typeof retained['title'] === 'string' && retained['title'].length > 0
-          ? retained['title']
-          : null,
-    };
-  }
-
   /**
    * Commits one registered domain record. The body is published as a resource
    * first, because the event carries only a reference to it; the authority
@@ -1394,60 +1364,6 @@ export class LocalManagedSessionAuthority {
       );
     }
     return this.runSerial(async () => {
-      let content = request.content;
-      let saved: Record<string, unknown> | undefined;
-      const incomingTitleRevision = content['managedRenameRevision'];
-      const retiredTitleRevision = content['managedRenameRetiredRevision'];
-      if (request.domain === 'session_metadata') {
-        if (!managedSessionKeysEqual(command.sessionKey, this.sessionKey)) {
-          throw new ManagedSessionConflictError(
-            'command session key does not match this session.',
-          );
-        }
-        for (const revision of [incomingTitleRevision, retiredTitleRevision]) {
-          if (
-            revision !== undefined &&
-            (typeof revision !== 'string' ||
-              !/^[1-9][0-9]{0,18}$/u.test(revision) ||
-              BigInt(revision) > 9223372036854775807n)
-          ) {
-            throw new ManagedSessionRecordError(
-              'Invalid Session title revision.',
-            );
-          }
-        }
-        const previousMetadata = this.domainRecords.get(request.domain);
-        if (previousMetadata !== undefined) {
-          saved = JSON.parse(
-            (await store.read(previousMetadata.recordRef)).toString('utf8'),
-          ) as Record<string, unknown>;
-        }
-        for (const revision of [
-          saved?.['managedRenameRevision'],
-          saved?.['managedRenameRetiredRevision'],
-        ]) {
-          if (
-            revision !== undefined &&
-            (typeof revision !== 'string' ||
-              !/^[1-9][0-9]{0,18}$/u.test(revision) ||
-              BigInt(revision) > 9223372036854775807n)
-          ) {
-            throw new ManagedSessionRecordError(
-              'Invalid persisted Session title revision.',
-            );
-          }
-        }
-        const retired = saved?.['managedRenameRetiredRevision'];
-        // Retirement revokes even the successful replay of an older title.
-        if (
-          retiredTitleRevision === undefined &&
-          incomingTitleRevision !== undefined &&
-          retired !== undefined &&
-          BigInt(incomingTitleRevision as string) <= BigInt(retired as string)
-        ) {
-          throw new ManagedSessionTitleSupersededError();
-        }
-      }
       // A retry returns what it committed even if the domain was disabled
       // since.
       const replayed = this.replayedDomain(command, request.domain);
@@ -1459,52 +1375,44 @@ export class LocalManagedSessionAuthority {
       this.assertCommandWritable(command);
       this.assertExpectedSequence(command);
       const previous = this.domainRecords.get(request.domain);
-      if (request.domain === 'session_metadata') {
-        const savedRevision = saved?.['managedRenameRevision'] as
-          | string
-          | undefined;
-        const savedRetiredRevision = saved?.['managedRenameRetiredRevision'] as
-          | string
-          | undefined;
-        if (retiredTitleRevision !== undefined) {
-          const retired = retiredTitleRevision as string;
-          const retained = { ...saved };
-          delete retained['operationId'];
-          delete retained['revision'];
-          delete retained['previousRecordRef'];
-          content = {
-            ...retained,
-            managedRenameRevision:
-              savedRevision !== undefined &&
-              BigInt(savedRevision) > BigInt(retired)
-                ? savedRevision
-                : retired,
-            managedRenameRetiredRevision:
-              savedRetiredRevision !== undefined &&
-              BigInt(savedRetiredRevision) > BigInt(retired)
-                ? savedRetiredRevision
-                : retired,
-          };
-        } else {
+      let content = request.content;
+      const incomingTitleRevision = content['managedRenameRevision'];
+      if (
+        request.domain === 'session_metadata' &&
+        incomingTitleRevision !== undefined &&
+        (typeof incomingTitleRevision !== 'string' ||
+          !/^[1-9][0-9]{0,18}$/u.test(incomingTitleRevision) ||
+          BigInt(incomingTitleRevision) > 9223372036854775807n)
+      ) {
+        throw new ManagedSessionRecordError('Invalid Session title revision.');
+      }
+      if (request.domain === 'session_metadata' && previous !== undefined) {
+        const saved = JSON.parse(
+          (await store.read(previous.recordRef)).toString('utf8'),
+        ) as Record<string, unknown>;
+        const savedRevision = saved['managedRenameRevision'];
+        const requestedRevision = content['managedRenameRevision'];
+        if (savedRevision !== undefined) {
           if (
-            incomingTitleRevision !== undefined &&
-            savedRevision !== undefined &&
-            BigInt(incomingTitleRevision as string) <= BigInt(savedRevision)
+            typeof savedRevision !== 'string' ||
+            !/^[1-9][0-9]*$/u.test(savedRevision)
+          ) {
+            throw new ManagedSessionRecordError(
+              'Invalid persisted Session title revision.',
+            );
+          }
+          if (
+            requestedRevision !== undefined &&
+            (typeof requestedRevision !== 'string' ||
+              !/^[1-9][0-9]*$/u.test(requestedRevision) ||
+              BigInt(requestedRevision) <= BigInt(savedRevision))
           ) {
             throw new ManagedSessionTitleSupersededError();
           }
-          // Every ordinary writer retains both hosted ordering watermarks.
+          // Local/manual title writers retain the hosted ordering watermark.
           content = {
             ...content,
-            ...(incomingTitleRevision !== undefined ||
-            savedRevision !== undefined
-              ? {
-                  managedRenameRevision: incomingTitleRevision ?? savedRevision,
-                }
-              : {}),
-            ...(savedRetiredRevision !== undefined
-              ? { managedRenameRetiredRevision: savedRetiredRevision }
-              : {}),
+            managedRenameRevision: requestedRevision ?? savedRevision,
           };
         }
       }
