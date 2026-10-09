@@ -213,12 +213,15 @@ export interface HostCapabilitiesState {
  * (status flips to offline/unauthorized but the rows keep rendering) and
  * hosts are always polled with their own per-origin client.
  */
-export function useHostCapabilities(origin: string): HostCapabilitiesState {
+export function useHostCapabilities(origin: string): HostCapabilitiesState & {
+  refresh: () => void;
+} {
   const [state, setState] = useState<HostCapabilitiesState>({
     workspaces: undefined,
     status: 'connecting',
     generation: 0,
   });
+  const [round, setRound] = useState(0);
   useEffect(() => {
     let cancelled = false;
     const refresh = async () => {
@@ -245,6 +248,6 @@ export function useHostCapabilities(origin: string): HostCapabilitiesState {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [origin]);
-  return state;
+  }, [origin, round]);
+  return { ...state, refresh: () => setRound((value) => value + 1) };
 }

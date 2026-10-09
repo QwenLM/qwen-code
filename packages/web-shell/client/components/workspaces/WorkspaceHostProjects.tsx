@@ -4,8 +4,10 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
-import { Folder, Server } from 'lucide-react';
+import { Folder, Server, Trash2Icon } from 'lucide-react';
 import { useDaemonTargetOptional } from '../../config/daemon-target';
+import { useWorkspaceRemoval } from './useWorkspaceRemoval';
+import { WorkspaceRemovalDialog } from './WorkspaceRemovalDialog';
 import {
   getHostClient,
   useFanoutOrigins,
@@ -155,8 +157,21 @@ function FanoutHostGroup({
   onOpenHostSession?: OpenHostSessionHandler;
 }) {
   const { t } = useI18n();
-  const { workspaces, status, generation } = useHostCapabilities(origin);
+  const { workspaces, status, generation, refresh } =
+    useHostCapabilities(origin);
   const openHostWorkspace = useOpenHostedWorkspaceFlow();
+  // Workspace removal runs over the host's own client: it is catalog
+  // management with the user's own per-origin token, distinct from the
+  // phase-1 read-only chat/terminal surface the fan-out rows stay under.
+  const removal = useWorkspaceRemoval({
+    removeWorkspace: (workspaceId, options) =>
+      getHostClient(origin).workspaceById(workspaceId).remove(options),
+    onRemoved: async () => {
+      refresh();
+    },
+    onError: () => {},
+    errorMessage: t('sidebar.removeWorkspaceError'),
+  });
   const liveWorkspaces = useMemo(
     () => workspaces?.filter((workspace) => workspace.kind !== 'live'),
     [workspaces],
@@ -212,6 +227,7 @@ function FanoutHostGroup({
               workspace={workspace}
               generation={generation}
               onOpenHostSession={onOpenHostSession}
+              onRemoveWorkspace={removal.request}
             />
           ))
         : snapshotWorkspaces.map((workspace) => (
@@ -224,26 +240,32 @@ function FanoutHostGroup({
               onOpen={openHostWorkspace}
             />
           ))}
+      <WorkspaceRemovalDialog
+        removal={removal}
+        currentSessionInCandidate={false}
+      />
     </div>
   );
 }
 
 /**
  * One live workspace of a fan-out host. Sessions come from WorkspaceSection's
- * own catalog queries against the host's client; mutations (rename, delete,
- * trust, git) are focused-host-only in this phase, so those props stay unset
- * and the section renders read-only affordance-free rows.
+ * own catalog queries against the host's client; chat/terminal/name-trust
+ * mutations are focused-host-only in this phase, while workspace removal is
+ * offered on the row — it runs the daemon REST of that very host.
  */
 function LiveHostWorkspace({
   origin,
   workspace,
   generation,
   onOpenHostSession,
+  onRemoveWorkspace,
 }: {
   origin: string;
   workspace: DaemonWorkspaceCapability;
   generation: number;
   onOpenHostSession?: OpenHostSessionHandler;
+  onRemoveWorkspace?: (workspace: DaemonWorkspaceCapability) => void;
 }) {
   const { t } = useI18n();
   const openSession = (session: DaemonSessionSummary) => {
@@ -271,6 +293,26 @@ function LiveHostWorkspace({
       channelGroupingEnabled={false}
       ungroupedLabel={t('sidebar.groupUngrouped')}
       showSessionDetails={false}
+      headerActions={
+        onRemoveWorkspace && workspace.removable
+          ? () => (
+              <button
+                type="button"
+                className={sectionStyles.workspaceHeaderAction}
+                title={t('sidebar.removeWorkspace')}
+                data-testid="fanout-remove-workspace"
+                onClick={() => onRemoveWorkspace(workspace)}
+              >
+                <Trash2Icon
+                  className={sectionStyles.folderIcon}
+                  size={14}
+                  strokeWidth={1.4}
+                  aria-hidden="true"
+                />
+              </button>
+            )
+          : undefined
+      }
       renderSession={(session) => (
         <FanoutSessionRow
           key={session.sessionId}
