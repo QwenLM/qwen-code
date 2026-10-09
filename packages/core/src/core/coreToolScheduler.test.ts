@@ -11034,6 +11034,115 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(getToolSpans()[0].ended).toBe(false);
   });
 
+  it('shows a PreToolUse ask on an MCP tool as a literal-text info confirmation', async () => {
+    const mcpConfirmation = async (): Promise<ToolCallConfirmationDetails> => ({
+      type: 'mcp',
+      title: 'Confirm MCP Tool Execution',
+      serverName: 'external-context',
+      toolName: 'context_remember',
+      // Distinct from `toolName`, as in production (#13687): the title
+      // assertion below must discriminate which field is read.
+      toolDisplayName: 'context_remember (external-context MCP Server)',
+      onConfirm: async () => {},
+    });
+    const { waiting } = await askUntilApproval({
+      messageBus: askMessageBus(
+        'Save this exact content to the bound Mem0 repository memory?\n[visible](https://hidden.example/target)',
+      ),
+      tools: [
+        new MockTool({
+          name: 'mcpTool',
+          execute: vi.fn().mockResolvedValue(textResult('ok')),
+          getConfirmationDetails: mcpConfirmation,
+        }),
+      ],
+    });
+
+    // MCP details have no body for the reason, so the ask falls back to the
+    // literal-text info confirmation the pre-merge hook bounce used (#13687).
+    expect(waiting.confirmationDetails.type).toBe('info');
+    const details = waiting.confirmationDetails as {
+      title: string;
+      prompt: string;
+      renderPromptAsPlainText?: boolean;
+      hideAlwaysAllow?: boolean;
+    };
+    expect(details.title).toBe(
+      'Hook requested confirmation to run context_remember',
+    );
+    // The reason stays literal and first; the destination follows it, because
+    // the info dialog renders no title and carries no server field.
+    expect(details.prompt).toBe(
+      'Save this exact content to the bound Mem0 repository memory?\n' +
+        '[visible](https://hidden.example/target)\n\n' +
+        'MCP Server: external-context\nTool: context_remember',
+    );
+    expect(details.renderPromptAsPlainText).toBe(true);
+    expect(details.hideAlwaysAllow).toBe(true);
+  });
+
+  it('still blocks a hook-asked MCP tool call in plan mode', async () => {
+    const mcpConfirmation = async (): Promise<ToolCallConfirmationDetails> => ({
+      type: 'mcp',
+      title: 'Confirm MCP Tool Execution',
+      serverName: 'external-context',
+      toolName: 'context_remember',
+      toolDisplayName: 'context_remember (external-context MCP Server)',
+      onConfirm: async () => {},
+    });
+    const { onAllToolCallsComplete } = await scheduleWithAsk({
+      approvalMode: ApprovalMode.PLAN,
+      configOverrides: { getSdkMode: () => false },
+      messageBus: askMessageBus('Save this exact content?'),
+      tools: [
+        new MockTool({
+          name: 'mcpTool',
+          execute: vi.fn().mockResolvedValue(textResult('ok')),
+          getConfirmationDetails: mcpConfirmation,
+        }),
+      ],
+    });
+
+    // The ask rewrite must not turn the blocked MCP call into an approvable
+    // `info` dialog: plan mode blocks it before any prompt is shown.
+    const [completed] = (await settledLastBatch(
+      onAllToolCallsComplete,
+    )) as CompletedToolCall[];
+    expectStatus(completed, 'error');
+    expect(JSON.stringify(completed.response.responseParts)).toContain(
+      'Tool blocked by plan mode',
+    );
+  });
+
+  it('does not let AUTO_EDIT auto-approve a hook-asked MCP call', async () => {
+    const mcpConfirmation = async (): Promise<ToolCallConfirmationDetails> => ({
+      type: 'mcp',
+      title: 'Confirm MCP Tool Execution',
+      serverName: 'external-context',
+      toolName: 'context_remember',
+      toolDisplayName: 'context_remember (external-context MCP Server)',
+      onConfirm: async () => {},
+    });
+    const execute = vi.fn().mockResolvedValue(textResult('ok'));
+    const { waiting } = await askUntilApproval({
+      approvalMode: ApprovalMode.AUTO_EDIT,
+      messageBus: askMessageBus('Save this exact content?'),
+      tools: [
+        new MockTool({
+          name: 'mcpTool',
+          execute,
+          getConfirmationDetails: mcpConfirmation,
+        }),
+      ],
+    });
+
+    // The ask rewrite makes the details an approvable `info` shape, so the
+    // `!preToolUseAsk` term is the only thing between AUTO_EDIT and a silently
+    // executed write the hook explicitly asked the user about.
+    expect(waiting.confirmationDetails.type).toBe('info');
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('executes the tool exactly once when the user approves an ask (no re-ask loop)', async () => {
     const execute = vi.fn().mockResolvedValue(textResult('ok'));
     const messageBus = askMessageBus();

@@ -1610,6 +1610,20 @@ function withPreToolUseAskReason(
         prompt: `${reason}\n\n${details.prompt}`,
         renderPromptAsPlainText: true,
       };
+    case 'mcp':
+      // MCP details have no body that can carry the reason, so the ask falls
+      // back to a literal-text info confirmation, as the pre-merge bounce did.
+      // The `info` shape has no server field and its `title` is not rendered in
+      // the TUI, so the destination is named in the body: the hook's reason
+      // alone need not identify which server receives the write.
+      return {
+        type: 'info',
+        title: `Hook requested confirmation to run ${details.toolName}`,
+        prompt: `${reason}\n\nMCP Server: ${details.serverName}\nTool: ${details.toolName}`,
+        renderPromptAsPlainText: true,
+        hideAlwaysAllow: true,
+        onConfirm: details.onConfirm,
+      };
     default:
       return details;
   }
@@ -4157,6 +4171,10 @@ export class CoreToolScheduler {
               throw new Error('Unable to prepare shell confirmation.');
             }
 
+            // Plan mode judges the tool's own confirmation shape: the ask
+            // rewrite must not turn a blocked MCP call into an approvable
+            // `info` dialog.
+            const planModeDetails = confirmationDetails;
             if (preToolUseAsk) {
               confirmationDetails = withPreToolUseAskReason(
                 confirmationDetails,
@@ -4173,7 +4191,7 @@ export class CoreToolScheduler {
                 isPlanMode,
                 isExitPlanModeTool,
                 isAskUserQuestionTool,
-                confirmationDetails,
+                planModeDetails,
                 isEnterPlanModeTool,
               )
             ) {

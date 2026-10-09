@@ -55,7 +55,10 @@ import {
   runWithAgentContext,
   runWithAgentDisallowedTools,
 } from '../../agents/runtime/agent-context.js';
-import { runWithTeammateIdentity } from '../../agents/team/identity.js';
+import {
+  isTeammate,
+  runWithTeammateIdentity,
+} from '../../agents/team/identity.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -2160,6 +2163,27 @@ describe('AgentTool', () => {
       ]);
       await agentTool.refreshSubagents();
       expectText(agentTool.description, ['test-agent', 'A test agent']);
+    });
+
+    it('rebuilds the client declarations outside a teammate scope', async () => {
+      // A teammate's derived Config resolves to the leader's client; a schema
+      // that reads the ambient scope (send_message) must not see the teammate.
+      let scopedAtRebuild: boolean | undefined;
+      vi.mocked(config.getLlmClient).mockReturnValue({
+        setTools: vi.fn(async () => {
+          scopedAtRebuild = isTeammate();
+        }),
+      } as unknown as ReturnType<Config['getLlmClient']>);
+      await runWithTeammateIdentity(
+        {
+          agentId: 'scribe@demo',
+          agentName: 'scribe',
+          teamName: 'demo',
+          isTeamLead: false,
+        },
+        () => agentTool.refreshSubagents(),
+      );
+      expect(scopedAtRebuild).toBe(false);
     });
   });
 

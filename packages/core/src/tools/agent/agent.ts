@@ -127,7 +127,10 @@ import {
   validateMaxSessionTurns,
   type Config,
 } from '../../config/config.js';
-import { isTeammate } from '../../agents/team/identity.js';
+import {
+  isTeammate,
+  runOutsideTeammateIdentity,
+} from '../../agents/team/identity.js';
 import { isSubagentLikeExecutionContext } from '../../agents/runtime/subagent-plan-tool-policy.js';
 import {
   buildAgentTranscriptAttach,
@@ -158,6 +161,7 @@ import {
   type BundledReferenceSurface,
   toolSearchBridgeSentence,
 } from '../../skills/bundled-reference.js';
+import { isDirectToolBridgeAvailable } from '../tool-search.js';
 
 const EXTERNAL_USAGE_NOTICE =
   '\n\n[External executor token usage and cost are unavailable.]';
@@ -799,6 +803,10 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
    * cannot make two refreshes disagree about where the reference lives.
    */
   private readonly delegationSurface: BundledReferenceSurface;
+  // list_agents is excluded for subagents and teammates, whose registries can
+  // still list it. Decided once for the context that builds this instance, so
+  // a refresh fired from another scope cannot flip the description.
+  private readonly listAgentsReachable = isTopLevelSession() && !isTeammate();
 
   constructor(private readonly config: Config) {
     // Initialize with a basic schema first
@@ -925,10 +933,14 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
       this.availableSubagents = BuiltinAgentRegistry.getBuiltinAgents();
       this.updateDescriptionAndSchema();
     } finally {
-      // Update the client with the new tools
+      // Update the client with the new tools. A teammate's derived Config
+      // resolves to the leader's client, and a schema such as send_message's
+      // reads the ambient teammate scope, so rebuilding here inside a
+      // teammate's context would write the teammate view into the leader's
+      // declarations.
       const llmClient = this.config.getLlmClient();
       if (llmClient) {
-        await llmClient.setTools();
+        await runOutsideTeammateIdentity(() => llmClient.setTools());
       }
     }
   }
@@ -972,6 +984,14 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     const delegationSection = buildAgentDelegationSection(
       this.delegationSurface,
     );
+    const registry = this.config.getToolRegistry?.();
+    const rosterDiscovery =
+      this.listAgentsReachable &&
+      registry &&
+      isDirectToolBridgeAvailable(registry) &&
+      registry.getAllToolNames().includes(ToolNames.LIST_AGENTS)
+        ? `In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)}\n\n`
+        : '';
     const baseDescription = `${AGENT_DESCRIPTION_FIRST_LINE}
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
@@ -1006,9 +1026,7 @@ ${todoGuidance}- Delegate only concrete, bounded tasks that can run independentl
 
 ## Working with background agents
 
-In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)}
-
-**Don't peek.** Do not read or tail a background agent's output file while it runs. You get a completion notification; trust it. Reading the transcript mid-flight pulls the agent's tool noise into your context, which defeats the point of delegating.
+${rosterDiscovery}**Don't peek.** Do not read or tail a background agent's output file while it runs. You get a completion notification; trust it. Reading the transcript mid-flight pulls the agent's tool noise into your context, which defeats the point of delegating.
 
 **Don't race.** After launching a background agent, you know nothing about what it found. Never fabricate or predict its results in any format — not as prose, summary, or structured output. The notification arrives as a user-role message in a later turn; it is never something you write yourself. If the user asks a follow-up before the notification lands, tell them the agent is still running — give status, not a guess.
 
