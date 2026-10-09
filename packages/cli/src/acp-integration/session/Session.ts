@@ -1186,6 +1186,9 @@ const MID_TURN_QUEUE_DRAIN_TIMEOUT_MS = 2_000;
 // into an unrelated turn's context.
 const MID_TURN_QUEUE_RECOVERY_TIMEOUT_MS = 30_000;
 const MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS = 10_000;
+// Bounds resolving the input a finished turn keeps unsent: the turn only
+// records it, so its reply does not wait out media resolution.
+const MID_TURN_KEEP_RESOLVE_TIMEOUT_MS = 2_000;
 // `waitForActiveTurnsToSettle` polls at this interval when the active turn
 // publishes no completion promise to await — `goalProcessing` and
 // `historyMutationActive` both block `#hasActiveTurn()` without one. Yielding
@@ -7444,6 +7447,15 @@ export class Session implements SessionContext {
     // consecutive-block cap and continuation prompt ids.
     let stopHookForcedTurn = false;
     let stopHookReasons: string[] = [];
+    // Queued user input a continuation answered after cutting its response
+    // short replaces the turn, as input drained before a Stop check does.
+    let continuationAnsweredUserInput = false;
+    const onUserInputAnswered = () => {
+      continuationAnsweredUserInput = true;
+      stopHookForcedTurn = false;
+      stopHookIterationCount = 0;
+      stopHookReasons = [];
+    };
     const onFullTurnModel = (model: string) => {
       if (modelOverride === model) {
         return true;
@@ -7507,7 +7519,9 @@ export class Session implements SessionContext {
             rejectOnLoopDetected,
             ...(goalTurn ? { goalTurn } : {}),
             ...(channelTurn ? { channelTurn: true } : {}),
-            ...(interruptible ? { interruptible: true } : {}),
+            ...(interruptible
+              ? { interruptible: true, onUserInputAnswered }
+              : {}),
           },
         );
         if (continuation.kind === 'terminal') return continuation;
@@ -7557,7 +7571,9 @@ export class Session implements SessionContext {
               rejectOnLoopDetected,
               ...(goalTurn ? { goalTurn } : {}),
               ...(channelTurn ? { channelTurn: true } : {}),
-              ...(interruptible ? { interruptible: true } : {}),
+              ...(interruptible
+                ? { interruptible: true, onUserInputAnswered }
+                : {}),
             },
           );
           if (continuation.kind === 'terminal') {
@@ -7670,7 +7686,9 @@ export class Session implements SessionContext {
                 rejectOnLoopDetected,
                 ...(goalTurn ? { goalTurn } : {}),
                 ...(channelTurn ? { channelTurn: true } : {}),
-                ...(interruptible ? { interruptible: true } : {}),
+                ...(interruptible
+                  ? { interruptible: true, onUserInputAnswered }
+                  : {}),
               },
             );
             if (continuation.kind === 'terminal') {
@@ -7775,6 +7793,7 @@ export class Session implements SessionContext {
       }
       // Only a continuation carrying a Stop hook's reason is hook-forced.
       stopHookForcedTurn = Boolean(externalReason);
+      continuationAnsweredUserInput = false;
       const continuation = await this.#runStopContinuation(
         pendingSend,
         continuationPromptId,
@@ -7802,14 +7821,21 @@ export class Session implements SessionContext {
           rejectOnLoopDetected,
           ...(goalTurn ? { goalTurn } : {}),
           ...(channelTurn ? { channelTurn: true } : {}),
-          ...(interruptible ? { interruptible: true } : {}),
+          ...(interruptible
+            ? { interruptible: true, onUserInputAnswered }
+            : {}),
         },
       );
       if (continuation.supersededAutomaticContinuation) {
         // Queued user input replaced the continuation.
         stopHookForcedTurn = false;
       }
-      if (continuation.supersededAutomaticContinuation && externalReason) {
+      if (
+        continuation.supersededAutomaticContinuation &&
+        externalReason &&
+        // Already restarted by the input the continuation answered.
+        !continuationAnsweredUserInput
+      ) {
         stopHookIterationCount--;
         stopHookReasons = stopHookReasons.slice(0, -1);
       }
@@ -7837,6 +7863,8 @@ export class Session implements SessionContext {
       channelTurn?: boolean;
       /** Let queued user input cut its model responses short. */
       interruptible?: boolean;
+      /** Called when the continuation answers user input it cut in for. */
+      onUserInputAnswered?: () => void;
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
@@ -8432,6 +8460,7 @@ export class Session implements SessionContext {
         );
         if (nextMessage) {
           nextGuardContinuation = undefined;
+          options.onUserInputAnswered?.();
           continue;
         }
       }
@@ -10049,10 +10078,21 @@ export class Session implements SessionContext {
       this.midTurnRecoveredMessages = this.midTurnRecoveredMessages.filter(
         (message) => !this.earlyDrainedMidTurnMessages.has(message),
       );
-      const parts = await this.#buildMidTurnParts(unsent, abortSignal, {
-        preserveFallbackOnAbort: true,
-        prefix: MID_TURN_RESPONSE_USER_MESSAGE_PREFIX,
-      });
+      const deadline = new AbortController();
+      const timer = setTimeout(
+        () => deadline.abort(),
+        MID_TURN_KEEP_RESOLVE_TIMEOUT_MS,
+      );
+      let parts: Part[];
+      try {
+        parts = await this.#buildMidTurnParts(unsent, abortSignal, {
+          preserveFallbackOnAbort: true,
+          prefix: MID_TURN_RESPONSE_USER_MESSAGE_PREFIX,
+          deadline: deadline.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
       if (parts.length > 0) {
         this.#getCurrentChat().addHistory({ role: 'user', parts });
       }
@@ -10124,8 +10164,13 @@ export class Session implements SessionContext {
       onFullTurnModel?: (model: string) => boolean;
       preserveFallbackOnAbort?: boolean;
       prefix?: string;
+      /** Also ends resolution, which then falls back to the message text. */
+      deadline?: AbortSignal;
     } = {},
   ): Promise<Part[]> {
+    const resolveSignal = options.deadline
+      ? AbortSignal.any([abortSignal, options.deadline])
+      : abortSignal;
     const proposalTurn = this.activeGoalProposalTurn;
     if (
       messages.length > 0 &&
@@ -10153,7 +10198,7 @@ export class Session implements SessionContext {
           rawParts = [{ text: message.message }];
         } else {
           rawParts = await withTimeoutSignal(
-            abortSignal,
+            resolveSignal,
             MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
             (signal) =>
               this.#resolvePrompt(message.content, signal, {
@@ -10161,15 +10206,17 @@ export class Session implements SessionContext {
               }),
           );
           // Keep local resolution bounded, then let media bridges own their
-          // longer timeouts while remaining cancellable by the real turn.
+          // longer timeouts while remaining cancellable by the real turn. A
+          // deadline cancels them too, so nothing runs on or reports after
+          // it; their per-turn limits then count this input on its own.
           rawParts = await this.#applyBridgeConversionsIfNeeded(
             rawParts,
             message.content,
-            abortSignal,
+            resolveSignal,
             options.onFullTurnModel,
           );
           // Bridges report cancellation as skipped instead of throwing.
-          abortSignal.throwIfAborted();
+          resolveSignal.throwIfAborted();
         }
       } catch (messageError) {
         if (abortSignal.aborted && !options.preserveFallbackOnAbort) {

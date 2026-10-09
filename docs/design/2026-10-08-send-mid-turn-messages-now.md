@@ -48,7 +48,8 @@ is delivered. Interrupting becomes an explicit action.
 
 - Typing during a turn keeps tool-boundary delivery, unchanged.
 - A send-now action delivers the queued messages within one round trip while
-  a foreground turn streams a model response.
+  a foreground turn streams a model response. Goal continuations are
+  foreground turns and are covered too.
 - Running tools are never interrupted; their results go out with the
   messages.
 
@@ -78,7 +79,7 @@ the next tool boundary.
 
 `acpAgent` routes the request to `Session.sendMidTurnInputNow()`, which
 records it for the running turn and wakes the response currently open to
-interruption.
+interruption. A request that arrives before the response opens waits for it.
 `#openResponseInterrupt` opens each model response in the main prompt loop
 and in Stop continuations of foreground, non-channel turns:
 
@@ -105,11 +106,18 @@ and in Stop continuations of foreground, non-channel turns:
    and when the response had already ended,
    `[User message received while you were responding]`. Otherwise delivery
    stays at the next tool boundary, as before. A turn stopped by then takes
-   nothing more from the host, which promotes what is still queued.
-5. If the turn is cancelled or fails before it sends input an early drain
-   took, the turn records that input in the conversation and the transcript
-   when it ends, as a stopped tool run already does with input the host
-   handed over.
+   nothing more from the host, which promotes what is still queued. Input
+   answered this way inside a Stop-hook continuation replaces that turn, as
+   input drained before a Stop check does: the next Stop check is not
+   hook-forced, and the count of consecutive blocks restarts.
+5. If the turn ends before it sends input an early drain took (it is
+   cancelled, fails, or a tool ends it), the turn records that input in the
+   conversation and the transcript, as a stopped tool run already does with
+   input the host handed over. The turn has ended and only records the input,
+   so resolving its attachments gets a 2 s deadline of its own, past which
+   the input is kept as text. The deadline also cancels media bridges, so no
+   conversion runs on or reports after the turn; their per-turn image limit
+   then counts this input on its own.
 
 ### Web Shell
 
@@ -118,13 +126,19 @@ delete and edit when the daemon advertises the capability. It calls the route
 through the SDK's `sendMidTurnMessagesNow` (the session client, or the daemon
 client with the persisted client id for a row restored after a session
 switch). The row then clears on the usual `mid_turn_message_injected` echo.
+When the daemon answers `{ requested: false }`, the row's message has already
+left the queue, so the row is reconciled against the daemon's queue instead,
+where the daemon supports the mid-turn query and the row has a session.
+A second click on the row while the request is out is ignored.
 
 ### Decisions
 
 - **Explicit, not default.** Enter keeps the edit window and never cuts a
   response for an aside; the user decides when a message is urgent.
-- **Session-wide.** The drain takes the whole queue, so Send now on one row
-  delivers every message waiting there, in order.
+- **Session-wide.** Send now on one row serves all of the session's user
+  input: the drain takes every message the user queued, in queue order.
+  Queue-only steering keeps its own delivery; when it goes out in the same
+  request, it follows the user's messages.
 - **Drain before abort.** Aborting first could leave nothing to send: the
   message may already be gone (deleted, or taken by another drain), and the
   turn would end with a truncated answer. Draining first means an extra
@@ -144,8 +158,8 @@ switch). The row then clears on the usual `mid_turn_message_injected` echo.
   messages typed with plain Enter.
 - **Taken input is never stranded.** Once the host hands queued input over,
   the user sees it as delivered and the host will not promote it. Input that
-  a cancelled or failed turn took but never sent is kept in that turn's
-  conversation rather than dropped. Only a drain that timed out and is
+  a turn took but never sent is kept in that turn's conversation rather than
+  dropped. Only a drain that timed out and is
   answered after the response it was meant to interrupt has ended falls back
   to the existing late-recovery path, which delivers the input at the next
   tool boundary.
@@ -159,46 +173,57 @@ switch). The row then clears on the usual `mid_turn_message_injected` echo.
 
 - New Web Shell, older daemon: the capability is missing, so no Send now
   action is shown.
-- New daemon, older agent: the request fails with `-32601` and is ignored.
-  Delivery stays at tool boundaries.
+- New daemon, older agent: the request fails with `-32601`, which the daemon
+  logs and otherwise ignores. Delivery stays at tool boundaries.
 - The desktop ACP client and the standalone channels host answer drains from
   their own queues and never send the request, so their behavior is unchanged.
 
 ## Validation
 
 - Unit: `Session.test.ts` covers a cut-off response answered in the same
-  turn; a request that finds an empty queue; a response that already called
-  a tool, whose tool call is still streaming, whose tool call starts while
-  the drain is out, or whose tool ends the turn; a drain that answers after
-  the response ended; late answers from a timed-out send-now drain during the
-  response, after it, and after the turn; input recovered from a timed-out
-  drain; a Stop-hook continuation; channel turns and their Stop
-  continuations; repeated requests while a drain is out; a tool-boundary
-  drain that waits for an early drain; input kept when the turn is
-  cancelled; no further drain once the turn is stopped; a request between
-  turns; a request its turn never served; and a request left over from a
-  stopped turn. `acpAgent.test.ts` covers routing. `bridge.test.ts` covers
-  that typing alone sends nothing, that send-now sends the request only when
-  user messages wait, that the send-now drain leaves queue-only steering
-  queued, and client authorization. `server.test.ts` and
-  `multi-workspace-sessions.test.ts` cover the route and its owner routing,
-  the SDK tests cover both clients, and the Web Shell tests cover the row
-  action, its wiring in the app and the chat pane, the hook and the session
-  action. Removing any one of the agent guards behind the decisions above
-  fails a test, except the turn binding and the end-of-turn reset, which back
-  each other up: removing both fails two tests.
+  turn; a request that arrives before the response opens; a request that
+  finds an empty queue; a response that already called a tool, whose tool
+  call is still streaming (in the main loop and in a Stop continuation),
+  whose tool call starts while the drain is out, or whose tool ends the turn;
+  a drain that answers after the response ended; late answers from a
+  timed-out send-now drain during the response, after it, and after the turn;
+  input recovered from a timed-out drain; a host that cannot answer drains; a
+  Stop-hook continuation, and the Stop-hook state after input cut one short;
+  channel turns and their Stop continuations; repeated requests while a drain
+  is out; a tool-boundary drain that waits for an early drain; input kept
+  when the turn is cancelled (as text when its attachment cannot be resolved
+  then) or when a tool ends it while the drain is out (within the keep
+  deadline when a file read or a media bridge hangs, the bridge being
+  cancelled at the deadline); no further
+  drain once the turn is stopped, also while its response still streams; a
+  request between turns; a request its turn never served; and a request left
+  over from a stopped turn. `acpAgent.test.ts` covers routing and the
+  session context. `bridge.test.ts` and `bridgeClient.test.ts` cover that
+  typing alone sends nothing, that send-now sends the request only when user
+  messages wait, that a rejected request is logged and changes nothing, that
+  the send-now drain leaves queue-only steering queued, that a failed
+  send-now drain requeues in the original order, and client authorization.
+  `server.test.ts` and `multi-workspace-sessions.test.ts` cover the route,
+  its owner routing and its failure statuses, the SDK tests cover both
+  clients, and the Web Shell tests cover the row action, its wiring in the
+  app and the chat pane, the hook (including a row already gone from the
+  queue and a repeated click) and the session action. Removing any one of
+  the agent guards behind the decisions above fails a test, with two
+  exceptions: the turn binding and the end-of-turn reset back each other up,
+  and the check that keeps a superseded Stop-hook continuation from undoing
+  a restarted block count has no test of its own.
 - End to end, same harness as above; Enter then Send now right away:
 
 | Situation at insert time          | Enter only | Send now |
 | --------------------------------- | ---------- | -------- |
-| 10 s answer streaming             | 8.3 s      | 14 ms    |
-| 6 s response before a quick tool  | 5.1 s      | 10 ms    |
-| Short steps                       | 1.35 s     | 10 ms    |
-| Silent 5 s before the first token | 3.9 s      | 11 ms    |
-| 8 s shell command running         | 6.1 s      | 6.1 s    |
+| 10 s answer streaming             | 8.29 s     | 15 ms    |
+| 6 s response before a quick tool  | 5.12 s     | 10 ms    |
+| Short steps                       | 1.35 s     | 11 ms    |
+| Silent 5 s before the first token | 3.97 s     | 11 ms    |
+| 8 s shell command running         | 6.10 s     | 6.10 s   |
 
 In Web Shell the typed message stayed queued with its Send now action, and the
-click reached the model 44 ms later. The interrupted request carries the
+click reached the model 47 ms later. The interrupted request carries the
 partial answer as an assistant message followed by the prefixed user message,
 and the transcript keeps that order after a reload.
 
@@ -207,6 +232,10 @@ and the transcript keeps that order after a reload.
 - An interrupted response is billed for the tokens it produced, and the next
   request resends the context. Send now is an explicit action, and prompt
   caching keeps the resend cheap.
+- A response cut short may end before the provider reports its token usage.
+  As on a cancel, that usage is then missing from the turn's usage report.
+  The next request's prompt count includes the partial answer, so the
+  context-size accounting catches up with it.
 - While a tool runs, Send now has no visible effect until the tool finishes.
   Claude Code moves running shells to the background in this case; that is
   left for later.
@@ -216,5 +245,6 @@ and the transcript keeps that order after a reload.
   today), or a model that writes tool calls as text, can still have a
   half-written call cut short.
 - In the narrow window where a drain is already out when a tool call starts,
-  and that tool then ends the turn, the taken input is kept in the
-  conversation and transcript but is not answered in that turn.
+  and that tool then ends the turn, or when the turn is stopped, the taken
+  input is kept in the conversation and transcript but is not answered in
+  that turn.

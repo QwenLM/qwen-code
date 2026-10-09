@@ -1,4 +1,4 @@
-Send queued mid-turn messages now
+# Send queued mid-turn messages now
 
 ## Baseline
 
@@ -38,18 +38,25 @@ deliver it sooner without stopping the turn.
 ## Automated coverage
 
 `Session.test.ts` (queued input during a streaming response) pins the cut and
-the same-turn answer, no cut when the queue is empty, no early drain once a
-tool call has started (complete, still streaming, or ending the turn),
-delivery when the drain answers after the response ended, no cut when a tool
-call starts while the drain is out, late answers from a timed-out send-now
-drain (during the response, after it, and after the turn), a Stop-hook continuation, channel turns, input
-recovered from a timed-out drain, one drain at a time, a tool-boundary drain
-that waits for an early drain, input kept when the turn is cancelled, a
+the same-turn answer, a request that arrives before the response opens, no
+cut when the queue is empty, no early drain once a tool call has started
+(complete, still streaming in the main loop or a Stop continuation, or ending
+the turn), delivery when the drain answers after the response ended, no cut
+when a tool call starts while the drain is out, late answers from a timed-out
+send-now drain (during the response, after it, and after the turn), a
+Stop-hook continuation and the Stop-hook state after a cut, channel turns,
+input recovered from a timed-out drain, a host that cannot answer drains, one
+drain at a time, a tool-boundary drain that waits for an early drain, input
+kept when the turn is cancelled (with an attachment kept as text) or when a
+tool ends it while the drain is out (within the keep deadline when a file read
+or a media bridge hangs), no drain for a stopped turn, a
 request between turns, a request its turn never served, and a request left
 over from a stopped turn.
-`acpAgent.test.ts` pins routing of `craft/midTurnSendNow`. `bridge.test.ts`
-pins that typing alone sends nothing, that send-now sends the request only
-when user messages wait, and that the send-now drain leaves queue-only
-steering queued. `server.test.ts` pins the route, the SDK unit tests pin
-both clients, and the Web Shell tests pin the row action, the hook and the
-session action.
+`acpAgent.test.ts` pins routing of `craft/midTurnSendNow` and its session
+context. `bridge.test.ts` and `bridgeClient.test.ts` pin that typing alone
+sends nothing, that send-now sends the request only when user messages wait,
+that a rejected request is logged, that the send-now drain leaves queue-only
+steering queued, and that a failed send-now drain requeues in order.
+`server.test.ts` and `multi-workspace-sessions.test.ts` pin the route and its
+failure statuses, the SDK unit tests pin both clients, and the Web Shell tests
+pin the row action, the hook and the session action.

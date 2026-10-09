@@ -2876,9 +2876,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   /**
    * Ask the agent to deliver the session's queued mid-turn messages now: a
    * model response that is streaming is cut short so they reach the model in
-   * this round trip, while running tools still finish first. `requested` is
-   * false when no user message is waiting. Authorized like the sibling
-   * mid-turn methods.
+   * this round trip, unless it has started a tool call; running tools still
+   * finish first. `requested` is false when no user message is waiting.
+   * Authorized like the sibling mid-turn methods.
    */
   sendMidTurnMessagesNow(
     sessionId: string,

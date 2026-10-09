@@ -38162,6 +38162,66 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
+  it('logs a send-now request an older agent rejects and keeps the queue', async () => {
+    const firstTurn = deferred<void>();
+    const handle = makeChannel({
+      promptImpl: async (req: PromptRequest) => {
+        if ((req.prompt[0] as { text?: string }).text === 'work') {
+          await firstTurn.promise;
+        }
+        return { stopReason: 'end_turn' };
+      },
+      extMethodImpl: (method) => {
+        if (method === MID_TURN_SEND_NOW_METHOD) {
+          throw RequestError.methodNotFound(method);
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const turn = bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'work' }],
+    });
+    await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+    const client = { clientId: session.clientId };
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'steer',
+        client,
+        'typed-1',
+      );
+      // Advisory: the answer does not wait for the agent.
+      expect(bridge.sendMidTurnMessagesNow(session.sessionId, client)).toEqual({
+        requested: true,
+      });
+      await vi.waitFor(() =>
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `[mid-turn] session=${JSON.stringify(session.sessionId)} send-now request failed`,
+          ),
+        ),
+      );
+      // The message still waits for the tool boundary.
+      await expect(
+        handle.agentConnection.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
+          sessionId: session.sessionId,
+        }),
+      ).resolves.toMatchObject({ messages: ['steer'] });
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    firstTurn.resolve();
+    await turn;
+    await bridge.shutdown();
+  });
+
   it('rejects admission while the session is closing', async () => {
     const closeStarted = deferred<void>();
     const closeGate = deferred<Record<string, unknown>>();

@@ -14984,7 +14984,11 @@ export function createSessionControlPlane(
       // next tool boundary.
       void entry.connection
         .extMethod(MID_TURN_SEND_NOW_METHOD, { sessionId: entry.sessionId })
-        .catch(() => {});
+        .catch((error: unknown) => {
+          writeStderrLine(
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} send-now request failed: ${JSON.stringify(extractErrorMessage(error))}`,
+          );
+        });
       return { requested: true };
     },
 

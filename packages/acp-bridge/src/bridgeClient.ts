@@ -790,6 +790,25 @@ function ownsActivePrompt(
   );
 }
 
+/**
+ * Puts the messages a failed drain took back where they were, ahead of
+ * anything queued while it was out.
+ */
+function requeueMidTurnMessages(
+  queue: MidTurnQueueEntry[],
+  queuedBefore: readonly MidTurnQueueEntry[],
+  drained: readonly MidTurnQueueEntry[],
+): void {
+  const restored = new Set([...drained, ...queue]);
+  const earlier = new Set(queuedBefore);
+  queue.splice(
+    0,
+    queue.length,
+    ...queuedBefore.filter((message) => restored.has(message)),
+    ...queue.filter((message) => !earlier.has(message)),
+  );
+}
+
 /** Removes and returns the queued messages that are not queue-only, in order. */
 function takeUserMidTurnMessages(
   queue: MidTurnQueueEntry[],
@@ -1612,6 +1631,7 @@ export class BridgeClient implements Client {
     // The child knows which execution is draining during a prompt handoff.
     // Capture ownership before attachment I/O can yield to the next turn.
     const promptId = requestedPromptId ?? currentTurnMetadata(entry).promptId;
+    const queuedBefore = [...entry.midTurnMessageQueue];
     // A send-now drain takes only the user's own messages: queue-only steering
     // keeps its tool-boundary delivery and the settle path its caller drives.
     const drained =
@@ -1711,7 +1731,7 @@ export class BridgeClient implements Client {
       const ring = entry.settledMidTurnMessageIds;
       const kept = ring.filter((id) => !requeued.has(id));
       ring.splice(0, ring.length, ...kept);
-      entry.midTurnMessageQueue.unshift(...drained);
+      requeueMidTurnMessages(entry.midTurnMessageQueue, queuedBefore, drained);
       writeStderrLine(
         `[mid-turn] session=${JSON.stringify(entry.sessionId)} drain failed, requeued ${drained.length} message(s): ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
       );

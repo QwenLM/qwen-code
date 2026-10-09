@@ -288,7 +288,8 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     const sendMidTurnMessagesNow = vi.mocked(actions.sendMidTurnMessagesNow);
     sendMidTurnMessagesNow
       .mockResolvedValueOnce({ requested: true })
-      .mockRejectedValueOnce(new Error('daemon 500'));
+      .mockRejectedValueOnce(new Error('daemon 500'))
+      .mockResolvedValue({ requested: true });
     const { reportError } = mount(
       'responding',
       actions,
@@ -317,6 +318,37 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       expect.any(Error),
       t('queue.sendNowFailed'),
     );
+    // A failed request does not block the next click.
+    await act(async () => latest.sendQueuedPromptNow(1));
+    expect(sendMidTurnMessagesNow).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not query the mid-turn queue after send-now without that capability', async () => {
+    const { actions } = createActions();
+    const getMidTurnMessages = vi.fn();
+    Object.assign(actions, { getMidTurnMessages });
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'inserted-1',
+    });
+    vi.mocked(actions.sendMidTurnMessagesNow).mockResolvedValue({
+      requested: false,
+    });
+    const { reportError } = mount(
+      'responding',
+      actions,
+      true,
+      false,
+      false,
+      true,
+    );
+    act(() => latest.enqueuePrompt('send this now'));
+    await act(async () => latest.insertQueuedPrompt(1));
+
+    await act(async () => latest.sendQueuedPromptNow(1));
+    expect(actions.sendMidTurnMessagesNow).toHaveBeenCalledTimes(1);
+    expect(getMidTurnMessages).not.toHaveBeenCalled();
+    expect(reportError).not.toHaveBeenCalled();
   });
 
   it('inserts a message typed during a turn without asking to send it now', async () => {

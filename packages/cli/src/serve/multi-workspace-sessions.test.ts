@@ -4102,9 +4102,16 @@ describe('multi-workspace session dispatch', () => {
           '/session/missing/mid-turn-messages/mid-missing',
         ),
       ).set('X-Qwen-Client-Id', 'secondary-client'),
+      auth(
+        request(missing.app).post(
+          '/session/missing/mid-turn-messages/send-now',
+        ),
+      )
+        .set('X-Qwen-Client-Id', 'secondary-client')
+        .send({}),
     ]);
     expect(missingResponses.map((response) => response.status)).toEqual([
-      404, 404, 404, 404, 404,
+      404, 404, 404, 404, 404, 404,
     ]);
     for (const response of missingResponses) {
       expect(response.body.code).toBe('session_not_found');
@@ -4115,6 +4122,7 @@ describe('multi-workspace session dispatch', () => {
       expect(bridge.addArtifactCalls).toEqual([]);
       expect(bridge.removeArtifactCalls).toEqual([]);
       expect(bridge.removeMidTurnMessageCalls).toEqual([]);
+      expect(bridge.sendMidTurnNowCalls).toEqual([]);
     }
 
     const duplicate = makeSummary('duplicate-session', PRIMARY_CWD);
@@ -4135,9 +4143,14 @@ describe('multi-workspace session dispatch', () => {
           '/session/duplicate-session/mid-turn-messages/mid-duplicate',
         ),
       ),
+      auth(
+        request(ambiguous.app).post(
+          '/session/duplicate-session/mid-turn-messages/send-now',
+        ),
+      ).send({}),
     ]);
     expect(ambiguousResponses.map((response) => response.status)).toEqual([
-      500, 500, 500,
+      500, 500, 500, 500,
     ]);
     for (const response of ambiguousResponses) {
       expect(response.body.code).toBe('ambiguous_session_owner');
@@ -4148,6 +4161,8 @@ describe('multi-workspace session dispatch', () => {
     expect(ambiguous.secondaryBridge.continueCalls).toEqual([]);
     expect(ambiguous.primaryBridge.removeMidTurnMessageCalls).toEqual([]);
     expect(ambiguous.secondaryBridge.removeMidTurnMessageCalls).toEqual([]);
+    expect(ambiguous.primaryBridge.sendMidTurnNowCalls).toEqual([]);
+    expect(ambiguous.secondaryBridge.sendMidTurnNowCalls).toEqual([]);
   });
 
   it('preserves primary routing for remaining mutations', async () => {
@@ -4277,10 +4292,16 @@ describe('multi-workspace session dispatch', () => {
           '/session/22222222-2222-4222-a222-222222222222/mid-turn-messages/mid-1',
         )
         .set('Host', host()),
+      request(app)
+        .post(
+          '/session/22222222-2222-4222-a222-222222222222/mid-turn-messages/send-now',
+        )
+        .set('Host', host())
+        .send({}),
     ]);
 
     expect(responses.map((response) => response.status)).toEqual([
-      401, 401, 401, 401,
+      401, 401, 401, 401, 401,
     ]);
     expect(primaryBridge.metadataCalls).toEqual([]);
     expect(secondaryBridge.metadataCalls).toEqual([]);
@@ -4290,6 +4311,8 @@ describe('multi-workspace session dispatch', () => {
     expect(secondaryBridge.goalClearCalls).toEqual([]);
     expect(primaryBridge.removeMidTurnMessageCalls).toEqual([]);
     expect(secondaryBridge.removeMidTurnMessageCalls).toEqual([]);
+    expect(primaryBridge.sendMidTurnNowCalls).toEqual([]);
+    expect(secondaryBridge.sendMidTurnNowCalls).toEqual([]);
   });
 
   it('rejects invalid secondary owner-local inputs before bridge actions', async () => {
@@ -4382,10 +4405,17 @@ describe('multi-workspace session dispatch', () => {
         .set('Host', host())
         .set('Authorization', TEST_AUTHORIZATION)
         .send({}),
+      request(app)
+        .post(
+          '/session/22222222-2222-4222-a222-222222222222/mid-turn-messages/send-now',
+        )
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION)
+        .send({}),
     ]);
 
     expect(responses.map((response) => response.status)).toEqual([
-      403, 403, 403, 403, 403, 403, 403, 403,
+      403, 403, 403, 403, 403, 403, 403, 403, 403,
     ]);
     for (const response of responses) {
       expect(response.body.code).toBe('untrusted_workspace');
@@ -4397,6 +4427,7 @@ describe('multi-workspace session dispatch', () => {
       expect(bridge.midTurnMessageCalls).toEqual([]);
       expect(bridge.getMidTurnMessagesCalls).toEqual([]);
       expect(bridge.removeMidTurnMessageCalls).toEqual([]);
+      expect(bridge.sendMidTurnNowCalls).toEqual([]);
       expect(bridge.taskCancelCalls).toEqual([]);
       expect(bridge.goalClearCalls).toEqual([]);
     }

@@ -26144,6 +26144,7 @@ describe('QwenAgent sessionIdContext binding', () => {
       setModel?: ReturnType<typeof vi.fn>;
       cancelPendingPrompt?: ReturnType<typeof vi.fn>;
       releaseTodoStopGuardQueuedPromptWait?: ReturnType<typeof vi.fn>;
+      sendMidTurnInputNow?: ReturnType<typeof vi.fn>;
     } = {},
   ) {
     const id = overrides.sessionId ?? sessionId;
@@ -26161,6 +26162,7 @@ describe('QwenAgent sessionIdContext binding', () => {
       releaseTodoStopGuardQueuedPromptWait:
         overrides.releaseTodoStopGuardQueuedPromptWait ??
         vi.fn().mockReturnValue(true),
+      sendMidTurnInputNow: overrides.sendMidTurnInputNow ?? vi.fn(),
     };
   }
 
@@ -26228,6 +26230,30 @@ describe('QwenAgent sessionIdContext binding', () => {
     });
 
     expect(runSpy).toHaveBeenCalledWith(sessionId, expect.any(Function));
+
+    runSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('binds sessionIdContext for MID_TURN_SEND_NOW_METHOD', async () => {
+    const { agent, agentPromise } = await bootAgent();
+    await agent.initialize({ clientCapabilities: {} });
+    let boundSessionId: string | undefined;
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      sessionId,
+      makeSession({
+        sendMidTurnInputNow: vi.fn(() => {
+          boundSessionId = sessionIdContext.getStore();
+        }),
+      }),
+    );
+    const runSpy = vi.spyOn(sessionIdContext, 'run');
+
+    await agent.extMethod(MID_TURN_SEND_NOW_METHOD, { sessionId });
+
+    expect(runSpy).toHaveBeenCalledWith(sessionId, expect.any(Function));
+    expect(boundSessionId).toBe(sessionId);
 
     runSpy.mockRestore();
     mockConnectionState.resolve();

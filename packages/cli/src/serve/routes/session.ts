@@ -9994,7 +9994,8 @@ export function registerSessionRoutes(
   );
 
   // Deliver the queued mid-turn messages now: the agent cuts a streaming
-  // model response short instead of waiting for its next tool boundary.
+  // model response short instead of waiting for its next tool boundary,
+  // unless that response has started a tool call.
   app.post(
     '/session/:id/mid-turn-messages/send-now',
     mutate(),

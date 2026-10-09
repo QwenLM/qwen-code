@@ -25358,12 +25358,24 @@ describe('Session', () => {
           type: core.StreamEventType.CHUNK,
           value: { candidates: [{ content: { parts: [{ text: 'plan A' }] } }] },
         };
+        const imageItem = {
+          messageId: 'm-image',
+          displayText: 'look at this',
+          content: [
+            { type: 'text', text: 'look at this' },
+            { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          ],
+        };
         const drainCalls = () =>
           vi
             .mocked(mockClient.extMethod)
             .mock.calls.filter((call) => call[0] === 'craft/drainMidTurnQueue');
         const nextTick = () =>
           new Promise<void>((resolve) => setImmediate(resolve));
+        // Drives the mid-turn drain deadlines; everything else stays real.
+        const useFakeDrainTimers = () =>
+          vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        const pastDrainTimeout = () => vi.advanceTimersByTimeAsync(2_100);
 
         /** Opens send number `emptyBefore + 1`; every other send is empty. */
         function openResponse(
@@ -25443,6 +25455,64 @@ describe('Session', () => {
           ).toHaveBeenCalledWith([midTurnPart], 'use plan B instead');
         });
 
+        it('cuts a response that has not streamed anything yet', async () => {
+          mockClient.extMethod = vi
+            .fn()
+            .mockResolvedValueOnce({ messages: ['use plan B instead'] })
+            .mockResolvedValue({ messages: [] });
+          let markSent!: () => void;
+          const sent = new Promise<void>((resolve) => {
+            markSent = resolve;
+          });
+          let openResponseNow!: () => void;
+          const opened = new Promise<void>((resolve) => {
+            openResponseNow = resolve;
+          });
+          let release!: () => void;
+          const released = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          let signal: AbortSignal | undefined;
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockImplementationOnce(
+              async (
+                _model: string,
+                request: { config: { abortSignal: AbortSignal } },
+              ) => {
+                signal = request.config.abortSignal;
+                markSent();
+                await opened;
+                return createOpenStream(
+                  [],
+                  request.config.abortSignal,
+                  released,
+                  () => {},
+                );
+              },
+            )
+            .mockResolvedValue(createEmptyStream());
+
+          const done = startPrompt();
+          await sent;
+          // The request is out but no response is open yet: the request
+          // waits for one.
+          session.sendMidTurnInputNow();
+          await nextTick();
+          expect(drainCalls()).toHaveLength(0);
+          openResponseNow();
+          try {
+            await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+          } finally {
+            release();
+          }
+
+          await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+          expect(
+            vi.mocked(mockChat.sendMessageStream).mock.calls[1]?.[1].message,
+          ).toEqual([{ text: `${interruptPrefix}use plan B instead` }]);
+        });
+
         it('lets the response finish when the queue holds nothing', async () => {
           mockClient.extMethod = vi.fn().mockResolvedValue({ messages: [] });
           const { streaming, release, state } = openResponse([textChunk]);
@@ -25460,20 +25530,13 @@ describe('Session', () => {
         });
 
         it('leaves input to the tool boundary once the response called a tool', async () => {
-          const tool = {
-            name: 'read_file',
-            kind: core.Kind.Read,
-            build: vi.fn().mockReturnValue({
-              params: { path: '/tmp/test.txt' },
-              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
-              getDescription: vi.fn().mockReturnValue('Read file'),
-              toolLocations: vi.fn().mockReturnValue([]),
-              execute: vi
+          mockToolRegistry.getTool.mockReturnValue(
+            readFileTool(
+              vi
                 .fn()
                 .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
-            }),
-          };
-          mockToolRegistry.getTool.mockReturnValue(tool);
+            ),
+          );
           mockConfig.getApprovalMode = vi
             .fn()
             .mockReturnValue(ApprovalMode.YOLO);
@@ -25481,20 +25544,7 @@ describe('Session', () => {
             .fn()
             .mockResolvedValueOnce({ messages: ['also check tests'] })
             .mockResolvedValue({ messages: [] });
-          const { streaming, release, state } = openResponse([
-            {
-              type: core.StreamEventType.CHUNK,
-              value: {
-                functionCalls: [
-                  {
-                    id: 'c',
-                    name: 'read_file',
-                    args: { path: '/tmp/test.txt' },
-                  },
-                ],
-              },
-            },
-          ]);
+          const { streaming, release, state } = openResponse([readFileCall]);
 
           const done = startPrompt();
           await streaming;
@@ -25586,6 +25636,125 @@ describe('Session', () => {
           ]);
         });
 
+        it('restarts the Stop-hook block count for input that cut a forced continuation', async () => {
+          mockConfig.getStopHookBlockingCap = vi.fn().mockReturnValue(3);
+          let stopCalls = 0;
+          const stopActiveFlags: unknown[] = [];
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.getMessageBus = vi.fn().mockReturnValue({
+            request: vi.fn().mockImplementation(async (request) => {
+              if (request.eventName !== 'Stop') {
+                return { success: true, output: {} };
+              }
+              stopCalls++;
+              stopActiveFlags.push(request.input?.stop_hook_active);
+              return stopCalls <= 3
+                ? {
+                    success: true,
+                    output: { decision: 'block', reason: `block ${stopCalls}` },
+                  }
+                : { success: true, output: {} };
+            }),
+          });
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((name: string) => name === 'Stop');
+          mockClient.extMethod = vi
+            .fn()
+            .mockResolvedValueOnce({ messages: ['do this instead'] })
+            .mockResolvedValue({ messages: [] });
+          const { streaming, state } = openResponse([textChunk], 1);
+
+          const done = startPrompt();
+          await streaming;
+          session.sendMidTurnInputNow();
+
+          await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+          expect(state.signal?.aborted).toBe(true);
+          // The user's input replaced the hook-forced turn: the next Stop
+          // check is not hook-forced, and its block starts a new run.
+          expect(stopActiveFlags).toEqual([false, false, true, true]);
+          const stopHookLoops = vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.map(([params]) => params.update._meta?.['stopHookLoop'])
+            .filter((meta) => meta !== undefined);
+          expect(stopHookLoops).toEqual([
+            expect.objectContaining({
+              iterationCount: 2,
+              reasons: ['block 2', 'block 3'],
+            }),
+          ]);
+          expect(agentMessageChunks()).not.toContain(
+            'Stop hook blocked continuation 3 consecutive times; overriding and ending the turn.',
+          );
+        });
+
+        it('restarts the Stop-hook state for input that cut a background-result continuation', async () => {
+          let stopCalls = 0;
+          const stopActiveFlags: unknown[] = [];
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.getMessageBus = vi.fn().mockReturnValue({
+            request: vi.fn().mockImplementation(async (request) => {
+              if (request.eventName !== 'Stop') {
+                return { success: true, output: {} };
+              }
+              stopCalls++;
+              stopActiveFlags.push(request.input?.stop_hook_active);
+              return stopCalls === 1
+                ? {
+                    success: true,
+                    output: { decision: 'block', reason: 'Keep working' },
+                  }
+                : { success: true, output: {} };
+            }),
+          });
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((name: string) => name === 'Stop');
+          mockClient.extMethod = vi
+            .fn()
+            .mockResolvedValueOnce({ messages: ['look at the result'] })
+            .mockResolvedValue({ messages: [] });
+          const { streaming, state } = openResponse([textChunk], 2);
+          const send = mockChat.sendMessageStream as (
+            ...args: unknown[]
+          ) => unknown;
+          const notify = mockBackgroundTaskRegistry.setNotificationCallback.mock
+            .calls[0]?.[0] as (
+            display: string,
+            model: string,
+            meta: { agentId: string; status: string; sourceTurnId?: string },
+          ) => void;
+          let sends = 0;
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockImplementation(async (...args: unknown[]) => {
+              // A background result arrives during the hook-forced
+              // continuation, so the next send answers it.
+              if (++sends === 2) {
+                notify('worker done', 'BACKGROUND RESULT', {
+                  agentId: 'worker',
+                  status: 'completed',
+                  sourceTurnId: 'rpc-steer',
+                });
+              }
+              return send(...args);
+            });
+
+          const done = startPrompt();
+          await streaming;
+          session.sendMidTurnInputNow();
+
+          await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+          expect(state.signal?.aborted).toBe(true);
+          expect(
+            JSON.stringify(
+              vi.mocked(mockChat.sendMessageStream).mock.calls[2]?.[1],
+            ),
+          ).toContain('BACKGROUND RESULT');
+          // The user's input replaced the turn that the hook had forced.
+          expect(stopActiveFlags).toEqual([false, false]);
+        });
         it('leaves input with the host while a tool call is still streaming', async () => {
           mockClient.extMethod = vi
             .fn()
@@ -25607,6 +25776,70 @@ describe('Session', () => {
           expect(state.signal?.aborted).toBe(false);
           expect(drainCalls()).toHaveLength(0);
           expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        });
+
+        it('leaves input with the host while a Stop-hook continuation streams a tool call', async () => {
+          let stopCalls = 0;
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.getMessageBus = vi.fn().mockReturnValue({
+            request: vi.fn().mockImplementation(async (request) => {
+              if (request.eventName !== 'Stop') {
+                return { success: true, output: {} };
+              }
+              stopCalls++;
+              return stopCalls === 1
+                ? {
+                    success: true,
+                    output: { decision: 'block', reason: 'Keep working' },
+                  }
+                : { success: true, output: {} };
+            }),
+          });
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((name: string) => name === 'Stop');
+          mockClient.extMethod = vi
+            .fn()
+            .mockResolvedValue({ messages: ['also check tests'] });
+          const { streaming, release, state } = openResponse(
+            [
+              {
+                type: core.StreamEventType.CHUNK,
+                value: createPreparationResponse('c', 'write_file'),
+              },
+            ],
+            1,
+          );
+
+          const done = startPrompt();
+          await streaming;
+          session.sendMidTurnInputNow();
+          await nextTick();
+          release();
+
+          await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+          expect(state.signal?.aborted).toBe(false);
+          expect(drainCalls()).toHaveLength(0);
+        });
+
+        it('does not drain when the host cannot answer drains', async () => {
+          (
+            session as unknown as { midTurnDrainUnavailable: boolean }
+          ).midTurnDrainUnavailable = true;
+          mockClient.extMethod = vi
+            .fn()
+            .mockResolvedValue({ messages: ['not served'] });
+          const { streaming, release, state } = openResponse([textChunk]);
+
+          const done = startPrompt();
+          await streaming;
+          session.sendMidTurnInputNow();
+          await nextTick();
+          release();
+
+          await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+          expect(drainCalls()).toHaveLength(0);
+          expect(state.signal?.aborted).toBe(false);
         });
 
         it('leaves input with the host when the tool it waits for ends the turn', async () => {
@@ -25667,10 +25900,18 @@ describe('Session', () => {
             .fn()
             .mockResolvedValueOnce(createStreamWithChunks([readFileCall]))
             .mockResolvedValue(createEmptyStream());
-          // The tool-boundary drain times out; its answer lands afterwards.
-          await startPrompt();
-          answerLate!({ messages: ['recovered late'] });
-          await nextTick();
+          useFakeDrainTimers();
+          try {
+            // The tool-boundary drain times out; its answer lands afterwards.
+            const first = startPrompt();
+            await vi.waitFor(() => expect(answerLate).toBeDefined());
+            await pastDrainTimeout();
+            await first;
+            answerLate!({ messages: ['recovered late'] });
+            await nextTick();
+          } finally {
+            vi.useRealTimers();
+          }
           const drainsBefore = drainCalls().length;
           mockChat.sendMessageStream = vi
             .fn()
@@ -25681,7 +25922,7 @@ describe('Session', () => {
           });
           expect(drainCalls()).toHaveLength(drainsBefore);
           expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-        }, 20_000);
+        });
 
         it('never interrupts a channel turn', async () => {
           mockClient.extMethod = vi
@@ -25755,22 +25996,36 @@ describe('Session', () => {
                 }),
             )
             .mockResolvedValue({ messages: [] });
-          const { streaming, state } = openResponse([textChunk]);
+          const { streaming, release, state } = openResponse([textChunk]);
 
-          const done = startPrompt();
-          await streaming;
-          session.sendMidTurnInputNow();
-          await vi.waitFor(() => expect(answerLate).toBeDefined());
-          // Past the drain timeout, with the answer still streaming.
-          await new Promise((resolve) => setTimeout(resolve, 2_100));
-          answerLate!({ messages: ['late steer'] });
+          useFakeDrainTimers();
+          try {
+            const done = startPrompt();
+            await streaming;
+            session.sendMidTurnInputNow();
+            await vi.waitFor(() => expect(answerLate).toBeDefined());
+            // Past the drain timeout, with the answer still streaming.
+            await pastDrainTimeout();
+            expect(
+              (session as unknown as { midTurnDrainTimeoutStrikes: number })
+                .midTurnDrainTimeoutStrikes,
+            ).toBe(1);
+            answerLate!({ messages: ['late steer'] });
+            try {
+              await vi.waitFor(() => expect(state.signal?.aborted).toBe(true));
+            } finally {
+              release();
+            }
 
-          await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+            await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+          } finally {
+            vi.useRealTimers();
+          }
           expect(state.signal?.aborted).toBe(true);
           expect(
             vi.mocked(mockChat.sendMessageStream).mock.calls[1]?.[1].message,
           ).toEqual([{ text: `${interruptPrefix}late steer` }]);
-        }, 20_000);
+        });
 
         it('leaves a late answer that lands after its turn to the tool boundary', async () => {
           mockToolRegistry.getTool.mockReturnValue(
@@ -25795,15 +26050,21 @@ describe('Session', () => {
             .mockResolvedValue({ messages: [] });
           const { streaming, release } = openResponse([textChunk]);
 
-          const first = startPrompt();
-          await streaming;
-          session.sendMidTurnInputNow();
-          await vi.waitFor(() => expect(answerLate).toBeDefined());
-          release();
-          // The turn ends once the drain times out; the answer lands later.
-          await expect(first).resolves.toEqual({ stopReason: 'end_turn' });
-          answerLate!({ messages: ['late steer'] });
-          await nextTick();
+          useFakeDrainTimers();
+          try {
+            const first = startPrompt();
+            await streaming;
+            session.sendMidTurnInputNow();
+            await vi.waitFor(() => expect(answerLate).toBeDefined());
+            release();
+            // The turn ends once the drain times out; the answer lands later.
+            await pastDrainTimeout();
+            await expect(first).resolves.toEqual({ stopReason: 'end_turn' });
+            answerLate!({ messages: ['late steer'] });
+            await nextTick();
+          } finally {
+            vi.useRealTimers();
+          }
           vi.mocked(mockChat.addHistory).mockClear();
 
           // A turn without a tool boundary leaves it alone...
@@ -25830,7 +26091,7 @@ describe('Session', () => {
           ).toContainEqual({
             text: '\n[User message received during tool execution]: late steer',
           });
-        }, 20_000);
+        });
 
         it('leaves a late answer that lands after its response to the tool boundary', async () => {
           mockToolRegistry.getTool.mockReturnValue(
@@ -25876,18 +26137,24 @@ describe('Session', () => {
             .mockResolvedValue({ messages: [] });
           const { streaming, release } = openResponse([textChunk]);
 
-          const first = startPrompt();
-          await streaming;
-          session.sendMidTurnInputNow();
-          await vi.waitFor(() => expect(answerLate).toBeDefined());
-          release();
-          // The response has ended and the drain timed out; the answer lands
-          // while the turn is still in its Stop hook.
-          await stopReached;
-          answerLate!({ messages: ['late steer'] });
-          await nextTick();
-          finishStop();
-          await expect(first).resolves.toEqual({ stopReason: 'end_turn' });
+          useFakeDrainTimers();
+          try {
+            const first = startPrompt();
+            await streaming;
+            session.sendMidTurnInputNow();
+            await vi.waitFor(() => expect(answerLate).toBeDefined());
+            release();
+            // The response has ended and the drain timed out; the answer
+            // lands while the turn is still in its Stop hook.
+            await pastDrainTimeout();
+            await stopReached;
+            answerLate!({ messages: ['late steer'] });
+            await nextTick();
+            finishStop();
+            await expect(first).resolves.toEqual({ stopReason: 'end_turn' });
+          } finally {
+            vi.useRealTimers();
+          }
           expect(
             JSON.stringify(vi.mocked(mockChat.addHistory).mock.calls),
           ).not.toContain('late steer');
@@ -25906,7 +26173,7 @@ describe('Session', () => {
           ).toContainEqual({
             text: '\n[User message received during tool execution]: late steer',
           });
-        }, 20_000);
+        });
 
         it('does not cut a response whose tool call starts while the drain is out', async () => {
           let answerDrain: ((value: unknown) => void) | undefined;
@@ -26110,18 +26377,255 @@ describe('Session', () => {
             mockChatRecordingService.recordMidTurnUserMessage,
           ).toHaveBeenCalledWith([kept], 'use plan B instead');
 
-          // Nothing carries over into the next turn.
-          vi.mocked(mockChat.sendMessageStream).mockClear();
+          // Nothing carries over into the next turn, not even at its tool
+          // boundary, where recovered input would be delivered.
+          mockToolRegistry.getTool.mockReturnValue(
+            readFileTool(
+              vi
+                .fn()
+                .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
+            ),
+          );
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          const drainsBefore = drainCalls().length;
           mockChat.sendMessageStream = vi
             .fn()
+            .mockResolvedValueOnce(createStreamWithChunks([readFileCall]))
             .mockResolvedValue(createEmptyStream());
           await startPrompt();
+          expect(drainCalls().length).toBeGreaterThan(drainsBefore);
           const sent = JSON.stringify(
             vi.mocked(mockChat.sendMessageStream).mock.calls,
           );
           expect(sent).not.toContain('use plan B instead');
         });
 
+        it('keeps taken input with an attachment as text when the turn is cancelled', async () => {
+          let answerDrain: ((value: unknown) => void) | undefined;
+          mockClient.extMethod = vi
+            .fn()
+            .mockImplementationOnce(
+              () =>
+                new Promise((resolve) => {
+                  answerDrain = resolve;
+                }),
+            )
+            .mockResolvedValue({ messages: [] });
+          const { streaming } = openResponse([textChunk]);
+
+          const done = startPrompt();
+          await streaming;
+          session.sendMidTurnInputNow();
+          await vi.waitFor(() => expect(answerDrain).toBeDefined());
+          void session.cancelPendingPrompt();
+          await nextTick();
+          answerDrain!({ items: [imageItem] });
+
+          await expect(done).resolves.toMatchObject({
+            stopReason: 'cancelled',
+          });
+          expect(mockChat.addHistory).toHaveBeenCalledWith({
+            role: 'user',
+            parts: [
+              { text: `${responsePrefix}look at this` },
+              { text: '[Attachment could not be processed]' },
+            ],
+          });
+        });
+
+        it('keeps input with an attachment it cut in for when the turn stops before sending it', async () => {
+          let answerSecond: ((value: unknown) => void) | undefined;
+          mockClient.extMethod = vi
+            .fn()
+            .mockResolvedValueOnce({ items: [imageItem] })
+            .mockImplementationOnce(
+              () =>
+                new Promise((resolve) => {
+                  answerSecond = resolve;
+                }),
+            )
+            .mockResolvedValue({ messages: [] });
+          const { streaming, state } = openResponse([textChunk]);
+
+          const done = startPrompt();
+          await streaming;
+          session.sendMidTurnInputNow();
+          // The response is cut; the turn is stopped while it drains the
+          // rest of the queue.
+          await vi.waitFor(() => expect(answerSecond).toBeDefined());
+          void session.cancelPendingPrompt();
+          await nextTick();
+          answerSecond!({ messages: [] });
+
+          await expect(done).resolves.toMatchObject({
+            stopReason: 'cancelled',
+          });
+          expect(state.signal?.aborted).toBe(true);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          expect(mockChat.addHistory).toHaveBeenCalledWith({
+            role: 'user',
+            parts: [
+              { text: `${interruptPrefix}look at this` },
+              { text: '[Attachment could not be processed]' },
+            ],
+          });
+        });
+
+        it.each(['a file read', 'a media bridge'] as const)(
+          'bounds resolving the input a finished turn keeps unsent when %s hangs',
+          async (hang) => {
+            const tempDir = await fs.realpath(
+              await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-keep-')),
+            );
+            const imagePath = path.join(tempDir, 'shot.png');
+            await fs.writeFile(imagePath, 'image');
+            mockConfig.getEffectiveInputModalities = vi
+              .fn()
+              .mockReturnValue({});
+            mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+            mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+              isPathWithinWorkspace: (pathSpec: string) =>
+                path
+                  .resolve(tempDir, pathSpec)
+                  .startsWith(`${tempDir}${path.sep}`),
+            });
+            mockConfig.getDefaultVisionBridgeModel = vi
+              .fn()
+              .mockReturnValue({ id: 'qwen3.7-plus' });
+            const readManyFilesSpy = vi
+              .spyOn(core, 'readManyFiles')
+              .mockReturnValue(new Promise(() => {}));
+            // Like the real bridge, it answers `skipped` once cancelled.
+            runVisionBridgeSpy.mockImplementation(
+              ({ signal }: { signal: AbortSignal }) =>
+                new Promise((resolve) =>
+                  signal.addEventListener(
+                    'abort',
+                    () =>
+                      resolve({
+                        applied: false,
+                        status: 'skipped',
+                        convertedCount: 0,
+                        omittedCount: 0,
+                      }),
+                    { once: true },
+                  ),
+                ),
+            );
+            const started =
+              hang === 'a file read' ? readManyFilesSpy : runVisionBridgeSpy;
+            const content =
+              hang === 'a file read'
+                ? [{ type: 'text', text: `compare with @${imagePath}` }]
+                : [
+                    { type: 'text', text: 'compare with this' },
+                    {
+                      type: 'image',
+                      mimeType: 'image/png',
+                      data: 'iVBORw0KGgo=',
+                    },
+                  ];
+            const kept = {
+              role: 'user',
+              parts: [
+                { text: `${responsePrefix}compare with this` },
+                ...(hang === 'a media bridge'
+                  ? [{ text: '[Attachment could not be processed]' }]
+                  : []),
+              ],
+            };
+            mockToolRegistry.getTool.mockReturnValue(
+              readFileTool(
+                vi.fn().mockResolvedValue({
+                  llmContent: 'ok',
+                  returnDisplay: 'ok',
+                  terminateTurn: true,
+                }),
+              ),
+            );
+            mockConfig.getApprovalMode = vi
+              .fn()
+              .mockReturnValue(ApprovalMode.YOLO);
+            let answerEarly: ((value: unknown) => void) | undefined;
+            mockClient.extMethod = vi
+              .fn()
+              .mockImplementationOnce(
+                () =>
+                  new Promise((resolve) => {
+                    answerEarly = resolve;
+                  }),
+              )
+              .mockResolvedValue({ messages: [] });
+            let markStreaming!: () => void;
+            const streaming = new Promise<void>((resolve) => {
+              markStreaming = resolve;
+            });
+            let callTool!: () => void;
+            const toolCalled = new Promise<void>((resolve) => {
+              callTool = resolve;
+            });
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockImplementationOnce(async () =>
+                (async function* () {
+                  yield textChunk;
+                  markStreaming();
+                  await toolCalled;
+                  yield readFileCall;
+                })(),
+              )
+              .mockResolvedValue(createEmptyStream());
+
+            useFakeDrainTimers();
+            try {
+              const done = startPrompt();
+              await streaming;
+              session.sendMidTurnInputNow();
+              await vi.waitFor(() => expect(answerEarly).toBeDefined());
+              // A tool that ends the turn starts while the drain is out, so
+              // what the drain takes is kept but never sent.
+              callTool();
+              answerEarly!({
+                items: [
+                  {
+                    messageId: 'm-keep',
+                    displayText: 'compare with this',
+                    content,
+                  },
+                ],
+              });
+              for (let i = 0; i < 20 && !started.mock.calls.length; i++) {
+                await nextTick();
+              }
+              expect(started).toHaveBeenCalled();
+              expect(mockChat.addHistory).not.toHaveBeenCalledWith(kept);
+
+              // Kept once the deadline passes, not when slower bounds do.
+              await vi.advanceTimersByTimeAsync(2_100);
+              const isKept = () =>
+                JSON.stringify(
+                  vi.mocked(mockChat.addHistory).mock.calls,
+                ).includes('compare with this');
+              for (let i = 0; i < 20 && !isKept(); i++) await nextTick();
+              expect(mockChat.addHistory).toHaveBeenCalledWith(kept);
+              if (hang === 'a media bridge') {
+                // The deadline cancels the bridge, so it cannot run on and
+                // report after the turn.
+                expect(
+                  runVisionBridgeSpy.mock.calls[0]?.[0].signal.aborted,
+                ).toBe(true);
+              }
+              await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+            } finally {
+              vi.useRealTimers();
+              readManyFilesSpy.mockRestore();
+              await fs.rm(tempDir, { recursive: true, force: true });
+            }
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          },
+        );
         it('takes nothing more from the host once the turn is stopped', async () => {
           let answerEarly: ((value: unknown) => void) | undefined;
           mockClient.extMethod = vi
@@ -26157,6 +26661,57 @@ describe('Session', () => {
           );
           expect(history).toContain('use plan B');
           expect(history).not.toContain('typed later with plain Enter');
+        });
+
+        it('does not drain for a stopped turn whose response still streams', async () => {
+          let answerFirst: ((value: unknown) => void) | undefined;
+          mockClient.extMethod = vi
+            .fn()
+            .mockImplementationOnce(
+              () =>
+                new Promise((resolve) => {
+                  answerFirst = resolve;
+                }),
+            )
+            .mockResolvedValue({ messages: ['typed later with plain Enter'] });
+          let markStreaming!: () => void;
+          const streaming = new Promise<void>((resolve) => {
+            markStreaming = resolve;
+          });
+          let release!: () => void;
+          const released = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          // A provider that keeps the response open after the turn stops.
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockImplementationOnce(async () =>
+              (async function* () {
+                yield textChunk;
+                markStreaming();
+                await released;
+              })(),
+            )
+            .mockResolvedValue(createEmptyStream());
+
+          const done = startPrompt();
+          await streaming;
+          session.sendMidTurnInputNow();
+          await vi.waitFor(() => expect(answerFirst).toBeDefined());
+          // A second request waits for the first drain, which lands after
+          // the turn is stopped.
+          session.sendMidTurnInputNow();
+          void session.cancelPendingPrompt();
+          answerFirst!({ messages: [] });
+          await nextTick();
+          await nextTick();
+          expect(drainCalls()).toHaveLength(1);
+          release();
+
+          await expect(done).resolves.toMatchObject({
+            stopReason: 'cancelled',
+          });
+          expect(drainCalls()).toHaveLength(1);
         });
 
         it('keeps a send-now request from a stopped turn out of the next', async () => {
