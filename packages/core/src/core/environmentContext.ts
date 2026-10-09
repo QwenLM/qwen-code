@@ -758,23 +758,39 @@ export function isSystemReminderContent(content: Content): boolean {
 }
 
 export function stripSystemReminderBlocks(text: string): string {
-  let out = '';
-  let offset = 0;
+  const intervals: Array<[number, number]> = [];
+  let lastOpen = -1;
+  let cursor = 0;
 
-  while (offset < text.length) {
-    const open = text.indexOf(SYSTEM_REMINDER_OPEN, offset);
-    if (open === -1) return out + text.slice(offset);
+  while (cursor < text.length) {
+    const nextOpen = text.indexOf(SYSTEM_REMINDER_OPEN, cursor);
+    const nextClose = text.indexOf(SYSTEM_REMINDER_CLOSE, cursor);
 
-    const close = text.indexOf(
-      SYSTEM_REMINDER_CLOSE,
-      open + SYSTEM_REMINDER_OPEN.length,
-    );
-    if (close === -1) return out + text.slice(offset, open);
+    if (nextOpen === -1 && nextClose === -1) {
+      break;
+    }
 
-    out += text.slice(offset, open);
-    offset = close + SYSTEM_REMINDER_CLOSE.length;
+    if (nextOpen !== -1 && (nextClose === -1 || nextOpen < nextClose)) {
+      lastOpen = nextOpen;
+      cursor = nextOpen + SYSTEM_REMINDER_OPEN.length;
+    } else {
+      if (lastOpen !== -1) {
+        intervals.push([lastOpen, nextClose + SYSTEM_REMINDER_CLOSE.length]);
+        lastOpen = -1;
+      }
+      cursor = nextClose + SYSTEM_REMINDER_CLOSE.length;
+    }
   }
 
+  if (intervals.length === 0) return text;
+
+  let out = '';
+  let lastEnd = 0;
+  for (const [start, end] of intervals) {
+    out += text.slice(lastEnd, start);
+    lastEnd = end;
+  }
+  out += text.slice(lastEnd);
   return out;
 }
 
