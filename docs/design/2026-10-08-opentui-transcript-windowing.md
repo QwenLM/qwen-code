@@ -80,19 +80,31 @@ declares) and stored in a `Map` keyed by item id.
 
 The map is deliberately kept after an item scrolls out of the window — an
 estimate must never be re-applied to something already measured, or the spacers
-would jump every time the window moved. It is cleared only when
-`availableWidth` changes, because wrapping depends on the width and every
-measurement taken at the old one is then wrong.
+would jump every time the window moved. A resize does not clear it either. The
+entries a width change actually invalidates are the mounted ones, and those are
+re-measured on the next frame; clearing the whole table instead renumbered every
+offset underneath a scroll position that is itself counted in rows, moving the
+visible turn by more than a hundred for a resize that changed nothing above it.
 
-## Decision 3 — the scroll position is sampled on the renderer's `frame` event
+## Decision 3 — two signals: the scroll bar's `change` event and the renderer's `frame` event
 
 `ScrollBoxRenderable` exposes no scroll event, and `viewportCulling` only culls
 drawing: it frees no `TextBuffer`. Polling on a timer or an animation frame was
 rejected for the reason the sweep's Decision 28 already established — a spinner
-that redraws while nothing is happening reads as wasted CPU. Instead the hook
-subscribes to `renderer.on('frame')`: a frame is emitted only when something
-drew, and every wheel tick, scrollbar drag and key scroll draws. Idle therefore
-costs nothing, and the position is read at most once per frame.
+that redraws while nothing is happening reads as wasted CPU.
+
+The scroll bar does emit one. `scrollTop` is the bar's `scrollPosition`, whose
+setter drives the slider, and the slider's `onChange` chain ends in a public
+`verticalScrollBar.emit('change')` — so every scroll path (wheel, key,
+programmatic, track click, thumb drag) reports synchronously, before
+`requestRender()` paints. Subscribing to it is what makes an absolute jump safe:
+a track click can land anywhere in the transcript, far outside a fixed 24-row
+overscan, and sampling only on `frame` paints one spacer-only gap first — the
+symptom this design exists to remove.
+
+The `frame` subscription stays, for the half that needs layout to be finished:
+reading each mounted item's real row count. Idle still costs nothing, since
+neither event fires when nothing moves.
 
 ## Decision 4 — the transcript's offset inside the scroll content is `root.y - host.content.y`
 
@@ -104,24 +116,37 @@ inside the scrollable area. The scroll host itself is found by walking `parent`
 from the transcript root and duck-typing on `scrollTop`/`content`/`viewport`,
 which keeps the shell's tree shape private to the shell.
 
-## Decision 5 — a height correction above the viewport moves the scroll position, except while bottom-pinned
+## Decision 5 — a measurement never moves the scroll position
 
-Replacing an estimate with a measurement changes every offset below it. If the
-correction is above the viewport top, the rows the user is looking at would
-slide, so the hook adds the same delta to `host.scrollTop`.
+Replacing an estimate with a measurement changes the offsets below it, which
+looks like it should slide the rows the user is reading. It does not, and the
+correction an earlier revision of this change wrote here was wrong in both
+direction and effect.
 
-The first frame is excluded. Until a real offset has been read, the position is
-the placeholder `Number.MAX_SAFE_INTEGER`, meaning "pinned to the tail", and
-every item counts as being above it — correcting there would fight
-`stickyScroll`, which already re-pins the view when content grows. Corrections
-apply only once a real scroll position is known.
+Every item the measuring loop can see is mounted, and a mounted item is already
+painted at the height just read from it. Both spacers come from offsets that a
+change inside `[start, end)` leaves alone: `topPad` is `offsets[start]`, which
+sums only the items before the window, and `bottomPad` is `total - offsets[end]`,
+where correcting an item inside the window moves `total` and `offsets[end]` by
+the same amount. The painted layout therefore does not move when the table
+catches up with it, and the compensation owed is exactly zero.
+
+Writing a nonzero one was worse than a no-op. It went through the sticky-aware
+`scrollTop` setter, which recomputes `_hasManualScroll` from the position it
+lands on, so a correction that left the view one row above the tail took the
+shell's bottom pin off for the rest of the session. Ordinary one-row turns
+produce corrections of that size.
 
 ## Decision 6 — the item cap keeps the top of the viewport
 
-`MAX_MOUNTED_ITEMS = 400` is a backstop for a window made of many one-row items.
-It binds only when the viewport is itself taller than the cap, in which case no
-window can cover it; the shrink keeps the top rows, where reading starts. A
-realistic viewport of 60 rows yields at most `60 + 2 * 24 + 1` items.
+`MAX_MOUNTED_ITEMS = 400` is a backstop for a window made of many one-row items,
+and the only bound this design puts on the live native buffer count. It binds
+once `viewportRows + 2 * OVERSCAN_ROWS` exceeds `MAX_MOUNTED_ITEMS * rowHeight` —
+a 353-row viewport for one-row items, 753 for two-row items. From there up to a
+`MAX_MOUNTED_ITEMS`-row viewport the mounted items still cover the viewport and
+only the bottom overscan is trimmed; above that no window can cover it at all,
+and the shrink keeps the top rows, where reading starts. A realistic viewport of
+60 rows yields at most `60 + 2 * 24 + 1` items.
 
 ## Decision 7 — the session preview is top-anchored
 
@@ -162,7 +187,17 @@ Unit tests:
   session: the default view mounts the tail and not the head, the top-anchored
   pane mounts the head and not the tail, and both stay under 400 elements. Both
   were mutation-proved — replacing the slice with `items.slice(0)` fails them.
-- The whole `src/ui/opentui` suite passes (1698 tests over 84 files). The
+- The same file gained a scroll-host harness for the frame-driven half, which
+  jsdom cannot otherwise reach: it installs both the host the view walks up to
+  and the laid-out tree it reads back onto the DOM nodes the JSX mock produces.
+  Four tests run against it and each was mutation-proved against the defect it
+  pins — re-adding the scroll-position correction moves the reading position 72
+  rows, dropping the scroll-bar subscription leaves an absolute jump on the
+  turns it jumped away from, re-adding the width-change clear remounts 25 items
+  where 9 were on screen, and seeding the viewport rows once at mount leaves a
+  host-less pane sized for the old terminal after a resize. A fifth pins that
+  unmount drops both subscriptions.
+- The whole `src/ui/opentui` suite passes (1703 tests over 84 files). The
   session picker's preview pane mounts the transcript view, so its
   `@opentui/react` mock gained the `useRenderer` export the windowing hook
   reads; without it the five Space-to-preview tests throw.
@@ -188,8 +223,9 @@ four styled captures carry three distinct digests, with `00-bottom` and
 
 ## Follow-ups
 
-- The two other reported defects — the composer caret (#227) and the flickering
-  markdown h3 (#228) — are untouched by this change.
+- The two other reported defects — the composer caret that reads as missing,
+  and the flickering markdown h3 — are untouched by this change. The caret is
+  handled by a separate change (#13693); the h3 flicker has no tracker entry.
 - In the resume repro leg, injected SGR wheel sequences do not scroll the
   transcript. The behaviour is identical with and without this change, so it is
   a property of that leg rather than of windowing; the same sequences scroll

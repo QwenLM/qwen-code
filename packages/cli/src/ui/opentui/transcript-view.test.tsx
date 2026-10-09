@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { render } from '@testing-library/react';
+import { render, act } from '@testing-library/react';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
 
 // theme.ts builds a SyntaxStyle at module scope, which needs the OpenTUI
@@ -51,6 +51,11 @@ const mocks = vi.hoisted(() => {
         if (source['width'] !== undefined) {
           dom['data-width'] = String(source['width']);
         }
+        if (source['ref'] !== undefined) {
+          // The transcript's windowing hangs off the root element it is handed
+          // here, so the ref has to survive the mapping to a DOM node.
+          dom['ref'] = source['ref'];
+        }
         return React.createElement(
           type === 'box' ? 'div' : 'span',
           dom,
@@ -65,14 +70,39 @@ const mocks = vi.hoisted(() => {
     };
     return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
   }
-  return { buildJsxRuntime };
+
+  /** Stand-in for the OpenTUI renderer: a bare event target, so a test can fire
+   *  the `frame` event the windowing measures and samples on. */
+  function createFakeRenderer() {
+    const handlers = new Map<string, Set<() => void>>();
+    const listeners = (event: string): Set<() => void> => {
+      let set = handlers.get(event);
+      if (!set) {
+        set = new Set();
+        handlers.set(event, set);
+      }
+      return set;
+    };
+    return {
+      on: (event: string, fn: () => void) => void listeners(event).add(fn),
+      off: (event: string, fn: () => void) => void listeners(event).delete(fn),
+      emit: (event: string) => {
+        for (const fn of [...listeners(event)]) fn();
+      },
+      count: (event: string) => listeners(event).size,
+    };
+  }
+
+  const renderer = createFakeRenderer();
+  return { buildJsxRuntime, renderer };
 });
 
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
-// No renderer in jsdom: the transcript falls back to a bottom-anchored window
-// sized from `availableTerminalHeight`, which is what these tests assert on.
-vi.mock('@opentui/react', () => ({ useRenderer: () => null }));
+// Without a scroll host the transcript falls back to a bottom-anchored window
+// sized from `availableTerminalHeight`, which is what the mount tests assert on.
+// `OpenTuiTranscriptView scroll host` below installs one.
+vi.mock('@opentui/react', () => ({ useRenderer: () => mocks.renderer }));
 
 import { OpenTuiTranscriptView } from './transcript-view.js';
 import { C } from './theme.js';
@@ -801,5 +831,206 @@ describe('OpenTuiTranscriptView windowing', () => {
     expect(container.textContent).toContain('TURN_0000');
     expect(container.textContent).not.toContain('TURN_1999');
     expect(container.querySelectorAll('div').length).toBeLessThan(400);
+  });
+
+  it('re-seeds a host-less pane when the terminal height changes', () => {
+    // The session preview has no scroll host to report a viewport, so the height
+    // prop is the only source — and seeding it once at mount left the window
+    // sized for the old terminal after a resize.
+    const mountedCount = (container: HTMLElement) =>
+      [...(container.textContent ?? '').matchAll(/TURN_\d+/g)].length;
+    const view = render(
+      <OpenTuiTranscriptView
+        items={longSession}
+        availableTerminalHeight={24}
+        initialAnchor="top"
+      />,
+    );
+    const at24 = mountedCount(view.container);
+    view.rerender(
+      <OpenTuiTranscriptView
+        items={longSession}
+        availableTerminalHeight={60}
+        initialAnchor="top"
+      />,
+    );
+    expect(mountedCount(view.container)).toBeGreaterThan(at24);
+  });
+});
+
+/**
+ * The frame-driven half of the windowing, against a stand-in scroll host.
+ *
+ * jsdom has no renderables, so the host the view walks up to (`scrollTop`,
+ * `content`, `viewport`, `verticalScrollBar`) and the laid-out tree it reads
+ * back (`parent`, `getChildren()`, `height`) are installed on the DOM nodes the
+ * JSX mock produces. A re-render replaces the item nodes, so the tree is
+ * re-installed before every frame — which is also what makes the heights below
+ * live: `rows[index]` is read at measure time, not at mount time.
+ */
+describe('OpenTuiTranscriptView scroll host', () => {
+  const session = Array.from({ length: 2000 }, (_, index) => ({
+    kind: 'user' as const,
+    id: `u${index}`,
+    text: `TURN_${String(index).padStart(4, '0')}`,
+  }));
+
+  function mountHosted(opts: {
+    rows: number[];
+    viewportRows?: number;
+    width?: number;
+  }) {
+    let width = opts.width ?? 100;
+    const rows = opts.rows;
+    const viewportRows = opts.viewportRows ?? 24;
+    const view = render(
+      <OpenTuiTranscriptView
+        items={session}
+        availableWidth={width}
+        availableTerminalHeight={viewportRows}
+      />,
+    );
+
+    const changed = new Set<() => void>();
+    const host = {
+      scrollTop: 0,
+      content: { y: 0 },
+      viewport: { height: viewportRows },
+      verticalScrollBar: {
+        on: (_event: string, fn: () => void) => void changed.add(fn),
+        off: (_event: string, fn: () => void) => void changed.delete(fn),
+      },
+    };
+
+    const install = () => {
+      const walk = (el: Element, parent: unknown) => {
+        Object.defineProperty(el, 'parent', {
+          value: parent,
+          configurable: true,
+        });
+        Object.defineProperty(el, 'y', { value: 0, configurable: true });
+        Object.defineProperty(el, 'height', {
+          get: () => {
+            const turn = /TURN_(\d+)/.exec(el.textContent ?? '');
+            return turn ? rows[Number(turn[1])] : 0;
+          },
+          configurable: true,
+        });
+        Object.defineProperty(el, 'getChildren', {
+          value: () => [...el.children],
+          configurable: true,
+        });
+        for (const child of el.children) walk(child, el);
+      };
+      walk(view.container.firstElementChild as Element, host);
+    };
+    install();
+
+    /** The ids the view has mounted, in transcript order. */
+    const mounted = () =>
+      [...(view.container.textContent ?? '').matchAll(/TURN_(\d+)/g)].map(
+        (match) => match[1],
+      );
+
+    return {
+      container: view.container,
+      host,
+      /** How many scroll-bar `change` subscriptions the view has installed. */
+      scrollListeners: () => changed.size,
+      /** One renderer frame: layout is done, so heights can be measured. */
+      frame: () =>
+        act(() => {
+          install();
+          mocks.renderer.emit('frame');
+        }),
+      /** An absolute jump — a track click or a thumb drag. Fires the scroll bar
+       *  without a frame, which is the only way to tell a pre-paint window
+       *  update from one that waits to be sampled. */
+      jump: (top: number) =>
+        act(() => {
+          host.scrollTop = top;
+          for (const fn of [...changed]) fn();
+        }),
+      setWidth: (next: number) =>
+        act(() => {
+          width = next;
+          view.rerender(
+            <OpenTuiTranscriptView
+              items={session}
+              availableWidth={width}
+              availableTerminalHeight={viewportRows}
+            />,
+          );
+          install();
+        }),
+      mounted,
+      unmount: () => act(() => view.unmount()),
+    };
+  }
+
+  it('records real heights without moving the scroll position', () => {
+    const rows = Array.from({ length: 2000 }, () => 3);
+    const view = mountHosted({ rows });
+    view.host.scrollTop = 3000;
+    view.frame();
+    expect(view.host.scrollTop).toBe(3000);
+
+    // Every mounted turn turns out taller than measured. The correction this
+    // used to write through the sticky-aware `scrollTop` setter is not owed:
+    // the items are already painted at these heights, and both spacers are
+    // derived from offsets a change inside the window leaves alone. Writing it
+    // moved the reading position and, at the tail, latched the shell's bottom
+    // pin off for the rest of the session.
+    rows.fill(10);
+    view.frame();
+    expect(view.host.scrollTop).toBe(3000);
+  });
+
+  it('answers a scrollbar jump without waiting for a frame', () => {
+    const rows = Array.from({ length: 2000 }, () => 3);
+    const view = mountHosted({ rows });
+    view.frame();
+
+    // An absolute jump the fixed overscan cannot cover: the window has to be
+    // recomputed from the scroll bar's own `change` event, because the frame
+    // that would sample it is the frame that paints the gap.
+    view.jump(4000);
+    expect(view.container.textContent).not.toContain('TURN_0000');
+    expect(view.mounted().length).toBeGreaterThan(0);
+
+    view.jump(0);
+    expect(view.mounted()[0]).toBe('0000');
+    expect(view.scrollListeners()).toBe(1);
+  });
+
+  it('keeps the reading position across a resize', () => {
+    const rows = Array.from({ length: 2000 }, () => 8);
+    const view = mountHosted({ rows, width: 100 });
+    // Read 120 rows down and let the turns there be measured, so the height
+    // table disagrees with the estimates for rows above the reading position —
+    // the state a real resize finds the transcript in.
+    view.frame();
+    view.jump(120);
+    view.frame();
+    const before = view.mounted();
+    expect(before[0]).not.toBe('0000');
+
+    // Wrapping changes, so the mounted items are re-measured — but the height
+    // table is not thrown away. Clearing it renumbered every offset underneath
+    // a scroll position counted in rows and moved the visible turn by more than
+    // a hundred.
+    view.setWidth(60);
+    expect(view.mounted()).toEqual(before);
+  });
+
+  it('drops the frame and scroll-bar subscriptions on unmount', () => {
+    const rows = Array.from({ length: 2000 }, () => 3);
+    const view = mountHosted({ rows });
+    view.frame();
+    expect(view.scrollListeners()).toBe(1);
+    expect(mocks.renderer.count('frame')).toBe(1);
+    view.unmount();
+    expect(mocks.renderer.count('frame')).toBe(0);
+    expect(view.scrollListeners()).toBe(0);
   });
 });

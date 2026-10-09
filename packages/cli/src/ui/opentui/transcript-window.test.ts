@@ -92,7 +92,6 @@ describe('computeTranscriptWindow', () => {
       offsets,
       scrollTop: 0,
       viewportRows: 20,
-      overscanRows: 0,
     });
     expect(win.end).toBe(3);
     expect(win.bottomPad).toBe(0);
@@ -106,7 +105,6 @@ describe('computeTranscriptWindow', () => {
       offsets,
       scrollTop: 11,
       viewportRows: 5,
-      overscanRows: 0,
     });
     expect(offsets[win.end] + win.bottomPad).toBe(offsets[heights.length]);
     expect(offsets[win.start]).toBe(win.topPad);
@@ -122,7 +120,6 @@ describe('computeTranscriptWindow', () => {
       offsets,
       scrollTop: 2500,
       viewportRows: 500,
-      maxMountedItems: 400,
     });
     expect(scrolled).toEqual({
       start: 2476,
@@ -136,7 +133,6 @@ describe('computeTranscriptWindow', () => {
       offsets,
       scrollTop: 0,
       viewportRows: 500,
-      maxMountedItems: 400,
     });
     expect(atTop).toEqual({ start: 0, end: 400, topPad: 0, bottomPad: 4600 });
   });

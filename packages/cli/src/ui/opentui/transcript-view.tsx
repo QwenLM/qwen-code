@@ -16,7 +16,7 @@
  * silent no-op, which the composition-root contract forbids.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ErrorInfo } from 'react';
 import { useRenderer } from '@opentui/react';
 import type { Renderable, ScrollBoxRenderable } from '@opentui/core';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
@@ -167,9 +167,14 @@ function renderNothing(): null {
   return null;
 }
 
-function logItemFailure(error: Error, item: LiveHistoryItem): void {
+function logItemFailure(
+  error: Error,
+  item: LiveHistoryItem,
+  info: ErrorInfo,
+): void {
   transcriptLogger.error(
-    `[TRANSCRIPT_ITEM_ERROR] kind=${item.kind} id=${item.id} ${error.message}`,
+    `[TRANSCRIPT_ITEM_ERROR] kind=${item.kind} id=${item.id} ` +
+      `${error.message}\n${info.componentStack ?? ''}\n${error.stack ?? ''}`,
   );
 }
 
@@ -180,7 +185,12 @@ function findScrollHost(node: Renderable | null): ScrollBoxRenderable | null {
     cur = cur.parent as Renderable | null
   ) {
     const host = cur as unknown as Partial<ScrollBoxRenderable>;
-    if (typeof host.scrollTop === 'number' && host.content && host.viewport) {
+    if (
+      typeof host.scrollTop === 'number' &&
+      host.content &&
+      host.viewport &&
+      host.verticalScrollBar
+    ) {
       return cur as unknown as ScrollBoxRenderable;
     }
   }
@@ -202,20 +212,26 @@ function sameWindow(a: TranscriptWindow, b: TranscriptWindow): boolean {
  * transcript. See ./transcript-window.ts for why mounting everything blanks the
  * screen on a long session.
  *
- * The scroll region owns no scroll event, so the position is sampled on the
- * renderer's `frame` event: frames only happen when something drew, and every
- * wheel tick, drag or key scroll draws. Idle therefore costs nothing.
+ * Two signals, because they fire at the two moments that matter. The scroll
+ * bar's `change` event is emitted synchronously as the position moves, before
+ * the renderer paints, so an absolute jump — a track click or a thumb drag,
+ * which can land anywhere in the transcript — still gets a window that covers
+ * it in the same frame. The renderer's `frame` event fires after layout, which
+ * is the only moment an item's real row count can be read. Both recompute the
+ * window; only the frame measures. Idle costs nothing: neither event fires.
  */
 function useTranscriptWindow(
   items: readonly LiveHistoryItem[],
-  availableWidth: number,
   availableTerminalHeight: number,
   initialAnchor: 'top' | 'bottom',
 ) {
   const renderer = useRenderer();
   const rootRef = useRef<Renderable | null>(null);
   /** Measured rows per item id, kept after the item scrolls out of the window
-   *  so an estimate is never re-applied to something already measured. */
+   *  so an estimate is never re-applied to something already measured. A resize
+   *  does not clear it: the mounted items are re-measured on the next frame, and
+   *  dropping the whole table would renumber every row offset underneath a
+   *  scroll position that is itself counted in rows. */
   const heightsRef = useRef(new Map<string, number>());
   const offsetsRef = useRef<number[]>([0]);
   const itemsRef = useRef(items);
@@ -225,19 +241,14 @@ function useTranscriptWindow(
     topPad: 0,
     bottomPad: 0,
   });
+  /** `rows: 0` means no scroll host has reported a viewport yet, so the height
+   *  prop is the fallback — read every render, which keeps a host-less pane
+   *  (the session preview) in step across a resize. */
   const scrollRef = useRef({
     top: initialAnchor === 'bottom' ? ANCHOR_BOTTOM : 0,
-    rows: Math.max(1, availableTerminalHeight),
+    rows: 0,
   });
   const [revision, setRevision] = useState(0);
-
-  const widthRef = useRef(availableWidth);
-  if (widthRef.current !== availableWidth) {
-    // Wrapping depends on the width, so every measurement taken at the old one
-    // is wrong.
-    widthRef.current = availableWidth;
-    heightsRef.current.clear();
-  }
 
   const offsets = useMemo(() => {
     const measured = heightsRef.current;
@@ -251,7 +262,7 @@ function useTranscriptWindow(
     // Measured heights live in a ref that the frame handler mutates, so
     // `revision` is what tells this memo one of them changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, revision, availableWidth]);
+  }, [items, revision]);
 
   itemsRef.current = items;
   offsetsRef.current = offsets;
@@ -259,74 +270,86 @@ function useTranscriptWindow(
     itemCount: items.length,
     offsets,
     scrollTop: scrollRef.current.top,
-    viewportRows: scrollRef.current.rows,
+    viewportRows: scrollRef.current.rows || availableTerminalHeight,
   });
   mountedRef.current = win;
 
   useEffect(() => {
     if (!renderer?.on) return;
-    const onFrame = () => {
+    let bar: ScrollBoxRenderable['verticalScrollBar'] | null = null;
+
+    const locate = () => {
       const root = rootRef.current;
-      if (!root) return;
+      if (!root) return null;
       const host = findScrollHost(root);
-      if (!host) return;
+      return host ? { root, host } : null;
+    };
 
-      const mounted = mountedRef.current;
-      const previousTop = scrollRef.current.top;
-      // While the position is still the "pinned to the tail" placeholder,
-      // stickyScroll owns it; correcting from here would fight the pin.
-      const pinned = previousTop === ANCHOR_BOTTOM;
-      const measured = heightsRef.current;
-      // Children are [top spacer, ...mounted items, bottom spacer].
-      const children = root.getChildren();
-      let anchorDelta = 0;
-      let revised = false;
-      for (let slot = 1; slot + 1 < children.length; slot++) {
-        const index = mounted.start + slot - 1;
-        const item = itemsRef.current[index];
-        const node = children[slot];
-        if (!item || !node || !(node.height > 0)) continue;
-        const rows = Math.round(node.height) + itemMarginTop(item.kind);
-        const before = measured.get(item.id);
-        if (before === rows) continue;
-        measured.set(item.id, rows);
-        revised = true;
-        // A height correction above the viewport shifts everything the user is
-        // looking at, so the scroll position has to move with it.
-        if (!pinned && (offsetsRef.current[index] ?? 0) < previousTop) {
-          anchorDelta +=
-            rows -
-            (before ??
-              (index === 0 ? ESTIMATED_FIRST_ITEM_ROWS : ESTIMATED_ITEM_ROWS));
-        }
-      }
-
+    /** Samples the host's real position for the render body to read back, and
+     *  reports whether it implies a window other than the mounted one. */
+    const syncWindow = (root: Renderable, host: ScrollBoxRenderable) => {
       // `y` is absolute, so the difference is the offset inside the scroll
       // content and cancels the translation the scroll position applies.
       const top =
         Math.round(host.scrollTop) - Math.round(root.y - host.content.y);
       const rows = Math.max(1, Math.round(host.viewport.height));
-      const moved =
-        top !== scrollRef.current.top || rows !== scrollRef.current.rows;
       scrollRef.current = { top, rows };
-      if (anchorDelta !== 0) host.scrollTop += anchorDelta;
-      if (revised) {
-        setRevision((value) => value + 1);
-        return;
-      }
-      if (!moved) return;
       const next = computeTranscriptWindow({
         itemCount: itemsRef.current.length,
         offsets: offsetsRef.current,
         scrollTop: top,
         viewportRows: rows,
       });
-      if (sameWindow(next, mountedRef.current)) return;
-      setRevision((value) => value + 1);
+      return !sameWindow(next, mountedRef.current);
     };
+
+    const onScroll = () => {
+      const found = locate();
+      if (!found) return;
+      if (syncWindow(found.root, found.host)) setRevision((value) => value + 1);
+    };
+
+    const onFrame = () => {
+      const found = locate();
+      if (!found) return;
+      const { root, host } = found;
+      if (bar !== host.verticalScrollBar) {
+        bar?.off('change', onScroll);
+        bar = host.verticalScrollBar;
+        bar.on('change', onScroll);
+      }
+
+      const mounted = mountedRef.current;
+      const measured = heightsRef.current;
+      // Children are [top spacer, ...mounted items, bottom spacer].
+      const children = root.getChildren();
+      let revised = false;
+      for (let slot = 1; slot + 1 < children.length; slot++) {
+        const item = itemsRef.current[mounted.start + slot - 1];
+        const node = children[slot];
+        if (!item || !node || !(node.height > 0)) continue;
+        const rows = Math.round(node.height) + itemMarginTop(item.kind);
+        if (measured.get(item.id) === rows) continue;
+        measured.set(item.id, rows);
+        revised = true;
+      }
+      // No scroll correction is owed for a measurement, and writing one is what
+      // breaks the shell's bottom pin. Every item this loop can see is mounted,
+      // so it is already painted at the height just read, and both spacers come
+      // from offsets a change inside `[start, end)` leaves alone: `topPad` sums
+      // only the items before the window, and `bottomPad`'s two terms move by
+      // the same amount. The painted layout does not move, so the compensation
+      // is zero — and the sticky-aware setter would read a nonzero one as the
+      // user scrolling away from the tail. See Decision 5.
+      if (syncWindow(root, host) || revised) {
+        setRevision((value) => value + 1);
+      }
+    };
+
     renderer.on('frame', onFrame);
     return () => {
       renderer.off('frame', onFrame);
+      bar?.off('change', onScroll);
     };
   }, [renderer]);
 
@@ -355,7 +378,6 @@ export function OpenTuiTranscriptView({
   )?.id;
   const { rootRef, win } = useTranscriptWindow(
     items,
-    availableWidth,
     availableTerminalHeight,
     initialAnchor,
   );
@@ -377,7 +399,7 @@ export function OpenTuiTranscriptView({
         >
           <OpenTuiErrorBoundary
             fallback={renderNothing}
-            onError={(error) => logItemFailure(error, item)}
+            onError={(error, info) => logItemFailure(error, item, info)}
           >
             <TranscriptItem
               item={item}

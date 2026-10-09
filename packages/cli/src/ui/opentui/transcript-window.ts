@@ -26,14 +26,20 @@ export const ESTIMATED_ITEM_ROWS = 3;
 export const ESTIMATED_FIRST_ITEM_ROWS = 10;
 
 /** One screen of slack on each side so a wheel tick never shows a gap. */
-const OVERSCAN_ROWS = 24;
+export const OVERSCAN_ROWS = 24;
 
 /**
- * Backstop for a window made of many one-row items. 400 items is far more than
- * a viewport holds and still leaves an order of magnitude of headroom under the
- * native buffer cap.
+ * Backstop for a window made of many one-row items, and the only bound this
+ * module puts on the live native buffer count: 400 items still leaves an order
+ * of magnitude of headroom under that cap.
+ *
+ * It binds once `viewportRows + 2 * OVERSCAN_ROWS` exceeds
+ * `MAX_MOUNTED_ITEMS * rowHeight` — a 353-row viewport for one-row items, 753
+ * for two-row items. From there up to a `MAX_MOUNTED_ITEMS`-row viewport the
+ * mounted items still cover the viewport and only the bottom overscan is
+ * trimmed; above that no window can cover it.
  */
-const MAX_MOUNTED_ITEMS = 400;
+export const MAX_MOUNTED_ITEMS = 400;
 
 export interface TranscriptWindow {
   /** First mounted item index. */
@@ -74,13 +80,9 @@ export function computeTranscriptWindow(opts: {
   /** Scroll position in transcript rows, 0 at the first item. */
   scrollTop: number;
   viewportRows: number;
-  overscanRows?: number;
-  maxMountedItems?: number;
 }): TranscriptWindow {
   const { itemCount, offsets } = opts;
   if (itemCount <= 0) return { start: 0, end: 0, topPad: 0, bottomPad: 0 };
-  const overscan = opts.overscanRows ?? OVERSCAN_ROWS;
-  const maxItems = opts.maxMountedItems ?? MAX_MOUNTED_ITEMS;
   const viewportRows = Math.max(1, opts.viewportRows);
   const total = offsets[itemCount] ?? 0;
 
@@ -88,17 +90,21 @@ export function computeTranscriptWindow(opts: {
     Math.max(0, opts.scrollTop),
     Math.max(0, total - viewportRows),
   );
-  const start = lastOffsetAtMost(offsets, Math.max(0, scrollTop - overscan));
-  const reach = scrollTop + viewportRows + overscan;
+  const start = lastOffsetAtMost(
+    offsets,
+    Math.max(0, scrollTop - OVERSCAN_ROWS),
+  );
+  const reach = scrollTop + viewportRows + OVERSCAN_ROWS;
   let end = lastOffsetAtMost(offsets, reach);
   // An item straddling the bottom edge is not included by the search above.
   if (end < itemCount && offsets[end] < reach) end += 1;
   end = Math.min(end, itemCount);
 
-  if (end - start > maxItems) {
-    // Only reachable when the viewport itself is taller than the backstop, so no
-    // window can cover it; keep the top rows, which is where reading starts.
-    end = start + maxItems;
+  if (end - start > MAX_MOUNTED_ITEMS) {
+    // Keep the top rows, which is where reading starts. Up to a
+    // `MAX_MOUNTED_ITEMS`-row viewport this trims only the bottom overscan;
+    // past that no window can cover the viewport at all.
+    end = start + MAX_MOUNTED_ITEMS;
   }
 
   return {
