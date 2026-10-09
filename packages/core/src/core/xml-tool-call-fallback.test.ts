@@ -1072,6 +1072,27 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     expect(result.remainingText).toBe('');
   });
 
+  it('recovers a genuine call from a markup-only turn beside a stray opener', () => {
+    // A rejected block leaves its opener behind with no closer for the intent
+    // guard's pattern to pair, so that markup used to be charged to prose. On a
+    // turn made of markup alone — one unclosed invoke opener, well-formed
+    // parameter elements and one complete call — the ratio crosses the
+    // threshold and the whole turn is refused, dropping the genuine call the
+    // extraction had already found. See #13492.
+    const text =
+      '<invoke name="a">' +
+      Array.from({ length: 16 }, (_, index) =>
+        param(`p${index}`, `v${index}`),
+      ).join(' ') +
+      ' ' +
+      invoke('read_file', param('file_path', 'a.ts'));
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(true);
+    expect(
+      result.functionCallParts.map((part) => part.functionCall?.name),
+    ).toEqual(['read_file']);
+  });
+
   it('does not borrow a closer that following prose merely mentions', () => {
     // Stepping out of a quoted value searches the rest of the text, so the
     // advance lands on the closer this prose documents instead of the block's
@@ -1156,7 +1177,7 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     // point is dropped: the required `content` here never reaches write_file,
     // validation fails, and the block is accepted so nothing is left behind in
     // the turn to explain it.
-    const text = `${OPEN} name='write_file'>\n${param('file_path', 'doc.md')}\n${param('content', 'body')}\n${CLOSE}`;
+    const text = `${OPEN} name="write_file'>\n${param('file_path', 'doc.md')}\n${param('content', 'body')}\n${CLOSE}`;
     expect(extractXmlToolCalls(text)).toEqual([
       { name: 'write_file', args: { file_path: 'doc.md', content: 'body' } },
     ]);
@@ -1169,6 +1190,30 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     expect(extractXmlToolCalls(text)).toEqual([
       { name: 'read_file', args: { file_path: 'a.ts' } },
     ]);
+  });
+
+  it('never dispatches a truncated value when a parameter name mixes quote characters', () => {
+    // A parameter name opened with one quote character and closed with the
+    // other is admitted by PARAMETER_PATTERN's name group, whose delimiters are
+    // likewise independent classes. Classifying such an element as a quoted
+    // value rests on an `openTagEnd` scan that leaves quote mode inside the
+    // value, so the argument would be sliced from behind its own leading text
+    // and a truncated write dispatched with nothing left in the turn to explain
+    // it. The element falls back to the flat match instead, whose parameter
+    // region still holds the quoted opener, so the block is rejected and the
+    // whole turn stays visible. See #13492.
+    const quoted = invoke('a', param('p', 'v'));
+    const text =
+      `${OPEN} name="write_file">` +
+      param('file_path', 'doc.md') +
+      `<parameter name='content">A' x>${quoted}</parameter>` +
+      CLOSE;
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
   });
 
   it('carries the advance past two quoted values in one block', () => {
@@ -1207,6 +1252,34 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     ]);
   });
 
+  it('does not let a value-borne example closer end a prose-opened example', () => {
+    // The complementary half: the masked closer may end the range only as a
+    // last resort, since a closer prose writes further on is the boundary.
+    // Ending the range at the masked one leaves the documented call between
+    // them outside every range, and the prose's own closer then opens a range
+    // that filters out the real call after it. See #13492.
+    const documented = invoke(
+      'run_shell_command',
+      param('command', 'rm -rf /tmp/x'),
+    );
+    const text =
+      '<example>\n' +
+      invoke(
+        'w',
+        param(
+          'content',
+          'Use the example closer tag to end the block</example>\ntail',
+        ),
+      ) +
+      '\n' +
+      documented +
+      '\n</example>\n' +
+      invoke('read_file', param('file_path', 'b.ts'));
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'read_file', args: { file_path: 'b.ts' } },
+    ]);
+  });
+
   it('keeps a later call when a quoted value hides a fence closer', () => {
     // Same asymmetry with a delimiter: a prose-opened fence must still be
     // closed by the delimiter line the mask covers.
@@ -1219,6 +1292,30 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
       invoke('c', param('q', 'z'));
     expect(extractXmlToolCalls(text)).toEqual([
       { name: 'c', args: { q: 'z' } },
+    ]);
+  });
+
+  it('does not let a value-borne delimiter close a fence prose still closes', () => {
+    // The complementary half for a fence, and it fails in both directions:
+    // clearing on the masked delimiter ends the fence inside the value, so the
+    // documented call between them is dispatched, while the prose's genuine
+    // delimiter then opens a fence that swallows the real call after it. The
+    // masked line may close only when prose has no delimiter left to do it.
+    // See #13492.
+    const quoted = invoke('read_file', param('file_path', 'x.txt'));
+    const documented = invoke(
+      'run_shell_command',
+      param('command', 'rm -rf /tmp/x'),
+    );
+    const text =
+      '```\n' +
+      invoke('w', param('content', `${quoted}\n\`\`\`\ntail`)) +
+      '\n' +
+      documented +
+      '\n```\n' +
+      invoke('read_file', param('file_path', 'b.ts'));
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'read_file', args: { file_path: 'b.ts' } },
     ]);
   });
 

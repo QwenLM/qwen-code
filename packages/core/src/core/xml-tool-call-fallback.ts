@@ -100,26 +100,58 @@ function stripDelimitingNewlines(value: string): string {
  * run — CommonMark forbids an info string on a closing fence.
  *
  * Delimiters inside a line that starts in `parameterRanges` are only allowed to
- * *close* a fence: those lines are parameter values, not prose, so fence-like
- * content there must not open one — but the mask covers a value wholesale, and
- * a prose-opened fence whose closing delimiter sits inside a value would
- * otherwise never close, marking the rest of the turn fenced and dropping every
- * call after it. See #13492.
+ * *close* a fence, and only as a last resort: those lines are parameter values,
+ * not prose, so fence-like content there must not open one — but the mask
+ * covers a value wholesale, and a prose-opened fence whose closing delimiter
+ * sits inside a value would otherwise never close, marking the rest of the turn
+ * fenced and dropping every call after it. A masked delimiter may therefore
+ * close a fence only when prose has no delimiter line left to do it: otherwise
+ * the fence ends inside the value, the documentation after it is dispatched,
+ * and the prose's own delimiter re-opens a fence that swallows a real call.
+ * See #13492.
  */
+const FENCE_DELIMITER_LINE = /^ {0,3}((`{3,})|~{3,})/;
+
+/**
+ * Offset of the last delimiter line that is prose rather than parameter text,
+ * or -1 when prose has none. Consulted only when a masked delimiter could close
+ * an open fence, which is rare, so no pass is paid for by calls that never see
+ * one.
+ */
+function lastUnmaskedDelimiter(
+  text: string,
+  parameterRanges: Array<[number, number]>,
+): number {
+  let last = -1;
+  let scanStart = 0;
+  for (const line of text.split('\n')) {
+    const masked = parameterRanges.some(
+      ([start, end]) => scanStart >= start && scanStart < end,
+    );
+    if (!masked && FENCE_DELIMITER_LINE.test(line)) {
+      last = scanStart;
+    }
+    scanStart += line.length + 1;
+  }
+  return last;
+}
+
 function positionInsideFence(
   text: string,
   index: number,
   parameterRanges: Array<[number, number]>,
 ): boolean {
   let openFence: { delim: string; len: number } | null = null;
+  let lastProseDelimiter: number | null = null;
   let lineStart = 0;
   for (const line of text.slice(0, index).split('\n')) {
     const lineEnd = lineStart + line.length;
-    const insideParameter = parameterRanges.some(
+    const startsInsideParameter = parameterRanges.some(
       ([start, end]) => lineStart >= start && lineStart < end,
     );
+    const startsAt = lineStart;
     lineStart = lineEnd + 1;
-    const m = /^ {0,3}((`{3,})|~{3,})/.exec(line);
+    const m = FENCE_DELIMITER_LINE.exec(line);
     if (!m) continue;
     const delim = m[2] ? '`' : '~';
     const len = m[1].length;
@@ -128,8 +160,10 @@ function positionInsideFence(
       openFence.delim === delim &&
       len >= openFence.len &&
       line.slice(m[0].length).trim() === '';
-    if (insideParameter) {
-      if (closes) openFence = null;
+    if (startsInsideParameter) {
+      if (!closes) continue;
+      lastProseDelimiter ??= lastUnmaskedDelimiter(text, parameterRanges);
+      if (startsAt > lastProseDelimiter) openFence = null;
     } else if (openFence === null) {
       openFence = { delim, len };
     } else if (closes) {
@@ -189,6 +223,20 @@ function computeExampleRanges(
 
   const ranges: Array<[number, number]> = [];
   const tags = /<\/?example(?=[\s/>])(?:[^>"']|"[^"]*"|'[^']*')*>/g;
+  // Where prose's last closer sits, so a masked closer knows whether it is the
+  // last resort. One forward pass, like the fence tracker below.
+  let lastUnmaskedCloser = -1;
+  let scan: RegExpExecArray | null;
+  while ((scan = tags.exec(text)) !== null) {
+    const index = scan.index;
+    if (
+      scan[0].startsWith('</') &&
+      !parameterRanges.some(([start, end]) => index >= start && index < end)
+    ) {
+      lastUnmaskedCloser = index;
+    }
+  }
+  tags.lastIndex = 0;
   let depth = 0;
   let start = 0;
   let match: RegExpExecArray | null;
@@ -199,17 +247,21 @@ function computeExampleRanges(
       ([start, end]) => tagPosition >= start && tagPosition < end,
     );
     // Masked tags are parameter data, which may close an example but never
-    // open one. Symmetric treatment matters because the mask covers a value
-    // wholesale: an opener that stays inert is what keeps documented syntax
-    // from swallowing the turn, while a swallowed closer would leave a
-    // prose-opened example range running to the end of the text and filter out
-    // every real call after it. See #13492.
-    if (
-      (masked ? !closes : !skipLexer && !tagPositions.has(tagPosition)) ||
-      positionInsideFence(text, tagPosition, parameterRanges)
-    ) {
+    // open one, and a masked closer is only a last resort: when prose closes
+    // the example further on, that closer is the boundary. Symmetric treatment
+    // matters because the mask covers a value wholesale: an opener that stays
+    // inert is what keeps documented syntax from swallowing the turn, while a
+    // closer that ends the range early leaves the documentation after it
+    // outside every range, and the prose's own closer then opens a range that
+    // filters out a real call. A swallowed closer with no prose closer left
+    // would instead leave the range running to the end of the text and filter
+    // out every real call after it. See #13492.
+    if (masked) {
+      if (!closes || tagPosition < lastUnmaskedCloser) continue;
+    } else if (!skipLexer && !tagPositions.has(tagPosition)) {
       continue;
     }
+    if (positionInsideFence(text, tagPosition, parameterRanges)) continue;
     if (/\/\s*>$/.test(match[0])) continue;
     if (closes) {
       if (depth > 0 && --depth === 0) {
@@ -343,6 +395,16 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     if (start < outerEnd) continue;
     outerEnd = end;
     const element = text.slice(start, end);
+    // Classifying on a scan-derived offset is only sound when the open tag is
+    // the same well-formed element the flat matcher consumes. A name whose two
+    // quotes do not pair — which the name group admits, its delimiters being
+    // independent classes — sends `openTagEnd` out of quote mode inside the
+    // value, so the element would be classified from behind its own leading
+    // text and a truncated argument dispatched. Fall back to the flat match
+    // instead, which leaves the block rejected. See #13492.
+    if (!/^<parameter(?:\s+name=(["'])[^"']*\1|=)[^>]*>/.test(element)) {
+      continue;
+    }
     const valueStart = openTagEnd(element);
     if (
       valueStart !== -1 &&
@@ -567,10 +629,16 @@ export function tryRecoverXmlToolCalls(text: string): {
   }
   withoutRecoveredCalls += text.slice(cursor);
   // Use the same complete boundaries as argument extraction, while still
-  // counting parameterless blocks as XML rather than surrounding prose.
+  // counting parameterless blocks as XML rather than surrounding prose. A
+  // rejected block leaves its opener behind with no closer for the pattern
+  // above to pair, so its markup would otherwise be charged to prose and
+  // refuse a turn whose only call was recovered: measure markup by the
+  // dialect's tags rather than by whether a boundary could be paired. See
+  // #13492.
   TOOL_CALL_PATTERN.lastIndex = 0;
   const proseOnly = withoutRecoveredCalls
     .replace(TOOL_CALL_PATTERN, '')
+    .replace(/<\/?(?:invoke|function|parameter)\b[^>]*>/g, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
   if (text.length > 0 && proseOnly.length / text.length > 0.8) {
