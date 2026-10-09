@@ -1227,8 +1227,6 @@ describe('multi-workspace session dispatch', () => {
         primary: true,
         trusted: true,
         workflowsEnabled: false,
-        registrationIds: [],
-        isPinned: false,
       },
       {
         id: 'secondary-id',
@@ -1237,8 +1235,6 @@ describe('multi-workspace session dispatch', () => {
         primary: false,
         trusted: true,
         workflowsEnabled: false,
-        registrationIds: [],
-        isPinned: false,
       },
     ]);
     expect(res.body.limits.maxSessionsPerWorkspace).toBe(32);

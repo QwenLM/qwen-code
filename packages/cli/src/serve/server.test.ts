@@ -3895,6 +3895,24 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'workspace_pinning') {
+          expect(
+            predicate({ persistentWorkspaceRegistrationAvailable: true }),
+          ).toBe(true);
+          expect(
+            predicate({ persistentWorkspaceRegistrationAvailable: false }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              persistentWorkspaceRegistrationAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'scratch_workspace_registration') {
           expect(
             predicate({ scratchWorkspaceRegistrationAvailable: true }),
@@ -6210,8 +6228,6 @@ describe('createServeApp', () => {
         trusted: true,
         workflowsEnabled: false,
         kind: 'live',
-        registrationIds: [],
-        isPinned: false,
       });
       expect(response.body.features).not.toContain('multi_workspace_sessions');
       expect(response.body.limits).toHaveProperty('maxSessionsPerWorkspace');

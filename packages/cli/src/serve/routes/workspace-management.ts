@@ -2252,9 +2252,8 @@ export function registerWorkspaceManagementRoutes(
         }
         if (!targetEntry) {
           // Not found in registry — try the store directly for non-registry workspaces.
-          await workspaceRegistrationStore.setPinned(requestedId, isPinned);
+          // Check existence BEFORE mutating to avoid false positives.
           const snapshot = await workspaceRegistrationStore.read();
-          // Verify the registration exists in the store.
           const exists = snapshot.workspaces.some(
             (workspace) => workspaceRegistrationId(workspace) === requestedId,
           );
@@ -2265,7 +2264,9 @@ export function registerWorkspaceManagementRoutes(
             });
             return;
           }
-          const pinnedAt = snapshot.pinnedAts?.[requestedId];
+          await workspaceRegistrationStore.setPinned(requestedId, isPinned);
+          const updatedSnapshot = await workspaceRegistrationStore.read();
+          const pinnedAt = updatedSnapshot.pinnedAts?.[requestedId];
           res.json({
             id: requestedId,
             isPinned: pinnedAt !== undefined,
@@ -2274,26 +2275,24 @@ export function registerWorkspaceManagementRoutes(
           return;
         }
 
-        // Update pin state for ALL registration IDs of this entry.
-        let anyApplied = false;
-        for (const regId of targetEntry.registrationIds) {
-          const applied = await workspaceRegistrationStore.setPinned(
-            regId,
-            isPinned,
-          );
-          if (applied) anyApplied = true;
-        }
-        if (!anyApplied && !isPinned) {
-          // No-op unpin — already unpinned, return current state.
-          res.json({ id: requestedId, isPinned: false });
-          return;
-        }
-        if (!anyApplied) {
+        // Verify at least one registration ID exists in the store before mutating.
+        const preSnapshot = await workspaceRegistrationStore.read();
+        const existsInStore = targetEntry.registrationIds.some((regId) =>
+          preSnapshot.workspaces.some(
+            (w) => workspaceRegistrationId(w) === regId,
+          ),
+        );
+        if (!existsInStore) {
           res.status(404).json({
             error: 'Workspace registration not found in store',
             code: 'workspace_registration_not_found',
           });
           return;
+        }
+
+        // Update pin state for ALL registration IDs of this entry.
+        for (const regId of targetEntry.registrationIds) {
+          await workspaceRegistrationStore.setPinned(regId, isPinned);
         }
 
         // Read back the pinnedAt for the requested ID (may be an alias).

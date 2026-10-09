@@ -8,7 +8,7 @@ Let Web Shell users pin important workspaces to the top of the sidebar so they a
 
 ## Contract
 
-- `PATCH /workspace-registrations/:id/pin` toggles or sets pin state for a persisted registration.
+- `PATCH /workspace-registrations/:id/pin` sets or clears pin state for a persisted registration.
 - `/capabilities` workspaces entries include `registrationIds`, `isPinned` (boolean, always present when feature is advertised), and `pinnedAt` (ISO-8601, present only when pinned) when `workspace_pinning` is advertised; when the tag is absent, those fields are omitted entirely.
 - `workspace_pinning` capability tag advertises support; clients preflight-check this before showing UI.
 - Web Shell sidebar shows a "Pin" menu item only on rows that have persistent registration records AND the daemon advertises `workspace_pinning`.
@@ -96,13 +96,12 @@ This prevents the menu from appearing on:
 - Temporary workspaces without persistent registration
 - Daemons that do not advertise `workspace_pinning` (older versions)
 
-Pinned rows display a 📌 icon and sort above all others. The toggle action calls `PATCH /workspace-registrations/:id/pin` with `{ isPinned: <target state> }`.
+Pinned rows display a 📌 icon and sort above all others. The pin action calls `PATCH /workspace-registrations/:id/pin` with `{ isPinned: <target state> }`.
 
 ## Testing strategy
 
 - Unit tests verify `/capabilities` emits `isPinned: false` for unpinned entries and omits the fields when the feature tag is absent.
 - Unit tests verify pin route returns correct error codes for missing registrations.
-- Sidebar unit tests verify Pin menu does not appear on unpinnable rows.
 - Integration tests (manual) verify pin persists across daemon restart and sorts correctly.
 
 ## Risks and open questions

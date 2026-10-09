@@ -8,7 +8,7 @@
 
 ## 契约
 
-- `PATCH /workspace-registrations/:id/pin` 用于切换或设置某个持久化注册项的置顶状态。
+- `PATCH /workspace-registrations/:id/pin` 用于设置或清除某个持久化注册项的置顶状态。
 - `/capabilities` 中的工作区条目在通告 `workspace_pinning` 时包含 `registrationIds`、`isPinned`（布尔值，功能通告时始终存在）和 `pinnedAt`（ISO-8601，仅置顶时存在）；当标签不存在时，这些字段完全省略。
 - `workspace_pinning` 能力标签用于通告支持；客户端在显示 UI 之前通过预检检查此标签。
 - Web Shell 侧边栏仅在具有持久化注册记录且守护进程通告了 `workspace_pinning` 的行上显示"置顶工作区"菜单项。
@@ -96,13 +96,12 @@ const canPin =
 - 没有持久化注册的临时工作区
 - 未通告 `workspace_pinning` 的守护进程（旧版本）
 
-已置顶的行显示 📌 图标并排在所有其他行之上。切换操作调用 `PATCH /workspace-registrations/:id/pin` 并传递 `{ isPinned: <目标状态> }`。
+已置顶的行显示 📌 图标并排在所有其他行之上。置顶操作调用 `PATCH /workspace-registrations/:id/pin` 并传递 `{ isPinned: <目标状态> }`。
 
 ## 测试策略
 
 - 单元测试验证 `/capabilities` 对未置顶条目发送 `isPinned: false`，且在功能标签不存在时省略这些字段。
 - 单元测试验证置顶路由对缺失的注册项返回正确的错误码。
-- 侧边栏单元测试验证 Pin 菜单不出现在不可置顶的行上。
 - 集成测试（手动）验证置顶状态在守护进程重启后持久化且排序正确。
 
 ## 风险和未决问题

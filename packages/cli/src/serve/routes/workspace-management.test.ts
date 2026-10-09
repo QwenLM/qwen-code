@@ -3318,7 +3318,7 @@ describe('persistent workspace registrations', () => {
 
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('workspace_registration_not_found');
-    expect(setPinned).toHaveBeenCalledWith('not-stored', true);
+    expect(setPinned).not.toHaveBeenCalled();
   });
 
   it('reports the current state when the pin is a no-op', async () => {
