@@ -19,6 +19,42 @@ function pause(signal: AbortSignal, ms: number): Promise<void> {
   });
 }
 
+// AbortSignal.any needs Chrome 116 / Safari 17.4, above the package floor
+// (Chrome 111 / Safari 16.4); mirrors composeAbortSignals in
+// packages/sdk-typescript/src/daemon/acpTransportUtils.ts.
+function composeSignals(signals: AbortSignal[]): AbortSignal {
+  const anyFn = (
+    AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal }
+  ).any;
+  if (typeof anyFn === 'function') return anyFn.call(AbortSignal, signals);
+  const ctrl = new AbortController();
+  const cleanups: Array<() => void> = [];
+  const detachAll = () => {
+    while (cleanups.length > 0) {
+      try {
+        cleanups.pop()?.();
+      } catch {
+        /* swallow */
+      }
+    }
+  };
+  for (const s of signals) {
+    if (s.aborted) {
+      ctrl.abort(s.reason);
+      detachAll();
+      return ctrl.signal;
+    }
+    const onAbort = () => {
+      ctrl.abort(s.reason);
+      detachAll();
+    };
+    s.addEventListener('abort', onAbort, { once: true });
+    cleanups.push(() => s.removeEventListener('abort', onAbort));
+  }
+  ctrl.signal.addEventListener('abort', detachAll, { once: true });
+  return ctrl.signal;
+}
+
 interface ManagedSessionState {
   sessionId?: string;
   summary?: ManagedAgentSessionSummary;
@@ -61,7 +97,7 @@ export function useManagedSession(
       if (!sessionId || !abort || abort.signal.aborted) return undefined;
       const read = await provider.getSession(sessionId, {
         clientId,
-        signal: signal ? AbortSignal.any([signal, abort.signal]) : abort.signal,
+        signal: signal ? composeSignals([signal, abort.signal]) : abort.signal,
       });
       if (abort.signal.aborted || signal?.aborted) return undefined;
       const summary = retainSummary(read);

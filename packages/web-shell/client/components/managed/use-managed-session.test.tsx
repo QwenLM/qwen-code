@@ -103,6 +103,48 @@ describe('useManagedSession', () => {
     expect(latest.events.map((item) => item.id)).toEqual([1, 2]);
   });
 
+  it('refreshSummary composes a caller signal without AbortSignal.any', async () => {
+    // Chrome 111-115 and Safari 16.4-17.3 are inside the documented
+    // support matrix but lack AbortSignal.any; the fallback wiring must
+    // still compose the caller signal with the hook lifetime.
+    const original = AbortSignal.any;
+    (AbortSignal as unknown as { any?: unknown }).any = undefined;
+    try {
+      const getSession = vi.fn().mockResolvedValue({ sessionId: 'session-1' });
+      const getTranscript = vi.fn().mockResolvedValue(transcript(1));
+      const provider = {
+        getSession,
+        getTranscript,
+        async *subscribeEvents(_id: string, opts: { signal: AbortSignal }) {
+          yield event(2);
+          await new Promise((resolve) =>
+            opts.signal.addEventListener('abort', resolve),
+          );
+        },
+      } as unknown as ManagedAgentProvider;
+      let latest!: ReturnType<typeof useManagedSession>;
+      function Probe() {
+        latest = useManagedSession(provider, 'c', 'session-1');
+        return null;
+      }
+      root = createRoot(document.createElement('div'));
+      await act(async () => {
+        root!.render(<Probe />);
+      });
+      const caller = new AbortController();
+      await act(async () => {
+        await latest.refreshSummary(caller.signal);
+      });
+      const composed = getSession.mock.calls.at(-1)?.[1]?.signal as AbortSignal;
+      expect(composed).toBeDefined();
+      expect(composed.aborted).toBe(false);
+      caller.abort();
+      expect(composed.aborted).toBe(true);
+    } finally {
+      (AbortSignal as unknown as { any?: unknown }).any = original;
+    }
+  });
+
   it('keeps the highest revision when poll and event refresh resolve in one React batch', async () => {
     vi.useFakeTimers();
     try {
