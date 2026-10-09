@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore.Action;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore.Response;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -113,6 +114,12 @@ public class ActionResponseCoordinator {
             // A lost answer may follow a committed decision. Inspect the projection
             // again before returning this command to the outbox.
             if (settled(op, actions.response(tenant, session, operation))) {
+                return;
+            }
+            if (error instanceof RuntimeBrokerException failure
+                    && !failure.isRetryable()
+                    && "workspace_unavailable".equals(failure.getCode())) {
+                actions.complete(op, owner, failure.getCode(), null, clock.millis());
                 return;
             }
             long delay =

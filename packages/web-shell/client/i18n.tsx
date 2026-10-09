@@ -5,6 +5,16 @@ import {
   type PropsWithChildren,
 } from 'react';
 
+import {
+  TRAJECTORY_FILTER_MESSAGES_EN,
+  TRAJECTORY_FILTER_MESSAGES_ZH,
+} from './trajectory/filter-messages.js';
+
+import {
+  TRAJECTORY_WINDOW_MESSAGES_EN,
+  TRAJECTORY_WINDOW_MESSAGES_ZH,
+} from './trajectory/window-messages.js';
+
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
 import {
   COLLAB_MESSAGES_EN,
@@ -1174,6 +1184,9 @@ const EN: Messages = {
   'daemon.connection.add': 'Add connection',
   'daemon.connection.saved': 'Connected computers',
   'daemon.connection.forget': (v) => `Forget ${v?.address}`,
+  'workspaceHost.local': 'Local',
+  'workspaceHost.remote': 'Remote',
+  'workspaceHost.openHost': (v) => `Open ${v?.host ?? ''}`,
   'daemon.connection.invalid': 'Enter a valid HTTP or HTTPS origin.',
   'daemon.connection.notReady':
     'The daemon did not accept the connection; the stored credential was left unchanged.',
@@ -4286,6 +4299,8 @@ const EN: Messages = {
   ...LIVE_MESSAGES_EN,
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
+  ...TRAJECTORY_FILTER_MESSAGES_EN,
+  ...TRAJECTORY_WINDOW_MESSAGES_EN,
 };
 
 const ZH: Messages = {
@@ -5429,6 +5444,9 @@ const ZH: Messages = {
   'daemon.connection.add': '添加连接',
   'daemon.connection.saved': '已连接的计算机',
   'daemon.connection.forget': (v) => `移除 ${v?.address}`,
+  'workspaceHost.local': '本地',
+  'workspaceHost.remote': '远程',
+  'workspaceHost.openHost': (v) => `打开 ${v?.host ?? ''}`,
   'daemon.connection.invalid': '请输入有效的 HTTP 或 HTTPS origin。',
   'daemon.connection.notReady': 'Daemon 未接受该连接，已保存的凭据未被修改。',
   'daemon.connection.authFailed':
@@ -8297,6 +8315,8 @@ const ZH: Messages = {
   ...LIVE_MESSAGES_ZH,
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
+  ...TRAJECTORY_FILTER_MESSAGES_ZH,
+  ...TRAJECTORY_WINDOW_MESSAGES_ZH,
 };
 
 const MESSAGES: Record<WebShellLanguage, Messages> = {
