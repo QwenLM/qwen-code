@@ -12014,9 +12014,10 @@ describe('Hosted Harness Runtime turn takeover', () => {
     // assistant message is text-only with an empty tail, so every
     // settleProjectablePromptId guard passes except the file-history
     // probe — which can never pay here (the checkpoint names turn_settled
-    // and the text tail carries no tool calls). The load must keep the
-    // retriable refusal instead of projecting a turn_result over a
-    // history record nothing clears.
+    // and the text tail carries no tool calls). The record's clearing
+    // commit is held back below, so it still names the parked Turn: the
+    // load must keep the retriable refusal instead of projecting a
+    // turn_result over a history record nothing clears.
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockResolvedValue(
@@ -12067,6 +12068,15 @@ describe('Hosted Harness Runtime turn takeover', () => {
           throw new Error('settlement unavailable');
         return originalWrite.call(this, record);
       });
+    // Hold back the record's clearing commit: it still names the parked
+    // Turn when the projection would run — the shape the probe refuses.
+    const commitHistory = hostedHistory.commitHostedFileHistory;
+    vi.spyOn(hostedHistory, 'commitHostedFileHistory').mockImplementation(
+      async (managed, historyRecord) =>
+        historyRecord.pendingTurn === null
+          ? undefined
+          : commitHistory(managed, historyRecord),
+    );
     const prompt = [{ type: 'text', text: 'write a.txt' }];
     const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
     const admitted = await headers(
