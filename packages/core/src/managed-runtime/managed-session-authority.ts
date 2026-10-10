@@ -99,6 +99,13 @@ import {
   type SessionMessage,
 } from './managed-session-message-record.js';
 import {
+  MANAGED_TEAM_LEADER,
+  parseTeamMessage,
+  parseTeamPlan,
+  parseTeamState,
+  parseTeamTask,
+} from './managed-team-record.js';
+import {
   ManagedSessionCommitRejectedError,
   managedSessionActivationStateFrom,
   managedSessionCommandKey,
@@ -2348,6 +2355,154 @@ export class LocalManagedSessionAuthority {
         }
       }
     }
+    if (domain === 'team_state') {
+      // H4e: a team lives in its lead's journal, and each member joins as a
+      // live child Session run of the lead that no other team lists.
+      const team = parseTeamState(parsed.record);
+      if (team.leadSessionId !== this.sessionKey.sessionId) {
+        reject('Team must be led by this Session.');
+      }
+      const before =
+        previous === undefined ? [] : parseTeamState(previous.record).members;
+      for (const member of team.members) {
+        if (before.some((each) => each.childRunId === member.childRunId)) {
+          continue;
+        }
+        const named = this.extensionRecord('child_run', member.childRunId);
+        const child =
+          named === undefined ? undefined : parseChildRun(named.record);
+        if (
+          child === undefined ||
+          !isChildSessionRun(child) ||
+          isTerminalRunState(child.run.state)
+        ) {
+          reject(
+            'Team member must join as a child Session run of this Session that has not ended.',
+          );
+        }
+        if (
+          this.extensionRecordsInDomain('team_state').some(
+            (other) =>
+              other.recordId !== team.teamId &&
+              parseTeamState(other.record).members.some(
+                (each) => each.childRunId === member.childRunId,
+              ),
+          )
+        ) {
+          reject("Team member's child run must belong to no other team.");
+        }
+      }
+    }
+    if (
+      domain === 'team_task' ||
+      domain === 'team_message' ||
+      domain === 'team_plan'
+    ) {
+      // H4e: every team record belongs to a team of this journal, and only
+      // an active team takes new ones, so a closing team drains.
+      const { teamId } = parsed.record as { teamId: string };
+      const named = this.extensionRecord('team_state', teamId);
+      const team =
+        named === undefined ? undefined : parseTeamState(named.record);
+      if (
+        team === undefined ||
+        (previous === undefined && team.lifecycle !== 'active')
+      ) {
+        reject('Team record must open in an active team of this Session.');
+      }
+      const takesPart = (name: string) =>
+        name === MANAGED_TEAM_LEADER ||
+        team.members.some((member) => member.name === name);
+      if (domain === 'team_task') {
+        const task = parseTeamTask(parsed.record);
+        const earlier =
+          previous === undefined ? undefined : parseTeamTask(previous.record);
+        if (
+          earlier === undefined &&
+          this.extensionRecordsInDomain('team_task').some((other) => {
+            const each = parseTeamTask(other.record);
+            return each.teamId === teamId && each.number === task.number;
+          })
+        ) {
+          reject('Team task number must be unique in its team.');
+        }
+        if (
+          task.owner !== null &&
+          task.owner !== earlier?.owner &&
+          !takesPart(task.owner)
+        ) {
+          reject('Team task owner must be the leader or a member of its team.');
+        }
+        const added = task.blockedBy.filter(
+          (blocker) => !earlier?.blockedBy.includes(blocker),
+        );
+        for (const blocker of added) {
+          const other = this.extensionRecord('team_task', blocker);
+          if (
+            other === undefined ||
+            parseTeamTask(other.record).teamId !== teamId
+          ) {
+            reject('Team task must be blocked only by tasks of its team.');
+          }
+        }
+        // Only the new edges can close a cycle: one does exactly when this
+        // task is reachable from a new blocker.
+        const pending = [...added];
+        const seen = new Set<string>();
+        while (pending.length > 0) {
+          const next = pending.pop()!;
+          if (next === task.taskId) {
+            reject('Team task dependencies must not form a cycle.');
+          }
+          if (seen.has(next)) continue;
+          seen.add(next);
+          pending.push(
+            ...parseTeamTask(this.extensionRecord('team_task', next)!.record)
+              .blockedBy,
+          );
+        }
+      }
+      if (domain === 'team_message') {
+        const message = parseTeamMessage(parsed.record);
+        if (
+          previous === undefined &&
+          (!takesPart(message.from) || !takesPart(message.to))
+        ) {
+          reject(
+            'Team message must travel between the leader and members of its team.',
+          );
+        }
+        if (message.targetSessionId !== null) {
+          // The leader is this Session; a member is the Session its run
+          // attached, so a message to one not attached yet stays planned.
+          let target: string | null = this.sessionKey.sessionId;
+          if (message.to !== MANAGED_TEAM_LEADER) {
+            const member = team.members.find(
+              (each) => each.name === message.to,
+            )!;
+            const child = parseChildRun(
+              this.extensionRecord('child_run', member.childRunId)!.record,
+            );
+            target = isChildSessionRun(child) ? child.childSessionId : null;
+          }
+          if (message.targetSessionId !== target) {
+            reject('Team message must target the Session of its recipient.');
+          }
+        }
+      }
+      if (domain === 'team_plan' && previous === undefined) {
+        const plan = parseTeamPlan(parsed.record);
+        if (
+          !team.members.some(
+            (member) => member.name === plan.member && member.planModeRequired,
+          )
+        ) {
+          reject(
+            'Team plan must come from a member of its team that requires plan mode.',
+          );
+        }
+      }
+    }
     if (previous === undefined) {
       if (!body.isStart(parsed.record)) {
         reject(
@@ -2588,6 +2743,14 @@ export class LocalManagedSessionAuthority {
       refs = [acceptance.contentRef, acceptance.terminalReceiptRef];
     } else if (domain === 'session_message') {
       refs = [parseSessionMessage(record).contentRef];
+    } else if (domain === 'team_task') {
+      const task = parseTeamTask(record);
+      refs = [task.descriptionRef, task.metadataRef];
+    } else if (domain === 'team_message') {
+      refs = [parseTeamMessage(record).contentRef];
+    } else if (domain === 'team_plan') {
+      const plan = parseTeamPlan(record);
+      refs = [plan.planRef, plan.feedbackRef];
     } else if (domain === 'schedule') {
       refs = [parseScheduleRecord(record).promptRef];
     } else if (domain === 'monitor_run') {
