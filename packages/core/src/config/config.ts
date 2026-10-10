@@ -6204,10 +6204,10 @@ export class Config {
     // each derived Config should clear its own cache, not the parent's.
     this.getFileReadCache().clear();
     // Conditional-rule markers must not survive a session boundary:
-    // /clear and /reset empty history entirely, and /resume loads a
-    // persisted transcript whose tool results no longer carry the
-    // original reminder text. refreshHierarchicalMemory() — the only
-    // thing that rebuilds the registry — does not run here.
+    // /clear and /reset empty history entirely. /resume preserves
+    // the full transcript including tool-result reminders, but the
+    // registry is not rebuilt (refreshHierarchicalMemory() does not
+    // run here), so markers must be cleared to avoid stale state.
     // startNewSession() rejects derived Configs, so this clears the
     // canonical registry, not a parent's by accident.
     this.getConditionalRulesRegistry()?.resetInjected();
