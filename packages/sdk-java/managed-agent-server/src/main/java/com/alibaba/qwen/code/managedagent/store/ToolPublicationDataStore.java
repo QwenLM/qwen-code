@@ -609,7 +609,35 @@ public final class ToolPublicationDataStore {
                 failure.getStatus().value(), failure.getCode(), scope, publicationId, operationId);
         jdbc.update("UPDATE qwen_tool_publication SET active_operation_id = NULL WHERE scope_key = ?"
                 + " AND publication_id = ? AND active_operation_id = ?", scope, publicationId, operationId);
+        releaseFailedFinish(scope, publicationId, operationId);
         LOG.info("Tool publication verification failed operation={} code={}", operationId, failure.getCode());
+    }
+
+    private void releaseFailedFinish(String scope, String publicationId, String operationId) {
+        Integer finishing = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication"
+                + " WHERE scope_key = ? AND publication_id = ? AND producer_phase = 'FINISHING'"
+                + " AND finish_operation_id = ?", Integer.class, scope, publicationId, operationId);
+        if (finishing == null || finishing == 0) {
+            return;
+        }
+        var terminal = jdbc.queryForList("SELECT byte_length FROM qwen_tool_publication_object"
+                + " WHERE scope_key = ? AND publication_id = ? AND slot_key = 'terminal' AND operation_id = ?",
+                scope, publicationId, operationId);
+        long rollback = terminal.isEmpty() ? 0 : ((Number) terminal.get(0).get("byte_length")).longValue();
+        if (!terminal.isEmpty()) {
+            String retiredSlot = "terminal:failed:" + operationId;
+            String retiredResource = retiredSlot.length() <= 128 ? retiredSlot : retiredSlot.substring(0, 128);
+            jdbc.update("UPDATE qwen_tool_publication_object SET slot_key = ?, resource_id = ?"
+                            + " WHERE scope_key = ? AND publication_id = ? AND slot_key = 'terminal'"
+                            + " AND operation_id = ?",
+                    retiredSlot, retiredResource, scope, publicationId, operationId);
+        }
+        jdbc.update("UPDATE qwen_tool_publication SET producer_phase = 'OPEN',"
+                        + " finish_operation_id = NULL, finish_predecessor_id = NULL, finish_digest = NULL,"
+                        + " producer_used_bytes = CASE WHEN producer_used_bytes >= ? THEN producer_used_bytes - ?"
+                        + " ELSE 0 END WHERE scope_key = ? AND publication_id = ?"
+                        + " AND producer_phase = 'FINISHING' AND finish_operation_id = ?",
+                rollback, rollback, scope, publicationId, operationId);
     }
 
     private void expireVerification(String scope, String publicationId, String operationId) {

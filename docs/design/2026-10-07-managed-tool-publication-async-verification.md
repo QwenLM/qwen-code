@@ -90,6 +90,10 @@ a permanently failed predecessor fails finish rather than looping indefinitely.
 
 Permanent validation/storage-denial/fencing failures persist safe status/code
 without raw storage messages or credentials.
+A lapsed activation horizon is retried when the activation id and epoch still
+match, because renewal keeps that identity. An expired writer lease stays a
+permanent fence. A permanently failed finish stays FAILED, leaves FINISHING,
+and retires its terminal candidate so a later finish can be admitted.
 Accepted tasks whose original CSI binding was released or whose CSI authority
 was fenced fail permanently and leave the queue. Replica credential-key and SQL
 failures remain retryable, rather than being mistaken for lost runtime identity.

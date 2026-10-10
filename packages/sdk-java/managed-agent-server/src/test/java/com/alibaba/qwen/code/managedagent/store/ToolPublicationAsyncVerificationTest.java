@@ -687,6 +687,56 @@ public class ToolPublicationAsyncVerificationTest {
     }
 
     @Test
+    void lapsedActivationDefersAcceptedWorkUntilItIsRenewed() {
+        publish("lapse", 0, "bytes");
+        Number expires = fixture.jdbc.queryForObject(
+                "SELECT activation_expires_at FROM qwen_managed_session_journal_head", Number.class);
+        assertThat(expires).isNotNull();
+        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET activation_expires_at = ?", 1L);
+        try (var verifier = manualVerifier(data)) {
+            assertThat(verifier.runOnce()).isTrue();
+        }
+        assertThat(status("lapse").path("state").asText()).isEqualTo("PENDING");
+        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at IS NOT NULL"
+                + " FROM qwen_tool_publication_operation WHERE operation_id = 'lapse'", Boolean.class)).isTrue();
+        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET activation_expires_at = ?",
+                expires.longValue());
+        due("lapse");
+        try (var verifier = manualVerifier(data)) {
+            assertThat(verifier.runOnce()).isTrue();
+        }
+        assertThat(status("lapse").path("state").asText()).isEqualTo("SUCCEEDED");
+    }
+
+    @Test
+    void failedFinishReleasesThePublicationForALaterFinish() {
+        publish("segment", 0, "bytes");
+        try (var verifier = manualVerifier(data)) {
+            assertThat(verifier.runOnce()).isTrue();
+        }
+        byte[] body = terminal(10);
+        assertThat(data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", body, true).path("state").asText())
+                .isEqualTo("PENDING");
+        fixture.jdbc.update("UPDATE qwen_tool_publication_object SET inline_bytes = ? WHERE slot_key = 'terminal'",
+                new byte[] {1});
+        try (var verifier = manualVerifier(data)) {
+            assertThat(verifier.runOnce()).isTrue();
+        }
+        assertThat(status("finish").path("state").asText()).isEqualTo("FAILED");
+        assertThat(fixture.jdbc.queryForObject("SELECT producer_phase FROM qwen_tool_publication", String.class))
+                .isEqualTo("OPEN");
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object"
+                + " WHERE slot_key = 'terminal'", Integer.class)).isZero();
+        assertThat(data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish-2", body, true).path("state").asText())
+                .isEqualTo("PENDING");
+        try (var verifier = manualVerifier(data)) {
+            assertThat(verifier.runOnce()).isTrue();
+        }
+        assertThat(status("finish-2").path("state").asText()).isEqualTo("SUCCEEDED");
+        assertThat(status("finish").path("state").asText()).isEqualTo("FAILED");
+    }
+
+    @Test
     void fencedAcceptedWorkFailsWithoutReadingAndStatusDoesNotReviveOrRenewIt() {
         publish("fenced", 0, "bytes");
         Timestamp deadline = fixture.jdbc.queryForObject("SELECT deadline FROM qwen_tool_publication_operation",

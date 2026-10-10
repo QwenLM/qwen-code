@@ -72,7 +72,7 @@ runtime 与 CSI。开启异步接收要求已开启 journal-head authorization�
 时明确失败，不无限等待。
 
 永久 validation/storage-denial/fencing 失败仅保存安全 status/code，不保存原始
-存储异常或凭据。已接受任务的原始 CSI binding 被释放或 CSI 授权失效时，永久失败并
+存储异常或凭据。activation 的 id 与 epoch 仍匹配时，仅有效期已过会重试，因为续期保留该身份。writer 租约过期仍是永久 fence。finish 永久失败后保持 FAILED，离开FINISHING，并退役其 terminal 候选，之后的 finish 仍可被接受。已接受任务的原始 CSI binding 被释放或 CSI 授权失效时，永久失败并
 退出队列。副本凭据密钥或 SQL 错误仍可重试，不能误判为运行时身份失效。
 候选的输入或授权错误逐项隔离：未领取任务在原 epoch 下失败、延后一秒或到期，
 然后扫描继续处理后面的候选；SQL 状态更新失败则退出本轮扫描。期限内失去租约的
