@@ -124,6 +124,8 @@ import {
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { planCodeModeBindings, ToolMode } from '../tools/code-mode.js';
+import { MockTool } from '../test-utils/mock-tool.js';
 import {
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
@@ -680,6 +682,7 @@ describe('Gemini Client (client.ts)', () => {
   /** The suite's tool-registry mock, typed so each stub is a `Mock`. */
   const registryMock = () =>
     vi.mocked(mockConfig.getToolRegistry)() as unknown as Record<
+      | 'getCodeModeBindingPlan'
       | 'warmAll'
       | 'getDeferredToolSummary'
       | 'getMcpServerInstructions'
@@ -842,6 +845,9 @@ describe('Gemini Client (client.ts)', () => {
     // LlmClient's constructor starts an async startChat that needs a
     // fully-formed Config, so the whole Config is mocked.
     const mockToolRegistry = {
+      getCodeModeBindingPlan: vi
+        .fn()
+        .mockReturnValue({ bindings: [], collisions: [] }),
       warmAll: vi.fn().mockResolvedValue(undefined),
       ensureTool: vi.fn().mockResolvedValue(null),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
@@ -3411,6 +3417,102 @@ describe('Gemini Client (client.ts)', () => {
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('tools.disabled'),
       );
+    });
+
+    it('reports normal direct approval when exec is absent in CodeMode', async () => {
+      const reg = registryMock();
+      reg.getTool.mockReturnValue(null);
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'write_file', description: 'write' },
+      ]);
+      reg.isPermissionDeferred.mockReturnValue(true);
+      mockConfig.getToolMode = vi.fn().mockReturnValue(ToolMode.CodeMode);
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await client.setTools();
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'direct calls by name still use normal approval: write_file',
+        ),
+      );
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('remain callable through exec'),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('reports only code-mode-callable withheld tools as reachable through exec', async () => {
+      const reg = registryMock();
+      reg.getCodeModeBindingPlan.mockReturnValue(
+        planCodeModeBindings(
+          [
+            new MockTool({ name: 'write_file' }),
+            new MockTool({ name: 'send_message' }),
+          ],
+          () => true,
+        ),
+      );
+      reg.getTool.mockImplementation((name: string) =>
+        name === ToolNames.EXEC ? ({} as never) : null,
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'write_file', description: 'write' },
+        { name: 'send_message', description: 'send' },
+      ]);
+      reg.isPermissionDeferred.mockReturnValue(true);
+      mockConfig.getToolMode = vi.fn().mockReturnValue(ToolMode.CodeMode);
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await client.setTools();
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('remain callable through exec: write_file'),
+      );
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'direct calls by name still use normal approval: write_file, send_message',
+        ),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('does not advertise an omitted collision binding as reachable through exec', async () => {
+      const reg = registryMock();
+      reg.getTool.mockImplementation((name: string) =>
+        name === ToolNames.EXEC ? ({} as never) : null,
+      );
+      reg.getCodeModeBindingPlan.mockReturnValue(
+        planCodeModeBindings(
+          [
+            new MockTool({ name: 'get--data' }),
+            new MockTool({ name: 'get-_data' }),
+          ],
+          () => true,
+        ),
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'get-_data', description: 'omitted target' },
+      ]);
+      reg.isPermissionDeferred.mockReturnValue(true);
+      mockConfig.getToolMode = vi.fn().mockReturnValue(ToolMode.CodeMode);
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await client.setTools();
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'direct calls by name still use normal approval: get-_data',
+          ),
+        );
+        expect(warn).not.toHaveBeenCalledWith(
+          expect.stringContaining('remain callable through exec'),
+        );
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it('names the missing bridge half when only tool_call is excluded', async () => {

@@ -54,11 +54,11 @@ Tool responses and pure system reminders do not count as user turns. Regular nam
 
 ## Restricting Fork Tool Execution with `fork_tools`
 
-Only `subagent_type: "fork"` accepts `fork_tools`. The array may contain exact canonical tool names, such as `read_file` and `grep_search`, or MCP server patterns such as `mcp__github`. The fork still receives the same model-visible tool declarations as an unrestricted fork, preserving its prompt-cache prefix, but its task prompt identifies the restriction and a call not matched by `fork_tools` is rejected before scheduling or approval.
+Only `subagent_type: "fork"` accepts `fork_tools`. The array may contain exact canonical tool names, such as `read_file` and `grep_search`, or MCP server patterns such as `mcp__github`. In `direct` mode the fork still receives the same model-visible tool declarations as an unrestricted fork, preserving its prompt-cache prefix, while under hybrid `tools.mode: "code_mode"` the fork's top-level declarations are filtered by this allowlist; either way its task prompt identifies the restriction, and a call not matched by `fork_tools` is rejected before scheduling or approval. Two code-mode exceptions: under either code mode `exec` is always declared and executable whatever `fork_tools` lists — an empty array included — and listing `exec` admits every code-mode-callable tool this fork's own surface admits through exec's nested `tools.<name>(...)` calls — see the `exec` note under [Tool Configuration](#tool-configuration).
 
 - Forks never execute `ask_user_question`; when user input is required, they report the blocker to their parent agent.
 - Omitting `fork_tools` allows every other inherited tool.
-- An empty array rejects every tool call.
+- An empty array rejects every tool call (under a code mode, `exec` — and `tool_search` in `code_mode_only` — remains admitted anyway; see above).
 - `*` is not accepted; omit `fork_tools` to allow every otherwise-executable inherited tool.
 - Tool names cannot have surrounding whitespace. Wildcards are accepted only as `mcp__*` or as a trailing MCP tool-prefix pattern such as `mcp__github__read_*`.
 - `mcp__*` intentionally allows every MCP tool while still denying unlisted built-in tools.
@@ -381,9 +381,11 @@ Do not modify any files.
 
 Use `tools` and `disallowedTools` to control which tools a subagent can access.
 
-**`tools` (allowlist):** When specified, the subagent can only use the listed tools. When omitted, the subagent inherits all available tools from the parent session.
+**`tools` (allowlist):** When specified, the list bounds direct tool calls and deferred-tool bridge targets. Code mode also supports the nested `exec` path described below. When omitted, the subagent inherits all available tools from the parent session.
 
-The allowlist applies both to directly declared tools and to targets invoked through the `tool_search`/`tool_call` deferred-tool bridge. An explicit list of ordinary tools does not automatically include either bridge tool; name both `tool_search` and `tool_call` if the agent needs discovery and bridge invocation. A listed ordinary deferred target is declared directly, while a target demoted by `tools.eager` remains hidden unless a separate reveal rule applies. A hidden target must still be present in `tools` to be invoked through the bridge. `disallowedTools` and `permissions.deny` remain additional blocklists, and listing a tool does not bypass the subagent control-plane exclusions. Code Mode (`tools.codeModeOnly`) differs: `tool_call` is not available, an agent allowed any tool callable from `exec` gets `tool_search` automatically unless `disallowedTools` names it, and tools demoted by `tools.eager` stay callable through `exec`.
+The allowlist applies both to directly declared tools and to targets invoked through the `tool_search`/`tool_call` deferred-tool bridge. An explicit list of ordinary tools does not automatically include either bridge tool; name both `tool_search` and `tool_call` if the agent needs discovery and bridge invocation. A listed ordinary deferred target is declared directly, while a target demoted by `tools.eager` remains hidden unless a separate reveal rule applies. A hidden target must still be present in `tools` to be invoked through the bridge. `disallowedTools` and `permissions.deny` remain additional blocklists, and listing a tool does not bypass the subagent control-plane exclusions. Code Mode (`tools.mode: "code_mode_only"`) differs: `tool_call` is not available, an agent allowed any tool callable from `exec` gets `tool_search` automatically unless `disallowedTools` names it, and tools demoted by `tools.eager` stay callable through `exec`.
+
+With `tools.mode: "code_mode"` or `"code_mode_only"`, `exec` provides a third path: nested `tools.<name>(...)` calls. Explicitly listing `exec` also grants otherwise-admitted code-mode-callable bindings, including ordinary tools such as `write_file` and `run_shell_command` that are not individually listed. Thus `tools: [read_file, exec]` is not a read-only policy. Omit `exec` from the configured list to keep nested targets bounded by the listed names; the runtime still exposes the `exec` wrapper in code mode. `disallowedTools`, `permissions.deny`, and subagent exclusions continue to restrict access in both modes. Hybrid additionally excludes tools hidden by `tools.eager`. This nested grant does not add direct-call permission in hybrid mode. A fork's explicit `fork_tools: [exec]` grant is not an exec-only policy: in both code modes it admits every code-mode-callable tool the parent could reach through the nested path, bounded by the parent's inherited execution policy and blocklists.
 
 ```
 ---
@@ -412,7 +414,7 @@ disallowedTools:
 
 If both `tools` and `disallowedTools` are set, the allowlist is applied first, then the blocklist removes from that set.
 
-**MCP tools** follow the same rules. If a subagent has no `tools` list, it inherits all MCP tools from the parent session. If a subagent has an explicit `tools` list, it only gets MCP tools that are explicitly named in that list.
+**MCP tools** follow the same rules. Without a `tools` list, the subagent inherits MCP tools from the parent session. An explicit list ordinarily requires matching MCP entries. Granting `exec` also admits otherwise-available MCP bindings through the nested path when the list contains no MCP entries; once the list mentions MCP, nested MCP calls must match those entries. The blocklists and exclusions above still apply.
 
 The `disallowedTools` field supports MCP server-level patterns:
 

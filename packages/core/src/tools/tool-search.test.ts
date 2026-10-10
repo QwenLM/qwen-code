@@ -66,7 +66,7 @@ function makeConfigWithRegistry(
   const { withToolCall = true, params } = options;
   const config = new Config({
     ...baseConfigParams,
-    codeModeOnly: options.codeModeOnly,
+    toolMode: options.codeModeOnly ? 'code_mode_only' : 'direct',
     ...params,
   });
   const registry = new ToolRegistry(config);
@@ -359,10 +359,14 @@ describe('Code Mode discovery', () => {
       new MockTool({ name: 'remote_fetch', shouldDefer: true }),
     );
     const result = await new ToolSearchTool(config)
-      .build({ query: 'select:remote_fetch,tool_search,exec' })
+      .build({ query: 'select:remote-fetch,tool_search,exec' })
       .execute(new AbortController().signal);
     expect(String(result.llmContent)).not.toContain('<function>');
     expect(String(result.llmContent)).toContain('Not found:');
+    const winner = await new ToolSearchTool(config)
+      .build({ query: 'select:remote_fetch' })
+      .execute(new AbortController().signal);
+    expect(String(winner.llmContent)).toContain('"name":"remote_fetch"');
   });
 
   it('uses the scoped collision winner for both search and execution', async () => {
@@ -370,24 +374,22 @@ describe('Code Mode discovery', () => {
     registry.registerTool(
       new MockTool({
         name: 'remote_fetch',
-        description: 'scoped winner',
+        description: 'global winner',
         shouldDefer: true,
       }),
     );
     const result = await runWithToolCallRuntime(
       {
         parentCallId: 'search',
-        allowedToolNames: ['remote_fetch'],
+        allowedToolNames: ['remote-fetch'],
         dispatch: vi.fn(),
       },
       () =>
         new ToolSearchTool(config)
-          .build({ query: 'select:remote_fetch' })
+          .build({ query: 'select:remote-fetch' })
           .execute(new AbortController().signal),
     );
-    expect(String(result.llmContent)).toContain(
-      '"description":"scoped winner"',
-    );
+    expect(String(result.llmContent)).toContain('"name":"remote-fetch"');
     expect(String(result.llmContent)).toContain('"jsName":"remote_fetch"');
   });
 

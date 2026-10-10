@@ -121,7 +121,7 @@ describe('buildSettingsListItems', () => {
     expect(items.length).toBeGreaterThan(0);
     const keys = items.map((item) => item.key);
     expect(keys).toContain('ui.theme');
-    expect(keys.indexOf('tools.codeModeOnly')).toBe(
+    expect(keys.indexOf('tools.mode')).toBe(
       keys.indexOf('tools.approvalMode') + 1,
     );
     expect(keys).not.toContain('tools.freeform');

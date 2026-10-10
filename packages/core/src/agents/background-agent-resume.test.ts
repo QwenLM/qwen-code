@@ -188,6 +188,7 @@ describe('BackgroundAgentResumeService', () => {
        * negative rows pass vacuously.
        */
       registeredToolNames?: string[];
+      skillVisibility?: 'hidden' | 'visible';
       toolMode?: ToolMode;
       hookSystem?:
         | {
@@ -254,6 +255,8 @@ describe('BackgroundAgentResumeService', () => {
         .fn()
         .mockReturnValue(options.deferredToolSummary ?? []),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
+      isPermissionDeferred: (name: string) =>
+        name === ToolNames.SKILL && options.skillVisibility !== undefined,
       getMcpServerInstructions: vi
         .fn()
         .mockReturnValue(options.mcpServerInstructions ?? new Map()),
@@ -294,6 +297,8 @@ describe('BackgroundAgentResumeService', () => {
       getStopHookBlockingCap: () => options.stopHookBlockingCap ?? 8,
       getApprovalMode: () => 'default',
       getToolMode: () => options.toolMode,
+      getVisibleTools: () =>
+        new Set(options.skillVisibility === 'visible' ? [ToolNames.SKILL] : []),
       getModel: () => 'parent-model',
       getBareMode: () => false,
       getSandbox: () => undefined,
@@ -1220,9 +1225,107 @@ describe('BackgroundAgentResumeService', () => {
       },
       boolean,
       ToolMode?,
+      boolean?,
+      ('hidden' | 'visible')?,
     ]
   >([
     ['inherits every tool', {}, true],
+    [
+      'CodeMode * with hidden eager Skill',
+      { tools: ['*'] },
+      false,
+      ToolMode.CodeMode,
+      true,
+      'hidden',
+    ],
+    [
+      'CodeMode * with visible eager Skill',
+      { tools: ['*'] },
+      true,
+      ToolMode.CodeMode,
+      true,
+      'visible',
+    ],
+    [
+      'CodeMode skill with hidden eager Skill',
+      { tools: ['skill'] },
+      false,
+      ToolMode.CodeMode,
+      true,
+      'hidden',
+    ],
+    [
+      'CodeMode skill with visible eager Skill',
+      { tools: ['skill'] },
+      true,
+      ToolMode.CodeMode,
+      true,
+      'visible',
+    ],
+    [
+      'CodeMode exec with hidden eager Skill',
+      { tools: ['exec'] },
+      false,
+      ToolMode.CodeMode,
+      true,
+      'hidden',
+    ],
+    [
+      'CodeMode exec with visible eager Skill',
+      { tools: ['exec'] },
+      true,
+      ToolMode.CodeMode,
+      true,
+      'visible',
+    ],
+    [
+      'CodeModeOnly * with hidden eager Skill',
+      { tools: ['*'] },
+      true,
+      ToolMode.CodeModeOnly,
+      true,
+      'hidden',
+    ],
+    [
+      'CodeModeOnly * with visible eager Skill',
+      { tools: ['*'] },
+      true,
+      ToolMode.CodeModeOnly,
+      true,
+      'visible',
+    ],
+    [
+      'CodeModeOnly skill with hidden eager Skill',
+      { tools: ['skill'] },
+      true,
+      ToolMode.CodeModeOnly,
+      true,
+      'hidden',
+    ],
+    [
+      'CodeModeOnly skill with visible eager Skill',
+      { tools: ['skill'] },
+      true,
+      ToolMode.CodeModeOnly,
+      true,
+      'visible',
+    ],
+    [
+      'CodeModeOnly exec with hidden eager Skill',
+      { tools: ['exec'] },
+      true,
+      ToolMode.CodeModeOnly,
+      true,
+      'hidden',
+    ],
+    [
+      'CodeModeOnly exec with visible eager Skill',
+      { tools: ['exec'] },
+      true,
+      ToolMode.CodeModeOnly,
+      true,
+      'visible',
+    ],
     [
       'disallows the Skill tool',
       { tools: ['*'], disallowedTools: [ToolNames.SKILL] },
@@ -1257,14 +1360,49 @@ describe('BackgroundAgentResumeService', () => {
       true,
     ],
     // Under CodeModeOnly a finite list naming `exec` reaches `skill` through
-    // the code-mode gateway, so launch keeps the manager and resume must keep
-    // the listing. Dropping the tool-mode argument at the resume call site —
-    // the parent Config here reports CodeModeOnly — turns this row red.
+    // the code-mode gateway while exec is actually registered, so launch
+    // keeps the manager and resume must keep the listing. Dropping the
+    // tool-mode argument at the resume call site — the parent Config here
+    // reports CodeModeOnly — turns this row red.
     [
-      'names exec without skill under CodeModeOnly',
+      'names exec without skill under CodeModeOnly with exec registered',
       { tools: [ToolNames.EXEC] },
       true,
       ToolMode.CodeModeOnly,
+      true,
+    ],
+    // A deny rule or a legacy coreTools allowlist can keep exec out of the
+    // registry while the mode says code_mode_only; the agent then has no
+    // route to skill, so launch keeps no manager and resume must not list.
+    [
+      'names exec without skill under CodeModeOnly with exec unregistered',
+      { tools: [ToolNames.EXEC] },
+      false,
+      ToolMode.CodeModeOnly,
+    ],
+    // The wildcard inherits the registry, but with exec kept out of a
+    // CodeModeOnly registry the resumed agent has no route to skill, so the
+    // listing must stay silent. Dropping the codeModeOnly argument at the
+    // resume call site turns this row red while the rows above stay green.
+    [
+      'inherits the registry under CodeModeOnly with exec unregistered',
+      { tools: ['*'] },
+      false,
+      ToolMode.CodeModeOnly,
+    ],
+    [
+      'names exec without skill under Hybrid with registered exec',
+      { tools: [ToolNames.EXEC] },
+      true,
+      ToolMode.CodeMode,
+      true,
+    ],
+    [
+      'names exec without skill under Hybrid without exec',
+      { tools: [ToolNames.EXEC] },
+      false,
+      ToolMode.CodeMode,
+      false,
     ],
     // Same definition, Direct mode: no gateway, so no listing. Pins that the
     // row above is the tool mode and not the `exec` name doing the work.
@@ -1275,7 +1413,14 @@ describe('BackgroundAgentResumeService', () => {
     ],
   ])(
     'matches the launch-time skill listing when the definition %s',
-    async (_label, toolFields, expectListing, toolMode) => {
+    async (
+      _label,
+      toolFields,
+      expectListing,
+      toolMode,
+      hasExec = false,
+      skillVisibility,
+    ) => {
       const sessionId = 'session-skill-listing';
       const agentId = 'agent-skill-listing';
       const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -1331,11 +1476,15 @@ describe('BackgroundAgentResumeService', () => {
       };
       const { service, subagentManager } = createService({
         toolMode,
+        skillVisibility,
         // The session this resume runs in does have the Skill tool; the rows
         // below are about `subagentWillHaveSkillTool`, not about #12838's
         // registry gate. Omitting this made every row answer "no listing" for
         // the registry's reason and the two negative rows pass vacuously.
-        registeredToolNames: [ToolNames.SKILL],
+        registeredToolNames: [
+          ToolNames.SKILL,
+          ...(hasExec ? [ToolNames.EXEC] : []),
+        ],
         skillManager: {
           listSkills: vi.fn().mockResolvedValue([
             {
@@ -1819,6 +1968,7 @@ describe('BackgroundAgentResumeService', () => {
       format: 'persisted deny-all execution policy',
       legacyCapabilities: {},
       executionAllowedTools: [] as string[] | undefined,
+      nestedExecutionAllowedTools: ['read_file'],
       includeDisplayImage: false,
       deniedTool: 'Read',
       expectedExecutionAllowedTools: [],
@@ -1876,6 +2026,7 @@ describe('BackgroundAgentResumeService', () => {
     async ({
       legacyCapabilities,
       executionAllowedTools,
+      nestedExecutionAllowedTools,
       includeDisplayImage,
       deniedTool,
       expectedExecutionAllowedTools,
@@ -1889,7 +2040,7 @@ describe('BackgroundAgentResumeService', () => {
         launchPrompt,
         [userText('bootstrap env'), modelText('bootstrap ack')],
         {
-          meta: { executionAllowedTools },
+          meta: { executionAllowedTools, nestedExecutionAllowedTools },
           payload: legacyCapabilities,
           reply: 'Working silently',
         },
@@ -1986,6 +2137,9 @@ describe('BackgroundAgentResumeService', () => {
           ToolNames.ASK_USER_QUESTION,
         ],
         executionAllowedTools: expectedExecutionAllowedTools,
+        ...(nestedExecutionAllowedTools !== undefined
+          ? { nestedExecutionAllowedTools }
+          : {}),
       });
       expect(createArgs?.[9]).toBe(launchPrompt);
       expect(createArgs?.[10]).toBe(agentId);

@@ -271,6 +271,75 @@ function makeQualifiedApp(
   };
 }
 
+describe('GET tool mode settings', () => {
+  it.each([
+    { legacy: true, mode: undefined, expected: 'code_mode_only' },
+    { legacy: false, mode: undefined, expected: 'direct' },
+    { legacy: 'true', mode: undefined, expected: 'direct' },
+    { legacy: true, mode: 'direct', expected: 'direct' },
+    { legacy: true, mode: 'code_mode', expected: 'code_mode' },
+  ])(
+    'serves the effective mode without migrating settings: $legacy/$mode',
+    async ({ legacy, mode, expected }) => {
+      const userSettings = { tools: { codeModeOnly: legacy } };
+      const workspaceSettings = mode === undefined ? {} : { tools: { mode } };
+      const { app, persistSetting } = makeApp({
+        userSettings,
+        workspaceSettings,
+      });
+      const response = await request(app).get('/workspace/settings');
+      expect(response.status).toBe(200);
+      const toolMode = response.body.settings.find(
+        (row: { key: string }) => row.key === 'tools.mode',
+      );
+      expect(toolMode.values.effective).toBe(expected);
+      expect(toolMode.values.user).toBeUndefined();
+      expect(toolMode.values.workspace).toBe(mode);
+      expect(persistSetting).not.toHaveBeenCalled();
+      expect(userSettings).toEqual({ tools: { codeModeOnly: legacy } });
+    },
+  );
+
+  it('uses the selected workspace legacy mode without reading or writing a primary fallback', async () => {
+    const { app, persistSetting } = makeQualifiedApp({
+      workspaceCwd: '/selected-workspace',
+    });
+    vi.mocked(loadSettings).mockImplementation(
+      (workspace) =>
+        ({
+          merged: {
+            tools:
+              workspace === '/selected-workspace'
+                ? { codeModeOnly: true }
+                : { mode: 'direct' },
+          },
+          user: { settings: {} },
+          workspace: { settings: {} },
+          forScope: vi.fn().mockReturnValue({ settings: {} }),
+        }) as never,
+    );
+    vi.mocked(loadSettings).mockClear();
+    const response = await request(app).get('/workspaces/primary/settings');
+    expect(response.status).toBe(200);
+    expect(
+      response.body.settings.find(
+        (row: { key: string }) => row.key === 'tools.mode',
+      ).values.effective,
+    ).toBe('code_mode_only');
+    expect(loadSettings).toHaveBeenCalledWith('/selected-workspace', {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: false,
+      workspaceTrusted: true,
+    });
+    expect(
+      vi
+        .mocked(loadSettings)
+        .mock.calls.every(([workspace]) => workspace === '/selected-workspace'),
+    ).toBe(true);
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+});
+
 describe('POST /workspace/settings', () => {
   it('updates live sessions when Session Workflow changes', async () => {
     // Seeded as the post-write state: the route reads back the effective value.

@@ -14,7 +14,9 @@ import {
   SubagentError,
   SubagentErrorCode,
 } from './types.js';
-import type { ToolRegistry } from '../tools/tool-registry.js';
+import { ToolRegistry } from '../tools/tool-registry.js';
+import { ExecTool } from '../tools/exec.js';
+import { MockTool } from '../test-utils/mock-tool.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import { makeFakeConfig } from '../test-utils/config.js';
@@ -3204,25 +3206,91 @@ describe('SubagentManager', () => {
       // skills through the exec gateway and must keep its manager. The parent
       // is a real CodeModeOnly Config: dropping the tool-mode argument at the
       // createAgentHeadless call site turns this case red.
-      it('keeps the manager for an exec-only agent under CodeModeOnly', async () => {
-        const codeModeParent = makeFakeConfig({ codeModeOnly: true });
-        vi.spyOn(codeModeParent, 'getSkillManager').mockReturnValue(
-          sessionManager,
-        );
-        vi.spyOn(codeModeParent, 'getSubagentManager').mockReturnValue(manager);
-        vi.spyOn(codeModeParent, 'getToolRegistry').mockReturnValue(
-          mockToolRegistry,
-        );
+      it.each(['code_mode_only', 'code_mode'] as const)(
+        'keeps the manager and registered Skill for an exec-only agent in %s',
+        async (toolMode) => {
+          const codeModeParent = makeFakeConfig({ toolMode });
+          const codeModeRegistry = new ToolRegistry(codeModeParent);
+          codeModeRegistry.registerFactory(
+            ToolNames.EXEC,
+            async () => new ExecTool(codeModeParent),
+          );
+          expect(codeModeRegistry.getTool(ToolNames.EXEC)).toBeUndefined();
+          vi.spyOn(codeModeParent, 'getSkillManager').mockReturnValue(
+            sessionManager,
+          );
+          vi.spyOn(codeModeParent, 'getSubagentManager').mockReturnValue(
+            manager,
+          );
+          vi.spyOn(codeModeParent, 'getToolRegistry').mockReturnValue(
+            codeModeRegistry,
+          );
 
-        const context = await launch(
-          { tools: [ToolNames.EXEC] },
-          codeModeParent,
-        );
-        expect(context.getSkillManager()).toBe(sessionManager);
-        expect(context.getToolRegistry().getAllToolNames()).toContain(
-          ToolNames.SKILL,
-        );
+          const context = await launch(
+            { tools: [ToolNames.EXEC] },
+            codeModeParent,
+          );
+          expect(context.getSkillManager()).toBe(sessionManager);
+          expect(context.getToolRegistry().getAllToolNames()).toContain(
+            ToolNames.SKILL,
+          );
+        },
+      );
+
+      // The exec registration probe alone leaves the wildcard route open:
+      // with exec kept out of a CodeModeOnly registry the agent has no Skill
+      // route at all, so the manager must be withheld even for the default
+      // wildcard config. Dropping the codeModeOnly argument at the
+      // createAgentHeadless call site turns this case red.
+      it('withholds the manager for a wildcard agent in CodeModeOnly without exec', async () => {
+        const parent = makeFakeConfig({ toolMode: 'code_mode_only' });
+        const registry = new ToolRegistry(parent);
+        registry.registerTool(new MockTool({ name: ToolNames.SKILL }));
+        vi.spyOn(parent, 'getSkillManager').mockReturnValue(sessionManager);
+        vi.spyOn(parent, 'getSubagentManager').mockReturnValue(manager);
+        vi.spyOn(parent, 'getToolRegistry').mockReturnValue(registry);
+
+        const { context, dispose } = await launchHandle({}, parent);
+        try {
+          expect(context.getSkillManager()).toBeNull();
+          expect(resolveAgentDelegationSurface(context)).toBe('inline');
+        } finally {
+          await dispose();
+          await registry.stop();
+        }
       });
+
+      it.each([false, true])(
+        'withholds the manager for an eager-hidden Hybrid Skill even if parent revealed it: %s',
+        async (revealed) => {
+          const parent = makeFakeConfig({
+            toolMode: 'code_mode',
+            eagerTools: [ToolNames.READ_FILE],
+          });
+          const registry = new ToolRegistry(parent);
+          registry.registerTool(new ExecTool(parent));
+          registry.registerPermissionDeferredFactory(
+            ToolNames.SKILL,
+            async () => new MockTool({ name: ToolNames.SKILL }),
+          );
+          await registry.ensureTool(ToolNames.SKILL);
+          if (revealed) registry.revealDeferredTool(ToolNames.SKILL);
+          vi.spyOn(parent, 'getSkillManager').mockReturnValue(sessionManager);
+          vi.spyOn(parent, 'getSubagentManager').mockReturnValue(manager);
+          vi.spyOn(parent, 'getToolRegistry').mockReturnValue(registry);
+          const { context, dispose } = await launchHandle(
+            { tools: [ToolNames.EXEC, ToolNames.AGENT] },
+            parent,
+          );
+          try {
+            expect(context.getSkillManager()).toBeNull();
+            expect(resolveAgentDelegationSurface(context)).toBe('inline');
+          } finally {
+            await dispose();
+            await registry.stop();
+          }
+        },
+      );
 
       // The rebuilt registry's tools are per-subagent instances: the nested
       // Agent tool subscribes to the *shared session* SubagentManager in its

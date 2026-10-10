@@ -152,6 +152,8 @@ export interface AgentMeta {
    * exclusion; an empty list means deny-all.
    */
   executionAllowedTools?: string[];
+  /** Exact names allowed only inside exec; never grants direct tool calls. */
+  nestedExecutionAllowedTools?: string[];
   /**
    * Launch-time per-agent tool blocklist of a fork, persisted beside
    * `executionAllowedTools`: the resume path rebuilds the fork's toolConfig

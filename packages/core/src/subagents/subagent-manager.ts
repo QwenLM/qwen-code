@@ -88,8 +88,12 @@ import {
   hasRebuiltToolRegistry,
   rebuildToolRegistryOnOverride,
 } from '../tools/agent/agent.js';
-import { toolConfigAllowsSkill } from '../agents/runtime/subagent-plan-tool-policy.js';
 import { ToolMode } from '../tools/code-mode.js';
+import {
+  hasAgentSkillExecBinding,
+  isAgentSkillEagerHidden,
+  toolConfigAllowsSkill,
+} from '../agents/runtime/subagent-plan-tool-policy.js';
 
 const AGENT_CONFIG_DIR = 'agents';
 
@@ -1154,6 +1158,13 @@ export class SubagentManager {
               ],
             }
           : {}),
+        ...(configuredToolConfig?.nestedExecutionAllowedTools !== undefined
+          ? {
+              nestedExecutionAllowedTools: [
+                ...configuredToolConfig.nestedExecutionAllowedTools,
+              ],
+            }
+          : {}),
         disallowedTools: Array.from(
           new Set([
             ...(configuredToolConfig?.disallowedTools ?? []),
@@ -1175,8 +1186,37 @@ export class SubagentManager {
         modelConfig.reasoningEffort,
       );
 
+      const skillRegistryWillBeRebuilt =
+        !!Object.keys(config.mcpServers ?? {}).length ||
+        !hasRebuiltToolRegistry(runtimeContext) ||
+        sessionSkillManager(runtimeContext) !==
+          runtimeContext.getSkillManager();
+      let skillEagerHidden = isAgentSkillEagerHidden(
+        runtimeContext,
+        skillRegistryWillBeRebuilt,
+      );
+      if (
+        skillRegistryWillBeRebuilt &&
+        runtimeContext.getToolMode?.() === ToolMode.CodeMode &&
+        !runtimeContext
+          .getToolRegistry()
+          .getAllToolNames()
+          .includes(ToolNames.SKILL)
+      ) {
+        // A parent without a SkillManager omits the Skill factory entirely.
+        // Recover its registration policy before restoring skills to a child.
+        const status = await runtimeContext
+          .getPermissionManager?.()
+          ?.getToolRegistrationStatus(ToolNames.SKILL);
+        skillEagerHidden =
+          status === 'disabled' ||
+          (status === 'deferred' &&
+            !runtimeContext.getVisibleTools().has(ToolNames.SKILL));
+      }
       const skillsAvailable = toolConfigAllowsSkill(
         toolConfig,
+        hasAgentSkillExecBinding(runtimeContext, skillRegistryWillBeRebuilt),
+        skillEagerHidden,
         runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
       );
       const { context: subagentContext, cleanup } =

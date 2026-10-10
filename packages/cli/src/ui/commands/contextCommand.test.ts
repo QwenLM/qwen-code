@@ -138,6 +138,90 @@ describe('collectContextData (contextCommand)', () => {
     expect(getFunctionDeclarationsSpy).toHaveBeenCalledWith();
   });
 
+  it('accounts for decorated CodeMode declarations in per-tool rows', async () => {
+    const execTool = {
+      name: 'exec',
+      schema: { name: 'exec', description: 'raw' },
+    };
+    const decoratedExec = {
+      name: 'exec',
+      description: 'decorated '.repeat(200),
+    };
+    const config = {
+      ...mockConfig,
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: vi.fn().mockReturnValue([execTool]),
+        getFunctionDeclarations: vi.fn().mockReturnValue([decoratedExec]),
+        isDeferredAndHidden: vi.fn().mockReturnValue(false),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.builtinTools).toHaveLength(1);
+    expect(data.builtinTools[0]?.name).toBe('exec');
+    expect(data.builtinTools[0]?.tokens).toBeGreaterThan(100);
+  });
+
+  it('counts only emitted declarations when ordinary tools are nested in exec', async () => {
+    const decoratedExec = {
+      name: 'exec',
+      description: 'tools.read_file and tools.skill '.repeat(100),
+    };
+    const config = {
+      ...mockConfig,
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: () =>
+          ['exec', 'read_file', 'skill'].map((name) => ({
+            name,
+            schema: { name, description: 'raw schema '.repeat(20) },
+          })),
+        getFunctionDeclarations: () => [decoratedExec],
+        isDeferredAndHidden: () => false,
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.builtinTools.map((tool) => tool.name)).toEqual(['exec']);
+    expect(data.breakdown.skills).toBe(0);
+    expect(data.breakdown.builtinTools).toBe(
+      estimateContextTextTokens(JSON.stringify([decoratedExec])),
+    );
+  });
+
+  it('charges the decorated Skill declaration once and leaves the residual in built-ins', async () => {
+    const decoratedExec = { name: 'exec', description: 'exec '.repeat(100) };
+    const decoratedSkill = {
+      name: 'skill',
+      description: 'skill plus its nested declaration '.repeat(100),
+    };
+    const declarations = [decoratedExec, decoratedSkill];
+    const config = {
+      ...mockConfig,
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: () =>
+          ['exec', 'skill'].map((name) => ({
+            name,
+            schema: { name, description: 'raw' },
+          })),
+        getFunctionDeclarations: () => declarations,
+        isDeferredAndHidden: () => false,
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+    const skillTokens = estimateContextTextTokens(
+      JSON.stringify(decoratedSkill),
+    );
+
+    expect(data.breakdown.skills).toBe(skillTokens);
+    expect(data.breakdown.builtinTools).toBe(
+      estimateContextTextTokens(JSON.stringify(declarations)) - skillTokens,
+    );
+    expect(data.builtinTools.map((tool) => tool.name)).toEqual(['exec']);
+  });
+
   it('reads the per-session chat token count, not the process-global singleton (#5763)', async () => {
     // uiTelemetryService is a module-level singleton shared by every session
     // in a `serve` daemon. Reading it here would report whichever session most
@@ -1001,13 +1085,10 @@ describe('collectContextData (contextCommand)', () => {
       expect(sumRows(data.breakdown)).toBe(100_000);
     });
 
-    it('charges the builtin-clamp deficit to the mcp row, not to messages', async () => {
-      // Under `tools.codeModeOnly` the declarations collapse to a few control
-      // tools while an `alwaysLoadTools` MCP server still bills every schema
-      // the detail loop sees, so the billed tools exceed the declared ones and
-      // `displayBuiltinTools` clamps at 0. The clamp deficit must come out of
-      // the mcp row — the row whose billing overshoots the declarations;
-      // otherwise `attributedOverhead` silently takes it out of `messages`.
+    it('bills the declared mcp schema to the mcp row, not to messages', async () => {
+      // The detail loop bills only declared tools, so a declared MCP schema
+      // lands on the mcp row and the rows must still partition the provider
+      // total exactly: `messages` absorbs only the calibrated remainder.
       // Own value properties shadow the prototype's getters (Object.assign
       // would trip the setter-less `schema` accessor on DeclarativeTool).
       const mcpToolDouble = Object.defineProperties(
@@ -1034,7 +1115,7 @@ describe('collectContextData (contextCommand)', () => {
         mcpToolDouble,
         { name: controlSchema.name, schema: controlSchema },
       ];
-      const declared = [skillToolSchema, controlSchema];
+      const declared = [skillToolSchema, mcpToolDouble.schema, controlSchema];
       const history = [prelude, ...conversation];
 
       const unscaled = await collectContextData(
@@ -1050,32 +1131,49 @@ describe('collectContextData (contextCommand)', () => {
             unscaled.breakdown.autocompactBuffer,
         ),
       );
-      // The deficit comes out of the mcp row, not the built-in or skills rows.
       expect(unscaled.breakdown.mcpTools).toBe(
-        estimateContextTextTokens(JSON.stringify(declared)) -
-          estimateContextTextTokens(JSON.stringify(skillToolSchema)),
+        estimateContextTextTokens(JSON.stringify(mcpToolDouble.schema)),
       );
-      expect(unscaled.breakdown.mcpTools).toBeGreaterThan(0);
-      expect(unscaled.breakdown.builtinTools).toBe(0);
-      // With nothing declared the mcp row cannot absorb the whole deficit, so
-      // the rest is charged to skills and the window still adds up.
+      expect(unscaled.breakdown.builtinTools).toBe(
+        estimateContextTextTokens(JSON.stringify(declared)) -
+          estimateContextTextTokens(JSON.stringify(skillToolSchema)) -
+          estimateContextTextTokens(JSON.stringify(mcpToolDouble.schema)),
+      );
+      // The hidden MCP schema does not consume the declared control's budget.
+      const hiddenMcp = await collectContextData(
+        makeChatConfig({
+          total: 0,
+          tools,
+          declared: [skillToolSchema, controlSchema],
+          history,
+        }),
+        false,
+      );
+      expect(hiddenMcp.breakdown.mcpTools).toBe(0);
+      expect(hiddenMcp.breakdown.builtinTools).toBe(
+        estimateContextTextTokens(
+          JSON.stringify([skillToolSchema, controlSchema]),
+        ) - estimateContextTextTokens(JSON.stringify(skillToolSchema)),
+      );
+      // With no declared schemas, only the listing is billed to skills.
       const undeclared = await collectContextData(
         makeChatConfig({ total: 0, tools, declared: [], history }),
         false,
       );
       expect(undeclared.breakdown.mcpTools).toBe(0);
       expect(undeclared.breakdown.skills).toBe(
-        estimateContextTextTokens(listingReminder) +
-          estimateContextTextTokens(JSON.stringify([])),
+        estimateContextTextTokens(listingReminder),
       );
-      expect(undeclared.breakdown.freeSpace).toBe(
-        Math.max(
-          0,
-          undeclared.contextWindowSize -
-            sumRows(undeclared.breakdown) -
-            undeclared.breakdown.autocompactBuffer,
-        ),
-      );
+      for (const estimate of [hiddenMcp, undeclared]) {
+        expect(estimate.breakdown.freeSpace).toBe(
+          Math.max(
+            0,
+            estimate.contextWindowSize -
+              sumRows(estimate.breakdown) -
+              estimate.breakdown.autocompactBuffer,
+          ),
+        );
+      }
       // The provider-side total: the measured overhead plus the 300-token
       // conversation, so exactly 300 tokens are left for `messages`.
       const total =
@@ -1089,12 +1187,10 @@ describe('collectContextData (contextCommand)', () => {
         false,
       );
 
-      // The fixture does put the clamp in force: billed skill definition plus
-      // mcp schemas exceed the declared tools.
-      expect(
-        estimateContextTextTokens(JSON.stringify(skillToolSchema)) +
-          estimateContextTextTokens(JSON.stringify(mcpToolDouble.schema)),
-      ).toBeGreaterThan(estimateContextTextTokens(JSON.stringify(declared)));
+      // The mcp schema is declared, so the guard bills it to the mcp row.
+      expect(data.breakdown.mcpTools).toBe(
+        estimateContextTextTokens(JSON.stringify(mcpToolDouble.schema)),
+      );
       expect(data.breakdown.messages).toBe(300);
       expect(sumRows(data.breakdown)).toBe(total);
 
