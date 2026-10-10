@@ -73,7 +73,9 @@ export function getSessionTurnRecordHint(
     record.subtype !== 'notification' &&
     record.subtype !== 'cron' &&
     record.subtype !== 'mid_turn_user_message' &&
-    record.subtype !== 'realtime_message'
+    record.subtype !== 'realtime_message' &&
+    record.subtype !== 'agent_mention' &&
+    record.subtype !== 'agent_message'
       ? (record.parentUuid ?? null)
       : undefined;
   const backgroundTask =
@@ -143,7 +145,13 @@ function parseSessionPromptTurn(
 }
 
 function isUserPromptRecord(record: ChatRecord): boolean {
-  if (record.type !== 'user' || record.subtype === 'realtime_message') {
+  if (
+    record.type !== 'user' ||
+    record.subtype === 'realtime_message' ||
+    // Session multi-agent records never start a main-model turn.
+    record.subtype === 'agent_mention' ||
+    record.subtype === 'agent_message'
+  ) {
     return false;
   }
   return (

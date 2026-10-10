@@ -42,6 +42,14 @@ import {
   type AnyChildRun,
 } from './managed-child-run-record.js';
 import {
+  isChannelDeliveryStart,
+  isChannelDeliverySuccessor,
+  isChannelRouteStart,
+  isChannelRouteSuccessor,
+  parseChannelDelivery,
+  parseChannelRoute,
+} from './managed-channel-record.js';
+import {
   isAutomationRunStart,
   isAutomationRunSuccessor,
   isScheduleStart,
@@ -54,6 +62,11 @@ import {
   isChildAcceptanceSuccessor,
   parseChildAcceptance,
 } from './managed-child-acceptance-record.js';
+import {
+  isSessionMessageStart,
+  isSessionMessageSuccessor,
+  parseSessionMessage,
+} from './managed-session-message-record.js';
 
 // H0c of #12827: how the Session authority keys, chains and projects the
 // Stage H records of managed-extension-record/1. The shared fixtures in
@@ -108,6 +121,26 @@ export interface ManagedExtensionRecordBody {
   };
   isStart(value: unknown): boolean;
   isSuccessor(previous: unknown, next: unknown): boolean;
+}
+
+/**
+ * The task kind one child run projects, by its own kind. Each kind is
+ * named, so a kind added to `AnyChildRun` fails to compile here rather
+ * than projecting as a child agent by default.
+ */
+function childRunTaskKind(record: AnyChildRun): ManagedTaskKind {
+  switch (record.kind) {
+    case 'shell':
+      return 'background_shell';
+    case 'child_agent':
+      return 'child_agent';
+    case 'workflow':
+      return 'workflow';
+    default: {
+      const exhaustive: never = record;
+      return exhaustive;
+    }
+  }
 }
 
 /**
@@ -166,10 +199,7 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isMonitorRunSuccessor,
   }),
   child_run: Object.freeze({
-    taskKindOf: (record: unknown) =>
-      (record as AnyChildRun).kind === 'shell'
-        ? 'background_shell'
-        : 'child_agent',
+    taskKindOf: (record: unknown) => childRunTaskKind(record as AnyChildRun),
     parse: (value: unknown) => {
       const record = parseChildRun(value);
       return {
@@ -180,6 +210,24 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     },
     isStart: isChildRunStart,
     isSuccessor: isChildRunSuccessor,
+  }),
+  channel_route: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseChannelRoute(value);
+      return { record, recordId: record.routeId, run: record.run };
+    },
+    isStart: isChannelRouteStart,
+    isSuccessor: isChannelRouteSuccessor,
+  }),
+  channel_delivery: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseChannelDelivery(value);
+      return { record, recordId: record.deliveryId, run: record.run };
+    },
+    isStart: isChannelDeliveryStart,
+    isSuccessor: isChannelDeliverySuccessor,
   }),
   child_acceptance: Object.freeze({
     taskKindOf: () => null,
@@ -207,6 +255,15 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     },
     isStart: isAutomationRunStart,
     isSuccessor: isAutomationRunSuccessor,
+  }),
+  session_message: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseSessionMessage(value);
+      return { record, recordId: record.messageId, run: record.run };
+    },
+    isStart: isSessionMessageStart,
+    isSuccessor: isSessionMessageSuccessor,
   }),
 });
 

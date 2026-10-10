@@ -44,7 +44,10 @@ class ManagedExtensionProjectionContractTest {
                                 JSON.createObjectNode().put("kind", "shell")))
                         .put("child_agent", body.taskKindOf().apply(
                                 JSON.createObjectNode()
-                                        .put("kind", "child_agent"))));
+                                        .put("kind", "child_agent")))
+                        .put("workflow", body.taskKindOf().apply(
+                                JSON.createObjectNode()
+                                        .put("kind", "workflow"))));
             } else {
                 // Probe with a record-shaped node carrying the identity
                 // fields a mapping could regress into reading — the real
@@ -63,7 +66,7 @@ class ManagedExtensionProjectionContractTest {
         });
         Map<String, Object> expected = new TreeMap<>(JSON.convertValue(
                 fixtures.required("recordBodies"), TreeMap.class));
-        // The bodies H6 added to the projection contract after H4.
+        // The bodies H6 and H4d added to the projection contract after H4.
         expected.putAll(JSON.convertValue(
                 fixtures.required("additionalRecordBodies"), TreeMap.class));
         assertEquals(JSON.convertValue(expected, TreeMap.class),

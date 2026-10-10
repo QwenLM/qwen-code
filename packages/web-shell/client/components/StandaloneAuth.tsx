@@ -22,6 +22,10 @@ import {
   isRemoteWorkspaceAddActive,
   leaveRemoteWorkspaceAdd,
 } from '../config/remote-workspace-add';
+import {
+  openHostedWorkspace,
+  useWorkspaceHosts,
+} from '../config/workspace-hosts';
 import type { WebShellLanguage } from '../i18n';
 import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Button } from './ui/button';
@@ -189,6 +193,7 @@ export function StandaloneAuth({
   const copy = COPY[language] ?? COPY.en;
   const remoteWorkspaceAddActive = isRemoteWorkspaceAddActive();
   const remoteConnectionAddActive = isRemoteConnectionAddActive();
+  const hosts = useWorkspaceHosts();
   const [address, setAddress] = useState(initialAddress);
   const [token, setToken] = useState(initialToken ?? '');
   const [accepted, setAccepted] = useState<{ token?: string }>();
@@ -536,6 +541,26 @@ export function StandaloneAuth({
                   : copy.local}
             </Button>
           )}
+          {hosts
+            .filter(
+              (host) =>
+                host.origin !== baseUrl &&
+                host.origin !== window.location.origin,
+            )
+            .map((host) => (
+              <Button
+                key={host.origin}
+                variant="outline"
+                onClick={() => {
+                  // See the local-return button: leaving a target must retire
+                  // its probe loop before navigation is committed.
+                  retireProbe();
+                  openHostedWorkspace(host.origin);
+                }}
+              >
+                {host.origin}
+              </Button>
+            ))}
         </CardContent>
         <CardFooter className="justify-center">
           <p className="text-center text-xs text-muted-foreground">
