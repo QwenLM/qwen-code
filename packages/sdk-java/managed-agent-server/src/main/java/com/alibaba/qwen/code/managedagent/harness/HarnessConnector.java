@@ -109,8 +109,9 @@ public interface HarnessConnector extends AutoCloseable {
     /**
      * H4d-b: one session message operation onto the Session's journal,
      * from the control plane's message relay (handover, receive, accepted,
-     * consumed, cancelled, rejected). The Hosted side settles it before
-     * answering.
+     * consumed, cancelled, rejected, unknown, consume). The Hosted side
+     * settles it before answering. A receive or consume starts work in the
+     * Session, so it takes the same Workspace admission as a submit.
      */
     default void runMessageOperation(String tenantId, String sessionId,
             Map<String, Object> body) {

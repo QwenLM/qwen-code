@@ -137,6 +137,12 @@ public class SessionMessageRelay {
         }
     }
 
+    /** The receipt's input, as the Hosted side derives it
+     * (sessionMessageInputId); its sender refuses any other id. */
+    private static String inputIdOf(String messageId) {
+        return messageId + ":message";
+    }
+
     private static String target(JsonNode body) {
         JsonNode target = body.path("targetSessionId");
         if (!target.isTextual()) {
@@ -204,7 +210,7 @@ public class SessionMessageRelay {
      * sender. A redelivery replays the same receipt. */
     private void deliver(MessageRow row, JsonNode body, String target,
             long now) {
-        String inputId = row.messageId() + ":message";
+        String inputId = inputIdOf(row.messageId());
         if (store.deliveryState(row.tenantId(), target,
                 row.messageId()) == null) {
             if (!"ACTIVE".equals(records.sessionStatus(row.tenantId(),
@@ -343,7 +349,7 @@ public class SessionMessageRelay {
                     if (store.deliveryState(row.tenantId(), target(body),
                             row.messageId()) != null) {
                         senderOperation(row, "accepted",
-                                Map.of("inputId", row.messageId() + ":message"));
+                                Map.of("inputId", inputIdOf(row.messageId())));
                     } else if ("accepting".equals(state)) {
                         senderOperation(row, "unknown", Map.of());
                     }

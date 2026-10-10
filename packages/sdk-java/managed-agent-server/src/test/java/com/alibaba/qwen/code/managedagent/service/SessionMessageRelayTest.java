@@ -140,8 +140,9 @@ class SessionMessageRelayTest {
                     row.set(new MessageRow(before.tenantId(),
                             before.senderSessionId(), before.messageId(),
                             args.getArgument(3), args.getArgument(2),
-                            before.claimedBy(), before.claimedUntil(), 0,
-                            args.getArgument(4), null));
+                            before.claimedBy(), before.claimedUntil(),
+                            before.attempts(), args.getArgument(4),
+                            before.lastError()));
                     return null;
                 }).when(store).advance(any(MessageRow.class), anyString(),
                         anyString(), any(), anyLong(), anyLong(), anyLong());

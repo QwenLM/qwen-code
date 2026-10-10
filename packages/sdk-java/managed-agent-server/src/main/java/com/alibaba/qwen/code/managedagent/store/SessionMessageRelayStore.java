@@ -203,18 +203,20 @@ public class SessionMessageRelayStore {
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
-    /** One held claim advances its state and target, with a fresh
-     * attempt line. */
+    /** One held claim advances its state and target. */
     public void advance(MessageRow row, String owner, String state,
             String targetSessionId, long nextRetryAt, long leaseUntil,
             long now) {
+        // A forward step neither adds nor erases a failure: the attempt
+        // bound measures failures (ChildResultRelayStore.advance).
         jdbc.update("UPDATE qwen_managed_session_message_relay SET state = ?,"
-                        + " target_session_id = ?, attempts = 0,"
-                        + " next_retry_at = ?, last_error = NULL,"
-                        + " claimed_until = ?, updated_at = ?"
+                        + " target_session_id = ?, attempts = ?,"
+                        + " next_retry_at = ?, claimed_until = ?,"
+                        + " updated_at = ?"
                         + " WHERE tenant_id = ? AND sender_session_id = ?"
                         + " AND message_id = ? AND claimed_by = ?",
-                state, targetSessionId, nextRetryAt, leaseUntil, now,
+                state, targetSessionId, Math.max(row.attempts(), 0),
+                nextRetryAt, leaseUntil, now,
                 row.tenantId(), row.senderSessionId(), row.messageId(), owner);
     }
 

@@ -180,12 +180,13 @@ class SessionMessageRelayStoreTest {
         store.classify(claimed, "owner-b", "orphaned", "fake", 1_000);
         assertThat(store.find(TENANT, sender, "msg_1").state())
                 .isEqualTo("relaying");
-        store.advance(claimed, "owner-a", "delivered", "target-1", 2_000,
-                31_000, 1_000);
+        store.advance(store.find(TENANT, sender, "msg_1"), "owner-a",
+                "delivered", "target-1", 2_000, 31_000, 1_000);
         MessageRow advanced = store.find(TENANT, sender, "msg_1");
         assertThat(advanced.state()).isEqualTo("delivered");
         assertThat(advanced.targetSessionId()).isEqualTo("target-1");
-        assertThat(advanced.attempts()).isZero();
+        // A forward step keeps the failures it was preceded by counted.
+        assertThat(advanced.attempts()).isEqualTo(1);
         // An expired lease yields the row to the next worker.
         assertThat(store.claim(TENANT, sender, "msg_1", "owner-b", 64_000,
                 40_000)).isNotNull();

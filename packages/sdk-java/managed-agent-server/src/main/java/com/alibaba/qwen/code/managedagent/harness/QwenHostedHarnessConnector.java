@@ -488,15 +488,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             // the Workspace checks submit and continueManagedRuntime run
             // apply to every relay.
             requireReadyForNewWork(tenantId, sessionId, false);
-            if (!attachments.containsKey(new AttachmentKey(tenantId, sessionId))
-                    && sessions.requireSession(tenantId, sessionId)
-                            .harnessBootId() != null) {
-                // A Session a prior control-plane process attached: a plain
-                // load answers hosted_session_already_attached until the
-                // Harness evicts it, so re-attach through the takeover load
-                // a Turn uses (HarnessCoordinator.runClaimed).
-                recoverManagedRuntime(tenantId, sessionId, false);
-            }
+            reattachTakenOver(tenantId, sessionId);
             // Resolve the attachment BEFORE fetching the client: the
             // resolution may block on a create/load round trip, and an
             // adoption closing the captured client during that window
@@ -528,11 +520,37 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public void runMessageOperation(String tenantId, String sessionId,
             Map<String, Object> body) {
         try {
+            // A receipt admits an input and wakes a turn in its target, and
+            // the consume reconciliation reloads a Session whose wake pump
+            // then runs the waiting input: both drive new work, so they take
+            // the automation relay's Workspace checks. The sender's own
+            // steps are journal writes. Every verb re-attaches a Session a
+            // prior control-plane process attached, since the relay's
+            // ledger outlives that process.
+            Object kind = body.get("kind");
+            if ("receive".equals(kind) || "consume".equals(kind)) {
+                requireReadyForNewWork(tenantId, sessionId, false);
+            }
+            reattachTakenOver(tenantId, sessionId);
             HarnessSessionRef ref = attachment(tenantId, sessionId, true);
             client().runMessageOperation(ref, body);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
+        }
+    }
+
+    /**
+     * A Session a prior control-plane process attached: a plain load
+     * answers hosted_session_already_attached until the Harness evicts it,
+     * so re-attach through the takeover load a Turn uses
+     * (HarnessCoordinator.runClaimed).
+     */
+    private void reattachTakenOver(String tenantId, String sessionId) {
+        if (!attachments.containsKey(new AttachmentKey(tenantId, sessionId))
+                && sessions.requireSession(tenantId, sessionId)
+                        .harnessBootId() != null) {
+            recoverManagedRuntime(tenantId, sessionId, false);
         }
     }
 

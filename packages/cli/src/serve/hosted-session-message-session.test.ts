@@ -420,6 +420,10 @@ describe('the session message funnel (H4d-b)', () => {
     await expect(
       parent.messages.handover('msg_call-9', randomUUID()),
     ).rejects.toThrow(ManagedSessionConflictError);
+    // Only the input the message id derives can carry it.
+    await expect(
+      parent.messages.accepted('msg_call-9', 'msg_call-9:other'),
+    ).rejects.toThrow('is carried by msg_call-9:message');
     await parent.messages.accepted('msg_call-9', 'msg_call-9:message');
     await parent.messages.accepted('msg_call-9', 'msg_call-9:message');
     await parent.messages.settle('msg_call-9', 'consumed');

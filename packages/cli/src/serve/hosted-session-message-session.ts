@@ -224,6 +224,15 @@ export class HostedSessionMessageSession {
 
   /** The target committed its receipt: the sender names the carrying input. */
   accepted(messageId: string, inputId: string): Promise<void> {
+    // The receipt's input id derives from the message id alone, so any
+    // other id is a relay that drifted from it, never the carrying input.
+    if (inputId !== sessionMessageInputId(messageId)) {
+      return Promise.reject(
+        new ManagedSessionRecordError(
+          `Session message ${messageId} is carried by ${sessionMessageInputId(messageId)}, not ${inputId}.`,
+        ),
+      );
+    }
     return this.revise(messageId, (previous) => {
       const state = previous.run.delivery?.state;
       if (state === 'accepting' || state === 'unknown') {
