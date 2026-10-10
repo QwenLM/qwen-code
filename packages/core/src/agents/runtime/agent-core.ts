@@ -2711,16 +2711,22 @@ export class AgentCore {
             responseParts,
           });
 
+          const execution = executionResults.get(req.callId);
           this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
             subagentId: this.subagentId,
             round: currentRound,
             callId: req.callId,
             name: toolName,
-            lifecycle: startedLifecycles.has(req.callId)
-              ? undefined
-              : toolLifecycles
-                  .get(req.callId)
-                  ?.finish('cancelled', 'not_started'),
+            lifecycle:
+              startedLifecycles.has(req.callId) && !execution
+                ? undefined
+                : toolLifecycles
+                    .get(req.callId)
+                    ?.finish(
+                      'cancelled',
+                      execution?.status ?? 'not_started',
+                      execution?.durationMs,
+                    ),
             success: false,
             error: errorMessage,
             responseParts,

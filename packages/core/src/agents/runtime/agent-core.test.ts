@@ -736,6 +736,65 @@ describe('AgentCore approval response deduplication', () => {
     return { core, errorSpy };
   }
 
+  it('preserves settled execution status when cancelled before post-processing completes', async () => {
+    const { core } = buildCore('late-synthetic', { tools: ['*'] });
+    const results = recordToolEvents(core).results;
+    const outputs: AgentToolOutputUpdateEvent[] = [];
+    core
+      .getEventEmitter()
+      .on(AgentEventType.TOOL_OUTPUT_UPDATE, (event) => outputs.push(event));
+    let settle!: (
+      callId: string,
+      status: 'success' | 'cancelled',
+      duration: number,
+    ) => void;
+    const schedule = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        const options = (
+          this as unknown as {
+            schedulerOptions: {
+              onToolExecutionStarted: (callId: string, epoch: number) => void;
+              onToolExecutionSettled: typeof settle;
+            };
+          }
+        ).schedulerOptions;
+        settle = options.onToolExecutionSettled;
+        options.onToolExecutionStarted('late-call', 100);
+      });
+    try {
+      const controller = new AbortController();
+      const running = core.processFunctionCalls(
+        [{ id: 'late-call', name: 'read_file', args: {} }],
+        controller,
+        'late-prompt',
+        1,
+        [{ name: 'read_file' }],
+      );
+      await vi.waitFor(() => expect(outputs).toHaveLength(1));
+      settle('late-call', 'success', 20);
+      controller.abort();
+      await running;
+      settle('late-call', 'success', 20);
+      expect(results).toHaveLength(1);
+      expect(
+        [...outputs, ...results]
+          .map((event) => event.lifecycle)
+          .filter(Boolean),
+      ).toEqual([
+        expect.objectContaining({ phase: 'started' }),
+        expect.objectContaining({
+          phase: 'ended',
+          outcome: 'cancelled',
+          executionStatus: 'success',
+          executionDurationMs: 20,
+        }),
+      ]);
+    } finally {
+      schedule.mockRestore();
+    }
+  });
+
   it('emits one late lifecycle terminal after synthetic cancellation without a second tool result', async () => {
     const { core } = buildCore('late-synthetic', { tools: ['*'] });
     const results = recordToolEvents(core).results;
