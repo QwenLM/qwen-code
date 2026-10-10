@@ -349,6 +349,41 @@ class EmbeddedRuntimeBrokerTest {
         }
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"CLOSING",
+            "CLOSED", "ARCHIVING", "ARCHIVED", "DELETING", "DELETED"})
+    void acquireOfANewRuntimeSessionIsFencedLikeWarm(String status)
+            throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        when(store.findSessionById(SESSION_ID)).thenReturn(
+                Optional.of(new SessionRecord("tenant-a", SESSION_ID,
+                        "qwen-code", null, status, null, null, 0, 0, 1,
+                        1, null, 0)));
+        try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
+            // A Runtime Session this process does not hold would provision a
+            // Runtime, which is new work on a closed Session.
+            HttpURLConnection connection = (HttpURLConnection) broker
+                    .getBaseUri().resolve("/internal/runtime-broker/v1/"
+                            + "tool-sessions:acquire")
+                    .toURL().openConnection();
+            connection.setRequestMethod("POST");
+            connection.setRequestProperty("Authorization",
+                    "Bearer broker-token");
+            connection.setDoOutput(true);
+            connection.getOutputStream().write(("{\"protocolVersion\":1,"
+                    + "\"requestId\":\"req-acquire\","
+                    + "\"harnessSessionId\":\"" + SESSION_ID + "\","
+                    + "\"runtimeSessionId\":\"" + RUNTIME_ID + "\","
+                    + "\"turnKind\":\"bootstrap\"}")
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            assertThat(connection.getResponseCode()).isEqualTo(409);
+            assertThat(new String(connection.getErrorStream().readAllBytes(),
+                    java.nio.charset.StandardCharsets.UTF_8))
+                    .contains("runtime_broker_session_closed");
+            connection.disconnect();
+        }
+    }
+
     @Test
     void reconcileStillAnswersAnUnknownExecutionOfAClosedSession()
             throws Exception {

@@ -499,7 +499,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 }
             });
         }
-        return resolveScope(harnessId, authority).thenCompose(scope -> {
+        // A Runtime Session this process does not hold yet admits new work
+        // (ensureBinding can provision a Runtime), so it takes the admission
+        // resolve like warm; release and reconcile stay off the fence.
+        return resolveScope(harnessId, true, authority).thenCompose(scope -> {
             RuntimeSession session = new RuntimeSession(harnessId,
                     runtimeId, turnKind, scope);
             return acquireSession(session);
