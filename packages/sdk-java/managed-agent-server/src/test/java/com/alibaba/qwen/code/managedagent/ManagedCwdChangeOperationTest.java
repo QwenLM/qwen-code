@@ -1477,6 +1477,51 @@ class ManagedCwdChangeOperationTest {
         assertThat(admitted.turnId()).isNotBlank();
     }
 
+    // The lifecycle retry budget (maxOperationRetries) is close/delete
+    // semantics; a cwd change carries its own probe budget inside
+    // settleCwdChange. With the lifecycle budget configured BELOW the probe
+    // budget, a transiently failing probe must keep its plain reschedule —
+    // never the close/delete terminal arm's failOperation + Runtime drain —
+    // until the probe budget itself writes the typed terminal failure.
+    @Test
+    void coordinatorNeverAppliesTheLifecycleTerminalBudgetToACwdChange() {
+        Fixture fixture = fixture(true);
+        fixture.properties.getDispatch().setMaxOperationRetries(2);
+        StubWarmer warmer = new StubWarmer();
+        SessionLifecycleCoordinator coordinator = fixture.coordinator(
+                warmer);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        String operationId = begin(fixture, sessionId, "key", "digest",
+                "services/b", 1).operation().operationId();
+        warmer.refuseAlways(WorkspaceExecutionStore.unavailableTransient(
+                new java.io.IOException("stale mount handle")));
+        // Three deliveries pass the lifecycle budget of 2: the close/delete
+        // terminal arm would fire at the second. The cwd change keeps its
+        // plain reschedule instead.
+        coordinator.dispatch(TENANT, sessionId, operationId);
+        for (int deliveries = 2; deliveries <= 3; deliveries++) {
+            fixture.jdbc.update("UPDATE managed_agent_operation SET"
+                    + " available_at = 0 WHERE tenant_id = ? AND session_id"
+                    + " = ? AND operation_id = ?", TENANT, sessionId,
+                    operationId);
+            coordinator.recoverOperations();
+        }
+        OperationRecord waiting = fixture.store.findOperation(TENANT,
+                sessionId, operationId).orElseThrow();
+        assertThat(waiting.state()).isEqualTo("RUNNING");
+        assertThat(waiting.deliveryState()).isEqualTo("PENDING");
+        assertThat(waiting.failureCode()).isNull();
+        // No close-specific wait accounting either: a writer-live or
+        // stale-boot exemption belongs to close/delete delivery, so the
+        // watermark stays at zero for a cwd probe refusal.
+        assertThat(waiting.budgetExemptAttempt()).isEqualTo(0);
+        // The binding is untouched: no terminal drain arm ran.
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getContextRevision()).isEqualTo(1);
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getCwdRelative()).isEqualTo("services/api");
+    }
+
     @Test
     void coordinatorReclaimsADeadOwnersClaimExactlyOnce() {
         Fixture fixture = fixture(true);

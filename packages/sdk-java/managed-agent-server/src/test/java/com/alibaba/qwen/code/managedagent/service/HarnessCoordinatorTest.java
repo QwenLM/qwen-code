@@ -6,18 +6,19 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.Executors;
 import java.util.concurrent.CountDownLatch;
 import static org.mockito.Mockito.atLeast;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.after;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -53,13 +54,68 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Future;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 
 class HarnessCoordinatorTest {
+    // Pins the fail-fast validation of the dispatch retry budgets: any
+    // negative budget — and a post-admission budget below the
+    // pre-admission one, which would silently strip late-admitted turns of
+    // their retries — is a startup error.
+    @ParameterizedTest(name = "pre = {0}, post = {1}, operations = {2}")
+    @CsvSource({"-1, 10, 10", "5, -1, 10", "5, 10, -1"})
+    void rejectsInvalidDispatchRetryBudgets(int pre, int post,
+            int operations) {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getDispatch().setMaxPreAdmissionRetries(pre);
+        properties.getDispatch().setMaxPostAdmissionRetries(post);
+        properties.getDispatch().setMaxOperationRetries(operations);
+        assertThrows(IllegalStateException.class, () ->
+                new HarnessCoordinator(mock(AgentStateStore.class),
+                        mock(HarnessConnector.class),
+                        new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                        directExecutor(), Clock.systemUTC(), properties));
+    }
+
+    // The cross-field guard rejects a configuration that was legal before
+    // the budgets existed, so its message must name the offending pair and
+    // both values — an operator deploying onto an external config gets no
+    // other pointer.
+    @Test
+    void rejectsAPostAdmissionBudgetBelowThePreAdmissionOne() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getDispatch().setMaxPreAdmissionRetries(5);
+        properties.getDispatch().setMaxPostAdmissionRetries(4);
+        properties.getDispatch().setMaxOperationRetries(10);
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new HarnessCoordinator(mock(AgentStateStore.class),
+                        mock(HarnessConnector.class),
+                        new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                        directExecutor(), Clock.systemUTC(), properties));
+        org.assertj.core.api.Assertions.assertThat(error.getMessage())
+                .contains("max-pre-admission-retries=5")
+                .contains("max-post-admission-retries=4");
+    }
+
+    // Positive control for the ordering guard: equal budgets are a
+    // legitimate "no extra retries after admission" policy, and zero budgets
+    // disable retries entirely.
+    @ParameterizedTest(name = "pre = {0}, post = {1}, operations = {2}")
+    @CsvSource({"5, 5, 10", "0, 0, 0"})
+    void acceptsValidDispatchRetryBudgets(int pre, int post, int operations) {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getDispatch().setMaxPreAdmissionRetries(pre);
+        properties.getDispatch().setMaxPostAdmissionRetries(post);
+        properties.getDispatch().setMaxOperationRetries(operations);
+        new HarnessCoordinator(mock(AgentStateStore.class),
+                mock(HarnessConnector.class), new HarnessEventProjector(),
+                mock(RuntimeWarmer.class), directExecutor(),
+                Clock.systemUTC(), properties).close();
+    }
+
     @Test
     void recoveredBoundTurnFailsBeforeAnyLegacyHarnessCall() {
         String tenantId = "tenant-bound";
@@ -515,9 +571,14 @@ class HarnessCoordinatorTest {
 
     // An approval wait is bounded by the approval timeout, never by a
     // durable verdict: a decline with this reason stays retriable — the
-    // Turn must not die while the Action is still requested.
-    @Test
-    void awaitActionDeclineStaysRetriableWhileActionRequested() {
+    // Turn must not die while the Action is still requested. 10 is exactly
+    // the spent post-admission budget and 42 is far past it: no constant
+    // retry budget tracks the 1s-to-24h operator-settable approval timeout,
+    // so the wait is exempt (review R3-9).
+    @ParameterizedTest(name = "retryCount = {0}")
+    @ValueSource(ints = {5, 10, 42})
+    void awaitActionDeclineStaysRetriableWhileActionRequested(
+            int retryCount) {
         AgentStateStore store = mock(AgentStateStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
@@ -525,13 +586,18 @@ class HarnessCoordinatorTest {
         // submissionAttempted = true: the wait the retry beats the human
         // over happens after admission, where the budget is bypassed.
         TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
-                "epoch-1", 3, "RUNNING", true, 5);
+                "epoch-1", 3, "RUNNING", true, retryCount);
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
         when(store.requireSession("tenant", "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        // Keep the terminal path's reconcile observable: without the
+        // exemption the post-admission budget arm cancels through the bound
+        // Harness before recording the terminal failure.
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-old"))).thenReturn(true);
         when(harness.recoverManagedRuntime("tenant", "session", false))
                 .thenThrow(new HostedHarnessRecoveryDeclinedException(
                         "await_action"));
@@ -548,6 +614,7 @@ class HarnessCoordinatorTest {
                 eq("turn"), anyString(), anyLong());
         verify(store, never()).failTurn(anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyString());
+        verify(harness, never()).cancel(anyString(), anyString());
     }
 
     // The daemon now answers a cancellation-only takeover plain when the
@@ -2093,11 +2160,14 @@ class HarnessCoordinatorTest {
 
     // Protects the post-submission uncertainty invariant: once submit may
     // have been admitted, neither a lost response nor a permanent Workspace
-    // refusal ends the Turn, even with the pre-admission retry budget spent.
-    // The refusal row is not redundant with the generic catch: deleting the
-    // RuntimeBrokerException arm keeps it green by design, so the negative
-    // control is weakening that arm's guard to drop !submissionAttempted,
-    // which would make this row terminal.
+    // refusal ends the Turn while its post-admission retry budget lasts
+    // (retryCount 5 is past the pre-admission budget but below the
+    // post-admission one; exhaustion is covered by
+    // AdmittedTurnRetryTerminalStateTest). The refusal row is not redundant
+    // with the generic catch: deleting the RuntimeBrokerException arm keeps
+    // it green by design, so the negative control is weakening that arm's
+    // guard to drop !submissionAttempted, which would make this row
+    // terminal.
     @ParameterizedTest(name = "workspace refusal = {0}")
     @ValueSource(booleans = {false, true})
     void neverTerminatesOnceSubmissionMayHaveBeenAdmitted(
@@ -2677,7 +2747,7 @@ class HarnessCoordinatorTest {
                 List.of(Map.of("type", "text", "text", "recover")),
                 "sha256:" + "a".repeat(64), status, submissionAttempted,
                 eventEpoch, lastEventId, "previous-owner", Long.MAX_VALUE,
-                retryCount, null, null, null, 1, 1, null, 1);
+                retryCount, retryCount, null, null, null, 1, 1, null, 1);
     }
 
     private static SourceStream cancelledStream(String promptId) {
@@ -2733,16 +2803,6 @@ class HarnessCoordinatorTest {
     }
 
     private static ExecutorService directExecutor() {
-        ExecutorService executor = mock(ExecutorService.class);
-        Future<?> future = mock(Future.class);
-        doAnswer(invocation -> {
-            ((Runnable) invocation.getArgument(0)).run();
-            return null;
-        }).when(executor).execute(any(Runnable.class));
-        doAnswer(invocation -> {
-            ((Runnable) invocation.getArgument(0)).run();
-            return future;
-        }).when(executor).submit(any(Runnable.class));
-        return executor;
+        return CoordinatorTestSupport.directExecutor();
     }
 }

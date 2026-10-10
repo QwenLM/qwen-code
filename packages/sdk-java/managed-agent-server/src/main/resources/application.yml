@@ -90,6 +90,8 @@ qwen:
       retry-initial-delay: '1s'
       retry-max-delay: '1m'
       max-pre-admission-retries: 5
+      max-post-admission-retries: 10
+      max-operation-retries: 10
     events:
       poll-interval: '5s'
       heartbeat-interval: '15s'

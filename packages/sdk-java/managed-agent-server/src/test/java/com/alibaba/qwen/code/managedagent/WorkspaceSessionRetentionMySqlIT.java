@@ -353,12 +353,13 @@ class WorkspaceSessionRetentionMySqlIT {
         assertThat(jdbc.queryForMap("SELECT * FROM managed_agent_session")).containsAllEntriesOf(originalSession);
         assertThat(jdbc.queryForMap("SELECT * FROM managed_agent_operation"))
                 .containsAllEntriesOf(originalClose)
-                .hasSize(originalClose.size() + 6)
+                .hasSize(originalClose.size() + 7)
                 .containsEntry("target_cwd_relative", null)
                 .containsEntry("expected_context_revision", null)
                 .containsEntry("result_context_revision", null)
                 .containsEntry("lifecycle_protocol_version", 0)
                 .containsEntry("lifecycle_effects_receipt_json", null)
+                .containsEntry("budget_exempt_attempt", 0)
                 // V56 grandfather: a pre-V56 operation settles on the
                 // creator-keyed facts alone.
                 .containsEntry("actor_key", null);

@@ -51,6 +51,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -64,6 +66,8 @@ import java.util.Locale;
 
 @Repository
 public class ManagedAgentStore implements AgentStateStore {
+    private static final Logger LOG = LoggerFactory.getLogger(
+            ManagedAgentStore.class);
     private static final TypeReference<List<Map<String, Object>>> INPUT_TYPE =
             new TypeReference<>() {
             };
@@ -146,6 +150,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     result.getString("dispatch_owner"),
                     nullableLong(result, "dispatch_lease_until"),
                     result.getInt("retry_count"),
+                    additiveInt(result, "consecutive_failures"),
                     nullableLong(result, "retry_after"),
                     result.getString("error_code"),
                     result.getString("error_message"),
@@ -211,6 +216,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     additiveLong(result, "expected_context_revision"),
                     additiveLong(result, "result_context_revision"),
                     result.getString("error_code"),
+                    additiveInt(result, "budget_exempt_attempt"),
                     hasColumn(result, "lifecycle_protocol_version")
                             ? result.getInt("lifecycle_protocol_version") : 0,
                     // NULL on a pre-V56 operation: those operations settle
@@ -1135,7 +1141,34 @@ public class ManagedAgentStore implements AgentStateStore {
             }
         }
         requireNoOpenOperation(tenantId, sessionId);
-        validateOperationStart(session, kind);
+        String sessionStatusBefore = session.status();
+        boolean resumed = false;
+        if (kind != OperationKind.ACTION_RESPONSE
+                && kind != OperationKind.CWD_CHANGE
+                && pendingStatus(kind).equals(session.status())) {
+            // A terminally FAILED operation leaves the Session in the
+            // pending status, which validateOperationStart refuses forever:
+            // the Session would be un-closable and un-deletable without
+            // database surgery (review round 9, R9-3). With no operation
+            // open, the same kind is re-admitted — a Session with a live
+            // operation still cannot double-close, because
+            // requireNoOpenOperation above throws first. The new operation
+            // carries the failed one's original pre-operation status, so its
+            // settle runs the steps the failed attempt was owed: an
+            // ACTIVE-before close asks the Harness to stop again, and a
+            // CLOSED-before delete still makes no Runtime calls.
+            String failedBefore =
+                    latestFailedOperationStatusBefore(tenantId, sessionId,
+                            kind);
+            if (failedBefore == null) {
+                validateOperationStart(session, kind);
+            } else {
+                sessionStatusBefore = failedBefore;
+                resumed = true;
+            }
+        } else {
+            validateOperationStart(session, kind);
+        }
         if (protocolVersion == 1) {
             WorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper, tenantId, sessionId);
         }
@@ -1156,10 +1189,23 @@ public class ManagedAgentStore implements AgentStateStore {
                 tenantId, sessionId, operationId, kind.name(), actorDigest,
                 idempotencyKey, requestDigest,
                 archive ? "COMPLETED" : "PENDING",
-                archive ? "CONFIRMED" : "PENDING", session.status(),
+                archive ? "CONFIRMED" : "PENDING", sessionStatusBefore,
                 archive ? publicId("rcpt") : null, now, now, now,
                 archive ? now : null, protocolVersion);
-        if (protocolVersion == 1) {
+        if (protocolVersion == 1 && resumed) {
+            // failOperation kept the fence row and released the dead
+            // operation's claim on it, so the re-admitted operation rebinds
+            // the row rather than inserting a duplicate.
+            jdbc.update("UPDATE qwen_runtime_harness_drain SET"
+                            + " operation_id = ? WHERE tenant_key = ? AND"
+                            + " harness_key = ? AND tenant_id = ? AND"
+                            + " harness_session_id = ? AND phase ="
+                            + " 'LIFECYCLE_ONLY' AND operation_id IS NULL",
+                    operationId,
+                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    tenantId, sessionId);
+        } else if (protocolVersion == 1) {
             jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, tenantId, sessionId, operationId);
                 return null;
@@ -1516,10 +1562,13 @@ public class ManagedAgentStore implements AgentStateStore {
         List<OperationTarget> targets =
                 new ArrayList<>(
                         jdbc.query(
+                                // Every blocked lifecycle shape is
+                                // re-driven: only CLOSE and DELETE are ever
+                                // delivered (an archive completes at
+                                // admission), and both publish their waits.
                                 "SELECT tenant_id, session_id, operation_id FROM"
                                         + " managed_agent_operation WHERE operation_kind <>"
-                                        + " 'ACTION_RESPONSE' AND (delivery_state = 'PENDING' OR (delivery_state = 'BLOCKED' AND (operation_kind = 'CLOSE'"
-                                        + " OR (operation_kind = 'DELETE' AND (session_status_before IN ('CLOSED', 'ARCHIVED') OR lifecycle_protocol_version = 1))))) AND"
+                                        + " 'ACTION_RESPONSE' AND delivery_state IN ('PENDING', 'BLOCKED') AND"
                                         + " available_at <= ? ORDER BY available_at LIMIT ?",
                                 operationTargetMapper,
                                 now,
@@ -1551,8 +1600,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " claim_generation = claim_generation + 1,"
                         + " updated_at = ? WHERE tenant_id = ? AND"
                         + " session_id = ? AND operation_id = ? AND"
-                        + " (((delivery_state = 'PENDING' OR (delivery_state = 'BLOCKED' AND (operation_kind = 'CLOSE'"
-                        + " OR (operation_kind = 'DELETE' AND (session_status_before IN ('CLOSED', 'ARCHIVED') OR lifecycle_protocol_version = 1))))) AND available_at <= ?)"
+                        + " ((delivery_state IN ('PENDING', 'BLOCKED') AND available_at <= ?)"
                         + " OR (delivery_state = 'LEASED' AND lease_until < ?))",
                 owner, Math.addExact(now, leaseDuration.toMillis()), now,
                 tenantId, sessionId, operationId, now, now);
@@ -1647,6 +1695,57 @@ public class ManagedAgentStore implements AgentStateStore {
         return true;
     }
 
+    @Override
+    @Transactional
+    public boolean failOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            String failureCode) {
+        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
+        long now = lifecycleDatabaseTime();
+        // The same fencing as completeOperation, and deliberately no
+        // Session effect beyond the claim-mirror release below: the Session
+        // row keeps its pending status and no completion event is appended,
+        // because the settle never succeeded. The receipt
+        // the contract requires of every confirmed row certifies nothing —
+        // status failed and the failure code carry the outcome.
+        // delivery_state CONFIRMED keeps every recovery scan from re-driving
+        // the row.
+        int updated = jdbc.update("UPDATE managed_agent_operation SET"
+                        + " state = 'FAILED', delivery_state = 'CONFIRMED',"
+                        + " error_code = ?, receipt_id = ?,"
+                        + " lease_owner = NULL, lease_until = NULL,"
+                        + " updated_at = ?, completed_at = ? WHERE"
+                        + " tenant_id = ? AND session_id = ? AND"
+                        + " operation_id = ? AND delivery_state = 'LEASED'"
+                        + " AND lease_owner = ? AND claim_generation = ?"
+                        + " AND lease_until > ?",
+                failureCode, publicId("rcpt"), now, now, tenantId, sessionId,
+                operationId, owner, claimGeneration, now);
+        if (updated == 1) {
+            // The terminal write also releases the lifecycle claim mirror a
+            // v1 admission raised: nothing will drive this operation again,
+            // so the fence row must not stay bound to a dead operation's id.
+            // The phase stays LIFECYCLE_ONLY, though — only the completion
+            // path flips it to DRAINING, gated on its effects verification,
+            // and isHarnessDraining (drainHarnessSession's sole precondition)
+            // reads the phase alone: writing DRAINING here would authorize
+            // draining a Session whose worker stop was never verified (review
+            // round 6, R5-5). retryOperation and blockLifecycleOperation
+            // deliberately only NULL the lease — a rescheduled operation is
+            // still in flight and must stay admission-closed to everyone
+            // else.
+            jdbc.update("UPDATE qwen_runtime_harness_drain SET"
+                            + " operation_id = NULL, claim_lease_until = NULL"
+                            + " WHERE tenant_key = ? AND harness_key = ? AND"
+                            + " tenant_id = ? AND harness_session_id = ? AND"
+                            + " operation_id = ? AND phase = 'LIFECYCLE_ONLY'",
+                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    tenantId, sessionId, operationId);
+        }
+        return updated == 1;
+    }
+
     private long lifecycleDatabaseTime() {
         return jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> Math.addExact(Math.multiplyExact(row.getLong(1), 1000), row.getLong(2) / 1000));
@@ -1685,10 +1784,26 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
             String owner, long generation, String failureCode, long availableAt) {
+        blockLifecycleOperation(tenantId, sessionId, operationId, owner,
+                generation, failureCode, availableAt, false);
+    }
+
+    @Override
+    @Transactional
+    public void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
+            String owner, long generation, String failureCode, long availableAt,
+            boolean budgetExempt) {
         WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
         long now = lifecycleDatabaseTime();
+        // The exempt count increments from itself, never from
+        // attempt_count: a wait refunds no already-charged attempt, so
+        // attempt_count - budget_exempt_attempt stays the count of attempts
+        // that could have made progress regardless of interleaving order.
         jdbc.update("UPDATE managed_agent_operation SET state = 'RECOVERY_BLOCKED', delivery_state = 'BLOCKED',"
                 + " error_code = ?, available_at = ?, lease_owner = NULL, lease_until = NULL, updated_at = ?,"
+                + (budgetExempt
+                        ? " budget_exempt_attempt = budget_exempt_attempt + 1,"
+                        : "")
                 + " attempt_count = attempt_count + 1"
                 + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ? AND delivery_state = 'LEASED'"
                 + " AND lease_owner = ? AND claim_generation = ? AND lease_until > ?",
@@ -1705,12 +1820,28 @@ public class ManagedAgentStore implements AgentStateStore {
     public void retryOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             long availableAt) {
+        retryOperation(tenantId, sessionId, operationId, owner,
+                claimGeneration, availableAt, false);
+    }
+
+    @Override
+    @Transactional
+    public void retryOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            long availableAt, boolean budgetExempt) {
         WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
         long delay = Math.max(0, availableAt - clock.millis());
         long now = lifecycleDatabaseTime();
         availableAt = Math.addExact(now, delay);
+        // The exempt count increments from itself, never from
+        // attempt_count: a wait refunds no already-charged attempt, so
+        // attempt_count - budget_exempt_attempt stays the count of attempts
+        // that could have made progress regardless of interleaving order.
         jdbc.update("UPDATE managed_agent_operation SET delivery_state ="
                         + " 'PENDING', lease_owner = NULL, lease_until = NULL,"
+                        + (budgetExempt
+                                ? " budget_exempt_attempt = budget_exempt_attempt + 1,"
+                                : "")
                         + " attempt_count = attempt_count + 1,"
                         + " available_at = ?, updated_at = ? WHERE"
                         + " tenant_id = ? AND session_id = ? AND"
@@ -2171,11 +2302,63 @@ public class ManagedAgentStore implements AgentStateStore {
         long expected = covered + 1;
         for (EventRecord event : events) {
             if (event.sequence() != expected) {
-                throw new IllegalStateException(
-                        "Message projection event sequence has a gap");
+                // A gap is permanent: appendEvent allocates a sequence under
+                // the session row lock this method already holds, so no
+                // missing sequence can still appear. Skipping ahead once
+                // beats throwing on every scan and wedging the projection.
+                LOG.error("Message projection skips a permanent event gap"
+                                + " tenant={} session={} missingSequences={}-{}"
+                                + " nextEvent={}",
+                        tenantId, sessionId, expected, event.sequence() - 1,
+                        event.sequence());
+                // The skipped range may have carried a turn's terminal
+                // event, whose settle is the only write that moves its
+                // items off in_progress. Settle those turns' items here, or
+                // they would be pinned forever — but only for a turn that is
+                // provably over: its terminal event is in the journal (its
+                // own materialization settled it already, making this a
+                // no-op guard) or its row is not live. A turn whose row is
+                // still live (recordHarnessEvents flips it in the same
+                // transaction that appends the terminal event, so a live row
+                // means the terminal event can still arrive) is settled by
+                // its own event or by turn recovery's turn.failed — never
+                // here. The remaining guards mirror settleTurnItems (never
+                // re-settle a completed item, never push last_sequence
+                // backwards).
+                jdbc.update("UPDATE managed_agent_item SET item_status ="
+                                + " 'failed', last_sequence = CASE WHEN"
+                                + " last_sequence < ? THEN ? ELSE"
+                                + " last_sequence END, updated_at = ?,"
+                                + " revision = revision + 1 WHERE tenant_id"
+                                + " = ? AND session_id = ? AND item_status"
+                                + " = 'in_progress' AND last_sequence < ?"
+                                + " AND NOT EXISTS (SELECT 1 FROM"
+                                + " managed_agent_event terminal WHERE"
+                                + " terminal.tenant_id ="
+                                + " managed_agent_item.tenant_id AND"
+                                + " terminal.session_id ="
+                                + " managed_agent_item.session_id AND"
+                                + " terminal.turn_id ="
+                                + " managed_agent_item.turn_id AND"
+                                + " terminal.event_type IN"
+                                + " ('turn.completed', 'turn.failed',"
+                                + " 'turn.cancelled'))"
+                                + " AND NOT EXISTS (SELECT 1 FROM"
+                                + " managed_agent_turn live WHERE"
+                                + " live.tenant_id ="
+                                + " managed_agent_item.tenant_id AND"
+                                + " live.session_id ="
+                                + " managed_agent_item.session_id AND"
+                                + " live.turn_id ="
+                                + " managed_agent_item.turn_id AND"
+                                + " live.status IN ('ACCEPTED', 'RUNNING',"
+                                + " 'CANCELLING'))",
+                        event.sequence() - 1, event.sequence() - 1,
+                        clock.millis(), tenantId, sessionId,
+                        event.sequence());
             }
             materializeEvent(event);
-            expected++;
+            expected = event.sequence() + 1;
         }
         long nextCovered = events.get(events.size() - 1).sequence();
         long now = clock.millis();
@@ -2329,6 +2512,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public void scheduleTurnRetry(String tenantId, String sessionId,
             String turnId, String owner, long retryAfter) {
         jdbc.update("UPDATE managed_agent_turn SET retry_count = retry_count"
+                        + " + 1, consecutive_failures = consecutive_failures"
                         + " + 1, retry_after = ?, dispatch_owner = NULL,"
                         + " dispatch_lease_until = NULL, updated_at = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
@@ -2444,10 +2628,16 @@ public class ManagedAgentStore implements AgentStateStore {
             String turnId, String owner, String eventEpoch,
             long lastEventId) {
         long now = clock.millis();
+        // The admission proves coordination made progress, so the retry
+        // budget restarts: it counts consecutive failures without progress.
+        // retry_count is not reset — it paces the backoff, which must keep
+        // growing across a crash loop that keeps making progress (review
+        // round 8, R8-3).
         int updated = jdbc.update("UPDATE managed_agent_turn SET status ="
                         + " CASE WHEN status = 'CANCELLING' THEN status ELSE"
                         + " 'RUNNING' END, harness_event_epoch = ?,"
-                        + " harness_last_event_id = ?, updated_at = ?,"
+                        + " harness_last_event_id = ?, consecutive_failures = 0,"
+                        + " updated_at = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
@@ -2498,10 +2688,15 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new IllegalStateException(
                     "Hosted Harness recovery epoch changed");
         }
+        // The recovery admission proves coordination made progress, so the
+        // retry budget restarts: it counts consecutive failures without
+        // progress. retry_count is not reset — it paces the backoff (review
+        // round 8, R8-3).
         int updated = jdbc.update("UPDATE managed_agent_turn SET status ="
                         + " CASE WHEN status = 'CANCELLING' THEN status ELSE"
                         + " 'RUNNING' END, harness_event_epoch = ?,"
-                        + " harness_last_event_id = ?, updated_at = ?,"
+                        + " harness_last_event_id = ?, consecutive_failures = 0,"
+                        + " updated_at = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
@@ -2749,9 +2944,14 @@ public class ManagedAgentStore implements AgentStateStore {
     private int updateHarnessCursor(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
             long lastSourceId, long now) {
+        // Journaling new events proves coordination made progress, so the
+        // retry budget restarts: it counts consecutive failures without
+        // progress. retry_count is not reset — it paces the backoff (review
+        // round 8, R8-3).
         return jdbc.update("UPDATE managed_agent_turn SET"
                         + " harness_event_epoch = ?,"
-                        + " harness_last_event_id = ?, updated_at = ?,"
+                        + " harness_last_event_id = ?, consecutive_failures = 0,"
+                        + " updated_at = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
@@ -3295,6 +3495,20 @@ public class ManagedAgentStore implements AgentStateStore {
         return "control:" + operation + ":" + idempotencyKey + ":" + phase;
     }
 
+    // The most recent terminally failed operation of the same kind, if any:
+    // its recorded pre-operation status is the one a re-admission continues
+    // from.
+    private String latestFailedOperationStatusBefore(String tenantId,
+            String sessionId, OperationKind kind) {
+        List<String> rows = jdbc.queryForList("SELECT session_status_before"
+                        + " FROM managed_agent_operation WHERE tenant_id = ?"
+                        + " AND session_id = ? AND operation_kind = ? AND"
+                        + " state = 'FAILED' ORDER BY updated_at DESC,"
+                        + " created_at DESC LIMIT 1",
+                String.class, tenantId, sessionId, kind.name());
+        return rows.isEmpty() ? null : rows.getFirst();
+    }
+
     // One lifecycle change at a time: a pending rename or unarchive command
     // blocks an operation, and an open operation blocks both commands.
     private void requireNoOpenOperation(String tenantId, String sessionId) {
@@ -3580,9 +3794,10 @@ public class ManagedAgentStore implements AgentStateStore {
         return result.wasNull() ? null : value;
     }
 
-    // The cwd columns arrive with V46; an operation read against an
-    // additive-upgrade schema that predates them must treat the columns as
-    // absent instead of erroring the whole query.
+    // The cwd columns arrive with V46 and the budget-exempt watermark with
+    // V58; an operation read against an additive-upgrade schema that predates
+    // them must treat the columns as absent instead of erroring the whole
+    // query.
     private static String additiveString(java.sql.ResultSet result,
             String name) throws java.sql.SQLException {
         return hasColumn(result, name) ? result.getString(name) : null;
@@ -3591,6 +3806,11 @@ public class ManagedAgentStore implements AgentStateStore {
     private static Long additiveLong(java.sql.ResultSet result, String name)
             throws java.sql.SQLException {
         return hasColumn(result, name) ? nullableLong(result, name) : null;
+    }
+
+    private static int additiveInt(java.sql.ResultSet result, String name)
+            throws java.sql.SQLException {
+        return hasColumn(result, name) ? result.getInt(name) : 0;
     }
 
     private static boolean hasColumn(java.sql.ResultSet result, String name)

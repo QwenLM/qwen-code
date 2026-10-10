@@ -424,6 +424,116 @@ public class ManagedActionStore {
                         "idempotency_conflict",
                         "The idempotency key was reused with different content.");
             }
+            if ("FAILED".equals(existing.state())
+                    && ("action_response_delivery_failed"
+                                    .equals(existing.failureCode())
+                            || "action_response_decision_expired"
+                                    .equals(existing.failureCode()))) {
+                // The delivery failed past its budget while the Action is
+                // still waiting: the caller's retry re-admits the same
+                // response under the same key, digest and row — a second
+                // vote stays impossible — instead of returning the stale
+                // failure receipt forever. Only the budget terminal is
+                // re-admissible: a FAILED the Harness itself produced (a
+                // definitive 400 invalid_action_response, or an ended
+                // Action) keeps replaying its recorded terminal row, since
+                // re-sending the identical body would only repeat a refusal
+                // the Harness already made. The Session gate does apply:
+                // on a Session that no longer accepts responses the replay
+                // keeps returning the recorded failure instead of
+                // re-admitting deliveries that can never land. The Action's
+                // expiry applies too: a fresh admission would refuse it
+                // 409 action_expired, and a resurrected PENDING row for an
+                // expired Action could never complete — it would only wedge
+                // lifecycle admission, which counts any open operation. A
+                // decision-expired row can never satisfy that expiry guard
+                // again — its Action's deadline has already passed — so for
+                // it only the digest-match heal below applies.
+                Response failedResponse = response(tenantId, sessionId,
+                        existing.operationId());
+                Optional<Action> action = failedResponse.actionId() == null
+                        ? Optional.empty()
+                        : find(tenantId, sessionId, failedResponse.actionId());
+                var replaySession = jdbc.queryForMap(
+                        "SELECT status, workspace_storage_id FROM"
+                                + " managed_agent_session WHERE tenant_id = ?"
+                                + " AND session_id = ?",
+                        tenantId, sessionId);
+                String replaySessionStatus =
+                        (String) replaySession.get("status");
+                String replayStorage =
+                        (String) replaySession.get("workspace_storage_id");
+                // A workspace migration holding the storage fence blocks a
+                // resurrected delivery exactly like a fresh admission
+                // (requireSessionOpen below): the fence is the migration's
+                // own evidence that a new write must wait. The heal path
+                // must not throw, though — a held fence falls through to the
+                // recorded terminal failure, which keeps replaying with its
+                // re-admissibility intact until the fence lifts (review
+                // round 7, R7-4).
+                if (action.isPresent()
+                        && "requested".equals(action.get().state())
+                        && now < action.get().options().path("expiresAt")
+                                .asLong()
+                        && "ACTIVE".equals(replaySessionStatus)
+                        && (replayStorage == null
+                                || WorkspaceMigrationAdmission.owner(jdbc,
+                                        tenantId, replayStorage) == null)) {
+                    jdbc.update("UPDATE managed_agent_operation SET state ="
+                                    + " 'PENDING', delivery_state ="
+                                    + " 'PENDING', error_code = NULL,"
+                                    + " attempt_count = 0,"
+                                    + " budget_exempt_attempt = 0,"
+                                    + " lease_owner ="
+                                    + " NULL, lease_until = NULL, receipt_id"
+                                    + " = NULL, available_at = ?, updated_at"
+                                    + " = ?, completed_at = NULL WHERE"
+                                    + " tenant_id = ? AND session_id = ? AND"
+                                    + " operation_id = ?",
+                            now, now, tenantId, sessionId,
+                            existing.operationId());
+                    return new OperationAdmission(
+                            sessions.findOperation(tenantId, sessionId,
+                                    existing.operationId()).orElseThrow(),
+                            true);
+                }
+                // The projection shows the Action decided with THIS
+                // response's own decision — the delivery did land and only
+                // Java's record is wrong, so the replay settles the row in
+                // place with the decision receipt instead of returning the
+                // stale failure forever. The row is never resurrected to
+                // PENDING, so a second vote stays impossible; a digest
+                // mismatch (another actor's decision, an expired or
+                // cancelled Action) keeps replaying the recorded failure.
+                if (action.isPresent()
+                        && "decided".equals(action.get().state())
+                        && action.get().decisionDigest() != null
+                        && action.get().decisionDigest().equals(
+                                decisionDigest(failedResponse.body()))) {
+                    jdbc.update("UPDATE managed_agent_operation SET state ="
+                                    + " 'COMPLETED', admission_stage ="
+                                    + " 'HARNESS_CONFIRMED', delivery_state ="
+                                    + " 'CONFIRMED', receipt_id = ?,"
+                                    + " error_code = NULL,"
+                                    + " decision_receipt_id = ?, lease_owner"
+                                    + " = NULL, lease_until = NULL,"
+                                    + " updated_at = ?, completed_at = ?"
+                                    + " WHERE tenant_id = ? AND session_id ="
+                                    + " ? AND operation_id = ? AND state ="
+                                    + " 'FAILED' AND error_code IN"
+                                    + " ('action_response_delivery_failed',"
+                                    + " 'action_response_decision_expired')",
+                            "rcpt_" + UUID.randomUUID().toString()
+                                    .replace("-", ""),
+                            action.get().decisionReceiptId(),
+                            now, now, tenantId, sessionId,
+                            existing.operationId());
+                    return new OperationAdmission(
+                            sessions.findOperation(tenantId, sessionId,
+                                    existing.operationId()).orElseThrow(),
+                            true);
+                }
+            }
             return new OperationAdmission(existing, true);
         }
         if (!admitted && !workspaceOperatorAdmits(tenantId, ownerRow,
@@ -545,15 +655,17 @@ public class ManagedActionStore {
             String owner,
             String errorCode,
             String decisionReceiptId,
+            boolean harnessConfirmed,
             long now) {
         jdbc.update(
-                "UPDATE managed_agent_operation SET state = ?, admission_stage ="
-                    + " 'HARNESS_CONFIRMED', delivery_state = 'CONFIRMED', receipt_id = ?,"
+                "UPDATE managed_agent_operation SET state = ?, admission_stage = ?,"
+                    + " delivery_state = 'CONFIRMED', receipt_id = ?,"
                     + " error_code = ?, decision_receipt_id = ?, lease_owner = NULL, lease_until ="
                     + " NULL, updated_at = ?, completed_at = ? WHERE tenant_id = ? AND session_id ="
                     + " ? AND operation_id = ? AND delivery_state = 'LEASED' AND lease_owner = ?"
                     + " AND claim_generation = ?",
                 errorCode == null ? "COMPLETED" : "FAILED",
+                harnessConfirmed ? "HARNESS_CONFIRMED" : "JAVA_DURABLE",
                 "rcpt_" + UUID.randomUUID().toString().replace("-", ""),
                 errorCode,
                 decisionReceiptId,

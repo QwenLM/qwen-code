@@ -236,12 +236,32 @@ public final class HostedHarnessClient implements AutoCloseable {
                 request.getPayloadDigest());
         ActivePrompt existing = activePrompts.putIfAbsent(
                 session.getHarnessSessionId(), candidate);
-        if (existing != null
-                && (!existing.promptId.equals(candidate.promptId)
-                        || !existing.payloadDigest.equals(
-                                candidate.payloadDigest))) {
-            throw new DaemonException(
-                    "Hosted Harness session already has a running turn");
+        if (existing != null && !existing.matches(candidate)) {
+            // A prompt whose admission outcome was never learned (an
+            // ambiguous answer, then a terminal coordinator failure) must
+            // not pin the Session for every later Turn: ask the Harness,
+            // which drops the entry when nothing is running there. The
+            // probe is fail-closed — only a successful idle read clears the
+            // entry — and its own failure must not leak the probe's
+            // exception types: the dispatcher maps DaemonHttpException and
+            // DaemonProtocolException to a terminal Turn failure, while the
+            // plain busy-turn refusal below retries. A generation change
+            // still propagates, so the dispatcher adopts the new
+            // generation instead of flattening it into a busy retry.
+            try {
+                getStatus(session);
+            } catch (HostedHarnessGenerationException generationChange) {
+                throw generationChange;
+            } catch (DaemonException probeFailure) {
+                throw new DaemonException(
+                        "Hosted Harness session already has a running turn");
+            }
+            existing = activePrompts.putIfAbsent(
+                    session.getHarnessSessionId(), candidate);
+            if (existing != null && !existing.matches(candidate)) {
+                throw new DaemonException(
+                        "Hosted Harness session already has a running turn");
+            }
         }
         boolean ownsActivePrompt = existing == null;
         HttpResponse<HttpSupport.Body> raw;
@@ -1444,6 +1464,11 @@ public final class HostedHarnessClient implements AutoCloseable {
         ActivePrompt(String promptId, String payloadDigest) {
             this.promptId = promptId;
             this.payloadDigest = payloadDigest;
+        }
+
+        boolean matches(ActivePrompt other) {
+            return promptId.equals(other.promptId)
+                    && payloadDigest.equals(other.payloadDigest);
         }
     }
 

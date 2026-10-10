@@ -256,15 +256,29 @@ export async function openManagedSession(
       return activation;
     },
     // Sealing is the at-rest barrier, but only the lease's owner may end it.
-    // Normally the lifecycle owner also records the boundary, or the activation
-    // reads as abandoned. An external permanent fence can forbid that append.
-    // An adopted lease stops renewal but leaves the lease with its owner.
+    // A call that owns the whole lifecycle also records the boundary, or the
+    // activation would read as abandoned. An external permanent fence may
+    // forbid that append. An adopted lease still stops the
+    // renewal it started; only the lease itself stays with its owner.
+    // The seal runs in a finally: a writer left unsealed because releasing
+    // the activation failed can neither resume cleanly nor be taken over.
     close: async (options) => {
       renewal.stop();
       if (adopted) return;
-      if (options?.releaseActivation !== false)
-        await authority.releaseActivation();
-      await authority.close();
+      try {
+        if (options?.releaseActivation !== false)
+          await authority.releaseActivation();
+      } catch (error) {
+        // The finally's seal failure would otherwise erase this error from
+        // the caller's view entirely.
+        debugLogger.debug(
+          'Managed Session activation release failed before seal',
+          describeRenewalError(error),
+        );
+        throw error;
+      } finally {
+        await authority.close();
+      }
     },
   };
 }

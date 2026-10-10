@@ -1633,6 +1633,61 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  // Regression for R1-38: a failed close-time seal must not keep the grant
+  // on the renewal cadence. The backend re-issues the same writer generation
+  // to a same-credential re-acquire during a live lease (the replay branch in
+  // ManagedSessionStore.acquireWriter), so a stale client still renewing
+  // would seal the journal out from under the freshly re-attached session.
+  // The grant simply lapses; a later close() still retries the seal, which
+  // the backend accepts without a live lease.
+  it('lets a same-credential re-attach keep writing after a close-time seal failure', async () => {
+    vi.useFakeTimers();
+    const server = new FakeManagedSessionStore();
+    const options = {
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    } as const;
+    const first = createHttpManagedSessionStores(options);
+    const second = createHttpManagedSessionStores(options);
+    try {
+      await first.journalStore.open({ sessionKey: SESSION_KEY });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(server.renewCount).toBe(1);
+
+      server.sealFailuresRemaining = 1;
+      await expect(first.close()).rejects.toThrow('backend down');
+      expect(server.sealCount).toBe(1);
+      expect(server.state).toBe('ACTIVE');
+
+      // The broker redrives the attach with byte-identical credentials; the
+      // backend replays the live lease and hands over the same generation.
+      const secondJournal = await second.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      expect(server.replayedGrants).toBe(1);
+
+      // No renewal cadence survives the failed close: nothing seals the
+      // journal from the stale client while the re-attached one works.
+      await vi.advanceTimersByTimeAsync(400_000);
+      expect(server.sealCount).toBe(1);
+      expect(server.state).toBe('ACTIVE');
+      await expect(secondJournal.read()).resolves.toBeDefined();
+
+      // The lapsed grant stays sealable by its own writer, so a caller that
+      // retries close() still converges the journal to SEALED.
+      await first.close();
+      expect(server.state).toBe('SEALED');
+    } finally {
+      await first.close().catch(() => undefined);
+      await second.close().catch(() => undefined);
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
   it('swallows a renewal the Store fences after its writer sealed', async () => {
     vi.useFakeTimers();
     const server = new FakeManagedSessionStore();
@@ -3039,6 +3094,8 @@ class FakeManagedSessionStore {
   readonly receiptOverrides: Record<string, unknown> = {};
   transactionReads = 0;
   sealCount = 0;
+  renewCount = 0;
+  sealFailuresRemaining = 0;
 
   editStoredTransaction(index: number, patch: Record<string, unknown>): void {
     Object.assign(this.transactions[index]!, patch);
@@ -3060,12 +3117,44 @@ class FakeManagedSessionStore {
         : 'application/json',
     );
     if (suffix === '/writers:acquire') {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const token = headers.get('X-Qwen-Managed-Writer-Token');
+      // The real backend re-issues the same writer generation to a
+      // same-credential acquire while the lease is live
+      // (ManagedSessionStore.acquireWriter's replay branch); only a lapsed
+      // lease or a sealed head bumps the generation.
+      if (
+        this.state === 'ACTIVE' &&
+        Date.now() < this.leaseUntil &&
+        body['writerId'] === this.writerId &&
+        token === this.writerToken
+      ) {
+        this.replayedGrants++;
+        this.leaseUntil = Math.max(this.leaseUntil, Date.now() + 300_000);
+        return jsonResponse({ ...this.grant(), replayed: true });
+      }
       this.writerGeneration++;
       this.state = 'ACTIVE';
       this.leaseUntil = Date.now() + 300_000;
+      this.writerId = String(body['writerId']);
+      this.writerToken = token;
       return jsonResponse(this.grant());
     }
     if (suffix === '/writers:renew') {
+      // The real backend refuses to renew a lapsed lease
+      // (ManagedSessionStore.requireWriter with requireUnexpired); the seal
+      // endpoint below intentionally keeps accepting one.
+      if (Date.now() >= this.leaseUntil) {
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_writer_conflict',
+              message: 'The writer lease has lapsed.',
+            },
+          },
+          409,
+        );
+      }
       if (this.state === 'SEALED')
         return jsonResponse(
           {
@@ -3077,11 +3166,19 @@ class FakeManagedSessionStore {
           },
           409,
         );
+      this.renewCount++;
       this.leaseUntil = Date.now() + 300_000;
       return jsonResponse(this.grant());
     }
     if (suffix === '/writers:seal') {
       this.sealCount++;
+      if (this.sealFailuresRemaining > 0) {
+        this.sealFailuresRemaining--;
+        return jsonResponse(
+          { error: { code: 'store_unavailable', message: 'backend down' } },
+          500,
+        );
+      }
       this.state = 'SEALED';
       return jsonResponse({
         writerGeneration: this.writerGeneration,
@@ -3230,9 +3327,12 @@ class FakeManagedSessionStore {
     );
   });
 
-  private state = 'SEALED';
+  state = 'SEALED';
+  replayedGrants = 0;
   private writerGeneration = 0;
   private leaseUntil = 0;
+  private writerId: string | undefined;
+  private writerToken: string | null = null;
   private committedSequence = 0;
   private lastCommitDigest: string | null = null;
   private activationEpoch = 0;
