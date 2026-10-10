@@ -73,12 +73,14 @@ const DEFAULT_EXCLUDE_PATTERNS = [
 ];
 
 const MIN_WORKSPACE_RESULT_SCAN_LIMIT = 1000;
+const MIN_WORKSPACE_DIAGNOSTIC_REPORT_SCAN_LIMIT = 100000;
 
 class WorkspaceResultScanLimitError extends Error {
-  constructor(limit: number) {
-    super(
-      `LSP workspace result scan limit (${limit}) exceeded; narrow the query or select a server with serverName`,
-    );
+  constructor(
+    limit: number,
+    advice = 'narrow the query or select a server with serverName',
+  ) {
+    super(`LSP workspace result scan limit (${limit}) exceeded; ${advice}`);
   }
 }
 
@@ -2048,7 +2050,12 @@ export class NativeLspService {
     this.assertServersAvailable(handles.length, serverName);
     const results: LspFileDiagnostics[] = [];
     const scanLimit = Math.max(MIN_WORKSPACE_RESULT_SCAN_LIMIT, limit);
+    const reportScanLimit = Math.max(
+      MIN_WORKSPACE_DIAGNOSTIC_REPORT_SCAN_LIMIT,
+      limit,
+    );
     let scanned = 0;
+    let reportsScanned = 0;
 
     for (const [name, handle] of handles) {
       const connection = handle.connection;
@@ -2121,8 +2128,15 @@ export class NativeLspService {
           if (results.length >= limit) {
             break;
           }
-          if (++scanned > scanLimit) {
-            throw new WorkspaceResultScanLimitError(scanLimit);
+          scanned++;
+          reportsScanned++;
+          if (scanned > scanLimit || reportsScanned > reportScanLimit) {
+            const exhaustedLimit =
+              scanned > scanLimit ? scanLimit : reportScanLimit;
+            throw new WorkspaceResultScanLimitError(
+              exhaustedLimit,
+              `increase limit above ${exhaustedLimit} or select a server with serverName`,
+            );
           }
           const report =
             item && typeof item === 'object'
@@ -2153,7 +2167,12 @@ export class NativeLspService {
               `Invalid diagnostic report for ${uri}: malformed diagnostic`,
             );
           }
-          if (normalized.diagnostics.length > 0) results.push(normalized);
+          if (normalized.diagnostics.length > 0) {
+            results.push(normalized);
+          } else {
+            // Valid clean reports consume only the larger total-report budget.
+            scanned--;
+          }
         }
       } catch (error) {
         if (error instanceof WorkspaceResultScanLimitError) throw error;

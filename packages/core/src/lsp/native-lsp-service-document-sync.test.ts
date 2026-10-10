@@ -291,6 +291,75 @@ describe('NativeLspService disk document synchronization', () => {
         expect(await query()).toEqual([]);
       });
 
+      if (method === 'workspace/diagnostic') {
+        it('returns a dirty tail after more than 1000 valid clean reports', async () => {
+          const items = Array.from({ length: 1001 }, (_, index) => {
+            const cleanFile = path.join(directory, `clean-${index}.ts`);
+            fs.writeFileSync(cleanFile, '');
+            return {
+              uri: pathToFileURL(cleanFile).toString(),
+              items: [],
+            };
+          });
+          const diagnostic = { range, message: 'dirty tail', severity: 1 };
+          connection.request.mockResolvedValue({
+            items: [...items, { uri, items: [diagnostic] }],
+          });
+          expect(await query(50)).toMatchObject([
+            { uri, diagnostics: [{ message: 'dirty tail' }] },
+          ]);
+          const result = await execute(lspTool(), {
+            operation: 'workspaceDiagnostics',
+          });
+          expect(result.llmContent).toContain('1 issues in 1 files');
+          expect(result.llmContent).toContain('dirty tail');
+        });
+
+        it('bounds clean reports separately and allows a higher explicit limit', async () => {
+          const items = Array.from({ length: 100000 }, () => ({
+            uri,
+            items: [],
+          }));
+          connection.request.mockResolvedValue({ items });
+          expect(await query()).toEqual([]);
+          connection.request.mockResolvedValue({
+            items: [...items, { uri, items: [] }],
+          });
+          await expect(query()).rejects.toThrow(
+            'scan limit (100000) exceeded; increase limit above 100000',
+          );
+          expect(await query(100001)).toEqual([]);
+        });
+
+        it('shares the total clean-report budget across servers', async () => {
+          const second = createConnection();
+          useHandles([
+            ['test', handle],
+            ['second', { ...handle, connection: second }],
+          ]);
+          const items = Array.from({ length: 50000 }, () => ({
+            uri,
+            items: [],
+          }));
+          connection.request.mockResolvedValue({ items });
+          second.request.mockResolvedValue({
+            items: [...items, { uri, items: [] }],
+          });
+          await expect(query()).rejects.toThrow('scan limit (100000) exceeded');
+          expect(second.request).toHaveBeenCalledOnce();
+        });
+
+        it('still charges out-of-scope clean reports to the result budget', async () => {
+          connection.request.mockResolvedValue({
+            items: Array.from({ length: 1001 }, () => ({
+              uri: outsideUri,
+              items: [],
+            })),
+          });
+          await expect(query()).rejects.toThrow('scan limit (1000) exceeded');
+        });
+      }
+
       it('rejects a scan beyond budget instead of hiding a valid tail', async () => {
         connection.request.mockResolvedValue(
           response([...Array<string>(1000).fill(outsideUri), uri]),
@@ -373,6 +442,10 @@ describe('NativeLspService disk document synchronization', () => {
         });
         for (const content of [result.llmContent, result.returnDisplay]) {
           expect(content).toContain('scan limit (1000) exceeded');
+          if (method === 'workspace/diagnostic') {
+            expect(content).toContain('increase limit above 1000');
+            expect(content).not.toContain('narrow the query');
+          }
           expect(content).not.toContain('No symbols found');
           expect(content).not.toContain('No diagnostics found');
         }

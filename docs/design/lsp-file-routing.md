@@ -93,11 +93,17 @@ presented as current. Valid virtual result URIs remain visible with a non-file
 marker; malformed URIs and bare paths are omitted. Workspace output discloses that out-of-scope file results are omitted, even when
 empty. Result filtering uses fresh physical paths without per-item refusal logs,
 reusing URI decisions only within one synchronous server-response filter. Each
-workspace query examines at most `max(1000, limit)` entries across all servers,
-including rejected, malformed and duplicate entries. Reaching the requested
-output limit returns normally; needing to examine another entry beyond the scan
-budget raises an explicit error, never a partial or clean result. Exactly a full
-budget with no remaining entries can return normally. No persistent path cache
+workspace query has a `max(1000, limit)` result-scan budget across all servers,
+including rejected, malformed and duplicate entries. Workspace diagnostics refund
+this charge only after a report passes scope and payload validation with an empty
+`items` array. Such clean reports, including duplicates, still count toward a
+separate `max(100000, limit)` total-report budget across all servers. This allows
+large mostly-clean workspaces without unbounded filtering; symbol scans retain
+the original budget. Reaching the requested output limit returns normally; needing
+to examine another entry after either budget is exhausted raises an explicit error,
+never a partial or clean result. Exactly a full budget with no remaining entries
+can return normally. Diagnostic scan errors advise increasing `limit` above the
+exhausted budget or selecting `serverName`, not narrowing an unused `query`. No persistent path cache
 weakens containment. Output formatting snapshots directories and scope decisions
 only for one response, labels each affected location, and gives each kind of
 advice once with short tags on subsequent locations. Request descriptions carry
@@ -134,7 +140,10 @@ The manual E2E harness uses real `WorkspaceContext` root normalization.
 - Bound workspace symbol/diagnostic scans across servers, memoize duplicate URIs
   only within a response, preserve fresh symlink checks on later requests, and
   distinguish an exhausted scan from no matching results. Explicit output limits
-  above 1000 remain supported.
+  above 1000 remain supported. More than 1000 valid clean diagnostic reports must
+  not hide a dirty tail. Pin the separate total-report boundary, aggregation across
+  servers, raised-limit recovery, and continued charging of out-of-scope clean
+  reports to the smaller budget.
 - Equivalent file URI spellings share one didOpen, monotonic versions and one
   lifecycle, replay once after restart, and defer the same state on scope loss.
   Canonical server-echoed hierarchy items remain traversable after signing.
