@@ -5364,9 +5364,9 @@ describe('Gemini Client (client.ts)', () => {
 
       await client.tryCompressChat('p-unknown');
 
-      expect(
-        client.getChat().getLastTurnCancellationConfirmationId(),
-      ).toBe('daemon-1');
+      expect(client.getChat().getLastTurnCancellationConfirmationId()).toBe(
+        'daemon-1',
+      );
       expect(client.getChat().isLastTurnCancelled()).toBe(false);
     });
 
