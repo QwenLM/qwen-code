@@ -6506,8 +6506,10 @@ export class CoreToolScheduler {
           const reminderBlocks: string[] = [];
 
           for (const candidatePath of candidatePaths) {
-            // Inject conditional rules at most once per session per rule
-            // file. The registry tracks dedup internally.
+            // Inject conditional rules at most once while the reminder
+            // is still in the conversation. The registry tracks dedup
+            // internally; once the reminder is evicted, the marker resets
+            // and the rule becomes eligible again.
             const rulesCtx =
               await rulesRegistry?.matchAndConsume(candidatePath);
             if (rulesCtx) reminderBlocks.push(rulesCtx);

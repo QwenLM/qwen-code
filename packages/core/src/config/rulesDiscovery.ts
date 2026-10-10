@@ -235,8 +235,9 @@ interface CompiledRule {
  * Registry that holds conditional rules and injects them on-demand when
  * the model accesses a file matching a rule's `paths:` patterns.
  *
- * Each rule is injected at most once per session. Patterns are pre-compiled
- * with picomatch for efficient repeated matching.
+ * Each rule is injected at most once while its reminder is still present in
+ * the conversation context. Patterns are pre-compiled with picomatch for
+ * efficient repeated matching.
  */
 export class ConditionalRulesRegistry {
   private readonly compiledRules: CompiledRule[];
@@ -290,6 +291,31 @@ export class ConditionalRulesRegistry {
       newMatches.map((m) => m.rule),
       this.projectRoot,
     );
+  }
+
+  /**
+   * Drop ALL consumed markers so rules can be injected again.
+   *
+   * A reminder rides the tool result that triggered the match. Anything that
+   * evicts that result — pre-send microcompaction, `/compress`,
+   * `/compress-fast`, auto-compaction, `/rewind`, memory-pressure
+   * `compact_history`, or a wholesale history replacement — drops the text
+   * but not the marker, and the marker would then suppress every later
+   * re-injection for the rest of the session.
+   *
+   * This is intentionally a blanket clear: callers evict only *some* tool
+   * results, so rules whose reminder is still resident get re-armed too.
+   * The trade-off is deliberate — a duplicate injection (bounded text cost)
+   * is far cheaper than a silently suppressed rule (the bug this fixes).
+   */
+  resetInjected(): void {
+    if (this.injected.size === 0) {
+      return;
+    }
+    logger.debug(
+      `Resetting ${this.injected.size} injected conditional rule marker(s)`,
+    );
+    this.injected.clear();
   }
 
   get totalCount(): number {
