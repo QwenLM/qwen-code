@@ -299,6 +299,57 @@ describe('AutoReconnectTransport', () => {
   // ---- dispose() --------------------------------------------------------
 
   describe('dispose()', () => {
+    it('preserves closure errors when late replacement cleanup throws', async () => {
+      const entered = deferred<void>();
+      const pendingFactory = deferred<DaemonTransport>();
+      const cleanupError = new Error('replacement cleanup failed');
+      const replacement = createMockTransport({
+        dispose: vi.fn(() => {
+          throw cleanupError;
+        }),
+      });
+      const initial = createMockTransport({
+        fetch: vi.fn(async () => {
+          throw new DaemonTransportClosedError();
+        }),
+        subscribeEvents: vi.fn(async function* () {
+          throw new DaemonTransportClosedError();
+        }),
+      });
+      const restFetch = vi.fn(async () => new Response('unexpected'));
+      const transport = new AutoReconnectTransport({
+        baseUrl: 'http://d',
+        initial,
+        fetch: restFetch,
+        factory: () => {
+          entered.resolve();
+          return pendingFactory.promise;
+        },
+      });
+      const settled = Promise.allSettled([
+        transport.fetch('http://d/health', {}),
+        transport.subscribeEvents('s1').next(),
+      ]);
+
+      await entered.promise;
+      transport.dispose();
+      pendingFactory.resolve(replacement);
+      const results = await settled;
+      transport.dispose();
+
+      for (const result of results) {
+        expect(result.status).toBe('rejected');
+        if (result.status === 'rejected') {
+          expect(result.reason).toBeInstanceOf(DaemonTransportClosedError);
+        }
+      }
+      expect(replacement.dispose).toHaveBeenCalledTimes(1);
+      expect(replacement.fetch).not.toHaveBeenCalled();
+      expect(replacement.subscribeEvents).not.toHaveBeenCalled();
+      expect(restFetch).not.toHaveBeenCalled();
+      expect(transport.connected).toBe(false);
+    });
+
     describe.each(['fetch', 'subscription'] as const)(
       '%s reconnect',
       (operation) => {

@@ -160,7 +160,11 @@ export class AutoReconnectTransport implements DaemonTransport {
     }
 
     if (this._disposed) {
-      replacement?.dispose();
+      try {
+        replacement?.dispose();
+      } catch {
+        /* cleanup must not replace the closure error */
+      }
       throw new DaemonTransportClosedError();
     }
 
