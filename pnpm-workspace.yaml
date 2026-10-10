@@ -17,6 +17,7 @@ packages:
   - 'packages/channels/weixin'
   - 'integrations/external-context'
   - 'integrations/external-context-mem0'
+  - 'integrations/test-failure-explorer'
   - '!packages/desktop'
   - '!packages/live-host'
   - '!packages/mobile-shell'
