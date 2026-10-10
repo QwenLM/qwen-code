@@ -68,12 +68,25 @@ async function upstream(route: string, body?: Buffer) {
   });
   const text = await response.text();
   // #13800: a recovery-blocked turn hands its Workspace mount back on the
-  // release-mount row; the Broker may answer a transient 409
+  // release-mount row; only two refusals are legitimate — a transient 409
   // runtime_session_busy while this turn's own dying operation still reads
-  // active, and the bounded handback retries settle it. The route is the
-  // one legitimate non-200 call this driver can see.
-  if (!new URL(route, config.brokerUrl).pathname.endsWith(':release-mount'))
+  // active (the bounded handback retries settle it), and a 503
+  // runtime_reconciliation_required when the turn's full release already
+  // evicted the Runtime Session (non-resident mount residue belongs to the
+  // LOST family's own sweep). Anything else breaks the fixture's contract.
+  if (new URL(route, config.brokerUrl).pathname.endsWith(':release-mount')) {
+    const replyBody = JSON.parse(text) as { code?: unknown };
+    assert(
+      response.status === 200 ||
+        (response.status === 409 &&
+          replyBody.code === 'runtime_session_busy') ||
+        (response.status === 503 &&
+          replyBody.code === 'runtime_reconciliation_required'),
+      `${response.status} ${route}: ${text}`,
+    );
+  } else {
     assert.equal(response.status, 200, `${route}: ${text}`);
+  }
   return { text, reply: JSON.parse(text) as Reply };
 }
 

@@ -108,11 +108,11 @@ public interface ToolExecutionRepository {
 
     /** Any execution of this Runtime Session that settled its tool work but
      * whose output delivery is still open (publication `deliveryStatus`
-     * `pending`): its Workspace effects are discharged, but its output
-     * evidence is not closed, so the mount's exclusion must hold too —
-     * the operator-recovery family lives on exactly this distinction. The
-     * default fails closed like findByBinding's: a repository without the
-     * probe cannot vouch for anything unproven. */
+     * `pending` or `blocked`): its Workspace effects are discharged, but
+     * its output evidence is not closed, so the mount's exclusion must
+     * hold too — the operator-recovery family lives on exactly this
+     * distinction. The default fails closed like findByBinding's: a
+     * repository without the probe cannot vouch for anything unproven. */
     default boolean hasPendingDeliveryByRuntimeSession(String bindingId,
             long runtimeGeneration, String runtimeSessionId) {
         throw new UnsupportedOperationException(
