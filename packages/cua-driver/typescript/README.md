@@ -191,6 +191,11 @@ application that embeds the daemon must obtain it from the same GitHub Release,
 place it outside ASAR, preserve its executable bit, and sign it before signing
 and notarizing the enclosing app.
 
+Native payload downloads honor `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`.
+Their lowercase forms take precedence when both are set. No
+`NODE_USE_ENV_PROXY` opt-in is required. Set `QWEN_CUA_SDK_RELEASE_BASE_URL`
+to download from an internal release mirror.
+
 Windows release payloads statically link the Microsoft C runtime, so importing
 the SDK on a clean x64 or ARM64 Windows installation does not require a
 separate Visual C++ Redistributable installation.
