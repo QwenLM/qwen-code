@@ -9,6 +9,7 @@ import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { estimateTextTokens } from './request-tokenizer/textTokenizer.js';
+import { base64ByteLength, readFileWithinBase64Limit } from './inline-media.js';
 
 const MAX_PDF_TEXT_OUTPUT_CHARS = 100000;
 const PDF_FULL_TEXT_PAGE_LIMIT = 10;
@@ -119,12 +120,29 @@ function execCommand(
   maxBufferExceeded: boolean;
   timedOut: boolean;
 }> {
-  return new Promise((resolve) => {
-    execFile(
+  options.signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    let completed: Parameters<typeof resolve>[0] | undefined;
+    let closed = false;
+    let executionError: Error | null = null;
+    let cancellationTimer: ReturnType<typeof setTimeout> | undefined;
+    const finish = () => {
+      if (!completed || !closed) return;
+      clearTimeout(cancellationTimer);
+      try {
+        options.signal?.throwIfAborted();
+        if (executionError?.name === 'AbortError') throw executionError;
+        resolve(completed);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    const child = execFile(
       command,
       args,
       { encoding: 'utf8', ...options },
       (error, stdout, stderr) => {
+        executionError = error;
         if (error) {
           // Node sets error.code to the string 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
           // when stdout or stderr exceeds the configured maxBuffer — the child
@@ -149,24 +167,47 @@ function execCommand(
                 (errAny.signal === 'SIGTERM' ||
                   errAny.signal === undefined ||
                   errAny.signal === null)));
-          resolve({
+          completed = {
             stdout: String(stdout ?? ''),
             stderr: String(stderr ?? ''),
             code: typeof error.code === 'number' ? error.code : 1,
             maxBufferExceeded,
             timedOut,
-          });
-          return;
+          };
+        } else {
+          completed = {
+            stdout: String(stdout ?? ''),
+            stderr: String(stderr ?? ''),
+            code: 0,
+            maxBufferExceeded: false,
+            timedOut: false,
+          };
         }
-        resolve({
-          stdout: String(stdout ?? ''),
-          stderr: String(stderr ?? ''),
-          code: 0,
-          maxBufferExceeded: false,
-          timedOut: false,
-        });
+        // Give cancellation cleanup a bound even if the child cannot close.
+        if (error?.name === 'AbortError' && !closed) {
+          cancellationTimer = setTimeout(() => {
+            child.kill('SIGKILL');
+            if (closed) return;
+            cancellationTimer = setTimeout(() => {
+              child.unref();
+              child.stdout?.destroy();
+              child.stderr?.destroy();
+              reject(options.signal?.reason ?? error);
+            }, 1000);
+          }, 1000);
+        }
+        // Abort callbacks can precede exit; normally wait before cleanup.
+        queueMicrotask(finish);
       },
     );
+    if (child.pid === undefined) {
+      closed = true;
+    } else {
+      child.once('close', () => {
+        closed = true;
+        finish();
+      });
+    }
   });
 }
 
@@ -276,6 +317,7 @@ export function resetPdftotextCache(): void {
  */
 export async function getPDFPageCount(
   filePath: string,
+  signal?: AbortSignal,
 ): Promise<number | null> {
   try {
     // `--` separates options from positional args so a filename starting
@@ -283,7 +325,9 @@ export async function getPDFPageCount(
     // poppler's option parser.
     const { stdout, code } = await execCommand('pdfinfo', ['--', filePath], {
       timeout: 10000,
+      signal,
     });
+    signal?.throwIfAborted();
     if (code !== 0) {
       return null;
     }
@@ -293,7 +337,9 @@ export async function getPDFPageCount(
     }
     const count = parseInt(match[1]!, 10);
     return isNaN(count) ? null : count;
-  } catch {
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (error instanceof Error && error.name === 'AbortError') throw error;
     return null;
   }
 }
@@ -313,7 +359,9 @@ export async function extractPDFText(
   filePath: string,
   options?: { firstPage?: number; lastPage?: number; signal?: AbortSignal },
 ): Promise<PDFTextResult> {
+  options?.signal?.throwIfAborted();
   const available = await isPdftotextAvailable();
+  options?.signal?.throwIfAborted();
   if (!available) {
     return {
       success: false,
@@ -349,9 +397,7 @@ export async function extractPDFText(
     // execCommand reports a signal-killed child as timedOut (killed +
     // SIGTERM); check the caller's abort first so a user cancel is not
     // misreported as a 30s timeout.
-    if (options?.signal?.aborted) {
-      return { success: false, error: 'PDF text extraction was cancelled.' };
-    }
+    options?.signal?.throwIfAborted();
 
     if (timedOut) {
       return {
@@ -426,6 +472,8 @@ export async function extractPDFText(
 
     return { success: true, text: stdout };
   } catch (e: unknown) {
+    options?.signal?.throwIfAborted();
+    if (e instanceof Error && e.name === 'AbortError') throw e;
     return {
       success: false,
       error: `pdftotext execution failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -482,7 +530,7 @@ export interface PDFRenderedImage {
 
 export type PDFRenderResult =
   | { success: true; images: PDFRenderedImage[]; bytesTruncated: boolean }
-  | { success: false; error: string };
+  | { success: false; error: string; tooLarge?: boolean };
 
 /**
  * Compare two pdftoppm output filenames (e.g. "page-1.jpg", "page-10.jpg") by
@@ -510,9 +558,16 @@ function comparePdfPageFilenames(a: string, b: string): number {
  */
 export async function renderPDFPagesToImages(
   filePath: string,
-  options?: { firstPage?: number; lastPage?: number },
+  options?: {
+    firstPage?: number;
+    lastPage?: number;
+    signal?: AbortSignal;
+    maxTotalBase64Bytes?: number;
+  },
 ): Promise<PDFRenderResult> {
+  options?.signal?.throwIfAborted();
   const available = await isPdftoppmAvailable();
+  options?.signal?.throwIfAborted();
   if (!available) {
     return { success: false, error: PDF_RENDER_UNAVAILABLE_MESSAGE };
   }
@@ -539,7 +594,9 @@ export async function renderPDFPagesToImages(
 
     const { stderr, code, timedOut } = await execCommand('pdftoppm', args, {
       timeout: PDF_RENDER_TIMEOUT_MS,
+      signal: options?.signal,
     });
+    options?.signal?.throwIfAborted();
 
     if (timedOut) {
       return {
@@ -586,23 +643,45 @@ export async function renderPDFPagesToImages(
     let totalBytes = 0;
     let bytesTruncated = false;
     for (const name of entries) {
-      const buffer = await readFile(join(tempDir, name));
-      const data = buffer.toString('base64');
-      // Always keep the first page; afterwards stop before exceeding the cap so
-      // one tool result can't balloon to tens of MB.
+      options?.signal?.throwIfAborted();
+      const remaining =
+        (options?.maxTotalBase64Bytes ?? PDF_RENDER_MAX_TOTAL_BASE64_BYTES) -
+        totalBytes;
+      const buffer =
+        options?.maxTotalBase64Bytes === undefined
+          ? await readFile(join(tempDir, name), { signal: options?.signal })
+          : await readFileWithinBase64Limit(
+              join(tempDir, name),
+              remaining,
+              options.signal,
+            );
+      options?.signal?.throwIfAborted();
+      // Only the legacy ceiling permits an oversized first page.
       if (
-        images.length > 0 &&
-        totalBytes + data.length > PDF_RENDER_MAX_TOTAL_BASE64_BYTES
+        buffer === undefined ||
+        ((options?.maxTotalBase64Bytes !== undefined || images.length > 0) &&
+          base64ByteLength(buffer.length) > remaining)
       ) {
+        if (images.length === 0) {
+          return {
+            success: false,
+            error:
+              "The first rendered PDF page exceeds the inline media limit. Use the 'pages' parameter with a smaller page or a smaller document.",
+            tooLarge: true,
+          };
+        }
         bytesTruncated = true;
         break;
       }
+      const data = buffer.toString('base64');
       totalBytes += data.length;
       images.push({ data, mimeType: 'image/jpeg' });
     }
 
     return { success: true, images, bytesTruncated };
   } catch (e: unknown) {
+    options?.signal?.throwIfAborted();
+    if (e instanceof Error && e.name === 'AbortError') throw e;
     return {
       success: false,
       error: `pdftoppm execution failed: ${

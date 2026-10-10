@@ -23,6 +23,8 @@ import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.j
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import type { ToolResult } from './tools.js';
 import type { VisionBridgeNoticeDisplay } from '../services/visionBridge/vision-bridge-service.js';
+import { normalizeParts } from '../services/visionBridge/image-part-utils.js';
+import { createHash } from 'node:crypto';
 
 const visionBridgeMocks = vi.hoisted(() => ({
   runVisionBridge: vi.fn(),
@@ -99,6 +101,7 @@ describe('ReadFileTool', () => {
       getFileService: () => new FileDiscoveryService(tempRootDir),
       getFileSystemService: () => new StandardFileSystemService(),
       getTargetDir: () => tempRootDir,
+      getModel: () => 'test-model',
       getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
       storage: {
         getProjectTempDir: () => path.join(tempRootDir, '.temp'),
@@ -191,6 +194,287 @@ describe('ReadFileTool', () => {
   afterEach(async () => {
     vi.unstubAllEnvs();
     await fsp.rm(tempRootDir, { recursive: true, force: true });
+  });
+
+  describe('trusted media limits', () => {
+    const limits = {
+      maxInlineMediaBase64Bytes: 768 * 1024,
+      maxMediaResultBytes: 896 * 1024,
+    };
+    const boundedTool = (overrides = {}) =>
+      new ReadFileTool(
+        makeConfig({ getFileReadCacheDisabled: () => true, ...overrides }),
+        limits,
+      );
+
+    it('accepts native PDF bytes at the exact base64 ceiling and refuses one decoded byte over', async () => {
+      const bytes = Buffer.alloc((limits.maxInlineMediaBase64Bytes / 4) * 3);
+      bytes.write('%PDF-1.7');
+      const file = await put('native.pdf', bytes);
+      const result = await read(file, boundedTool());
+      expect(result.error).toBeUndefined();
+      const inline = normalizeParts(result.llmContent)[0]?.inlineData;
+      expect(inline?.mimeType).toBe('application/pdf');
+      expect(inline?.displayName).toBe('native.pdf');
+      expect(typeof inline?.data).toBe('string');
+      expect(inline!.data!.length).toBe(limits.maxInlineMediaBase64Bytes);
+      expect(
+        createHash('sha256')
+          .update(Buffer.from(inline!.data!, 'base64'))
+          .digest('hex'),
+      ).toBe(createHash('sha256').update(bytes).digest('hex'));
+      await fsp.appendFile(file, 'x');
+      const refused = await read(file, boundedTool());
+      expect(refused.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(refused.llmContent).toContain('inline media byte limit');
+      expect(refused.llmContent).not.toContain(
+        'inline media result byte limit',
+      );
+      expect(JSON.stringify(refused)).not.toContain('inlineData');
+      expect(
+        (await read(file, new ReadFileTool(makeConfig()))).error,
+      ).toBeUndefined();
+    });
+
+    it('applies the tool-level aggregate limit to audio from a trusted config', async () => {
+      const file = await put('clip.mp3', Buffer.alloc(589825));
+      const result = await read(
+        file,
+        boundedTool({ getEffectiveInputModalities: () => ({ audio: true }) }),
+      );
+      expect(result.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(result.llmContent).toContain('inline media result byte limit');
+    });
+
+    it('measures complete JSON UTF-8 bytes, including escaped and multibyte metadata', async () => {
+      const file = await put('文档.pdf', '%PDF-1.7');
+      pdfMocks.getPDFPageCount.mockResolvedValue(2);
+      pdfMocks.renderPDFPagesToImages.mockResolvedValue({
+        success: true,
+        images: [{ data: 'YWJj', mimeType: 'image/jpeg' }],
+        bytesTruncated: true,
+      });
+      const overrides = {
+        getEffectiveInputModalities: () => ({ image: true }),
+        getFileReadCacheDisabled: () => true,
+      };
+      const baseline = await read(file, boundedTool(overrides));
+      expect(baseline.error).toBeUndefined();
+      expect(JSON.stringify(baseline)).toContain('inlineData');
+      expect(JSON.stringify(baseline)).toContain('\\"');
+      const bytes = Buffer.byteLength(JSON.stringify(baseline), 'utf8');
+      expect(bytes).toBeGreaterThan(JSON.stringify(baseline).length);
+      const config = makeConfig(overrides);
+      const exact = new ReadFileTool(config, {
+        ...limits,
+        maxMediaResultBytes: bytes,
+      });
+      expect(await read(file, exact)).toEqual(baseline);
+      const under = new ReadFileTool(config, {
+        ...limits,
+        maxMediaResultBytes: bytes - 1,
+      });
+      const refused = await read(file, under);
+      expect(refused.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(JSON.stringify(refused)).not.toContain('inlineData');
+    });
+
+    it.each(['png', 'jpeg', 'webp', 'gif'] as const)(
+      'delivers actual %s bytes and refuses an oversized rendered/raw result',
+      async (format) => {
+        const source = await sharp({
+          create: { width: 2, height: 3, channels: 3, background: '#246080' },
+        })
+          .toFormat(format)
+          .toBuffer();
+        const file = await put(`tiny.${format}`, source);
+        const result = await read(file, boundedTool());
+        const inline = normalizeParts(result.llmContent).find(
+          (part) => part.inlineData,
+        )?.inlineData;
+        expect(inline?.data).toBeTruthy();
+        const decoded = Buffer.from(inline!.data!, 'base64');
+        expect(await sharp(decoded).metadata()).toMatchObject({
+          width: 2,
+          height: 3,
+        });
+        if (format === 'gif') expect(decoded).toEqual(source);
+        const refused = await read(
+          file,
+          new ReadFileTool(makeConfig(), {
+            ...limits,
+            maxInlineMediaBase64Bytes: inline!.data!.length - 1,
+          }),
+        );
+        expect(refused.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+        expect(JSON.stringify(refused)).not.toContain('inlineData');
+      },
+    );
+
+    it.each(['text.txt', 'shape.svg', 'cells.ipynb', 'text.pdf'])(
+      'does not apply media-result limits to %s',
+      async (name) => {
+        const contents = name.endsWith('ipynb')
+          ? notebookJson([codeCell('x'.repeat(1024), 1, 'output')])
+          : name.endsWith('pdf')
+            ? '%PDF-1.7'
+            : 'x'.repeat(1024);
+        const file = await put(name, contents);
+        pdfMocks.getPDFPageCount.mockResolvedValue(1);
+        pdfMocks.extractPDFText.mockResolvedValue({
+          success: true,
+          text: 'x'.repeat(1024),
+        });
+        const result = await read(
+          file,
+          new ReadFileTool(
+            makeConfig({ getEffectiveInputModalities: () => ({}) }),
+            { maxInlineMediaBase64Bytes: 1, maxMediaResultBytes: 1 },
+          ),
+        );
+        expect(result.error).toBeUndefined();
+        expect(Buffer.byteLength(JSON.stringify(result))).toBeGreaterThan(1);
+        expect(JSON.stringify(result)).not.toContain('inlineData');
+      },
+    );
+
+    it.each([2, null])(
+      'handles a rendered range beyond the document with page count %s',
+      async (pageCount) => {
+        const file = await put('scan.pdf', '%PDF-1.7');
+        pdfMocks.getPDFPageCount.mockResolvedValue(pageCount);
+        pdfMocks.renderPDFPagesToImages.mockResolvedValue({
+          success: true,
+          images: [
+            { data: 'YWJj', mimeType: 'image/jpeg' },
+            { data: 'YWJj', mimeType: 'image/jpeg' },
+          ],
+          bytesTruncated: false,
+        });
+        const result = await read(
+          { file_path: file, pages: '1-10' },
+          boundedTool({ getEffectiveInputModalities: () => ({ image: true }) }),
+        );
+        if (pageCount === null) {
+          expect(result.error?.type).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+        } else {
+          expect(result.error).toBeUndefined();
+          expect(
+            normalizeParts(result.llmContent).filter((part) => part.inlineData),
+          ).toHaveLength(2);
+          expect(JSON.stringify(result.llmContent)).toContain(
+            'The document has 2 pages; rendered pages 1-2.',
+          );
+        }
+      },
+    );
+
+    it('does not probe the page count or add a notice for a complete range', async () => {
+      const file = await put('scan.pdf', '%PDF-1.7');
+      pdfMocks.renderPDFPagesToImages.mockResolvedValue({
+        success: true,
+        images: [
+          { data: 'YWJj', mimeType: 'image/jpeg' },
+          { data: 'YWJj', mimeType: 'image/jpeg' },
+        ],
+        bytesTruncated: false,
+      });
+      const result = await read(
+        { file_path: file, pages: '1-2' },
+        boundedTool({ getEffectiveInputModalities: () => ({ image: true }) }),
+      );
+      expect(result.error).toBeUndefined();
+      expect(normalizeParts(result.llmContent)).toHaveLength(2);
+      expect(JSON.stringify(result.llmContent)).not.toContain(
+        'The document has',
+      );
+      expect(pdfMocks.getPDFPageCount).not.toHaveBeenCalled();
+    });
+
+    it('rejects an explicit incomplete rendered range but announces an implicit whole-page prefix', async () => {
+      const file = await put('scan.pdf', '%PDF-1.7');
+      pdfMocks.getPDFPageCount.mockResolvedValue(2);
+      pdfMocks.renderPDFPagesToImages.mockResolvedValue({
+        success: true,
+        images: [{ data: 'YWJj', mimeType: 'image/jpeg' }],
+        bytesTruncated: true,
+      });
+      const mediaTool = boundedTool({
+        getEffectiveInputModalities: () => ({ image: true }),
+      });
+      const prefix = await read(file, mediaTool);
+      expect(prefix.error).toBeUndefined();
+      expect(JSON.stringify(prefix.llmContent)).toContain(
+        'later pages were omitted',
+      );
+      const explicit = await read({ file_path: file, pages: '1-2' }, mediaTool);
+      expect(explicit.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(pdfMocks.renderPDFPagesToImages).toHaveBeenLastCalledWith(file, {
+        firstPage: 1,
+        lastPage: 2,
+        signal: abortSignal,
+        maxTotalBase64Bytes: limits.maxInlineMediaBase64Bytes,
+      });
+      pdfMocks.renderPDFPagesToImages.mockResolvedValue({
+        success: true,
+        images: [{ data: 'YWJj', mimeType: 'image/jpeg' }],
+        bytesTruncated: false,
+      });
+      const shortRange = await read(
+        { file_path: file, pages: '1-2' },
+        mediaTool,
+      );
+      expect(shortRange.error?.type).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+      expect(JSON.stringify(shortRange)).not.toContain('inlineData');
+      pdfMocks.renderPDFPagesToImages.mockResolvedValue({
+        success: false,
+        error: 'first page too large',
+        tooLarge: true,
+      });
+      const tooLarge = await read(file, mediaTool);
+      expect(tooLarge.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(tooLarge.llmContent).toBe('first page too large');
+    });
+
+    it.each(['page-count', 'text', 'render'])(
+      'propagates abort after %s without another fallback',
+      async (stage) => {
+        const file = await put('scan.pdf', '%PDF-1.7');
+        const controller = new AbortController();
+        pdfMocks.getPDFPageCount.mockResolvedValue(1);
+        const target =
+          stage === 'page-count'
+            ? pdfMocks.getPDFPageCount
+            : stage === 'text'
+              ? pdfMocks.extractPDFText
+              : pdfMocks.renderPDFPagesToImages;
+        target.mockImplementation(async () => {
+          controller.abort();
+          return stage === 'page-count'
+            ? null
+            : { success: false, error: 'cancelled' };
+        });
+        await expect(
+          read(
+            file,
+            boundedTool({
+              getEffectiveInputModalities: () => ({ image: true }),
+            }),
+            controller.signal,
+          ),
+        ).rejects.toThrow(/abort/i);
+        expect(pdfMocks.getPDFPageCount).toHaveBeenCalledWith(
+          file,
+          controller.signal,
+        );
+        if (stage !== 'page-count')
+          expect(pdfMocks.extractPDFText).toHaveBeenCalledWith(file, {
+            signal: controller.signal,
+          });
+        if (stage !== 'render')
+          expect(pdfMocks.renderPDFPagesToImages).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe('build', () => {

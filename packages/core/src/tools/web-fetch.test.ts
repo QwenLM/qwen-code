@@ -594,14 +594,12 @@ describe('WebFetchTool', () => {
     it('should not return a late side-query success after the user aborts', async () => {
       // The final stream chunk can already be queued when the user aborts:
       // the side query then resolves successfully despite the abort.
-      const { result } = await runAnswering((_options, controller) => {
-        controller.abort();
-        return Promise.resolve({ text: 'Late success' });
-      });
-
-      expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
-      expect(result.llmContent).not.toContain('Late success');
-      expect(result.llmContent).not.toContain('Test content');
+      await expect(
+        runAnswering((_options, controller) => {
+          controller.abort();
+          return Promise.resolve({ text: 'Late success' });
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
     });
 
     it.each([
@@ -629,28 +627,24 @@ describe('WebFetchTool', () => {
       },
     );
 
-    it('should return a proper error result when aborted with a non-Error reason', async () => {
+    it('should propagate cancellation with a non-Error reason', async () => {
       // Session.ts aborts with a plain string reason; throwIfAborted rethrows
       // it as-is, so the error path must not assume an Error instance.
-      const { result } = await runAnswering((_options, controller) => {
-        controller.abort('qwen:user-cancel');
-        return Promise.resolve({ text: 'Late success' });
-      });
-
-      expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
-      expect(result.llmContent).toContain('qwen:user-cancel');
-      expect(result.llmContent).not.toContain('undefined');
-      expect(result.llmContent).not.toContain('Late success');
+      await expect(
+        runAnswering((_options, controller) => {
+          controller.abort('qwen:user-cancel');
+          return Promise.resolve({ text: 'Late success' });
+        }),
+      ).rejects.toBe('qwen:user-cancel');
     });
 
     it('should propagate a user abort instead of fabricating a raw-content result', async () => {
-      const { result } = await runAnswering((_options, controller) => {
-        controller.abort();
-        return Promise.reject(new Error('Request was aborted.'));
-      });
-
-      expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
-      expect(result.llmContent).not.toContain('Test content');
+      await expect(
+        runAnswering((_options, controller) => {
+          controller.abort();
+          return Promise.reject(new Error('Request was aborted.'));
+        }),
+      ).rejects.toThrow('Request was aborted.');
     });
   });
 
@@ -770,6 +764,48 @@ describe('WebFetchTool', () => {
         expect.stringMatching(/\.pdf$/),
         { signal: controller.signal },
       );
+    });
+
+    it('removes and refunds a PDF cancelled during text extraction', async () => {
+      stubFetch(PDF);
+      const controller = new AbortController();
+      const reason = new DOMException('cancelled', 'AbortError');
+      mockExtractPDFText.mockImplementationOnce(async () => {
+        controller.abort(reason);
+        throw reason;
+      });
+      await expect(
+        run('https://example.com/doc.pdf', 'read it', {
+          signal: controller.signal,
+        }),
+      ).rejects.toBe(reason);
+      expect(vi.mocked(mockConfig.trackToolResultBytes).mock.calls).toEqual([
+        [pdfBytes.length],
+        [-pdfBytes.length],
+      ]);
+      expect(fs.readdirSync(toolResultsDir)).toEqual([]);
+      expect(mockGenerateContent).not.toHaveBeenCalled();
+    });
+
+    it('retains the disk charge if cancellation cleanup cannot delete the PDF', async () => {
+      stubFetch(PDF);
+      const controller = new AbortController();
+      const reason = new DOMException('cancelled', 'AbortError');
+      mockExtractPDFText.mockImplementationOnce(async (file: string) => {
+        fs.unlinkSync(file);
+        fs.mkdirSync(file);
+        controller.abort(reason);
+        throw reason;
+      });
+      await expect(
+        run('https://example.com/doc.pdf', 'read it', {
+          signal: controller.signal,
+        }),
+      ).rejects.toBe(reason);
+      expect(vi.mocked(mockConfig.trackToolResultBytes).mock.calls).toEqual([
+        [pdfBytes.length],
+      ]);
+      expect(fs.readdirSync(toolResultsDir)).toHaveLength(1);
     });
 
     it('should persist PDFs, extract their text, and summarize it', async () => {

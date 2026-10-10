@@ -52,6 +52,8 @@ import {
 } from './managed-runtime-attestation-contract.js';
 import {
   MANAGED_RUNTIME_PROVIDER_ROUTE,
+  MAX_PROVIDER_INLINE_MEDIA_BASE64_BYTES,
+  MAX_PROVIDER_MEDIA_RESULT_BYTES,
   managedRuntimeProviderLimit,
   ManagedRuntimeProviderProtocolError,
   fitManagedRuntimeProviderResult,
@@ -441,6 +443,8 @@ export class ManagedRuntimeProviderWorker {
       });
       const toolConfig = deriveConfig(config, {
         getFileHistoryService: () => history(value).service,
+        // Execution workers never upload media through an inherited Omni opt-in.
+        isOmniEnabled: () => false,
       });
       const shell = new WorkspaceShellTool(toolConfig, config);
       const tools = [
@@ -468,10 +472,19 @@ export class ManagedRuntimeProviderWorker {
             conflict('Managed Runtime tool does not support media context.');
           return new ReadFileTool(
             deriveConfig(toolConfig, {
-              getEffectiveInputModalities: () => ({ ...media.inputModalities }),
+              getEffectiveInputModalities: () => ({
+                image: media.inputModalities.image === true,
+                pdf: media.inputModalities.pdf === true,
+                audio: false,
+                video: false,
+              }),
               getFileReadCache: () => toolConfig.getFileReadCache(),
               getFileService: () => toolConfig.getFileService(),
             }),
+            {
+              maxInlineMediaBase64Bytes: MAX_PROVIDER_INLINE_MEDIA_BASE64_BYTES,
+              maxMediaResultBytes: MAX_PROVIDER_MEDIA_RESULT_BYTES,
+            },
           );
         },
       );
