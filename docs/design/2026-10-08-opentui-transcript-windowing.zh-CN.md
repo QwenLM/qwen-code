@@ -86,7 +86,7 @@ boundary 位于条目的 `<box>` 内部而不是外面。测量环节已不再�
 单元测试：
 
 - `transcript-window.test.ts`（10 条）钉住偏移前缀和、空转录、恰好放进视口、滚动夹紧、两侧 overscan、跨底边界的条目、混合高度下的 spacer 运算，以及上限。
-- `transcript-view.test.tsx` 新增三条针对 2000 条会话的无宿主窗口化测试：默认视图挂载尾部而不挂载头部，锚定顶部的面板挂载头部而不挂载尾部，两者元素数都低于 400。把切片换成 `items.slice(0)` 会让它们失败。第四条钉住无宿主面板在 frame 上仍然测量真实高度，把宿主查找挪回测量循环之前会让它变红。
+- `transcript-view.test.tsx` 新增三条针对 2000 条会话的无宿主窗口化测试：默认视图挂载尾部而不挂载头部，锚定顶部的面板挂载头部而不挂载尾部，两者元素数都低于 400。第四条钉住无宿主面板在 frame 上仍然测量真实高度，把宿主查找挪回测量循环之前会让它变红。把切片换成 `items.slice(0)` 会让这四条、外加下面 harness 上十条里的六条失败。
 - 同一文件新增了针对「frame 驱动的那一半」的滚动宿主 harness —— jsdom 否则根本到不了那里：它把视图上溯的宿主、以及视图回读的已布局树，都装到 JSX mock 产出的 DOM 节点上。宿主的 `content.y` 携带滚动位移、而 `root.y` 是一个非零静态值，所以决定 4 那个偏移的两个操作数都不为零、也都不是对方；删掉 `- host.content.y` 会让三条测试失败。spacer 把自己的 `height` prop 转发成 `data-height`，测试因此读得到它；JSX mock 会统计元素数，测试因此能区分「重渲染了」和「没重渲染」。
 - 十条测试跑在这个 harness 上。每一条都至少被下面某个变异杀死，下面那条选择器测试也有自己的变异；每次跑完树都按字节还原。
   - 对本来就已测量过的条目结算高度差 —— 也就是决定 5 移除掉的那个修正 → `records real heights without moving the scroll position`、`travels the whole distance over turns shorter than the estimate`

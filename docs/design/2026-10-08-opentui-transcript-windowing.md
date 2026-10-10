@@ -236,9 +236,10 @@ Unit tests:
 - `transcript-view.test.tsx` gained three host-less windowing tests over a
   2000-item session: the default view mounts the tail and not the head, the
   top-anchored pane mounts the head and not the tail, and both stay under 400
-  elements. Replacing the slice with `items.slice(0)` fails them. A fourth pins
-  that a host-less pane still measures real heights on a frame, and goes red
-  when the host lookup is moved back ahead of the measuring loop.
+  elements. A fourth pins that a host-less pane still measures real heights on a
+  frame, and goes red when the host lookup is moved back ahead of the measuring
+  loop. Replacing the slice with `items.slice(0)` fails all four and six of the
+  ten on the harness below.
 - The same file gained a scroll-host harness for the frame-driven half, which
   jsdom cannot otherwise reach: it installs both the host the view walks up to
   and the laid-out tree it reads back onto the DOM nodes the JSX mock produces.
