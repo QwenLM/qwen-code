@@ -198,9 +198,8 @@ export function isApiUserPrompt(
  *
  * One CLI-side walk is not yet delegated here and is a near-twin of this one,
  * so a change to the walk semantics below — `includeCompressed`, a new
- * structural entry kind to skip, the -1 convention — has to be re-applied
- * there too or OpenTUI rewind computes a different boundary than ACP for the
- * same history:
+ * structural entry kind to skip, the -1 convention — must also be reviewed
+ * there when changing the positional walk:
  *
  * - `rewindApiCutPoint` (`ui/opentui/session-rewind-model.ts`) is 1-based and
  *   returns -1 for `occurrence <= 0`, where this function is 0-based and
@@ -208,8 +207,8 @@ export function isApiUserPrompt(
  *   only because nothing sits between the startup prelude and the first user
  *   prompt today.
  *
- * The Ink path no longer mirrors the walk: `computeApiTruncationIndex`
- * (`ui/utils/historyMapping.ts`) resolves the target turn's entry through
+ * Live Ink and ACP resolve identities rather than using this walk.
+ * `computeApiTruncationIndex` (`ui/utils/historyMapping.ts`) calls
  * `findApiHistoryPromptIndex`.
  */
 export function findApiRewindCutPoint(
