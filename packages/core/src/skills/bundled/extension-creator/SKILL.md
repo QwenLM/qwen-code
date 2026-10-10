@@ -14,6 +14,8 @@ allowedTools:
 
 # Extension Creator
 
+Search compatibility: when `glob` and `grep_search` are not exposed, use read-only `run_shell_command` calls with `rg --files` and `rg` instead.
+
 Use this skill to create Qwen Code extensions with the existing extension
 scaffold command and bundled templates.
 

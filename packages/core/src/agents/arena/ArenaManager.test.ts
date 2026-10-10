@@ -15,6 +15,7 @@ import { ArenaSessionStatus, ARENA_MAX_AGENTS } from './types.js';
 import { AgentStatus } from '../runtime/agent-types.js';
 import { ApprovalMode } from '../../config/config.js';
 import { getBuiltInOutputStyle } from '../../core/output-styles.js';
+import { getCoreSystemPrompt } from '../../core/prompts.js';
 import { modelText, userText } from '../../test-utils/model-fixtures.js';
 
 const hoistedMockSetupWorktrees = vi.hoisted(() => vi.fn());
@@ -22,6 +23,14 @@ const hoistedMockCleanupSession = vi.hoisted(() => vi.fn());
 const hoistedMockGetWorktreeDiff = vi.hoisted(() => vi.fn());
 const hoistedMockApplyWorktreeChanges = vi.hoisted(() => vi.fn());
 const hoistedMockDetectBackend = vi.hoisted(() => vi.fn());
+
+vi.mock('../../core/prompts.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/prompts.js')>();
+  return {
+    ...actual,
+    getCoreSystemPrompt: vi.fn(actual.getCoreSystemPrompt),
+  };
+});
 
 vi.mock('../index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../index.js')>();
@@ -130,6 +139,7 @@ describe('ArenaManager', () => {
     mockConfig = createMockConfig(tempDir, { worktreeBaseDir: tempDir });
 
     mockBackend = createMockBackend();
+    vi.mocked(getCoreSystemPrompt).mockClear();
     hoistedMockDetectBackend.mockResolvedValue({ backend: mockBackend });
 
     hoistedMockSetupWorktrees.mockImplementation(
@@ -400,10 +410,23 @@ describe('ArenaManager', () => {
       // answer. The headless variant's single-turn marker is absent from
       // every other interaction mode.
       mockBackend.type = 'in-process';
-      await startWith({
+      const { manager } = await startWith({
         getOutputStyle: () => getBuiltInOutputStyle('Concise'),
         isTodoWriteEnabled: () => true,
       });
+
+      for (const model of ['model-1', 'model-2']) {
+        expect(getCoreSystemPrompt).toHaveBeenCalledWith(
+          undefined,
+          model,
+          undefined,
+          'headless',
+          getBuiltInOutputStyle('Concise'),
+          manager['config'],
+          true,
+          false,
+        );
+      }
 
       for (const systemPrompt of spawnedSystemPrompts()) {
         expect(systemPrompt).toContain(

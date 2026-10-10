@@ -94,6 +94,7 @@ export class QwenIgnoreParser implements QwenIgnoreFilter {
     ignoreFileName: string;
     ignorer: ReturnType<typeof ignore>;
   }> = [];
+  private readonly ignorer = ignore();
 
   constructor(projectRoot: string, customIgnoreFileNames?: readonly string[]) {
     this.projectRoot = path.resolve(projectRoot);
@@ -102,7 +103,15 @@ export class QwenIgnoreParser implements QwenIgnoreFilter {
   }
 
   private loadPatterns(): void {
-    for (const ignoreFileName of this.ignoreFileNames) {
+    const orderedIgnoreFileNames = [
+      ...this.ignoreFileNames.filter(
+        (ignoreFileName) => ignoreFileName !== QWEN_IGNORE_FILE_NAME,
+      ),
+      ...this.ignoreFileNames.filter(
+        (ignoreFileName) => ignoreFileName === QWEN_IGNORE_FILE_NAME,
+      ),
+    ];
+    for (const ignoreFileName of orderedIgnoreFileNames) {
       const patternsFilePath = path.join(this.projectRoot, ignoreFileName);
       let content: string;
       try {
@@ -133,6 +142,7 @@ export class QwenIgnoreParser implements QwenIgnoreFilter {
           ignoreFileName,
           ignorer: sourceIgnorer,
         });
+        this.ignorer.add(patterns);
       }
       this.patterns.push(...patterns);
     }
@@ -148,9 +158,7 @@ export class QwenIgnoreParser implements QwenIgnoreFilter {
       return false;
     }
 
-    return this.sourceIgnorers.some(({ ignorer }) =>
-      ignorer.ignores(normalizedPath),
-    );
+    return this.ignorer.ignores(normalizedPath);
   }
 
   getIgnoreFileNameForPath(filePath: string): string | undefined {
@@ -159,7 +167,10 @@ export class QwenIgnoreParser implements QwenIgnoreFilter {
       return undefined;
     }
 
-    return this.sourceIgnorers.find(({ ignorer }) =>
+    if (!this.ignorer.ignores(normalizedPath)) {
+      return undefined;
+    }
+    return this.sourceIgnorers.findLast(({ ignorer }) =>
       ignorer.ignores(normalizedPath),
     )?.ignoreFileName;
   }

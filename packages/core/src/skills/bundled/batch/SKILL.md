@@ -15,6 +15,8 @@ allowedTools:
 
 # /batch - Parallel Batch Operations
 
+Search compatibility: when `glob` and `grep_search` are not exposed, use read-only `run_shell_command` calls with `rg --files` and `rg` instead.
+
 You are orchestrating a batch operation across multiple files. Your job is to:
 
 1. Parse the user's request to understand the target files and operation

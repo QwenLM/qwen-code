@@ -1715,7 +1715,7 @@ describe('Gemini Client (client.ts)', () => {
       // startChat must read back exactly what the setters recorded (the
       // mocked getters are backed by that state), or gating renders with
       // `declaredTools === undefined` and never engages.
-      const surface = vi.mocked(getCoreSystemPrompt).mock.calls.at(-1)?.[7] as
+      const surface = vi.mocked(getCoreSystemPrompt).mock.calls.at(-1)?.[8] as
         | { declaredTools?: ReadonlySet<string>; agentReachable?: boolean }
         | undefined;
       expect(surface?.agentReachable).toBe(true);
@@ -9309,7 +9309,10 @@ Other open files:
         const send = () => run([{ text: 'Plan this change' }], promptId);
         await (inSubagent ? runWithAgentContext('agent-1', send) : send());
 
-        expect(getPlanModeSystemReminder).toHaveBeenCalledWith(forSubagent);
+        expect(getPlanModeSystemReminder).toHaveBeenCalledWith(
+          forSubagent,
+          mockConfig,
+        );
       },
     );
 
@@ -12286,6 +12289,7 @@ Other open files:
         undefined,
         mode,
         outputStyle,
+        mockConfig,
         false,
         codeModeOnly,
         // The prompt-surface getters on the mock are backed by what

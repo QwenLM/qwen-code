@@ -15,6 +15,8 @@ import {
   MCPServerStatus,
   getMCPServerStatus,
   OutputFormat,
+  ApprovalMode,
+  getPlanModeSystemReminder,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { createMinimalSettings } from '../config/settings.js';
@@ -29,6 +31,7 @@ import {
   createAgentToolProgressHandler,
   functionResponsePartsToString,
   insertAfterFunctionResponses,
+  buildInitialSystemReminders,
 } from './nonInteractiveHelpers.js';
 
 // Mock dependencies
@@ -84,7 +87,23 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...actual,
     getMCPServerStatus: vi.fn(),
+    getPlanModeSystemReminder: vi.fn(actual.getPlanModeSystemReminder),
   };
+});
+
+describe('buildInitialSystemReminders', () => {
+  it('threads the active Config into the plan-mode reminder', () => {
+    const config = {
+      getApprovalMode: () => ApprovalMode.PLAN,
+      getSdkMode: () => false,
+      getArenaManager: () => undefined,
+    } as unknown as Config;
+
+    const reminders = buildInitialSystemReminders(config);
+
+    expect(getPlanModeSystemReminder).toHaveBeenCalledWith(false, config);
+    expect(reminders[0]?.text).toContain('Plan mode is active');
+  });
 });
 
 describe('extractPartsFromUserMessage', () => {

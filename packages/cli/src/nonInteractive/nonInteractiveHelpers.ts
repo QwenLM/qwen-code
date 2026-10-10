@@ -116,7 +116,9 @@ export function buildInitialSystemReminders(config: Config): Part[] {
   const reminders: Part[] = [];
 
   if (config.getApprovalMode() === ApprovalMode.PLAN) {
-    reminders.push({ text: getPlanModeSystemReminder(config.getSdkMode?.()) });
+    reminders.push({
+      text: getPlanModeSystemReminder(config.getSdkMode?.(), config),
+    });
   }
 
   const arenaManager = config.getArenaManager?.();
