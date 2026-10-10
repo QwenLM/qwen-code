@@ -143,7 +143,7 @@ export function useCommandCompletion(
           }
         }
         const pathStart = i + 1;
-        const partialPath = currentLine.substring(pathStart, end);
+        const partialPath = codePoints.slice(pathStart, end).join('');
         return {
           completionMode: CompletionMode.AT,
           query: partialPath,
