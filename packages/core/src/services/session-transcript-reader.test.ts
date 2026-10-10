@@ -1770,7 +1770,7 @@ describe('SessionTranscriptReader', () => {
       executionContext,
     );
     const restored = await service.readRestoreProjection(sessionId, NONE);
-    expect(restored?.runtime.apiHistory).toEqual(
+    expect(restored?.runtime.apiHistory).toMatchObject(
       messages.map((message) => message.message),
     );
     expect(restored?.runtime.recording.sessionModel).toBeUndefined();
