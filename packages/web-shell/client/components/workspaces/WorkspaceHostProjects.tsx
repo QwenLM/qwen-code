@@ -13,7 +13,6 @@ import {
   getHostClient,
   useFanoutOrigins,
   useHostCapabilities,
-  useHostFanout,
 } from '../../config/host-fanout';
 import {
   WorkspaceHostsEnabled,
@@ -141,10 +140,6 @@ function OtherHosts({
   const origin = useCurrentHostOrigin();
   const origins = useOtherOrigins(origin);
   const saved = useWorkspaceHosts();
-  // Owns the per-origin client pool lifecycle (clients are created with the
-  // host set and dropped when hosts leave it); per-host live state comes
-  // from useHostCapabilities inside FanoutHostGroup.
-  useHostFanout(origins);
   if (origins.length === 0) return null;
   return (
     <div

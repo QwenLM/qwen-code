@@ -10,6 +10,7 @@ const state = vi.hoisted(() => ({
     string,
     {
       capabilities: () => Promise<unknown>;
+      capabilitiesCalls?: number;
       listWorkspaceSessionsPage?: (cwd: string) => Promise<unknown>;
     }
   >,
@@ -59,6 +60,7 @@ import {
   rememberWorkspaceHost,
   WorkspaceHostsEnabled,
 } from '../../config/workspace-hosts';
+import { useHostFanout } from '../../config/host-fanout';
 import { WorkspaceSection } from '../sidebar/WorkspaceSection';
 import {
   OtherHostProjects,
@@ -77,8 +79,16 @@ function registerHost(
 ): void {
   state.hosts[origin] = {
     capabilities: options.failWith
-      ? () => Promise.reject(options.failWith)
-      : () => Promise.resolve({ workspaces: options.workspaces ?? [] }),
+      ? () => {
+          const host = state.hosts[origin]!;
+          host.capabilitiesCalls = (host.capabilitiesCalls ?? 0) + 1;
+          return Promise.reject(options.failWith);
+        }
+      : () => {
+          const host = state.hosts[origin]!;
+          host.capabilitiesCalls = (host.capabilitiesCalls ?? 0) + 1;
+          return Promise.resolve({ workspaces: options.workspaces ?? [] });
+        },
     listWorkspaceSessionsPage: (cwd) =>
       Promise.resolve({ sessions: options.sessions?.[cwd] ?? [] }),
   };
@@ -348,6 +358,37 @@ describe('WorkspaceHostHeading / OtherHostProjects', () => {
 
     expect(container.textContent).toContain('host-f.example');
     expect(buttonWithText(container, 'repo-f')).toBeDefined();
+  });
+
+  it('polls each host once no matter how many consumers subscribe', async () => {
+    rememberWorkspaceHost('https://host-i.example', []);
+    registerHost('https://host-i.example', {
+      workspaces: [
+        { id: 'wi', cwd: '/srv/repo-i', primary: true, trusted: true },
+      ],
+    });
+    // The sidebar group (useHostCapabilities) and the App-level fan-out
+    // (useHostFanout) both subscribe; the shared store must issue exactly
+    // one capabilities round per host (PR review: was 3 pollers per host).
+    function FanoutSubscriber() {
+      useHostFanout(['https://host-i.example']);
+      return null;
+    }
+    const container = renderWithHosts(
+      <>
+        <OtherHostProjects />
+        <FanoutSubscriber />
+      </>,
+    );
+    await settle();
+
+    expect(container.textContent).toContain('repo-i');
+    expect(state.hosts['https://host-i.example']?.capabilitiesCalls).toBe(1);
+    expect(
+      state.clientConstructs.filter(
+        (opts) => opts.baseUrl === 'https://host-i.example',
+      ).length,
+    ).toBe(1);
   });
 
   it('focuses a CSP-covered host in-app instead of navigating', async () => {

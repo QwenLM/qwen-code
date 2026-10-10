@@ -15,9 +15,13 @@
  * paths only (capabilities, session listings); session creation and every
  * mutation go through the focused provider or an explicit one-shot call that
  * immediately hands the session to the focused provider.
+ *
+ * Polling is shared: one `capabilities()` round per tracked origin every
+ * 30 s, no matter how many components subscribe (the composer picker, the
+ * sidebar host groups and the App-level fan-out all read the same store).
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { DaemonClient } from '@qwen-code/sdk/daemon';
 import type { DaemonCapabilities } from '@qwen-code/sdk/daemon';
 import { getDaemonToken } from './daemon';
@@ -39,8 +43,8 @@ const clients = new Map<
 /**
  * Stable read-only client for `origin`. Recreated only when the stored
  * per-origin token changed; a client whose daemon vanished stays online as an
- * instance (its next request fails) and its entry is dropped by
- * `dropHostClient` when the host is removed from the saved set.
+ * instance (its next request fails) and its entry is dropped when the host
+ * loses its last subscriber.
  */
 export function getHostClient(origin: string): DaemonClient {
   const existing = clients.get(origin);
@@ -52,17 +56,96 @@ export function getHostClient(origin: string): DaemonClient {
   return client;
 }
 
-export function dropHostClient(origin: string): void {
+function dropHostClient(origin: string): void {
   clients.get(origin)?.client.dispose();
   clients.delete(origin);
 }
 
-/** The hosts this page currently fans out to: saved workspace hosts minus
- * the focused daemon, plus the page origin when the focused daemon is remote
- * (the "way back" group). Callers compose the focused origin separately. */
-
 const POLL_MS = 30_000;
 const UNAUTHORIZED_PATTERN = /401|unauthori[sz]ed/i;
+
+export const HOST_FANOUT_POLL_MS = POLL_MS;
+
+export interface HostCapabilitiesState {
+  workspaces: DaemonCapabilities['workspaces'];
+  status: HostConnectionStatus;
+  /** Bumps on every content-changed refresh so poll consumers resubscribe. */
+  generation: number;
+}
+
+interface HostFanoutEntry extends HostCapabilitiesState {
+  listeners: Set<() => void>;
+  /** Immutable per-round snapshot handed to useSyncExternalStore. */
+  snapshot: HostCapabilitiesState;
+}
+
+/** Monotonic store version: bumped on every settled poll round. */
+let storeVersion = 0;
+const versionListeners = new Set<() => void>();
+
+function storeVersionSnapshot(): number {
+  return storeVersion;
+}
+
+function notify(): void {
+  storeVersion += 1;
+  for (const listener of versionListeners) listener();
+}
+
+function notifyOrigin(origin: string): void {
+  const entry = fanoutStore.get(origin);
+  if (!entry) return;
+  for (const listener of entry.listeners) listener();
+}
+
+/**
+ * Module-level fan-out store: one poller per origin, shared by every
+ * consumer. The sidebar groups, the composer picker and any other
+ * `useHostFanout`/`useHostCapabilities` subscriber observe the same rounds —
+ * N hosts cost N `capabilities()` requests per interval, never one per
+ * consumer. The interval runs while at least one origin is tracked.
+ */
+const fanoutStore = new Map<string, HostFanoutEntry>();
+let pollTimer: number | undefined;
+
+async function pollOrigin(origin: string): Promise<void> {
+  const entry = fanoutStore.get(origin);
+  if (!entry) return;
+  try {
+    const capabilities = await getHostClient(origin).capabilities();
+    const current = fanoutStore.get(origin);
+    if (!current) return;
+    // Generation feeds WorkspaceSection's reloadToken: bumping it on every
+    // poll re-runs the whole session catalog and visibly flickers the
+    // sidebar every 30 s. Only a really different snapshot may advance it.
+    const changed =
+      current.workspaces === undefined ||
+      workspacesSignature(current.workspaces) !==
+        workspacesSignature(capabilities.workspaces);
+    current.workspaces = capabilities.workspaces;
+    current.status = 'online';
+    if (changed) current.generation += 1;
+    publishSnapshot(current);
+    notifyOrigin(origin);
+    notify();
+  } catch (error) {
+    const current = fanoutStore.get(origin);
+    if (!current) return;
+    // Failed rounds keep the last known workspaces for that host.
+    current.status = isUnauthorized(error) ? 'unauthorized' : 'offline';
+    publishSnapshot(current);
+    notifyOrigin(origin);
+    notify();
+  }
+}
+
+function publishSnapshot(entry: HostFanoutEntry): void {
+  entry.snapshot = {
+    workspaces: entry.workspaces,
+    status: entry.status,
+    generation: entry.generation,
+  };
+}
 
 function isUnauthorized(error: unknown): boolean {
   return error instanceof Error
@@ -70,107 +153,105 @@ function isUnauthorized(error: unknown): boolean {
     : UNAUTHORIZED_PATTERN.test(String(error));
 }
 
-/**
- * Live connection state + a client for every `origins` entry. Polls
- * `capabilities()` per host and on a slow cadence; a failed round marks the
- * host offline (or unauthorized on a 401-class error) without tearing the
- * client down — the group keeps rendering its last-known snapshot.
- */
-export function useHostFanout(origins: readonly string[]): {
-  clientsByOrigin: ReadonlyMap<string, DaemonClient>;
-  statusByOrigin: ReadonlyMap<string, HostConnectionStatus>;
-  workspacesByOrigin: ReadonlyMap<
-    string,
-    DaemonCapabilities['workspaces'] | undefined
-  >;
-  refreshAll: () => void;
-} {
-  const stableOrigins = useMemo(
-    () => [...new Set(origins)].sort(),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [origins.join('')],
-  );
-  const clientsByOrigin = useMemo(() => {
-    const map = new Map<string, DaemonClient>();
-    for (const origin of stableOrigins) map.set(origin, getHostClient(origin));
-    return map;
-  }, [stableOrigins]);
-  const [statusByOrigin, setStatusByOrigin] = useState<
-    ReadonlyMap<string, HostConnectionStatus>
-  >(new Map());
-  const [workspacesByOrigin, setWorkspacesByOrigin] = useState<
-    ReadonlyMap<string, DaemonCapabilities['workspaces'] | undefined>
-  >(new Map());
-  const [round, setRound] = useState(0);
-
-  useEffect(() => {
-    let cancelled = false;
-    const probe = async () => {
-      const entries = await Promise.all(
-        stableOrigins.map(async (origin) => {
-          const client = clientsByOrigin.get(origin);
-          if (!client) return undefined;
-          try {
-            const capabilities = await client.capabilities();
-            return [origin, 'online', capabilities.workspaces] as const;
-          } catch (error) {
-            return [
-              origin,
-              isUnauthorized(error) ? 'unauthorized' : 'offline',
-              undefined,
-            ] as const;
-          }
-        }),
-      );
-      if (cancelled) return;
-      // Hosts that left the set lose their client and their row entirely.
-      for (const origin of [...clients.keys()]) {
-        if (!stableOrigins.includes(origin)) dropHostClient(origin);
-      }
-      setStatusByOrigin(() => {
-        const next = new Map<string, HostConnectionStatus>();
-        for (const entry of entries) {
-          if (entry) next.set(entry[0], entry[1]);
-        }
-        return next;
-      });
-      setWorkspacesByOrigin((previous) => {
-        const next = new Map(previous);
-        for (const origin of [...next.keys()]) {
-          if (!stableOrigins.includes(origin)) next.delete(origin);
-        }
-        for (const entry of entries) {
-          if (!entry) continue;
-          // Failed rounds keep the last known workspaces for that host.
-          if (entry[2] !== undefined) next.set(entry[0], entry[2]);
-        }
-        return next;
-      });
-    };
-    setStatusByOrigin((previous) => {
-      const next = new Map(previous);
-      for (const origin of stableOrigins) {
-        if (!next.has(origin)) next.set(origin, 'connecting');
-      }
-      return next;
-    });
-    void probe();
-    const timer = setInterval(probe, POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [clientsByOrigin, stableOrigins, round]);
-
-  return {
-    clientsByOrigin,
-    statusByOrigin,
-    workspacesByOrigin,
-    refreshAll: () => setRound((value) => value + 1),
-  };
+/** Content address for a workspaces snapshot: id + identity fields. */
+function workspacesSignature(
+  workspaces: DaemonCapabilities['workspaces'],
+): string {
+  return (workspaces ?? [])
+    .map((workspace) =>
+      [
+        workspace.id,
+        workspace.cwd,
+        workspace.displayName ?? '',
+        workspace.trusted ? '1' : '0',
+        workspace.primary ? '1' : '0',
+        workspace.kind ?? '',
+        workspace.removable ? '1' : '0',
+      ].join(''),
+    )
+    .join('');
 }
 
-export const HOST_FANOUT_POLL_MS = POLL_MS;
+function ensurePollTimer(): void {
+  if (pollTimer !== undefined || fanoutStore.size === 0) return;
+  pollTimer = window.setInterval(() => {
+    for (const origin of fanoutStore.keys()) void pollOrigin(origin);
+  }, POLL_MS);
+}
+
+function stopPollTimerIfIdle(): void {
+  if (pollTimer === undefined || fanoutStore.size > 0) return;
+  window.clearInterval(pollTimer);
+  pollTimer = undefined;
+}
+
+function trackOrigin(origin: string): HostFanoutEntry {
+  let entry = fanoutStore.get(origin);
+  if (!entry) {
+    entry = {
+      workspaces: undefined,
+      status: 'connecting',
+      generation: 0,
+      listeners: new Set(),
+      snapshot: {
+        workspaces: undefined,
+        status: 'connecting',
+        generation: 0,
+      },
+    };
+    fanoutStore.set(origin, entry);
+    void pollOrigin(origin);
+    ensurePollTimer();
+  }
+  return entry;
+}
+
+function untrackOrigin(origin: string): void {
+  fanoutStore.delete(origin);
+  stopPollTimerIfIdle();
+}
+
+/**
+ * Live `capabilities().workspaces` + connection status for one fan-out host.
+ * Shares the store's single poll round with every other consumer; the last
+ * successful payload survives later failures (status flips to
+ * offline/unauthorized but the rows keep rendering) and hosts are always
+ * polled with their own per-origin client.
+ */
+export function useHostCapabilities(origin: string): HostCapabilitiesState & {
+  refresh: () => void;
+} {
+  const subscribe = useMemo(
+    () => (listener: () => void) => {
+      const entry = trackOrigin(origin);
+      entry.listeners.add(listener);
+      return () => {
+        const current = fanoutStore.get(origin);
+        if (!current) return;
+        current.listeners.delete(listener);
+        if (current.listeners.size === 0) {
+          untrackOrigin(origin);
+          dropHostClient(origin);
+        }
+      };
+    },
+    [origin],
+  );
+  const snapshot = useSyncExternalStore(
+    subscribe,
+    () => fanoutStore.get(origin)?.snapshot,
+  );
+  const [refreshTick, setRefreshTick] = useState(0);
+  useEffect(() => {
+    if (refreshTick > 0) void pollOrigin(origin);
+  }, [origin, refreshTick]);
+  const state: HostCapabilitiesState = snapshot ?? {
+    workspaces: undefined,
+    status: 'connecting',
+    generation: 0,
+  };
+  return { ...state, refresh: () => setRefreshTick((tick) => tick + 1) };
+}
 
 /**
  * The single ordered host set both the sidebar fan-out and App composers
@@ -200,83 +281,66 @@ export function useFanoutOrigins(): string[] {
   }, [hosts, connections, focused, pageOrigin]);
 }
 
-export interface HostCapabilitiesState {
-  workspaces: DaemonCapabilities['workspaces'];
-  status: HostConnectionStatus;
-  /** Bumps on every successful refresh so poll consumers can resubscribe. */
-  generation: number;
-}
-
 /**
- * Live `capabilities().workspaces` for one fan-out host, refreshed on mount
- * and on a slow cadence. The last successful payload survives later failures
- * (status flips to offline/unauthorized but the rows keep rendering) and
- * hosts are always polled with their own per-origin client.
+ * Live connection state + a client for every `origins` entry, drawn from the
+ * shared per-origin store: subscribing here never adds a second poller — the
+ * composer picker and the sidebar groups observe the same rounds. Failed
+ * hosts keep their last-known snapshot; hosts that lose their last
+ * subscriber are dropped from the client pool.
  */
-export function useHostCapabilities(origin: string): HostCapabilitiesState & {
-  refresh: () => void;
+export function useHostFanout(origins: readonly string[]): {
+  clientsByOrigin: ReadonlyMap<string, DaemonClient>;
+  statusByOrigin: ReadonlyMap<string, HostConnectionStatus>;
+  workspacesByOrigin: ReadonlyMap<
+    string,
+    DaemonCapabilities['workspaces'] | undefined
+  >;
+  refreshAll: () => void;
 } {
-  const [state, setState] = useState<HostCapabilitiesState>({
-    workspaces: undefined,
-    status: 'connecting',
-    generation: 0,
-  });
-  const [round, setRound] = useState(0);
-  useEffect(() => {
-    let cancelled = false;
-    const refresh = async () => {
-      try {
-        const capabilities = await getHostClient(origin).capabilities();
-        if (cancelled) return;
-        setState((previous) => {
-          // Generation feeds WorkspaceSection's reloadToken: bumping it on
-          // every poll re-runs the whole session catalog and visibly
-          // flickers the sidebar every 30 s. Only a really different
-          // snapshot may advance it.
-          const changed =
-            previous.workspaces === undefined ||
-            workspacesSignature(previous.workspaces) !==
-              workspacesSignature(capabilities.workspaces);
-          return {
-            workspaces: capabilities.workspaces,
-            status: 'online',
-            generation: changed ? previous.generation + 1 : previous.generation,
-          };
-        });
-      } catch (error) {
-        if (cancelled) return;
-        setState((previous) => ({
-          ...previous,
-          status: isUnauthorized(error) ? 'unauthorized' : 'offline',
-        }));
+  const stableOrigins = useMemo(
+    () => [...new Set(origins)].sort(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [origins.join('')],
+  );
+  const subscribe = useMemo(
+    () => (listener: () => void) => {
+      for (const origin of stableOrigins) {
+        trackOrigin(origin).listeners.add(listener);
       }
-    };
-    setState((previous) => ({ ...previous, status: 'connecting' }));
-    void refresh();
-    const timer = setInterval(refresh, POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [origin, round]);
-  return { ...state, refresh: () => setRound((value) => value + 1) };
-}
-
-/** Content address for a workspaces snapshot: id + identity fields. */
-function workspacesSignature(
-  workspaces: DaemonCapabilities['workspaces'],
-): string {
-  return (workspaces ?? [])
-    .map((workspace) =>
-      [
-        workspace.id,
-        workspace.cwd,
-        workspace.displayName ?? '',
-        workspace.trusted ? '1' : '0',
-        workspace.primary ? '1' : '0',
-        workspace.kind ?? '',
-        workspace.removable ? '1' : '0',
-      ].join(''),
-    )
-    .join('');
+      return () => {
+        for (const origin of stableOrigins) {
+          const entry = fanoutStore.get(origin);
+          if (!entry) continue;
+          entry.listeners.delete(listener);
+          if (entry.listeners.size === 0) {
+            untrackOrigin(origin);
+            dropHostClient(origin);
+          }
+        }
+      };
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [stableOrigins.join('')],
+  );
+  useSyncExternalStore(subscribe, storeVersionSnapshot, storeVersionSnapshot);
+  const clientsByOrigin = new Map<string, DaemonClient>();
+  const statusByOrigin = new Map<string, HostConnectionStatus>();
+  const workspacesByOrigin = new Map<
+    string,
+    DaemonCapabilities['workspaces'] | undefined
+  >();
+  for (const origin of stableOrigins) {
+    const entry = fanoutStore.get(origin);
+    clientsByOrigin.set(origin, getHostClient(origin));
+    statusByOrigin.set(origin, entry?.status ?? 'connecting');
+    workspacesByOrigin.set(origin, entry?.workspaces);
+  }
+  return {
+    clientsByOrigin,
+    statusByOrigin,
+    workspacesByOrigin,
+    refreshAll: () => {
+      for (const origin of stableOrigins) void pollOrigin(origin);
+    },
+  };
 }

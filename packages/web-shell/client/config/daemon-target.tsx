@@ -80,7 +80,8 @@ export interface DaemonTargetController {
    * through the navigation-based connect flow instead.
    */
   focusHost(target: FocusHostTarget): void;
-  /** Token for the focused host, read per render so token edits re-key it. */
+  /** Token for the focused host, refreshed when the focused origin (or any
+   * controller dependency) changes; a token edit alone does not re-key it. */
   activeToken: string | undefined;
   /**
    * Focus another host and hand an intent to the remounted app. The app
