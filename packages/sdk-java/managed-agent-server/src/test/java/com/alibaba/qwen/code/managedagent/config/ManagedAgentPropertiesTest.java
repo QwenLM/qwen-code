@@ -98,7 +98,12 @@ class ManagedAgentPropertiesTest {
             java.util.Set.of(
                     "Auth.allowedDrift",
                     "Events.batchInterval",
-                    "Events.materializeInterval");
+                    "Events.materializeInterval",
+                    "RuntimeBroker.childWorkspaceGitTimeout",
+                    "Automation.scanDelay",
+                    "Automation.lease",
+                    "Automation.lateTolerance",
+                    "Automation.lookback");
 
     @Test
     void everyDurationFieldDeclaresABindingUnit() {
@@ -123,7 +128,7 @@ class ManagedAgentPropertiesTest {
                 if (field.getType() == java.time.Duration.class) {
                     // Presence is not enough — the declared VALUE is the
                     // binding contract, so each field is pinned against the
-                    // table: only the three documented millisecond
+                    // table: only the documented millisecond
                     // exceptions expect MILLIS, and flipping
                     // SessionStore.writerLeaseDuration to MILLIS goes red.
                     String name = current.getSimpleName() + "."
@@ -142,10 +147,10 @@ class ManagedAgentPropertiesTest {
         }
         // The walk must not pass vacuously: extracting a group out of
         // the properties class empties it and the millisecond
-        // exceptions would go unchecked. 27 is the current field
+        // exceptions would go unchecked. 32 is the current field
         // inventory — update it in the same change that adds or
         // removes a Duration field.
-        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(27);
+        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(32);
     }
 
     @Test
@@ -464,8 +469,10 @@ class ManagedAgentPropertiesTest {
         }
         assertThat(swept).containsExactlyInAnyOrder(
                 "artifacts.projection-interval",
+                "automation.scan-delay",
                 "channels.scan-delay",
                 "child-relay.scan-delay",
+                "child-workspace.scan-delay",
                 "dispatch.scan-delay",
                 "events.replay-floor-interval");
         var placeholderOnly = new java.util.TreeSet<String>();
@@ -710,5 +717,134 @@ class ManagedAgentPropertiesTest {
             change.accept(properties);
             assertThatThrownBy(properties::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class);
         }
+    }
+
+    @Test
+    void automationTunablesBindFromTheShippedConfiguration() throws Exception {
+        var yaml = new org.springframework.boot.env.YamlPropertySourceLoader()
+                .load("application.yml",
+                        new org.springframework.core.io.ClassPathResource(
+                                "application.yml"));
+        // The flattened keys must exist: a renamed or dropped key binds
+        // nothing, and the Java defaults below would silently win.
+        assertThat(yaml).anySatisfy(source -> {
+            assertThat(source.containsProperty("qwen.managed-agent.automation"
+                    + ".enabled")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent.automation"
+                    + ".scan-delay")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent.automation"
+                    + ".lease")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent.automation"
+                    + ".late-tolerance")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent.automation"
+                    + ".lookback")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent.automation"
+                    + ".max-slots-per-tick")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent.automation"
+                    + ".concurrency")).isTrue();
+        });
+        new ApplicationContextRunner()
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .withInitializer(ctx -> {
+                    java.util.Map<String, Object> ambient =
+                            new java.util.LinkedHashMap<>(System.getenv());
+                    ambient.keySet().removeIf(name -> name
+                            .startsWith("QWEN_MANAGED_AGENT_"));
+                    ctx.getEnvironment().getPropertySources().replace(
+                            "systemEnvironment",
+                            new org.springframework.core.env.MapPropertySource(
+                                    "systemEnvironment", ambient));
+                    yaml.forEach(ctx.getEnvironment().getPropertySources()
+                            ::addLast);
+                })
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    var automation = started
+                            .getBean(ManagedAgentProperties.class)
+                            .getAutomation();
+                    assertThat(automation.isEnabled()).isFalse();
+                    assertThat(automation.getScanDelay())
+                            .isEqualTo(java.time.Duration.ofSeconds(10));
+                    assertThat(automation.getLease())
+                            .isEqualTo(java.time.Duration.ofSeconds(60));
+                    assertThat(automation.getLateTolerance())
+                            .isEqualTo(java.time.Duration.ofMinutes(5));
+                    assertThat(automation.getLookback())
+                            .isEqualTo(java.time.Duration.ofHours(24));
+                    assertThat(automation.getMaxSlotsPerTick()).isEqualTo(1000);
+                    assertThat(automation.getConcurrency()).isEqualTo(4);
+                });
+    }
+
+    @Test
+    void automationTunablesRefuseNonPositiveValuesAtStartup() {
+        List<Consumer<ManagedAgentProperties>> invalid = List.of(
+                p -> p.getAutomation().setMaxSlotsPerTick(0),
+                p -> p.getAutomation().setConcurrency(0),
+                p -> p.getAutomation().setScanDelay(
+                        java.time.Duration.ZERO),
+                p -> p.getAutomation().setLease(java.time.Duration.ZERO),
+                p -> p.getAutomation().setLateTolerance(
+                        java.time.Duration.ZERO),
+                p -> p.getAutomation().setLookback(java.time.Duration.ZERO));
+        for (Consumer<ManagedAgentProperties> change : invalid) {
+            ManagedAgentProperties properties = new ManagedAgentProperties();
+            properties.getAutomation().setEnabled(true);
+            // The complete values bind cleanly: the offender alone throws.
+            assertThatCode(properties::validateWorkspaceFiles)
+                    .doesNotThrowAnyException();
+            change.accept(properties);
+            assertThatThrownBy(properties::validateWorkspaceFiles)
+                    .isInstanceOf(IllegalStateException.class);
+        }
+        // And automation OFF may carry any values untouched.
+        ManagedAgentProperties off = new ManagedAgentProperties();
+        off.getAutomation().setMaxSlotsPerTick(0);
+        assertThatCode(off::validateWorkspaceFiles).doesNotThrowAnyException();
+    }
+
+    @Test
+    void childWorkspacesAreOffByDefaultAndNeedTheMountingBroker() {
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().isChildWorkspacesEnabled()).isFalse();
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().getChildWorkspaceGitTimeout())
+                .isEqualTo(java.time.Duration.ofMinutes(2));
+        List<Consumer<ManagedAgentProperties>> invalid = List.of(
+                p -> p.getRuntimeBroker().setEnabled(false),
+                p -> p.getRuntimeBroker().setProvisioner("kubernetes"),
+                p -> p.getRuntimeBroker().setIsolationClass("workspace"),
+                p -> p.getRuntimeBroker().setWorkspaceMounts(List.of()));
+        for (Consumer<ManagedAgentProperties> change : invalid) {
+            ManagedAgentProperties properties = new ManagedAgentProperties();
+            properties.getRuntimeBroker().setEnabled(true);
+            properties.getRuntimeBroker().setChildWorkspacesEnabled(true);
+            properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                    new ManagedAgentProperties.RuntimeBroker.WorkspaceMount("tenant", "storage", "/workspace")));
+            if (ManagedAgentProperties.childWorkspacesSupportedOn(System.getProperty("os.name"))
+                    && ManagedAgentProperties.utf8FileNames(System.getProperty("sun.jnu.encoding"))) {
+                assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+            } else {
+                assertThatThrownBy(properties::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class);
+            }
+            change.accept(properties);
+            assertThatThrownBy(properties::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Child Workspaces require");
+        }
+        for (java.time.Duration timeout : List.of(java.time.Duration.ofMillis(30),
+                java.time.Duration.ofMillis(999), java.time.Duration.ofHours(2))) {
+            ManagedAgentProperties properties = new ManagedAgentProperties();
+            properties.getRuntimeBroker().setEnabled(true);
+            properties.getRuntimeBroker().setChildWorkspacesEnabled(true);
+            properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                    new ManagedAgentProperties.RuntimeBroker.WorkspaceMount("tenant", "storage", "/workspace")));
+            properties.getRuntimeBroker().setChildWorkspaceGitTimeout(timeout);
+            assertThatThrownBy(properties::validateWorkspaceFiles).as(timeout.toString())
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("child-workspace-git-timeout");
+        }
+        assertThat(ManagedAgentProperties.childWorkspacesSupportedOn("Linux")).isTrue();
+        assertThat(ManagedAgentProperties.childWorkspacesSupportedOn("Mac OS X")).isTrue();
+        assertThat(ManagedAgentProperties.childWorkspacesSupportedOn("Windows Server 2022")).isFalse();
+        assertThat(ManagedAgentProperties.utf8FileNames("UTF-8")).isTrue();
+        assertThat(ManagedAgentProperties.utf8FileNames("ANSI_X3.4-1968")).isFalse();
     }
 }

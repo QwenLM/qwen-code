@@ -482,11 +482,44 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public Map<String, Object> runAutomationOperation(String tenantId,
+            String sessionId, Map<String, Object> body) {
+        try {
+            // Automation operations drive new work (a fire admits an input
+            // and wakes a turn), so a cached attachment is no admission:
+            // the Workspace checks submit and continueManagedRuntime run
+            // apply to every relay.
+            requireReadyForNewWork(tenantId, sessionId, false);
+            if (!attachments.containsKey(new AttachmentKey(tenantId, sessionId))
+                    && sessions.requireSession(tenantId, sessionId)
+                            .harnessBootId() != null) {
+                // A Session a prior control-plane process attached: a plain
+                // load answers hosted_session_already_attached until the
+                // Harness evicts it, so re-attach through the takeover load
+                // a Turn uses (HarnessCoordinator.runClaimed).
+                recoverManagedRuntime(tenantId, sessionId, false);
+            }
+            // Resolve the attachment BEFORE fetching the client: the
+            // resolution may block on a create/load round trip, and an
+            // adoption closing the captured client during that window
+            // would strand this call on a dead instance instead of the
+            // rebuilt one (the ordering doContinueManagedRuntime follows).
+            HarnessSessionRef ref = attachment(tenantId, sessionId, true);
+            return client().runAutomationOperation(ref, body);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
     public void runChildOperation(String tenantId, String sessionId,
             Map<String, Object> body) {
         try {
-            client().runChildOperation(attachment(tenantId, sessionId, true),
-                    body);
+            // Same ordering as the automation relay: the attachment
+            // resolves first, the client reads after it.
+            HarnessSessionRef ref = attachment(tenantId, sessionId, true);
+            client().runChildOperation(ref, body);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;

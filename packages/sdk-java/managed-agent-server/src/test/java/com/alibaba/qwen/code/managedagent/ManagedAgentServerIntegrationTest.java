@@ -1998,10 +1998,18 @@ class ManagedAgentServerIntegrationTest {
         private volatile String closeAnswer = BOOT_ID;
         private final Map<String, HarnessRuntimeRecovery>
                 tenantRecoveries = new ConcurrentHashMap<>();
+        /** H6b: the automation funnel this fixture answers for. */
+        final AutomationHarnessFake automations = new AutomationHarnessFake();
 
         @Override
         public boolean isAvailable() {
             return available;
+        }
+
+        @Override
+        public Map<String, Object> runAutomationOperation(String tenantId,
+                String sessionId, Map<String, Object> body) {
+            return automations.run(sessionId, body);
         }
 
         @Override
