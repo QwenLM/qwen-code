@@ -1527,6 +1527,69 @@ const timer = setInterval(() => {
     expect(JSON.parse(body)).toEqual({ ...envelope, result: manifest });
   });
 
+  it.each([0, 1])(
+    'enforces the history response limit at 8 MiB + %i bytes',
+    async (overflow) => {
+      await begin();
+      const state = await control<ManagedToolFileHistoryState>({
+        kind: 'history',
+      });
+      const snapshot = state.snapshots[0];
+      const backup = {
+        backupFileName: null,
+        version: 0,
+        backupTime: snapshot.timestamp,
+      };
+      // Spread padding across paths that stay within the schema's 4096 chars.
+      const files = Array.from(
+        { length: 2048 },
+        (_, index) => `/file-${index}`,
+      );
+      snapshot.trackedFileBackups = Object.fromEntries(
+        files.map((file) => [file, backup]),
+      );
+      const envelope = {
+        protocolVersion: 1,
+        providerProtocol: MANAGED_RUNTIME_PROVIDER_PROTOCOL,
+        session: SESSION,
+        result: state,
+      };
+      const limit = 8 * 1024 * 1024;
+      const padding =
+        limit + overflow - Buffer.byteLength(JSON.stringify(envelope));
+      snapshot.trackedFileBackups = Object.fromEntries(
+        files.map((file, index) => [
+          file +
+            'x'.repeat(
+              Math.floor(padding / files.length) +
+                Number(index < padding % files.length),
+            ),
+          backup,
+        ]),
+      );
+      expect(Buffer.byteLength(JSON.stringify(envelope))).toBe(
+        limit + overflow,
+      );
+      vi.spyOn(ManagedToolFileHistory.prototype, 'state').mockReturnValue(
+        state,
+      );
+      const response = await post({ kind: 'history' });
+      if (overflow === 0) {
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        expect(Buffer.byteLength(body)).toBe(limit);
+        expect(JSON.parse(body)).toEqual(envelope);
+      } else {
+        expect(response.status).toBe(413);
+        expect(await response.json()).toEqual({
+          code: 'managed_runtime_provider_too_large',
+          error:
+            'Managed Runtime provider response exceeds its body size limit.',
+        });
+      }
+    },
+  );
+
   it('fits a status whose envelope is one byte over the wire limit', async () => {
     await begin();
     const ref = reference(
