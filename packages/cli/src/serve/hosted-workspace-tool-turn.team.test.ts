@@ -31,11 +31,16 @@ import {
   type HostedTeamStore,
 } from './hosted-team-session.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import { settleInterruptedTurnRuntime } from './hosted-runtime-recovery.js';
+import {
+  HOSTED_APPROVAL_OPTIONS,
+  HOSTED_TOOL_APPROVAL_POLICY,
+} from './hosted-tool-approval.js';
 
 // H4e-b1: team_state and team_task stay disabled until the physical
 // acceptance pass, so the gate is lifted per test; with it closed the turn
 // keeps the H4b surface exactly.
-const enablement = vi.hoisted(() => ({ teams: true }));
+const enablement = vi.hoisted(() => ({ teamState: true, teamTask: true }));
 vi.mock(
   '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
   async (importOriginal) => {
@@ -48,7 +53,12 @@ vi.mock(
       assertManagedSessionDomainEnabled: (
         domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
       ) => {
-        if (!(domain.startsWith('team_') && enablement.teams))
+        if (
+          !(
+            (domain === 'team_state' && enablement.teamState) ||
+            (domain === 'team_task' && enablement.teamTask)
+          )
+        )
           actual.assertManagedSessionDomainEnabled(domain);
       },
     };
@@ -195,7 +205,8 @@ function roster() {
 }
 
 beforeEach(async () => {
-  enablement.teams = true;
+  enablement.teamState = true;
+  enablement.teamTask = true;
   vi.resetAllMocks();
   broker.warm.mockResolvedValue(undefined);
   broker.acquire.mockResolvedValue(undefined);
@@ -272,14 +283,19 @@ it('declares the team tools only beside the root Agent tool, behind both gates',
       team.includes(name!),
     ),
   ).toBe(false);
-  enablement.teams = false;
-  const closed = await createTurn().declarations(signal);
-  expect(closed).toContain(HOSTED_AGENT_TOOL);
-  expect(closed.some((tool) => team.includes(tool.name!))).toBe(false);
+  // Each domain gates the team on its own.
+  for (const gate of ['teamState', 'teamTask'] as const) {
+    enablement.teamState = gate !== 'teamState';
+    enablement.teamTask = gate !== 'teamTask';
+    const closed = await createTurn().declarations(signal);
+    expect(closed).toContain(HOSTED_AGENT_TOOL);
+    expect(closed.some((tool) => team.includes(tool.name!))).toBe(false);
+  }
 });
 
 it('keeps refusing name while the team domains are disabled', async () => {
-  enablement.teams = false;
+  enablement.teamState = false;
+  enablement.teamTask = false;
   const answer = await execute(createTurn(), [member('alice', 'call-1')]);
   expect(answer).toContain('unsupported argument');
   expect(answer).toContain('\\"name\\"');
@@ -361,6 +377,16 @@ it('refuses a foreground member and the batch rules before anything runs', async
       member('bob', 'call-5'),
     ]),
   ).toContain('cannot launch in the same batch as team_create or team_delete');
+  expect(
+    await execute(turn, [
+      call(
+        'agent',
+        { description: 'audit', prompt: 'review', run_in_background: false },
+        'call-6',
+      ),
+      member('carol', 'call-7'),
+    ]),
+  ).toContain('cannot launch in the same batch as a foreground child agent');
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     0,
   );
@@ -488,6 +514,124 @@ it('labels a member result notification with its name', async () => {
     '<kind>child_agent</kind>\n<teammate>alice</teammate>',
   );
   expect(text).toContain('all clean');
+});
+
+it('answers an interrupted turn honestly for a team call that committed', async () => {
+  const authority = session.authority;
+  const harness = createManagedHarnessHandle(session);
+  await authority.submitInput(
+    {
+      operation: 'submitInput',
+      commandId: 'prompt',
+      sessionKey,
+      contentDigest: 'd'.repeat(64),
+    },
+    {
+      inputId: 'prompt',
+      turnId: 'prompt',
+      source: 'hosted-harness',
+      contentRef: await session.resources.publish(
+        'managed-input',
+        Buffer.from(JSON.stringify([{ type: 'text', text: 'make a team' }])),
+      ),
+      admissionRef: await session.resources.publish(
+        'managed-admission',
+        Buffer.from('{}'),
+      ),
+      deadline: null,
+      wakeReason: 'input',
+    },
+  );
+  await harness.ensureRunnable();
+  const messageId = randomUUID();
+  await session.sink.write({
+    uuid: messageId,
+    parentUuid: null,
+    sessionId: sessionKey.sessionId,
+    timestamp: new Date().toISOString(),
+    model: 'model',
+    type: 'assistant',
+    cwd: root,
+    version: 'test',
+    daemonPromptId: 'prompt',
+    message: {
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            id: 'call-team',
+            name: 'team_create',
+            args: { team_name: 'review' },
+          },
+        },
+        {
+          functionCall: {
+            id: 'call-task',
+            name: 'task_create',
+            args: { subject: 'audit', description: 'audit it' },
+          },
+        },
+      ],
+    },
+  });
+  // The team committed; the Harness then died asking about the next call.
+  await teams.run('team_create', { team_name: 'review' }, 'prompt:call-team');
+  const inputRef = await session.resources.publish(
+    'managed-tool-input',
+    Buffer.from('{}'),
+  );
+  const requestId = `tool_approval_${'a'.repeat(32)}`;
+  await harness.commitDurableWait(
+    {
+      requestId,
+      kind: 'permission',
+      source: 'tool_call',
+      optionsRef: await session.resources.publish(
+        'managed-action-options',
+        Buffer.from(
+          JSON.stringify({
+            v: 1,
+            requestId,
+            turnId: 'prompt',
+            functionCallId: 'call-task',
+            toolName: 'task_create',
+            policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+            inputRevision: 1,
+            createdAt: 1,
+            expiresAt: 2,
+            options: HOSTED_APPROVAL_OPTIONS,
+          }),
+        ),
+      ),
+      inputRevision: '1',
+      invocationRef: inputRef,
+      attemptId: messageId,
+      routeRef: inputRef,
+    },
+    { turnId: 'prompt', promptId: 'prompt' },
+  );
+  await settleInterruptedTurnRuntime({
+    session,
+    sessionId: sessionKey.sessionId,
+    cwd: root,
+    promptId: 'prompt',
+    brokerOptions: undefined,
+    toolProfile: true,
+    teams,
+  });
+  const answers = new Map(
+    (await session.sink.project())
+      .filter((entry) => entry.type === 'tool_result')
+      .flatMap((entry) => entry.message?.parts ?? [])
+      .map((part) => [
+        part.functionResponse?.id,
+        JSON.stringify(part.functionResponse?.response),
+      ]),
+  );
+  expect(answers.get('call-team')).toContain(
+    'committed its team change, in full or in part',
+  );
+  expect(answers.get('call-task')).toContain('The tool call never ran');
 });
 
 it('fires PostToolUse for a team tool that ran, never for one it refused', async () => {

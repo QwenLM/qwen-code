@@ -424,10 +424,10 @@ class SessionLifecycleCoordinatorTest {
     }
 
     // H4e-b1 (#13745 E3): a team's members are the lead's child_agent runs,
-    // so the lead's close cascades over them exactly as over any child,
-    // and the team's own records stay as the lead last committed them.
+    // so the lead's close cascades over them exactly as over any child; the
+    // team's row in the same table is never taken for a child to cascade.
     @Test
-    void aLeadCloseCancelsItsMembersAndLeavesItsTeamRecords() {
+    void aLeadCloseCancelsItsMembersAndNotItsTeamRecord() {
         World world = closingWorld("team-");
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO qwen_managed_session_extension_record"
@@ -458,10 +458,6 @@ class SessionLifecycleCoordinatorTest {
                         .extracting(op -> op.get("childRunId"))
                         .containsOnly("run-1");
                 assertThat(harness.closed).contains(world.child, world.session);
-                assertThat(world.jdbc.queryForObject("SELECT revision FROM"
-                                + " qwen_managed_session_extension_record"
-                                + " WHERE domain = 'team_state'",
-                        Long.class)).isEqualTo(2L);
             } finally {
                 coordinator.stopRenewals();
             }

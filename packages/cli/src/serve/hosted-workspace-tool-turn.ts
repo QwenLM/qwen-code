@@ -773,7 +773,8 @@ export class HostedWorkspaceToolTurn {
   /**
    * H4e-b1's batch rules for a member launch: its name is a string, no
    * other launch in the batch takes the same name, and the batch neither
-   * creates nor deletes the team the member joins.
+   * creates nor deletes the team the member joins nor waits on a
+   * foreground child.
    */
   private memberBatchError(
     call: ToolCallRequestInfo,
@@ -788,6 +789,18 @@ export class HostedWorkspaceToolTurn {
       )
     )
       return 'Hosted team member cannot launch in the same batch as team_create or team_delete; let the team change land first.';
+    // A recovered foreground wait (#13708) answers the batch's other
+    // launches as plain background starts, which would hide the join.
+    if (
+      batch.some(
+        (other) =>
+          other.name === 'agent' &&
+          (other.args['run_in_background'] === false ||
+            (typeof other.args['run_in_background'] === 'string' &&
+              other.args['run_in_background'].toLowerCase() === 'false')),
+      )
+    )
+      return 'Hosted team member cannot launch in the same batch as a foreground child agent; launch it in its own batch.';
     if (
       batch.some(
         (other) =>

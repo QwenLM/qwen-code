@@ -628,6 +628,47 @@ describe('the board', () => {
     );
   });
 
+  it('refuses a dependency that would grow a task past 64 blockers', async () => {
+    await createTeam();
+    for (let index = 1; index <= 67; index++)
+      await teams.run(
+        'task_create',
+        { subject: `task ${index}`, description: 'd' },
+        `prompt:create-${index}`,
+      );
+    const first64 = Array.from({ length: 64 }, (_, index) => `${index + 2}`);
+    await teams.run(
+      'task_update',
+      { taskId: '1', addBlockedBy: first64 },
+      'prompt:full',
+    );
+    expect(
+      await refusal(
+        teams.run('task_update', { taskId: '1', addBlockedBy: ['66'] }, 'p:a'),
+      ),
+    ).toBe('Cannot update task #1: task #1 would have more than 64 blockers.');
+    // The addBlocks arm grows the other task: refused before task #67
+    // itself is revised.
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '67', status: 'completed', addBlocks: ['1'] },
+          'p:b',
+        ),
+      ),
+    ).toBe('Cannot update task #67: task #1 would have more than 64 blockers.');
+    expect(revisions('team_task', 'prompt:call-team#67')).toBe(1);
+    // An edge already stored is not counted twice.
+    expect(
+      await teams.run(
+        'task_update',
+        { taskId: '1', addBlockedBy: ['2'] },
+        'p:c',
+      ),
+    ).toContain('Task #1 updated');
+  });
+
   it('finishes a call stopped part-way on replay without adding twice', async () => {
     await createTeam();
     for (const subject of ['one', 'two', 'three'])

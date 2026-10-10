@@ -34,6 +34,10 @@ import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/m
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
+  HOSTED_TEAM_TOOL_NAMES,
+  type HostedTeamSession,
+} from './hosted-team-session.js';
+import {
   fitChildResultInline,
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
   HOSTED_AGENT_WAIT_ABANDONED_TEXT,
@@ -401,6 +405,7 @@ async function answerAbandonedTurnCalls(input: {
   cwd: string;
   promptId: string;
   message: string;
+  teams?: HostedTeamSession;
 }): Promise<void> {
   const records = (await input.session.sink.project()).filter(
     (entry) => entry.daemonPromptId === input.promptId,
@@ -420,11 +425,21 @@ async function answerAbandonedTurnCalls(input: {
         owed.set(call.id, { name: call.name, messageId: record.uuid });
     }
   for (const [functionCallId, call] of owed) {
+    // H4e-b1: a team tool writes only to the journal, before its answer.
+    const committed =
+      input.teams !== undefined &&
+      HOSTED_TEAM_TOOL_NAMES.includes(call.name) &&
+      input.teams.committedBy(
+        call.name,
+        hostedChildRunIdFor(input.promptId, functionCallId),
+      );
     const parts = convertToFunctionErrorResponse(
       call.name,
       functionCallId,
       [],
-      `The tool call never ran: ${input.message}.`,
+      committed
+        ? `The turn was interrupted after this call committed its team change, in full or in part (${input.message}); read task_list before retrying it.`
+        : `The tool call never ran: ${input.message}.`,
     );
     const response = parts[0]?.functionResponse;
     if (!response || parts.length !== 1)
@@ -741,6 +756,8 @@ export async function settleInterruptedTurnRuntime(input: {
    * answer even here. */
   children?: HostedChildAgentSession;
   consume?: (childRunId: string) => void;
+  /** H4e-b1: the team funnel that tells which team calls committed. */
+  teams?: HostedTeamSession;
 }): Promise<HostedInterruptedTurnRuntime> {
   const authorization = await input.session.authority.harnessRunAuthorization();
   // Only a committed, readable checkpoint — or the durable absence of any
@@ -879,6 +896,7 @@ export async function settleInterruptedTurnRuntime(input: {
         action !== undefined && action.state !== 'requested'
           ? `the approval ended ${action.state} after the Harness that asked was interrupted`
           : 'the Harness that asked was interrupted',
+      teams: input.teams,
     });
   }
   // The handback owed for a taken Workspace survives a settlement split

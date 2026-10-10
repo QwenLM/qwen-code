@@ -3363,6 +3363,7 @@ export function registerHostedHarnessSessionRoutes(
                     children: session.childAgents,
                     consume: (childRunId) =>
                       session.childConsumption.add(childRunId),
+                    teams: session.teams,
                   });
                 } catch (cause) {
                   // R6 P1: a durable decline freezes for the fleet, but a

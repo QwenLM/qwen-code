@@ -437,6 +437,35 @@ export class HostedTeamSession {
   }
 
   /**
+   * Whether a call committed any part of its team write before its Turn
+   * died: the interrupted Turn's settlement must not answer such a call
+   * as one that never ran.
+   */
+  committedBy(toolName: string, callKey: string): boolean {
+    const commands: ReadonlyArray<readonly [string, string]> =
+      toolName === 'team_create'
+        ? [['createTeam', callKey]]
+        : toolName === 'task_create'
+          ? [['createTeamTask', callKey]]
+          : toolName === 'team_delete'
+            ? [
+                ['deleteTeam', `${callKey}:closing`],
+                ['deleteTeam', `${callKey}:deleted`],
+              ]
+            : toolName === 'task_update'
+              ? Array.from(
+                  { length: MANAGED_TEAM_LIMITS.maxBlockers + 1 },
+                  (_, place) =>
+                    ['updateTeamTask', `${callKey}:${place + 1}`] as const,
+                )
+              : [];
+    return commands.some(
+      ([operation, commandId]) =>
+        this.committed(operation, commandId) !== undefined,
+    );
+  }
+
+  /**
    * Runs one team tool call against the committed team and board and
    * answers its text; a refusal throws HostedTeamRefusal and commits
    * nothing. `callKey` is the call's replay-stable key.
@@ -728,6 +757,23 @@ export class HostedTeamSession {
     if (missing.length > 0)
       throw new HostedTeamRefusal(
         `Cannot update task #${number}: referenced task${missing.length === 1 ? '' : 's'} ${missing.map((each) => `#${each}`).join(', ')} not found.`,
+      );
+    // The record bounds every task's stored blockers, deleted ones
+    // included, so a call that would grow one past the bound is refused
+    // here rather than by the commit.
+    const crowded = [
+      [number, blockedBy] as const,
+      ...blocks.map((each) => [each, [number]] as const),
+    ].find(
+      ([each, added]) =>
+        new Set([
+          ...board.get(each)!.blockedBy,
+          ...added.map((other) => board.get(other)!.taskId),
+        ]).size > MANAGED_TEAM_LIMITS.maxBlockers,
+    );
+    if (crowded)
+      throw new HostedTeamRefusal(
+        `Cannot update task #${number}: task #${crowded[0]} would have more than ${MANAGED_TEAM_LIMITS.maxBlockers} blockers.`,
       );
     const cycle = dependencyCycle(board, number, blocks, blockedBy);
     if (cycle)
