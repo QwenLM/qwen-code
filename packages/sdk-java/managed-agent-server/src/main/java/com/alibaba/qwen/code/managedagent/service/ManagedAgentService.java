@@ -247,6 +247,19 @@ public class ManagedAgentService {
     public CommandAdmission createChildSession(String tenantId,
             String parentSessionId, String childRunId, String description,
             String prompt) {
+        return createChildSession(tenantId, parentSessionId, childRunId,
+                description, prompt, false);
+    }
+
+    /**
+     * The same creation; {@code isolated} binds the child to its run's
+     * ready child Workspace (#13753 I1) instead of the parent's directory.
+     * The child directory joins the request digest, so a replay that names
+     * a different binding is an idempotency conflict.
+     */
+    public CommandAdmission createChildSession(String tenantId,
+            String parentSessionId, String childRunId, String description,
+            String prompt, boolean isolated) {
         SessionRecord parent = store.requireSession(tenantId, parentSessionId);
         if (parent.workspace() == null || !"ACTIVE".equals(parent.status())) {
             throw new ApiException(HttpStatus.CONFLICT,
@@ -274,16 +287,35 @@ public class ManagedAgentService {
         String title = description.isBlank() ? "child agent"
                 : description.length() > 256 ? description.substring(0, 256)
                         : description;
+        String childCwd = null;
+        if (isolated) {
+            childCwd = store.findChildWorkspaceCwd(tenantId,
+                    parentSessionId, childRunId);
+            if (childCwd == null) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "child_workspace_not_ready",
+                        "The child run's Workspace is not ready to bind a child Session.");
+            }
+        }
         Map<String, Object> semantic = new LinkedHashMap<>();
         semantic.put("child", childRunId);
         semantic.put("title", title);
         semantic.put("input", input);
+        if (childCwd != null) {
+            semantic.put("workspace", childCwd);
+        }
         String requestDigest = digests.digest(semantic);
         StoreModels.Admission admission;
         try {
-            admission = store.insertChildSessionCommand(tenantId,
-                    parentSessionId, creationKey, requestDigest, title, input,
-                    SubmitHarnessTurn.computePayloadDigest(input), lineage);
+            admission = childCwd == null
+                    ? store.insertChildSessionCommand(tenantId,
+                            parentSessionId, creationKey, requestDigest, title,
+                            input, SubmitHarnessTurn.computePayloadDigest(input),
+                            lineage)
+                    : store.insertChildSessionCommand(tenantId,
+                            parentSessionId, creationKey, requestDigest, title,
+                            input, SubmitHarnessTurn.computePayloadDigest(input),
+                            lineage, childCwd);
         } catch (DuplicateKeyException error) {
             admission = store.replayChildSessionCommand(tenantId,
                     parentSessionId, creationKey, requestDigest);
