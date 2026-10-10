@@ -45,6 +45,8 @@ fetchRetryMaxtimeout: 120000
 fetchTimeout: 300000
 
 overrides:
+  'brace-expansion@1': '1.1.21'
+  'brace-expansion@2': '2.1.7'
   typescript: '5.8.3'
   '@microsoft/api-extractor>typescript': '5.9.3'
   '@qwen-code/mobile-mcp>typescript': '5.8.2'

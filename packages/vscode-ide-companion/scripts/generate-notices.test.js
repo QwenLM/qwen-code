@@ -8,15 +8,118 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 import {
   collectDependencies,
   findLicenseFile,
   findNoticeFile,
   findSupplementaryLicenseFiles,
   getFallbackLicenseText,
+  getExceljsBrowserNotices,
   normalizeRepositoryUrl,
   runNoticeGeneration,
 } from './generate-notices.js';
+
+describe('ExcelJS browser bundle notices', () => {
+  const require = createRequire(
+    new URL('../../web-shell/package.json', import.meta.url),
+  );
+  const exceljsDir = path.dirname(require.resolve('exceljs/package.json'));
+
+  it('ships original supplementary licenses for every embedded package', async () => {
+    const write = vi.spyOn(fs, 'writeFile').mockImplementation(async () => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await runNoticeGeneration({});
+      expect(write).toHaveBeenCalledTimes(1);
+      const notices = String(write.mock.calls[0][1]);
+      const sourceMap = JSON.parse(
+        await fs.readFile(
+          path.join(exceljsDir, 'dist/exceljs.min.js.map'),
+          'utf-8',
+        ),
+      );
+      const packages = new Set(
+        sourceMap.sources
+          .filter((source) => source.includes('node_modules/'))
+          .map((source) => {
+            const tail = source.split('node_modules/').at(-1);
+            return tail
+              .split('/')
+              .slice(0, tail.startsWith('@') ? 2 : 1)
+              .join('/');
+          }),
+      );
+      expect(packages.size).toBe(68);
+      for (const name of packages) {
+        expect(notices).toContain(`\n${name}@`);
+      }
+      const inventory = JSON.parse(
+        await fs.readFile(
+          new URL('./licenses/exceljs-browser.json', import.meta.url),
+          'utf-8',
+        ),
+      );
+      const mapBytes = await fs.readFile(
+        path.join(exceljsDir, 'dist/exceljs.min.js.map'),
+      );
+      expect(createHash('sha256').update(mapBytes).digest('hex')).toBe(
+        inventory.sourceMapSha256,
+      );
+      for (const dep of inventory.packages) {
+        expect(notices).toContain(
+          `${dep.name}@${dep.version}\n(${dep.repository})\n\n${dep.license}`,
+        );
+        expect(dep.license).toMatch(/Copyright|copyright/);
+      }
+      expect(
+        inventory.packages
+          .filter(({ name }) => name === 'bn.js')
+          .map(({ version }) => version),
+      ).toEqual(['4.12.0', '5.2.1']);
+    } finally {
+      write.mockRestore();
+      log.mockRestore();
+    }
+  });
+
+  it('rejects an unreviewed bundle or ExcelJS version', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'exceljs-notices-'));
+    try {
+      await fs.mkdir(path.join(dir, 'dist'));
+      const manifest = JSON.parse(
+        await fs.readFile(path.join(exceljsDir, 'package.json'), 'utf-8'),
+      );
+      await fs.writeFile(
+        path.join(dir, 'package.json'),
+        JSON.stringify(manifest),
+      );
+      const bundle = await fs.readFile(
+        path.join(exceljsDir, 'dist/exceljs.min.js'),
+      );
+      await fs.writeFile(path.join(dir, 'dist/exceljs.min.js'), bundle);
+      expect(await getExceljsBrowserNotices(dir)).toHaveLength(41);
+      await fs.appendFile(
+        path.join(dir, 'dist/exceljs.min.js'),
+        '\n// changed',
+      );
+      await expect(getExceljsBrowserNotices(dir)).rejects.toThrow(
+        'refresh its bundled license inventory',
+      );
+      await fs.writeFile(path.join(dir, 'dist/exceljs.min.js'), bundle);
+      await fs.writeFile(
+        path.join(dir, 'package.json'),
+        JSON.stringify({ ...manifest, version: '4.5.0' }),
+      );
+      await expect(getExceljsBrowserNotices(dir)).rejects.toThrow(
+        'refresh its bundled license inventory',
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('runNoticeGeneration', () => {
   it('skips generation during dependency-only worktree setup', async () => {
@@ -92,6 +195,16 @@ describe('findLicenseFile', () => {
     const resolved = await findLicenseFile(packageDir);
 
     expect(resolved).toBe(path.join(packageDir, 'License'));
+  });
+
+  it('finds JSZip’s LICENSE.markdown attribution', async () => {
+    await fs.writeFile(
+      path.join(packageDir, 'LICENSE.markdown'),
+      'JSZip license',
+    );
+    expect(await findLicenseFile(packageDir)).toBe(
+      path.join(packageDir, 'LICENSE.markdown'),
+    );
   });
 
   it('prefers LICENSE over other variants', async () => {

@@ -43,6 +43,63 @@ function enclosingLayer(rule: Rule): string | undefined {
 }
 
 describe('build artifact — package boundary', () => {
+  it.each(['.', 'assets'])(
+    'ships the spreadsheet worker in a lazy chunk in dist/%s',
+    (directory) => {
+      const chunkDir = resolve(DIST_DIR, directory);
+      const files = readdirSync(chunkDir).filter((name) =>
+        name.endsWith('.js'),
+      );
+      const previewName = files.find((name) =>
+        /^SpreadsheetPreview-.*\.js$/.test(name),
+      );
+      expect(previewName).toBeDefined();
+      const preview = readFileSync(resolve(chunkDir, previewName!), 'utf8');
+      expect(preview).toContain('data-web-shell-excel-preview');
+      expect(preview).toContain('new Worker(');
+      expect(preview).toContain('createObjectURL');
+      const otherChunks = files
+        .filter((name) => name !== previewName)
+        .map((name) => readFileSync(resolve(chunkDir, name), 'utf8'))
+        .join('\n');
+      expect(otherChunks.includes(`import("./${previewName}")`)).toBe(true);
+      expect(
+        /(?:from|import)\s*["']\.\/SpreadsheetPreview-[^"']+\.js["']/.test(
+          otherChunks,
+        ),
+      ).toBe(false);
+      expect(otherChunks.includes('data-web-shell-excel-preview')).toBe(false);
+      const workerCode = preview.match(/["']([A-Za-z0-9+/=]{1000,})["']/)?.[1];
+      expect(workerCode).toBeDefined();
+      const decodedWorker = Buffer.from(workerCode!, 'base64').toString();
+      // Parser code must stay inside the worker, even if the UI remains lazy.
+      for (const marker of [
+        'Worksheet index is outside the preview range.',
+        'Cannot merge already merged cells',
+      ]) {
+        expect(
+          decodedWorker.includes(marker),
+          `Worker contains ${marker}`,
+        ).toBe(true);
+        expect(
+          preview.includes(marker),
+          `Parser leaked into preview: ${marker}`,
+        ).toBe(false);
+        expect(
+          otherChunks.includes(marker),
+          `Parser leaked outside worker: ${marker}`,
+        ).toBe(false);
+      }
+      expect(otherChunks.includes(workerCode!)).toBe(false);
+      // Embedded hosts must not resolve external ExcelJS/SSF packages themselves.
+      expect(
+        /(?:from|import)\s*["'](?:exceljs|ssf)["']/.test(
+          `${preview}\n${otherChunks}\n${decodedWorker}`,
+        ),
+      ).toBe(false);
+    },
+  );
+
   it('does not depend on @qwen-code/webui', () => {
     const bundle = readPackageJavascript();
     expect(bundle).not.toContain('@qwen-code/webui');

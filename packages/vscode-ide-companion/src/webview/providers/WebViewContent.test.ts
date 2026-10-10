@@ -99,6 +99,16 @@ describe('WebViewContent', () => {
     expect(html).toContain("script-src https://csp.source 'wasm-unsafe-eval';");
   });
 
+  it('allows only blob workers without broadening script execution', () => {
+    const html = WebViewContent.generate(
+      createMockWebview() as never,
+      fakeExtensionUri,
+    );
+    expect(html).toContain('worker-src blob:;');
+    expect(html).toContain("script-src https://csp.source 'wasm-unsafe-eval';");
+    expect(html).toContain("default-src 'none';");
+  });
+
   it('allows the WebShell transcript to use its inlined fonts', () => {
     const webview = createMockWebview();
     const html = WebViewContent.generate(webview as never, fakeExtensionUri);
