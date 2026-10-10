@@ -124,6 +124,26 @@ export interface ManagedExtensionRecordBody {
 }
 
 /**
+ * The task kind one child run projects, by its own kind. Each kind is
+ * named, so a kind added to `AnyChildRun` fails to compile here rather
+ * than projecting as a child agent by default.
+ */
+function childRunTaskKind(record: AnyChildRun): ManagedTaskKind {
+  switch (record.kind) {
+    case 'shell':
+      return 'background_shell';
+    case 'child_agent':
+      return 'child_agent';
+    case 'workflow':
+      return 'workflow';
+    default: {
+      const exhaustive: never = record;
+      return exhaustive;
+    }
+  }
+}
+
+/**
  * The record bodies defined so far. A domain joins when its slice defines
  * its body; enabling it for submission remains a separate step. A body
  * never joins a domain that is already enabled for envelope commits: the
@@ -179,14 +199,7 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isMonitorRunSuccessor,
   }),
   child_run: Object.freeze({
-    taskKindOf: (record: unknown) => {
-      const kind = (record as AnyChildRun).kind;
-      return kind === 'shell'
-        ? 'background_shell'
-        : kind === 'workflow'
-          ? 'workflow'
-          : 'child_agent';
-    },
+    taskKindOf: (record: unknown) => childRunTaskKind(record as AnyChildRun),
     parse: (value: unknown) => {
       const record = parseChildRun(value);
       return {

@@ -36,6 +36,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
@@ -126,6 +127,12 @@ class SurfaceAdmissionAcceptanceTest {
     private static final String ARTIFACT_TENANT = "tenant-1";
     private static final String ARTIFACT_WORKSPACE = "workspace-1";
     private static final String ARTIFACT_SESSION = "session-1";
+    private static final Set<String> ADMISSION_REFUSALS = Set.of(
+            "actor_required", "actor_scope_mismatch", "session_not_found",
+            "workspace_not_found", "workspace_forbidden",
+            "workspace_unavailable", "session_operation_forbidden",
+            "action_forbidden", "artifact_content_forbidden",
+            "automation_not_found");
 
     @Autowired
     private MockMvc mvc;
@@ -158,6 +165,7 @@ class SurfaceAdmissionAcceptanceTest {
     private String pendingActionLegacy;
     private String artifactId;
     private String artifactItemId;
+    private String automation;
 
     @BeforeAll
     void graph() throws Exception {
@@ -218,6 +226,7 @@ class SurfaceAdmissionAcceptanceTest {
         pendingActionPublicRank = insertAction(tenant, bound);
         pendingActionWebRank = insertAction(tenant, bound);
         pendingActionLegacy = insertAction(tenant, legacy);
+        automation = insertAutomation(tenant, bound);
     }
 
     static Stream<SurfaceRegistry> everyRoute() {
@@ -254,19 +263,28 @@ class SurfaceAdmissionAcceptanceTest {
                 expect(entry, READER, 403, "workspace_forbidden");
             }
             case READER -> {
-                // The Session lists are tenant-scoped sets with the bound
-                // rows filtered out; every other reader family entry hides
-                // a bound Session below the grant.
-                int status = entry.capabilities().contains(
-                        Capability.SESSION_LIST) ? 200 : 404;
-                String code = status == 404 ? "session_not_found" : null;
-                MvcResult strangers = expect(entry, STRANGER, status, code);
-                MvcResult anonymous = expect(entry, null, status, code);
-                if (status == 200) {
+                if (entry.capabilities().contains(
+                        Capability.AUTOMATION_LIST)) {
+                    // The definition list is a tenant-scoped set filtered
+                    // below the Workspace read grant, like the Session
+                    // lists: the reader's page holds the bound Session's
+                    // definition, a stranger's or anonymous page does not.
+                    expectAutomationListed(entry, STRANGER, false);
+                    expectAutomationListed(entry, null, false);
+                    expectAutomationListed(entry, READER, true);
+                } else if (automationEntry(entry)) {
+                    // A definition below the grant is invisible under its
+                    // own family's code; the reader is admitted.
+                    expect(entry, STRANGER, 404, "automation_not_found");
+                    expect(entry, null, 404, "automation_not_found");
+                    expectAdmitted(entry, READER);
+                } else if (entry.capabilities().contains(Capability.SESSION_LIST)) {
                     // The 200 pins filtering, not just the status: the
                     // bound row must stay invisible while the legacy rows
                     // the tenant owns still list — an empty page would
                     // satisfy the negative half with the filter removed.
+                    MvcResult strangers = expect(entry, STRANGER, 200, null);
+                    MvcResult anonymous = expect(entry, null, 200, null);
                     assertThat(strangers.getResponse().getContentAsString())
                             .as("%s leaks the bound Session to a stranger",
                                     entry.routeKey())
@@ -281,6 +299,16 @@ class SurfaceAdmissionAcceptanceTest {
                             .as("%s drops the legacy rows anonymously",
                                     entry.routeKey())
                             .contains(legacy);
+                } else {
+                    // Every other reader family entry hides a bound
+                    // Session below the grant and admits the reader. The
+                    // stream would stay open; its public twin carries the
+                    // admitted arm.
+                    expect(entry, STRANGER, 404, "session_not_found");
+                    expect(entry, null, 404, "session_not_found");
+                    if (entry != SurfaceRegistry.WEBSHELL_EVENT_STREAM) {
+                        expectAdmitted(entry, READER);
+                    }
                 }
             }
             case READER_ACTOR -> {
@@ -321,10 +349,20 @@ class SurfaceAdmissionAcceptanceTest {
                                 ? "actor_required" : "session_not_found");
             }
             case OWNER -> {
-                expect(entry, STRANGER, 404, "session_not_found");
+                // A stranger sees neither the Session nor, for the routes
+                // addressed by a definition, the definition.
+                expect(entry, STRANGER, 404, automationEntry(entry)
+                        && !entry.capabilities().contains(
+                                Capability.AUTOMATION_CREATE)
+                        ? "automation_not_found" : "session_not_found");
                 expect(entry, READER, 403, "session_operation_forbidden");
                 expect(entry, OPERATOR, 403, "session_operation_forbidden");
-                expect(entry, null, 404, "session_not_found");
+                // An anonymous mutation needs an actor: the automation
+                // mutations name it up front (401), while the lifecycle
+                // family stays invisible (404).
+                expect(entry, null, automationEntry(entry) ? 401 : 404,
+                        automationEntry(entry) ? "actor_required"
+                                : "session_not_found");
             }
             case WORKSPACE_DISCOVERY ->
                 expect(entry, null, 401, "actor_required");
@@ -1128,6 +1166,71 @@ class SurfaceAdmissionAcceptanceTest {
                 .isEqualTo(status);
     }
 
+    /**
+     * The caller the route's class names as enough gets an answer outside
+     * the admission refusals: success or a domain refusal of its own. This
+     * is what makes demoting a whole capability family to a weaker class
+     * fail, since the probes of the stronger class are no longer fired.
+     */
+    private void expectAdmitted(SurfaceRegistry entry, String actor)
+            throws Exception {
+        String caller = actor == null ? "anonymous" : actor;
+        MvcResult result = mvc.perform(requestFor(entry, actor, tenant))
+                .andReturn();
+        int status = result.getResponse().getStatus();
+        String body = result.getResponse().getContentAsString();
+        String code = body.isEmpty() ? ""
+                : JSON.readTree(body).path("error").path("code").asText();
+        assertThat(status).as("%s answered %d (%s): %s", entry.routeKey(),
+                status, caller, body).isNotIn(401, 403).isLessThan(500);
+        assertThat(code).as("%s refused %s", entry.routeKey(), caller)
+                .isNotIn(ADMISSION_REFUSALS);
+    }
+
+    private static boolean automationEntry(SurfaceRegistry entry) {
+        return entry.capabilities().stream()
+                .anyMatch(capability -> capability.name()
+                        .startsWith("AUTOMATION_"));
+    }
+
+    /** The definition list probe: the seeded definition is listed exactly
+     * for a holder of the bound Session's Workspace read grant. */
+    private void expectAutomationListed(SurfaceRegistry entry, String actor,
+            boolean listed) throws Exception {
+        String caller = actor == null ? "anonymous" : actor;
+        MvcResult result = mvc.perform(requestFor(entry, actor, tenant))
+                .andReturn();
+        assertThat(result.getResponse().getStatus())
+                .as("%s answered %d (%s)", entry.routeKey(),
+                        result.getResponse().getStatus(), caller)
+                .isEqualTo(200);
+        List<String> ids = new ArrayList<>();
+        JSON.readTree(result.getResponse().getContentAsString())
+                .path("data").forEach(each -> ids.add(each.path("id").asText()));
+        assertThat(ids.contains(automation))
+                .as("%s lists the bound definition for %s", entry.routeKey(),
+                        caller)
+                .isEqualTo(listed);
+    }
+
+    /** One live automation definition of a Session, as the control plane
+     * mirrors it after the Harness committed revision 1. */
+    private String insertAutomation(String tenant, String sessionId) {
+        String id = "asch_" + UUID.randomUUID().toString().replace("-", "");
+        long now = System.currentTimeMillis();
+        jdbc.update("INSERT INTO qwen_managed_automation_schedule (tenant_id,"
+                + " schedule_id, session_id, workspace_id, actor_id,"
+                + " record_revision, definition_revision, definition_digest,"
+                + " goal, cron, timezone, session_mode, overlap, catch_up,"
+                + " catch_up_limit, enabled, state, blocked_reason, armed_at,"
+                + " watermark_slot, lease_owner, lease_until, fence,"
+                + " created_at, updated_at) VALUES (?, ?, ?, 'ws', ?, 1, 1, ?,"
+                + " 'probe', '0 2 * * *', 'UTC', 'persistent', 'skip', 'none',"
+                + " NULL, TRUE, 'live', NULL, ?, NULL, NULL, NULL, 0, ?, ?)",
+                tenant, id, sessionId, OWNER, "0".repeat(64), now, now, now);
+        return id;
+    }
+
     private MvcResult expect(SurfaceRegistry entry, String actor,
             int status, String code) throws Exception {
         String headerTenant = entry.ruleClass() == RuleClass.READER_ACTOR
@@ -1183,6 +1286,7 @@ class SurfaceAdmissionAcceptanceTest {
                 : pendingAction);
         variables.put("workspaceId", "ws");
         variables.put("agentId", "agent-missing");
+        variables.put("automationId", automation);
         variables.put("channelId", "channel-missing");
         variables.put("deliveryId", "delivery-missing");
         variables.put("itemId", artifactItemId);
@@ -1320,6 +1424,10 @@ class SurfaceAdmissionAcceptanceTest {
             case ARTIFACT_LIST -> "{\"sessionId\":\"" + session + "\"}";
             case WORKSPACE_LIST -> "{}";
             case WORKSPACE_GET -> "{\"workspaceId\":\"ws\"}";
+            case AUTOMATION_CREATE -> "{\"session_id\":\"" + session
+                    + "\",\"goal\":\"probe\",\"cron\":\"0 2 * * *\","
+                    + "\"timezone\":\"UTC\",\"prompt\":\"probe\"}";
+            case AUTOMATION_UPDATE -> "{\"goal\":\"probe\"}";
             case AGENT_DEFINITION_CREATE, AGENT_DEFINITION_UPDATE ->
                 "{\"model\":{\"id\":\"qwen3-coder-plus\"},\"instructions\":"
                         + "\"Review code.\",\"tools\":[],"
