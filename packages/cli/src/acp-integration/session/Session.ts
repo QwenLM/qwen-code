@@ -485,6 +485,11 @@ import {
   type RepeatedToolFailureGuardDecision,
   type RepeatedToolFailureGuardState,
 } from './repeated-tool-failure-guard.js';
+import {
+  getToolExplorationKind,
+  TOOL_EXPLORATION_REMINDER,
+  ToolExplorationBudget,
+} from '@qwen-code/qwen-code-core/services/tool-exploration-budget.js';
 
 const debugLogger = createDebugLogger('SESSION');
 const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
@@ -834,6 +839,7 @@ export type DaemonToolLoopState = {
   loopType?: LoopType;
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
   repeatedToolFailureState: RepeatedToolFailureGuardState;
+  explorationBudget?: ToolExplorationBudget;
 };
 
 const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
@@ -915,6 +921,7 @@ function createDaemonToolLoopState(
     loopDetected: false,
     repeatedToolFailureMode,
     repeatedToolFailureState: createRepeatedToolFailureGuardState(),
+    explorationBudget: new ToolExplorationBudget(),
   };
 }
 
@@ -1136,6 +1143,18 @@ function recordDaemonToolCalls(
       LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
       `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
       loopState,
+    );
+  }
+  // Deliberately after both halt checks: a halted batch is skipped whole and
+  // never executes, so its calls must not feed the exploration budget (nor
+  // trigger the registry lookups classifying them needs).
+  for (const call of calls) {
+    loopState.explorationBudget?.record(
+      getToolExplorationKind(
+        config.getToolRegistry(),
+        call.name ?? '',
+        call.args ?? {},
+      ),
     );
   }
   return false;
@@ -9339,6 +9358,11 @@ export class Session implements SessionContext {
     const parts = [
       ...toolRun.parts,
       ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
+      ...(toolLoopState.explorationBudget?.takeReminder(
+        this.config.getMaxToolCallsPerTurn(),
+      )
+        ? [{ text: TOOL_EXPLORATION_REMINDER }]
+        : []),
       ...(repeatedToolFailureDecision.kind === 'warn'
         ? [{ text: REPEATED_TOOL_FAILURE_REMINDER }]
         : []),

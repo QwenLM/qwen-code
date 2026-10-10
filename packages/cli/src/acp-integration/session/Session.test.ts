@@ -21263,6 +21263,50 @@ describe('Session', () => {
           .mockResolvedValueOnce(createEmptyStream());
       };
 
+      it('adds one exploration reminder after read results and permits further investigation', async () => {
+        const execute = installFailingTool();
+        execute.mockResolvedValue({
+          llmContent: 'file data',
+          returnDisplay: 'file data',
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          ...mockToolRegistry.getTool('failing_tool'),
+          kind: core.Kind.Read,
+        });
+        mockToolRegistry.getAllToolNames.mockReturnValue(['failing_tool']);
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(2);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(false);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(streamForBatch(1, 2))
+          .mockResolvedValueOnce(streamForBatch(2, 1))
+          .mockResolvedValueOnce(createEmptyStream());
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: 'investigate the files without writing' },
+            ],
+          }),
+        ).resolves.toMatchObject({ stopReason: 'end_turn' });
+        expect(execute).toHaveBeenCalledTimes(3);
+        expect(
+          sentText().filter((text) =>
+            text.includes('read-only exploration phase'),
+          ),
+        ).toHaveLength(1);
+        const followUp = vi.mocked(mockChat.sendMessageStream).mock
+          .calls[1]?.[1] as { message: Part[] };
+        expect(
+          followUp.message.filter((part) => part.functionResponse),
+        ).toHaveLength(2);
+        expect(followUp.message.at(-1)?.text).toContain(
+          'does not authorize writes',
+        );
+      });
+
       it('defaults an invalid operator mode to shadow and records a warning', () => {
         debugLoggerWarnSpy.mockClear();
         const previous = process.env[guardModeEnv];
