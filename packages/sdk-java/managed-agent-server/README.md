@@ -404,8 +404,10 @@ npm run dev:managed-agent
 # Once per clone, and re-run after pulling changes to qwencode/runtime-broker (~12 s):
 mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
 mvn -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
-# One-time, on a fresh MySQL 8 (creates the database and user the URL names):
-mysql -u root -e "CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'qwen'@'localhost' IDENTIFIED BY 'replace-me'; CREATE USER 'qwen'@'127.0.0.1' IDENTIFIED BY 'replace-me'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'127.0.0.1';"
+# One-time, on a fresh MySQL 8 (creates the database and user the URL names;
+# the performance_schema SELECT covers Flyway's boot probe — without it the
+# probe is denied (ERROR 1142) and startup stops at 'foreign_key_checks'):
+mysql -u root -e "CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'qwen'@'localhost' IDENTIFIED BY 'replace-me'; CREATE USER 'qwen'@'127.0.0.1' IDENTIFIED BY 'replace-me'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'127.0.0.1'; GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'localhost'; GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'127.0.0.1';"
 # (official MySQL images enable skip-name-resolve, so 'qwen'@'localhost' alone never
 #  matches TCP clients; a containerized MySQL sees the gateway address — grant at
 #  'qwen'@'%' or the container-visible host instead)
@@ -904,6 +906,61 @@ docker build -f packages/sdk-java/managed-agent-server/Dockerfile .
 The stock image contains the Java control plane only. Use the static Runtime
 provisioner, or provide a derived image/mount with Node.js and the Qwen worker
 artifacts, before enabling the local-process provisioner in a container.
+
+The image keeps the application's `127.0.0.1` defaults, so a plain
+`docker run -p 8080:8080` publishes nothing: `-p` DNATs to the container's
+bridge IP, and a loopback listener is unreachable through it. Publishing is
+an explicit opt-in, and the server refuses a non-loopback bind under the
+shipped `auto` auth mode, so the command must name an authentication
+posture — signed mode, as the introduction recommends (see "Broker
+authentication and writer credentials" above). The signing key and the
+datasource password are passed valueless so Docker forwards them from the
+shell environment — the `=` spelling would leave either secret in the
+command's argv for the container's whole lifetime. A valueless `-e`
+forwards the variable of the same name, so export
+`QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY` and `SPRING_DATASOURCE_PASSWORD` before
+the run. The datasource must also be
+named: the Prerequisites' `127.0.0.1` default is the container itself from
+inside, so the image cannot boot against it:
+
+```bash
+docker run -p 8080:8080 \
+  -e QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0 \
+  -e QWEN_MANAGED_AGENT_AUTH_MODE=signed \
+  -e QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY \
+  -e SPRING_DATASOURCE_URL='jdbc:mysql://<db-host>:3306/qwen_managed_agent' \
+  -e SPRING_DATASOURCE_USERNAME='qwen' \
+  -e SPRING_DATASOURCE_PASSWORD \
+  <image>
+```
+
+or the deliberately unauthenticated
+`-e QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND=true` override.
+
+The `qwen` user the recipe names needs the grants from the Full WebShell
+entry's MySQL one-liner — including `SELECT` on
+`performance_schema.user_variables_by_thread`, granted at the
+container-visible host — or Flyway's boot probe is denied (`ERROR 1142`)
+and startup stops.
+
+Publishing the API needs no Runtime Broker face: the broker ships disabled
+by default, and a non-loopback broker bind is a separate opt-in — the broker
+refuses one unless `QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK=true`
+is also set (see Broker deployment above).
+
+The opt-in makes the authentication consequence load-bearing. Under the
+shipped default — `auto` resolving to `open` — there is no HTTP
+authentication: tenancy is whatever `X-Qwen-Tenant-Id` says. Signed mode
+HMAC-authenticates every request's tenant and actor headers; the
+insecure-bind override publishes with request authentication off. Either way the tenant-scoped API is
+exposed to anything that can route to the listener. That exposure does
+not depend on publishing a port: on the default bridge network the API
+also answers on the container's own bridge address, so every process on
+the Docker host and every peer container on that bridge can reach it
+with no `-p` at all. Run a published deployment behind an ingress that
+authenticates the tenant before setting `X-Qwen-Tenant-Id`, map ports
+only inside your own network policy, and attach the container only to
+networks whose peers you trust.
 
 ## Managed Session Store verification
 

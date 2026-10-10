@@ -1577,6 +1577,27 @@ describe('buildSpringRecipeLines', () => {
       );
     }
   });
+
+  it('prints the README MySQL one-liner verbatim, grants included', () => {
+    const readme = readFileSync(
+      path.join(
+        root,
+        'packages',
+        'sdk-java',
+        'managed-agent-server',
+        'README.md',
+      ),
+      'utf8',
+    );
+    const oneLiner = readme.match(/mysql -u root -e "[^"]+"/)?.[0];
+    expect(oneLiner).toBeTruthy();
+    const joined = buildSpringRecipeLines({
+      isWinPlatform: false,
+      springEnvPath: envPath,
+      springPs1Path: ps1Path,
+    }).join('\n');
+    expect(joined).toContain(oneLiner);
+  });
 });
 
 describe('script entry', () => {

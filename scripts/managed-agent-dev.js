@@ -352,7 +352,7 @@ export function buildSpringRecipeLines({
   springPs1Path,
 }) {
   const lines = [
-    `  # one-time DB/user: mysql -u root -e "CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'qwen'@'localhost' IDENTIFIED BY 'replace-me'; CREATE USER 'qwen'@'127.0.0.1' IDENTIFIED BY 'replace-me'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'127.0.0.1';"`,
+    `  # one-time DB/user: mysql -u root -e "CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'qwen'@'localhost' IDENTIFIED BY 'replace-me'; CREATE USER 'qwen'@'127.0.0.1' IDENTIFIED BY 'replace-me'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'127.0.0.1'; GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'localhost'; GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'127.0.0.1';"`,
     `  # (official MySQL images enable skip-name-resolve, so 'qwen'@'localhost' alone never matches TCP clients; a containerized MySQL sees the gateway address — grant at 'qwen'@'%' or the container-visible host instead)`,
     '  # once per clone, and re-run after pulling changes to qwencode/runtime-broker (~12 s):',
     '  #           mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install',

@@ -4,9 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { inspect } from 'node:util';
 import {
   createSourceFile,
+  isArrayLiteralExpression,
+  isCallExpression,
   isFunctionDeclaration,
   isVariableStatement,
   ScriptTarget,
@@ -39,31 +51,101 @@ const fencedShellBlocks = (text) =>
   ].map((match) => match[1]);
 
 describe('managed-agent-server e2e runner', () => {
-  it('keeps service and proxy ports distinct when an ephemeral port repeats', async () => {
+  const extracted = (names) => {
     const source = createSourceFile(
       'runner.ts',
       read('scripts/run-managed-agent-server-e2e.ts'),
       ScriptTarget.Latest,
       true,
     );
-    const allocation = source.statements
+    const text = source.statements
       .filter(
         (node) =>
-          (isFunctionDeclaration(node) &&
-            ['freePort', 'startHeldExecutionStartProxy'].includes(
-              node.name?.text,
-            )) ||
+          (isFunctionDeclaration(node) && names.includes(node.name?.text)) ||
           (isVariableStatement(node) &&
-            node.declarationList.declarations.some(
-              (declaration) =>
-                declaration.name.getText(source) === 'allocatedPorts',
+            node.declarationList.declarations.some((declaration) =>
+              names.includes(declaration.name.getText(source)),
             )),
       )
       .map((node) => node.getText(source))
       .join('\n');
-    const { outputText } = transpileModule(allocation, {
+    return transpileModule(text, {
       compilerOptions: { target: ScriptTarget.ES2022 },
-    });
+    }).outputText;
+  };
+
+  // waitUntil calls childExited, so its extraction list must name the
+  // predicate: a free identifier in generated code resolves against the
+  // global scope, and the early-exit branch would die with a ReferenceError
+  // that points at the runner instead of at this harness's extraction list.
+  // One inventory with one loader — pasted copies drift, and the drift reds
+  // a test whose author did not touch it while the other copies stay
+  // silently stale.
+  const WAIT_UNTIL_DEPS = ['waitUntil', 'receivedSignal', 'childExited'];
+  const load = (names, returns, ...params) =>
+    new Function(...params, `${extracted(names)}\nreturn { ${returns} };`);
+  // The interrupt setter closes over the extracted body's own
+  // receivedSignal: without it the binding is permanently undefined and no
+  // test can reach the poll-head interrupt early-exit.
+  const loadWaitUntil = () =>
+    load(
+      WAIT_UNTIL_DEPS,
+      'waitUntil, interrupt: (signal) => { receivedSignal = signal }',
+      'inspect',
+    )(inspect);
+
+  // Source-level MySQL launch sites, selected on the launched binary
+  // rather than the callee or a hand-listed identifier: a launch through
+  // any spawner, with the binary spelled as a bare identifier or any quoted
+  // literal, is inventoried the same way. The binary names come from the
+  // runner's own command() resolutions, so a future mysql* binary joins the
+  // inventory with its declaration.
+  const mysqlCalls = (sourceText) => {
+    const binaries = new Set();
+    for (const match of sourceText.matchAll(
+      /const (\w+) = command\('([^']+)'\)/g,
+    )) {
+      if (match[2].startsWith('mysql')) {
+        binaries.add(match[1]).add(match[2]);
+      }
+    }
+    const ast = createSourceFile(
+      'runner.ts',
+      sourceText,
+      ScriptTarget.Latest,
+      true,
+    );
+    const calls = [];
+    const visit = (node) => {
+      if (isCallExpression(node) && node.arguments.length > 0) {
+        // command('mysql…') resolves a binary path; it is not a launch.
+        if (node.expression.getText(ast) === 'command') {
+          node.forEachChild(visit);
+          return;
+        }
+        // getText returns a string literal with its quotes, so compare the
+        // unquoted spelling: the quote style must not hide a launch.
+        const binary = node.arguments[0]
+          .getText(ast)
+          .replace(/^['"`]|['"`]$/g, '');
+        if (binaries.has(binary)) {
+          const args = node.arguments[1];
+          const firstArg =
+            args !== undefined &&
+            isArrayLiteralExpression(args) &&
+            args.elements.length > 0
+              ? args.elements[0].getText(ast)
+              : undefined;
+          calls.push({ binary, text: node.getText(ast), firstArg });
+        }
+      }
+      node.forEachChild(visit);
+    };
+    visit(ast);
+    return { calls, binaries };
+  };
+
+  it('keeps service and proxy ports distinct when an ephemeral port repeats', async () => {
     const sequence = [
       33061, 33231, 36301, 36302, 36301, 36303, 38943, 36417, 36417, 36418,
       36417, 36418, 36419,
@@ -84,9 +166,10 @@ describe('managed-agent-server e2e runner', () => {
         done?.();
       },
     });
-    const { freePort, startHeldExecutionStartProxy } = new Function(
+    const { freePort, startHeldExecutionStartProxy } = load(
+      ['freePort', 'startHeldExecutionStartProxy', 'allocatedPorts'],
+      'freePort, startHeldExecutionStartProxy',
       'createServer',
-      `${outputText}\nreturn { freePort, startHeldExecutionStartProxy };`,
     )(createServer);
     const ports = [];
     for (const count of [4, 3]) {
@@ -496,4 +579,686 @@ describe('managed-agent-server e2e runner', () => {
       '`managed_session_store_conflict` fence is target design',
     );
   });
+
+  it('waitUntil surfaces the last predicate error', async () => {
+    const { waitUntil } = loadWaitUntil();
+    await expect(
+      waitUntil(
+        'probe',
+        () => Promise.reject(new Error('HTTP 503 wedged')),
+        300,
+      ),
+    ).rejects.toThrow(/wedged/);
+  });
+
+  // A non-Error rejection is recorded on every poll; rendering only Error
+  // instances would drop the one diagnostic the budget produced.
+  it('waitUntil surfaces a non-Error predicate rejection', async () => {
+    const { waitUntil } = loadWaitUntil();
+    // An object rejection discriminates inspect from String: the latter
+    // renders "[object Object]" and drops the one diagnostic the poll
+    // produced.
+    await expect(
+      waitUntil('probe', () => Promise.reject({ status: 503 }), 300),
+    ).rejects.toThrow(/503/);
+    // The harness injects its own inspect as a parameter, so the runner's
+    // binding is pinned by text: without the import, the free identifier
+    // resolves to Node's deprecated global inspect in production.
+    expect(read('scripts/run-managed-agent-server-e2e.ts')).toMatch(
+      /import \{ inspect \} from 'node:util'/,
+    );
+  });
+
+  it('exercises the poll-head interrupt early-exit through the setter', async () => {
+    const { waitUntil, interrupt } = loadWaitUntil();
+    interrupt('SIGINT');
+    await expect(waitUntil('probe', () => false, 300)).rejects.toThrow(
+      /Interrupted by SIGINT/,
+    );
+  });
+
+  // Positive control: with no signal set the same poll fails by deadline,
+  // so the setter — not a spurious initial value — drives the exit above.
+  it('does not throw before the signal is set (positive control)', async () => {
+    const { waitUntil } = loadWaitUntil();
+    await expect(waitUntil('probe', () => false, 300)).rejects.toThrow(
+      /did not become ready/,
+    );
+  });
+
+  it('waitUntil bounds a stalled iteration by the deadline', async () => {
+    const { waitUntil } = loadWaitUntil();
+    const started = Date.now();
+    await expect(
+      waitUntil('probe', () => new Promise(() => {}), 300),
+    ).rejects.toThrow(/predicate stalled/);
+    // A hung predicate used to outlive timeoutMs several-fold.
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  // The mirror of the stall bound: a poll already in flight at the deadline
+  // must be allowed to answer. The final iteration can start with a sliver
+  // of budget left, and a dependency that becomes ready inside that sliver
+  // is ready — discarding its answer misreports it as a wedged predicate.
+  it('waitUntil lets the final in-flight poll answer past the deadline', async () => {
+    const { waitUntil } = loadWaitUntil();
+    const started = Date.now();
+    await expect(
+      waitUntil(
+        'probe',
+        async () => {
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          return Date.now() - started >= 200;
+        },
+        250,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it('waitUntil reports a child that exited early', async () => {
+    const { waitUntil } = loadWaitUntil();
+    await expect(
+      waitUntil('probe', () => new Promise(() => {}), 300, {
+        child: { exitCode: 1, signalCode: null },
+        log: () => '',
+      }),
+    ).rejects.toThrow(/exited early/);
+  });
+
+  // A child killed BY signal (OOM-kill, segfault) keeps exitCode null and
+  // sets signalCode: an exitCode-only early-exit guard never trips, the
+  // poll burns its whole site budget, and the failure reads "did not
+  // become ready" — pointing at the dependency instead of the dead child.
+  it('waitUntil reports a child that died by signal as exited early', async () => {
+    const { waitUntil } = loadWaitUntil();
+    await expect(
+      waitUntil('probe', () => false, 300, {
+        child: { exitCode: null, signalCode: 'SIGKILL' },
+        log: () => '',
+      }),
+    ).rejects.toThrow(/exited early/);
+  });
+
+  // A rejecting-then-hanging predicate must keep both facts: the deadline
+  // found the hang, so the older real error is named as predating the stall
+  // rather than posing as the state the deadline saw.
+  it('waitUntil keeps a real predicate error when a later iteration stalls', async () => {
+    const { waitUntil } = loadWaitUntil();
+    let calls = 0;
+    const failure = await waitUntil(
+      'probe',
+      () =>
+        calls++ === 0
+          ? Promise.reject(
+              new Error('fetch failed', { cause: new Error('ECONNREFUSED') }),
+            )
+          : new Promise(() => {}),
+      300,
+    ).catch((error) => error);
+    expect(failure.message).toContain(
+      'predicate stalled; last error before the stall: ECONNREFUSED',
+    );
+  });
+
+  // The stall wording is earned by a stalled final poll: a predicate that
+  // answers every poll with the same real error must not acquire it.
+  it('waitUntil names no stall when the error is the deadline state', async () => {
+    const { waitUntil } = loadWaitUntil();
+    const failure = await waitUntil(
+      'probe',
+      () =>
+        Promise.reject(
+          new Error('fetch failed', { cause: new Error('ECONNREFUSED') }),
+        ),
+      300,
+    ).catch((error) => error);
+    expect(failure.message).toContain('ECONNREFUSED');
+    expect(failure.message).not.toContain('predicate stalled');
+  });
+
+  // The mirror: once the predicate answers falsy, a connectivity error from
+  // an earlier phase no longer describes the state the deadline found.
+  it('waitUntil drops an error that later answered iterations supersede', async () => {
+    const { waitUntil } = loadWaitUntil();
+    let calls = 0;
+    const failure = await waitUntil(
+      'probe',
+      () =>
+        calls++ === 0
+          ? Promise.reject(
+              new Error('fetch failed', { cause: new Error('ECONNREFUSED') }),
+            )
+          : false,
+      300,
+    ).catch((error) => error);
+    expect(failure.message).toContain('did not become ready');
+    expect(failure.message).not.toContain('ECONNREFUSED');
+  });
+
+  // spawnSync blocks the event loop, so the stall race cannot bound a
+  // synchronous predicate: the remaining budget is handed to the predicate
+  // for its own probe timeout, and wall time must stay near the budget
+  // rather than near budget + a site-local probe timeout.
+  it('waitUntil threads the remaining budget into a synchronous predicate', async () => {
+    const { waitUntil } = loadWaitUntil();
+    const started = Date.now();
+    await expect(
+      waitUntil(
+        'probe',
+        (remainingMs) =>
+          spawnSync(process.execPath, ['-e', 'setTimeout(() => {}, 5_000)'], {
+            timeout: remainingMs,
+          }).status === 0,
+        300,
+      ),
+    ).rejects.toThrow(/did not become ready/);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('crashProcess reports a by-signal exit instead of throwing ESRCH', async () => {
+    const { crashProcess } = load(
+      ['crashProcess', 'childExited'],
+      'crashProcess',
+      'process',
+    )(process);
+    const child = spawn('node', [
+      '-e',
+      'setTimeout(() => process.kill(process.pid, "SIGKILL"), 20)',
+    ]);
+    // Let the by-signal death land first: guard reads signalCode, not
+    // exitCode, and must refuse with the descriptive pre-exit diagnostic.
+    await new Promise((resolve) => child.once('exit', resolve));
+    await expect(crashProcess(child, 'probe')).rejects.toThrow(
+      /exited before the crash was injected/,
+    );
+  });
+
+  // The pre-crash guard is pinned above; the poll loop and the
+  // survived-SIGKILL throw must read a by-signal death too: an exitCode-only
+  // poll burns the 5 s deadline on a child SIGKILL already reaped, and an
+  // exitCode-only throw reports that dead child as having survived.
+  it('crashProcess returns promptly once its SIGKILL lands', async () => {
+    const { crashProcess } = load(
+      ['crashProcess', 'childExited'],
+      'crashProcess',
+      'process',
+    )(process);
+    const child = spawn('node', ['-e', 'setTimeout(() => {}, 30_000)']);
+    const started = Date.now();
+    await expect(crashProcess(child, 'probe')).resolves.toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  // The success document must not reach stdout for a run the operator
+  // stopped: every payload is assembled inside the try and printed only
+  // after both post-finally throws, so the guard decides before the record
+  // exists. A print inside the try would leave the finally's teardown —
+  // seconds of stopChild awaits with the handlers still attached —
+  // unguarded.
+  it('checks the received signal at the success exit too', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    // The base's eager prints were multi-line calls, so a single-line
+    // negative pin is true of base and head alike and can never fire: pin
+    // the deferred assignment on every mode branch, and that no success
+    // payload is printed eagerly. The freeze arm's wake record reads as a
+    // pass line on stdout too, so it defers the same way — no eager
+    // console.log of a JSON payload remains inside the try at all.
+    expect(source.match(/resultJson = JSON\.stringify\(/g)).toHaveLength(4);
+    expect(source.match(/fencedWriterJson = JSON\.stringify\(/g)).toHaveLength(
+      1,
+    );
+    expect(source).not.toMatch(/console\.log\(\s*JSON\.stringify\(/);
+    // No gate typechecks scripts/ (tsx strips types unchecked), so the
+    // module-scope binding the deferred print reads is pinned by text:
+    // dropped, the print below throws ReferenceError on the success path.
+    expect(source).toMatch(/^let resultJson: string \| undefined;$/m);
+    expect(source).toMatch(/^let fencedWriterJson: string \| undefined;$/m);
+    // The behavioural tests inject the signal through this harness's
+    // synthesized setter, so the production link — the runner's own
+    // handleSignal assigning the module-scope receivedSignal the guards
+    // below read — is pinned by text: registered with an empty body, the
+    // handlers swallow Ctrl-C and a CI cancellation, and the run prints
+    // the success payload and exits 0. Pin the process.on pair only; the
+    // finally removes both listeners during teardown.
+    expect(source).toMatch(
+      /const handleSignal = \(signal: NodeJS\.Signals\) => \{\s*receivedSignal = signal;\s*\};/,
+    );
+    expect(source).toMatch(/process\.on\('SIGINT', handleSignal\);/);
+    expect(source).toMatch(/process\.on\('SIGTERM', handleSignal\);/);
+    // An interrupted run is a non-pass: the finally's keep decision must
+    // still honor the keep switch, or a stopped run deletes its own
+    // evidence before the signal throw below reports it.
+    expect(source).toMatch(
+      /\(failure \|\| receivedSignal\) &&\s*process\.env\['QWEN_MANAGED_E2E_KEEP_TMP'\]/,
+    );
+    const failureThrow = source.indexOf('if (failure) throw failure;');
+    const signalThrow = source.indexOf(
+      'if (receivedSignal) throw new Error',
+      failureThrow,
+    );
+    const print = source.indexOf('console.log(resultJson)');
+    expect(failureThrow).toBeGreaterThan(-1);
+    expect(signalThrow).toBeGreaterThan(failureThrow);
+    expect(
+      print,
+      'the success payload must print only after both exit guards',
+    ).toBeGreaterThan(signalThrow);
+    // The freeze arm's wake record follows the main result, restoring the
+    // base's ordering, and sits behind the same two guards.
+    const wakePrint = source.indexOf('console.log(fencedWriterJson)');
+    expect(
+      wakePrint,
+      'the freeze wake record must print only after the main result',
+    ).toBeGreaterThan(print);
+  });
+
+  // A timed-out spawn sets error and leaves status null with empty stderr,
+  // so a status-only check throws "MySQL command failed: " and the one
+  // diagnostic a wedged durable-state dump exists to produce is lost.
+  it('runMysql surfaces the spawn-level reason on a timeout', () => {
+    const spawns = [];
+    const { runMysql } = load(
+      ['runMysql'],
+      'runMysql',
+      'spawnSync',
+      'mysql',
+      'mysqlClientEnv',
+    )(
+      (...args) => {
+        spawns.push(args);
+        return {
+          status: null,
+          signal: 'SIGTERM',
+          stderr: '',
+          error: new Error('spawnSync mysql ETIMEDOUT'),
+        };
+      },
+      'mysql',
+      { HOME: '/tmp/mysql-client-home' },
+    );
+    expect(() => runMysql(3306, 'SELECT 1')).toThrow(/ETIMEDOUT/);
+    // A final waitUntil poll can hand runMysql a remaining budget below one
+    // client round trip; the floor keeps the last probe possible.
+    expect(() => runMysql(3306, 'SELECT 1', 3)).toThrow(/ETIMEDOUT/);
+    expect(spawns[1][2].timeout).toBeGreaterThanOrEqual(2_000);
+    // The default-timeout call pins the opposite direction: a budget above
+    // the floor reaches spawnSync unchanged.
+    expect(spawns[0][2].timeout).toBe(10_000);
+  });
+
+  // --no-defaults does not disable $HOME/.mylogin.cnf, so a developer's
+  // mysql_config_editor credential would still auth-connect to the scratch
+  // empty-password server. Both client invocations — the mysql client in
+  // runMysql and the mysqladmin readiness probe — run against an isolated
+  // environment: an empty HOME under the runner's one scratch root (so the
+  // finally reclaims it) with MYSQL_PWD and MYSQL_TEST_LOGIN_FILE stripped;
+  // the two mysqld server launches deliberately keep the real HOME.
+  it('isolates the MySQL client HOME under the runner scratch root', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toContain("path.join(temporary, 'mysql-client-home')");
+    // --no-defaults and the isolated HOME leave two credential sources
+    // open: MYSQL_PWD is read as the password, and MYSQL_TEST_LOGIN_FILE
+    // relocates .mylogin.cnf ahead of $HOME and past --no-defaults. The
+    // shared client environment must strip both, or an exported developer
+    // credential reaches the scratch empty-password server.
+    expect(source).toContain("delete mysqlClientEnv['MYSQL_PWD'];");
+    expect(source).toContain("delete mysqlClientEnv['MYSQL_TEST_LOGIN_FILE'];");
+    // Per call site, not a whole-file count: a count detects a removed
+    // override but stays green when a fifth client invocation without one is
+    // added. The mysqld server launches deliberately keep the real HOME, so
+    // the isolated override is required on the mysql/mysqladmin clients.
+    const { calls, binaries } = mysqlCalls(source);
+    // The exact inventory, not a lower bound — and the scan's binary set is
+    // the runner's own command() resolutions, pinned exactly — so a scan
+    // that silently stops seeing a call site or a declaration fails here
+    // instead of passing against a collapsed population.
+    expect([...binaries].sort()).toEqual(['mysql', 'mysqladmin', 'mysqld']);
+    expect(calls).toHaveLength(4);
+    for (const call of calls) {
+      // MySQL honors --no-defaults only as the first option, so pin the
+      // position: containment would survive the flag moving off index 0.
+      expect(
+        call.firstArg,
+        `${call.binary} must pass --no-defaults first`,
+      ).toBe("'--no-defaults'");
+      if (call.binary === 'mysqld') continue;
+      expect(
+        call.text,
+        `${call.binary} must run with the isolated mysqlClientEnv`,
+      ).toContain('env: mysqlClientEnv');
+    }
+  });
+
+  // The inventory promises quote-style blindness: TypeScript reports a
+  // no-substitution template literal with its backticks on, so the strip
+  // class must cover the third JS string spelling or a backticked launch
+  // is never inventoried.
+  it('inventories a MySQL launch spelled with any quote style', () => {
+    const { calls } = mysqlCalls(`
+      const mysql = command('mysql');
+      spawnSync('mysql', ['--no-defaults']);
+      spawnSync("mysql", ['--no-defaults']);
+      spawnSync(\`mysql\`, ['--no-defaults']);
+    `);
+    expect(calls).toHaveLength(3);
+  });
+
+  // spawnSync blocks the event loop, so waitUntil's race cannot bound a
+  // synchronous probe: the mysqladmin readiness probe carries its own
+  // timeout, and the two lease polls derive each call's timeout from the
+  // remaining waitUntil budget rather than a site-local constant that can
+  // overshoot the declared budget several-fold.
+  it('bounds every synchronous MySQL probe by the poll budget', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toMatch(/spawnSync\(\s*mysqladmin,[\s\S]*?timeout: 10_000/);
+    // Pin the forwarded argument, not the parameter list: an arrow that
+    // takes remainingMs but never passes it on falls back to the 10 s
+    // default inside a budget that may be smaller.
+    expect(
+      source.match(/\(remainingMs\) =>\s*runMysql\([\s\S]*?remainingMs,/g),
+      'both lease polls must derive the probe timeout from the waitUntil budget',
+    ).toHaveLength(2);
+  });
+
+  it('names the jar explicitly on both surfaces — pom-derived name in the runner, classifier exclusion at image build', () => {
+    const script = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(script).not.toContain('qwen-managed-agent-server-0.1.0-alpha');
+    // The pom's repackage executions leave the unclassified jar plus one
+    // artifact per classifier in target/. The runner derives the
+    // unclassified name from the pom (one source of truth); the Dockerfile
+    // selects by classifier exclusion with a loud cardinality guard.
+    expect(script).toContain('qwen-managed-agent-server-${pomVersion}.jar');
+    expect(script).not.toContain('packagedJars');
+    const dockerfile = read(
+      'packages/sdk-java/managed-agent-server/Dockerfile',
+    );
+    expect(dockerfile).not.toContain('qwen-managed-agent-server-0.1.0-alpha');
+    expect(dockerfile).toContain('/tmp/qwen-managed-agent-server.jar');
+    // The exclusion set must cover every classifier the pom declares, or a
+    // pom edit surfaces as an operator's failed docker build ("found 2")
+    // instead of a red here: derive the set from the pom, the one source
+    // of truth, rather than pinning a literal copy of it.
+    const classifiers = [
+      ...read('packages/sdk-java/managed-agent-server/pom.xml').matchAll(
+        /<classifier>([^<]+)<\/classifier>/g,
+      ),
+    ].map((match) => match[1]);
+    expect(classifiers.length).toBeGreaterThan(0);
+    for (const classifier of classifiers) {
+      expect(dockerfile).toContain(`*-${classifier}.jar`);
+    }
+  });
+
+  it('unrefs the waitUntil stall timer so a fast success does not idle the runner', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toMatch(/stallTimer\.unref\(\)/);
+  });
+
+  it('resolves the project version from the real pom', () => {
+    // The runner's own regex executes against the real pom — lifted from
+    // the runner source, not copied — so a whitespace change between
+    // <artifactId> and <version> or a ${revision} indirection surfaces
+    // here, not at the next local run of the script. A routine version
+    // bump must stay green: pin the shape the runner depends on (the match
+    // anchored at the module's own artifactId and a concrete, non-property
+    // version), never today's value.
+    const script = read('scripts/run-managed-agent-server-e2e.ts');
+    const patternSource = script.match(
+      /pomXml\.match\(\s*(\/(?:\\.|[^\\/])*\/)/,
+    )?.[1];
+    expect(patternSource).toBeTruthy();
+    const pattern = new Function(`return ${patternSource};`)();
+    const match = read('packages/sdk-java/managed-agent-server/pom.xml').match(
+      pattern,
+    );
+    expect(match?.[0]).toContain(
+      '<artifactId>qwen-managed-agent-server</artifactId>',
+    );
+    expect(match?.[1]).toBeTruthy();
+    expect(match?.[1]).not.toContain('${');
+    // The descriptive throw stays part of the lookup: a pom whose version
+    // the regex cannot read must fail there, not at the jar existsSync.
+    expect(script).toContain('Could not read the project <version>');
+    // Whitespace inside the element (a formatter wrapping the value) must
+    // not flow into the jar path: the lifted pattern's capture is
+    // whitespace-tolerant, and an empty element still matches nothing, so
+    // the runner's descriptive guard fires.
+    const wrapped =
+      '<artifactId>qwen-managed-agent-server</artifactId>\n  <version>\n    9.9.9\n  </version>';
+    expect(wrapped.match(pattern)?.[1]).toBe('9.9.9');
+    expect(
+      '<artifactId>qwen-managed-agent-server</artifactId><version></version>'.match(
+        pattern,
+      ),
+    ).toBeNull();
+  });
+
+  it('keeps the image on the loopback default and the jar guard loud', () => {
+    const dockerfile = read(
+      'packages/sdk-java/managed-agent-server/Dockerfile',
+    );
+    // The module has no HTTP authentication, so the published image must
+    // not bind beyond loopback by default: publishing is the operator's
+    // explicit -e opt-in at docker run, documented in the README's
+    // container section. The cardinality guard stays loud, so the build
+    // fails rather than shipping a wrong or glob-stat jar.
+    // Dockerfile instructions are case-insensitive and tolerate leading
+    // whitespace, so anchor on the instruction rather than its
+    // conventional spelling: a lowercase or indented ENV would
+    // reintroduce the published wide bind with an uppercase-only pin
+    // green.
+    expect(dockerfile).not.toMatch(
+      /^[ \t]*ENV[ \t]+QWEN_MANAGED_AGENT_SERVER_ADDRESS/im,
+    );
+    expect(dockerfile).not.toMatch(
+      /^[ \t]*ENV[ \t]+QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST/im,
+    );
+    // Pin the bind default at the file that owns it, not only at one
+    // downstream file declining to override it: every Java test passes
+    // --server.address on the command line and the e2e runner passes none,
+    // so a flipped yml default would otherwise ship silently.
+    const applicationYml = read(
+      'packages/sdk-java/managed-agent-server/src/main/resources/application.yml',
+    );
+    expect(applicationYml).toMatch(
+      /address: '\$\{QWEN_MANAGED_AGENT_SERVER_ADDRESS:127\.0\.0\.1\}'/,
+    );
+    expect(dockerfile).toMatch(/\{ \[ "\$count" -eq 1 \] \|\|/);
+    expect(dockerfile).toContain(
+      'expected exactly one unclassified server jar',
+    );
+    // Host Maven output must not ride the build context into the stage the
+    // guard inspects: a stale jar from a developer's target/ would trip the
+    // cardinality check with an artifact this build did not produce. Both
+    // spellings — a bare `target` is root-anchored under Docker's pattern
+    // syntax.
+    const dockerignore = read('.dockerignore');
+    expect(dockerignore).toMatch(/^target$/m);
+    expect(dockerignore).toMatch(/^\*\*\/target$/m);
+    // The container section must document the opt-in and name the
+    // default-bridge exposure, or an operator who skips -p concludes the
+    // surface is closed.
+    const readme = read('packages/sdk-java/managed-agent-server/README.md');
+    expect(readme).toContain('-e QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0');
+    expect(readme).toMatch(/with no `-p` at all/);
+    // RuntimeBrokerHttpServer refuses a non-loopback broker bind unless the
+    // allow-non-loopback flag is set, so a documented broker wildcard opt-in
+    // must name the flag in the same block: the unguarded pair crash-loops
+    // the container the moment the broker is enabled.
+    for (const document of [dockerfile, readme]) {
+      const wildcard = document.indexOf(
+        'QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST=0.0.0.0',
+      );
+      if (wildcard === -1) continue;
+      const before = document.lastIndexOf('\n\n', wildcard);
+      const after = document.indexOf('\n\n', wildcard);
+      expect(
+        document.slice(
+          before === -1 ? 0 : before,
+          after === -1 ? undefined : after,
+        ),
+        'a documented broker wildcard bind must name ALLOW_NON_LOOPBACK=true',
+      ).toMatch(
+        /QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK='?true'?/,
+      );
+    }
+    // BrokerSecurity refuses a non-loopback server.address under the
+    // shipped auto / allow-insecure-bind=false defaults, so a documented
+    // wildcard opt-in whose command names neither override crash-loops the
+    // container: every block setting SERVER_ADDRESS=0.0.0.0 must pass
+    // signed mode with its signing key or the explicit insecure override as
+    // -e flags — an override mentioned only in prose is not in the command
+    // an operator copies.
+    for (const document of [dockerfile, readme]) {
+      for (const occurrence of document.matchAll(
+        /QWEN_MANAGED_AGENT_SERVER_ADDRESS=0\.0\.0\.0/g,
+      )) {
+        const before = document.lastIndexOf('\n\n', occurrence.index);
+        const after = document.indexOf('\n\n', occurrence.index);
+        const block = document.slice(
+          before === -1 ? 0 : before,
+          after === -1 ? undefined : after,
+        );
+        // The signing key must be forwarded valueless: the = spelling
+        // leaves the HMAC secret in the docker run argv, readable by any
+        // local user from /proc/<pid>/cmdline for the container's
+        // lifetime.
+        const signed =
+          /-e QWEN_MANAGED_AGENT_AUTH_MODE='?signed'?/.test(block) &&
+          /-e QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY(?!=)/.test(block);
+        const insecure =
+          /-e QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND='?true'?/.test(block);
+        expect(
+          signed || insecure,
+          'a documented server wildcard bind must pass -e AUTH_MODE=signed with a valueless signing key or -e AUTH_ALLOW_INSECURE_BIND=true',
+        ).toBe(true);
+        // The datasource password is a credential of the same class as
+        // the signing key above: spelled with = it sits in the docker run
+        // argv, readable from /proc/<pid>/cmdline for the container's
+        // lifetime, so the recipe must forward it valueless.
+        expect(
+          block,
+          'a documented server wildcard bind must pass -e SPRING_DATASOURCE_PASSWORD valueless',
+        ).toMatch(/-e SPRING_DATASOURCE_PASSWORD(?!=)/);
+        // Flyway runs against SPRING_DATASOURCE_URL at container start and
+        // the yml default's 127.0.0.1 is the container itself: a publish
+        // recipe that omits the datasource — or points it at loopback —
+        // passes the auth guard and then dies at the datasource with the
+        // published port refused. toContain stops at the flag name, so pin
+        // the loopback spellings away from the host; the <db-host>
+        // placeholder the recipes document stays valid.
+        expect(
+          block,
+          'a documented server wildcard bind must pass -e SPRING_DATASOURCE_URL= with a container-reachable host',
+        ).toMatch(
+          /-e SPRING_DATASOURCE_URL='?jdbc:mysql:\/\/(?!127\.0\.0\.1|localhost)/,
+        );
+        // Docker drops a valueless -e whose variable is unset without a
+        // warning, so the recipe prose must have the operator export BOTH
+        // valueless variables: an instruction naming only the password
+        // boots the container with an empty signing key, and the JVM dies
+        // at BrokerSecurity's minimum-key guard with the published port
+        // refused. The Dockerfile's comment defers to the README's
+        // container section rather than repeating the precondition, so
+        // the pin is README-only.
+        if (document === readme) {
+          const preceding = document.slice(0, before === -1 ? 0 : before);
+          expect(
+            preceding,
+            'the prose ahead of a documented server wildcard bind must have the operator export both valueless variables',
+          ).toMatch(
+            /export[\s\S]{0,160}?QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY[\s\S]{0,160}?SPRING_DATASOURCE_PASSWORD/,
+          );
+        }
+      }
+    }
+  });
+
+  // The jar-selection guard is executable shell, and the text pins above
+  // never look inside the loop body: deleting the glob break or forcing the
+  // count both left them green. Run the stage's own shell text against
+  // fixture target/ populations so the guard's behaviour is pinned, not its
+  // spelling.
+  // The fixture ends in `cp`, and a Git-Bash-only Windows PATH resolves
+  // sh.exe without the coreutils: probe the capability the fixture consumes
+  // and skip visibly — an in-body return would record the case as passed for
+  // a guard that never ran.
+  const hasShAndCp =
+    spawnSync('sh', ['-c', 'command -v cp >/dev/null 2>&1'], {
+      stdio: 'ignore',
+    }).status === 0;
+
+  it.skipIf(!hasShAndCp)(
+    'fails the image build loudly when the jar selection is ambiguous',
+    () => {
+      const dockerfile = read(
+        'packages/sdk-java/managed-agent-server/Dockerfile',
+      );
+      const stage = dockerfile.match(
+        /cd packages\/sdk-java\/managed-agent-server\/target \\[\s\S]*?&& cp "\$main" \/tmp\/qwen-managed-agent-server\.jar/,
+      );
+      expect(
+        stage,
+        'the jar-selection RUN stage must be extractable from the Dockerfile',
+      ).not.toBeNull();
+      const script = stage[0]
+        .split('\n')
+        .filter((line) => !line.trimStart().startsWith('#'))
+        .map((line) => line.trimEnd().replace(/\\$/, ''))
+        .join(' ');
+      const populations = [
+        { jars: [], status: 1, found: 0 },
+        { jars: ['qwen-managed-agent-server-1.0.jar'], status: 0 },
+        {
+          jars: [
+            'qwen-managed-agent-server-1.0.jar',
+            'qwen-managed-agent-server-1.0-workspace-bundle.jar',
+            'qwen-managed-agent-server-1.0-operator-recovery.jar',
+          ],
+          status: 0,
+        },
+        {
+          jars: [
+            'qwen-managed-agent-server-1.0.jar',
+            'qwen-managed-agent-server-1.0-workspace-bundle.jar',
+            'qwen-managed-agent-server-1.0-workspace-migration.jar',
+            'qwen-managed-agent-server-1.0-operator-recovery.jar',
+          ],
+          status: 0,
+        },
+        {
+          jars: [
+            'qwen-managed-agent-server-1.0.jar',
+            'qwen-managed-agent-server-2.0.jar',
+          ],
+          status: 1,
+          found: 2,
+        },
+      ];
+      for (const { jars, status, found } of populations) {
+        const dir = mkdtempSync(join(tmpdir(), 'jar-guard-'));
+        try {
+          for (const jar of jars) writeFileSync(join(dir, jar), '');
+          const fixture = script
+            .replace(
+              'cd packages/sdk-java/managed-agent-server/target',
+              `cd '${dir.replaceAll('\\', '/')}'`,
+            )
+            .replace(
+              '/tmp/qwen-managed-agent-server.jar',
+              `'${join(dir, 'published.jar').replaceAll('\\', '/')}'`,
+            );
+          const run = spawnSync('sh', ['-c', fixture], { encoding: 'utf8' });
+          expect(run.status, `${jars.length} jars: ${run.stderr}`).toBe(status);
+          if (found !== undefined) {
+            expect(run.stderr).toContain(
+              `expected exactly one unclassified server jar, found ${found}`,
+            );
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+  );
 });
