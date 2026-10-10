@@ -142,7 +142,8 @@ public final class ExtensionRecordJournal {
 
     /**
      * The same commit carrying one input and wake per id, as a writer that
-     * does not follow the contract might bundle more than one.
+     * does not follow the contract might bundle more than one. A repeated
+     * id still gets its own event and turn.
      */
     CommitTransactionRequest requestDomainWithInputs(String commandId,
             String domain, JsonNode body, List<CommitResource> resources,
@@ -155,21 +156,24 @@ public final class ExtensionRecordJournal {
                 .put("digest", input.digest());
         StringBuilder lines = new StringBuilder();
         long accepted = sequence + 2;
-        for (String inputId : inputIds) {
-            ObjectNode inputEvent = event(accepted, inputId + ":accepted",
+        for (int index = 0; index < inputIds.size(); index++) {
+            String inputId = inputIds.get(index);
+            String turn = inputIds.indexOf(inputId) == index ? inputId
+                    : inputId + ":" + index;
+            ObjectNode inputEvent = event(accepted, turn + ":accepted",
                     "input.accepted");
             inputEvent.putObject("payload").put("inputId", inputId)
-                    .put("turnId", inputId).put("source", "session_message")
+                    .put("turnId", turn).put("source", "session_message")
                     .<ObjectNode>set("contentRef", ref.deepCopy())
                     .putNull("deadline")
                     .set("admissionRef", ref.deepCopy());
-            ObjectNode wake = event(accepted + 1, inputId + ":wake",
+            ObjectNode wake = event(accepted + 1, turn + ":wake",
                     "wake.requested");
             ObjectNode payload = wake.putObject("payload")
-                    .put("wakeId", inputId + ":wake").put("reason", "input");
+                    .put("wakeId", turn + ":wake").put("reason", "input");
             payload.putObject("subject").put("type", "turn")
-                    .put("turnId", inputId);
-            payload.put("sourceEventId", inputId + ":accepted")
+                    .put("turnId", turn);
+            payload.put("sourceEventId", turn + ":accepted")
                     .put("requiredSequence", accepted);
             lines.append(line(sessionId, "managed_session_event_v1",
                     inputEvent)).append(line(sessionId,

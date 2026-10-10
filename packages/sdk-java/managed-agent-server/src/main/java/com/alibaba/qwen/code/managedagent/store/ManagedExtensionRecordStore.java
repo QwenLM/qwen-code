@@ -19,7 +19,6 @@ import java.security.NoSuchAlgorithmException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.List;
@@ -629,11 +628,12 @@ public class ManagedExtensionRecordStore {
                 arguments).stream().findFirst();
     }
 
-    /** The inputs a transaction accepts, by id, read only when a record
-     * must bind to them. */
-    private static Set<String> transactionInputIds(String[] lines,
+    /** The ids of the inputs a transaction accepts, one per input event
+     * (a repeated id stays repeated), read only when a record must bind to
+     * them. */
+    private static List<String> transactionInputIds(String[] lines,
             int eventCount) {
-        Set<String> inputs = new HashSet<>();
+        List<String> inputs = new ArrayList<>();
         for (int index = 0; index < Math.min(eventCount, lines.length);
                 index++) {
             JsonNode event = parse(lines[index]);
@@ -651,7 +651,7 @@ public class ManagedExtensionRecordStore {
             String sessionId, String domain, Body body, String operationId,
             JsonNode recordRef, long sequence, long occurredAt,
             Function<String, StoredResource> resources,
-            Supplier<Set<String>> inputIds) {
+            Supplier<List<String>> inputIds) {
         String resourceId = recordRef.get("resourceId").textValue();
         StoredResource resource = resources.apply(resourceId);
         require(resource.kind().equals(recordRef.get("kind").textValue())
@@ -1014,12 +1014,16 @@ public class ManagedExtensionRecordStore {
         }
         if (domain.equals("session_message")) {
             // After the chain rules, so a different message under a taken
-            // id answers as the conflict it is, as the authority does.
+            // id answers as the conflict it is, as the authority does. A
+            // transaction carries at most one Stage H record (apply), so
+            // every input it accepts is this record's: an opening receipt
+            // carries exactly one, under its own id, and no other revision
+            // carries any.
             boolean opening = previous == null && "inbound".equals(
                     record.get("direction").textValue());
-            Set<String> inputs = inputIds.get();
+            List<String> inputs = inputIds.get();
             require(opening
-                    ? inputs.equals(Set.of(record.get("inputId").textValue()))
+                    ? inputs.equals(List.of(record.get("inputId").textValue()))
                     : inputs.isEmpty(),
                     "An inbound session message opens together with its"
                             + " input, and no other revision carries one.");
@@ -1210,8 +1214,8 @@ public class ManagedExtensionRecordStore {
         if (outbound == "to_child".equals(message.get("route").textValue())) {
             JsonNode child = recordBody(scopeKey, sessionId, "child_run",
                     childRunId, resources);
-            require(child != null && !"shell".equals(child.get("kind")
-                    .textValue()),
+            require(child != null
+                    && ManagedExtensionRecords.isChildSessionRun(child),
                     "Session message must name a child Session run of this"
                             + " Session.");
             String attached = child.get("childSessionId").isNull() ? null
@@ -1270,7 +1274,8 @@ public class ManagedExtensionRecordStore {
     private void requireContinuation(String sessionId, String scopeKey,
             JsonNode child, Function<String, StoredResource> resources) {
         JsonNode named = child.get("predecessorChildRunId");
-        if ("shell".equals(child.get("kind").textValue()) || named.isNull()) {
+        if (!ManagedExtensionRecords.isChildSessionRun(child)
+                || named.isNull()) {
             return;
         }
         String predecessorId = named.textValue();
@@ -1295,16 +1300,20 @@ public class ManagedExtensionRecordStore {
                         .get("definition"), child.get("run").get("definition")),
                 "Child continuation must keep its predecessor's scope, tree,"
                         + " workspace and definition.");
-        // Continuations are rare and checked only when one opens, so the
-        // child Session runs are read rather than indexed: a sibling proven
-        // never to have started releases the predecessor, which no unique
-        // index could express.
+        // Continuations are rare and checked only when one opens, so the runs
+        // are read rather than indexed: a sibling proven never to have
+        // started releases the predecessor, which no unique index could
+        // express. Only a run of the predecessor's kind can continue it, so
+        // only those are read. Each opened once every earlier one proved it
+        // never started, so at most one still holds the predecessor; the
+        // authority keeps just that latest one, relying on the same
+        // invariant, so a second release condition must change both.
         List<String> siblings = jdbc.query("SELECT record_resource_id FROM"
                         + " qwen_managed_session_extension_record WHERE"
                         + " session_scope_key = ? AND domain = 'child_run'"
-                        + " AND task_kind <> 'background_shell'",
+                        + " AND task_kind = ?",
                 (result, row) -> result.getString("record_resource_id"),
-                scopeKey);
+                scopeKey, ManagedExtensionRecords.childRunTaskKind(child));
         for (String sibling : siblings) {
             JsonNode body = readBody(resources.apply(sibling));
             require(!predecessorId.equals(body.get("predecessorChildRunId")

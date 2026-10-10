@@ -8,7 +8,7 @@
 
 H4b 让 child 的结果持久、让其 acceptance 可观察,但通信仍是单向且终态的:父发起,child 运行,child 的结果被复制回来并被接受。父无法向运行中的 child 补充信息,child 无法向父询问任何事,已完成的 child 也无法被续跑。H4b 是有意停在这里的。它的决策 12 指出 `continueChildRun` "没有诚实的 v1 生产者",其真正的生产者是 H4d 的 peer 消息与复活路径。H4a 的交付地图把"`session_message` 记录体与无团队的持久 `send_message` 路由"交给 H4d,出口为"持久送达,每个收件方各有 accepted 与 consumed,跨重启与重连"。
 
-Issue #13744 提出了三项交付。维护者于 2026-10-09 按 issue 上的分诊意见裁定了范围:
+Issue #13744 提出了三项交付。维护者于 2026-10-09 裁定了范围。D1 的收窄与 D3 的移出采纳了 issue 上的分诊意见。D2 一分为二、`queryChildRun` 不实现这两项分诊意见留待定夺,是维护者的决定,记录于此:
 
 - **D1(操作)收窄为 `continueChildRun`。** `queryChildRun` 不作为操作实现。H4b 决策 12 依然成立:查询不需要写 journal,relay 与工具轮已经读取已提交的记录或其 SQL 投影(见下文决策 12)。
 - **D2(持久投递)一分为二。** 本变更落地记录这一半:投递所需的每个事实都是已提交的记录,并在两种语言中有提交时规则。运行时那一半属于 H4d-b:managed `send_message` 工具、消息 relay、投递边界、消费与复活。
@@ -135,7 +135,7 @@ Schema version 1。链以 `messageId` 为键。所有键都必填;可空的键�
   - 重新打开的日志会重建每一条链。
   - 续跑在前驱已完成后提交成功;前驱缺失、失败、未结束、被请求停止、改了 scope 或已被续跑时被拒绝;从未启动的续跑会释放前驱,已启动的不会。
   - HTTP Session store 把血缘拒绝当作可回滚的未提交,日志保持可写。
-- **Java store。** 同样的链在 H2 的 MySQL 模式上提交成功。血缘规则以自己的错误码拒绝不遵循 `managed_agent_session` 血缘的消息。事务级 input 绑定拒绝不带 input 或多带一个 input 的 inbound 开启,也拒绝携带 input 的其他修订。续跑规则与 TypeScript 一致。`session_message` 行不投影任务。
+- **Java store。** 同样的链在 H2 的 MySQL 模式上提交成功。血缘规则以自己的错误码拒绝不遵循 `managed_agent_session` 血缘的消息。事务级 input 绑定拒绝不带 input 或多带一个 input 的 inbound 开启(多带的 input 即使 id 相同也拒绝),也拒绝携带 input 的其他修订。续跑规则与 TypeScript 一致。`session_message` 行不投影任务。
 - **变异检查。** 依次禁用每个新守卫,其见证测试在各自语言中变红。
 
 ## 验收标准

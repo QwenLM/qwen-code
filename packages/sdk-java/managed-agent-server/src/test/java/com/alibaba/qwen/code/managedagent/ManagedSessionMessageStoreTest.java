@@ -52,8 +52,10 @@ class ManagedSessionMessageStoreTest {
     private static final String WORKSPACE = "workspace-extension";
     private static final String REJECTED =
             ManagedExtensionRecordStore.ERROR_REJECTED;
-    private static final String LINEAGE =
-            ManagedExtensionRecordStore.ERROR_MESSAGE_LINEAGE;
+    // Spelled out, not read from the store: the TypeScript HTTP store
+    // matches this literal to treat the refusal as a rollbackable
+    // non-commit, so renaming the constant must fail here.
+    private static final String LINEAGE = "session_message_lineage_refused";
     private static final String BINDING =
             "An inbound session message opens together with its input, and"
                     + " no other revision carries one";
@@ -219,6 +221,13 @@ class ManagedSessionMessageStoreTest {
                         "message-9:accept", "session_message",
                         fromChild(parent, "accepted"), List.of(content),
                         List.of("message-9:input", "message-9:extra"),
+                        notification)));
+        // Two inputs, two turns, one id: each would still be consumed.
+        assertRefused("a receipt bundling its input twice", parent, BINDING,
+                () -> journal.commit(journal.requestDomainWithInputs(
+                        "message-9:accept", "session_message",
+                        fromChild(parent, "accepted"), List.of(content),
+                        List.of("message-9:input", "message-9:input"),
                         notification)));
         assertRefused("a receipt without its input", parent, BINDING,
                 () -> commit(journal, "message-9:accept",

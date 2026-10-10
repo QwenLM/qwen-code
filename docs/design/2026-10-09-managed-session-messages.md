@@ -8,7 +8,7 @@ Status: implemented in this change. Landed: the `managed-session_message` record
 
 H4b made a child's result durable and its acceptance observable, but the communication stays one-directional and terminal: the parent launches, the child runs, and the child's result is copied back and accepted. A parent cannot add information to a running child, a child cannot ask its parent anything, and a completed child cannot be continued. H4b stopped there on purpose. Its decision 12 names `continueChildRun` as having "no honest v1 producer" whose real producers are H4d's peer-message and revive paths. The H4a delivery map gives H4d "the `session_message` body and durable `send_message` routing without a team", with the exit "durable delivery, per-recipient accepted and consumed, across restart and reconnect".
 
-Issue #13744 asked for three deliverables. The maintainer settled the scope on 2026-10-09, following the triage on the issue:
+Issue #13744 asked for three deliverables. The maintainer settled the scope on 2026-10-09. The narrowing of D1 and the move of D3 follow the triage on the issue. Splitting D2 and leaving `queryChildRun` unbuilt, which the triage left open, are the maintainer's call, recorded here:
 
 - **D1 (operations) is narrowed to `continueChildRun`.** `queryChildRun` is not built as an operation. H4b decision 12 stands: a query needs no journal write, and the relay and the tool turn already read the committed records or their SQL projection (decision 12 below).
 - **D2 (durable delivery) is split.** This change lands the record half: every fact the delivery needs is a committed record with commit-time rules in both languages. The runtime half is H4d-b: the managed `send_message` tool, the message relay, the delivery boundary, consumption and revive.
@@ -135,7 +135,7 @@ No key changes. Decision 9's rules are commit-time checks in the authority and t
   - A reopened log rebuilds every chain.
   - A continuation commits after a completed predecessor and is refused for a missing, failed, unfinished, stop-requested, re-scoped or already-continued predecessor; a continuation that never started releases its predecessor, one that started does not.
   - The HTTP Session store treats the lineage refusal as a rollbackable non-commit, and the log stays writable.
-- **Java store.** The same chains commit over H2 in MySQL mode. The lineage rules refuse, with their own code, a message that does not follow `managed_agent_session`'s lineage. The transaction-level input binding refuses an inbound opening without its input or with a second one, and refuses any other revision that carries one. The continuation rules match TypeScript. A `session_message` row projects no task.
+- **Java store.** The same chains commit over H2 in MySQL mode. The lineage rules refuse, with their own code, a message that does not follow `managed_agent_session`'s lineage. The transaction-level input binding refuses an inbound opening without its input or with a second one, even a second one under the same id, and refuses any other revision that carries one. The continuation rules match TypeScript. A `session_message` row projects no task.
 - **Mutation checks.** Each new guard is disabled in turn, and its witness goes red in its own language.
 
 ## Acceptance criteria

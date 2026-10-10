@@ -481,7 +481,13 @@ export class LocalManagedSessionAuthority {
     }
   >();
   private readonly hookDefinitionPins = new Map<string, string>();
-  /** Each continued predecessor's latest continuation, by child run id (H4d). */
+  /**
+   * Each continued predecessor's latest continuation, by child run id (H4d).
+   * The latest is the only one that can still hold the predecessor: another
+   * opens only once it proved it never started. The Java store scans every
+   * continuation instead and relies on the same invariant, so a second
+   * release condition must change both.
+   */
   private readonly childContinuations = new Map<string, string>();
   /**
    * The Stage H record resources an opened log replayed, and the resources
@@ -1506,7 +1512,7 @@ export class LocalManagedSessionAuthority {
         // decided from the parsed body.
         const child = parseChildRun(parsed.record);
         assertManagedSessionChildRunKindEnabled(child.kind);
-        if (child.kind !== 'shell' && child.predecessorChildRunId !== null) {
+        if (isChildSessionRun(child) && child.predecessorChildRunId !== null) {
           assertManagedSessionChildContinuationEnabled();
         }
       }
@@ -1526,7 +1532,7 @@ export class LocalManagedSessionAuthority {
         // fact, so a redelivery that finds the receipt can never add a
         // second input. Checked after the chain rules, so a different
         // message under a taken id answers as the conflict it is.
-        const message = parsed.record as SessionMessage;
+        const message = parseSessionMessage(parsed.record);
         const opening =
           message.direction === 'inbound' &&
           this.extensionRecord(request.domain, parsed.recordId) === undefined;
@@ -2233,7 +2239,7 @@ export class LocalManagedSessionAuthority {
       // chain stays linear. A continuation proven never to have started
       // left the predecessor untouched, so it releases it.
       const child = parseChildRun(parsed.record);
-      if (child.kind !== 'shell' && child.predecessorChildRunId !== null) {
+      if (isChildSessionRun(child) && child.predecessorChildRunId !== null) {
         const named = this.extensionRecord(
           'child_run',
           child.predecessorChildRunId,
@@ -2307,7 +2313,7 @@ export class LocalManagedSessionAuthority {
         const named = this.extensionRecord('child_run', message.childRunId);
         const child =
           named === undefined ? undefined : parseChildRun(named.record);
-        if (child === undefined || child.kind === 'shell') {
+        if (child === undefined || !isChildSessionRun(child)) {
           reject(
             'Session message must name a child Session run of this Session.',
           );
@@ -2441,7 +2447,7 @@ export class LocalManagedSessionAuthority {
       }
       if (domain === 'child_run') {
         const child = parseChildRun(parsed.record);
-        if (child.kind !== 'shell' && child.predecessorChildRunId !== null) {
+        if (isChildSessionRun(child) && child.predecessorChildRunId !== null) {
           this.childContinuations.set(
             child.predecessorChildRunId,
             child.childRunId,
