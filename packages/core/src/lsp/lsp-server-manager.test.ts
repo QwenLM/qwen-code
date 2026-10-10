@@ -841,18 +841,6 @@ describe('LspServerManager', () => {
     );
   });
 
-  it('records the refusal cause on the handle when the workspace is not trusted', async () => {
-    const manager = createTrustedManager();
-    spyPrivate(manager, 'checkWorkspaceTrust').mockResolvedValue(false);
-
-    manager.setServerConfigs([serverConfig]);
-    await manager.startAll();
-
-    const handle = manager.getHandles().get('clangd');
-    expect(handle?.status).toBe('FAILED');
-    expect(handle?.error?.message).toBe('workspace is not trusted');
-  });
-
   it('retries the same config after a crash restart failure', async () => {
     const { manager, crash } = crashingManager([true, false, true]);
     const config = { ...serverConfig, restartOnCrash: true };

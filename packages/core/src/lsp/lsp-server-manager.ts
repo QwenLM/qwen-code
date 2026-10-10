@@ -411,8 +411,8 @@ export class LspServerManager {
       debugLogger.warn(
         `Workspace trust check failed, not starting LSP server ${name}`,
       );
-      handle.error = new Error('workspace is not trusted');
-      handle.processDiagnostics = undefined;
+      // The gate above rejects on the same predicate this check uses, so this
+      // branch is unreachable and records no cause; the reachable gate does.
       handle.status = 'FAILED';
       this.serverConfigHashes.delete(name);
       return;

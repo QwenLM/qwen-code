@@ -3325,6 +3325,29 @@ describe('NativeLspService disk document synchronization', () => {
       expect(result.llmContent).not.toContain('No diagnostics found');
     });
 
+    it('names a push-only TypeScript server that refuses a JS-family file', async () => {
+      // A `typescript` declaration answers for the JS family, so tsls was a
+      // legitimate candidate for App.jsx and its refusal explains the empty
+      // result. Without the family widening the refusal reads as no-owner and
+      // the message claims no configured server covers a file tsls was asked
+      // about.
+      const [jsxPath] = addFile('App.jsx', 'export const x = "";\n');
+      withServers([
+        ['tsls', serverOn('tsls', ['typescript'], refusingConnection(-32601))],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: jsxPath,
+      });
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'tsls: does not support pull diagnostics',
+      );
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
     it('still lets a -32601 workspace pull veto an empty workspace report', async () => {
       // The workspace leg stays unqualified on purpose: with no queried file
       // there is nothing to attribute, and a server that does not implement

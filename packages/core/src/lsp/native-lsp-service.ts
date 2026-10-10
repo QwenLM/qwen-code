@@ -2333,17 +2333,20 @@ export class NativeLspService {
       // may excuse one server from vetoing another's answer; it cannot make an
       // unknown or unowned answer certify the file.
       if (answeredRelevant === 0 || (attributable && answeredOwner === 0)) {
-        // For a document query, name only a refusal whose strict declaration
-        // proves ownership. A server-name key or a language alias that cannot
-        // prove ownership cannot explain why this file has no backing answer.
-        // Workspace queries have no extension to attribute, so retain their
-        // existing refusal details.
+        // For a document query, name a refusal only when the server's
+        // declaration can own the queried extension, using the same
+        // TypeScript-family widening as `answeredOwner`: a `typescript`
+        // declaration answers for the JS family, so its refusal explains the
+        // empty result, while a JavaScript-only declaration cannot claim
+        // TypeScript. A server-name key or an unplaceable alias still cannot
+        // explain why this file has no backing answer. Workspace queries have
+        // no extension to attribute, so retain their existing refusal details.
         const blame = [
           ...relevantFailures,
           ...unsupported.filter(
             ({ handle }) =>
               extension === undefined ||
-              this.declaredOwnerExtensions(handle).has(extension),
+              this.declaredOwnerExtensions(handle, true).has(extension),
           ),
         ];
         throw blame.length > 0
