@@ -14,7 +14,7 @@
  * so /delete could only ever remove the row under the cursor.
  */
 
-import { act, render, screen } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionListItem } from '@qwen-code/qwen-code-core/services/sessionService.js';
 
@@ -45,9 +45,26 @@ const mocks = vi.hoisted(() => {
       const config = key === undefined ? props : { ...props, key };
       const children = (config?.children ?? null) as React.ReactNode;
       if (type === 'box' || type === 'text') {
+        // Layout props are what the structural test reads, and the DOM nodes
+        // this mock maps to would drop them: keep the primitives as an
+        // attribute.
+        const captured = JSON.stringify(
+          Object.fromEntries(
+            Object.entries(config ?? {}).filter(
+              ([k, v]) =>
+                k !== 'children' &&
+                (typeof v === 'string' ||
+                  typeof v === 'number' ||
+                  typeof v === 'boolean'),
+            ),
+          ),
+        );
         return React.createElement(
           type === 'box' ? 'div' : 'span',
-          key === undefined ? null : { key },
+          {
+            ...(key === undefined ? {} : { key }),
+            'data-p': captured,
+          },
           children,
         );
       }
@@ -100,6 +117,8 @@ vi.mock('./key-map.js', () => ({
 }));
 
 import { OpenTuiSessionPicker } from './session-picker.js';
+import { dialogAreaWidth } from './dialogs-shared.js';
+import { getCachedStringWidth } from '../utils/textUtils.js';
 
 function press(key: RawKey) {
   if (mocks.state.keyboardHandlers.length === 0) {
@@ -153,7 +172,9 @@ function renderPicker(
   const onSelect = vi.fn();
   const onCancel = vi.fn();
   const onConfirmMulti = vi.fn();
-  render(
+  // Built fresh on every call so a rerender is a real re-render, not the same
+  // element object handed back.
+  const build = () => (
     <OpenTuiSessionPicker
       // A null service renders ink's loading notice, so the list needs one.
       sessionService={{ listSessions: vi.fn() } as never}
@@ -162,9 +183,16 @@ function renderPicker(
       onCancel={onCancel}
       onConfirmMulti={onConfirmMulti}
       {...props}
-    />,
+    />
   );
-  return { onSelect, onCancel, onConfirmMulti };
+  const view = render(build());
+  return {
+    onSelect,
+    onCancel,
+    onConfirmMulti,
+    container: view.container,
+    rerender: () => view.rerender(build()),
+  };
 }
 
 /** The marker/checkbox line and the dim metadata line of one session row. */
@@ -384,6 +412,57 @@ describe('OpenTuiSessionPicker', () => {
     press({ name: 'b', sequence: 'b', ctrl: true });
     expect(screen.getByText('(branch: feature)')).toBeTruthy();
     expect(titles()).toEqual(['Session 02']);
+  });
+
+  it('clips the header title to the one physical row the budget charges', () => {
+    // RESERVED_LINES pays the header one row; an unclipped title wraps onto a
+    // second row the list's window thinks it owns. The box is 96 columns wide
+    // at this mocked width, and its border and the row's padding take two
+    // columns each side.
+    renderPicker([session(1)], { title: 'T'.repeat(120) });
+    expect(screen.queryByText('T'.repeat(120))).toBeNull();
+    expect(screen.getByText(`${'T'.repeat(91)}…`)).toBeTruthy();
+  });
+
+  it('clips the header suffix in display columns, off the padded row', () => {
+    // The header row paints inside the border (2) and its own padding (2),
+    // and the suffix budget subtracts the clipped title's display width: a
+    // double-width title measures ten UTF-16 units where it paints twenty
+    // columns, so a .length budget grants the suffix ten columns the row no
+    // longer has, and the wrap grows the frame past the region.
+    mocks.state.width = 100; // boxWidth 96
+    const branch = 'b'.repeat(70);
+    renderPicker([session(1, { gitBranch: branch })], {
+      title: '界'.repeat(10),
+      currentBranch: branch,
+    });
+    press({ name: 'b', sequence: 'b', ctrl: true });
+    const suffix = screen.getByText(/branch: /);
+    // 96 - 4 - 20 (the title's columns) - 1 (the gap) = 71 for the suffix;
+    // the 80-column branch suffix clips. A UTF-16 budget grants 81.
+    expect(getCachedStringWidth(suffix.textContent ?? '')).toBeLessThanOrEqual(
+      71,
+    );
+    expect(suffix.textContent).toMatch(/…$/);
+  });
+
+  it('clips the search query at the narrower width the same way', () => {
+    mocks.state.width = 40; // boxWidth 36
+    renderPicker([session(1)]);
+    for (let i = 0; i < 85; i++) typeChar('q');
+    // 36 - 4 - 8 ('Search: ') - 1 (the cursor block) = 23 columns.
+    expect(screen.queryByText('q'.repeat(85))).toBeNull();
+    expect(screen.getByText(`${'q'.repeat(22)}…`)).toBeTruthy();
+  });
+
+  it('clips the search row to its one charged row', () => {
+    // The query is user-typed and unbounded; the row is charged one physical
+    // row, so it clips at 96 - 4 (border + the row's padding) - 8 ('Search: ')
+    // - 1 (the cursor block) = 83 columns.
+    renderPicker([session(1)]);
+    for (let i = 0; i < 200; i++) typeChar('q');
+    expect(screen.queryByText('q'.repeat(200))).toBeNull();
+    expect(screen.getByText(`${'q'.repeat(82)}…`)).toBeTruthy();
   });
 });
 
@@ -631,5 +710,208 @@ describe('OpenTuiSessionPicker under one stdin read', () => {
     burst([SPACE, DOWN, RETURN]);
 
     expect(onSelect).toHaveBeenCalledWith('id-01');
+  });
+});
+
+describe('OpenTuiSessionPicker inside the popup region', () => {
+  const layoutOf = (node: Element | null): Record<string, unknown> =>
+    JSON.parse(node?.getAttribute('data-p') ?? '{}') as Record<string, unknown>;
+
+  it('caps the box at the region width on wide terminals', () => {
+    // The popup region is dialogAreaWidth wide and clips what overruns it.
+    // Sizing the box from the raw terminal width instead (width - 4) asks for
+    // 116 columns on a 120-column terminal, and the region's clip cuts the
+    // right border and the tail of every row — invisible to the parity matrix,
+    // whose widest arm is the 100 columns both formulas agree on.
+    mocks.state.width = 120;
+    const { container } = renderPicker([session(1), session(2)]);
+    expect(layoutOf(container.firstElementChild)).toMatchObject({
+      width: dialogAreaWidth(120),
+      height: 39,
+      flexShrink: 1,
+      overflow: 'hidden',
+    });
+  });
+
+  it('windows the list from the region budget, not the raw terminal height', () => {
+    // The region is five rows shorter than the raw terminal: at a 40-row
+    // terminal the region is 35 and the window is floor((35 - 7) / 3) = 9
+    // rows, not the 11 the raw height would offer. The two extra rows were
+    // the clip's — the last one took the down-scroll marker with it, so the
+    // list looked complete while Enter could still commit the clipped row.
+    const sessions = Array.from({ length: 14 }, (_, i) => session(i + 1));
+    const { onSelect } = renderPicker(sessions, {
+      availableTerminalHeight: 35,
+    });
+    expect(screen.getAllByText(/^Session \d\d$/)).toHaveLength(9);
+    expect(lines('Session 01').row).toBe('› Session 01');
+    expect(lines('Session 09').row).toBe('↓ Session 09');
+
+    // The window follows the cursor, so the row Enter commits is always one
+    // the region painted.
+    for (let i = 0; i < 9; i++) press({ name: 'down' });
+    expect(lines('Session 10').row).toBe('› Session 10');
+    press({ name: 'return' });
+    expect(onSelect).toHaveBeenCalledWith('id-10');
+  });
+
+  it('lets the region press the box down instead of pushing the composer out', () => {
+    // ink asks for `height - 1` too and lets its fixed-height popup wrapper
+    // compress the box, because ink's Box defaults to flexShrink 1. @opentui
+    // resolves flexShrink to 0 whenever a size is set explicitly, so the shrink
+    // has to be asked for: without it a 40-row terminal drew the 39-row box
+    // from above the region and squeezed the transcript into one garbled row.
+    const { container } = renderPicker([session(1), session(2)]);
+    expect(layoutOf(container.firstElementChild)).toMatchObject({
+      height: 39,
+      flexShrink: 1,
+      overflow: 'hidden',
+    });
+    // ink's picker has no top margin; one row of it would be absorbed out of
+    // the border box, rendering the list one row lower than ink's.
+    expect(layoutOf(container.firstElementChild)['marginTop']).toBeUndefined();
+  });
+
+  it('holds the preview to the region too, with no top margin', async () => {
+    // Same root cause as the list: an explicit size makes @opentui resolve
+    // flexShrink to 0. ink's `SessionPreview` has no margin and no size of its
+    // own, so its title starts on the region's first row.
+    const { container } = renderPicker([session(1), session(2)], {
+      enablePreview: true,
+      sessionService: serviceWith(vi.fn().mockResolvedValue(loadedSession([]))),
+    });
+    press({ name: 'space', sequence: ' ' });
+    await flush();
+
+    expect(layoutOf(container.firstElementChild)).toMatchObject({
+      height: 39,
+      flexShrink: 1,
+      overflow: 'hidden',
+    });
+    expect(layoutOf(container.firstElementChild)['marginTop']).toBeUndefined();
+  });
+
+  it('rebuilds the box on a terminal resize so the shrink survives it', () => {
+    // The renderer's width/height setters clear an explicit flexShrink back to
+    // 0 and its reconciler only re-applies props whose value changed, so after
+    // a resize the shrink is lost unless the host node is rebuilt — which is
+    // what folding the size into the branch key forces. A reused node here
+    // means the picker goes back to holding its full height inside a shorter
+    // region, squeezing the transcript beside it into one garbled row, until
+    // it is reopened.
+    const { container, rerender } = renderPicker([session(1), session(2)]);
+    const beforeResize = container.firstElementChild;
+
+    mocks.state.height = 37;
+    rerender();
+
+    const afterResize = container.firstElementChild;
+    expect(afterResize).not.toBe(beforeResize);
+    expect(layoutOf(afterResize)).toMatchObject({
+      height: 36,
+      flexShrink: 1,
+      overflow: 'hidden',
+    });
+  });
+
+  it('rebuilds the box on a width-only resize, so the shrink survives it too', () => {
+    // The renderer's width setter clears an explicit flexShrink exactly the
+    // way its height setter does, so a width-only resize needs the remount
+    // just as much — and the folded key only turns over through boxWidth
+    // there. A reused node would keep its old width and its cleared shrink
+    // inside the region until the picker is reopened.
+    const { container, rerender } = renderPicker([session(1), session(2)]);
+    const beforeResize = container.firstElementChild;
+
+    mocks.state.width = 120;
+    rerender();
+
+    const afterResize = container.firstElementChild;
+    expect(afterResize).not.toBe(beforeResize);
+    expect(layoutOf(afterResize)).toMatchObject({
+      width: dialogAreaWidth(120),
+      height: 39,
+      flexShrink: 1,
+      overflow: 'hidden',
+    });
+  });
+
+  it('commits nothing when the region leaves the window no rows', () => {
+    // A three-row region does not cover the seven reserved chrome rows, so
+    // the window floors at zero. The one-row floor it used to carry kept the
+    // cursor row Enter-committable and Space-checkable over a frame that
+    // paints not one session row — a /delete Enter there removed a session
+    // nobody saw.
+    const sessions = Array.from({ length: 14 }, (_, i) => session(i + 1));
+    const { onSelect, onConfirmMulti } = renderPicker(sessions, {
+      availableTerminalHeight: 3,
+      enableMultiSelect: true,
+    });
+    expect(screen.queryAllByText(/^Session \d\d$/)).toHaveLength(0);
+
+    press({ name: 'space', sequence: ' ' });
+    press({ name: 'return' });
+
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onConfirmMulti).not.toHaveBeenCalled();
+  });
+
+  it('refuses Enter on a zero-row window in single-select mode too', () => {
+    const sessions = Array.from({ length: 14 }, (_, i) => session(i + 1));
+    const { onSelect } = renderPicker(sessions, { availableTerminalHeight: 3 });
+
+    press({ name: 'return' });
+
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('clips the metadata line and the footer hint to the width their row charge pays', () => {
+    // The budget counts three rows per session (title, meta, gap) and one for
+    // the footer; an unclipped run wraps its row and the frame's last painted
+    // row becomes one the budget never paid for. An 80-column branch name
+    // puts the meta past maxPromptWidth (boxWidth - 6) at full width.
+    const wideBranch = `feature/${'very-long-branch-name-'.repeat(4)}`;
+    mocks.state.width = 100;
+    const wide = renderPicker([session(1, { gitBranch: wideBranch })], {
+      currentBranch: 'main',
+    });
+    const meta = within(wide.container).getByText(/just now · 3 messages ·/);
+    const metaBudget = dialogAreaWidth(100) - 6;
+    expect(getCachedStringWidth(meta.textContent ?? '')).toBeLessThanOrEqual(
+      metaBudget,
+    );
+    expect(meta.textContent).toMatch(/…$/);
+
+    // The footer: the Ctrl+B run's five columns come off the row first.
+    mocks.state.width = 40;
+    const narrow = renderPicker([session(1)], { currentBranch: 'main' });
+    const footer = within(narrow.container).getByText(/to toggle branch/);
+    // boxWidth 36, minus border 2 and the row's padding 2.
+    expect(getCachedStringWidth(footer.textContent ?? '')).toBeLessThanOrEqual(
+      32,
+    );
+    expect(footer.textContent).toMatch(/…$/);
+  });
+
+  it('rebuilds the preview box on a width-only resize too', async () => {
+    // The preview branch folds the same two values into its own key for the
+    // same reason; a width-only resize has to rebuild it as well.
+    const { container, rerender } = renderPicker([session(1), session(2)], {
+      enablePreview: true,
+      sessionService: serviceWith(vi.fn().mockResolvedValue(loadedSession([]))),
+    });
+    press({ name: 'space', sequence: ' ' });
+    await flush();
+    const beforeResize = container.firstElementChild;
+
+    mocks.state.width = 120;
+    rerender();
+
+    const afterResize = container.firstElementChild;
+    expect(afterResize).not.toBe(beforeResize);
+    expect(layoutOf(afterResize)).toMatchObject({
+      width: dialogAreaWidth(120),
+      flexShrink: 1,
+    });
   });
 });

@@ -612,6 +612,51 @@ describe('BackgroundAgentResumeService', () => {
     return metaPath;
   }
 
+  it('explains how to discover the roster after recovery', () => {
+    const service = new BackgroundAgentResumeService({
+      getToolRegistry: () => ({
+        getAllToolNames: () => [
+          ToolNames.LIST_AGENTS,
+          ToolNames.TOOL_SEARCH,
+          ToolNames.TOOL_CALL,
+        ],
+      }),
+    } as unknown as Config);
+    expect(service.buildRecoveredBackgroundAgentsModelNotice(1)).toContain(
+      'In Direct mode: If the list_agents tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
+    );
+    expect(service.buildRecoveredBackgroundAgentsNotice(1)).not.toContain(
+      'tool_search',
+    );
+  });
+
+  it('omits discovery instructions without both registered bridge halves', () => {
+    const service = new BackgroundAgentResumeService({
+      getToolRegistry: () => ({
+        getAllToolNames: () => [ToolNames.LIST_AGENTS, ToolNames.TOOL_CALL],
+      }),
+    } as unknown as Config);
+    expect(service.buildRecoveredBackgroundAgentsModelNotice(1)).not.toContain(
+      'tool_search',
+    );
+    expect(
+      new BackgroundAgentResumeService(
+        {} as Config,
+      ).buildRecoveredBackgroundAgentsModelNotice(1),
+    ).not.toContain('tool_search');
+  });
+
+  it('does not name list_agents when it is not registered', () => {
+    const service = new BackgroundAgentResumeService({
+      getToolRegistry: () => ({
+        getAllToolNames: () => [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL],
+      }),
+    } as unknown as Config);
+    const notice = service.buildRecoveredBackgroundAgentsModelNotice(2);
+    expect(notice).not.toContain('list_agents');
+    expect(notice).toBe('2 background agents were restored from this session.');
+  });
+
   it('restores interrupted and completed background agents without notifying again', async () => {
     const sessionId = 'session-1';
     const runningAgentId = 'agent-running';

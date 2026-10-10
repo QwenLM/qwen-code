@@ -16,48 +16,48 @@ class WorkspaceViewTest {
 
     @Test
     void showsOnlyTheListedFields() {
-        WorkspaceView view = new WorkspaceView(ALPHA, WorkspaceAccess.CREATE);
+        WorkspaceView view = new WorkspaceView(ALPHA, WorkspaceAccess.OPERATOR);
 
         assertEquals("alpha", view.getWorkspaceId());
         assertEquals("Workspace alpha", view.getDisplayName());
         assertEquals(WorkspaceState.ACTIVE, view.getState());
         assertTrue(view.canCreateSession());
-        assertFalse(new WorkspaceView(ALPHA, WorkspaceAccess.READ)
+        assertFalse(new WorkspaceView(ALPHA, WorkspaceAccess.READER)
                 .canCreateSession());
     }
 
     @Test
     void comparesByEveryField() {
-        WorkspaceView view = new WorkspaceView(ALPHA, WorkspaceAccess.CREATE);
+        WorkspaceView view = new WorkspaceView(ALPHA, WorkspaceAccess.OPERATOR);
 
-        assertEquals(new WorkspaceView(ALPHA, WorkspaceAccess.CREATE), view);
+        assertEquals(new WorkspaceView(ALPHA, WorkspaceAccess.OPERATOR), view);
         assertEquals(new WorkspaceView(new WorkspaceRecord(copy(TENANT),
                 copy("alpha"), 1, "storage-alpha",
                 copy("Workspace alpha"), WorkspaceState.ACTIVE,
-                "policy:default", "config:alpha"), WorkspaceAccess.CREATE),
+                "policy:default", "config:alpha"), WorkspaceAccess.OPERATOR),
                 view);
-        assertEquals(new WorkspaceView(ALPHA, WorkspaceAccess.CREATE)
+        assertEquals(new WorkspaceView(ALPHA, WorkspaceAccess.OPERATOR)
                 .hashCode(), view.hashCode());
-        assertNotEquals(new WorkspaceView(ALPHA, WorkspaceAccess.READ), view);
+        assertNotEquals(new WorkspaceView(ALPHA, WorkspaceAccess.READER), view);
         assertNotEquals(new WorkspaceView(new WorkspaceRecord(TENANT, "beta",
                 1, "storage-alpha", "Workspace alpha", WorkspaceState.ACTIVE,
-                "policy:default", "config:alpha"), WorkspaceAccess.CREATE),
+                "policy:default", "config:alpha"), WorkspaceAccess.OPERATOR),
                 view);
         assertNotEquals(new WorkspaceView(workspace(TENANT, "beta",
-                WorkspaceState.ACTIVE), WorkspaceAccess.CREATE), view);
+                WorkspaceState.ACTIVE), WorkspaceAccess.OPERATOR), view);
         assertNotEquals(new WorkspaceView(workspace(TENANT, "alpha",
-                WorkspaceState.DRAINING), WorkspaceAccess.CREATE), view);
+                WorkspaceState.DRAINING), WorkspaceAccess.OPERATOR), view);
         assertNotEquals(new WorkspaceView(new WorkspaceRecord(TENANT, "alpha",
                 1, "storage-alpha", "Renamed", WorkspaceState.ACTIVE,
-                "policy:default", "config:alpha"), WorkspaceAccess.CREATE),
+                "policy:default", "config:alpha"), WorkspaceAccess.OPERATOR),
                 view);
         assertNotEquals(new WorkspaceView(new WorkspaceRecord(TENANT, "Alpha",
                 1, "storage-alpha", "Workspace alpha", WorkspaceState.ACTIVE,
-                "policy:default", "config:alpha"), WorkspaceAccess.CREATE),
+                "policy:default", "config:alpha"), WorkspaceAccess.OPERATOR),
                 view);
         assertNotEquals(new WorkspaceView(new WorkspaceRecord(TENANT, "alpha",
                 1, "storage-alpha", "workspace alpha", WorkspaceState.ACTIVE,
-                "policy:default", "config:alpha"), WorkspaceAccess.CREATE),
+                "policy:default", "config:alpha"), WorkspaceAccess.OPERATOR),
                 view);
         assertFalse(view.equals(null));
         assertFalse(view.equals("alpha"));

@@ -2121,6 +2121,78 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(actions.removeMidTurnMessage).not.toHaveBeenCalled();
   });
 
+  it('cancels only the selected in-flight submission and does not resurrect its late admission', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const sibling = deferred<{ promptId: string }>();
+    vi.mocked(actions.submitPrompt)
+      .mockReturnValueOnce(pendingSubmit.promise)
+      .mockReturnValueOnce(sibling.promise);
+    vi.mocked(actions.getPendingPrompts).mockResolvedValue({
+      pendingPrompts: [
+        {
+          promptId: 'kept-admission',
+          text: 'keep this admission',
+          state: 'queued',
+        },
+      ],
+    });
+    const { editor, reportError } = mount('responding', actions);
+    const images = [{ data: 'eA==', media_type: 'image/png' }];
+
+    act(() => latest.enqueuePrompt('cancel this admission', images));
+    act(() => latest.enqueuePrompt('keep this admission', images));
+    const calls = vi.mocked(actions.submitPrompt).mock.calls;
+    act(() => latest.removeQueuedPrompt(1));
+
+    expect(calls[0]?.[1]?.signal?.aborted).toBe(true);
+    expect(calls[1]?.[1]?.signal?.aborted).toBe(false);
+    expect(latest.queuedPrompts.map((prompt) => prompt.text)).toEqual([
+      'keep this admission',
+    ]);
+    await act(async () => {
+      pendingSubmit.resolve({
+        promptId: 'removed-admission',
+        removedAfterAbort: true,
+      });
+      sibling.resolve({ promptId: 'kept-admission' });
+    });
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'keep this admission', serverPromptId: 'kept-admission' },
+    ]);
+    expect(editor.setText).not.toHaveBeenCalled();
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it('does not restore a deleted draft when cancellation aborts before admission', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { editor, reportError } = mount('idle', actions);
+    act(() => latest.enqueuePrompt('cancel before upload completes'));
+    act(() => latest.removeQueuedPrompt(1));
+    await act(async () => {
+      pendingSubmit.reject(new DOMException('Aborted', 'AbortError'));
+    });
+    expect(latest.queuedPrompts).toEqual([]);
+    expect(editor.setText).not.toHaveBeenCalled();
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it('does not dispatch a deleted row waiting for an earlier release-chain admission', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { render } = mount('idle', actions, true, false, false, true);
+    act(() => latest.enqueuePrompt('first held prompt'));
+    act(() => latest.enqueuePrompt('second held prompt'));
+    render('idle', undefined, false, false, false);
+    await act(async () => {});
+    expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
+    expect(latest.queuedPrompts[1]?.serverState).toBe('submitting');
+    act(() => latest.removeQueuedPrompt(2));
+    await act(async () =>
+      pendingSubmit.resolve({ promptId: 'first-admission' }),
+    );
+    expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
+    expect(latest.queuedPrompts.some((prompt) => prompt.id === 2)).toBe(false);
+  });
+
   it('clears a submitting row after the server confirms abort cleanup', async () => {
     const { actions, pendingSubmit } = createActions();
     mount('responding', actions);

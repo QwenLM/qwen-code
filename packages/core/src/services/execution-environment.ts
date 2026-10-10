@@ -92,6 +92,13 @@ export interface ExecutionPreparation {
   toolName: string;
   params: Record<string, unknown>;
   modification?: ExecutionModification;
+  /**
+   * The scheduler's function-call id for the call this invocation serves,
+   * when it carries one. The environment-facing `id` stays the invocation's
+   * own; durable records key on the scheduler's id so the recorded history
+   * and the Runtime log name one call the same.
+   */
+  callId?: string;
 }
 
 export interface PreparedExecution {

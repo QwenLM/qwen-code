@@ -4,6 +4,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
+import { getManagedClientId } from './managed-session-storage';
 import { I18nProvider } from '../../i18n';
 import type {
   ManagedAgentProvider,
@@ -370,6 +371,52 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
+  it.each([
+    ['en', false, 'Input preview: 9000 bytes.'],
+    ['en', true, 'Input preview truncated. Full input: 9000 bytes.'],
+    ['zh-CN', false, '输入预览：9000 字节。'],
+    ['zh-CN', true, '输入预览已截断，完整输入共 9000 字节。'],
+  ] as const)(
+    'shows a literal Action preview and accessible notice (%s, truncated=%s)',
+    async (language, truncated, notice) => {
+      // Leading space: the card must not trim the preview it renders.
+      const text = ' {"toolName":"run_shell_command","input":{"command":"<b>😀';
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          capabilities: { canSend: false, canCancel: false, actions: true },
+        }),
+      );
+      provider = {
+        ...provider,
+        actions: {
+          listPending: vi.fn().mockResolvedValue([
+            {
+              ...pendingAction,
+              toolName: 'run_shell_command',
+              inputPreview: { text, truncated, byteLength: 9000 },
+            },
+          ]),
+          respond: vi.fn(),
+        },
+      };
+      await render('s1', language);
+      const card = container.querySelector('[data-testid="managed-approval"]')!;
+      expect(card.querySelector('pre')?.textContent).toBe(text);
+      expect(card.querySelector('pre b')).toBeNull();
+      expect(card.textContent).toContain(notice);
+      expect(card.textContent).not.toContain('Tool arguments are unavailable');
+      const status = card.querySelector('p[role="status"]')!;
+      expect(status.textContent).toBe(notice);
+      expect(
+        card
+          .querySelector('[role="alertdialog"]')!
+          .getAttribute('aria-describedby')
+          ?.split(' '),
+      ).toContain(status.id);
+      expect(document.getElementById(status.id)).toBe(status);
+    },
+  );
+
   it('offers a direct retry when pending approvals could not be loaded', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('s1', {
@@ -460,7 +507,7 @@ describe('ManagedSessionsPage', () => {
     expect(alert).not.toContain('could not be loaded');
   });
 
-  it('explains that a reader cannot answer a creator-only approval', async () => {
+  it('explains that a reader cannot answer a role-based approval', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('s1', {
         capabilities: { canSend: false, canCancel: false, actions: true },
@@ -488,7 +535,7 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(
-      'Only the Session creator can answer this approval.',
+      "Only the Session's owner or a Workspace operator can answer this approval.",
     );
     // The refusal is final for this viewer, so the card stops offering the
     // answer instead of sending one 403 per click.
@@ -500,7 +547,57 @@ describe('ManagedSessionsPage', () => {
     expect(respond).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the next approval of the same Session unanswerable after a creator-only refusal', async () => {
+  it('re-probes a role-based refusal through the check-again affordance', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    const respond = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+    provider = {
+      ...provider,
+      actions: {
+        listPending: vi.fn().mockResolvedValue([pendingAction]),
+        respond,
+      },
+    };
+    await render('s1');
+    const allow = () =>
+      Array.from(container.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Yes, allow once'),
+      ) as HTMLButtonElement;
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(allow().disabled).toBe(true);
+    const alert = container.querySelector('[role="alert"]') as HTMLElement;
+    expect(alert?.textContent).toContain(
+      "Only the Session's owner or a Workspace operator can answer this approval.",
+    );
+    // The latched refusal got its own re-probe affordance, rendered with no
+    // `loadError` in play, so a grant raised while the page is open can stick.
+    const again = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Retry loading approvals'),
+    ) as HTMLButtonElement;
+    expect(again).toBeTruthy();
+    await act(async () => {
+      again.click();
+      await flush();
+    });
+    expect(allow().disabled).toBe(false);
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the next approval of the same Session unanswerable after a role-based refusal', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('s1', {
         capabilities: { canSend: false, canCancel: false, actions: true },
@@ -547,7 +644,7 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(
-      'Only the Session creator can answer this approval.',
+      "Only the Session's owner or a Workspace operator can answer this approval.",
     );
     expect(allow().disabled).toBe(true);
 
@@ -579,7 +676,9 @@ describe('ManagedSessionsPage', () => {
       Array.from(container.querySelectorAll('[role="status"]')).map(
         (node) => node.textContent,
       ),
-    ).toContain('Only the Session creator can answer this approval.');
+    ).toContain(
+      "Only the Session's owner or a Workspace operator can answer this approval.",
+    );
     // On screen is not enough: the reason is a sibling of the dialog, and a
     // polite region that mounts with its text already in place announces
     // nothing, so the dialog's own description is what carries the cause to a
@@ -595,12 +694,12 @@ describe('ManagedSessionsPage', () => {
       .map((id) => document.getElementById(id)?.textContent ?? '')
       .join(' | ');
     expect(described).toContain(
-      'Only the Session creator can answer this approval.',
+      "Only the Session's owner or a Workspace operator can answer this approval.",
     );
     expect(described).toContain('Tool arguments are unavailable');
   });
 
-  it('stops explaining a creator-only refusal once the Session has no approval left', async () => {
+  it('stops explaining a role-based refusal once the Session has no approval left', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('s1', {
         capabilities: { canSend: false, canCancel: false, actions: true },
@@ -627,7 +726,8 @@ describe('ManagedSessionsPage', () => {
         new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
       );
     provider = { ...provider, actions: { listPending, respond } };
-    const refusal = 'Only the Session creator can answer this approval.';
+    const refusal =
+      "Only the Session's owner or a Workspace operator can answer this approval.";
 
     await render('s1');
     await act(async () => flush());
@@ -665,7 +765,7 @@ describe('ManagedSessionsPage', () => {
     );
     // Every HTTP failure the Managed client builds carries a string code, so
     // carrying a code is not what marks a refusal final: only the
-    // creator-only refusal is.
+    // role-based refusal is.
     const respond = vi
       .fn()
       .mockRejectedValueOnce(
@@ -854,6 +954,34 @@ describe('ManagedSessionsPage', () => {
     );
   });
 
+  it.each([true, false])(
+    'lets the creator cancel a running bound Turn when workspaceTurns is %s',
+    async (workspaceTurns) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('bound', {
+          phase: 'tool_running',
+          workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+          capabilities: {
+            canSend: false,
+            canCancel: true,
+            ...(workspaceTurns ? { workspaceTurns: true } : {}),
+          },
+        }),
+      );
+      await render('bound');
+
+      // Without workspaceTurns the composer stays hidden, but Cancel does not.
+      expect(container.querySelector('textarea') !== null).toBe(workspaceTurns);
+      await click('Cancel turn');
+
+      expect(mocks.client.cancel).toHaveBeenCalledWith(
+        'bound',
+        'p1',
+        expect.objectContaining({ clientId: expect.any(String) }),
+      );
+    },
+  );
+
   async function click(label: string) {
     const button = [...container.querySelectorAll('button')].find(
       (item) => item.textContent === label,
@@ -924,6 +1052,386 @@ describe('ManagedSessionsPage', () => {
     expect(retry?.[1].idempotencyKey).toBe(first?.[1].idempotencyKey);
     expect(retry?.[1].clientId).toBe(first?.[1].clientId);
     expect(onSelect).toHaveBeenLastCalledWith('created');
+  });
+
+  it('discards a permanently failing pending prompt and restores the draft', async () => {
+    mocks.client.createSession.mockRejectedValue(
+      new TypeError('Network failed'),
+    );
+    await render();
+    await input('Do the work');
+    await click('Send');
+    expect(container.textContent).toContain('request outcome is unconfirmed');
+    const textarea = () => container.querySelector('textarea');
+    expect(textarea()?.disabled).toBe(true);
+    expect(container.querySelectorAll('p[role="alert"]')).toHaveLength(1);
+
+    // Without an escape the composer stays wedged on the retry loop forever.
+    const discard = [...container.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Discard this request',
+    );
+    expect(discard).toBeDefined();
+    discard!.focus();
+    await act(async () => {
+      discard!.click();
+      await flush();
+    });
+    expect(container.textContent).not.toContain(
+      'request outcome is unconfirmed',
+    );
+    expect(textarea()?.disabled).toBe(false);
+    expect(textarea()?.value).toBe('Do the work');
+    expect(mocks.client.createSession).toHaveBeenCalledTimes(1);
+    // The failed attempt's own alert is dismissed with it...
+    expect(container.querySelectorAll('p[role="alert"]')).toHaveLength(0);
+    // ...a create that committed server-side before the unconfirmed failure
+    // re-surfaces in the session list...
+    expect(mocks.client.listSessions).toHaveBeenCalledTimes(2);
+    // ...and focus lands on the composer now holding the restored draft.
+    expect(document.activeElement).toBe(textarea());
+
+    // The persisted pending prompt is gone too: a real remount does not
+    // return it.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    expect(container.textContent).not.toContain(
+      'request outcome is unconfirmed',
+    );
+  });
+
+  it('sends the edited draft under a fresh idempotency key after a discard', async () => {
+    mocks.client.createSession.mockRejectedValueOnce(
+      new TypeError('Network failed'),
+    );
+    await render();
+    await input('Do the work');
+    await click('Send');
+    expect(container.textContent).toContain('request outcome is unconfirmed');
+    const originalKey =
+      mocks.client.createSession.mock.calls[0]?.[1].idempotencyKey;
+
+    await click('Discard this request');
+    await input('Do the other work');
+    await click('Send');
+
+    expect(mocks.client.createSession).toHaveBeenCalledTimes(2);
+    expect(mocks.client.createSession.mock.calls[1]?.[0]).toEqual({
+      text: 'Do the other work',
+      workspaceCwd: undefined,
+    });
+    expect(
+      mocks.client.createSession.mock.calls[1]?.[1].idempotencyKey,
+    ).not.toBe(originalKey);
+  });
+
+  it('offers the discard escape only in the session that owns the pending prompt', async () => {
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [summary('s1'), summary('s2')],
+    });
+    mocks.client.submitPrompt.mockRejectedValue(
+      new TypeError('Network failed'),
+    );
+    await render('s1');
+    await input('For session A only');
+    await click('Send');
+    expect(container.textContent).toContain('request outcome is unconfirmed');
+
+    await click('Task s2Completed');
+    await render('s2');
+    // The composer is wedged on the other session's pending record: the
+    // explanation stays, but the destructive escape is offered only where
+    // the draft can be restored.
+    expect(container.querySelector('textarea')?.disabled).toBe(true);
+    expect(container.textContent).toContain('request outcome is unconfirmed');
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (item) => item.textContent === 'Discard this request',
+      ),
+    ).toBe(false);
+
+    // The escape stays reachable from the owning session.
+    await click('Task s1Completed');
+    await render('s1');
+    await click('Discard this request');
+    expect(container.textContent).not.toContain(
+      'request outcome is unconfirmed',
+    );
+    expect(container.querySelector('textarea')?.value).toBe(
+      'For session A only',
+    );
+  });
+
+  function seedPending(record: {
+    idempotencyKey: string;
+    text: string;
+    sessionId?: string;
+  }) {
+    const clientId = getManagedClientId(provider.storageKey);
+    sessionStorage.setItem(
+      `qwen-managed-pending:${provider.storageKey}:${clientId}`,
+      JSON.stringify(record),
+    );
+  }
+
+  async function focusAndClickDiscard() {
+    const discard = [...container.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Discard this request',
+    );
+    expect(discard).toBeDefined();
+    discard!.focus();
+    await act(async () => {
+      discard!.click();
+      await flush();
+    });
+  }
+
+  it('restores the draft from storage when a remounted pending prompt is discarded', async () => {
+    mocks.client.createSession.mockRejectedValueOnce(
+      new TypeError('Network failed'),
+    );
+    await render();
+    await input('Keep this prompt');
+    await click('Send');
+    expect(container.textContent).toContain('request outcome is unconfirmed');
+
+    // A real remount empties the text state: the composer is fed from the
+    // persisted pending record alone.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    expect(container.querySelector('textarea')?.value).toBe('Keep this prompt');
+
+    await click('Discard this request');
+    // The restore is the only way the draft survives the discard now.
+    expect(container.querySelector('textarea')?.value).toBe('Keep this prompt');
+    expect(container.querySelector('textarea')?.disabled).toBe(false);
+    expect(container.textContent).not.toContain(
+      'request outcome is unconfirmed',
+    );
+  });
+
+  it('moves focus to the session list when a discard has no composer to focus', async () => {
+    const bindingProvider = {
+      ...provider,
+      workspaceBinding: {
+        agentId: 'agent-a',
+        list: vi.fn().mockResolvedValue({ data: [], supported: true }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      },
+    } as unknown as ManagedAgentProvider;
+    seedPending({ idempotencyKey: 'key-1', text: 'Bind this draft' });
+    await render(undefined, 'en', bindingProvider);
+    // The workspace-binding creator replaces the composer form entirely.
+    expect(container.querySelector('textarea')).toBeNull();
+    expect(container.textContent).toContain('request outcome is unconfirmed');
+
+    await focusAndClickDiscard();
+
+    expect(container.textContent).not.toContain(
+      'request outcome is unconfirmed',
+    );
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(container.querySelector('nav'));
+  });
+
+  it('moves focus to the session list when a discard leaves the composer disabled', async () => {
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, { capabilities: { canSend: false, canCancel: false } }),
+    );
+    seedPending({
+      idempotencyKey: 'key-1',
+      text: 'Session draft',
+      sessionId: 's1',
+    });
+    await render('s1');
+    expect(container.querySelector('textarea')?.disabled).toBe(true);
+    expect(container.textContent).toContain('request outcome is unconfirmed');
+
+    await focusAndClickDiscard();
+
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(container.querySelector('nav'));
+  });
+
+  it('moves focus to the composer once a discard’s loading window ends', async () => {
+    let releaseSummary!: (value: ManagedAgentSessionSummary) => void;
+    mocks.client.getSession.mockImplementationOnce(
+      () =>
+        new Promise<ManagedAgentSessionSummary>((resolve) => {
+          releaseSummary = resolve;
+        }),
+    );
+    seedPending({
+      idempotencyKey: 'key-1',
+      text: 'Restore me',
+      sessionId: 's1',
+    });
+    await render('s1');
+    // The summary is still loading: the composer is disabled on the pending
+    // record alone, so the discard can only park focus on the session list.
+    expect(container.querySelector('textarea')?.disabled).toBe(true);
+
+    await focusAndClickDiscard();
+    expect(document.activeElement).toBe(container.querySelector('nav'));
+
+    await act(async () => {
+      releaseSummary(summary('s1'));
+      await flush();
+    });
+    // The composer became focusable holding the restored draft: the latch
+    // was still armed, so focus lands there now.
+    expect(container.querySelector('textarea')?.value).toBe('Restore me');
+    expect(document.activeElement).toBe(container.querySelector('textarea'));
+  });
+
+  it('does not steal another session’s composer when a discard’s loading window ends', async () => {
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [summary('s1'), summary('s2')],
+    });
+    mocks.client.getSession.mockImplementation(
+      (_id: string) => new Promise<ManagedAgentSessionSummary>(() => {}),
+    );
+    seedPending({
+      idempotencyKey: 'key-1',
+      text: 'Session draft',
+      sessionId: 's1',
+    });
+    await render('s1');
+    // s1's summary never lands: the discard can only park focus on the list.
+    await focusAndClickDiscard();
+    expect(document.activeElement).toBe(container.querySelector('nav'));
+
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id),
+    );
+    await click('Task s2Completed');
+    await render('s2');
+    // The latch was armed by s1's discard: s2's composer becoming focusable
+    // must not pull focus into a session the user navigated to.
+    expect(container.querySelector('textarea')?.value).toBe('');
+    expect(document.activeElement).not.toBe(
+      container.querySelector('textarea'),
+    );
+  });
+
+  it('leaves focus alone when the user moved on during a discard’s loading window', async () => {
+    let releaseSummary!: (value: ManagedAgentSessionSummary) => void;
+    mocks.client.getSession.mockImplementationOnce(
+      () =>
+        new Promise<ManagedAgentSessionSummary>((resolve) => {
+          releaseSummary = resolve;
+        }),
+    );
+    seedPending({
+      idempotencyKey: 'key-1',
+      text: 'Session draft',
+      sessionId: 's1',
+    });
+    await render('s1');
+    await focusAndClickDiscard();
+    expect(document.activeElement).toBe(container.querySelector('nav'));
+
+    // The user moves on to another control while the summary is still
+    // loading.
+    const refresh = [...container.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Refresh',
+    );
+    expect(refresh).toBeDefined();
+    await act(async () => {
+      refresh!.focus();
+      await flush();
+    });
+
+    await act(async () => {
+      releaseSummary(summary('s1'));
+      await flush();
+    });
+    // The composer is focusable again, but the latch died with the user's
+    // own focus move: it must not be stolen back.
+    expect(container.querySelector('textarea')?.disabled).toBe(false);
+    expect(document.activeElement).toBe(refresh);
+  });
+
+  it('moves focus to the composer when a later summary lifts the send gate', async () => {
+    let releaseStream!: () => void;
+    mocks.client.getSession.mockImplementationOnce(async (id: string) =>
+      summary(id, { capabilities: { canSend: false, canCancel: false } }),
+    );
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      await new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      yield* [];
+    });
+    seedPending({
+      idempotencyKey: 'key-1',
+      text: 'Session draft',
+      sessionId: 's1',
+    });
+    await render('s1');
+    // The summary says the session cannot send: the discard parks focus on
+    // the session list, with the latch armed for as long as the gate can
+    // still lift.
+    await focusAndClickDiscard();
+    expect(document.activeElement).toBe(container.querySelector('nav'));
+
+    // The stream's clean pass delivers the summary that lifts the gate.
+    await act(async () => {
+      releaseStream();
+      await flush();
+    });
+    expect(container.querySelector('textarea')?.value).toBe('Session draft');
+    expect(document.activeElement).toBe(container.querySelector('textarea'));
+  });
+
+  it('announces the discard where the composer cannot take focus', async () => {
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, { capabilities: { canSend: false, canCancel: false } }),
+    );
+    seedPending({
+      idempotencyKey: 'key-1',
+      text: 'Session draft',
+      sessionId: 's1',
+    });
+    await render('s1');
+
+    await focusAndClickDiscard();
+
+    // The unconfirmed row unmounted with the click; the persistent visually
+    // hidden status region still announces the outcome.
+    expect(container.textContent).not.toContain(
+      'request outcome is unconfirmed',
+    );
+    expect(
+      Array.from(
+        container.querySelectorAll('[role="status"], [aria-live]'),
+      ).map((node) => node.textContent),
+    ).toContain('Request discarded. The draft is back in the composer.');
+  });
+
+  it('does not refetch the list when a dropped workspace path changes', async () => {
+    await render('s1');
+    expect(mocks.client.listSessions).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <ManagedSessionsPage
+            sessionId="s1"
+            onSelectSession={onSelect}
+            workspaceCwd="/other"
+            managedAgentProvider={provider}
+          />
+        </I18nProvider>,
+      );
+      await flush();
+    });
+
+    // The provider drops workspaceCwd from the request, so the new folder
+    // changes nothing: the fetched page (and its pagination) must survive.
+    expect(mocks.client.listSessions).toHaveBeenCalledTimes(1);
   });
 
   it('gates sending and cancels the captured Prompt without treating acceptance as terminal', async () => {

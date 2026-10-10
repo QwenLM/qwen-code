@@ -9,14 +9,15 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTask;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.ManagedTaskService;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -101,13 +102,857 @@ class ManagedExtensionRecordStoreTest {
     }
 
     @Test
+    void commitsAndProjectsAChildRunChain() throws Exception {
+        byte[] args = "{\"command\":\"yes\"}"
+                .getBytes(StandardCharsets.UTF_8);
+        CommitResource argsResource = new CommitResource(
+                ExtensionRecordJournal.resourceId(args), "managed-tool-args",
+                1, args.length, ExtensionRecordJournal.sha256(args),
+                Base64.getEncoder().encodeToString(args));
+        byte[] receipt = "{}".getBytes(StandardCharsets.UTF_8);
+        CommitResource receiptResource = new CommitResource(
+                ExtensionRecordJournal.resourceId(receipt),
+                "managed-runtime-receipt", 1, receipt.length,
+                ExtensionRecordJournal.sha256(receipt),
+                Base64.getEncoder().encodeToString(receipt));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        ObjectNode rev1 = childRun("admitted", "intent", null, argsResource);
+        var tx1 = journal.requestDomain("child-1", "child_run", rev1,
+                List.of(argsResource), 1_000);
+        journal.commit(tx1);
+        journal.committed(tx1);
+        ObjectNode rev2 = childRun("running", "dispatch_started", "binding-1", argsResource);
+        var tx2 = journal.requestDomain("child-2", "child_run", rev2,
+                List.of(), 2_000);
+        journal.commit(tx2);
+        journal.committed(tx2);
+        ObjectNode rev3 = childRun("waiting", "running_attached", "binding-1", argsResource);
+        rev3.set("startReceiptRef", hookRef(receiptResource));
+        var tx3 = journal.requestDomain("child-3", "child_run", rev3,
+                List.of(receiptResource), 3_000);
+        journal.commit(tx3);
+        journal.committed(tx3);
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "child_run",
+                        "shell-x"));
+        ManagedExtensionRecordStore.TaskRow row = records
+                .findTask(TENANT, sessionId, taskId).orElseThrow();
+        assertThat(row.kind()).isEqualTo("background_shell");
+        assertThat(row.projection().state()).isEqualTo("waiting");
+        assertThat(row.projection().runtimeState()).isEqualTo("ready");
+        assertThat(row.projection().startedAt()).isEqualTo(2_000L);
+        assertThat(row.projection().settledAt()).isNull();
+        // A revision naming a resource outside the transaction's closure is
+        // refused, and nothing of it persists.
+        String other = UUID.randomUUID().toString();
+        ExtensionRecordJournal broken = journal(other);
+        var bx1 = broken.requestDomain("broken-1", "child_run",
+                childRun("admitted", "intent", null, argsResource),
+                List.of(argsResource), 1_000);
+        broken.commit(bx1);
+        broken.committed(bx1);
+        var bx2 = broken.requestDomain("broken-2", "child_run",
+                childRun("running", "dispatch_started", "binding-1", argsResource),
+                List.of(), 2_000);
+        broken.commit(bx2);
+        broken.committed(bx2);
+        ObjectNode badAttach = childRun("waiting", "running_attached",
+                "binding-1", argsResource);
+        badAttach.set("startReceiptRef", hookRef(receiptResource));
+        assertRefused("child_run names a resource the closure lacks", other,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> broken.commit(broken.requestDomain("broken-3",
+                        "child_run", badAttach, List.of(), 3_000)));
+        assertThat(records.listTasks(TENANT, other, null, null, 10).tasks())
+                .extracting(ManagedExtensionRecordStore.TaskRow::taskId)
+                .containsExactly(ManagedExtensionProjection.taskId(
+                        ManagedExtensionProjection.recordKey(other,
+                                "child_run", "shell-x")));
+    }
+
+    @Test
+    void commitsAndProjectsAChildAgentChainWithItsAcceptance() throws Exception {
+        CommitResource inputResource = hookResource("input-x", "managed-input",
+                "{\"prompt\":\"audit\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-x",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-x",
+                "managed-runtime-receipt",
+                "{\"outcome\":\"settled\"}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        settleChildAgentChain(sessionId, "sent", journal, inputResource,
+                resultResource, receiptResource);
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "child_run",
+                        "run-x"));
+        assertThat(records.findTask(TENANT, sessionId, taskId).orElseThrow()
+                .kind()).isEqualTo("child_agent");
+        assertThat(records.findTask(TENANT, sessionId, taskId).orElseThrow()
+                .projection().state()).isEqualTo("completed");
+        // The acceptance is a receipt, not a task: the child task alone shows.
+        commitDomain(journal, "accept-1", "child_acceptance",
+                acceptance(resultResource, receiptResource, "accepted"),
+                List.of(resultResource, receiptResource));
+        assertThat(records.listTasks(TENANT, sessionId, null, null, 10).tasks())
+                .extracting(ManagedExtensionRecordStore.TaskRow::taskId)
+                .containsExactly(taskId);
+        assertThat(records.listRecords(TENANT, sessionId, "child_acceptance"))
+                .hasSize(1);
+        commitDomain(journal, "accept-2", "child_acceptance",
+                acceptance(resultResource, receiptResource, "consumed"),
+                List.of(resultResource, receiptResource));
+        assertThat(records.listRecords(TENANT, sessionId, "child_acceptance")
+                .get(0).required("run").required("delivery")
+                .required("state").textValue()).isEqualTo("consumed");
+    }
+
+    @Test
+    void closesAScheduleOverItsPromptResource() throws Exception {
+        ObjectNode schedule = ((ObjectNode) ManagedAutomationRecordContractTest
+                .fixtures().get("templates").get("schedule")).deepCopy();
+        // The template's promptRef names a resource this Session never held.
+        String unheld = UUID.randomUUID().toString();
+        ExtensionRecordJournal unheldJournal = journal(unheld);
+        schedule.put("targetSessionId", unheld);
+        assertRefused("a Schedule citing a prompt the Session does not hold",
+                unheld, ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> unheldJournal.commit(unheldJournal.requestDomain(
+                        "schedule-1", "schedule", schedule, List.of(), 1_000)));
+        CommitResource prompt = hookResource("prompt-x", "managed-prompt",
+                "{\"prompt\":\"nightly build\"}".getBytes(StandardCharsets.UTF_8));
+        schedule.set("promptRef", hookRef(prompt));
+        String sessionId = UUID.randomUUID().toString();
+        // H6b: a persistent definition lives in its target Session.
+        ExtensionRecordJournal foreign = journal(sessionId);
+        assertRefused("a persistent Schedule targeting another Session",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must be this Session",
+                () -> foreign.commit(foreign.requestDomain("schedule-1",
+                        "schedule", schedule, List.of(prompt), 1_000)));
+        schedule.put("targetSessionId", sessionId);
+        commitDomain(journal(sessionId), "schedule-1", "schedule", schedule,
+                List.of(prompt));
+    }
+
+    @Test
+    void bindsAutomationRunsToTheirLiveDefinition() throws Exception {
+        JsonNode templates = ManagedAutomationRecordContractTest.fixtures()
+                .get("templates");
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        CommitResource prompt = hookResource("prompt-a",
+                "managed-automation-prompt",
+                "Run it.".getBytes(StandardCharsets.UTF_8));
+        ObjectNode schedule = ((ObjectNode) templates.get("schedule")).deepCopy();
+        schedule.set("promptRef", hookRef(prompt));
+        schedule.put("targetSessionId", sessionId);
+        ObjectNode run = ((ObjectNode) templates.get("automation_run")).deepCopy();
+        run.put("scheduleId", "schedule-1");
+        run.put("definitionRevision", 1);
+        run.put("targetSessionId", sessionId);
+        String occurrenceKey = run.get("occurrenceKey").asText();
+        run.put("automationRunId", AutomationLedgerStore.automationRunId(
+                "schedule-1", occurrenceKey));
+        // H6b: no definition, a stale revision and an underived id refuse
+        // before anything is written; the bound run commits.
+        assertRefused("a run without its definition", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must bind to its live definition",
+                () -> journal.commit(journal.requestDomain("run-1",
+                        "automation_run", run, List.of(), 1_000)));
+        commitDomain(journal, "schedule-1", "schedule", schedule,
+                List.of(prompt));
+        ObjectNode stale = run.deepCopy();
+        stale.put("definitionRevision", 2);
+        assertRefused("a run at a stale definition revision", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must bind to its live definition",
+                () -> journal.commit(journal.requestDomain("run-stale",
+                        "automation_run", stale, List.of(), 1_000)));
+        ObjectNode renamed = run.deepCopy();
+        renamed.put("automationRunId", "run-1");
+        assertRefused("a run whose id is not derived", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must be derived from its definition and occurrence",
+                () -> journal.commit(journal.requestDomain("run-renamed",
+                        "automation_run", renamed, List.of(), 1_000)));
+        commitDomain(journal, "run-1", "automation_run", run, List.of());
+        assertThat(records.findTask(TENANT, sessionId,
+                ManagedExtensionProjection.taskId(ManagedExtensionProjection
+                        .recordKey(sessionId, "automation_run",
+                                run.get("automationRunId").asText())))
+                .orElseThrow().kind()).isEqualTo("automation_run");
+    }
+
+    @Test
+    void refusesAChildAcceptanceWithoutItsTarget() throws Exception {
+        CommitResource inputResource = hookResource("input-y", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-y",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource otherContent = hookResource("result-z",
+                "managed-child-result",
+                "{\"summary\":\"changed\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-y",
+                "managed-runtime-receipt", "{}".getBytes(StandardCharsets.UTF_8));
+        String missingChild = UUID.randomUUID().toString();
+        ExtensionRecordJournal missingJournal = journal(missingChild);
+        assertRefused("an acceptance without its child run", missingChild,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must name a child Session run of this Session",
+                () -> missingJournal.commit(missingJournal.requestDomain(
+                        "accept-1", "child_acceptance",
+                        acceptance(resultResource, receiptResource, "accepted"),
+                        List.of(resultResource, receiptResource), 1_000)));
+        String running = UUID.randomUUID().toString();
+        ExtensionRecordJournal runningJournal = journal(running);
+        commitDomain(runningJournal, "agent-1", "child_run",
+                childAgent(running, "sent", "admitted", "intent", null,
+                        inputResource),
+                List.of(inputResource));
+        assertRefused("an acceptance before the result", running,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must name a run that ended with its result committed",
+                () -> runningJournal.commit(runningJournal.requestDomain(
+                        "accept-1", "child_acceptance",
+                        acceptance(resultResource, receiptResource, "accepted"),
+                        List.of(resultResource, receiptResource), 1_000)));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        settleChildAgentChain(sessionId, "sent", journal, inputResource,
+                resultResource, receiptResource);
+        ObjectNode foreign = acceptance(resultResource, receiptResource,
+                "accepted");
+        foreign.put("parentScopeId", "scope-other");
+        assertRefused("an acceptance with a foreign scope", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must match its child run scope and result version",
+                () -> journal.commit(journal.requestDomain("accept-1",
+                        "child_acceptance", foreign,
+                        List.of(resultResource, receiptResource), 1_000)));
+        ObjectNode missing = acceptance(resultResource, receiptResource,
+                "accepted");
+        missing.withObject("/contentRef").put("resourceId", "never-committed");
+        assertRefused("an acceptance citing a resource the Session does not"
+                        + " hold", sessionId,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> journal.commit(journal.requestDomain("accept-missing",
+                        "child_acceptance", missing, List.of(), 1_000)));
+        commitDomain(journal, "accept-1", "child_acceptance",
+                acceptance(resultResource, receiptResource, "accepted"),
+                List.of(resultResource, receiptResource));
+        assertRefused("a redelivery with conflicting content", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must bind the result and receipt",
+                () -> journal.commit(journal.requestDomain("accept-2",
+                        "child_acceptance",
+                        acceptance(otherContent, receiptResource, "accepted"),
+                        List.of(otherContent, receiptResource), 1_000)));
+    }
+
+    @Test
+    void bindsAChildAcceptanceToItsRunKindCallReceiptAndClosure()
+            throws Exception {
+        CommitResource argsResource = hookResource("args-w",
+                "managed-tool-args",
+                "{\"command\":\"yes\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource inputResource = hookResource("input-w", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-w",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-w",
+                "managed-runtime-receipt", "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource otherReceipt = hookResource("receipt-v",
+                "managed-runtime-receipt",
+                "{\"other\":1}".getBytes(StandardCharsets.UTF_8));
+        // An acceptance naming a background Shell's record is not a child
+        // agent's acceptance, whatever it carries.
+        String shellSession = UUID.randomUUID().toString();
+        ExtensionRecordJournal shellJournal = journal(shellSession);
+        commitDomain(shellJournal, "shell-1", "child_run",
+                childRun("admitted", "intent", null, argsResource),
+                List.of(argsResource));
+        ObjectNode namingShell = acceptance(resultResource, receiptResource,
+                "accepted");
+        namingShell.put("childRunId", "shell-x");
+        assertRefused("an acceptance naming a background Shell", shellSession,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must name a child Session run of this Session",
+                () -> shellJournal.commit(shellJournal.requestDomain(
+                        "accept-1", "child_acceptance", namingShell,
+                        List.of(resultResource, receiptResource), 1_000)));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        settleChildAgentChain(sessionId, "sent", journal, inputResource,
+                resultResource, receiptResource);
+        // A "sent" child returns through a notification input, never a call.
+        ObjectNode withCall = acceptance(resultResource, receiptResource,
+                "accepted");
+        withCall.put("parentExecutionCallId", "call-x");
+        assertRefused("an acceptance attaching a call to a sent child",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must attach the completion call its child run names",
+                () -> journal.commit(journal.requestDomain("accept-1",
+                        "child_acceptance", withCall,
+                        List.of(resultResource, receiptResource), 1_000)));
+        // Same content, another receipt: the receipt binds on its own.
+        assertRefused("an acceptance citing another terminal receipt",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must bind the result and receipt",
+                () -> journal.commit(journal.requestDomain("accept-1",
+                        "child_acceptance",
+                        acceptance(resultResource, otherReceipt, "accepted"),
+                        List.of(resultResource, otherReceipt), 1_000)));
+        // A child agent's launch input closes over the Session's resources.
+        String unheld = UUID.randomUUID().toString();
+        ExtensionRecordJournal unheldJournal = journal(unheld);
+        assertRefused("a child agent launch citing an input the Session"
+                        + " does not hold", unheld,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> unheldJournal.commit(unheldJournal.requestDomain(
+                        "agent-1", "child_run",
+                        childAgent(unheld, "sent", "admitted", "intent", null,
+                                inputResource),
+                        List.of(), 1_000)));
+        // So do the result and receipt its settling revision names.
+        String unheldResult = UUID.randomUUID().toString();
+        ExtensionRecordJournal resultJournal = journal(unheldResult);
+        commitDomain(resultJournal, "agent-1", "child_run",
+                childAgent(unheldResult, "sent", "admitted", "intent", null,
+                        inputResource),
+                List.of(inputResource));
+        ObjectNode dispatching = childAgent(unheldResult, "sent", "running",
+                "dispatch_started", "binding-1", inputResource);
+        dispatching.withObject("/run").put("dispatchId", "dispatch-1");
+        commitDomain(resultJournal, "agent-2", "child_run", dispatching,
+                List.of());
+        ObjectNode attached = childAgent(unheldResult, "sent", "running",
+                "running_attached", "binding-1", inputResource);
+        attached.withObject("/run").put("dispatchId", "dispatch-1");
+        attached.put("childSessionId", "session-child");
+        commitDomain(resultJournal, "agent-3", "child_run", attached,
+                List.of());
+        ObjectNode settled = childAgent(unheldResult, "sent", "settled",
+                "settled", "binding-1", inputResource);
+        settled.withObject("/run").put("dispatchId", "dispatch-1");
+        settled.put("childSessionId", "session-child");
+        settled.put("stopReason", "completed");
+        settled.set("resultRef", hookRef(resultResource));
+        settled.set("terminalReceiptRef", hookRef(receiptResource));
+        assertRefused("a settled child agent citing a result the Session"
+                        + " does not hold", unheldResult,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> resultJournal.commit(resultJournal.requestDomain(
+                        "agent-4", "child_run", settled,
+                        List.of(receiptResource), 4_000)));
+    }
+
+    @Test
+    void bindsAnAcceptanceToTheChildRunItNamesNotItsSibling()
+            throws Exception {
+        CommitResource inputResource = hookResource("input-s", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-s",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-s",
+                "managed-runtime-receipt",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        settleChildAgentChain(sessionId, "sent", journal, inputResource,
+                resultResource, receiptResource);
+        ObjectNode sibling = childAgent(sessionId, "sent", "admitted",
+                "intent", null, inputResource);
+        sibling.put("childRunId", "run-y");
+        commitDomain(journal, "agent-b", "child_run", sibling,
+                List.of(inputResource));
+        ObjectNode claimingSibling = acceptance(resultResource,
+                receiptResource, "accepted");
+        claimingSibling.put("childRunId", "run-y");
+        assertRefused("an acceptance naming its sibling child run's unended"
+                        + " chain", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must name a run that ended with its result committed",
+                () -> journal.commit(journal.requestDomain("accept-1",
+                        "child_acceptance", claimingSibling,
+                        List.of(resultResource, receiptResource), 1_000)));
+    }
+
+    /** A child agent body reshaped into the workflow kind (H4c): the pin
+     * names the workflow revision the launch runs. */
+    private static ObjectNode workflow(ObjectNode body) {
+        body.put("kind", "workflow");
+        ObjectNode definition = body.withObject("/run")
+                .withObject("/definition");
+        definition.put("definitionId", "workflow-review");
+        definition.put("definitionRevision", 3);
+        definition.put("definitionDigest", "9".repeat(64));
+        return body;
+    }
+
+    @Test
+    void commitsAWorkflowChainUnderTheChildSessionRules() throws Exception {
+        CommitResource inputResource = hookResource("input-w", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-w",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-w",
+                "managed-runtime-receipt",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        ObjectNode foreign = workflow(childAgent(sessionId, "sent",
+                "admitted", "intent", null, inputResource));
+        foreign.put("rootSessionId", "session-other");
+        assertRefused("a first-level workflow rooted at another Session",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "rootSessionId must be this Session for a first-level child",
+                () -> journal.commit(journal.requestDomain("agent-0",
+                        "child_run", foreign, List.of(inputResource), 500)));
+        settleChildSessionChain(sessionId, "sent", journal, inputResource,
+                resultResource, receiptResource,
+                ManagedExtensionRecordStoreTest::workflow);
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "child_run",
+                        "run-x"));
+        var task = records.findTask(TENANT, sessionId, taskId).orElseThrow();
+        assertThat(task.kind()).isEqualTo("workflow");
+        assertThat(task.projection().state()).isEqualTo("completed");
+        assertThat(task.projection().definitionRevision()).isEqualTo(3L);
+        // The acceptance gate and its reverse bind a workflow run exactly
+        // as they bind a child agent.
+        ObjectNode accepted = workflow(childAgent(sessionId, "sent",
+                "settled", "settled", "binding-1", inputResource));
+        accepted.withObject("/run").put("dispatchId", "dispatch-1");
+        accepted.put("childSessionId", "session-child");
+        accepted.put("stopReason", "completed");
+        accepted.set("resultRef", hookRef(resultResource));
+        accepted.set("terminalReceiptRef", hookRef(receiptResource));
+        accepted.withObject("/run").withObject("/delivery")
+                .put("state", "accepted");
+        assertRefused("a workflow delivery reaching accepted ahead of its"
+                        + " acceptance", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "reaches accepted or consumed only with its acceptance record",
+                () -> journal.commit(journal.requestDomain("agent-5",
+                        "child_run", accepted, List.of(), 5_000)));
+        commitDomain(journal, "accept-1", "child_acceptance",
+                acceptance(resultResource, receiptResource, "accepted"),
+                List.of(resultResource, receiptResource));
+        commitDomain(journal, "agent-6", "child_run", accepted, List.of());
+        assertThat(records.listRecords(TENANT, sessionId, "child_run")
+                .get(0).required("run").required("delivery")
+                .required("state").textValue()).isEqualTo("accepted");
+    }
+
+    @Test
+    void refusesAFirstLevelChildAgentRootedAtAnotherSession()
+            throws Exception {
+        CommitResource inputResource = hookResource("input-r", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        ObjectNode foreign = childAgent(sessionId, "sent", "admitted",
+                "intent", null, inputResource);
+        foreign.put("rootSessionId", "session-other");
+        assertRefused("a first-level child agent rooted at another Session",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "rootSessionId must be this Session for a first-level child",
+                () -> journal.commit(journal.requestDomain("agent-1",
+                        "child_run", foreign, List.of(inputResource), 1_000)));
+    }
+
+    @Test
+    void bindsAToolCompletionAcceptanceToItsCompletionCall()
+            throws Exception {
+        CommitResource inputResource = hookResource("input-t", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-t",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-t",
+                "managed-runtime-receipt",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        settleChildAgentChain(sessionId, "tool", journal, inputResource,
+                resultResource, receiptResource);
+        // A "tool" child's result attaches to the parent's start call.
+        ObjectNode noCall = acceptance(resultResource, receiptResource,
+                "accepted");
+        assertRefused("a tool-completion acceptance without its completion"
+                        + " call", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must attach the completion call its child run names",
+                () -> journal.commit(journal.requestDomain("accept-1",
+                        "child_acceptance", noCall,
+                        List.of(resultResource, receiptResource), 1_000)));
+        ObjectNode withCall = acceptance(resultResource, receiptResource,
+                "accepted");
+        withCall.put("parentExecutionCallId", "call-x");
+        commitDomain(journal, "accept-2", "child_acceptance", withCall,
+                List.of(resultResource, receiptResource));
+        assertThat(records.listRecords(TENANT, sessionId,
+                "child_acceptance")).hasSize(1);
+    }
+
+    @Test
+    void gatesAChildRunDeliveryOnItsAcceptanceRecord() throws Exception {
+        CommitResource inputResource = hookResource("input-g", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-g",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-g",
+                "managed-runtime-receipt",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        settleChildAgentChain(sessionId, "sent", journal, inputResource,
+                resultResource, receiptResource);
+        // The acceptance is authoritative: accepted/consumed before it is
+        // refused, unknown/rejected after it is refused, and the relay's
+        // accepting -> unknown retry stays legal while it is absent.
+        ObjectNode unknown = childAgent(sessionId, "sent", "settled",
+                "settled", "binding-1", inputResource);
+        unknown.withObject("/run").put("dispatchId", "dispatch-1");
+        unknown.put("childSessionId", "session-child");
+        unknown.put("stopReason", "completed");
+        unknown.set("resultRef", hookRef(resultResource));
+        unknown.set("terminalReceiptRef", hookRef(receiptResource));
+        unknown.withObject("/run").withObject("/delivery")
+                .put("state", "unknown");
+        ObjectNode accepted = unknown.deepCopy();
+        accepted.withObject("/run").withObject("/delivery").put("state",
+                "accepted");
+        assertRefused("a delivery reaching accepted ahead of its acceptance",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "reaches accepted or consumed only with its acceptance record",
+                () -> journal.commit(journal.requestDomain("agent-5",
+                        "child_run", accepted, List.of(), 5_000)));
+        commitDomain(journal, "agent-6", "child_run", unknown, List.of());
+        assertRefused("a delivery still reaching accepted without it",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "reaches accepted or consumed only with its acceptance record",
+                () -> journal.commit(journal.requestDomain("agent-7",
+                        "child_run", accepted, List.of(), 7_000)));
+        // The same requirement's second pre-acceptance disjunct:
+        // `consumed` past the first commit must also refuse.
+        ObjectNode consumedPre = unknown.deepCopy();
+        consumedPre.withObject("/run").withObject("/delivery").put("state",
+                "consumed");
+        assertRefused("a delivery reaching consumed without its acceptance",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "reaches accepted or consumed only with its acceptance record",
+                () -> journal.commit(journal.requestDomain("agent-7b",
+                        "child_run", consumedPre, List.of(), 7_500)));
+        commitDomain(journal, "accept-1", "child_acceptance",
+                acceptance(resultResource, receiptResource, "accepted"),
+                List.of(resultResource, receiptResource));
+        ObjectNode rejected = unknown.deepCopy();
+        rejected.withObject("/run").withObject("/delivery").put("state",
+                "rejected");
+        assertRefused("a delivery retracting after its acceptance",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "cannot go unknown or rejected after its acceptance record",
+                () -> journal.commit(journal.requestDomain("agent-8",
+                        "child_run", rejected, List.of(), 8_000)));
+        commitDomain(journal, "agent-9", "child_run", accepted, List.of());
+        // And the consumed-with-acceptance commit lands (settlement
+        // vocabulary, not a refusal).
+        ObjectNode consumed = unknown.deepCopy();
+        consumed.withObject("/run").withObject("/delivery").put("state",
+                "consumed");
+        commitDomain(journal, "agent-9b", "child_run", consumed, List.of());
+        assertThat(records.listRecords(TENANT, sessionId, "child_run")
+                .get(0).required("run").required("delivery")
+                .required("state").textValue()).isEqualTo("consumed");
+    }
+
+    /** Commits a child agent through its settled result. */
+    static void settleChildAgentChain(String sessionId,
+            String completion, ExtensionRecordJournal journal,
+            CommitResource inputResource, CommitResource resultResource,
+            CommitResource receiptResource) {
+        settleChildSessionChain(sessionId, completion, journal,
+                inputResource, resultResource, receiptResource,
+                body -> body);
+    }
+
+    /** Commits a child Session run through its settled result, each body
+     * shaped into its kind by {@code shape}. */
+    static void settleChildSessionChain(String sessionId,
+            String completion, ExtensionRecordJournal journal,
+            CommitResource inputResource, CommitResource resultResource,
+            CommitResource receiptResource,
+            UnaryOperator<ObjectNode> shape) {
+        commitDomain(journal, "agent-1", "child_run",
+                shape.apply(childAgent(sessionId, completion, "admitted",
+                        "intent", null, inputResource)),
+                List.of(inputResource));
+        ObjectNode dispatching = shape.apply(childAgent(sessionId, completion,
+                "running", "dispatch_started", "binding-1", inputResource));
+        dispatching.withObject("/run").put("dispatchId", "dispatch-1");
+        commitDomain(journal, "agent-2", "child_run", dispatching, List.of());
+        ObjectNode attached = shape.apply(childAgent(sessionId, completion,
+                "running", "running_attached", "binding-1", inputResource));
+        attached.withObject("/run").put("dispatchId", "dispatch-1");
+        attached.put("childSessionId", "session-child");
+        commitDomain(journal, "agent-3", "child_run", attached, List.of());
+        ObjectNode settled = shape.apply(childAgent(sessionId, completion,
+                "settled", "settled", "binding-1", inputResource));
+        settled.withObject("/run").put("dispatchId", "dispatch-1");
+        settled.put("childSessionId", "session-child");
+        settled.put("stopReason", "completed");
+        settled.set("resultRef", hookRef(resultResource));
+        settled.set("terminalReceiptRef", hookRef(receiptResource));
+        commitDomain(journal, "agent-4", "child_run", settled,
+                List.of(resultResource, receiptResource));
+    }
+
+    private static ObjectNode acceptance(CommitResource content,
+            CommitResource receipt, String deliveryState) {
+        ObjectNode body = JsonNodeFactory.instance.objectNode();
+        body.put("childRunId", "run-x");
+        body.put("parentScopeId", "scope-x");
+        body.putNull("parentExecutionCallId");
+        body.put("resultVersion", 1);
+        body.set("contentRef", hookRef(content));
+        body.put("contentDigest", content.digest());
+        body.set("terminalReceiptRef", hookRef(receipt));
+        ObjectNode run = JsonNodeFactory.instance.objectNode();
+        run.put("state", "settled");
+        run.putNull("reason");
+        run.putNull("definition");
+        run.putNull("executionCallId");
+        run.putNull("effectId");
+        run.putNull("dispatchId");
+        run.putNull("deliveryId");
+        run.putNull("execution");
+        run.putNull("runtime");
+        ObjectNode delivery = JsonNodeFactory.instance.objectNode();
+        delivery.put("target", "session");
+        delivery.put("state", deliveryState);
+        run.set("delivery", delivery);
+        body.set("run", run);
+        return body;
+    }
+
+    static ObjectNode childAgent(String sessionId, String completion,
+            String state, String execution, String runtimeBinding,
+            CommitResource inputResource) {
+        ObjectNode body = JsonNodeFactory.instance.objectNode();
+        body.put("kind", "child_agent");
+        body.put("childRunId", "run-x");
+        body.put("ownerScopeId", "scope-x");
+        // A first-level child's root is the Session that owns this journal.
+        body.put("rootSessionId", sessionId);
+        body.put("depth", 1);
+        body.put("completion", completion);
+        body.set("inputRef", hookRef(inputResource));
+        body.put("workspaceMode", "shared");
+        body.put("workingDirectory", ".");
+        body.putNull("childSessionId");
+        body.putNull("predecessorChildRunId");
+        body.put("resultVersion", 1);
+        body.putNull("resultRef");
+        body.putNull("terminalReceiptRef");
+        body.putNull("stopReason");
+        body.put("stopRequested", false);
+        ObjectNode run = JsonNodeFactory.instance.objectNode();
+        run.put("state", state);
+        run.putNull("reason");
+        ObjectNode definition = JsonNodeFactory.instance.objectNode();
+        definition.put("definitionId", "agent-def-1");
+        definition.put("definitionRevision", 1);
+        definition.put("definitionDigest", "f".repeat(64));
+        run.set("definition", definition);
+        run.put("executionCallId", "call-x");
+        run.putNull("effectId");
+        run.putNull("dispatchId");
+        run.putNull("deliveryId");
+        run.put("execution", execution);
+        if (runtimeBinding != null) {
+            ObjectNode runtime = JsonNodeFactory.instance.objectNode();
+            runtime.put("runtimeBindingId", runtimeBinding);
+            runtime.put("generation", "1");
+            run.set("runtime", runtime);
+        } else {
+            run.putNull("runtime");
+        }
+        String delivery = "settled".equals(state) ? "accepting"
+                : "failed".equals(state) || "cancelled".equals(state)
+                        ? "cancelled" : "planned";
+        ObjectNode line = JsonNodeFactory.instance.objectNode();
+        line.put("target", "session");
+        line.put("state", delivery);
+        run.set("delivery", line);
+        body.set("run", run);
+        return body;
+    }
+
+    @Test
+    void verifiesTheChannelResourceClosure() throws Exception {
+        JsonNode templates = ManagedChannelRecordContractTest.fixtures()
+                .required("templates");
+        CommitResource policy = channelResource("policy-1", "channel-policy",
+                "{\"allowed\":[\"sender-1\"]}");
+        CommitResource result = channelResource("result-1", "managed-tool-result",
+                "{\"text\":\"ok\"}");
+        CommitResource seg1 = channelResource("seg-1-data",
+                "channel-delivery-segment", "part one");
+        CommitResource seg2 = channelResource("seg-2-data",
+                "channel-delivery-segment", "part two");
+        CommitResource proof = channelResource("proof-1",
+                "channel-delivery-receipt", "{\"250\":\"ok\"}");
+        // Positive: both shared templates commit with their closures, and a
+        // revision closing a proofed receipt commits with the proof. The
+        // corpus templates carry placeholder reference digests, so pin them
+        // onto the resources this transaction actually provides.
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        var route = journal.requestDomain("route-1", "channel_route",
+                channelRoute(templates, policy), List.of(policy), 1_000);
+        journal.commit(route);
+        journal.committed(route);
+        var delivery = journal.requestDomain("delivery-1", "channel_delivery",
+                channelDelivery(templates, result, seg1, seg2),
+                List.of(result, seg1, seg2), 2_000);
+        journal.commit(delivery);
+        journal.committed(delivery);
+        ObjectNode sending = channelDelivery(templates, result, seg1, seg2);
+        ObjectNode run = (ObjectNode) sending.required("run");
+        run.put("state", "running");
+        ObjectNode line = (ObjectNode) run.required("delivery");
+        line.put("state", "sending");
+        ObjectNode firstSegment = (ObjectNode) sending.required("segments")
+                .get(0);
+        ObjectNode receipt = JsonNodeFactory.instance.objectNode();
+        receipt.put("providerMessageId", "provider-msg-1");
+        receipt.put("acceptedAt", 1_750_000_000_000L);
+        receipt.set("proofRef", hookRef(proof));
+        firstSegment.set("receipt", receipt);
+        var proofed = journal.requestDomain("delivery-2", "channel_delivery",
+                sending, List.of(proof), 3_000);
+        journal.commit(proofed);
+        journal.committed(proofed);
+        // Negative: every missing resource kind refuses on its own.
+        String routeWs = UUID.randomUUID().toString();
+        ExtensionRecordJournal routeless = journal(routeWs);
+        assertRefused("channel_route names no policy resource", routeWs,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> routeless.commit(routeless.requestDomain("route-1",
+                        "channel_route", channelRoute(templates, policy),
+                        List.of(), 1_000)));
+        String deliveryWs = UUID.randomUUID().toString();
+        ExtensionRecordJournal noResult = journal(deliveryWs);
+        assertRefused("channel_delivery names no result resource", deliveryWs,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> noResult.commit(noResult.requestDomain("delivery-1",
+                        "channel_delivery",
+                        channelDelivery(templates, result, seg1, seg2),
+                        List.of(seg1, seg2), 1_000)));
+        assertRefused("channel_delivery names no segment resource",
+                deliveryWs,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> noResult.commit(noResult.requestDomain("delivery-1",
+                        "channel_delivery",
+                        channelDelivery(templates, result, seg1, seg2),
+                        List.of(result, seg1), 1_000)));
+        String proofWs = UUID.randomUUID().toString();
+        ExtensionRecordJournal noProof = journal(proofWs);
+        // H5c: a delivery binds to its committed route, so the proof
+        // Session opens the route first.
+        var proofRoute = noProof.requestDomain("route-1", "channel_route",
+                channelRoute(templates, policy), List.of(policy), 500);
+        noProof.commit(proofRoute);
+        noProof.committed(proofRoute);
+        var base = noProof.requestDomain("delivery-1", "channel_delivery",
+                channelDelivery(templates, result, seg1, seg2),
+                List.of(result, seg1, seg2), 1_000);
+        noProof.commit(base);
+        noProof.committed(base);
+        assertRefused("channel_delivery names no proof resource", proofWs,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> noProof.commit(noProof.requestDomain("delivery-2",
+                        "channel_delivery", sending.deepCopy(), List.of(),
+                        2_000)));
+    }
+
+    private static CommitResource channelResource(String resourceId,
+            String kind, String text) {
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        return new CommitResource(resourceId, kind, 1, bytes.length,
+                ExtensionRecordJournal.sha256(bytes),
+                Base64.getEncoder().encodeToString(bytes));
+    }
+
+    private static ObjectNode channelRoute(JsonNode templates,
+            CommitResource policy) {
+        ObjectNode route = (ObjectNode) templates.required("channel_route")
+                .deepCopy();
+        route.set("policyRef", hookRef(policy));
+        return route;
+    }
+
+    private static ObjectNode channelDelivery(JsonNode templates,
+            CommitResource result, CommitResource seg1, CommitResource seg2) {
+        ObjectNode delivery = (ObjectNode) templates
+                .required("channel_delivery").deepCopy();
+        delivery.set("contentRef", hookRef(result));
+        // segments are an ArrayNode; each element is mutable in place.
+        ((ObjectNode) delivery.required("segments").get(0)).set("contentRef",
+                hookRef(seg1));
+        ((ObjectNode) delivery.required("segments").get(1)).set("contentRef",
+                hookRef(seg2));
+        return delivery;
+    }
+    static ObjectNode childRun(String state, String execution,
+            String runtimeBinding, CommitResource argsResource) {
+        ObjectNode body = JsonNodeFactory.instance.objectNode();
+        body.put("kind", "shell");
+        body.put("shellId", "shell-x");
+        body.put("ownerScopeId", "scope-x");
+        body.set("commandRef", hookRef(argsResource));
+        body.putNull("startReceiptRef");
+        body.putNull("outputRef");
+        body.putNull("stopReason");
+        body.put("stopRequested", false);
+        body.putNull("exitCode");
+        body.putNull("exitSignal");
+        ObjectNode run = JsonNodeFactory.instance.objectNode();
+        run.put("state", state);
+        run.putNull("reason");
+        run.putNull("definition");
+        run.put("executionCallId", "call-x");
+        run.putNull("effectId");
+        run.putNull("dispatchId");
+        run.putNull("deliveryId");
+        run.put("execution", execution);
+        if (runtimeBinding != null) {
+            ObjectNode runtime = JsonNodeFactory.instance.objectNode();
+            runtime.put("runtimeBindingId", runtimeBinding);
+            runtime.put("generation", "1");
+            run.set("runtime", runtime);
+        } else {
+            run.putNull("runtime");
+        }
+        run.putNull("delivery");
+        body.set("run", run);
+        return body;
+    }
+
+    @Test
     void refusesTheSharedRejectedChains() throws Exception {
         for (JsonNode reject : fixtures().required("monitorChainRejectCases")) {
-            // Public, so the Session event count in assertRefused is not
-            // vacuous: appendLiveSessionEventIfAbsent needs the row.
-            String sessionId = agents.createSession(TENANT, "reject-"
-                    + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
-                    List.of()).sessionId();
+            String sessionId = UUID.randomUUID().toString();
             ExtensionRecordJournal journal = journal(sessionId);
             int index = 0;
             for (JsonNode monitor : reject.required("accepted")) {
@@ -122,30 +967,13 @@ class ManagedExtensionRecordStoreTest {
                     ? ExtensionRecordJournal.OPERATION : "reopenMonitorRun";
             String commandId = reuse == null ? "rejected"
                     : "accepted-" + reuse.intValue();
-            CommitTransactionRequest refusedRequest = journal.request(
-                    operation, commandId, ExtensionRecordJournal.bytes(
-                            reject.required("next")), occurredAt, event -> {
-                            }, records -> records);
             assertRefused(reject.required("id").textValue(), sessionId,
                     ManagedExtensionRecordStore.ERROR_REJECTED, null,
-                    () -> journal.commit(refusedRequest));
-            if (reuse == null) {
-                // No command row survives a refusal: the identical bytes
-                // are refused again, not replayed, and the resource rows a
-                // lost rollback would keep collide the resend on the
-                // resource reference primary key.
-                assertRefused(reject.required("id").textValue() + " resent",
-                        sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
-                        null, () -> journal.commit(refusedRequest));
-                // A new body under the same command id commits as new.
-                JsonNode retry = ((ObjectNode) chain().get(0)
-                        .required("monitorRun").deepCopy()).put("monitorId",
-                        "monitor-retry-" + index);
-                CommitReceipt resent = journal.commit(journal.request(
-                        commandId, retry, occurredAt + 1_000));
-                assertThat(resent.replayed()).isFalse();
-                assertThat(revisions(sessionId)).isEqualTo(index + 1L);
-            }
+                    () -> journal.commit(journal.request(operation,
+                            commandId, ExtensionRecordJournal.bytes(
+                                    reject.required("next")), occurredAt,
+                            event -> {
+                            }, records -> records)));
         }
     }
 
@@ -163,39 +991,49 @@ class ManagedExtensionRecordStoreTest {
     }
 
     @Test
+    void refusesAMonitorRunCitingAResourceOutsideItsCommit() throws Exception {
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        byte[] decoyBytes = { 0 };
+        CommitResource decoy = new CommitResource(UUID.randomUUID()
+                .toString(), "managed-note", 1, decoyBytes.length,
+                ExtensionRecordJournal.sha256(decoyBytes),
+                Base64.getEncoder().encodeToString(decoyBytes));
+        assertRefused("a monitor run that cites a resource outside its"
+                        + " commit", sessionId,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
+                "A referenced Managed Session resource is missing.",
+                () -> journal.commit(journal.requestDomain("open",
+                        "monitor_run", chain().get(0).required("monitorRun"),
+                        List.of(decoy), 1_000)));
+    }
+
+    @Test
     void refusesWhatTheAuthorityCouldNotReadBack() throws Exception {
         byte[] start = ExtensionRecordJournal.bytes(
                 chain().get(0).required("monitorRun"));
         byte[] trailing = (new String(start, StandardCharsets.UTF_8)
                 + " {}").getBytes(StandardCharsets.UTF_8);
         Map<String, Refusal> events = Map.ofEntries(
-                Map.entry("another tenant", new Refusal(
-                        "names another Session", event -> ((ObjectNode) event
-                                .get("sessionKey")).put("tenantId",
-                                        "other"))),
                 Map.entry("another workspace", new Refusal(
                         "names another Session", event -> ((ObjectNode) event
                                 .get("sessionKey")).put("workspaceId",
-                                        "other"))),
-                Map.entry("another Session", new Refusal(
-                        "names another Session", event -> ((ObjectNode) event
-                                .get("sessionKey")).put("sessionId",
                                         "other"))),
                 Map.entry("an extra Session key field", new Refusal(
                         "event.sessionKey must be an object with exactly",
                         event -> ((ObjectNode) event.get("sessionKey"))
                                 .put("extra", true))),
                 Map.entry("a schema version as text", new Refusal(
-                        "recordRef.schemaVersion is out of range",
+                        "recordRef.schemaVersion must be an integer from 0 to 9007199254740990",
                         event -> ((ObjectNode) event.at(
                                 "/payload/recordRef")).put("schemaVersion",
                                         "1"))),
                 Map.entry("a record version 2", new Refusal(
-                        "event.payload.version is out of range",
+                        "event.payload.version must be an integer from 1 to 1",
                         event -> ((ObjectNode) event.get("payload"))
                                 .put("version", 2))),
                 Map.entry("an event version 2", new Refusal(
-                        "event.v is out of range", event -> event.put("v",
+                        "event.v must be an integer from 1 to 1", event -> event.put("v",
                                 2))),
                 Map.entry("an extra payload field", new Refusal(
                         "event.payload must be an object with exactly",
@@ -206,7 +1044,7 @@ class ManagedExtensionRecordStoreTest {
                         event -> event.putObject("subject")
                                 .put("type", "turn").put("id", "turn-1"))),
                 Map.entry("a sequence past its place", new Refusal(
-                        "event.sequence is out of range",
+                        "event.sequence must be an integer from",
                         event -> event.put("sequence", event.get("sequence")
                                 .longValue() + 1))),
                 Map.entry("a digest of another body", new Refusal(
@@ -221,10 +1059,10 @@ class ManagedExtensionRecordStoreTest {
                                 "/payload/recordRef")).put("byteLength",
                                         start.length + 1))),
                 Map.entry("a time between two milliseconds", new Refusal(
-                        "event.occurredAt is out of range",
+                        "event.occurredAt must be an integer from 0 to 8640000000000000",
                         event -> event.put("occurredAt", 1_000.5))),
                 Map.entry("a time past the contract's range", new Refusal(
-                        "event.occurredAt is out of range",
+                        "event.occurredAt must be an integer from 0 to 8640000000000000",
                         event -> event.put("occurredAt",
                                 8_640_000_000_000_001L))),
                 Map.entry("a reference of another domain", new Refusal(
@@ -236,33 +1074,21 @@ class ManagedExtensionRecordStoreTest {
             refuse(edit.getKey(), edit.getValue().message(), start,
                     edit.getValue().editEvent(), records -> records);
         }
-        // The fifth field of the reference takes the missing-resource
-        // answer, not the mismatch one.
-        String missingId = UUID.randomUUID().toString();
-        ExtensionRecordJournal missingJournal = journal(missingId);
-        assertRefused("a reference of another resource", missingId,
-                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
-                "A referenced Managed Session resource is missing.",
-                () -> missingJournal.commit(missingJournal.request(
-                        ExtensionRecordJournal.OPERATION, "refused", start,
-                        1_000,
-                        event -> ((ObjectNode) event.at(
-                                "/payload/recordRef")).put("resourceId",
-                                        "other-resource"),
-                        records -> records)));
         refuse("a body with trailing content", "The Stage H record is not a"
                 + " JSON object the Session authority can read", trailing,
                 event -> {
                 }, records -> records);
-        refuse("no commit marker", "holds only its events, then its commit"
-                + " marker", start, event -> {
+        refuse("no commit marker", "has the unknown subtype"
+                + " managed_session_note after the Managed header", start,
+                event -> {
                 }, records -> records.substring(0, records.indexOf('\n')
                         + 1) + "{\"subtype\":\"managed_session_note\"}\n");
         String sessionId = UUID.randomUUID().toString();
         ExtensionRecordJournal journal = journal(sessionId);
         assertRefused("a line among the events that is not one", sessionId,
                 ManagedExtensionRecordStore.ERROR_REJECTED,
-                "holds only its events, then its commit marker",
+                "has the unknown subtype managed_session_note after the"
+                        + " Managed header",
                 () -> journal.commit(journal.request(
                         ExtensionRecordJournal.OPERATION, "refused", start,
                         1_000, event -> {
@@ -297,39 +1123,219 @@ class ManagedExtensionRecordStoreTest {
                             start, 1_000, event -> {
                             }, edit.getValue())));
         }
-        // And the refusal names the right line when only the second is bad.
-        String second = UUID.randomUUID().toString();
-        ExtensionRecordJournal secondJournal = journal(second);
-        assertRefused("a duplicate key on the second line", second,
-                ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
-                "Record line 2 is not a JSON object the Session authority"
-                        + " can read",
-                () -> secondJournal.commit(secondJournal.request(
-                        ExtensionRecordJournal.OPERATION, "refused-second",
-                        start, 1_000, event -> {
-                        }, records -> records.replaceFirst(
-                                "\\{\"uuid\"(?=[^\n]*managed_session_commit_v1)",
-                                "{\"dup\":1,\"dup\":2,\"uuid\""))));
         // The deepest line the authority reads is still accepted, on a line
         // the Stage H rules do not otherwise look at.
         String sessionId = UUID.randomUUID().toString();
         ExtensionRecordJournal journal = journal(sessionId);
         journal.commit(journal.request(ExtensionRecordJournal.OPERATION,
                 "deepest", start, 1_000, event -> {
-                }, records -> {
-                    String edited = records.replaceFirst(
-                            "\\{\"uuid\"(?=[^\n]*managed_session_commit_v1)",
-                            "{\"deep\":" + nested(63) + ",\"uuid\"");
-                    assertThat(edited).as("the injection landed")
-                            .isNotEqualTo(records);
-                    return edited;
-                }));
+                }, records -> records.replaceFirst(
+                        "\\{\"uuid\"(?=[^\n]*managed_session_commit_v1)",
+                        "{\"deep\":" + nested(63) + ",\"uuid\"")));
         assertThat(revisions(sessionId)).isEqualTo(1);
     }
 
     /** A value holding {@code depth} nested arrays. */
     private static String nested(int depth) {
         return "[".repeat(depth) + "]".repeat(depth);
+    }
+
+    /** A well-formed record line carrying an ordinary event. */
+    private static String ordinaryEventLine(String sessionId, long sequence,
+            String eventId, String kind) {
+        ObjectNode event = JsonNodeFactory.instance.objectNode()
+                .put("v", 1).put("sequence", sequence)
+                .put("eventId", eventId);
+        event.putObject("sessionKey").put("tenantId", TENANT)
+                .put("workspaceId", WORKSPACE).put("sessionId", sessionId);
+        event.put("kind", kind).put("occurredAt", 1_000);
+        event.putObject("payload");
+        ObjectNode record = JsonNodeFactory.instance.objectNode()
+                .put("uuid", UUID.randomUUID().toString())
+                .putNull("parentUuid").put("sessionId", sessionId)
+                .put("timestamp", "2026-09-27T00:00:00.000Z")
+                .put("type", "system")
+                .put("subtype", "managed_session_event_v1")
+                .put("cwd", "/workspace").put("version", "test");
+        record.set("managedSession", event);
+        return record + "\n";
+    }
+
+    /**
+     * Every line below answers 200 to an ordinary commit today and bricks
+     * the authority's reader at the next open; the store must refuse it
+     * with a 409 instead, as the class's invariant promises.
+     */
+    @Test
+    void refusesEventLinesTheAuthorityWouldRefuseAtReopen() throws Exception {
+        ObjectNode goal = JsonNodeFactory.instance.objectNode()
+                .put("goal", "live");
+        // The control: a faithful body-less domain.committed commits. The
+        // pass-through branch keeps every live managed Session working.
+        String accepted = UUID.randomUUID().toString();
+        ExtensionRecordJournal live = journal(accepted);
+        live.commit(live.requestOrdinary("ordinary", "goal_state", goal,
+                event -> {
+                }, records -> records, 0));
+
+        refuseOrdinary("an event line without its body", goal,
+                "event must be an object with exactly", event -> {
+                }, records -> records.replaceFirst(
+                        "\\{\"uuid\"[^\\n]*\n",
+                        "{\"subtype\":\"managed_session_event_v1\"}\n"), 0);
+        refuseOrdinary("a second event line out of sequence", goal,
+                "event.sequence must be an integer from 2 to 2.", event -> {
+                }, records -> records, 5);
+        refuseOrdinary("a second event line with a reserved event id", goal,
+                "event id monitor_run:1 is reserved for Stage H records",
+                event -> {
+                }, records -> records, -1);
+        refuseOrdinary("a second event line of an unknown kind", goal,
+                "event.kind must be one of", event -> {
+                }, records -> records, -2);
+        refuseOrdinary("a second event line for another Session", goal,
+                "The event names another Session", event -> {
+                }, records -> records, -3);
+        refuseOrdinary("a line of an unknown subtype after a Managed line",
+                goal, "has the unknown subtype not_a_subtype after the"
+                        + " Managed header", event -> {
+                }, records -> records.replaceFirst("\n",
+                        "\n{\"subtype\":\"not_a_subtype\"}\n"), 1);
+        refuseOrdinary("an event line with an extra envelope field", goal,
+                "event must be an object with exactly",
+                event -> event.put("extra", 1), records -> records, 0);
+        refuseOrdinary("an event line with a numeric payload", goal,
+                "event.payload must be a JSON object",
+                event -> event.set("payload", JsonNodeFactory.instance
+                        .numberNode(42)), records -> records, 0);
+        refuseOrdinary("an event line with a null payload", goal,
+                "event.payload must be a JSON object",
+                event -> event.putNull("payload"), records -> records, 0);
+        refuseOrdinary("an event line with a numeric subject", goal,
+                "event.subject must be a JSON object",
+                event -> event.set("subject", JsonNodeFactory.instance
+                        .numberNode(42)), records -> records, 0);
+        refuseOrdinary("a line of an unknown subtype ahead of the events",
+                goal, "is not an event line", event -> event.put("sequence",
+                        event.get("sequence").asLong() + 1),
+                records -> "{\"subtype\":\"not_a_subtype\"}\n" + records, 1);
+        refuseOrdinary("a stray commit marker among the events", goal,
+                "is not an event line", event -> {
+                }, records -> records.replaceFirst("\n",
+                        "\n{\"subtype\":\"managed_session_commit_v1\"}\n"), 1);
+        refuseOrdinary("a repeated Managed header among the events", goal,
+                "is not an event line", event -> {
+                }, records -> records.replaceFirst("\n",
+                        "\n{\"subtype\":\"managed_session_header_v1\"}\n"), 1);
+        refuseOrdinary("a body-less domain.committed with a fifth payload"
+                        + " field", goal,
+                "event.payload must be an object with exactly",
+                event -> ((ObjectNode) event.get("payload"))
+                        .put("extra", true), records -> records, 0);
+        refuseOrdinary("a body-less domain.committed of record version 2",
+                goal, "event.payload.version must be an integer from 1 to 1.",
+                event -> ((ObjectNode) event.get("payload"))
+                        .put("version", 2), records -> records, 0);
+        refuseOrdinary("a domain.committed naming a domain without an index"
+                        + " entry", goal, "event.payload.domain must be one"
+                        + " of", event -> {
+                }, records -> records, 0, "not_a_domain", 0);
+        refuseOrdinary("a domain.committed without a textual domain", goal,
+                "event.payload must be an object with exactly",
+                event -> ((ObjectNode) event.get("payload"))
+                        .remove("domain"), records -> records, 0);
+        refuseOrdinary("a domain.committed with a numeric domain", goal,
+                "event.payload.domain must be one of",
+                event -> ((ObjectNode) event.get("payload"))
+                        .put("domain", 123), records -> records, 0);
+        String marker = "{\"subtype\":\"managed_session_commit_v1\","
+                + "\"managedSession\":{\"commandId\":\"big\","
+                + "\"padding\":\"" + "x".repeat(100_000) + "\"}}\n";
+        refuseOrdinary("a commit marker past its byte cap", goal,
+                "exceeds 65536 UTF-8 bytes", event -> {
+                }, records -> records.substring(0, records.indexOf('\n')
+                        + 1) + marker, 0);
+
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        byte[] start = ExtensionRecordJournal.bytes(
+                chain().get(0).required("monitorRun"));
+        long sequence = journal.committedSequence() + 1;
+        assertRefused("two Stage H events in one transaction", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "A transaction carries at most one Stage H record",
+                () -> journal.commit(journal.request(
+                        ExtensionRecordJournal.OPERATION, "refused", start,
+                        1_000, event -> {
+                        }, records -> {
+                            String first = records.substring(0,
+                                    records.indexOf('\n'));
+                            String second = first.replaceFirst(
+                                    "\\\"sequence\\\":" + sequence,
+                                    "\\\"sequence\\\":" + (sequence + 1));
+                            return first + "\n" + second + records.substring(
+                                    records.indexOf('\n'));
+                        }, 1)));
+        // A cross-domain reserved id on a body-bearing line would collide
+        // with the other domain's next Stage H record.
+        String reserved = UUID.randomUUID().toString();
+        ExtensionRecordJournal reservedJournal = journal(reserved);
+        assertRefused("a Stage H line with another domain's reserved id",
+                reserved, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "is not its domain's reserved monitor_run:<n> id",
+                () -> reservedJournal.commit(reservedJournal.request(
+                        ExtensionRecordJournal.OPERATION, "refused", start,
+                        1_000, event -> event.put("eventId",
+                                "hook_execution:1"), records -> records)));
+    }
+
+    /** A refused ordinary body-less domain commit. The {@code inject} of 5
+     * inserts a second event line five sequences past its place, of -1 one
+     * carrying the reserved id {@code monitor_run:1}, of -2 one of a kind
+     * the journal does not know, of -3 one naming another Session; any
+     * other value declares it as the {@code extraEvents} of the request. */
+    private void refuseOrdinary(String label, JsonNode goal, String message,
+            Consumer<ObjectNode> editEvent, UnaryOperator<String> editRecords,
+            int inject) {
+        refuseOrdinary(label, goal, message, editEvent, editRecords, inject,
+                "goal_state", 1);
+    }
+
+    private void refuseOrdinary(String label, JsonNode goal, String message,
+            Consumer<ObjectNode> editEvent, UnaryOperator<String> editRecords,
+            int inject, String domain, int defaultExtra) {
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        long firstSequence = journal.committedSequence() + 1;
+        UnaryOperator<String> records = editRecords;
+        int extra = defaultExtra;
+        if (inject == 5) {
+            records = original -> original.replaceFirst("\n",
+                    "\n" + ordinaryEventLine(sessionId, firstSequence + 5,
+                            "input-1:accepted", "input.accepted"));
+        } else if (inject == -1) {
+            records = original -> original.replaceFirst("\n",
+                    "\n" + ordinaryEventLine(sessionId, firstSequence + 1,
+                            "monitor_run:1", "input.accepted"));
+        } else if (inject == -2) {
+            records = original -> original.replaceFirst("\n",
+                    "\n" + ordinaryEventLine(sessionId, firstSequence + 1,
+                            "event-1", "not_a_kind"));
+        } else if (inject == -3) {
+            records = original -> original.replaceFirst("\n",
+                    "\n" + ordinaryEventLine(sessionId, firstSequence + 1,
+                            "event-1", "input.accepted")
+                            .replace("\"workspaceId\":\"" + WORKSPACE + "\"",
+                                    "\"workspaceId\":\"other\""));
+        } else {
+            extra = inject;
+        }
+        UnaryOperator<String> edit = records;
+        int extraEvents = extra;
+        assertRefused(label, sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED, message,
+                () -> journal.commit(journal.requestOrdinary("refused",
+                        domain, goal, editEvent, edit, extraEvents)));
     }
 
     @Test
@@ -350,92 +1356,6 @@ class ManagedExtensionRecordStoreTest {
                         revision.resources())));
     }
 
-    @Test
-    void answersTheThreeResourceRefusals() throws Exception {
-        byte[] start = ExtensionRecordJournal.bytes(chain().get(0)
-                .required("monitorRun"));
-        // A body the reference names was never committed.
-        String missing = UUID.randomUUID().toString();
-        ExtensionRecordJournal missingJournal = journal(missing);
-        assertThatThrownBy(() -> missingJournal.commit(
-                missingJournal.request(ExtensionRecordJournal.OPERATION,
-                        "missing", start, 1_000,
-                        event -> ((ObjectNode) event.at(
-                                "/payload/recordRef")).put("resourceId",
-                                        "missing-body-1"),
-                        records -> records))).isInstanceOfSatisfying(
-                ApiException.class, error -> {
-                    assertThat(error.getCode()).isEqualTo(
-                            ManagedSessionStoreModels.ERROR_RESOURCE_MISSING);
-                    assertThat(error.getStatus()).isEqualTo(
-                            HttpStatus.CONFLICT);
-                });
-        // A row that no longer reads back, two ways the store knows it.
-        ExtensionRecordJournal corruptJournal = journal(
-                UUID.randomUUID().toString());
-        JsonNode first = chain().get(0).required("monitorRun");
-        corruptJournal.commitMonitor("corrupt-1", first, 1_000);
-        String corruptId = ExtensionRecordJournal.resourceId(
-                ExtensionRecordJournal.bytes(first));
-        // Its bytes no longer hold its recorded digest.
-        byte[] shifted = ExtensionRecordJournal.bytes(((ObjectNode) first
-                .deepCopy()).put("maxEvents", 1));
-        jdbc.update("UPDATE qwen_managed_session_resource SET"
-                        + " inline_bytes = ?, byte_length = ? WHERE"
-                        + " tenant_id = ? AND resource_id = ?",
-                shifted, shifted.length, TENANT, corruptId);
-        assertThatThrownBy(() -> corruptJournal.commitMonitor("corrupt-2",
-                chain().get(1).required("monitorRun"), 2_000))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
-                    assertThat(error.getCode()).isEqualTo(
-                            "managed_session_resource_corrupt");
-                    assertThat(error.getStatus()).isEqualTo(
-                            HttpStatus.INTERNAL_SERVER_ERROR);
-                });
-        // Its Session is not the request's, though the row says otherwise.
-        ExtensionRecordJournal foreignJournal = journal(
-                UUID.randomUUID().toString());
-        foreignJournal.commitMonitor("foreign-1", first, 1_000);
-        String foreignId = ExtensionRecordJournal.resourceId(
-                ExtensionRecordJournal.bytes(first));
-        jdbc.update("UPDATE qwen_managed_session_resource SET"
-                        + " tenant_id = 'other-tenant' WHERE tenant_id = ?"
-                        + " AND resource_id = ?",
-                TENANT, foreignId);
-        assertThatThrownBy(() -> foreignJournal.commitMonitor("foreign-2",
-                chain().get(1).required("monitorRun"), 2_000))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
-                    assertThat(error.getCode()).isEqualTo(
-                            "managed_session_not_found");
-                    assertThat(error.getStatus())
-                            .isEqualTo(HttpStatus.NOT_FOUND);
-                });
-    }
-
-    @Test
-    void announcesNothingInTheDeletingWindow() throws Exception {
-        String sessionId = agents.createSession(TENANT, "deleting-"
-                + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
-                List.of()).sessionId();
-        ExtensionRecordJournal journal = journal(sessionId);
-        JsonNode first = chain().get(0).required("monitorRun");
-        journal.commitMonitor("deleting-1", first, 1_000);
-        // The delete stays pending while this journal's writer holds the
-        // Session, so the Session is DELETING when the revision lands.
-        state.beginOperation(TENANT, sessionId, OperationKind.DELETE,
-                "sha256:" + "d".repeat(64), "delete", "digest-delete");
-        assertThat(jdbc.queryForObject("SELECT status FROM"
-                        + " managed_agent_session WHERE tenant_id = ?"
-                        + " AND session_id = ?", String.class,
-                TENANT, sessionId)).isEqualTo("DELETING");
-        journal.commitMonitor("deleting-2",
-                chain().get(1).required("monitorRun"), 2_000);
-        assertThat(state.findEvents(TENANT, sessionId, 0, 100))
-                .extracting(EventRecord::type)
-                .containsOnlyOnce("task.updated");
-        assertThat(revisions(sessionId)).isEqualTo(2);
-    }
-
     private record Refusal(String message, Consumer<ObjectNode> editEvent) {
     }
 
@@ -452,18 +1372,15 @@ class ManagedExtensionRecordStoreTest {
     }
 
     /**
-     * A refused commit leaves no resource reference, no revision and no
-     * Session event behind, the rows only a rollback removes. The event
-     * count is vacuous without a public Session, so the chain refusals
-     * create one, and the refused command row itself is proven where the
-     * pair is fresh by committing the identical bytes again: a refusal,
-     * not a replay. A {@code message} names the rule that refused it.
+     * A refused commit leaves no journal row, no resource reference and no
+     * revision behind, which it would if the store did not roll back. A
+     * {@code message} names the rule that refused it.
      */
     private void assertRefused(String label, String sessionId, String code,
             String message, ThrowingCallable commit) {
+        long transactions = rows("qwen_managed_session_journal_tx", sessionId);
         long references = rows("qwen_managed_session_resource_ref",
                 sessionId);
-        long events = rows("managed_agent_event", sessionId);
         long revisions = revisions(sessionId);
         assertThatThrownBy(commit).as(label)
                 .isInstanceOfSatisfying(ApiException.class, error -> {
@@ -479,77 +1396,44 @@ class ManagedExtensionRecordStoreTest {
                                 .contains(message);
                     }
                 });
+        assertThat(rows("qwen_managed_session_journal_tx", sessionId))
+                .as(label).isEqualTo(transactions);
         assertThat(rows("qwen_managed_session_resource_ref", sessionId))
                 .as(label).isEqualTo(references);
-        assertThat(rows("managed_agent_event", sessionId)).as(label)
-                .isEqualTo(events);
         assertThat(revisions(sessionId)).as(label).isEqualTo(revisions);
     }
 
     @Test
-    void announcesEachChangedViewOnThePublicSession() throws Exception {
-        String sessionId = agents.createSession(TENANT, "announce-"
+    void keepsOneTextPartAcrossATaskAnnouncement() throws Exception {
+        String sessionId = agents.createSession(TENANT, "split-"
                 + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
                 List.of()).sessionId();
+        String turnId = "turn-" + UUID.randomUUID();
+        state.appendPublicEventIfAbsent(TENANT, sessionId, turnId,
+                "item.output_text.delta", Map.of("text", "one"), false,
+                "delta-1");
         ExtensionRecordJournal journal = journal(sessionId);
-        List<String> expected = new ArrayList<>();
-        TaskProjection previous = null;
-        int index = 0;
-        for (JsonNode revision : chain()) {
-            journal.commitMonitor("announce-" + index++,
-                    revision.required("monitorRun"),
-                    revision.required("occurredAt").longValue());
-            TaskProjection view = ManagedExtensionProjectionContractTest.view(
-                    revision.required("view"));
-            if (!Objects.equals(previous, view)) {
-                expected.add(view.state());
-            }
-            previous = view;
-        }
-        List<EventRecord> announced = state.findEvents(TENANT, sessionId, 0,
-                100).stream()
-                .filter(event -> "task.updated".equals(event.type()))
-                .toList();
-        String taskId = ManagedExtensionProjection.taskId(
-                ManagedExtensionProjection.recordKey(sessionId,
-                        "monitor_run", "monitor-1"));
-        assertThat(announced).extracting(event -> event.data().get("state"))
-                .containsExactlyElementsOf(expected);
-        assertThat(announced).allSatisfy(event ->
-                assertThat(event.data().get("taskId")).isEqualTo(taskId));
-        assertThat(expected.size()).isLessThan(chain().size());
-    }
-
-    @Test
-    void announcesNothingOnceThePublicSessionIsBeingDeleted()
-            throws Exception {
-        String sessionId = agents.createSession(TENANT, "deleted-"
-                + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
-                List.of()).sessionId();
-        ExtensionRecordJournal journal = journal(sessionId);
-        List<JsonNode> chain = chain();
-        journal.commitMonitor("deleted-0", chain.get(0).required(
-                "monitorRun"), chain.get(0).required("occurredAt")
-                        .longValue());
-        // The delete stays pending while this journal's writer holds the
-        // Session, so the Session is being deleted when the revision lands.
-        state.beginOperation(TENANT, sessionId, OperationKind.DELETE,
-                "sha256:" + "d".repeat(64), "delete", "digest-delete");
-        // The next revision changes the view, which a live Session would
-        // hear about.
-        assertThat(ManagedExtensionProjectionContractTest.view(chain.get(1)
-                .required("view"))).isNotEqualTo(
-                        ManagedExtensionProjectionContractTest.view(chain
-                                .get(0).required("view")));
-        journal.commitMonitor("deleted-1", chain.get(1).required(
-                "monitorRun"), chain.get(1).required("occurredAt")
-                        .longValue());
-        List<EventRecord> events = state.findEvents(TENANT, sessionId, 0,
-                100);
-        assertThat(events).extracting(EventRecord::type)
-                .containsOnlyOnce("task.updated")
-                .endsWith("session.delete.requested");
-        assertThat(revisions(sessionId)).isEqualTo(2);
+        JsonNode revision = chain().get(0);
+        journal.commitMonitor("split-0", revision.required("monitorRun"),
+                revision.required("occurredAt").longValue());
+        state.appendPublicEventIfAbsent(TENANT, sessionId, turnId,
+                "item.output_text.delta", Map.of("text", "two"), false,
+                "delta-2");
+        state.materializeNextBatch(TENANT, sessionId, 100);
+        // The announcement leaves the message projection's sequence, so the
+        // two deltas keep one Part instead of splitting into two.
+        List<String> partIds = jdbc.queryForList("SELECT content_part_id"
+                        + " FROM managed_agent_event WHERE tenant_id = ?"
+                        + " AND session_id = ? AND event_type ="
+                        + " 'item.output_text.delta' ORDER BY sequence_id",
+                String.class, TENANT, sessionId);
+        assertThat(partIds).hasSize(2);
+        assertThat(partIds.get(0)).isEqualTo(partIds.get(1));
+        List<String> parts = jdbc.queryForList("SELECT part_text FROM"
+                        + " managed_agent_item_part WHERE tenant_id = ?"
+                        + " AND session_id = ? AND part_type = 'output_text'",
+                String.class, TENANT, sessionId);
+        assertThat(parts).containsExactly("onetwo");
     }
 
     @Test
@@ -773,7 +1657,69 @@ class ManagedExtensionRecordStoreTest {
         }
     }
 
-    private static void commitDomain(ExtensionRecordJournal journal, String commandId,
+    @Test
+    void commitsAChannelDeliveryOnlyAgainstItsCommittedRoute() throws Exception {
+        JsonNode fixtures = ManagedChannelRecordContractTest.fixtures();
+        CommitResource policy = inline("{\"adapter\":\"email\"}",
+                "managed-channel-policy");
+        CommitResource result = inline("{\"text\":\"ok\"}",
+                "managed-channel-reply");
+        CommitResource seg1 = inline("part one", "managed-channel-segment");
+        CommitResource seg2 = inline("part two", "managed-channel-segment");
+        ObjectNode route = fixtures.get("templates").get("channel_route")
+                .deepCopy();
+        route.set("policyRef", hookRef(policy));
+        ObjectNode delivery = fixtures.get("templates").get("channel_delivery")
+                .deepCopy();
+        delivery.set("contentRef", hookRef(result));
+        ((ObjectNode) delivery.get("segments").get(0)).set("contentRef",
+                hookRef(seg1));
+        ((ObjectNode) delivery.get("segments").get(1)).set("contentRef",
+                hookRef(seg2));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        // H5c: no route yet, no delivery.
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain(
+                "delivery-0", "channel_delivery", delivery,
+                List.of(result, seg1, seg2), 1000)))
+                .hasMessageContaining("pinned revision");
+        commitDomain(journal, "route-1", "channel_route", route,
+                List.of(policy));
+        // The route is at revision 3; a plan against another revision is
+        // refused.
+        ObjectNode stale = delivery.deepCopy();
+        stale.put("routeRevision", 2);
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain(
+                "delivery-stale", "channel_delivery", stale,
+                List.of(result, seg1, seg2), 1000)))
+                .hasMessageContaining("pinned revision");
+        commitDomain(journal, "delivery-1", "channel_delivery", delivery,
+                List.of(result, seg1, seg2));
+        assertThat(records.listRecords(TENANT, sessionId, "channel_delivery"))
+                .extracting(record -> record.get("deliveryId").asText())
+                .containsExactly("delivery-1");
+        // A retired route admits no new delivery.
+        ObjectNode retired = route.deepCopy();
+        retired.withObject("/run").put("state", "cancelled");
+        commitDomain(journal, "route-2", "channel_route", retired, List.of());
+        ObjectNode second = delivery.deepCopy();
+        second.put("deliveryId", "delivery-2");
+        second.withObject("/run").put("effectId", "delivery-2")
+                .put("deliveryId", "delivery-2");
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain(
+                "delivery-2", "channel_delivery", second,
+                List.of(result, seg1, seg2), 2000)))
+                .hasMessageContaining("pinned revision");
+    }
+
+    private static CommitResource inline(String text, String kind) {
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        return new CommitResource(ExtensionRecordJournal.resourceId(bytes),
+                kind, 1, bytes.length, ExtensionRecordJournal.sha256(bytes),
+                Base64.getEncoder().encodeToString(bytes));
+    }
+
+    static void commitDomain(ExtensionRecordJournal journal, String commandId,
             String domain, JsonNode record, List<CommitResource> resources) {
         CommitTransactionRequest request = journal.requestDomain(commandId, domain, record, resources, 1000);
         journal.commit(request);
@@ -860,12 +1806,12 @@ class ManagedExtensionRecordStoreTest {
                 "extension-writer-token-0123456789").bytes()).isEqualTo("[]".getBytes(StandardCharsets.UTF_8));
     }
 
-    private static CommitResource hookResource(String id, String kind, byte[] bytes) {
+    static CommitResource hookResource(String id, String kind, byte[] bytes) {
         return new CommitResource(id, kind, 1, bytes.length, ExtensionRecordJournal.sha256(bytes),
                 Base64.getEncoder().encodeToString(bytes));
     }
 
-    private static ObjectNode hookRef(CommitResource resource) {
+    static ObjectNode hookRef(CommitResource resource) {
         return JsonNodeFactory.instance.objectNode().put("resourceId", resource.resourceId()).put("kind", resource.kind())
                 .put("schemaVersion", resource.schemaVersion()).put("byteLength", resource.byteLength()).put("digest", resource.digest());
     }
@@ -899,5 +1845,217 @@ class ManagedExtensionRecordStoreTest {
 
     private static JsonNode fixtures() throws Exception {
         return ManagedExtensionProjectionContractTest.fixtures();
+    }
+
+    // Restored verbatim from main (b2c95e04dc): H3 task-journal and resource
+    // witnesses this PR deleted although they do not assert the stream channel.
+    @Test
+    void keepsCommittingRecordsWhenTheTaskJournalRefusesPastItsBound()
+            throws Exception {
+        JsonNode chain = fixtures().required("monitorChainCases").get(0);
+        JsonNode first = chain.required("revisions").get(0);
+        JsonNode second = chain.required("revisions").get(1);
+        // The witness only bites if the second revision actually changes the
+        // task view, because only a view change appends a journal event.
+        assertThat(ManagedExtensionProjectionContractTest
+                .view(second.required("view")))
+                .isNotEqualTo(ManagedExtensionProjectionContractTest
+                        .view(first.required("view")));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        JsonNode monitor = first.required("monitorRun");
+        journal.commitMonitor("wedge-0", monitor,
+                first.required("occurredAt").longValue());
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "monitor_run",
+                        monitor.required("monitorId").textValue()));
+
+        // One unarchived output pins the retention floor, so the automatic
+        // pass cannot expire anything and the bound starts refusing. The
+        // output admission gate reads the durable Session row, so bind this
+        // Session to its workspace first.
+        if (jdbc.update("UPDATE managed_agent_session SET workspace_id = ?"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                WORKSPACE, TENANT, sessionId) == 0) {
+            jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+                            + " session_id, agent_id, status, created_at,"
+                            + " updated_at, workspace_id,"
+                            + " workspace_generation, workspace_storage_id,"
+                            + " cwd_relative, context_config_ref,"
+                            + " context_revision, workspace_config_ref,"
+                            + " workspace_policy_ref) VALUES"
+                            + " (?, ?, 'qwen-code', 'ACTIVE', 1, 1,"
+                            + " ?, 1, 'storage-1', '.', ?, 1,"
+                            + " 'config', 'policy')",
+                    TENANT, sessionId, WORKSPACE,
+                    "sha256:" + ExtensionRecordJournal.sha256(
+                            "config\u0000policy"));
+        }
+        ManagedTaskEventStore events = new ManagedTaskEventStore(jdbc);
+        events.appendOutput(TENANT, sessionId, taskId, "x", false, null,
+                null, null, null, 0);
+        for (int round = 0; round < ManagedTaskEventStore.BACKLOG_BOUND - 1;
+                round++) {
+            events.appendStateChange(TENANT, sessionId, taskId, "running",
+                    "ready", round);
+        }
+        assertThatThrownBy(() -> events.appendStateChange(TENANT, sessionId,
+                taskId, "running", "ready", 0))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo(
+                                ManagedTaskEventStore.CODE_BACKLOG_FULL));
+
+        // The record row is the authoritative state; a full derived feed
+        // degrades the feed and never wedges the commit that feeds it.
+        journal.commitMonitor("wedge-1", second.required("monitorRun"),
+                second.required("occurredAt").longValue());
+        assertThat(records.findTask(TENANT, sessionId, taskId).orElseThrow()
+                .projection())
+                .isEqualTo(ManagedExtensionProjectionContractTest
+                        .view(second.required("view")));
+    }
+
+    @Test
+    void answersCursorExpiredRatherThanAGappedPageWhenTheFloorMoved()
+            throws Exception {
+        JsonNode chain = fixtures().required("monitorChainCases").get(0);
+        JsonNode first = chain.required("revisions").get(0);
+        String sessionId = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+                        + " session_id, agent_id, status, created_at,"
+                        + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
+                TENANT, sessionId);
+        ExtensionRecordJournal journal = journal(sessionId);
+        JsonNode monitor = first.required("monitorRun");
+        journal.commitMonitor("race-0", monitor,
+                first.required("occurredAt").longValue());
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "monitor_run",
+                        monitor.required("monitorId").textValue()));
+        // The floor stands at 2 when the read begins and at 7 once the
+        // events have loaded: an expiry that deleted everything through 7
+        // happened mid-read, so the contract's 409 must stand where a
+        // gapped page previously was — the marker flips at the read itself
+        // because that is what concurrent expiry means here.
+        final java.util.concurrent.atomic.AtomicBoolean readHappened =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        ManagedTaskEventStore racing = new ManagedTaskEventStore(jdbc) {
+            @Override
+            public CursorPositions positions(String tenantId,
+                    String session, String task) {
+                return new CursorPositions(9, readHappened.get() ? 7 : 2,
+                        List.of());
+            }
+
+            @Override
+            public EventPage read(String tenantId, String session,
+                    String task, long afterSequence, int limit) {
+                readHappened.set(true);
+                return new EventPage(List.of(), false);
+            }
+        };
+        ManagedTaskService service = new ManagedTaskService(agents, records,
+                racing);
+        String cursor = ManagedTaskEventStore.encodeCursor(taskId, 2);
+        assertThatThrownBy(() -> service.queryWebShellTaskEvents(TENANT,
+                TENANT, sessionId, taskId, cursor, 10))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("cursor_expired");
+                });
+    }
+
+    @Test
+    void pagesFreshEventsAgainstTheRealJournal() throws Exception {
+        JsonNode chain = fixtures().required("monitorChainCases").get(0);
+        JsonNode first = chain.required("revisions").get(0);
+        String sessionId = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+                        + " session_id, agent_id, status, created_at,"
+                        + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
+                TENANT, sessionId);
+        ExtensionRecordJournal journal = journal(sessionId);
+        JsonNode monitor = first.required("monitorRun");
+        journal.commitMonitor("fresh-0", monitor,
+                first.required("occurredAt").longValue());
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "monitor_run",
+                        monitor.required("monitorId").textValue()));
+        var page = tasks.queryWebShellTaskEvents(TENANT, TENANT, sessionId,
+                taskId, null, 10);
+        assertThat(page.data()).hasSize(1);
+        assertThat(page.nextCursor()).isEqualTo(
+                ManagedTaskEventStore.encodeCursor(taskId, 1));
+        // An as-of-now explicit cursor still admits: the floor did not move
+        // past it while the read was happening.
+        assertThat(tasks.queryWebShellTaskEvents(TENANT, TENANT, sessionId,
+                taskId, page.nextCursor(), 10).data()).isEmpty();
+    }
+
+    @Test
+    void answersTheThreeResourceRefusals() throws Exception {
+        byte[] start = ExtensionRecordJournal.bytes(chain().get(0)
+                .required("monitorRun"));
+        // A body the reference names was never committed.
+        String missing = UUID.randomUUID().toString();
+        ExtensionRecordJournal missingJournal = journal(missing);
+        assertThatThrownBy(() -> missingJournal.commit(
+                missingJournal.request(ExtensionRecordJournal.OPERATION,
+                        "missing", start, 1_000,
+                        event -> ((ObjectNode) event.at(
+                                "/payload/recordRef")).put("resourceId",
+                                        "missing-body-1"),
+                        records -> records))).isInstanceOfSatisfying(
+                ApiException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo(
+                            ManagedSessionStoreModels.ERROR_RESOURCE_MISSING);
+                    assertThat(error.getStatus()).isEqualTo(
+                            HttpStatus.CONFLICT);
+                });
+        // A row that no longer reads back, two ways the store knows it.
+        String corruptSession = UUID.randomUUID().toString();
+        ExtensionRecordJournal corruptJournal = journal(corruptSession);
+        JsonNode first = chain().get(0).required("monitorRun");
+        corruptJournal.commitMonitor("corrupt-1", first, 1_000);
+        String corruptId = jdbc.queryForObject(
+                "SELECT record_resource_id FROM"
+                        + " qwen_managed_session_extension_record"
+                        + " WHERE tenant_id = ? AND session_id = ? LIMIT 1",
+                String.class, TENANT, corruptSession);
+        // Its bytes no longer hold its recorded digest.
+        byte[] shifted = ExtensionRecordJournal.bytes(((ObjectNode) first
+                .deepCopy()).put("maxEvents", 1));
+        jdbc.update("UPDATE qwen_managed_session_resource SET"
+                        + " inline_bytes = ?, byte_length = ? WHERE"
+                        + " tenant_id = ? AND resource_id = ?",
+                shifted, shifted.length, TENANT, corruptId);
+        assertThatThrownBy(() -> corruptJournal.commitMonitor("corrupt-2",
+                chain().get(1).required("monitorRun"), 2_000))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo(
+                            "managed_session_resource_corrupt");
+                    assertThat(error.getStatus()).isEqualTo(
+                            HttpStatus.INTERNAL_SERVER_ERROR);
+                });
+        // Its Session is not the request's, though the row says otherwise.
+        String foreignSession = UUID.randomUUID().toString();
+        ExtensionRecordJournal foreignJournal = journal(foreignSession);
+        foreignJournal.commitMonitor("foreign-1", first, 1_000);
+        String foreignId = jdbc.queryForObject(
+                "SELECT record_resource_id FROM"
+                        + " qwen_managed_session_extension_record"
+                        + " WHERE tenant_id = ? AND session_id = ? LIMIT 1",
+                String.class, TENANT, foreignSession);
+        jdbc.update("UPDATE qwen_managed_session_resource SET"
+                        + " tenant_id = 'other-tenant' WHERE tenant_id = ?"
+                        + " AND resource_id = ?",
+                TENANT, foreignId);
+        assertThatThrownBy(() -> foreignJournal.commitMonitor("foreign-2",
+                chain().get(1).required("monitorRun"), 2_000))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo(
+                            "managed_session_not_found");
+                    assertThat(error.getStatus())
+                            .isEqualTo(HttpStatus.NOT_FOUND);
+                });
     }
 }
