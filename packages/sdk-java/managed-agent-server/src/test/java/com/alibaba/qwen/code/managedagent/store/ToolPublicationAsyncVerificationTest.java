@@ -708,8 +708,12 @@ public class ToolPublicationAsyncVerificationTest {
         publish("lapse", 0, "bytes");
         Number expires = fixture.jdbc.queryForObject(
                 "SELECT activation_expires_at FROM qwen_managed_session_journal_head", Number.class);
+        Number grant = fixture.jdbc.queryForObject(
+                "SELECT expires_at FROM qwen_tool_publication", Number.class);
         assertThat(expires).isNotNull();
+        assertThat(grant).isNotNull();
         fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET activation_expires_at = ?", 1L);
+        fixture.jdbc.update("UPDATE qwen_tool_publication SET expires_at = ?", 1L);
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
         }
@@ -718,6 +722,7 @@ public class ToolPublicationAsyncVerificationTest {
                 + " FROM qwen_tool_publication_operation WHERE operation_id = 'lapse'", Boolean.class)).isTrue();
         fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET activation_expires_at = ?",
                 expires.longValue());
+        fixture.jdbc.update("UPDATE qwen_tool_publication SET expires_at = ?", grant.longValue());
         due("lapse");
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
@@ -744,6 +749,8 @@ public class ToolPublicationAsyncVerificationTest {
                 .isEqualTo("OPEN");
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object"
                 + " WHERE slot_key = 'terminal'", Integer.class)).isZero();
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object"
+                + " WHERE state <> 'VERIFIED'", Integer.class)).isZero();
         assertThat(data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish-2", body, true).path("state").asText())
                 .isEqualTo("PENDING");
         try (var verifier = manualVerifier(data)) {
@@ -951,6 +958,11 @@ public class ToolPublicationAsyncVerificationTest {
 
         @Override
         public void requireUnversioned() {}
+
+        @Override
+        public void deleteIfPresent(String key) {
+            objects.remove(key);
+        }
 
         private static void await(CountDownLatch latch) {
             try {

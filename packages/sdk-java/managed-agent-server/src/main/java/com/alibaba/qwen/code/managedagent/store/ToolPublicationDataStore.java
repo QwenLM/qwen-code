@@ -620,17 +620,17 @@ public final class ToolPublicationDataStore {
         if (finishing == null || finishing == 0) {
             return;
         }
-        var terminal = jdbc.queryForList("SELECT byte_length FROM qwen_tool_publication_object"
+        var terminal = jdbc.queryForList("SELECT byte_length, object_key FROM qwen_tool_publication_object"
                 + " WHERE scope_key = ? AND publication_id = ? AND slot_key = 'terminal' AND operation_id = ?",
                 scope, publicationId, operationId);
         long rollback = terminal.isEmpty() ? 0 : ((Number) terminal.get(0).get("byte_length")).longValue();
+        String objectKey = terminal.isEmpty() ? null : (String) terminal.get(0).get("object_key");
         if (!terminal.isEmpty()) {
-            String retiredSlot = "terminal:failed:" + operationId;
-            String retiredResource = retiredSlot.length() <= 128 ? retiredSlot : retiredSlot.substring(0, 128);
-            jdbc.update("UPDATE qwen_tool_publication_object SET slot_key = ?, resource_id = ?"
-                            + " WHERE scope_key = ? AND publication_id = ? AND slot_key = 'terminal'"
-                            + " AND operation_id = ?",
-                    retiredSlot, retiredResource, scope, publicationId, operationId);
+            // A non-VERIFIED row blocks collection forever. Drop it with the
+            // charge so a later successful finish can be reclaimed.
+            jdbc.update("DELETE FROM qwen_tool_publication_object WHERE scope_key = ?"
+                            + " AND publication_id = ? AND slot_key = 'terminal' AND operation_id = ?",
+                    scope, publicationId, operationId);
         }
         jdbc.update("UPDATE qwen_tool_publication SET producer_phase = 'OPEN',"
                         + " finish_operation_id = NULL, finish_predecessor_id = NULL, finish_digest = NULL,"
@@ -638,6 +638,9 @@ public final class ToolPublicationDataStore {
                         + " ELSE 0 END WHERE scope_key = ? AND publication_id = ?"
                         + " AND producer_phase = 'FINISHING' AND finish_operation_id = ?",
                 rollback, rollback, scope, publicationId, operationId);
+        if (objectKey != null) {
+            objects.deleteIfPresent(objectKey);
+        }
     }
 
     private void expireVerification(String scope, String publicationId, String operationId) {

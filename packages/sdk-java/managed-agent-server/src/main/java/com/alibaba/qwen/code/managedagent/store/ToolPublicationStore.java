@@ -244,9 +244,17 @@ public final class ToolPublicationStore {
         require(((Number) current.get("quarantined")).intValue() == 0, "Publication is quarantined");
         if (access != Access.SETTLE) {
             require(equalHash(suppliedHash, (String) current.get("token_hash"))
-                    && "OPEN".equals(current.get("state")) && current.get("expires_at") != null
-                    && ((Number) current.get("expires_at")).longValue() > nowEpoch,
+                    && "OPEN".equals(current.get("state")) && current.get("expires_at") != null,
                     "Publication grant changed or expired");
+            // The grant expiry is min(writer lease, activation horizon), so a
+            // real activation lapse expires the grant on the same clock and
+            // this check runs before the activation deferral below.
+            if (((Number) current.get("expires_at")).longValue() <= nowEpoch) {
+                if (deferActivationLapse) {
+                    throw new ActivationLapsedException();
+                }
+                require(false, "Publication grant changed or expired");
+            }
         }
         require(row.digest().equals(current.get("binding_digest"))
                 && row.binding().equals(current.get("binding_json"))
