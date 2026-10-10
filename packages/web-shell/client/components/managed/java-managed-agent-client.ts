@@ -192,6 +192,13 @@ export class JavaManagedAgentClient {
     return this.post('/operations/query', request, signal);
   }
 
+  changeCwd(
+    request: Schemas['WebShellChangeCwdRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellCwdOperation']> {
+    return this.post('/sessions/cwd/change', request, signal);
+  }
+
   getToolResult(sessionId: string, itemId: string, signal?: AbortSignal) {
     return this.post<ManagedToolResultResponse>(
       '/tool-results/get',

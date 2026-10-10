@@ -135,6 +135,8 @@ function eventType(
       return 'stream_gap';
     case 'action.updated':
       return 'action_updated';
+    case 'session.context.changed':
+      return 'context_changed';
     default:
       return undefined;
   }

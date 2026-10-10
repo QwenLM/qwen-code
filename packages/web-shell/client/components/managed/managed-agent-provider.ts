@@ -24,7 +24,12 @@ export interface ManagedAgentSessionSummary {
   activeTurnId?: string;
   title: string;
   workspaceCwd?: string;
-  workspace?: { workspaceId: string; cwdRelative: string };
+  workspace?: {
+    workspaceId: string;
+    cwdRelative: string;
+    contextRevision?: number;
+    state?: 'ready' | 'changing' | 'recovery_blocked';
+  };
   createdAt: number;
   admittedAt: number;
   updatedAt: number;
@@ -38,6 +43,7 @@ export interface ManagedAgentSessionSummary {
     artifacts?: boolean;
     /** The caller may submit later Turns to this Workspace-bound Session. */
     workspaceTurns?: boolean;
+    cwdChange?: boolean;
   };
   failure?: { code: string; message: string };
 }
@@ -60,6 +66,7 @@ export type ManagedAgentSessionEventType =
   | 'cancelling'
   | 'cancelled'
   | 'action_updated'
+  | 'context_changed'
   | 'stream_gap';
 
 export interface ManagedAgentSessionEvent {
@@ -97,6 +104,8 @@ export interface ManagedAgentCommandOptions extends ManagedAgentRequestOptions {
   idempotencyKey: string;
 }
 
+export type ManagedCwdOperation = components['schemas']['WebShellCwdOperation'];
+
 /** A Hosted tool approval waiting for the Session owner's answer. */
 export interface ManagedAgentPendingAction {
   actionId: string;
@@ -130,6 +139,18 @@ export interface ManagedAgentProvider {
     ): Promise<void>;
   };
   readonly toolResults?: ManagedToolResultReader;
+  readonly cwdChange?: {
+    submit(
+      sessionId: string,
+      request: { cwdRelative: string; expectedContextRevision: number },
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedCwdOperation>;
+    query(
+      sessionId: string,
+      operationId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedCwdOperation>;
+  };
   readonly workspaceBinding?: {
     readonly agentId: string;
     list(

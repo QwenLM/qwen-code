@@ -190,6 +190,33 @@ const EN: Messages = {
   'managed.workspaceLabel': 'Workspace',
   'managed.workspaceChoose': 'Choose a Workspace',
   'managed.workspaceDirectory': 'Relative directory',
+  'managed.cwd.change': 'Change directory',
+  'managed.cwd.path': 'Directory relative to Workspace root',
+  'managed.cwd.description':
+    'Enter a path relative to the Workspace root. Use . for the root. Future tasks run in the new directory; conversation history is kept.',
+  'managed.cwd.close': 'Close',
+  'managed.cwd.changing': 'Changing directory…',
+  'managed.cwd.confirm': 'Continue confirming',
+  'managed.cwd.unconfirmed':
+    'The directory change is not confirmed yet. Continue confirming the original request.',
+  'managed.cwd.unconfirmedForbidden':
+    'Your account cannot confirm this change. Its result remains unconfirmed, and sending stays blocked until the server settles it or you open a new tab.',
+  'managed.cwd.busy':
+    'Finish the active task, approval or unconfirmed request before changing directory.',
+  'managed.cwd.invalid': 'The directory is invalid or cannot be accessed.',
+  'managed.cwd.conflict':
+    'The current directory has changed. Review it before submitting again.',
+  'managed.cwd.unavailable':
+    'The Workspace is currently unavailable for a directory change.',
+  'managed.cwd.forbidden':
+    'Your account does not have permission to change this directory.',
+  'managed.cwd.storage':
+    'Browser session storage is unavailable. The directory change cannot start safely.',
+  'managed.cwd.failed':
+    'The directory change failed. Review the current directory before trying again.',
+  'managed.cwd.updated': (v) =>
+    `The current directory changed to ${v?.cwd ?? ''}. Confirm this context before submitting.`,
+  'managed.cwd.useCurrent': 'Use the current directory context',
   'managed.workspaceCreate': 'Create session',
   'managed.workspaceBound': 'Bound Workspace',
   'managed.workspaceExecutionUnavailable':
@@ -4445,6 +4472,26 @@ const ZH: Messages = {
   'managed.workspaceLabel': '工作区',
   'managed.workspaceChoose': '选择工作区',
   'managed.workspaceDirectory': '相对目录',
+  'managed.cwd.change': '切换目录',
+  'managed.cwd.path': '相对于 Workspace 根目录的路径',
+  'managed.cwd.description':
+    '输入相对于 Workspace 根目录的路径，. 表示根目录。后续任务在新目录执行，对话历史保留。',
+  'managed.cwd.close': '关闭',
+  'managed.cwd.changing': '正在切换目录…',
+  'managed.cwd.confirm': '继续确认',
+  'managed.cwd.unconfirmed': '目录切换结果尚未确认，请继续确认原请求。',
+  'managed.cwd.unconfirmedForbidden':
+    '当前账号无权确认此操作，切换结果仍待确认；在服务器给出最终结果或新开标签页之前，发送将保持禁用。',
+  'managed.cwd.busy': '请先完成正在执行的任务、审批或未确认请求，再切换目录。',
+  'managed.cwd.invalid': '目录无效或无法访问。',
+  'managed.cwd.conflict': '当前目录已变化，请检查后重新提交。',
+  'managed.cwd.unavailable': 'Workspace 当前无法切换目录。',
+  'managed.cwd.forbidden': '当前账号没有切换此目录的权限。',
+  'managed.cwd.storage': '浏览器会话存储不可用，无法安全发起目录切换。',
+  'managed.cwd.failed': '目录切换失败，请检查当前目录后重试。',
+  'managed.cwd.updated': (v) =>
+    `当前目录已变为 ${v?.cwd ?? ''}，请先确认此上下文再提交。`,
+  'managed.cwd.useCurrent': '使用当前目录上下文',
   'managed.workspaceCreate': '创建会话',
   'managed.workspaceBound': '已绑定工作区',
   'managed.workspaceExecutionUnavailable':

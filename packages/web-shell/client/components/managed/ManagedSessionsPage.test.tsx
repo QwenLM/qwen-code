@@ -198,6 +198,96 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
+  it('changes cwd without optimistic directory updates or losing the editable draft', async () => {
+    let committed = false;
+    const bound = () =>
+      summary('s1', {
+        workspace: {
+          workspaceId: 'ws',
+          cwdRelative: committed ? 'B' : 'A',
+          contextRevision: committed ? 2 : 1,
+          state: 'ready',
+        },
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          cwdChange: true,
+          workspaceTurns: true,
+        },
+      });
+    mocks.client.getSession.mockImplementation(async () => bound());
+    let finish!: (value: unknown) => void;
+    const submit = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    provider = { ...provider, cwdChange: { submit, query: vi.fn() } };
+    await render('s1');
+    const button = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent === 'Change directory',
+    );
+    expect(button).toBeDefined();
+    await act(async () => {
+      button!.click();
+    });
+    const input = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Directory relative to Workspace root"]',
+    )!;
+    expect(input.value).toBe('A');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'B');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    });
+    expect(submit).toHaveBeenCalledWith(
+      's1',
+      { cwdRelative: 'B', expectedContextRevision: 1 },
+      expect.anything(),
+    );
+    const composer = container.querySelector('textarea')!;
+    expect(composer.disabled).toBe(false);
+    const send = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent === 'Send',
+    )!;
+    expect(send.disabled).toBe(true);
+    expect(container.textContent).toContain('A');
+    committed = true;
+    await act(async () => {
+      finish({
+        sessionId: 's1',
+        operationId: 'op',
+        type: 'cwd_change',
+        status: 'completed',
+        expectedContextRevision: 1,
+        targetCwdRelative: 'B',
+        resultContextRevision: 2,
+        replayed: false,
+      });
+      await flush();
+    });
+    expect(mocks.client.getTranscript).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain('B');
+  });
+
+  it('hides the cwd entry from old providers and capability-less sessions', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { workspace: { workspaceId: 'ws', cwdRelative: '.' } }),
+    );
+    await render('s1');
+    expect(container.textContent).not.toContain('Change directory');
+  });
+
   it('keeps the shown approval while a reload has not returned the Session yet', async () => {
     let hold = false;
     let release: (() => void) | undefined;

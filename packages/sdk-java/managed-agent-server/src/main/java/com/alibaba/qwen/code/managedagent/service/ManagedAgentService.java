@@ -798,15 +798,20 @@ public class ManagedAgentService {
         Map<String, EventRecord> environmentEvents = store
                 .findLatestEnvironmentEvents(tenantId, latestTurns);
         Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
-        // The role-submit capability batches its registry read like the
-        // close state: one IN query over the submit-shaped Sessions'
-        // workspaces answers the caller's role for the whole page.
+        // Cwd admission has no Turn execution-profile restriction. One role
+        // grant read covers the workspaces of both shapes; the executable
+        // facts read covers both id sets, retaining each capability's gates.
         Set<String> shaped = sessions.stream().filter(this::maySubmitShape)
                 .map(SessionRecord::sessionId)
                 .collect(java.util.stream.Collectors.toSet());
-        Set<String> grantWorkspaces = shaped.isEmpty() ? Set.of()
+        Set<String> cwdShaped = sessions.stream().filter(this::mayChangeCwdShape)
+                .map(SessionRecord::sessionId)
+                .collect(java.util.stream.Collectors.toSet());
+        Set<String> candidateIds = new java.util.HashSet<>(shaped);
+        candidateIds.addAll(cwdShaped);
+        Set<String> grantWorkspaces = candidateIds.isEmpty() ? Set.of()
                 : sessions.stream()
-                        .filter(session -> shaped.contains(
+                        .filter(session -> candidateIds.contains(
                                 session.sessionId()))
                         .map(session -> session.workspace().getWorkspaceId())
                         .collect(java.util.stream.Collectors.toSet());
@@ -815,22 +820,23 @@ public class ManagedAgentService {
                         || actorId.isEmpty() ? Map.of()
                         : submitterGrants(tenantId, actorId, grantWorkspaces);
         // The admission conjunct this mirrors: the caller's role above,
-        // and the creator-keyed execution facts of each submit-shaped
-        // Session, batched exactly like the close state — skipped when the
-        // grant read already proved nothing on the page can be submitted,
-        // the zero-query shape the removed creator chain provided.
+        // and the creator-keyed execution facts of each candidate Session,
+        // batched exactly like the close state — skipped when the grant
+        // read already proved nothing on the page can be admitted, the
+        // zero-query shape the removed creator chain provided.
         boolean operatorGrant = grants.values().stream().anyMatch(
                 ManagedWorkspaceRegistry.ReadableGrant::canCreateSession);
         Set<String> executable =
-                shaped.isEmpty() || !operatorGrant ? Set.of()
+                candidateIds.isEmpty() || !operatorGrant ? Set.of()
                         : store.sessionsWithExecutionRegistryFacts(tenantId,
-                                shaped);
+                                candidateIds);
         return sessions.stream()
                 .map(session -> webShellSession(session,
                         latestTurns.get(session.sessionId()),
                         environmentEvents.get(session.sessionId()),
                         retention(session, closed),
-                        maySubmitWorkspaceTurn(session, grants, executable)))
+                        maySubmitWorkspaceTurn(session, grants, executable),
+                        mayChangeCwd(session, grants, executable)))
                 .toList();
     }
 
@@ -853,7 +859,7 @@ public class ManagedAgentService {
 
     private WebShellSession webShellSession(SessionRecord session,
             TurnSummary latestTurn, EventRecord environmentEvent,
-            boolean retention, boolean maySubmit) {
+            boolean retention, boolean maySubmit, boolean mayChangeCwd) {
         return new WebShellSession(
                 session.sessionId(),
                 session.title(),
@@ -869,7 +875,8 @@ public class ManagedAgentService {
                 // Stage H records its Session store holds (H0c).
                 new WebShellSessionCapabilities(true, hasArtifacts(session),
                         hasActions(session), maySubmit, supportsClose(session),
-                        retention, retention, supportsDelete(session, retention)));
+                        retention, retention, supportsDelete(session, retention),
+                        mayChangeCwd));
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
@@ -1125,6 +1132,21 @@ public class ManagedAgentService {
                 && executable.contains(session.sessionId());
     }
 
+    // The cwd twin of the submit predicate above, mirroring admitCwdChange:
+    // the caller's OPERATOR-or-above role (canCreateSession) and the same
+    // creator-keyed executable facts admission re-checks — a capability
+    // must not certify what admission would refuse.
+    private boolean mayChangeCwd(SessionRecord session,
+            Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants,
+            java.util.Set<String> executable) {
+        if (!mayChangeCwdShape(session)) {
+            return false;
+        }
+        var grant = grants.get(session.workspace().getWorkspaceId());
+        return grant != null && grant.canCreateSession()
+                && executable.contains(session.sessionId());
+    }
+
     private boolean maySubmitShape(SessionRecord session) {
         if (session.workspace() == null
                 || !harness.isWorkspaceFilesAvailable()) {
@@ -1138,6 +1160,11 @@ public class ManagedAgentService {
                 && "qwen-code".equals(session.agentId())
                 && WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
                         session.workspace().getContextConfigRef());
+    }
+
+    private boolean mayChangeCwdShape(SessionRecord session) {
+        return session.workspace() != null && "ACTIVE".equals(session.status())
+                && session.deletedAt() == null && store.workspaceFilesEnabled();
     }
 
     void requireLegacyWorkspace(String tenantId, String actorId,

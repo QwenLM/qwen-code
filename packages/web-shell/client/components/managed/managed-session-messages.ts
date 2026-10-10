@@ -66,7 +66,8 @@ export function managedEventsToMessages(
   for (const event of events) {
     // Approval updates carry no Turn and render outside the transcript, so
     // they must not settle or split the Turn being streamed.
-    if (event.type === 'action_updated') continue;
+    if (event.type === 'action_updated' || event.type === 'context_changed')
+      continue;
     if (
       BOUNDARY_SETTLE_TYPES.has(event.type) &&
       event.type !== 'tool_result_updated' &&
