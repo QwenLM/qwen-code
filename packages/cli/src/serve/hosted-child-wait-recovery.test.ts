@@ -1315,6 +1315,170 @@ describe('hosted child wait recovery (#13708)', () => {
     }
   });
 
+  // H4e-b1: the interrupted-turn settlement never runs a call again, so a
+  // call that did run before the interruption must not be told it never
+  // ran — the model would redo it under a new call (a second task, a
+  // second member with the same name).
+  it('the interrupted-turn settlement answers committed launches and team calls from their records', async () => {
+    const first = await open('boot-1', true);
+    try {
+      // Round 1 binds the checkpoint to the Turn: a waited, folded child.
+      await park(first, false);
+      const write = (
+        uuid: string,
+        type: 'assistant' | 'tool_result',
+        parts: unknown[],
+      ) =>
+        first.sink.write({
+          uuid,
+          parentUuid: null,
+          sessionId: SESSION_ID,
+          timestamp: new Date().toISOString(),
+          type,
+          cwd: root,
+          version: 'test',
+          daemonPromptId: PROMPT_ID,
+          message: {
+            role: type === 'assistant' ? 'model' : 'user',
+            parts: parts as never,
+          },
+        });
+      await write('assistant-1', 'assistant', [
+        { functionCall: { id: 'call-1', name: 'agent', args: {} } },
+      ]);
+      await write('result-1', 'tool_result', [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'agent',
+            response: { output: 'clean' },
+          },
+        },
+      ]);
+      await createManagedHarnessHandle(first).resolveAwaitAgent(CHILD_RUN_ID);
+      // Round 2: the live arm committed every write below, then died
+      // before any of its tool_results was journaled.
+      await write('assistant-2', 'assistant', [
+        {
+          functionCall: {
+            id: 'call-2',
+            name: 'team_create',
+            args: { team_name: 'review' },
+          },
+        },
+        {
+          functionCall: {
+            id: 'call-3',
+            name: 'task_create',
+            args: { subject: 'Audit', description: 'a' },
+          },
+        },
+        {
+          functionCall: {
+            id: 'call-4',
+            name: 'agent',
+            args: { description: 'a', prompt: 'p', name: 'Alice' },
+          },
+        },
+        {
+          functionCall: {
+            id: 'call-5',
+            name: 'agent',
+            args: { description: 'b', prompt: 'p' },
+          },
+        },
+        {
+          functionCall: {
+            id: 'call-6',
+            name: 'task_update',
+            args: { taskId: '1', status: 'completed' },
+          },
+        },
+        {
+          functionCall: {
+            id: 'call-7',
+            name: 'read_file',
+            args: { file_path: 'a.txt' },
+          },
+        },
+      ]);
+      const teams = new HostedTeamSession(
+        { authority: first.authority, resources: first.resources },
+        sessionKey,
+      );
+      const teamId = `${PROMPT_ID}:call-2`;
+      await teams.createTeam(teamId, 'review');
+      await teams.createTask(`${PROMPT_ID}:call-3`, {
+        teamId,
+        subject: 'Audit',
+        description: 'a',
+        activeForm: null,
+        metadata: null,
+      });
+      for (const callId of ['call-4', 'call-5'])
+        await childrenOf(first).admit({
+          childRunId: `${PROMPT_ID}:${callId}`,
+          ownerScopeId: SESSION_ID,
+          rootSessionId: SESSION_ID,
+          completion: 'sent',
+          description: callId === 'call-4' ? 'a' : 'b',
+          prompt: 'p',
+          definition: {
+            definitionId: 'hosted-agent/hosted-workspace-files/1',
+            definitionRevision: 1,
+            definitionDigest:
+              first.authority.sessionHeader.definitionRef.digest,
+          },
+          workingDirectory: '.',
+          executionCallId: `${PROMPT_ID}:${callId}`,
+        });
+      await teams.joinTeam(teamId, {
+        name: 'alice',
+        childRunId: `${PROMPT_ID}:call-4`,
+      });
+    } finally {
+      await first.close();
+    }
+    resetManagedRuntimeDispatchGatesForTest();
+    const replacement = await open('boot-2', false);
+    try {
+      const settle = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions: undefined,
+        toolProfile: true,
+        children: childrenOf(replacement),
+      });
+      expect(settle.kind).toBe('ready');
+      const answers = new Map(
+        toolResultEntries(await replacement.sink.project()).flatMap((entry) =>
+          (entry.message?.parts ?? []).map((part) => [
+            part.functionResponse?.id,
+            JSON.stringify(part.functionResponse?.response),
+          ]),
+        ),
+      );
+      expect(answers.get('call-2')).toContain(
+        'interrupted after this call committed. Team \\"review\\" created.',
+      );
+      expect(answers.get('call-3')).toContain('Task #1 created');
+      expect(answers.get('call-4')).toContain(
+        'Teammate \\"alice\\" started in the background',
+      );
+      expect(answers.get('call-5')).toContain('started in the background');
+      expect(answers.get('call-5')).not.toContain('Teammate');
+      // What committed nothing still never ran.
+      expect(answers.get('call-6')).toContain('The tool call never ran');
+      expect(answers.get('call-7')).toContain('The tool call never ran');
+      expect(answers.get('call-7')).toContain('cancelled');
+      expect(answers.get('call-2')).not.toContain('cancelled');
+    } finally {
+      await replacement.close();
+    }
+  }, 10_000);
+
   it('the interrupted-turn settlement does not wait on an admitted orphan (R3-1)', async () => {
     await parkWedged(true);
     const orphanRunId = `${PROMPT_ID}:call-2`;

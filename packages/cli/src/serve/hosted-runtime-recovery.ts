@@ -44,10 +44,16 @@ import {
   truncateHostedGlobResponse,
 } from './hosted-workspace-tool-turn.js';
 import {
+  hostedTeamCallRecoveredAnswer,
+  hostedTeammateArg,
   hostedTeamName,
-  hostedTeammateOfRun,
   hostedTeammateStartedText,
+  isHostedTeamTool,
 } from './hosted-team-tools.js';
+import {
+  HostedTeamSession,
+  hostedTeamMemberOfRun,
+} from './hosted-team-session.js';
 import {
   endHostedAction,
   readHostedActionOptions,
@@ -394,11 +400,51 @@ export type HostedInterruptedTurnRuntime =
   | { readonly kind: 'held' };
 
 /**
+ * The started answer a background launch the interruption left unanswered
+ * owes: its admission committed, so the child runs and reports by
+ * notification. H4e-b1: a named launch joined its team only if the join
+ * committed — recovery never runs the call again, so the answer says which
+ * and never joins on its own. The roster's name wins over the raw
+ * argument, which a PreToolUse hook may have rewritten.
+ */
+function recoveredBackgroundLaunchText(
+  managed: ManagedSession,
+  childRunId: string,
+  args: Record<string, unknown> | undefined,
+): string {
+  const taskId = managedTaskId(
+    managedExtensionRecordKey(
+      managed.authority.sessionHeader.sessionKey.sessionId,
+      'child_run',
+      childRunId,
+    ),
+  );
+  const joined = hostedTeamMemberOfRun(managed.authority, childRunId)?.name;
+  const asked = args === undefined ? undefined : hostedTeammateArg(args);
+  const teammate =
+    joined ??
+    (asked === undefined ? undefined : hostedTeamName(asked, 'Teammate').name);
+  return teammate === undefined
+    ? hostedAgentBackgroundStartedText(taskId)
+    : hostedTeammateStartedText(
+        taskId,
+        teammate,
+        joined === undefined
+          ? 'the turn was interrupted before the join.'
+          : undefined,
+      );
+}
+
+/**
  * Answers every functionCall the dead Turn still owes with a cancelled
  * functionResponse: its assistant message is durable, and a resumed
  * thread carrying a dangling call is a malformed request the provider
  * rejects. Retry-safe — the answered set is re-derived from the journal
  * on every attempt, exactly like the parked-Runtime counterpart above.
+ * A call that did run before the interruption is never told it did not
+ * (H4e-b1): a background launch whose admission committed answers its
+ * started receipt, and a team call that committed answers from its
+ * records — the model would otherwise redo it under a new call.
  */
 async function answerAbandonedTurnCalls(input: {
   session: ManagedSession;
@@ -406,6 +452,7 @@ async function answerAbandonedTurnCalls(input: {
   cwd: string;
   promptId: string;
   message: string;
+  children?: HostedChildAgentSession;
 }): Promise<void> {
   const records = (await input.session.sink.project()).filter(
     (entry) => entry.daemonPromptId === input.promptId,
@@ -417,27 +464,72 @@ async function answerAbandonedTurnCalls(input: {
     input.promptId,
     records,
   );
-  const owed = new Map<string, { name: string; messageId: string }>();
+  const owed = new Map<
+    string,
+    {
+      name: string;
+      messageId: string;
+      args: Record<string, unknown> | undefined;
+    }
+  >();
   for (const record of records.filter((entry) => entry.type === 'assistant'))
     for (const part of record.message?.parts ?? []) {
       const call = part.functionCall;
       if (call?.id && call.name && !answered.has(call.id) && !owed.has(call.id))
-        owed.set(call.id, { name: call.name, messageId: record.uuid });
+        owed.set(call.id, {
+          name: call.name,
+          messageId: record.uuid,
+          args: call.args,
+        });
     }
+  const teams = new HostedTeamSession(
+    { authority: input.session.authority, resources: input.session.resources },
+    input.session.authority.sessionHeader.sessionKey,
+  );
   for (const [functionCallId, call] of owed) {
-    const parts = convertToFunctionErrorResponse(
-      call.name,
-      functionCallId,
-      [],
-      `The tool call never ran: ${input.message}.`,
-    );
-    const response = parts[0]?.functionResponse;
-    if (!response || parts.length !== 1)
-      throw new Error('Runtime result cannot be represented durably.');
-    response.response = {
-      ...response.response,
-      executionStatus: 'cancelled',
-    };
+    const callKey = hostedChildRunIdFor(input.promptId, functionCallId);
+    const launched =
+      call.name === 'agent' ? input.children?.record(callKey) : undefined;
+    const team = isHostedTeamTool(call.name)
+      ? hostedTeamCallRecoveredAnswer(teams, call.name, callKey)
+      : undefined;
+    let parts: Part[];
+    if (launched?.completion === 'sent') {
+      parts = convertToFunctionResponse(call.name, functionCallId, [
+        {
+          text: recoveredBackgroundLaunchText(
+            input.session,
+            launched.run.executionCallId ?? callKey,
+            call.args,
+          ),
+        },
+      ]);
+    } else if (team !== undefined) {
+      parts = team.error
+        ? convertToFunctionErrorResponse(
+            call.name,
+            functionCallId,
+            [],
+            team.text,
+          )
+        : convertToFunctionResponse(call.name, functionCallId, [
+            { text: team.text },
+          ]);
+    } else {
+      parts = convertToFunctionErrorResponse(
+        call.name,
+        functionCallId,
+        [],
+        `The tool call never ran: ${input.message}.`,
+      );
+      const response = parts[0]?.functionResponse;
+      if (!response || parts.length !== 1)
+        throw new Error('Runtime result cannot be represented durably.');
+      response.response = {
+        ...response.response,
+        executionStatus: 'cancelled',
+      };
+    }
     await input.session.sink.write({
       uuid: randomUUID(),
       parentUuid: call.messageId,
@@ -622,43 +714,15 @@ export async function fillParkedRoundAgentGaps(input: {
       // receipt: no wait row exists for it, so its consumption belongs to
       // the wake pump — never to this fill.
       if (foldOwed) {
-        const taskId = managedTaskId(
-          managedExtensionRecordKey(
-            input.managed.authority.sessionHeader.sessionKey.sessionId,
-            'child_run',
-            admitted.run.executionCallId ??
-              hostedChildRunIdFor(input.promptId, callId),
-          ),
-        );
-        // H4e-b1: a named launch the interruption left unanswered joined
-        // its team only if the join committed; the fill is not a replay of
-        // the call, so it says which, and never joins on its own.
-        const named = part.functionCall?.args?.['name'];
-        const teammate =
-          named === undefined
-            ? undefined
-            : hostedTeamName(named, 'Teammate').name;
-        const joined =
-          teammate === undefined
-            ? undefined
-            : hostedTeammateOfRun(
-                input.managed.authority,
-                admitted.run.executionCallId ??
-                  hostedChildRunIdFor(input.promptId, callId),
-              );
         await writeFold(
           convertToFunctionResponse(name, callId, [
             {
-              text:
-                teammate === undefined
-                  ? hostedAgentBackgroundStartedText(taskId)
-                  : hostedTeammateStartedText(
-                      taskId,
-                      teammate,
-                      joined === undefined
-                        ? 'the turn was interrupted before the join.'
-                        : undefined,
-                    ),
+              text: recoveredBackgroundLaunchText(
+                input.managed,
+                admitted.run.executionCallId ??
+                  hostedChildRunIdFor(input.promptId, callId),
+                part.functionCall?.args,
+              ),
             },
           ]),
         );
@@ -907,6 +971,7 @@ export async function settleInterruptedTurnRuntime(input: {
       sessionId: input.sessionId,
       cwd: input.cwd,
       promptId: input.promptId,
+      children: input.children,
       message:
         action !== undefined && action.state !== 'requested'
           ? `the approval ended ${action.state} after the Harness that asked was interrupted`

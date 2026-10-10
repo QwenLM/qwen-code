@@ -17,6 +17,7 @@ import {
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { parseTeamState } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
+import { teamLifecycleBody } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-operations.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
@@ -24,6 +25,8 @@ import {
   HOSTED_AGENT_TOOL,
   HOSTED_AGENT_TOOL_FOR_TEAMS,
 } from './hosted-workspace-tool-turn.js';
+import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import type { HostedHookSession } from './hosted-hook-session.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedTeamSession } from './hosted-team-session.js';
 import { HOSTED_TEAM_TOOL_NAMES } from './hosted-team-tools.js';
@@ -112,7 +115,7 @@ function call(
   } as ToolCallRequestInfo;
 }
 
-function createTurn(depth = 0): HostedWorkspaceToolTurn {
+function createTurn(depth = 0, hookEvents?: string[]): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
@@ -152,6 +155,30 @@ function createTurn(depth = 0): HostedWorkspaceToolTurn {
         queueConsumption: () => undefined,
         teams,
       },
+      ...(hookEvents
+        ? {
+            hooks: {
+              broker: new (HostedWorkspaceBroker as unknown as new (
+                ...args: unknown[]
+              ) => HostedWorkspaceBroker)(
+                { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+                sessionKey,
+                'hook-owner',
+              ),
+              mountHeld: false,
+              ensureReady: () => Promise.resolve(),
+              acquire: () => Promise.resolve(),
+              refresh: () => Promise.resolve(),
+              tools: () => [],
+              toolInput: () => undefined,
+              fire: (eventName: string) => {
+                hookEvents.push(eventName);
+                return Promise.resolve([]);
+              },
+              close: () => Promise.resolve(),
+            } as unknown as HostedHookSession,
+          }
+        : {}),
     },
   );
 }
@@ -426,8 +453,9 @@ it('finishes a join a crash interrupted, and leaves an ended run off the roster'
   // A run that ended before its join never joins, and its name stays free.
   await launch('prompt:call-3', 'bob');
   await finishChild('prompt:call-3', 'failed');
+  // It sends no notification, so its launch answers the failure.
   expect(await spawn('bob', 'call-3')).toContain(
-    'did not join the team as \\"bob\\": its child run had already ended.',
+    'Child agent run failed (creation_failed) before it could join the team as \\"bob\\"',
   );
   expect(team()!.members.map((member) => member.name)).toEqual(['alice']);
 });
@@ -658,4 +686,212 @@ it('refuses a cycle that runs through a deleted task, as the record rule does', 
     await one('task_update', { taskId: '2', addBlockedBy: ['1'] }, 'call-5'),
   ).toContain('dependency cycle');
   expect(teams.task('prompt:team-1#2')!.blockedBy).toEqual([]);
+});
+
+it('answers a launch whose run ended while it was joining, without blocking the turn', async () => {
+  await createTeam();
+  const commit = session.authority.commitExtensionRecord.bind(
+    session.authority,
+  );
+  let raced = false;
+  vi.spyOn(session.authority, 'commitExtensionRecord').mockImplementation(
+    async (command, body, actor) => {
+      // The relay's creation refusal lands between the join's check and
+      // its commit; the authority then refuses the join.
+      if (command.operation === 'joinTeam' && !raced) {
+        raced = true;
+        await finishChild('prompt:call-2', 'failed');
+      }
+      return commit(command, body, actor);
+    },
+  );
+  expect(await spawn('alice', 'call-2')).toContain(
+    'Child agent run failed (creation_failed) before it could join the team as \\"alice\\"',
+  );
+  expect(raced).toBe(true);
+  expect(team()!.members).toEqual([]);
+});
+
+it('treats a blank optional argument as not given, as Legacy does', async () => {
+  await createTeam();
+  // A blank name is an ordinary child, never a refused teammate.
+  const plain = await one(
+    'agent',
+    { description: 'work', prompt: 'do it', name: '' },
+    'call-2',
+  );
+  expect(plain).toContain('started in the background');
+  expect(plain).not.toContain('Teammate');
+  expect(team()!.members).toEqual([]);
+  expect(
+    await one(
+      'task_create',
+      { subject: 'A', description: 'a', activeForm: '', metadata: null },
+      'call-3',
+    ),
+  ).toContain('Task #1 created');
+  expect(teams.task('prompt:team-1#1')).toMatchObject({
+    activeForm: null,
+    metadataRef: null,
+  });
+  expect(
+    await one(
+      'task_update',
+      { taskId: '1', subject: '', status: '', metadata: null },
+      'call-4',
+    ),
+  ).toContain('Task #1 updated (status: pending)');
+  expect(teams.task('prompt:team-1#1')!.subject).toBe('A');
+  expect(
+    await one('task_list', { owner: '', blockedBy: ' ', status: '' }, 'call-5'),
+  ).toContain('#1 [pending] @unassigned — A');
+  // With teams on, `name` is no legacy argument any more.
+  const legacy = await one(
+    'agent',
+    { description: 'work', prompt: 'do it', model: 'fast' },
+    'call-6',
+  );
+  expect(legacy).toContain('unsupported argument \\"model\\"');
+  expect(legacy).not.toContain('isolation, name,');
+});
+
+it('filters task_list by open blockers only', async () => {
+  await createTeam();
+  await one('task_create', { subject: 'A', description: 'a' }, 'call-2');
+  await one('task_create', { subject: 'B', description: 'b' }, 'call-3');
+  await one('task_update', { taskId: '2', addBlockedBy: ['1'] }, 'call-4');
+  expect(await one('task_list', { blockedBy: '#1' }, 'call-5')).toContain(
+    '#2 [pending] @unassigned — B (blocked by #1)',
+  );
+  await one('task_update', { taskId: '1', status: 'completed' }, 'call-6');
+  expect(await one('task_list', { blockedBy: '1' }, 'call-7')).toContain(
+    'No tasks found.',
+  );
+});
+
+it('refuses a foreground child beside a team tool with the reason that applies', async () => {
+  await createTeam();
+  const answers = await run([
+    call('task_list', {}, 'call-2'),
+    call(
+      'agent',
+      { description: 'a', prompt: 'p', run_in_background: false },
+      'call-3',
+    ),
+  ]);
+  expect(answers[1]).toContain('cannot share a batch with a team tool');
+  expect(answers[1]).not.toContain('Workspace mount');
+});
+
+it('caps a task at 64 blockers in either direction', async () => {
+  await createTeam();
+  for (let number = 1; number <= 67; number++)
+    await one(
+      'task_create',
+      { subject: `T${number}`, description: 'd' },
+      `make-${number}`,
+    );
+  const sixtyFour = Array.from({ length: 64 }, (_, index) => `${index + 2}`);
+  expect(
+    await one('task_update', { taskId: '1', addBlockedBy: sixtyFour }, 'up-1'),
+  ).toContain('Task #1 updated');
+  expect(
+    await one('task_update', { taskId: '1', addBlockedBy: ['66'] }, 'up-2'),
+  ).toContain('task #1 would be blocked by more than 64 tasks');
+  expect(
+    await one('task_update', { taskId: '67', addBlocks: ['1'] }, 'up-3'),
+  ).toContain('task #1 would be blocked by more than 64 tasks');
+  expect(teams.task('prompt:team-1#1')!.blockedBy).toHaveLength(64);
+});
+
+it('keeps a team an interrupted delete left closing closed to new work', async () => {
+  await createTeam();
+  await one('task_create', { subject: 'A', description: 'a' }, 'call-2');
+  await session.authority.commitExtensionRecord(
+    {
+      operation: 'closeTeam',
+      commandId: 'prompt:dead:closing',
+      sessionKey,
+      contentDigest: 'a'.repeat(64),
+    },
+    { domain: 'team_state', record: teamLifecycleBody(team()!, 'closing') },
+    { class: 'trusted_entry' },
+  );
+  expect(
+    await one('task_create', { subject: 'B', description: 'b' }, 'call-3'),
+  ).toContain('is being deleted and takes no new tasks');
+  expect(await spawn('alice', 'call-4')).toContain(
+    'is being deleted and takes no new members',
+  );
+  expect(await one('team_create', { team_name: 'next' }, 'call-5')).toContain(
+    'Team \\"review-team\\" is still being deleted',
+  );
+  expect(
+    await one('task_update', { taskId: '1', status: 'completed' }, 'call-6'),
+  ).toContain('Task #1 updated');
+  expect(await one('team_delete', {}, 'call-7')).toContain('deleted.');
+  expect(teams.team('prompt:team-1')!.lifecycle).toBe('deleted');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
+it('admits at most ten teammates', async () => {
+  await createTeam();
+  for (let number = 1; number <= 10; number++) {
+    expect(await spawn(`m${number}`, `spawn-${number}`)).toContain('started');
+    await finishChild(`prompt:spawn-${number}`, 'completed');
+  }
+  expect(await spawn('m11', 'spawn-11')).toContain(
+    'Maximum number of teammates (10) reached.',
+  );
+  expect(team()!.members).toHaveLength(10);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    10,
+  );
+});
+
+it('fires PostToolUse on a resumed team result through the command it committed', async () => {
+  await createTeam();
+  const firstEvents: string[] = [];
+  const created = call(
+    'task_create',
+    { subject: 'A', description: 'a' },
+    'call-2',
+  );
+  const saved = await createTurn(0, firstEvents).execute(
+    [created],
+    [
+      {
+        functionCall: { id: 'call-2', name: 'task_create', args: created.args },
+      },
+    ],
+    'model',
+    new AbortController().signal,
+  );
+  expect(firstEvents).toContain('PostToolUse');
+  // A reconstructed turn starts with an empty dispatch set: the committed
+  // command is the evidence that survives.
+  const recoveredEvents: string[] = [];
+  await createTurn(0, recoveredEvents).resumeHookResults(
+    saved,
+    'model',
+    new AbortController().signal,
+  );
+  expect(recoveredEvents).toContain('PostToolUse');
+});
+
+it('answers a replayed task delete as deleted', async () => {
+  await createTeam();
+  await one('task_create', { subject: 'A', description: 'a' }, 'call-2');
+  const remove = { taskId: '1', status: 'deleted' };
+  expect(await one('task_update', remove, 'call-3')).toContain(
+    'Task #1 deleted.',
+  );
+  expect(await one('task_update', remove, 'call-3')).toContain(
+    'Task #1 deleted.',
+  );
+  expect(await one('task_update', remove, 'call-4')).toContain(
+    'Task #1 not found.',
+  );
 });

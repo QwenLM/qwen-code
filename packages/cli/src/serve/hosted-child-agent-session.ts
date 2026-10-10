@@ -53,7 +53,7 @@ import {
   managedExtensionRecordKey,
   managedTaskId,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
-import { parseTeamState } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
+import { hostedTeamMemberOfRun } from './hosted-team-session.js';
 import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
 import {
   stripDisplayControlChars,
@@ -621,7 +621,8 @@ export class HostedChildAgentSession {
               text: (await this.store.resources.read(resultRef)).toString(
                 'utf8',
               ),
-              teammate: this.teammateOf(childRunId),
+              teammate: hostedTeamMemberOfRun(this.store.authority, childRunId)
+                ?.name,
             }),
           }),
           'utf8',
@@ -634,19 +635,6 @@ export class HostedChildAgentSession {
       ),
       wakeReason: 'input',
     };
-  }
-
-  /** H4e-b1: the name a child run joined its lead's team as, if any. */
-  private teammateOf(childRunId: string): string | undefined {
-    for (const entry of this.store.authority.extensionRecordsInDomain(
-      'team_state',
-    )) {
-      const member = parseTeamState(entry.record).members.find(
-        (each) => each.childRunId === childRunId,
-      );
-      if (member !== undefined) return member.name;
-    }
-    return undefined;
   }
 
   private mustRecord(childRunId: string): ChildAgentRun {

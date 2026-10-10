@@ -74,6 +74,27 @@ class ManagedExtensionRecordLifecycleGateTest {
                                 .isEqualTo("workspace_lifecycle_admission_closed"));
     }
 
+    /**
+     * H4e-b1 decision 8: a closing lead commits no team record — its team
+     * ends with the Session, and the gate stays as narrow as before.
+     */
+    @Test
+    void keepsTeamRecordsAdmissionClosed() {
+        for (String domain : new String[] {"team_state", "team_task"}) {
+            byte[] team = domainEvent(domain).getBytes(StandardCharsets.UTF_8);
+            assertThatThrownBy(() -> records.hasNewLifecycleDispatch(TENANT,
+                    "session", team, resourceId -> null))
+                    .isInstanceOfSatisfying(ApiException.class,
+                            error -> assertThat(error.getCode())
+                                    .isEqualTo("workspace_lifecycle_admission_closed"));
+            assertThatThrownBy(() -> records.requireLifecycleSettlement(TENANT,
+                    "session", team, resourceId -> null))
+                    .isInstanceOfSatisfying(ApiException.class,
+                            error -> assertThat(error.getCode())
+                                    .isEqualTo("workspace_lifecycle_admission_closed"));
+        }
+    }
+
     /** Hook domains never lose their chain analysis at the same gate. */
     @Test
     void hookDomainsStillDriveTheChainAnalysis() {

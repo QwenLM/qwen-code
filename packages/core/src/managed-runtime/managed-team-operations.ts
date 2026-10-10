@@ -83,6 +83,18 @@ export function teamJoinBody(
   });
 }
 
+/** The member a child run joined as, in any of a lead's teams. */
+export function teamMemberOfRun(
+  teams: Iterable<TeamState>,
+  childRunId: string,
+): { readonly teamId: string; readonly name: string } | undefined {
+  for (const team of teams) {
+    const member = team.members.find((each) => each.childRunId === childRunId);
+    if (member !== undefined) return { teamId: team.teamId, name: member.name };
+  }
+  return undefined;
+}
+
 /** The next lifecycle step: `closing`, then `deleted`, which ends the run. */
 export function teamLifecycleBody(
   previous: TeamState,
@@ -206,5 +218,4 @@ export const MANAGED_TEAM_TOOL_LIMITS = Object.freeze({
   /** Legacy description cap, in characters. */
   maxDescriptionChars: 10_000,
   maxMetadataBytes: MANAGED_TEAM_LIMITS.maxMetadataBytes,
-  maxMembers: MANAGED_TEAM_LIMITS.maxMembers,
 } as const);

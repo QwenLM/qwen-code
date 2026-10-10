@@ -9,7 +9,6 @@ import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/ma
 import {
   MANAGED_TEAM_LEADER,
   MANAGED_TEAM_LIMITS,
-  parseTeamState,
   type TeamState,
   type TeamTask,
   type TeamTaskStatus,
@@ -180,6 +179,49 @@ export const HOSTED_AGENT_NAME_PROPERTY = {
 
 const TASK_ID = /^[1-9]\d*$/;
 
+/**
+ * The optional arguments of each team tool. Legacy reads the blank
+ * placeholder a model fills an optional parameter with (`null`, `""`) as
+ * not given; `task_update`'s `owner` keeps `""`, which unassigns.
+ */
+const OPTIONAL_ARGS: Readonly<Record<HostedTeamToolName, readonly string[]>> = {
+  team_create: [],
+  team_delete: [],
+  task_create: ['activeForm', 'metadata'],
+  task_update: [
+    'status',
+    'subject',
+    'description',
+    'activeForm',
+    'metadata',
+    'addBlocks',
+    'addBlockedBy',
+  ],
+  task_list: ['status', 'owner', 'blockedBy'],
+};
+
+function blank(value: unknown): boolean {
+  return value === null || (typeof value === 'string' && value.trim() === '');
+}
+
+function withoutBlankOptionals(
+  name: HostedTeamToolName,
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  const present = Object.entries(args).filter(
+    ([key, value]) => !(OPTIONAL_ARGS[name].includes(key) && blank(value)),
+  );
+  return present.length === Object.keys(args).length
+    ? args
+    : Object.fromEntries(present);
+}
+
+/** The Agent tool's `name`, or undefined when absent or a blank placeholder. */
+export function hostedTeammateArg(args: Record<string, unknown>): unknown {
+  const raw = args['name'];
+  return raw === undefined || blank(raw) ? undefined : raw;
+}
+
 function singleLine(value: string): boolean {
   // The record's bounded text admits no control character.
   // eslint-disable-next-line no-control-regex
@@ -245,9 +287,10 @@ function textError(
  */
 export function hostedTeamToolArgsError(
   name: HostedTeamToolName,
-  args: Record<string, unknown>,
+  raw: Record<string, unknown>,
 ): string | undefined {
   const limits = MANAGED_TEAM_TOOL_LIMITS;
+  const args = withoutBlankOptionals(name, raw);
   switch (name) {
     case 'team_create':
       return (
@@ -416,22 +459,15 @@ export function hostedTeammateStartedText(
     : `Child agent started in the background as ${taskId}, but it did not join the team as "${teammate}": ${joinRefusal} It reports like an ordinary background child.`;
 }
 
-/** The member name a child run joined as, read from the lead's records. */
-export function hostedTeammateOfRun(
-  authority: {
-    extensionRecordsInDomain(
-      domain: 'team_state',
-    ): ReadonlyArray<{ readonly record: unknown }>;
-  },
-  childRunId: string,
-): string | undefined {
-  for (const entry of authority.extensionRecordsInDomain('team_state')) {
-    const member = parseTeamState(entry.record).members.find(
-      (each) => each.childRunId === childRunId,
-    );
-    if (member !== undefined) return member.name;
-  }
-  return undefined;
+/**
+ * The answer of a named launch whose run failed or was cancelled before it
+ * joined: no notification follows, and the name stays free.
+ */
+export function hostedTeammateRunEndedText(
+  teammate: string,
+  run: ChildAgentRun,
+): string {
+  return `Child agent run ${run.run.state} (${run.stopReason ?? 'unknown'}) before it could join the team as "${teammate}". It produces no notification, and the name "${teammate}" stays free.`;
 }
 
 /** A member's run state as the board shows it. */
@@ -482,8 +518,9 @@ function memberRunning(
 export async function runHostedTeamTool(
   context: HostedTeamToolContext,
   name: HostedTeamToolName,
-  args: Record<string, unknown>,
+  raw: Record<string, unknown>,
 ): Promise<HostedTeamToolAnswer> {
+  const args = withoutBlankOptionals(name, raw);
   switch (name) {
     case 'team_create':
       return teamCreate(context, args);
@@ -510,7 +547,12 @@ async function teamCreate(
   if (!teams.committed('createTeam', callKey)) {
     const parsed = hostedTeamName(args['team_name'], 'Team');
     if (parsed.error !== undefined) return refuse(parsed.error);
-    if (teams.openTeam() !== undefined)
+    const open = teams.openTeam();
+    if (open?.lifecycle === 'closing')
+      return refuse(
+        `Team "${open.name}" is still being deleted. Call team_delete to finish it before creating a new one.`,
+      );
+    if (open !== undefined)
       return refuse(
         'A team is already active. Delete it before creating a new one.',
       );
@@ -620,11 +662,7 @@ async function taskUpdate(
         );
       // Only a new owner is checked: a task keeps the owner it has after
       // that member's one-shot run ends (decision 5).
-      if (
-        owner !== current.owner &&
-        owner !== MANAGED_TEAM_LEADER &&
-        !resumed
-      ) {
+      if (owner !== current.owner && owner !== MANAGED_TEAM_LEADER) {
         const member = team.members.find((each) => each.name === owner);
         if (member === undefined)
           return refuse(
@@ -756,17 +794,20 @@ function taskList(
     args['blockedBy'] === undefined
       ? undefined
       : teamTaskRecordId(team.teamId, taskNumber(args['blockedBy'])!);
+  // Legacy drops a blocker from its dependents once it completes or is
+  // deleted; the board keeps every edge, so only an open blocker matches.
   const lines = live
+    .map((task) => ({ task, open: openTeamTaskBlockers(task, byId) }))
     .filter(
-      (task) =>
+      ({ task, open }) =>
         (args['status'] === undefined || task.status === args['status']) &&
         (owner === undefined || task.owner === owner) &&
-        (blocker === undefined || task.blockedBy.includes(blocker)),
+        (blocker === undefined || open.some((each) => each.taskId === blocker)),
     )
-    .map((task) => {
-      const open = openTeamTaskBlockers(task, byId);
-      return `#${task.number} [${task.status}] @${task.owner ?? 'unassigned'} — ${task.subject}${open.length > 0 ? ` (blocked by ${open.map((each) => `#${each.number}`).join(', ')})` : ''}`;
-    });
+    .map(
+      ({ task, open }) =>
+        `#${task.number} [${task.status}] @${task.owner ?? 'unassigned'} — ${task.subject}${open.length > 0 ? ` (blocked by ${open.map((each) => `#${each.number}`).join(', ')})` : ''}`,
+    );
   const roster =
     team.members.length === 0
       ? 'Members: none yet.'
@@ -780,6 +821,66 @@ function taskList(
   return answer(
     `${lines.length > 0 ? lines.join('\n') : 'No tasks found.'}\n\n${roster}`,
   );
+}
+
+/**
+ * What an interrupted team call answers when recovery settles its turn
+ * instead of running it again: a call that committed says what the
+ * records hold, and one stopped part-way leaves the rest to the model.
+ * Undefined when the call committed nothing — it never ran.
+ */
+export function hostedTeamCallRecoveredAnswer(
+  teams: HostedTeamSession,
+  name: string,
+  callKey: string,
+): HostedTeamToolAnswer | undefined {
+  const interrupted = 'The turn was interrupted after this call committed.';
+  switch (name) {
+    case 'team_create': {
+      const team = teams.committed('createTeam', callKey)
+        ? teams.team(callKey)
+        : undefined;
+      return team === undefined
+        ? undefined
+        : answer(`${interrupted} Team "${team.name}" created.`);
+    }
+    case 'team_delete': {
+      const deleted = teams.committedRecordId(
+        'deleteTeam',
+        `${callKey}:deleted`,
+      );
+      if (deleted !== undefined)
+        return answer(
+          `${interrupted} Team "${teams.team(deleted)!.name}" deleted.`,
+        );
+      const closing = teams.committedRecordId(
+        'closeTeam',
+        `${callKey}:closing`,
+      );
+      return closing === undefined
+        ? undefined
+        : refuse(
+            `The turn was interrupted part-way through deleting team "${teams.team(closing)!.name}": it takes no new members or tasks. Call team_delete again to finish the deletion.`,
+          );
+    }
+    case 'task_create': {
+      const created = teams.committedRecordId('createTeamTask', callKey);
+      const task = created === undefined ? undefined : teams.task(created);
+      return task === undefined
+        ? undefined
+        : answer(
+            `${interrupted} Task #${task.number} created: "${task.subject}"`,
+          );
+    }
+    case 'task_update':
+      return hostedTeamCallCommitted(teams, name, callKey)
+        ? refuse(
+            'The turn was interrupted while this update was committing, and some or all of its changes landed. Read task_list for the board as it stands before retrying.',
+          )
+        : undefined;
+    default:
+      return undefined;
+  }
 }
 
 /** Whether a team call left any commit, so a resumed turn can tell it ran. */

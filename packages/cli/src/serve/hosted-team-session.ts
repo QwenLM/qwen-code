@@ -27,6 +27,7 @@ import {
   teamOpenBody,
   teamTaskOpenBody,
   teamTaskRecordId,
+  teamMemberOfRun,
   teamTaskReviseBody,
   type TeamTaskChange,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-operations.js';
@@ -79,6 +80,23 @@ const TRUSTED: ManagedSessionActor = { class: 'trusted_entry' };
 /** The resource kind of a task's description and metadata. */
 export const HOSTED_TEAM_CONTENT_KIND = 'managed-team-content';
 
+/** The member a child run joined as, read from a lead's team records. */
+export function hostedTeamMemberOfRun(
+  authority: {
+    extensionRecordsInDomain(
+      domain: 'team_state',
+    ): ReadonlyArray<{ readonly record: unknown }>;
+  },
+  childRunId: string,
+): { readonly teamId: string; readonly name: string } | undefined {
+  return teamMemberOfRun(
+    authority
+      .extensionRecordsInDomain('team_state')
+      .map((entry) => parseTeamState(entry.record)),
+    childRunId,
+  );
+}
+
 function digest(record: unknown): string {
   return createHash('sha256').update(JSON.stringify(record)).digest('hex');
 }
@@ -122,17 +140,7 @@ export class HostedTeamSession {
   memberOf(
     childRunId: string,
   ): { readonly teamId: string; readonly name: string } | undefined {
-    for (const entry of this.store.authority.extensionRecordsInDomain(
-      'team_state',
-    )) {
-      const team = parseTeamState(entry.record);
-      const member = team.members.find(
-        (each) => each.childRunId === childRunId,
-      );
-      if (member !== undefined)
-        return { teamId: team.teamId, name: member.name };
-    }
-    return undefined;
+    return hostedTeamMemberOfRun(this.store.authority, childRunId);
   }
 
   /** Whether the command a call commits under has already committed. */

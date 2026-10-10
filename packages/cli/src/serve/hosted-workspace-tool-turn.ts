@@ -82,14 +82,17 @@ import type { HostedChildRunSession } from './hosted-child-run-session.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { childLaunchAdmission } from './hosted-child-agent-session.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
+import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import type { HostedTeamSession } from './hosted-team-session.js';
 import {
   HOSTED_AGENT_NAME_PROPERTY,
   HOSTED_TEAM_TOOLS,
   hostedTeamCallCommitted,
+  hostedTeammateArg,
   hostedTeamName,
   hostedTeamToolArgsError,
   hostedTeammateAdmissionError,
+  hostedTeammateRunEndedText,
   hostedTeammateStartedText,
   isHostedTeamTool,
   runHostedTeamTool,
@@ -1503,10 +1506,9 @@ export class HostedWorkspaceToolTurn {
                 ...(teams ? ['name'] : []),
               ].includes(key),
           );
+          const named = teams ? hostedTeammateArg(args) : undefined;
           const teammate =
-            args['name'] === undefined
-              ? undefined
-              : hostedTeamName(args['name'], 'Teammate');
+            named === undefined ? undefined : hostedTeamName(named, 'Teammate');
           const backgroundValue = args['run_in_background'];
           agentBackground = !(
             backgroundValue === false ||
@@ -1525,7 +1527,7 @@ export class HostedWorkspaceToolTurn {
             validationError =
               'Hosted child agents are unavailable on this Session profile; read work through ordinary tools instead.';
           } else if (unsupportedKey !== undefined) {
-            validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition in the shared Workspace, without nesting: fork_*, working_dir, isolation, name, model and subagent_type belong to the legacy Agent tool.`;
+            validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition in the shared Workspace, without nesting: fork_*, working_dir, isolation, ${teams ? '' : 'name, '}model and subagent_type belong to the legacy Agent tool.`;
           } else if (backgroundIllFormed) {
             validationError =
               'Hosted child agent run_in_background must be a boolean.';
@@ -1540,8 +1542,8 @@ export class HostedWorkspaceToolTurn {
               (other) =>
                 other.callId !== call.callId &&
                 other.name === 'agent' &&
-                hostedTeamName(other.args['name'], 'Teammate').name ===
-                  teammate.name,
+                hostedTeamName(hostedTeammateArg(other.args), 'Teammate')
+                  .name === teammate.name,
             )
           ) {
             validationError = `Teammate names in one batch must be distinct; "${teammate.name}" appears more than once.`;
@@ -1577,6 +1579,15 @@ export class HostedWorkspaceToolTurn {
             // only the Session-owned holds are gated on the background arm.
             validationError =
               'Hosted child agent run_in_background=true is unavailable while the Session’s Hook catalog or MCP owner holds the Workspace mount, which ends when the Session closes; launch after the owner closes or from a Session without the mount held.';
+          } else if (
+            !agentBackground &&
+            calls.some((other) => isHostedTeamTool(other.name))
+          ) {
+            // A team call never takes the mount, but its answer must not
+            // sit in a parked agent-wait round: that round's recovery
+            // answers only agent calls.
+            validationError =
+              'Hosted child agent run_in_background=false cannot share a batch with a team tool; run the team tool in its own turn or launch the child in the background.';
           } else if (
             !agentBackground &&
             calls.some((other) => other.name !== 'agent')
@@ -2911,10 +2922,22 @@ export class HostedWorkspaceToolTurn {
     const team = teams.openTeam();
     const refusal = hostedTeammateAdmissionError(team, teammate);
     if (refusal !== undefined) return refusal;
-    const run = this.childAgents!.record(childRunId);
-    if (run === undefined || isTerminalRunState(run.run.state))
-      return 'its child run had already ended.';
-    await teams.joinTeam(team!.teamId, { name: teammate, childRunId });
+    const ended = (): boolean => {
+      const run = this.childAgents!.record(childRunId);
+      return run === undefined || isTerminalRunState(run.run.state);
+    };
+    if (ended()) return 'its child run had already ended.';
+    try {
+      await teams.joinTeam(team!.teamId, { name: teammate, childRunId });
+    } catch (cause) {
+      // The relay can end the run between the check above and the commit
+      // (a creation refusal fails it within seconds): the authority then
+      // refuses the join, and the launch answers that end instead of
+      // blocking the turn.
+      if (cause instanceof ManagedSessionConflictError && ended())
+        return 'its child run had already ended.';
+      throw cause;
+    }
     return undefined;
   }
 
@@ -3025,10 +3048,11 @@ export class HostedWorkspaceToolTurn {
     // H4e-b1: a named launch joins the Session's open team. Its team checks
     // run beside H4b's own and, like them, for a new launch only: a replayed
     // launch passed them already and finishes its join below.
+    const named = this.teamsAdmitted()
+      ? hostedTeammateArg(request.call.args)
+      : undefined;
     const teammate =
-      request.call.args['name'] === undefined
-        ? undefined
-        : hostedTeamName(request.call.args['name'], 'Teammate').name!;
+      named === undefined ? undefined : hostedTeamName(named, 'Teammate').name!;
     if (teammate !== undefined && children.record(childRunId) === undefined) {
       const refusal = hostedTeammateAdmissionError(
         this.teams!.openTeam(),
@@ -3113,6 +3137,23 @@ export class HostedWorkspaceToolTurn {
         model,
         signal,
       );
+    }
+    // A member whose run failed or was cancelled before it joined sends no
+    // notification: the launch answers that end, not a started receipt.
+    const ended =
+      joinRefusal === undefined ? undefined : children.record(childRunId);
+    if (
+      ended !== undefined &&
+      (ended.run.state === 'failed' || ended.run.state === 'cancelled')
+    ) {
+      const failed = convertToFunctionErrorResponse(
+        request.call.name,
+        request.call.callId,
+        [],
+        hostedTeammateRunEndedText(teammate!, ended),
+      );
+      await this.commit('tool_result', failed, model);
+      return failed;
     }
     const taskId = managedTaskId(
       managedExtensionRecordKey(key.sessionId, 'child_run', childRunId),
