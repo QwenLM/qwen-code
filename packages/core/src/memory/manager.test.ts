@@ -2392,6 +2392,53 @@ describe('MemoryManager', () => {
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
     });
 
+    it('keeps the relocated root snapshot when a run for the old root settles', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const relocated = path.join(tmp.tempDir, 'relocated');
+      await fs.mkdir(relocated, { recursive: true });
+      let liveRoot = tmp.projectRoot;
+      const config = {
+        getSessionId: () => 'sess',
+        getProjectRoot: () => liveRoot,
+      } as unknown as Config;
+      const turnAt = (root: string, length: number) =>
+        mgr.scheduleExtract({
+          ...extractParams(root, 'sess', turns(length), config),
+          belowCompactionWarn: true,
+        });
+
+      // Turn 1 arms in the original root, parked so it settles last.
+      let release!: () => void;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve(engagedNoop());
+          }),
+      );
+      const parked = turnAt(tmp.projectRoot, 2);
+
+      // `/cd` relocates the live Config in place and fires no discard. The new
+      // root's first run re-keys the entry, and the next turn skips and parks
+      // a snapshot that is genuinely owed a run.
+      liveRoot = relocated;
+      await turnAt(relocated, 4);
+      expect((await turnAt(relocated, 6)).skippedReason).toBe('cadence');
+
+      // The parked run describes the abandoned root, so it must not re-key the
+      // entry or drop the snapshot the live root parked.
+      release();
+      await parked;
+      await mgr.drain();
+
+      // Without the guard the snapshot is gone and this resolves `true` having
+      // forked nothing, certifying turns as extracted that never were.
+      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      const flush = vi.mocked(runAutoMemoryExtract).mock.calls.at(-1)![0];
+      expect(flush.projectRoot).toBe(relocated);
+      expect(flush.history).toHaveLength(6);
+    });
+
     it('drops a snapshot a newer run for the session already covered', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
       const mgr = new MemoryManager();

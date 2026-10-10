@@ -1353,6 +1353,18 @@ export class MemoryManager {
       this.extractCadence.delete(params.sessionId);
       return;
     }
+    // `/cd` relocates the live Config in place and fires no discard, so a run
+    // still in flight for the old root lands here afterwards. It describes
+    // another project's memory and must not re-key the entry or drop the
+    // snapshot the new root parked. Compare the live root, not the carried
+    // entry's, or the first run after a `/cd` could never re-arm the cadence.
+    const liveProjectRoot = params.config?.getProjectRoot?.();
+    if (
+      liveProjectRoot !== undefined &&
+      liveProjectRoot !== params.projectRoot
+    ) {
+      return;
+    }
     // A failed run retries on the next turn as before; it never arms.
     if (!result) {
       const state = this.extractCadence.get(params.sessionId);
