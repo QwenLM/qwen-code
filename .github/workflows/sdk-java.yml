@@ -31,6 +31,8 @@ on:
       - 'scripts/check-failsafe-reports.js'
       - 'scripts/check-flyway-migrations.js'
       - 'scripts/flyway-migration-utils.js'
+      - 'scripts/check-contract-version.js'
+      - 'scripts/contract-version-utils.js'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
   push:
@@ -62,6 +64,8 @@ on:
       - 'scripts/check-failsafe-reports.js'
       - 'scripts/check-flyway-migrations.js'
       - 'scripts/flyway-migration-utils.js'
+      - 'scripts/check-contract-version.js'
+      - 'scripts/contract-version-utils.js'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
 
@@ -437,6 +441,30 @@ jobs:
 
       - name: 'Check Flyway migration versions are unique'
         run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker packages/sdk-java/qwencode'
+
+      # Contract version monotonicity, #13804: every pull request that
+      # changes the OpenAPI document must move info.version strictly past
+      # the base ref's — consumers key capability detection on it, and a
+      # regressed or stalled number breaks nothing at runtime to be caught
+      # by. The default checkout is one commit deep and holds the
+      # prospective merge result, so the base branch's head is fetched at
+      # depth one for the comparison copy. Pull requests only: a push has
+      # no base to compare, and the races that remain after this ran are
+      # the re-check workflow's. Comparing contents, not a changed-paths
+      # list, is what lets a merge result that already advanced (another
+      # pull request landed) read as regressed-or-stalled instead of
+      # passing on a stale branch point.
+      - name: 'Check the API contract version advances'
+        if: "${{ github.event_name == 'pull_request' }}"
+        env:
+          BASE_REF: '${{ github.event.pull_request.base.ref }}'
+        run: |-
+          set -uo pipefail
+          DOCUMENT='packages/sdk-java/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json'
+          BASE_DOCUMENT="${RUNNER_TEMP}/contract-base.json"
+          git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"
+          git show "FETCH_HEAD:${DOCUMENT}" > "${BASE_DOCUMENT}" 2>/dev/null || : > "${BASE_DOCUMENT}"
+          node scripts/check-contract-version.js "${BASE_DOCUMENT}" "${DOCUMENT}"
 
   mysql-integration:
     name: 'Runtime Broker and Managed Agent MariaDB / Java 21'
