@@ -9863,6 +9863,12 @@ describe('Hosted Harness no-tool session', () => {
         // H4b: a Shell-laned root Session advertises its Agent tool,
         // and (H4d-b) messages the child tasks it launched.
         'agent',
+        // H4e-b1: with the team domains enabled, so are its team tools.
+        'team_create',
+        'team_delete',
+        'task_create',
+        'task_update',
+        'task_list',
         'send_message',
       ]);
       return { text: 'text without side effects', model: 'test-model' };
@@ -9942,6 +9948,12 @@ describe('Hosted Harness no-tool session', () => {
       // H4b: a Shell-laned root Session advertises its Agent tool,
       // and (H4d-b) messages the child tasks it launched.
       'agent',
+      // H4e-b1: with the team domains enabled, so are its team tools.
+      'team_create',
+      'team_delete',
+      'task_create',
+      'task_update',
+      'task_list',
       'send_message',
     ]);
     expect(state.model).toHaveBeenCalledTimes(2);
