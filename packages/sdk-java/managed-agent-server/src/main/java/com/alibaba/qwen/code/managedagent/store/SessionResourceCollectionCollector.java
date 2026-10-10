@@ -58,6 +58,9 @@ public final class SessionResourceCollectionCollector {
         }
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(manager);
+        // The page-time recovery re-check fences a registration through InnoDB gap locks, which exist
+        // only under REPEATABLE READ; pin it rather than inherit the server default.
+        this.transactions.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
         this.properties = properties;
         this.clock = clock;
     }

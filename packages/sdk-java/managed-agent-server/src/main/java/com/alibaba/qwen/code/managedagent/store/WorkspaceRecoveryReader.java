@@ -127,7 +127,11 @@ final class WorkspaceRecoveryReader {
                 + " AND publication_id = ? AND slot_key = ?", scope(head), publicationId, slot);
         check(rows.size() == 1, "publication_object_missing");
         var row = rows.getFirst();
-        check("VERIFIED".equals(row.get("state")), "publication_object_unverified");
+        // A COLLECTED object is the publication collector's positive freed-marker, so the
+        // byte loss is permanent: name the terminal resource_collected rather than
+        // publication_object_unverified, which never moves the capture out of CAPTURING.
+        check("VERIFIED".equals(row.get("state")),
+                "COLLECTED".equals(row.get("state")) ? "resource_collected" : "publication_object_unverified");
         long length = number(row, "byte_length");
         int maximum = (slot.startsWith("segment:") || slot.startsWith("content:")) ? 16 * 1024 * 1024
                 : slot.startsWith("page:") ? 256 * 1024 : slot.startsWith("manifest:") ? 64 * 1024 : 2 * 1024 * 1024;

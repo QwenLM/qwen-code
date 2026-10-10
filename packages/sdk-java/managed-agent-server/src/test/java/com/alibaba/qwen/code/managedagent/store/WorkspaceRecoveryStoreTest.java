@@ -136,6 +136,32 @@ class WorkspaceRecoveryStoreTest {
     }
 
     @Test
+    void collectedPublicationObjectInvalidatesTheCapture() {
+        String session = session("workspace-a");
+        head(session);
+        // The shape the publication collector leaves: the publication stays REFERENCED while
+        // the object row is state COLLECTED with its bytes permanently freed.
+        String scope = WorkspaceRecoveryStore.hash(WorkspaceRecoveryStore.JSON.createArrayNode()
+                .add("tenant").add("private-key").add(session).toString());
+        jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+                + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
+                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, write_evidence, accepted_complete,"
+                + " receipt_sequence, receipt_revision) VALUES (?, ?, 'tenant', 'private-key', ?, 'pub-1', ?,"
+                + " 'capture-1', '{}', ?, ?, 'FENCED', 0, 0, 0, 'REFERENCED', TRUE, TRUE, 1, 1)",
+                scope, WorkspaceRecoveryStore.hash("tenant"), session, scope, scope, scope);
+        jdbc.update("INSERT INTO qwen_tool_publication_object (scope_key, publication_id, slot_key, resource_id,"
+                + " resource_kind, byte_length, sha256, inline_bytes, state, operation_id, created_at)"
+                + " VALUES (?, 'pub-1', 'terminal', 'resource-1', 'managed-tool-terminal', 64, ?, NULL,"
+                + " 'COLLECTED', 'op-1', CURRENT_TIMESTAMP(6))", scope, "a".repeat(64));
+        var capture = capture();
+        assertThatThrownBy(() -> capture.call("publicationObject",
+                object().put("sessionId", session).put("publicationId", "pub-1").put("slotKey", "terminal")))
+                .hasMessageContaining("resource_collected");
+        assertThat(capture.inspect().path("state").asText()).isEqualTo("INVALIDATED");
+        assertThat(capture.inspect().path("lastErrorCode").asText()).isEqualTo("resource_collected");
+    }
+
+    @Test
     void registrationRetriesATransientLockWait() {
         String session = session("workspace-a");
         head(session);

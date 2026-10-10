@@ -274,6 +274,140 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     }
 
     @Test
+    void uncommittedRecoveryRegistrationHoldsThePageUntilItCommits() throws Exception {
+        String product;
+        try (var connection = jdbc.getDataSource().getConnection()) {
+            product = connection.getMetaData().getDatabaseProductName();
+        }
+        // Only InnoDB has the next-key and record locks this pins; H2 neither blocks nor sees the insert.
+        org.junit.jupiter.api.Assumptions.assumeTrue(product.equals("MySQL") || product.equals("MariaDB"));
+        initSession();
+        head(session);
+        publish("segment", CONTENT, new byte[64]);
+        retire();
+        jdbc.update("INSERT INTO qwen_managed_session_resource_collection (session_scope_key, tenant_key,"
+                + " session_key, tenant_id, session_id, created_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP(6))",
+                resScope, ToolPublicationRetentionStore.hash(tenant), ToolPublicationRetentionStore.hash(session),
+                tenant, session);
+        var collector = collector(true, Duration.ZERO);
+        var claim = collector.claim();
+        assertThat(claim).isNotNull();
+        try (var registrar = jdbc.getDataSource().getConnection();
+                var pages = java.util.concurrent.Executors.newSingleThreadExecutor()) {
+            // A registration in flight: its pin row is inserted but not committed when the page runs.
+            registrar.setAutoCommit(false);
+            try (var statement = registrar.createStatement()) {
+                statement.executeUpdate("INSERT INTO managed_workspace_recovery_operation (operation_id, tenant_id,"
+                        + " storage_id, mode, request_digest, request_json, registration_json, source_digest,"
+                        + " session_count, state, created_at, updated_at) VALUES ('op-inflight', '" + tenant + "',"
+                        + " 'storage-1', 'capture', '" + "a".repeat(64) + "', '{}', '{}', '" + "b".repeat(64) + "', 1,"
+                        + " 'CAPTURING', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))");
+                statement.executeUpdate("INSERT INTO managed_workspace_recovery_session (operation_id, session_id,"
+                        + " source_digest, source_json, state) VALUES ('op-inflight', '" + session + "', '"
+                        + "c".repeat(64) + "', '{}', 'PENDING')");
+            }
+            var page = pages.submit(() -> collector.collect(claim));
+            Thread.sleep(1000);
+            // The locking re-check waits on the uncommitted pin; a plain read would not see it and collect.
+            assertThat(page.isDone()).isFalse();
+            registrar.commit();
+            assertThat(page.get(30, java.util.concurrent.TimeUnit.SECONDS)).isFalse();
+        }
+        assertThat(rows().getFirst().get("state")).isEqualTo("PUBLISHED");
+        assertThat(rows().getFirst().get("inline_bytes")).isNotNull();
+        assertThat(ledger().get("gc_blocker")).isEqualTo("collection_retry");
+    }
+
+    @Test
+    void pageGapLockHoldsARegistrationEvenOnAReadCommittedPool() throws Exception {
+        String product;
+        try (var connection = jdbc.getDataSource().getConnection()) {
+            product = connection.getMetaData().getDatabaseProductName();
+        }
+        // Gap locks exist only on InnoDB, and only under REPEATABLE READ.
+        org.junit.jupiter.api.Assumptions.assumeTrue(product.equals("MySQL") || product.equals("MariaDB"));
+        initSession();
+        head(session);
+        publish("segment", CONTENT, new byte[64]);
+        retire();
+        jdbc.update("INSERT INTO qwen_managed_session_resource_collection (session_scope_key, tenant_key,"
+                + " session_key, tenant_id, session_id, created_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP(6))",
+                resScope, ToolPublicationRetentionStore.hash(tenant), ToolPublicationRetentionStore.hash(session),
+                tenant, session);
+        // A pool whose connections default to READ COMMITTED, as many managed MySQL services ship.
+        var readCommitted = new org.springframework.jdbc.datasource.DelegatingDataSource(jdbc.getDataSource()) {
+            @Override public java.sql.Connection getConnection() throws java.sql.SQLException {
+                var connection = super.getConnection();
+                connection.setTransactionIsolation(java.sql.Connection.TRANSACTION_READ_COMMITTED);
+                return connection;
+            }
+        };
+        var dropReached = new java.util.concurrent.CountDownLatch(1);
+        var paused = new JdbcTemplate(readCommitted) {
+            @Override public int update(String sql, Object... args) {
+                if (sql.startsWith("UPDATE qwen_managed_session_resource SET state = 'COLLECTED'")) {
+                    dropReached.countDown();
+                    try {
+                        Thread.sleep(1500);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                return super.update(sql, args);
+            }
+        };
+        var props = new ManagedAgentProperties();
+        props.getToolPublication().setGcEnabled(true);
+        props.getToolPublication().setDeletionGrace(Duration.ZERO);
+        var collector = new SessionResourceCollectionCollector(paused,
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(readCommitted), props);
+        var claim = collector.claim();
+        assertThat(claim).isNotNull();
+        try (var pages = java.util.concurrent.Executors.newSingleThreadExecutor()) {
+            // The page passes its re-check first and holds its transaction just before the byte drop.
+            var page = pages.submit(() -> collector.collect(claim));
+            assertThat(dropReached.await(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            long started = System.nanoTime();
+            jdbc.update("INSERT INTO managed_workspace_recovery_operation (operation_id, tenant_id, storage_id,"
+                    + " mode, request_digest, request_json, registration_json, source_digest, session_count, state,"
+                    + " created_at, updated_at) VALUES ('op-after', ?, 'storage-1', 'capture', ?, '{}', '{}', ?, 1,"
+                    + " 'CAPTURING', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))", tenant, "a".repeat(64), "b".repeat(64));
+            jdbc.update("INSERT INTO managed_workspace_recovery_session (operation_id, session_id, source_digest,"
+                    + " source_json, state) VALUES ('op-after', ?, ?, '{}', 'PENDING')", session, "c".repeat(64));
+            long waitedMillis = (System.nanoTime() - started) / 1_000_000;
+            // The pin could not be written until the page committed its byte drop: the page's gap lock
+            // serialized it, so no registration can pin bytes that are being dropped.
+            assertThat(page.get(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            assertThat(waitedMillis).isGreaterThanOrEqualTo(1000);
+        }
+    }
+
+    @Test
+    void collectorTransactionsPinRepeatableRead() {
+        initSession();
+        jdbc.update("INSERT INTO qwen_managed_session_resource_collection (session_scope_key, tenant_key,"
+                + " session_key, tenant_id, session_id, created_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP(6))",
+                resScope, ToolPublicationRetentionStore.hash(tenant), ToolPublicationRetentionStore.hash(session),
+                tenant, session);
+        var isolations = new java.util.ArrayList<Integer>();
+        var recording = new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()) {
+            @Override protected void doBegin(Object transaction,
+                    org.springframework.transaction.TransactionDefinition definition) {
+                isolations.add(definition.getIsolationLevel());
+                super.doBegin(transaction, definition);
+            }
+        };
+        var props = new ManagedAgentProperties();
+        props.getToolPublication().setGcEnabled(true);
+        props.getToolPublication().setDeletionGrace(Duration.ZERO);
+        new SessionResourceCollectionCollector(jdbc, recording, props).claim();
+        // H2 cannot observe the gap locks this pin enables, so assert the requested isolation
+        // directly; the InnoDB-observable half is the MySQL-only pair above.
+        assertThat(isolations).isNotEmpty().allSatisfy(level -> assertThat(level)
+                .isEqualTo(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ));
+    }
+
+    @Test
     void scheduledTickAbsorbsATransientFailureIntoAWarnAndTheRetryBlocker() {
         initSession();
         head(session);
