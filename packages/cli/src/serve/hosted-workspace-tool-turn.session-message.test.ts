@@ -23,6 +23,8 @@ import {
   HOSTED_SEND_MESSAGE_TO_PARENT_TOOL,
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { ManagedSessionStoreTransportError } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
   HostedSessionMessageSession,
   type HostedSessionLineage,
@@ -373,4 +375,27 @@ it('runs a launch and a message in one batch without the mount', async () => {
   expect(JSON.stringify(responses)).toContain('Message queued');
   expect(JSON.stringify(responses)).toContain('started in the background');
   expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it("answers a store refusal but fails the call on the store's own faults", async () => {
+  const taskId = await launchChild();
+  const send = vi.spyOn(children, 'sendToChild');
+  send.mockRejectedValueOnce(
+    new ManagedSessionRecordError('The Session is closing.'),
+  );
+  const refused = await execute(
+    createTurn(),
+    call({ task_id: taskId, message: 'refused' }, 'call-1'),
+  );
+  expect(JSON.stringify(refused)).toContain(
+    'The message was refused: The Session is closing.',
+  );
+  // A fault whose commit may still land is never told to the model as a
+  // message that was not sent: the turn fails into recovery instead.
+  send.mockRejectedValueOnce(
+    new ManagedSessionStoreTransportError('store unreachable'),
+  );
+  await expect(
+    execute(createTurn(), call({ task_id: taskId, message: 'x' }, 'call-2')),
+  ).rejects.toThrow('requires recovery');
 });

@@ -220,16 +220,21 @@ public class ChildResultRelayStore {
     /**
      * What a child Session's journal proves about the turns that decide its
      * result: how many messages it accepted still wait for the turn that
-     * reads them, when it last accepted an input or settled a turn, and its
-     * newest settled API or message turn (null while none settled). Other
-     * wake inputs — a Monitor's, an automation's — neither hold nor decide.
+     * reads them, the input of every message it accepted, when it last
+     * committed any event, and its newest settled API or message turn (null
+     * while none settled). Other wake inputs — a Monitor's, an
+     * automation's — neither hold nor decide.
      */
-    public record JournalTurns(int pendingMessageInputs, long lastActivityAt,
+    public record JournalTurns(int pendingMessageInputs,
+            Set<String> messageInputs, long lastActivityAt,
             SettledTurn lastSettled) {
     }
 
-    /** The messages on one parent–child edge, as committed now. */
-    public record EdgeMessages(int undelivered, int toChild) {
+    /** The messages on one parent–child edge, as committed now:
+     * `receivedToChild` names the input of each of the parent's messages
+     * to this run its target already received. */
+    public record EdgeMessages(int undelivered, int toChild,
+            List<String> receivedToChild) {
     }
 
     private static final String MESSAGES_SQL =
@@ -241,16 +246,18 @@ public class ChildResultRelayStore {
     /**
      * H4d-b: the messages on one parent–child edge. `undelivered` counts
      * those still owing their handover — the parent's to this run and every
-     * one the child sent (a child's outbox entries all go to its parent);
-     * `toChild` counts every message the parent sent this run, in any
-     * state, which the settlement names so the parent can refuse it over a
-     * message opened after this read. An unreadable body cannot prove which
-     * edge it is on and owes a retry.
+     * one the child sent while it is active (a child's outbox entries all
+     * go to its parent; a closed child's are orphaned by the message relay
+     * and never move again); `toChild` counts every message the parent
+     * sent this run, in any state, which the settlement names so the parent
+     * can refuse it over a message opened after this read. An unreadable
+     * body cannot prove which edge it is on and owes a retry.
      */
     public EdgeMessages edgeMessages(String tenantId, String parentSessionId,
             String childRunId, String childSessionId) {
         int undelivered = 0;
         int toChild = 0;
+        List<String> received = new ArrayList<>();
         for (Map<String, Object> row : jdbc.queryForList(MESSAGES_SQL,
                 tenantId, parentSessionId)) {
             JsonNode body = body(tenantId, row);
@@ -260,17 +267,38 @@ public class ChildResultRelayStore {
                 continue;
             }
             toChild++;
-            if (owesHandover((String) row.get("delivery_state"))) {
+            String state = (String) row.get("delivery_state");
+            if (owesHandover(state)) {
                 undelivered++;
+            } else if (("accepted".equals(state) || "consumed".equals(state))
+                    && body.path("inputId").isTextual()) {
+                received.add(body.path("inputId").textValue());
             }
+        }
+        if ("ACTIVE".equals(sessionStatus(tenantId, childSessionId))) {
+            for (Map<String, Object> row : jdbc.queryForList(MESSAGES_SQL,
+                    tenantId, childSessionId)) {
+                if (owesHandover((String) row.get("delivery_state"))) {
+                    undelivered++;
+                }
+            }
+        }
+        return new EdgeMessages(undelivered, toChild, List.copyOf(received));
+    }
+
+    /** Whether an active child still owes its parent a handover: its
+     * Session closes only after its own messages left. */
+    public boolean childOwesHandover(String tenantId, String childSessionId) {
+        if (!"ACTIVE".equals(sessionStatus(tenantId, childSessionId))) {
+            return false;
         }
         for (Map<String, Object> row : jdbc.queryForList(MESSAGES_SQL,
                 tenantId, childSessionId)) {
             if (owesHandover((String) row.get("delivery_state"))) {
-                undelivered++;
+                return true;
             }
         }
-        return new EdgeMessages(undelivered, toChild);
+        return false;
     }
 
     /** Planned or being handed over: a receipt never reaches either. */
@@ -307,6 +335,7 @@ public class ChildResultRelayStore {
      */
     public JournalTurns journalTurns(String tenantId, String sessionId) {
         Set<String> pending = new HashSet<>();
+        Set<String> messages = new HashSet<>();
         Map<String, String> sources = new HashMap<>();
         SettledTurn[] last = {null};
         long[] activity = {0};
@@ -314,18 +343,19 @@ public class ChildResultRelayStore {
             JsonNode payload = event.path("payload");
             String turnId = payload.path("turnId").asText(null);
             String kind = event.path("kind").asText();
+            // Any event is activity: a long turn commits its model
+            // attempts, tool steps and messages as it goes.
+            activity[0] = Math.max(activity[0],
+                    event.path("occurredAt").asLong(0));
             if ("input.accepted".equals(kind)) {
                 String source = payload.path("source").asText(null);
                 sources.put(turnId, source);
                 if ("session_message".equals(source)) {
                     pending.add(turnId);
+                    messages.add(turnId);
                 }
-                activity[0] = Math.max(activity[0],
-                        event.path("occurredAt").asLong(0));
             } else if ("turn.settled".equals(kind)) {
                 pending.remove(turnId);
-                activity[0] = Math.max(activity[0],
-                        event.path("occurredAt").asLong(0));
                 String source = sources.get(turnId);
                 if ("session_message".equals(source)
                         || "hosted-harness".equals(source)) {
@@ -335,7 +365,8 @@ public class ChildResultRelayStore {
                 }
             }
         });
-        return new JournalTurns(pending.size(), activity[0], last[0]);
+        return new JournalTurns(pending.size(), Set.copyOf(messages),
+                activity[0], last[0]);
     }
 
     /** The joined text of the newest assistant message one journal Turn
@@ -361,10 +392,19 @@ public class ChildResultRelayStore {
             if (!turnId.equals(record.path("daemonPromptId").asText())) {
                 continue;
             }
+            // Text runs a thought separates join with a newline, the way the
+            // API Turn's output_text parts do (terminalResultText).
             StringBuilder text = new StringBuilder();
+            boolean separated = false;
             for (JsonNode part : record.path("message").path("parts")) {
-                if (part.path("text").isTextual()
-                        && !part.path("thought").asBoolean(false)) {
+                if (part.path("thought").asBoolean(false)) {
+                    separated = !text.isEmpty();
+                } else if (part.path("text").isTextual()
+                        && !part.path("text").textValue().isEmpty()) {
+                    if (separated) {
+                        text.append('\n');
+                        separated = false;
+                    }
                     text.append(part.path("text").textValue());
                 }
             }

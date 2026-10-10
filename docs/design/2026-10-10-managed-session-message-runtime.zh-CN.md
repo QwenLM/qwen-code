@@ -30,16 +30,16 @@ H4d-a 让投递所需的每个事实都成为已提交的记录,并在两种语�
 
 1. **一个工具、两种形式,沿血缘发送。** `send_message` 有父形式(`task_id`、`message`)与子形式(`to: "parent"`、`message`)。Session 在可以启动 child 的地方(Shell 车道的根,受 `child_agent` kind 门禁控制)声明父形式,在其定义记录了血缘的地方声明子形式。二者都位于 `session_message` domain 门禁之后。team 收件方属于 H4e,具名 peer 属于以后的路由(契约决策 2);它们的参数以具名范围拒绝。该工具不需要 Runtime:只含消息的批次不占用 Workspace 挂载,也不做 Broker 预留,与 Agent launch 完全一样。
 2. **父方的路由在它的 child funnel 写入链上决定。** `task_id` 指向任意一代的 child run;路由沿其链走到链头,即最新的、未被证明从未启动的续跑(契约决策 9 会释放这样的前驱)。尚未结束的链头收到消息;以 `completed` 结束且从未请求停止的链头被续跑;请求过停止或以其他方式结束的链头被具名拒绝。决定及其提交与 H4b 的结算运行在同一条写入链上,所以一条消息要么在 run 结算之前开启(随后挡住该结算,见决策 8),要么发现 run 已结束而成为续跑。被重新驱动的调用会按证据比较并重放已提交的消息或续跑,绝不会路由两次。
-3. **两条路径共用一个发送上限。** 发往某个任务的消息,必须能放入以该任务自己的 launch 描述与定义构造的续跑 launch 信封(≤ 32 KiB,即 H4b 的信封上限),无论链头在运行还是已完成。该信封不依赖任何后来的状态,所以 child 的状态永远不会改变答复。child 发往父的消息受 64 KiB 内容上限约束。在每条边的每个方向上,发送方同时在途的消息(尚未被读取、取消、拒绝或放弃)至多 8 条,总共至多发送 64 条,这限定了 relay 要轮询的量,也限定了父子之间来回发消息的代价;正在关闭的父不再发送消息。拒绝是工具错误,且不提交任何东西。
+3. **两条路径共用一个发送上限。** 发往某个任务的消息,必须能放入以该任务自己的 launch 描述与定义构造的续跑 launch 信封(≤ 32 KiB,即 H4b 的信封上限),无论链头在运行还是已完成。该信封不依赖任何后来的状态,所以 child 的状态永远不会改变答复。child 发往父的消息受 64 KiB 内容上限约束。在每条边的每个方向上,发送方同时在途的消息(尚未交接,即 `planned` 或 `accepting`;消息一经交接即离开该计数,无论读取它的 turn 是否完成,所以失败的 turn 永远不会卡住这条边)至多 8 条,总共至多发送 64 条,这限定了 relay 要轮询的量,也限定了父子之间来回发消息的代价;正在关闭的父不再发送消息。拒绝是工具错误,且不提交任何东西。
 4. **身份由发送方生成,且重放稳定。** `messageId` 为 `msg_` 加上 `sha256(senderSessionId | turnId | callId)` 的 32 个十六进制字符:跨 Session 唯一(契约决策 1),且被重新驱动的调用得到同一个值。续跑的 `childRunId` 就是 Agent launch 会使用的那个调用键。在目标中承载消息的 input 与 wake turn 为 `<messageId>:message`;发送方拒绝把其他任何 id 当作承载 input。
 5. **消息 relay 位于 `managed-agent-server`,受它自己的 ledger 约束。** `SessionMessageRelay` 分页处理两类工作:仍欠交接的 `session_message` 行(`planned`、`accepting` 或 `unknown`;只有 outbox 条目会进入这些状态,所以 V54 索引服务于该扫描),以及条目已交接、正等待被读取的 ledger 行——后者按 ledger 自己的 `(state, next_retry_at)` 索引分页,所以永远不会再变化的条目不消耗任何代价,等待中的条目也不会把新的交接挤出页面。V61 新增 `qwen_managed_session_message_relay`:每个已认领的 outbox 条目一行,记录认领租约、退避与持久分类;另加一个 `(tenant_id, session_id, domain)` 索引,服务于下文的按 Session 读取。每一步都依据条目当前已提交的投递状态与正文作决定,绝不依据分页时的快照,并依据两个 journal 的已提交记录对账:
    - **交接。** 此时固定目标(契约决策 4):`to_child` 取该 run 所 attach 的 Session,run 尚未 attach 时持有;`to_parent` 取发送方血缘行所记录的父。交接前 run 已结束或正在被停止,或目标已不再活跃,则取消该条目(`planned → cancelled`,从未交出)。否则发送方提交带目标的 `planned → accepting`。
    - **回执。** relay 把发送方的内容字节复制给目标,目标发布自己的副本,按发送方的摘要校验它,并在同一事务中提交回执及其 input 与 wake(契约决策 6)。重投递会重放已提交的回执。父方对其 run 尚未 attach 的 child 消息以 `session_message_not_ready` 作答,relay 持有该消息。目标规则的拒绝(`session_message_record` 或 `session_message_conflict`)会拒绝该条目(`accepting → rejected`);目标 store 的故障以 `503 session_message_failed` 作答并重试,绝不拒绝。已经提交的回执直接跳到发送方的那一步。回执准入一条 input 并唤醒一个 turn,`consume` 也可能重新加载目标、让其 wake pump 运行一个 turn,所以两者都走与 submit 或 automation fire 相同的 Workspace 准入;发送方自己的那几步只是 journal 写入。每个动词都通过 Turn 使用的接管加载重新 attach 由更早的控制面进程 attach 的 Session,因为 ledger 比那个进程活得久。
    - **接受与消费。** 发送方提交带 input id 的 `accepting → accepted`。等待期间,relay 请目标对账其回执(`consume`,见决策 7);一旦回执为 `consumed`,发送方提交 `accepted → consumed`。读取回执的 turn 未完成就结束时,等待结束,条目停留在 `accepted`。
-   - **分类。** 目标收到条目之前就正在关闭或已不存在的发送方不再得到任何东西,该行为 `orphaned`。失败 64 次的步骤会放弃:relay 先在发送方结束该条目——从未交接的为 `cancelled`,回执已存在的为 `accepted`,否则为 `unknown`——让任何地方都不再把它读作仍欠交接,然后才把该行分类为 `unknown`(发送方那一步失败时,放弃仍欠着并重试)。这两种分类都绝不会被呈现为已投递。目标已收到的条目在任一侧于消费前关闭时为 `done`:发送方的条目停留在 `accepted`,目标的回执才是消费的事实依据。H4b 会在 child 结算后立即关闭它,所以 child 发往父的消息通常以这种方式结束。
+   - **分类。** 目标收到条目之前就正在关闭或已不存在的发送方不再得到任何东西,该行为 `orphaned`。失败 64 次的步骤会放弃:relay 先在发送方结束该条目——从未交接的为 `cancelled`,回执已存在的为 `accepted`,否则为 `unknown`——让任何地方都不再把它读作仍欠交接,然后才把该行分类为 `unknown`(发送方那一步失败时,放弃仍欠着并重试)。这两种分类都绝不会被呈现为已投递。目标已收到的条目在任一侧于消费前关闭时为 `done`:发送方的条目保持已提交的样子(`accepted`,或发送方在回执与它自己那一步之间关闭时的 `accepting`),目标的回执才是消费的事实依据。H4b 会在 child 结算后立即关闭它,所以 child 发往父的消息通常以这种方式结束。
 6. **投递边界是目标的 wake pump,只基于已提交的 input(契约开放问题 2)。** 消息等待目标当前的 turn 结束,并以带契约决策 7 有界通知文本的独立 wake turn 运行。它的 input 在 journal 中,所以能在 Runtime 被回收、Harness 被替换后存活。轮中投递仍是非目标。
 7. **消费跟随 wake turn 的真实结算。** 消息的 wake turn 以 `completed` 结算时,目标提交其回执 `accepted → consumed`。以其他方式结束的 turn 让回执停留在 `accepted`:这是欠下的证据,绝不扩大(H4b 决策 6)。relay 的 `consume` 对账停留在 accepted 的回执:其 turn 以 `completed` 结算时提交 consumed(turn 之后的那次提交可能已丢失),尚未结算时回答尚未就绪,turn 以其他方式结束时拒绝。该调用也经过 Harness 的 attachment,所以被替换的 Harness 已不再持有的 Session 会被重新加载,其 wake pump 会运行等待中的 input。关闭的 Session 会像取消其他 wake input 一样取消其待处理的消息 input。
-8. **消息结束了,child 才算结束(修订 H4b 决策 8)。** child 最新的 API Turn 终止后,relay 先读 child 的 journal,再读边:向父发消息的 turn 会在结算之前提交那条 outbox 条目,所以空闲的 journal 不会让边的读取漏掉任何东西。只有当 journal 中没有已投递、仍在等待读取它的 turn 的消息(其他 wake input——Monitor 的、automation 的——既不阻挡也不决定),且边上没有仍欠交接的消息(`planned` 或 `accepting`:父发往该 run 的,以及 child 发出的每一条)时,relay 才结算。等待其 turn 的消息只在 child 30 分钟内仍有活动时阻挡结算,所以被阻塞的 child 无法永远阻挡它。child 的结果是其最新的已结算 API 或消息 turn——完成与失败都一样:最后运行的是消息 wake turn 时,从 child 自己的 journal 读取(该 turn 最新的 assistant 记录,分块存储的 body 按字节拼接),否则仍是 H4b 的 API Turn 结果,不变。以其他方式结束的消息 wake turn 即使在更早的 API Turn 已完成之后也会让 child 失败:父的消息要的就是那个 turn 的工作,交回更早的结果会把这条消息报告成已被处理。持有消息的 child 的 journal 被压缩时无法证明其 turn,会被拒绝,绝不猜测。结算会指明 relay 读取时父发往该 run 的消息数(`commit_result` 与 relay 的 `fail` 上的 `messageCount`):只要有一条仍欠交接,或消息数多于 relay 所见,父就以 `409 child_messages_pending` 拒绝,这封住了 relay 读取与提交之间的窗口;relay 随后再次观察,不消耗尝试次数。已提交的结果绝不重新计算:acceptance 跟随已提交的那一个。放弃不指明消息数,也永不被阻挡。
+8. **消息结束了,child 才算结束(修订 H4b 决策 8)。** child 最新的 API Turn 终止后,relay 先读 child 的 journal,再读边:向父发消息的 turn 会在结算之前提交那条 outbox 条目,所以在 journal 之后读取的边不会漏掉已结算 turn 发出的任何消息。只有当 journal 中没有已投递、仍在等待读取它的 turn 的消息(其他 wake input——Monitor 的、automation 的——既不阻挡也不决定),且边上没有仍欠交接的消息(`planned` 或 `accepting`:父发往该 run 的,以及 child 仍处于活动状态时发出的每一条——已关闭 child 的条目被分类为 orphaned,永远不会再移动)时,relay 才结算。child 在 journal 读取之后才收到的父消息,从未被那次读取看到处于等待状态,所以边的读取会指明每条已收到消息的 input,对 journal 读取未见过的任何一条,relay 都会再次观察。不持有任何会话消息的 child 的 journal 永远不会被读取:那里没有运行过消息 turn。等待其 turn 的消息只在 child 的 journal 30 分钟内提交过任何事件时阻挡结算(运行中的 turn 会随进度提交其模型尝试、工具步骤与消息),所以被阻塞的 child 无法永远阻挡它。child 的结果是其最新的已结算 API 或消息 turn——完成与失败都一样:最后运行的是消息 wake turn 时,从 child 自己的 journal 读取(该 turn 最新的 assistant 记录,分块存储的 body 按字节拼接),否则仍是 H4b 的 API Turn 结果,不变。以其他方式结束的消息 wake turn 即使在更早的 API Turn 已完成之后也会让 child 失败:父的消息要的就是那个 turn 的工作,交回更早的结果会把这条消息报告成已被处理。持有消息的 child 的 journal 被压缩时无法证明其 turn,会被拒绝,绝不猜测。结算会指明 relay 读取时父发往该 run 的消息数(`commit_result` 与 relay 的 `fail` 上的 `messageCount`):只要有一条仍欠交接,或消息数多于 relay 所见,父就以 `409 child_messages_pending` 拒绝,这封住了 relay 读取与提交之间的窗口;relay 随后再次观察,不消耗尝试次数。已提交的结算绝不重新计算:acceptance 跟随已提交的结果,已提交的失败只欠关闭。在失败分支中,child 在 fail 提交之前关闭(H4b 的顺序),所以在这个窗口中开启的消息会被取消而不是被读取。活动 child 自己仍欠交接的 outbox 条目会挡住它的关闭,所以它在结算读取之后(由后来的 wake turn)发出的消息会先到达父;消息 relay 的放弃为这段等待设了上界。放弃不指明消息数,也永不被阻挡。
 9. **复活启动一个带链历史的新 child Session(契约开放问题 1)。** 续跑是新的链节点,有自己的 child Session 与血缘边,所以契约的血缘规则成立。它的第一条输入由 relay 依据父方的已提交记录组成:每个更早 run 的指令(launch 信封的 prompt)与结果(父方的结果副本),由旧到新,然后是新指令。更早的指令与结果作为数据经过 XML 转义后放进历史的标记中,所以任何更早的结果都无法闭合其块,也无法伪造下一条指令。组合受 Hosted prompt 上限约束(48 KiB 的 JSON 文本),超出时先略去最旧的 run;若最新的更早 run 单独都放不下,则带标记截断其文本。它只读取已提交记录,所以重放的创建给出同一条输入,创建保持幂等。这里携带的是父方看到的对话,而不是 child 的工具历史:transcript 导入(带恢复证明的 `history_copy`)需要 authority 尚不支持的 header 级导入,属于后续工作。
 10. **发送方关闭时的 outbox 保持已提交的样子(契约开放问题 3)。** 生命周期门禁继续在关闭声明下拒绝 `session_message`;relay 把正在关闭的发送方的条目分类为 `orphaned`。没有任何东西在 journal 内取消它们,也没有任何东西投递它们。
 11. **relay 在记录之外证明了什么(契约开放问题 5)。** input 的文本绑定目标自己的副本,目标在提交之前按发送方的摘要校验该副本;回执以 `messageId` 与摘要指名发送方的消息;父方接受来自其 run 已结束的 child 的消息,所以结束之前发出的消息仍能到达。
@@ -69,9 +69,9 @@ child 发往父的消息走同样的步骤,只是两个 journal 互换;其第 2 
 | --------------------- | ------------------------------------------ | ----------------------------- |
 | 发往 child 任务的消息 | 能放入该任务的续跑信封(≤ 32 KiB)           | 工具错误,`byte_limit`         |
 | 发往父的消息          | ≤ 64 KiB UTF-8                             | 工具错误                      |
-| 每条边在途的消息      | 每个方向 8 条(尚未被读取或结束)            | 工具错误,`count_limit`        |
+| 每条边在途的消息      | 每个方向 8 条(尚未交接)                    | 工具错误,`count_limit`        |
 | 每个 child run 的消息 | 每个方向 64 条                             | 工具错误,`budget_exhausted`   |
-| 等待消息 turn         | child 内 30 分钟无活动                     | 结算不再等待                  |
+| 等待消息 turn         | child journal 30 分钟无任何事件            | 结算不再等待                  |
 | 承载通知              | 序列化后 ≤ 48 KiB,先转义再带标记截断       | 截断,绝不拒绝                 |
 | 续跑的第一条输入      | ≤ 48 KiB 的 JSON 文本;略去最旧的 run       | 截断,绝不拒绝                 |
 | 每条消息的 relay 尝试 | 64 次,带退避                               | ledger `unknown`,绝不二次投递 |
@@ -115,12 +115,14 @@ child 发往父的消息走同样的步骤,只是两个 journal 互换;其第 2 
 
 1. **续跑的 transcript 导入。** 复活是否应通过带恢复证明的 header 级导入复制前驱的完整 transcript(包括工具调用),还是保持决策 9 的有界"指令与结果"历史。
 2. **发往忙碌前台父的消息。** 前台 child 发往正等待其结果的父的消息会立即被接受,并在父的 turn 之后才被读取,而那时父已收到结果。是否应改为拒绝前台 child 的 `send_message`,留待产品证据决定。
+3. **与回执竞争的放弃。** relay 放弃一条已交接的消息时,若其 receive 已超时但仍在目标中运行,回执可能在发送方提交 `unknown` 之后才落地。契约允许 `unknown → accepted`,但 relay 已分类该行且不会再访问它,所以目标读取了消息而发送方停留在 `unknown`。这需要第 64 次尝试恰好与一次在途的 receive 重合;ledger 是否应为迟到的回执复查 `unknown` 行,属于 H4f 的运维处置。
 
 ## 后续工作
 
-| 切片 | 范围                                                                                       |
-| ---- | ------------------------------------------------------------------------------------------ |
-| H4e  | team 与 mailbox;`send_message` 的 team 路由。                                              |
-| H4f  | 公开任务取消,以及 `unknown` 投递的运维处置,其中也包括被分类为 `unknown` 的消息 ledger 行。 |
-| 导入 | 续跑的 transcript 导入(开放问题 1)。                                                       |
-| Peer | 血缘之外的具名 peer,及其授权证明与路由值。                                                 |
+| 切片 | 范围                                                                                                |
+| ---- | --------------------------------------------------------------------------------------------------- |
+| H4e  | team 与 mailbox;`send_message` 的 team 路由。                                                       |
+| H4f  | 公开任务取消,以及 `unknown` 投递的运维处置,其中也包括被分类为 `unknown` 的消息 ledger 行。          |
+| 导入 | 续跑的 transcript 导入(开放问题 1)。                                                                |
+| Peer | 血缘之外的具名 peer,及其授权证明与路由值。                                                          |
+| 规模 | 为每次结算的边读取设上界(按 resource id 缓存 body),并让已分类的 outbox 条目离开交接扫描的索引范围。 |

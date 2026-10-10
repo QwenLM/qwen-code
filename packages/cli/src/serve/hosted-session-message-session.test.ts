@@ -290,13 +290,24 @@ describe('send_message to a child task (H4d-b)', () => {
     }
     const crowded = await send(parent.children, 'one too many', 'call-8');
     expect(JSON.stringify(crowded)).toContain('count_limit');
-    // A message read (or ended) frees its place; the lifetime budget stays.
+    // A message ended or handed over frees its place, whether or not the
+    // turn that reads it completes; the lifetime budget stays.
     await parent.messages.settle('msg_call-0', 'cancelled');
     expect(await send(parent.children, 'room again', 'call-9')).toEqual({
       kind: 'message',
       childRunId: 'run-1',
     });
-    expect(parent.children.messagesTo('run-1')).toHaveLength(9);
+    expect(
+      JSON.stringify(await send(parent.children, 'crowded', 'call-10')),
+    ).toContain('count_limit');
+    await attach(parent.children);
+    await parent.messages.handover('msg_call-1', CHILD);
+    await parent.messages.accepted('msg_call-1', 'msg_call-1:message');
+    expect(await send(parent.children, 'handed over', 'call-11')).toEqual({
+      kind: 'message',
+      childRunId: 'run-1',
+    });
+    expect(parent.children.messagesTo('run-1')).toHaveLength(10);
   });
 
   it('continues a completed child with the message as its next prompt', async () => {

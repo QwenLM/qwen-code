@@ -152,9 +152,11 @@ export function inboundConsumedBody(previous: SessionMessage): SessionMessage {
 
 /**
  * The runtime's own bounds on one lineage edge, per direction: messages a
- * sender may have in flight at once (not yet consumed, cancelled, rejected
- * or given up), and messages it may send to one child run in all. They bound
- * what a model can make the relay poll and what a ping-pong costs.
+ * sender may have in flight at once (not yet handed over: planned or
+ * accepting), and messages it may send to one child run in all. They bound
+ * what a model can make the relay poll and what a ping-pong costs. A
+ * handed-over message leaves the in-flight count whether or not its reading
+ * turn completed, so a failed turn never pins the edge.
  */
 export const MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS = Object.freeze({
   maxInFlightPerRun: 8,
@@ -162,23 +164,14 @@ export const MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS = Object.freeze({
 } as const);
 
 /**
- * Whether an outbox entry still owes its handover to the target. An entry
- * the relay gave up on moved to `unknown` (or `cancelled`), so it holds
- * nothing any more.
+ * Whether an outbox entry still owes its handover to the target — the
+ * in-flight count of the runtime limits. An entry the relay gave up on
+ * moved to `unknown` (or `cancelled`), so it holds nothing any more.
  */
 export function isUndeliveredMessage(message: SessionMessage): boolean {
   const state = message.run.delivery?.state;
   return (
     message.direction === 'outbound' &&
     (state === 'planned' || state === 'accepting')
-  );
-}
-
-/** Whether an outbox entry is still in flight: handed over or not, unread. */
-export function isInFlightMessage(message: SessionMessage): boolean {
-  const state = message.run.delivery?.state;
-  return (
-    message.direction === 'outbound' &&
-    (state === 'planned' || state === 'accepting' || state === 'accepted')
   );
 }

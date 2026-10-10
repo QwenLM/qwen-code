@@ -51,6 +51,7 @@ import {
   assertManagedSessionDomainEnabled,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
+  ManagedSessionWritesStoppedError,
   type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
@@ -58,6 +59,7 @@ import type { HarnessAgentWaitRun } from '@qwen-code/qwen-code-core/managed-runt
 import {
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
   ManagedSessionStoreHttpError,
+  ManagedSessionStoreTransportError,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
@@ -195,6 +197,21 @@ function shellHistoryId(executionCallId: string): string {
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = bytes.subarray(0, 16).toString('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+// H4d-b: a refusal the store makes at commit (a closing Session, a rule the
+// authority holds) is a send_message call's answer, never a failed turn. A
+// conflict and the store's own transient faults fail the call like any
+// other store fault: a refusal answer would tell the model a message that
+// may yet commit was never sent.
+function isMessageRefusal(cause: unknown): cause is ManagedSessionRecordError {
+  return (
+    cause instanceof ManagedSessionRecordError &&
+    !(cause instanceof ManagedSessionConflictError) &&
+    !(cause instanceof ManagedSessionStoreHttpError) &&
+    !(cause instanceof ManagedSessionStoreTransportError) &&
+    !(cause instanceof ManagedSessionWritesStoppedError)
+  );
 }
 
 // H3: background admissions exist only while the child_run domain is
@@ -2964,11 +2981,7 @@ export class HostedWorkspaceToolTurn {
           executionCallId: callKey,
         });
       } catch (cause) {
-        if (
-          !(cause instanceof ManagedSessionRecordError) ||
-          cause instanceof ManagedSessionConflictError
-        )
-          throw cause;
+        if (!isMessageRefusal(cause)) throw cause;
         return answer(
           `The message to the parent was refused: ${cause.message}`,
           true,
@@ -2992,13 +3005,7 @@ export class HostedWorkspaceToolTurn {
         closing: authority.currentActivation?.phase !== 'active',
       });
     } catch (cause) {
-      // A refusal the store makes at commit (a closing Session, a rule the
-      // authority holds) is the call's answer, never a failed turn.
-      if (
-        !(cause instanceof ManagedSessionRecordError) ||
-        cause instanceof ManagedSessionConflictError
-      )
-        throw cause;
+      if (!isMessageRefusal(cause)) throw cause;
       return answer(`The message was refused: ${cause.message}`, true);
     }
     if (route.kind === 'refused') return answer(route.reason, true);

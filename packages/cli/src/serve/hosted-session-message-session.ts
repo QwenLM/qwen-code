@@ -13,7 +13,7 @@ import {
   MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS,
   inboundConsumedBody,
   inboundMessageBody,
-  isInFlightMessage,
+  isUndeliveredMessage,
   outboundAcceptedBody,
   outboundDeliveryBody,
   outboundHandoverBody,
@@ -178,10 +178,11 @@ export class HostedSessionMessageSession {
         );
       }
       if (
-        sentBefore.filter(isInFlightMessage).length >= limits.maxInFlightPerRun
+        sentBefore.filter(isUndeliveredMessage).length >=
+        limits.maxInFlightPerRun
       ) {
         throw new ManagedSessionRecordError(
-          `The parent has ${limits.maxInFlightPerRun} messages from this Session it has not read yet (count_limit).`,
+          `This Session has ${limits.maxInFlightPerRun} messages still on their way to its parent (count_limit).`,
         );
       }
       const contentRef = await this.store.resources.publish(

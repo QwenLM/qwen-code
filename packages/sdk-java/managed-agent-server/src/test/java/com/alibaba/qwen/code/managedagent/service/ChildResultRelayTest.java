@@ -23,6 +23,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
@@ -201,7 +202,7 @@ class ChildResultRelayTest {
         when(store.hasAcceptance(TENANT, PARENT, RUN)).thenReturn(false);
         when(store.edgeMessages(anyString(), anyString(), anyString(),
                 any())).thenReturn(
-                new ChildResultRelayStore.EdgeMessages(0, 0));
+                new ChildResultRelayStore.EdgeMessages(0, 0, List.of()));
         when(store.readResource(TENANT, "resource-body")).thenReturn(
                 "{\"inputRef\":{\"resourceId\":\"resource-input\"},"
                         + "\"completion\":\"sent\"}");
@@ -1212,13 +1213,114 @@ class ChildResultRelayTest {
                 .thenReturn("first answer");
     }
 
+    private void holdsMessages() {
+        when(store.hasSessionMessages(TENANT, CHILD)).thenReturn(true);
+    }
+
+    // A child that never held a message ran no message turn: its journal
+    // is never read and H4b's API Turn result stands.
+    @Test
+    void neverReadsTheJournalOfAChildWithoutMessages() {
+        watching();
+        relay.scan();
+        verify(store, never()).journalTurns(anyString(), anyString());
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("commit_result", "accept");
+    }
+
+    // A parent's message received between the journal read and the edge
+    // read was never seen waiting by the journal read: the settlement
+    // would close it away unread, so the relay watches again.
+    @Test
+    void holdsAChildOverAReceiptItsJournalReadDidNotSee() {
+        watching();
+        holdsMessages();
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(0, Set.of(), now,
+                        null));
+        when(store.edgeMessages(TENANT, PARENT, RUN, CHILD)).thenReturn(
+                new ChildResultRelayStore.EdgeMessages(0, 1,
+                        List.of("msg_1:message")));
+        relay.scan();
+        assertThat(harness.operations).isEmpty();
+        assertThat(row.get().attempts()).isZero();
+        // Seen by the next read (and settled): the settlement proceeds.
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(0,
+                        Set.of("msg_1:message"), now, null));
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        relay.scan();
+        assertThat(harness.operations.getFirst())
+                .containsEntry("kind", "commit_result")
+                .containsEntry("messageCount", 1);
+    }
+
+    // A committed result stands over a newer message turn that failed:
+    // re-settling it as a failure would conflict forever.
+    @Test
+    void acceptsACommittedResultOverANewerFailedMessageTurn() {
+        watching();
+        holdsMessages();
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(0,
+                        Set.of("msg_1:message"), 42L,
+                        new ChildResultRelayStore.SettledTurn(
+                                "msg_1:message", "error", "session_message",
+                                42L)));
+        when(store.childRunBody(TENANT, PARENT, RUN)).thenReturn(json(
+                "{\"resultRef\":{\"resourceId\":\"result-1\"}}"));
+        relay.scan();
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("accept");
+        verify(childCloses, never()).admitChildClose(TENANT, PARENT, CHILD,
+                RUN);
+    }
+
+    // A committed failure stands as a committed result does: a newer
+    // turn never re-settles it (a result over it would only conflict).
+    @Test
+    void closesAnAlreadyFailedRunWithoutSettlingItAgain() {
+        watching();
+        when(store.childRunBody(TENANT, PARENT, RUN)).thenReturn(json(
+                "{\"run\":{\"state\":\"failed\"}}"));
+        relay.scan();
+        assertThat(harness.operations).isEmpty();
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(row.get().state()).isEqualTo("done");
+    }
+
+    // An active child still handing its parent a message keeps its
+    // Session until that message left.
+    @Test
+    void keepsTheChildOpenWhileItsOwnMessageOwesItsHandover() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "delivering", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.childOwesHandover(TENANT, CHILD)).thenReturn(true);
+        relay.scan();
+        assertThat(harness.operations).isEmpty();
+        verify(childCloses, never()).admitChildClose(TENANT, PARENT, CHILD,
+                RUN);
+        assertThat(row.get().attempts()).isZero();
+        when(store.childOwesHandover(TENANT, CHILD)).thenReturn(false);
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "delivering", "owner", now + 30_000, 0, 0, null, now, now));
+        relay.scan();
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("mark_accepted");
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+    }
+
     // H4d-b: a message on the child's edge that still owes its handover
     // holds the settlement — the child's own runtime, not a failed step.
     @Test
     void holdsAChildWhileAMessageOnItsEdgeOwesItsHandover() {
         watching();
         when(store.edgeMessages(TENANT, PARENT, RUN, CHILD)).thenReturn(
-                new ChildResultRelayStore.EdgeMessages(1, 1));
+                new ChildResultRelayStore.EdgeMessages(1, 1, List.of()));
         relay.scan();
         assertThat(harness.operations).isEmpty();
         assertThat(row.get().state()).isEqualTo("watching");
@@ -1230,8 +1332,9 @@ class ChildResultRelayTest {
     @Test
     void holdsAChildWhoseJournalOwesAMessageTurn() {
         watching();
+        holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(1, now - 60_000L,
+                new ChildResultRelayStore.JournalTurns(1, Set.of(), now - 60_000L,
                         null));
         relay.scan();
         assertThat(harness.operations).isEmpty();
@@ -1243,8 +1346,9 @@ class ChildResultRelayTest {
     @Test
     void stopsWaitingForAMessageTurnThatNeverComes() {
         watching();
+        holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(1,
+                new ChildResultRelayStore.JournalTurns(1, Set.of(),
                         now - 31 * 60_000L, null));
         relay.scan();
         assertThat(harness.operations)
@@ -1259,7 +1363,7 @@ class ChildResultRelayTest {
     void namesTheMessagesItSawOnTheSettlement() {
         watching();
         when(store.edgeMessages(TENANT, PARENT, RUN, CHILD)).thenReturn(
-                new ChildResultRelayStore.EdgeMessages(0, 2));
+                new ChildResultRelayStore.EdgeMessages(0, 2, List.of()));
         relay.scan();
         assertThat(harness.operations.getFirst())
                 .containsEntry("kind", "commit_result")
@@ -1285,8 +1389,9 @@ class ChildResultRelayTest {
     @Test
     void settlesFromTheMessageTurnTheChildRanLast() {
         watching();
+        holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(0, 42L,
+                new ChildResultRelayStore.JournalTurns(0, Set.of(), 42L,
                         new ChildResultRelayStore.SettledTurn(
                                 "msg_1:message", "completed",
                                 "session_message", 42L)));
@@ -1309,13 +1414,14 @@ class ChildResultRelayTest {
     @Test
     void failsFromAMessageTurnThatEndedIncomplete() {
         watching();
+        holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(0, 42L,
+                new ChildResultRelayStore.JournalTurns(0, Set.of(), 42L,
                         new ChildResultRelayStore.SettledTurn(
                                 "msg_1:message", "error", "session_message",
                                 42L)));
         when(store.edgeMessages(TENANT, PARENT, RUN, CHILD)).thenReturn(
-                new ChildResultRelayStore.EdgeMessages(0, 1));
+                new ChildResultRelayStore.EdgeMessages(0, 1, List.of()));
         relay.scan();
         assertThat(harness.operations)
                 .extracting(operation -> operation.get("kind"))

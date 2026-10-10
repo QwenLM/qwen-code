@@ -441,10 +441,10 @@ public class ChildResultRelay {
             // turn, and only once nothing on its edge is still on its way.
             // The journal is read first: a turn that messages the parent
             // commits that outbox entry before it settles, so the edge read
-            // after an idle journal misses nothing the child sent. A message
-            // waiting for its turn holds the settlement — the message
-            // relay's reconciliation reloads a child a replaced Harness
-            // dropped — but not past MESSAGE_TURN_WAIT_MS of no activity.
+            // after it misses nothing a settled turn sent. A message waiting
+            // for its turn holds the settlement — the message relay's
+            // reconciliation reloads a child a replaced Harness dropped —
+            // but not past MESSAGE_TURN_WAIT_MS without any journal event.
             ChildResultRelayStore.JournalTurns journal = journalTurns(row);
             if (journal != null) {
                 if (journal.pendingMessageInputs() > 0
@@ -466,7 +466,12 @@ public class ChildResultRelay {
             ChildResultRelayStore.EdgeMessages edge = relayStore.edgeMessages(
                     row.tenantId(), row.parentSessionId(), row.childRunId(),
                     row.childSessionId());
-            if (edge.undelivered() > 0) {
+            // A parent's message the child received after the journal read
+            // is one that read never saw waiting: watch again.
+            boolean unseen = edge.receivedToChild().stream().anyMatch(
+                    input -> journal == null
+                            || !journal.messageInputs().contains(input));
+            if (edge.undelivered() > 0 || unseen) {
                 relayStore.scheduleRetry(row, owner, now + HEARTBEAT_MS,
                         now + LEASE_MS, now);
                 return;
@@ -486,24 +491,23 @@ public class ChildResultRelay {
         }
     }
 
-    /** The child's journal turns, or null where a compacted journal of a
-     * child that never messaged leaves H4b's API Turn result alone. */
+    /** The child's journal turns, or null for a child that holds no
+     * session message: no message turn ran there, so H4b's API Turn result
+     * stands and its journal is never read. */
     private ChildResultRelayStore.JournalTurns journalTurns(RelayRow row) {
-        try {
-            return relayStore.journalTurns(row.tenantId(),
-                    row.childSessionId());
-        } catch (IllegalStateException error) {
-            if (relayStore.hasSessionMessages(row.tenantId(),
-                    row.childSessionId())) {
-                throw error;
-            }
+        if (!relayStore.hasSessionMessages(row.tenantId(),
+                row.childSessionId())) {
             return null;
         }
+        return relayStore.journalTurns(row.tenantId(), row.childSessionId());
     }
 
     private void settleFrom(RelayRow row, PendingChild pending,
             String status, String turnId, long completedAt,
             boolean journalTurn, Integer messageCount, long now) {
+        if (settledAlready(row, pending, status, now)) {
+            return;
+        }
         switch (status) {
             case "COMPLETED" -> complete(row, pending, status, turnId,
                     completedAt, journalTurn, messageCount, now);
@@ -539,18 +543,40 @@ public class ChildResultRelay {
         }
     }
 
+    /**
+     * A settlement already committed (its reply was lost) stands: the
+     * newest turn may have moved since, and a recomputed one — a result
+     * over a failure, a failure over a result — would only conflict with
+     * it. A committed result goes on to its acceptance; a committed
+     * failure only owes the close and the classification.
+     */
+    private boolean settledAlready(RelayRow row, PendingChild pending,
+            String status, long now) {
+        if (!"COMPLETED".equals(status) && !"CANCELLED".equals(status)
+                && !"FAILED".equals(status)) {
+            return false;
+        }
+        JsonNode settled = relayStore.childRunBody(row.tenantId(),
+                row.parentSessionId(), row.childRunId());
+        if (settled == null) {
+            return false;
+        }
+        if (settled.path("resultRef").isObject()) {
+            accept(row, pending, now);
+            return true;
+        }
+        if ("failed".equals(settled.path("run").path("state").asText())) {
+            boolean closed = closeFinishedChild(row, now);
+            finishOrRetainDebt(row, row.childSessionId(), closed, "done",
+                    "child run already failed", now);
+            return true;
+        }
+        return false;
+    }
+
     private void complete(RelayRow row, PendingChild pending, String status,
             String turnId, long completedAt, boolean journalTurn,
             Integer messageCount, long now) {
-        JsonNode settled = relayStore.childRunBody(row.tenantId(),
-                row.parentSessionId(), row.childRunId());
-        if (settled != null && settled.path("resultRef").isObject()) {
-            // The result already committed (its reply was lost): the newest
-            // turn may have moved since, and a recomputed result would only
-            // conflict with the committed one, so the acceptance follows it.
-            accept(row, pending, now);
-            return;
-        }
         String text = journalTurn
                 ? relayStore.journalTurnText(row.tenantId(),
                         row.childSessionId(), turnId)
@@ -630,6 +656,15 @@ public class ChildResultRelay {
     }
 
     private void deliver(RelayRow row, long now) {
+        if (row.childSessionId() != null && relayStore.childOwesHandover(
+                row.tenantId(), row.childSessionId())) {
+            // H4d-b: a message the child sent after the settlement's reads
+            // (a later wake turn) still leaves before its Session closes;
+            // the message relay's give-up bounds the wait.
+            relayStore.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                    now + LEASE_MS, now);
+            return;
+        }
         Map<String, Object> accepted = new LinkedHashMap<>();
         accepted.put("operationId", UUID.randomUUID().toString());
         accepted.put("kind", "mark_accepted");

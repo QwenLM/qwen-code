@@ -62,6 +62,21 @@ class SessionMessageRelayStoreTest {
                 + "\",\"childRunId\":\"" + childRunId + "\"}";
     }
 
+    private static String received(String childRunId, String inputId) {
+        return "{\"direction\":\"outbound\",\"route\":\"to_child\","
+                + "\"childRunId\":\"" + childRunId + "\",\"inputId\":\""
+                + inputId + "\"}";
+    }
+
+    private void session(String sessionId, String status) {
+        jdbc.update("DELETE FROM managed_agent_session WHERE tenant_id = ?"
+                + " AND session_id = ?", TENANT, sessionId);
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+                        + " session_id, agent_id, status, created_at,"
+                        + " updated_at) VALUES (?, ?, 'qwen-code', ?, 0, 0)",
+                TENANT, sessionId, status);
+    }
+
     private void resource(String sessionId, String resourceId, byte[] bytes) {
         jdbc.update("INSERT INTO qwen_managed_session_resource"
                         + " (session_scope_key, tenant_id, workspace_id,"
@@ -215,19 +230,31 @@ class SessionMessageRelayStoreTest {
     void countsTheMessagesOnOneEdgeAndThoseStillOwingAHandover() {
         String parent = UUID.randomUUID().toString();
         String child = UUID.randomUUID().toString();
+        session(child, "ACTIVE");
         assertThat(records.edgeMessages(TENANT, parent, "run-1", child))
-                .isEqualTo(new ChildResultRelayStore.EdgeMessages(0, 0));
+                .isEqualTo(new ChildResultRelayStore.EdgeMessages(0, 0,
+                        List.of()));
         message(parent, "msg_a", "planned", outbound("to_child", "run-1"));
         message(parent, "msg_b", "accepting", outbound("to_child", "run-2"));
-        message(parent, "msg_c", "accepted", outbound("to_child", "run-1"));
+        message(parent, "msg_c", "accepted",
+                received("run-1", "msg_c:message"));
         // A given-up entry the relay ended on its sender holds nothing.
         message(parent, "msg_d", "unknown", outbound("to_child", "run-1"));
         message(parent, "msg_f", "accepted",
                 "{\"direction\":\"inbound\",\"route\":\"to_parent\","
                         + "\"childRunId\":\"run-1\"}");
         message(child, "msg_e", "accepting", outbound("to_parent", "run-1"));
+        // The received one names its input, for the journal cross-check.
         assertThat(records.edgeMessages(TENANT, parent, "run-1", child))
-                .isEqualTo(new ChildResultRelayStore.EdgeMessages(2, 3));
+                .isEqualTo(new ChildResultRelayStore.EdgeMessages(2, 3,
+                        List.of("msg_c:message")));
+        assertThat(records.childOwesHandover(TENANT, child)).isTrue();
+        // A closed child's outbox is orphaned and never moves again: it
+        // holds neither the settlement nor the close.
+        session(child, "CLOSED");
+        assertThat(records.edgeMessages(TENANT, parent, "run-1", child)
+                .undelivered()).isEqualTo(1);
+        assertThat(records.childOwesHandover(TENANT, child)).isFalse();
         assertThat(records.hasSessionMessages(TENANT, child)).isTrue();
         assertThat(records.hasSessionMessages(TENANT,
                 UUID.randomUUID().toString())).isFalse();
@@ -271,6 +298,7 @@ class SessionMessageRelayStoreTest {
         journal(child, 3, input("mon:notify:1", "monitor"));
         JournalTurns pending = records.journalTurns(TENANT, child);
         assertThat(pending.pendingMessageInputs()).isEqualTo(1);
+        assertThat(pending.messageInputs()).containsExactly("msg_1:message");
         assertThat(pending.lastActivityAt()).isEqualTo(10);
         assertThat(pending.lastSettled().turnId()).isEqualTo("turn-api");
         assertThat(pending.lastSettled().source()).isEqualTo("hosted-harness");
@@ -284,6 +312,12 @@ class SessionMessageRelayStoreTest {
         JournalTurns idle = records.journalTurns(TENANT, child);
         assertThat(idle.pendingMessageInputs()).isZero();
         assertThat(idle.lastActivityAt()).isEqualTo(30);
+        // Any event is activity, not only inputs and settlements: a long
+        // turn's model attempts and tool steps keep it alive.
+        journal(child, 5, "{\"kind\":\"model.attempt\",\"occurredAt\":50,"
+                + "\"payload\":{\"attemptId\":\"a\",\"state\":\"started\"}}");
+        assertThat(records.journalTurns(TENANT, child).lastActivityAt())
+                .isEqualTo(50);
         assertThat(idle.lastSettled()).isEqualTo(
                 new ChildResultRelayStore.SettledTurn("msg_1:message",
                         "completed", "session_message", 20));
@@ -293,6 +327,23 @@ class SessionMessageRelayStoreTest {
                 .isEqualTo("first");
         assertThat(records.journalTurnText(TENANT, child, "turn-none"))
                 .isNull();
+    }
+
+    @Test
+    void joinsTextRunsAThoughtSeparatesWithANewline() {
+        String child = UUID.randomUUID().toString();
+        resource(child, "split", ("{\"type\":\"assistant\","
+                + "\"daemonPromptId\":\"msg_3:message\",\"message\":{"
+                + "\"role\":\"model\",\"parts\":[{\"text\":\"first \"},"
+                + "{\"text\":\"half\"},{\"text\":\"plan\",\"thought\":true},"
+                + "{\"text\":\"second\"}]}}").getBytes(StandardCharsets.UTF_8));
+        journal(child, 1, input("msg_3:message", "session_message"),
+                assistant("split", "managed-message"),
+                settled("msg_3:message", "completed", 5));
+        // As the API Turn's output_text parts join: adjacent text runs
+        // concatenate, a thought between them starts a new line.
+        assertThat(records.journalTurnText(TENANT, child, "msg_3:message"))
+                .isEqualTo("first half\nsecond");
     }
 
     @Test

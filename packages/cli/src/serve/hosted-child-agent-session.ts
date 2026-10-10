@@ -51,7 +51,6 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import {
   MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS,
-  isInFlightMessage,
   isUndeliveredMessage,
   outboundMessageBody,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
@@ -234,8 +233,9 @@ export function boundedNotificationText(
 
 /**
  * H4d-b: a child run cannot settle while a message from its parent still
- * owes its handover — the message would arrive at a run that has ended.
- * The relay answers it by watching again, never by counting an attempt.
+ * owes its handover, nor over more messages than the settlement saw — the
+ * message would arrive at a run that has ended. The relay answers it by
+ * watching again, never by counting an attempt.
  */
 export class ChildMessagesPendingError extends Error {}
 
@@ -477,12 +477,12 @@ export class HostedChildAgentSession {
           };
         }
         if (
-          sentBefore.filter(isInFlightMessage).length >=
+          sentBefore.filter(isUndeliveredMessage).length >=
           limits.maxInFlightPerRun
         ) {
           return {
             kind: 'refused',
-            reason: `Child agent task ${headTask} has ${limits.maxInFlightPerRun} messages it has not read yet (count_limit); wait for its answer.`,
+            reason: `Child agent task ${headTask} has ${limits.maxInFlightPerRun} messages still on their way to it (count_limit); wait for them to arrive.`,
           };
         }
         const contentRef = await this.store.resources.publish(

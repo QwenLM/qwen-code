@@ -493,6 +493,26 @@ class SessionMessageRelayTest {
     }
 
     // A give-up whose sender step faltered owes it: retried, not classified.
+    // The give-up decides from the entry as committed after the failed
+    // step: a handover that landed before its delivery failed is never
+    // cancelled from the planned state the claim saw.
+    @Test
+    void givesUpFromTheEntryAsTheFailedStepLeftIt() {
+        body("to_child", PARENT, CHILD);
+        when(store.currentRecord(anyString(), anyString(), anyString()))
+                .thenAnswer(ignored -> new SessionMessageRelayStore
+                        .CurrentRecord(kinds().contains("handover")
+                                ? "accepting" : "planned",
+                                "resource-message"));
+        harness.refuseKind = "receive";
+        harness.refuseCode = "session_message_failed";
+        row.set(new MessageRow(TENANT, PARENT, MESSAGE, null, "relaying",
+                "owner", 31_000L, 63, 0, null));
+        relay.scan();
+        assertThat(kinds()).containsExactly("handover", "unknown");
+        assertThat(row.get().state()).isEqualTo("unknown");
+    }
+
     @Test
     void owesAGiveUpWhoseSenderStepFaltered() {
         harness.refuseKind = "handover";

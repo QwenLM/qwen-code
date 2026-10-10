@@ -139,7 +139,7 @@ public class SessionMessageRelay {
                 default -> store.classify(row, owner, "done", null, now);
             }
         } catch (RuntimeException error) {
-            defer(row, current, error, now);
+            defer(row, error, now);
         }
     }
 
@@ -339,18 +339,22 @@ public class SessionMessageRelay {
      * its receipt exists and otherwise unknown. A give-up whose sender
      * step faltered owes it and retries, never classifying over it.
      */
-    private void defer(MessageRow row,
-            SessionMessageRelayStore.CurrentRecord current,
-            RuntimeException error, long now) {
+    private void defer(MessageRow row, RuntimeException error, long now) {
         if (row.attempts() + 1 >= MAX_ATTEMPTS) {
             try {
-                String state = current.deliveryState();
+                // The failed step may have moved the entry (a handover that
+                // landed before its delivery failed): decide from it as
+                // committed now.
+                SessionMessageRelayStore.CurrentRecord latest =
+                        store.currentRecord(row.tenantId(),
+                                row.senderSessionId(), row.messageId());
+                String state = latest == null ? null : latest.deliveryState();
                 if ("planned".equals(state)) {
                     senderOperation(row, "cancelled", Map.of());
                 } else if ("accepting".equals(state)
                         || "unknown".equals(state)) {
                     JsonNode body = readJson(records.readResource(
-                            row.tenantId(), current.recordResourceId()),
+                            row.tenantId(), latest.recordResourceId()),
                             "message body");
                     if (store.deliveryState(row.tenantId(), target(body),
                             row.messageId()) != null) {
