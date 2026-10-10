@@ -209,12 +209,26 @@ keywords cannot be missed. Candidates are counted before prompt trimming so a se
 result arrives after a skip; the shared client delivers it as the fast phase.
 This is an ablation experiment; default behavior is unchanged.
 
-Extraction cadence is unchanged. The #13004 cooldown implementation was removed
-from #13158: its shutdown tail and suspended oldest windows require durable
-replay before skipped facts can be preserved. Its raw-window, timestamp,
-failure-limit and compaction changes are also removed. Historical code remains
-at `a4568de26e49`; #13004 stays open. Selector-only validation must not be cited
-as extraction, quality, or token-savings acceptance.
+Extraction cadence is unchanged by default. The #13004 cooldown implementation
+was removed from #13158: its shutdown tail and suspended oldest windows require
+durable replay before skipped facts can be preserved. Historical code remains
+at `a4568de26e49`. #13571 adds a default-off experiment instead:
+`QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS` (0–3) skips up to N turns after a
+run that used a tool and saved nothing, only while every unprocessed entry fits
+half of the extractor's 40-entry tail and the prompt is below the compaction
+warning tier. An ACP session close flushes skipped turns within the remaining
+close budget, but that flush is best-effort: the cache-safe slot it reads is
+process-global, so another session capturing the slot first drops it silently.
+Compaction — which the warning-tier condition only makes less likely, since the
+token-independent screenshot trigger and a forced `/compress` both compact below
+that tier —, `/clear`, `/resume`, `/branch`, process exit and a close flush that
+lost the shared cache-safe slot to another session do not flush: up to N skipped
+turns are lost there, and a switch drops both sessions' skip state. The window
+bound is checked at skip time only, so a long following turn can still push a
+skipped turn out of the tail. These losses are what the paired runs must
+measure before the default can change; #13004 stays open. Selector-only
+validation must not be cited as extraction, quality, or token-savings
+acceptance.
 
 Short Latin keywords require token boundaries, so `ai` does not match
 `explain`. Han, Hiragana, Katakana, and Hangul use a shared CJK tokenizer. Body
