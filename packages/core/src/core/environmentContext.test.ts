@@ -630,10 +630,50 @@ describe('stripSystemReminderBlocks', () => {
     ).toBe('abc');
   });
 
-  it('drops a trailing unclosed reminder block', () => {
+  it('preserves an unclosed open tag and the text after it (#12961)', () => {
     expect(stripSystemReminderBlocks('keep <system-reminder>secret')).toBe(
-      'keep ',
+      'keep <system-reminder>secret',
     );
+    expect(
+      stripSystemReminderBlocks(
+        'How does <system-reminder> work in this repo? Also remember that I prefer tabs over spaces.',
+      ),
+    ).toBe(
+      'How does <system-reminder> work in this repo? Also remember that I prefer tabs over spaces.',
+    );
+    expect(
+      stripSystemReminderBlocks(
+        '<system-reminder> is a tag name; please explain it',
+      ),
+    ).toBe('<system-reminder> is a tag name; please explain it');
+  });
+
+  it('preserves stray closing tags without matching opener (#12961)', () => {
+    expect(stripSystemReminderBlocks('what </system-reminder> happened')).toBe(
+      'what </system-reminder> happened',
+    );
+  });
+
+  it('pairs close tag with nearest open tag, preserving preceding unclosed tag (#12961)', () => {
+    expect(
+      stripSystemReminderBlocks(
+        'what is <system-reminder>? <system-reminder>x</system-reminder> hello',
+      ),
+    ).toBe('what is <system-reminder>?  hello');
+  });
+
+  it('preserves stray closing tag followed by unclosed open tag (#12961)', () => {
+    expect(
+      stripSystemReminderBlocks('a </system-reminder> b <system-reminder> c'),
+    ).toBe('a </system-reminder> b <system-reminder> c');
+  });
+
+  it('scans large inputs with unclosed tags in linear time', () => {
+    const unclosedRepeated = `${'<system-reminder>'.repeat(10000)}trailing`;
+    const start = performance.now();
+    expect(stripSystemReminderBlocks(unclosedRepeated)).toBe(unclosedRepeated);
+    const elapsed = performance.now() - start;
+    expect(elapsed).toBeLessThan(100);
   });
 });
 

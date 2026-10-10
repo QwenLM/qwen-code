@@ -597,6 +597,27 @@ describe('tryGenerateSessionTitle', () => {
     expect(captured).toContain('what does this function do?');
   });
 
+  it('preserves unclosed system reminder tag in title prompt (#12961)', async () => {
+    const history: Content[] = [
+      userText('what is <system-reminder>? please explain it'),
+      modelText('It injects runtime reminders.'),
+    ];
+
+    let captured = '';
+    const { config } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history,
+      generateJsonResult: async (opts: unknown) => {
+        captured = JSON.stringify((opts as { contents: Content[] }).contents);
+        return { title: 'Explain system reminder' };
+      },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal);
+
+    expect(captured).toContain('what is <system-reminder>? please explain it');
+  });
+
   it('tail-slices conversations longer than 1000 characters', async () => {
     // A session that pivots mid-conversation — the final topic is what the
     // title should reflect. Feeding the head risks titling the session by

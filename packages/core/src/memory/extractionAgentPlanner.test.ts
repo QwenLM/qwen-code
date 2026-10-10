@@ -288,6 +288,44 @@ describe('runAutoMemoryExtractionByAgent', () => {
     );
   });
 
+  it('preserves user turns containing unclosed system-reminder tags (#12961)', async () => {
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: 'How does <system-reminder> work? Remember that I prefer Python.',
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'Understood.' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+      filesWritten: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    expect(vi.mocked(runForkedAgent).mock.calls[0]?.[0].extraHistory).toEqual([
+      {
+        role: 'user',
+        parts: [
+          {
+            text: 'How does <system-reminder> work? Remember that I prefer Python.',
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'Understood.' }] },
+    ]);
+  });
+
   it('keeps the triggering turn when sanitization empties the trailing model message', async () => {
     vi.mocked(getCacheSafeParams).mockReturnValue({
       generationConfig: {},
