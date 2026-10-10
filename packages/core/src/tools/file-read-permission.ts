@@ -7,9 +7,14 @@
 import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
+import { getVerifiedManagedExtensionsDir } from '../extension/managed-extension-dir.js';
 import { isAnyAutoMemPath } from '../memory/paths.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { isSubpaths, realpathNearestExisting } from '../utils/paths.js';
+import {
+  isSubpath,
+  isSubpaths,
+  realpathNearestExisting,
+} from '../utils/paths.js';
 
 export function getFileReadDefaultPermission(
   config: Config,
@@ -22,6 +27,9 @@ export function getFileReadDefaultPermission(
   // the decision and the open agree on which bytes are meant.
   const filePath = realpathNearestExisting(path.resolve(requestedPath));
   const workspaceContext = config.getWorkspaceContext();
+  const managedExtensionsDir = getVerifiedManagedExtensionsDir(
+    config.getManagedExtensionsDir(),
+  );
 
   // SYNC: Keep these base roots and the auto-memory check below aligned with
   // AcpAgent.buildAcpLocalReadRoots' mirrored ReadFileTool group. ACP may
@@ -57,6 +65,12 @@ export function getFileReadDefaultPermission(
   if (
     workspaceContext.isPathWithinWorkspace(filePath) ||
     isSubpaths(allowedRoots, filePath) ||
+    // The managed root must still be live at its pinned canonical path.
+    // Match it lexically so a relink cannot relocate the read boundary;
+    // the candidate realpath also refuses links shipped inside the root
+    // that point outside it.
+    (managedExtensionsDir !== undefined &&
+      isSubpath(managedExtensionsDir, filePath)) ||
     // isAnyAutoMemPath narrows to the managed auto-memory roots
     // (per-project + user-level under ~/.qwen/memories/) — never the
     // broad getMemoryBaseDir() — to avoid exposing sensitive ~/.qwen

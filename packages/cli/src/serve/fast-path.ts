@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { resolveManagedExtensionsDir } from '@qwen-code/qwen-code-core/extension/managed-extension-dir.js';
 import {
   assertExecutionSandboxSupported,
   InvalidExecutionSandboxConfigError,
@@ -72,6 +73,7 @@ const NUMBER_OPTIONS = new Map<
 const NUMBER_OPTION_BY_FLAG = invertOptionMap(NUMBER_OPTIONS);
 
 const STRING_OPTION_BY_FLAG = new Map<string, keyof ServeOptions>([
+  ['managed-extensions', 'managedExtensions'],
   ['hostname', 'hostname'],
   ['token', 'token'],
   ['workspace', 'workspace'],
@@ -155,7 +157,10 @@ function setServeOption(
   key: keyof ServeOptions,
   value: unknown,
 ): void {
-  (options as unknown as Record<string, unknown>)[key] = value;
+  (options as unknown as Record<string, unknown>)[key] =
+    key === 'managedExtensions'
+      ? resolveManagedExtensionsDir(value as string)
+      : value;
 }
 
 function getRateLimitValidationError(options: ServeOptions): string | null {
@@ -409,8 +414,10 @@ export function parseServeFastPathArgs(
       if (!read) return { kind: 'fallback' };
       i = read.nextIndex;
       if (
-        stringTarget === 'workspace' &&
-        (options.workspace !== undefined || read.value === '')
+        (stringTarget === 'workspace' &&
+          (options.workspace !== undefined || read.value === '')) ||
+        (stringTarget === 'managedExtensions' &&
+          options.managedExtensions !== undefined)
       ) {
         return { kind: 'fallback' };
       }

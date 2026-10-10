@@ -610,7 +610,7 @@ export async function main() {
     const { handleList: handleListExtensions } = await import(
       './commands/extensions/list.js'
     );
-    await handleListExtensions();
+    await handleListExtensions(argv.managedExtensions);
     process.exit(0);
   }
 

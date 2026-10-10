@@ -82,7 +82,12 @@ export async function convertCompatibleExtension(
       signal,
     );
     newExtensionDir = converted.convertedDir;
-    if (getAgentPluginSchemaStatus(newExtensionDir) !== 'unrelated') {
+    const convertedAgentPluginStatus =
+      getAgentPluginSchemaStatus(newExtensionDir);
+    if (
+      convertedAgentPluginStatus === 'supported' ||
+      convertedAgentPluginStatus === 'unsupported'
+    ) {
       fs.rmSync(path.join(newExtensionDir, AGENT_PLUGIN_MANIFEST), {
         force: true,
       });

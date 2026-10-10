@@ -4054,6 +4054,74 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('adds the deployment-managed extension root to ACP file system fallback roots', async () => {
+    const previousRoots = process.env[acpLocalReadRootsEnv];
+    delete process.env[acpLocalReadRootsEnv];
+
+    const managedRoot = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-managed-read-')),
+    );
+    try {
+      // The managed root is not a canonicalized localReadRoots entry; the
+      // helper asserts it arrives as the sole lexicalLocalReadRoots entry.
+      const expected = expectedDefaultAcpLocalReadRoots();
+      await expectAcpLocalReadRoots(
+        'session-with-fs-managed',
+        expected,
+        '/runtime-a',
+        managedRoot,
+      );
+    } finally {
+      await fs.rm(managedRoot, { recursive: true, force: true });
+      restoreOptionalEnv(acpLocalReadRootsEnv, previousRoots);
+    }
+  });
+
+  it('omits an unavailable configured managed root from ACP local read roots', async () => {
+    const previousRoots = process.env[acpLocalReadRootsEnv];
+    delete process.env[acpLocalReadRootsEnv];
+    const managedRoot = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-managed-missing-')),
+    );
+    try {
+      await fs.rm(managedRoot, { recursive: true });
+      await expectAcpLocalReadRoots(
+        'session-with-fs-managed-missing',
+        expectedDefaultAcpLocalReadRoots(),
+        '/runtime-a',
+        managedRoot,
+        [],
+      );
+    } finally {
+      await fs.rm(managedRoot, { recursive: true, force: true });
+      restoreOptionalEnv(acpLocalReadRootsEnv, previousRoots);
+    }
+  });
+
+  it('keeps the deployment extension root when a new session changes cwd', async () => {
+    await setupSessionMocks('managed-session');
+    const managedExtensions = '/deployment/prepared extensions';
+    const agentPromise = runAcpAgent(mockConfig, makeSessionSettings(), {
+      ...mockArgv,
+      managedExtensions,
+    });
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    } as AgentSideConnectionLike) as AgentLike;
+    await agent.newSession({ cwd: '/another-workspace', mcpServers: [] });
+    expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[1]).toMatchObject({
+      managedExtensions,
+    });
+    expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[2]).toBe(
+      '/another-workspace',
+    );
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('passes each concurrent newSession its own workspace settings instance', async () => {
     const settingsA = makeSessionSettings();
     const settingsB = makeSessionSettings();
@@ -5669,6 +5737,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       hasSessionWriteOwnership: vi.fn().mockReturnValue(false),
       getSessionRuntimeBaseDir: vi.fn().mockReturnValue('/runtime-a'),
       getPlansDir: vi.fn().mockReturnValue('/home/test/.qwen/plans'),
+      getManagedExtensionsDir: vi.fn().mockReturnValue(undefined),
       activateProvisionalWorkspace: vi.fn().mockResolvedValue(undefined),
       setFileSystemService: vi.fn(),
       getHookSystem: vi.fn().mockReturnValue(undefined),
@@ -5713,6 +5782,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     sessionId: string,
     expectedLocalReadRoots: string[],
     runtimeBaseDir = '/runtime-a',
+    managedExtensionsDir?: string,
+    expectedLexicalLocalReadRoots = managedExtensionsDir
+      ? [managedExtensionsDir]
+      : [],
   ): Promise<void> {
     const fsCapabilities = { readTextFile: true, writeTextFile: true };
     const fallbackFileSystem: Record<string, never> = {};
@@ -5721,6 +5794,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getTargetDir: vi.fn().mockReturnValue('/project'),
       getSessionId: vi.fn().mockReturnValue(sessionId),
       getSessionRuntimeBaseDir: vi.fn().mockReturnValue(runtimeBaseDir),
+      getManagedExtensionsDir: vi.fn().mockReturnValue(managedExtensionsDir),
       getFileSystemService: vi.fn().mockReturnValue(fallbackFileSystem),
       setFileSystemService: vi.fn(),
       storage: {
@@ -5776,6 +5850,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         fallbackFileSystem,
         {
           localReadRoots: expectedLocalReadRoots,
+          // The managed root is pinned lexically so the read fallback never
+          // re-resolves it (a mid-session relink must not relocate reads).
+          lexicalLocalReadRoots: expectedLexicalLocalReadRoots,
         },
       );
       expect(innerConfig.setFileSystemService).toHaveBeenCalled();
@@ -20241,6 +20318,485 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     return { agent, agentPromise };
   }
 
+  async function withWithdrawnAuxiliaryManagedFixture(
+    run: (fixture: {
+      workspace: string;
+      managedExtensionsDir: string;
+      refresh: (options?: { allowManagedHandBack?: boolean }) => Promise<void>;
+      assertRetained: (passive?: boolean) => Promise<void>;
+      assertRuntimeHandBack: () => Promise<void>;
+    }) => Promise<void>,
+  ) {
+    const { ExtensionManager: RealExtensionManager, getExtensionId } =
+      await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core/extension/extensionManager.js')
+      >('@qwen-code/qwen-code-core/extension/extensionManager.js');
+    const { ExtensionStore } = await vi.importActual<
+      typeof import('@qwen-code/qwen-code-core/extension/extension-store.js')
+    >('@qwen-code/qwen-code-core/extension/extension-store.js');
+    const extensionSettings = await vi.importActual<
+      typeof import('@qwen-code/qwen-code-core/extension/extensionSettings.js')
+    >('@qwen-code/qwen-code-core/extension/extensionSettings.js');
+    const { KeychainTokenStorage } = await vi.importActual<
+      typeof import('@qwen-code/qwen-code-core/mcp/token-storage/keychain-token-storage.js')
+    >('@qwen-code/qwen-code-core/mcp/token-storage/keychain-token-storage.js');
+    const root = await realFsPromises.realpath(
+      await realFsPromises.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-auxiliary-'),
+      ),
+    );
+    const home = path.join(root, 'home');
+    const workspace = path.join(root, 'workspace');
+    const managedExtensionsDir = path.join(root, 'deployment');
+    const deployed = path.join(managedExtensionsDir, 'bundle');
+    const keychainAvailable = vi
+      .spyOn(KeychainTokenStorage.prototype, 'isAvailable')
+      .mockResolvedValue(false);
+    const keytarUnavailable = vi
+      .spyOn(KeychainTokenStorage.prototype, 'getKeytar')
+      .mockResolvedValue(null);
+    try {
+      vi.stubEnv('QWEN_HOME', home);
+      vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
+      await realFsPromises.mkdir(deployed, { recursive: true });
+      await realFsPromises.mkdir(workspace);
+      const manifest = {
+        name: 'acp-auxiliary-managed',
+        version: '1.0.0',
+        settings: [
+          {
+            name: 'Token',
+            description: 'test token',
+            envVar: 'TOKEN',
+            sensitive: true,
+          },
+        ],
+      };
+      await realFsPromises.writeFile(
+        path.join(deployed, 'qwen-extension.json'),
+        JSON.stringify(manifest),
+      );
+      const manager = new RealExtensionManager({
+        managedExtensionsDir,
+        workspaceDir: workspace,
+        isWorkspaceTrusted: true,
+      });
+      await manager.refreshCache();
+      const managed = manager.getLoadedExtensions()[0]!;
+      expect(managed.source).toBe('managed');
+      await extensionSettings.updateSetting(
+        manifest,
+        managed.id,
+        'TOKEN',
+        async () => 'test-only-sentinel',
+        extensionSettings.ExtensionSettingScope.USER,
+      );
+      const store = new ExtensionStore();
+      const statePath = path.join(store.storeDir, 'state.json');
+      const secretPath = path.join(home, 'extension-secrets-v1.json');
+      const snapshotBefore = await store.readSnapshot();
+      expect(Object.keys(snapshotBefore.extensions)).toEqual([managed.id]);
+      const policyBefore = snapshotBefore.extensions[managed.id]!;
+      const stateBefore = await realFsPromises.readFile(statePath, 'utf8');
+      const secretBefore = await realFsPromises.readFile(secretPath, 'utf8');
+      await realFsPromises.rm(deployed, { recursive: true });
+      const user = path.join(store.extensionsDir, managed.name);
+      await realFsPromises.mkdir(user, { recursive: true });
+      await realFsPromises.writeFile(
+        path.join(user, 'qwen-extension.json'),
+        JSON.stringify(manifest),
+      );
+      const assertRetained = async (passive = false) => {
+        const stateAfter = await realFsPromises.readFile(statePath, 'utf8');
+        if (passive) {
+          expect.soft(stateAfter).toBe(stateBefore);
+        } else {
+          expect.soft(JSON.parse(stateAfter)).toEqual({
+            ...snapshotBefore,
+            generation: snapshotBefore.generation + 1,
+            extensions: { [getExtensionId(manifest)]: policyBefore },
+          });
+        }
+        expect
+          .soft(await realFsPromises.readFile(secretPath, 'utf8'))
+          .toBe(secretBefore);
+        expect
+          .soft(
+            await extensionSettings.hasStoredExtensionSecrets(
+              managed.name,
+              managed.id,
+            ),
+          )
+          .toBe(true);
+      };
+      await run({
+        workspace,
+        managedExtensionsDir,
+        refresh: (options) => manager.refreshCache(options),
+        assertRetained,
+        assertRuntimeHandBack: async () => {
+          await manager.refreshCache();
+          expect(
+            await extensionSettings.hasStoredExtensionSecrets(
+              managed.name,
+              managed.id,
+            ),
+          ).toBe(false);
+          expect(
+            Object.values((await store.readSnapshot()).extensions).some(
+              (policy) => policy.name === managed.name && policy.managed,
+            ),
+          ).toBe(false);
+        },
+      });
+    } finally {
+      keychainAvailable.mockRestore();
+      keytarUnavailable.mockRestore();
+      vi.unstubAllEnvs();
+      await realFsPromises.rm(root, { recursive: true, force: true });
+    }
+  }
+
+  it('auxiliary MCP discovery retains withdrawn managed policy and credentials while status remains passive', async () => {
+    await withWithdrawnAuxiliaryManagedFixture(async (fixture) => {
+      const previousManagedRoot = mockArgv.managedExtensions;
+      mockArgv.managedExtensions = fixture.managedExtensionsDir;
+      mockConfig.getTargetDir = vi.fn().mockReturnValue(fixture.workspace);
+      const discoveryManager = {
+        discoverAllMcpToolsIncremental: vi.fn().mockResolvedValue(undefined),
+        getDiscoveryState: vi.fn().mockReturnValue(MCPDiscoveryState.COMPLETED),
+        getMcpClientAccounting: vi
+          .fn()
+          .mockReturnValue({ total: 0, refusedServerNames: [] }),
+        getMcpClientBudget: vi.fn().mockReturnValue(undefined),
+        getMcpBudgetMode: vi.fn().mockReturnValue(undefined),
+      };
+      const discoveryConfig = {
+        ...makeInnerConfig(),
+        initialize: vi.fn((options: Parameters<Config['initialize']>[0]) =>
+          fixture.refresh(options),
+        ),
+        setMcpTransportPool: vi.fn(),
+        getTargetDir: vi.fn().mockReturnValue(fixture.workspace),
+        getMcpServers: vi.fn().mockReturnValue({}),
+        getTopTierMcpServers: vi.fn().mockReturnValue(undefined),
+        getRuntimeMcpServers: vi.fn().mockReturnValue({}),
+        getCliAllowedMcpServerNames: vi.fn().mockReturnValue(undefined),
+        getToolRegistry: vi
+          .fn()
+          .mockReturnValue({ getMcpClientManager: () => discoveryManager }),
+      };
+      let agentPromise: Promise<void> | undefined;
+      try {
+        const boot = await bootCoreSettingsAgent(makeSessionSettings());
+        agentPromise = boot.agentPromise;
+        vi.mocked(loadCliConfig).mockResolvedValue(
+          discoveryConfig as unknown as Config,
+        );
+        await boot.agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceMcp, {});
+        expect(discoveryConfig.initialize).not.toHaveBeenCalled();
+        await fixture.assertRetained(true);
+        await expect(
+          boot.agent.extMethod(
+            SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize,
+            {},
+          ),
+        ).resolves.toEqual({ accepted: true });
+        await vi.waitFor(() =>
+          expect(
+            discoveryManager.discoverAllMcpToolsIncremental,
+          ).toHaveBeenCalledWith(discoveryConfig),
+        );
+        await fixture.assertRetained();
+        await fixture.assertRuntimeHandBack();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+        mockArgv.managedExtensions = previousManagedRoot;
+      }
+    });
+  });
+
+  it('temporary source-copy initialization retains managed credentials while source metadata persists', async () => {
+    await withWithdrawnAuxiliaryManagedFixture(async (fixture) => {
+      const sessionId = '11111111-1111-4111-8111-111111111111';
+      const targetSessionId = '22222222-2222-4222-8222-222222222222';
+      const { innerConfig } = await setupSourceMocks(sessionId);
+      innerConfig.storage.getProjectRoot.mockReturnValue(fixture.workspace);
+      innerConfig.getTargetDir.mockReturnValue(fixture.workspace);
+      innerConfig.getSessionService.mockReturnValue({
+        readSessionSources: vi.fn().mockResolvedValue({}),
+        loadSession: vi.fn().mockResolvedValue({
+          conversation: { messages: [{ forkedFrom: { sessionId } }] },
+        }),
+      } as unknown as SessionService);
+      const previousManagedRoot = mockArgv.managedExtensions;
+      mockArgv.managedExtensions = fixture.managedExtensionsDir;
+      let agentPromise: Promise<void> | undefined;
+      try {
+        const boot = await bootInitializedAcpAgent(
+          makeSessionSettings(),
+          'trusted-capability',
+        );
+        agentPromise = boot.agentPromise;
+        await boot.agent.newSession({ cwd: fixture.workspace, mcpServers: [] });
+        await expect(
+          boot.agent.extMethod('qwen/session/sources/upsert', {
+            sessionId,
+            input: {
+              title: 'Docs',
+              locator: { type: 'url', url: 'https://example.com/docs' },
+            },
+          }),
+        ).resolves.toMatchObject({ revision: 1, change: 'created' });
+        const copiedPath = path.join(fixture.workspace, 'copied-sources.json');
+        const targetConfig = makeInnerConfig();
+        targetConfig.getSessionId.mockReturnValue(targetSessionId);
+        targetConfig.storage.getProjectRoot.mockReturnValue(fixture.workspace);
+        targetConfig.getTargetDir.mockReturnValue(fixture.workspace);
+        targetConfig.initialize.mockImplementation(
+          (options?: Parameters<Config['initialize']>[0]) =>
+            fixture.refresh(options),
+        );
+        targetConfig.getSessionService.mockReturnValue({
+          readSessionSources: vi.fn().mockResolvedValue({}),
+        } as unknown as SessionService);
+        targetConfig.getChatRecordingService.mockReturnValue({
+          flush: vi.fn().mockResolvedValue(undefined),
+          recordSessionSourcesSnapshot: vi.fn((snapshot: unknown) =>
+            realFsPromises.writeFile(copiedPath, JSON.stringify(snapshot)),
+          ),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        let targetService: ReturnType<Config['getSessionSourceService']>;
+        targetConfig.setSessionSourceServiceFactory.mockImplementation(
+          (factory: () => ReturnType<Config['getSessionSourceService']>) => {
+            targetService = factory();
+          },
+        );
+        targetConfig.getSessionSourceService.mockImplementation(
+          () => targetService,
+        );
+        vi.mocked(loadCliConfig).mockResolvedValue(
+          targetConfig as unknown as Config,
+        );
+        await expect(
+          boot.agent.extMethod('qwen/session/sources/copy', {
+            sessionId,
+            targetSessionId,
+            targetCwd: fixture.workspace,
+            attachmentIds: [],
+          }),
+        ).resolves.toEqual({ warnings: [] });
+        const copied = JSON.parse(
+          await realFsPromises.readFile(copiedPath, 'utf8'),
+        );
+        expect(copied).toMatchObject({
+          revision: 1,
+          sources: [
+            {
+              title: 'Docs',
+              locator: { type: 'url', url: 'https://example.com/docs' },
+            },
+          ],
+        });
+        expect(targetConfig.shutdown).toHaveBeenCalled();
+        await fixture.assertRetained();
+        await fixture.assertRuntimeHandBack();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+        mockArgv.managedExtensions = previousManagedRoot;
+      }
+    });
+  });
+
+  it.each(['getCore', 'setExtensionSetting'] as const)(
+    'qwen/settings/%s preserves withdrawn managed secrets and ownership',
+    async (method) => {
+      const { ExtensionManager: RealExtensionManager } = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core/extension/extensionManager.js')
+      >('@qwen-code/qwen-code-core/extension/extensionManager.js');
+      const { ExtensionStore } = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core/extension/extension-store.js')
+      >('@qwen-code/qwen-code-core/extension/extension-store.js');
+      const extensionSettings = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core/extension/extensionSettings.js')
+      >('@qwen-code/qwen-code-core/extension/extensionSettings.js');
+      const { KeychainTokenStorage } = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core/mcp/token-storage/keychain-token-storage.js')
+      >(
+        '@qwen-code/qwen-code-core/mcp/token-storage/keychain-token-storage.js',
+      );
+      const coreApi = await import('@qwen-code/qwen-code-core');
+      const previousManagerImplementation = vi
+        .mocked(ExtensionManager)
+        .getMockImplementation()!;
+      const previousUpdateImplementation = vi
+        .mocked(coreApi.updateSetting)
+        .getMockImplementation()!;
+      const root = await realFsPromises.realpath(
+        await realFsPromises.mkdtemp(
+          path.join(os.tmpdir(), 'qwen-acp-managed-read-'),
+        ),
+      );
+      const previousManagedRoot = mockArgv.managedExtensions;
+      const keychainAvailable = vi
+        .spyOn(KeychainTokenStorage.prototype, 'isAvailable')
+        .mockResolvedValue(false);
+      const keytarUnavailable = vi
+        .spyOn(KeychainTokenStorage.prototype, 'getKeytar')
+        .mockResolvedValue(null);
+      let agentPromise: Promise<void> | undefined;
+      try {
+        vi.stubEnv('QWEN_HOME', path.join(root, 'home'));
+        vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
+        const managedExtensionsDir = path.join(root, 'deployment');
+        const deployed = path.join(managedExtensionsDir, 'bundle');
+        const workspace = path.join(root, 'workspace');
+        await realFsPromises.mkdir(deployed, { recursive: true });
+        await realFsPromises.mkdir(workspace);
+        const manifest = {
+          name: 'acp-managed-read',
+          version: '1.0.0',
+          settings: [
+            {
+              name: 'Token',
+              description: 'test token',
+              envVar: 'TOKEN',
+              sensitive: true,
+            },
+          ],
+        };
+        await realFsPromises.writeFile(
+          path.join(deployed, 'qwen-extension.json'),
+          JSON.stringify(manifest),
+        );
+        const manager = new RealExtensionManager({
+          managedExtensionsDir,
+          workspaceDir: workspace,
+          isWorkspaceTrusted: true,
+        });
+        await manager.refreshCache();
+        const managed = manager.getLoadedExtensions()[0]!;
+        expect(managed.source).toBe('managed');
+        await extensionSettings.updateSetting(
+          manifest,
+          managed.id,
+          'TOKEN',
+          async () => 'test-only-sentinel',
+          extensionSettings.ExtensionSettingScope.USER,
+        );
+        expect(
+          await extensionSettings.hasStoredExtensionSecrets(
+            managed.name,
+            managed.id,
+          ),
+        ).toBe(true);
+        await realFsPromises.rm(deployed, { recursive: true });
+        const store = new ExtensionStore();
+        const user = path.join(store.extensionsDir, managed.name);
+        await realFsPromises.mkdir(user, { recursive: true });
+        await realFsPromises.writeFile(
+          path.join(user, 'qwen-extension.json'),
+          JSON.stringify(manifest),
+        );
+        const unrelated = path.join(store.extensionsDir, 'unrelated-settings');
+        await realFsPromises.mkdir(unrelated);
+        await realFsPromises.writeFile(
+          path.join(unrelated, 'qwen-extension.json'),
+          JSON.stringify({
+            name: 'unrelated-settings',
+            version: '1.0.0',
+            settings: [
+              {
+                name: 'Value',
+                description: 'Unrelated preference',
+                envVar: 'VALUE',
+              },
+            ],
+          }),
+        );
+        const before = Object.values(
+          (await store.readSnapshot()).extensions,
+        ).find((policy) => policy.name === managed.name);
+        expect(before).toHaveProperty('managed', true);
+        mockArgv.managedExtensions = managedExtensionsDir;
+        const boot = await bootCoreSettingsAgent(makeCoreSettings());
+        agentPromise = boot.agentPromise;
+        vi.mocked(ExtensionManager).mockImplementation(
+          (options) => new RealExtensionManager(options),
+        );
+
+        vi.mocked(coreApi.updateSetting).mockImplementation(
+          extensionSettings.updateSetting,
+        );
+        const result = (await boot.agent.extMethod(`qwen/settings/${method}`, {
+          cwd: workspace,
+          ...(method === 'setExtensionSetting'
+            ? {
+                extensionId: 'unrelated-settings',
+                settingKey: 'VALUE',
+                value: 'changed',
+                scope: 'user',
+              }
+            : {}),
+        })) as { extensions: Array<{ name: string }> };
+        if (method === 'setExtensionSetting') {
+          expect(
+            await realFsPromises.readFile(path.join(unrelated, '.env'), 'utf8'),
+          ).toContain('changed');
+        }
+
+        expect(result.extensions).toContainEqual(
+          expect.objectContaining({ name: managed.name }),
+        );
+        expect
+          .soft(
+            await extensionSettings.hasStoredExtensionSecrets(
+              managed.name,
+              managed.id,
+            ),
+          )
+          .toBe(true);
+        expect
+          .soft(
+            Object.values((await store.readSnapshot()).extensions).some(
+              (policy) => policy.name === managed.name && policy.managed,
+            ),
+          )
+          .toBe(true);
+        expect
+          .soft(
+            Object.values((await store.readSnapshot()).extensions).find(
+              (policy) => policy.name === managed.name,
+            ),
+          )
+          .toEqual(before);
+        await manager.refreshCache();
+        expect(
+          await extensionSettings.hasStoredExtensionSecrets(
+            managed.name,
+            managed.id,
+          ),
+        ).toBe(false);
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+        vi.mocked(ExtensionManager).mockImplementation(
+          previousManagerImplementation,
+        );
+        vi.mocked(coreApi.updateSetting).mockImplementation(
+          previousUpdateImplementation,
+        );
+        mockArgv.managedExtensions = previousManagedRoot;
+        keychainAvailable.mockRestore();
+        keytarUnavailable.mockRestore();
+        vi.unstubAllEnvs();
+        await realFsPromises.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('qwen/settings getCore resolves the bootstrap target dir when cwd and sessionId are omitted', async () => {
     const settings = makeCoreSettings();
     // The no-sessionId fallback is the branch every in-repo caller actually
@@ -21960,6 +22516,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       skipHooks: true,
       skipSkillManager: true,
       skipFileCheckpointing: true,
+      allowManagedHandBack: false,
       lenientToolWarmup: true,
     });
 
@@ -28805,6 +29362,35 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     }
     return { agent, agentPromise };
   }
+
+  it.each(['load', 'resume'] as const)(
+    '%s preserves the deployment extension root across workspace restore',
+    async (action) => {
+      bindRestoreMocks({ sessionExists: true });
+      mockArgv.managedExtensions = '/deployment/prepared extensions';
+      const { agent, agentPromise } = await spawnAgent();
+      try {
+        const params = {
+          cwd: '/restored-workspace',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+          _meta: { managedExtensions: '/request-must-not-override' },
+        };
+        if (action === 'load') await agent.loadSession(params);
+        else await agent.unstable_resumeSession(params);
+        expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[1]).toMatchObject({
+          managedExtensions: '/deployment/prepared extensions',
+        });
+        expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[2]).toBe(
+          '/restored-workspace',
+        );
+      } finally {
+        mockArgv.managedExtensions = undefined;
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it.each([
     { action: 'load', standalone: false },

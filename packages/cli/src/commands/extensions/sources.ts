@@ -11,9 +11,14 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getExtensionManager } from './utils.js';
 import { t } from '../../i18n/index.js';
 
-export async function handleSourcesAdd(args: { source: string }) {
+export async function handleSourcesAdd(args: {
+  source: string;
+  managedExtensions?: string;
+}) {
   try {
-    const extensionManager = await getExtensionManager();
+    const extensionManager = await getExtensionManager(args.managedExtensions, {
+      allowManagedHandBack: false,
+    });
     const entry = await extensionManager.addSource(args.source);
     writeStdoutLine(t('Added marketplace "{{name}}".', { name: entry.name }));
   } catch (error) {
@@ -22,9 +27,14 @@ export async function handleSourcesAdd(args: { source: string }) {
   }
 }
 
-export async function handleSourcesRemove(args: { name: string }) {
+export async function handleSourcesRemove(args: {
+  name: string;
+  managedExtensions?: string;
+}) {
   try {
-    const extensionManager = await getExtensionManager();
+    const extensionManager = await getExtensionManager(args.managedExtensions, {
+      allowManagedHandBack: false,
+    });
     if (!extensionManager.removeSource(args.name)) {
       writeStderrLine(
         t('Marketplace "{{name}}" not found.', { name: args.name }),
@@ -39,9 +49,11 @@ export async function handleSourcesRemove(args: { name: string }) {
   }
 }
 
-export async function handleSourcesList() {
+export async function handleSourcesList(managedExtensions?: string) {
   try {
-    const extensionManager = await getExtensionManager();
+    const extensionManager = await getExtensionManager(managedExtensions, {
+      allowManagedHandBack: false,
+    });
     const sources = extensionManager.getSources();
     if (sources.length === 0) {
       writeStdoutLine(t('No marketplace sources added yet.'));
@@ -66,9 +78,14 @@ export async function handleSourcesList() {
   }
 }
 
-export async function handleSourcesUpdate(args: { name: string }) {
+export async function handleSourcesUpdate(args: {
+  name: string;
+  managedExtensions?: string;
+}) {
   try {
-    const extensionManager = await getExtensionManager();
+    const extensionManager = await getExtensionManager(args.managedExtensions, {
+      allowManagedHandBack: false,
+    });
     const entry = extensionManager
       .getSources()
       .find((source) => source.name === args.name);
@@ -110,7 +127,10 @@ const addCommand: CommandModule = {
       demandOption: true,
     }),
   handler: async (argv) => {
-    await handleSourcesAdd({ source: argv['source'] as string });
+    await handleSourcesAdd({
+      source: argv['source'] as string,
+      managedExtensions: argv['managed-extensions'] as string | undefined,
+    });
   },
 };
 
@@ -124,7 +144,10 @@ const removeCommand: CommandModule = {
       demandOption: true,
     }),
   handler: async (argv) => {
-    await handleSourcesRemove({ name: argv['name'] as string });
+    await handleSourcesRemove({
+      name: argv['name'] as string,
+      managedExtensions: argv['managed-extensions'] as string | undefined,
+    });
   },
 };
 
@@ -132,8 +155,8 @@ const listCommand: CommandModule = {
   command: 'list',
   describe: t('Lists configured marketplace sources.'),
   builder: (yargs) => yargs,
-  handler: async () => {
-    await handleSourcesList();
+  handler: async (argv) => {
+    await handleSourcesList(argv['managed-extensions'] as string | undefined);
   },
 };
 
@@ -147,7 +170,10 @@ const updateCommand: CommandModule = {
       demandOption: true,
     }),
   handler: async (argv) => {
-    await handleSourcesUpdate({ name: argv['name'] as string });
+    await handleSourcesUpdate({
+      name: argv['name'] as string,
+      managedExtensions: argv['managed-extensions'] as string | undefined,
+    });
   },
 };
 

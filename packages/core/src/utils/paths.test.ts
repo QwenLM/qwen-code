@@ -724,6 +724,41 @@ describe('realpathNearestExistingAsync', () => {
   });
 });
 
+describe.each([
+  ['sync', realpathNearestExisting],
+  ['async', realpathNearestExistingAsync],
+] as const)('realpath target traversal (%s)', (_mode, resolvePath) => {
+  const { at, real, link } = useRealRoot('realpath-target-traversal-');
+
+  itPosix(
+    'lets the filesystem resolve dot-dot inside a relative symlink target',
+    async () => {
+      fs.mkdirSync(real('child'));
+      link('intermediate', real('child'), 'dir');
+      const leaf = link('leaf', 'intermediate/../file.txt');
+      expect(fs.realpathSync.native(leaf)).toBe(real('file.txt'));
+      await expect(Promise.resolve(resolvePath(leaf))).resolves.toBe(
+        real('file.txt'),
+      );
+    },
+  );
+
+  itPosix(
+    'still normalizes dot-dot in the requested path before following links',
+    async () => {
+      fs.mkdirSync(real('request-child'));
+      fs.writeFileSync(at('request.txt'), 'lexical request');
+      fs.writeFileSync(real('request.txt'), 'physical traversal');
+      const directory = link('request-link', real('request-child'), 'dir');
+      const requested = `${directory}/../request.txt`;
+      expect(fs.readFileSync(requested, 'utf8')).toBe('physical traversal');
+      await expect(Promise.resolve(resolvePath(requested))).resolves.toBe(
+        at('request.txt'),
+      );
+    },
+  );
+});
+
 describe('shortenPath', () => {
   const sepForRegex = sep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // abs('a/b') is `${sep}a${sep}b`.

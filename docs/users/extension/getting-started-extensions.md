@@ -317,3 +317,83 @@ You've successfully created a Qwen Code extension! You learned how to:
 - Link your extension for local development.
 
 From here, you can explore more advanced features and build powerful new capabilities into the Qwen Code.
+
+## Deployment-managed extensions
+
+Pass a collection root with `--managed-extensions` to load prepared extensions directly,
+including with a new `QWEN_HOME`. No install, link, or install metadata is needed:
+
+```text
+prepared-extensions/
+└── example/
+    ├── qwen-extension.json
+    ├── QWEN.md
+    ├── skills/
+    ├── commands/
+    └── hooks/
+```
+
+```dockerfile
+COPY prepared-extensions/ /opt/example/extensions/
+```
+
+```bash
+qwen serve --managed-extensions /opt/example/extensions/
+qwen --managed-extensions ./prepared-extensions -e example
+qwen --managed-extensions ./prepared-extensions extensions list
+qwen --managed-extensions ./prepared-extensions extensions disable example
+qwen --managed-extensions ./prepared-extensions extensions enable example
+qwen mcp list --managed-extensions ./prepared-extensions
+```
+
+There is one optional root. Only direct children are discovered. Relative paths
+resolve against startup cwd once; serve carries the resulting absolute directory
+to all workspaces and new, resumed, or recreated Agent processes. Session requests
+cannot override it. An empty directory is valid; a missing, unreadable, non-directory, or
+symbolic-link root fails with a configuration error, and the accepted root is pinned
+to its canonical path once at startup. The managed root must be disjoint from
+Qwen’s writable extension and extension-store directories, including symlink
+and filesystem case aliases. Without this option, only the existing user extension source is discovered.
+Continue supplying the option to management commands. A returning user copy with retained managed ownership cannot accept activation changes until the configured source proves withdrawal; commands without that source report a conflict instead of accepting a change that hand-back would undo. Unchanged skill bodies remain deduplicated during refresh.
+
+After proven withdrawal, release preserves a surviving user package’s pre-managed activation preferences, even while its manifest needs repair. Incomplete managed-credential cleanup remains recorded, warns visibly and is retried during a later runtime refresh or explicit release. Browsing status does not perform this cleanup.
+
+Docker/Podman sandboxes mount the managed root read-only, including aliases exposed by their settings, runtime, and other generated mounts. Settings and runtime state outside the managed root remain writable. Keep the writable workspace and explicit writable mount sources outside the managed root; overlapping sources or conflicting mount destinations cause sandbox startup to fail. A managed subdirectory of a writable parent, such as `<QWEN_HOME>/prepared`, is supported through a read-only submount. Advanced `SANDBOX_FLAGS` overrides are operator-controlled and are not covered by this mount guard.
+
+macOS Seatbelt (`sandbox-exec`) does not support managed extensions, with either built-in or custom profiles. Startup refuses this combination; select Docker or Podman explicitly, for example with `QWEN_SANDBOX=docker`, since automatic sandbox selection on macOS can choose Seatbelt.
+
+For managed extensions, User-scope CLI enable/disable changes the default across
+all workspaces, including those outside your home directory. These explicit
+actions and management API default-activation changes (including batches) clear
+inherited legacy path rules only for managed packages. Exact workspace overrides keep their
+existing precedence. User-installed extensions retain their
+existing home-path activation behavior.
+
+Managed extensions default to enabled and obey trust, safe mode, tool approval,
+and the existing `-e/--extensions` name filter. Names use the existing validation
+and case-insensitive comparison. Managed wins a conflict with a user extension,
+with a warning; disabling it does not activate the shadowed user copy. A
+managed package that fails to load warns and keeps its name reserved — the
+declared manifest name when it can still be read, otherwise its directory name —
+so a same-name user copy cannot silently take its place. Name package
+directories after their packages so the reservation holds even when a manifest
+becomes unreadable. Duplicate
+managed names are an error. Activation preferences use the existing name-based
+user state and survive manifest version changes and relocation of the root.
+
+List output and management status expose the manifest version and managed source.
+Daemon entries add `extensionSource: "managed"`; the existing `source` field keeps
+its install-URL meaning for user packages. Settings, preferences, and caches stay
+in writable user state. Qwen never writes managed installation metadata or copies
+packages to `QWEN_HOME`. Update, uninstall, and replacement are refused by core
+operations; update-all reports and skips managed entries while processing user
+extensions. The deployment owner supplies new package versions. A direct-child directory without a governing manifest makes withdrawal uncertain, including an asset or staging directory, so retained managed ownership and credentials are not released until that directory is removed or completed. Stage deployment changes outside the managed collection and publish complete packages; an entirely empty collection still counts as withdrawal. After the owner removes a managed package, an explicit same-name user installation can inherit its saved activation and resource preferences if no user package is already installed. A still-present managed package remains protected from replacement. An empty settings directory or one containing only the regular user `.env` file can be adopted without discarding saved values; values explicitly supplied during installation take precedence. Other existing files, symlinks and secret-selector metadata are retained and reported as conflicts instead of being overwritten.
+
+Skills, hooks, MCP, context, and commands use the normal extension runtime.
+`${CLAUDE_PLUGIN_ROOT}` and `${extensionPath}` resolve at load time to the actual
+package directory; extension scripts should likewise locate their resources at
+runtime and write output outside the package. Use the existing explicit extension
+refresh after deployment changes. In serve, prefer `POST /workspaces/:workspace/extensions/refresh` for each selected workspace and wait for the returned operation to succeed; reconciliation updates live Agent sessions. The primary-workspace compatibility route, `POST /workspace/extensions/refresh`, returns synchronously and does not record the applied generation, so the background reconciler may refresh it again. No new watcher or MCP dynamic-tool notification mechanism is added.
+
+See the [design](../../design/managed-extension-directory.md) for scope and
+validation requirements.

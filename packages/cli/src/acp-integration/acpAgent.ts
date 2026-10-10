@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getVerifiedManagedExtensionsDir } from '@qwen-code/qwen-code-core/extension/managed-extension-dir.js';
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
   findSessionAgentBinding,
@@ -1014,7 +1015,9 @@ function buildAcpLocalReadRoots(config: Config): string[] {
   return [
     // SYNC: The first group mirrors ReadFileTool's default allowed local roots,
     // including auto-memory roots. The ACP-only additions below expand only
-    // local read fallback, not read_file's default permission.
+    // local read fallback, not read_file's default permission. The managed
+    // extensions root is NOT here: it is passed as a lexical root so the ACP
+    // read fallback never re-resolves it (see AcpFileSystemService).
     config.storage.getProjectTempDir(),
     path.join(config.storage.getProjectDir(), 'subagents'),
     path.join(config.getSessionRuntimeBaseDir(), 'tmp'),
@@ -1032,6 +1035,13 @@ function buildAcpLocalReadRoots(config: Config): string[] {
     ...defaultAcpOnlyLocalReadRoots(),
     ...parseAcpLocalReadRootsEnv(),
   ];
+}
+
+function buildAcpLexicalLocalReadRoots(config: Config): string[] {
+  const managedExtensionsDir = getVerifiedManagedExtensionsDir(
+    config.getManagedExtensionsDir(),
+  );
+  return managedExtensionsDir ? [managedExtensionsDir] : [];
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -4474,6 +4484,7 @@ class QwenAgent implements Agent {
           skipSkillManager: true,
           skipMcpDiscovery: true,
           lenientToolWarmup: true,
+          allowManagedHandBack: false,
         });
         const manager = config.getToolRegistry()?.getMcpClientManager();
         if (!manager) {
@@ -7349,11 +7360,12 @@ class QwenAgent implements Agent {
     let extensions: ReturnType<ExtensionManager['getLoadedExtensions']> = [];
     try {
       const extensionManager = new ExtensionManager({
+        managedExtensionsDir: this.argv.managedExtensions,
         workspaceDir: cwd,
         isWorkspaceTrusted: settings.isTrusted,
         locale: getCurrentLanguage(),
       });
-      await extensionManager.refreshCache();
+      await extensionManager.refreshCache({ allowManagedHandBack: false });
       extensions = extensionManager.getLoadedExtensions();
     } catch (error) {
       debugLogger.warn(
@@ -9576,6 +9588,7 @@ class QwenAgent implements Agent {
             version: ext.version,
             isActive: ext.isActive,
             path: ext.path,
+            extensionSource: ext.source ?? 'user',
             ...(ext.installMetadata?.source
               ? { source: redactUrlCredentials(ext.installMetadata.source) }
               : {}),
@@ -11643,6 +11656,7 @@ class QwenAgent implements Agent {
                 skipSkillManager: true,
                 skipFileCheckpointing: true,
                 lenientToolWarmup: true,
+                allowManagedHandBack: false,
               },
             ));
           const targetService = targetConfig.getSessionSourceService();
@@ -14667,12 +14681,13 @@ class QwenAgent implements Agent {
         const settingsCwd = requestedCwd || this.config.getTargetDir();
         const settings = this.loadRequestSettings(settingsCwd);
         const extensionManager = new ExtensionManager({
+          managedExtensionsDir: this.argv.managedExtensions,
           workspaceDir: settingsCwd,
           isWorkspaceTrusted:
             isWorkspaceTrusted(settings.merged).isTrusted ?? true,
           locale: getCurrentLanguage(),
         });
-        await extensionManager.refreshCache();
+        await extensionManager.refreshCache({ allowManagedHandBack: false });
         const extension = extensionManager
           .getLoadedExtensions()
           .find((item) => item.id === extensionId || item.name === extensionId);
@@ -15242,6 +15257,7 @@ class QwenAgent implements Agent {
         skipHooks: true,
         skipSkillManager: true,
         skipFileCheckpointing: true,
+        allowManagedHandBack: false,
         // Read-only replay: tolerate tools that cannot construct without the
         // subsystems skipped above (e.g. SkillTool needs the SkillManager). The
         // registry is only consulted for optional tool_call metadata during
@@ -15968,6 +15984,7 @@ class QwenAgent implements Agent {
       config.getFileSystemService(),
       {
         localReadRoots: buildAcpLocalReadRoots(config),
+        lexicalLocalReadRoots: buildAcpLexicalLocalReadRoots(config),
       },
     );
     config.setFileSystemService(acpFileSystemService);

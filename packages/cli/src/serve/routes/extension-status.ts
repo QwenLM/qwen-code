@@ -36,6 +36,7 @@ export function toExtensionSummary(ext: Extension): ServeExtensionSummary {
     version: ext.version,
     isActive: ext.isActive,
     path: ext.path,
+    extensionSource: ext.source ?? 'user',
     ...(ext.installMetadata?.source && ext.installMetadata.type !== 'snapshot'
       ? {
           source: redactExtensionDisplaySource(ext.installMetadata.source),

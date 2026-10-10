@@ -19,6 +19,7 @@ import { getExtensionManager } from './utils.js';
 import { t } from '../../i18n/index.js';
 
 interface InstallArgs {
+  managedExtensions?: string;
   path: string;
 }
 
@@ -28,7 +29,7 @@ export async function handleLink(args: InstallArgs) {
       source: args.path,
       type: 'link',
     };
-    const extensionManager = await getExtensionManager();
+    const extensionManager = await getExtensionManager(args.managedExtensions);
 
     const extension = await extensionManager.installExtension(
       installMetadata,
@@ -38,10 +39,17 @@ export async function handleLink(args: InstallArgs) {
       writeStdoutLine(t('Link extension failed to install.'));
       return;
     }
+    // A link that adopts a retained policy commits that policy's activation
+    // as-is, which can be disabled — report the committed state.
     writeStdoutLine(
-      t('Extension "{{name}}" linked successfully and enabled.', {
-        name: extension.name,
-      }),
+      extension.isActive === false
+        ? t(
+            'Extension "{{name}}" linked successfully; it remains disabled by the retained activation preference.',
+            { name: extension.name },
+          )
+        : t('Extension "{{name}}" linked successfully and enabled.', {
+            name: extension.name,
+          }),
     );
   } catch (error) {
     if (isExtensionCommittedWithWarningsError(error)) {
@@ -67,6 +75,7 @@ export const linkCommand: CommandModule = {
       .check((_) => true),
   handler: async (argv) => {
     await handleLink({
+      managedExtensions: argv['managed-extensions'] as string | undefined,
       path: argv['path'] as string,
     });
   },

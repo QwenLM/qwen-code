@@ -111,6 +111,7 @@ export interface ExtensionRow {
   favorite?: boolean;
   scope?: 'user' | 'project';
   version?: string;
+  extensionSource?: 'managed' | 'user';
   source?: string;
   origin?: string;
   components?: string;
@@ -220,6 +221,11 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
     if (view !== 'list' && !currentRow) {
       setView('list');
       setSelectedKey(null);
+    } else if (
+      view === 'uninstall-confirm' &&
+      currentRow?.extensionSource === 'managed'
+    ) {
+      setView('detail');
     }
   }, [view, currentRow]);
 
@@ -313,7 +319,12 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
       value: 'uninstall',
       label: t('Uninstall'),
     });
-    return items;
+    return currentRow.extensionSource === 'managed'
+      ? items.filter(
+          (item) =>
+            !['mark-update', 'update', 'uninstall'].includes(item.value),
+        )
+      : items;
   }, [currentRow, checkedUpdateState]);
 
   const detailSelect = useDialogSelect({
@@ -399,7 +410,7 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
       if (view === 'uninstall-confirm') {
         // y/Enter confirms (ink UninstallConfirmStep), n backs out.
         if (original.sequence === 'y' || name === 'return') {
-          if (currentRow)
+          if (currentRow && currentRow.extensionSource !== 'managed')
             void Promise.resolve(
               onDetailAction?.(currentRow, 'uninstall'),
             ).catch(() => {});

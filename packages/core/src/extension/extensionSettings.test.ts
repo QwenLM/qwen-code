@@ -9,16 +9,28 @@ import {
   updateSetting,
   ExtensionSettingScope,
   getScopedEnvContents,
+  hasStoredExtensionSecrets,
+  clearStoredExtensionSecrets,
 } from './extensionSettings.js';
 import type { ExtensionConfig } from './extensionManager.js';
 import { ExtensionStorage } from './storage.js';
+import { Storage } from '../config/storage.js';
 import prompts from 'prompts';
 import * as fsPromises from 'node:fs/promises';
 import * as fs from 'node:fs';
 import { KeychainTokenStorage } from '../mcp/token-storage/keychain-token-storage.js';
+import { FileTokenStorage } from '../mcp/token-storage/file-token-storage.js';
 import { EXTENSION_SETTINGS_FILENAME } from './variables.js';
 
 vi.mock('prompts');
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof fsPromises>();
+  return {
+    ...actual,
+    realpath: vi.fn(actual.realpath),
+    readFile: vi.fn(actual.readFile),
+  };
+});
 vi.mock('os', async (importOriginal) => {
   const mockedOs = await importOriginal<typeof os>();
   return {
@@ -90,6 +102,7 @@ describe('extensionSettings', () => {
     fs.mkdirSync(extensionDir, { recursive: true });
     fs.mkdirSync(tempWorkspaceDir, { recursive: true });
     vi.mocked(os.homedir).mockReturnValue(tempHomeDir);
+    vi.stubEnv('QWEN_HOME', path.join(tempHomeDir, '.qwen'));
     vi.spyOn(process, 'cwd').mockReturnValue(tempWorkspaceDir);
     vi.mocked(prompts).mockClear();
   });
@@ -98,6 +111,7 @@ describe('extensionSettings', () => {
     fs.rmSync(tempHomeDir, { recursive: true, force: true });
     fs.rmSync(tempWorkspaceDir, { recursive: true, force: true });
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   const ID = '12345';
@@ -647,6 +661,249 @@ describe('extensionSettings', () => {
     });
   });
 
+  describe('stored secret workspace identities', () => {
+    it('preserves service names and clears every recorded workspace without touching another identity', async () => {
+      const canonicalCwd = await fsPromises.realpath(tempWorkspaceDir);
+      const aliasCwd = path.join(tempHomeDir, 'workspace-alias');
+      await fsPromises.symlink(canonicalCwd, aliasCwd, 'junction');
+      const unrelatedCwd = path.join(tempHomeDir, 'unrelated-workspace');
+      await fsPromises.mkdir(unrelatedCwd);
+      const config: ExtensionConfig = {
+        name: 'test-ext',
+        version: '1.0.0',
+        settings: [
+          {
+            name: 'Token',
+            description: 'token',
+            envVar: 'TOKEN',
+            sensitive: true,
+          },
+        ],
+      };
+      for (const cwd of [canonicalCwd, aliasCwd, unrelatedCwd]) {
+        vi.mocked(process.cwd).mockReturnValue(cwd);
+        await updateSetting(
+          config,
+          'alias-id',
+          'TOKEN',
+          async () => 'workspace-secret',
+          ExtensionSettingScope.WORKSPACE,
+        );
+        expect(
+          mockKeychainData[`Qwen Code Extensions test-ext alias-id ${cwd}`],
+        ).toEqual({
+          TOKEN: 'workspace-secret',
+        });
+      }
+      await updateSetting(
+        config,
+        'unrelated-id',
+        'TOKEN',
+        async () => 'unrelated-secret',
+        ExtensionSettingScope.WORKSPACE,
+      );
+      await updateSetting(
+        { ...config, name: 'TEST-EXT' },
+        'alias-id',
+        'TOKEN',
+        async () => 'different-name-secret',
+        ExtensionSettingScope.WORKSPACE,
+      );
+      vi.mocked(process.cwd).mockReturnValue(tempHomeDir);
+
+      await expect(
+        hasStoredExtensionSecrets('test-ext', 'alias-id', [aliasCwd]),
+      ).resolves.toBe(true);
+      await clearStoredExtensionSecrets('test-ext', 'alias-id', [aliasCwd]);
+
+      for (const cwd of [canonicalCwd, aliasCwd, unrelatedCwd]) {
+        expect(
+          mockKeychainData[`Qwen Code Extensions test-ext alias-id ${cwd}`],
+        ).toEqual({});
+      }
+      expect(
+        mockKeychainData[
+          `Qwen Code Extensions test-ext unrelated-id ${unrelatedCwd}`
+        ],
+      ).toEqual({
+        TOKEN: 'unrelated-secret',
+      });
+      expect(
+        mockKeychainData[
+          `Qwen Code Extensions TEST-EXT alias-id ${unrelatedCwd}`
+        ],
+      ).toEqual({ TOKEN: 'different-name-secret' });
+    });
+
+    const inventoryRoot = () =>
+      path.join(Storage.getGlobalQwenDir(), 'extension-secret-workspaces');
+    async function inventoryRecords() {
+      const [identity] = await fsPromises.readdir(inventoryRoot());
+      const directory = path.join(inventoryRoot(), identity);
+      return (await fsPromises.readdir(directory)).map((entry) =>
+        path.join(directory, entry),
+      );
+    }
+    const sensitiveConfig = extConfig([setting(2, { sensitive: true })]);
+    const writeWorkspaceSecret = () =>
+      updateSetting(
+        sensitiveConfig,
+        ID,
+        'VAR2',
+        async () => 'workspace-secret',
+        ExtensionSettingScope.WORKSPACE,
+      );
+
+    it('retains concurrent writer coordinates after cleanup and workspace removal', async () => {
+      const workspaceB = path.join(tempHomeDir, 'workspace-b');
+      const workspaceC = path.join(tempHomeDir, 'workspace-c');
+      await fsPromises.mkdir(workspaceB);
+      await fsPromises.mkdir(workspaceC);
+      vi.mocked(process.cwd)
+        .mockReturnValueOnce(workspaceB)
+        .mockReturnValueOnce(workspaceC)
+        .mockReturnValue(tempWorkspaceDir);
+      await Promise.all([writeWorkspaceSecret(), writeWorkspaceSecret()]);
+      await fsPromises.rm(workspaceB, { recursive: true });
+
+      const records = await inventoryRecords();
+      expect(records).toHaveLength(2);
+      const contents = await Promise.all(
+        records.map((record) => fsPromises.readFile(record, 'utf8')),
+      );
+      expect(contents.join('')).not.toContain('workspace-secret');
+      expect(contents.map((content) => JSON.parse(content).cwd).sort()).toEqual(
+        [workspaceB, workspaceC].sort(),
+      );
+      await expect(hasStoredExtensionSecrets('test-ext', ID)).resolves.toBe(
+        true,
+      );
+      await clearStoredExtensionSecrets('test-ext', ID);
+      for (const cwd of [workspaceB, workspaceC]) {
+        expect(mockKeychainData[`${USER_SERVICE} ${cwd}`]).toEqual({});
+      }
+      expect(await inventoryRecords()).toEqual(records);
+      await expect(hasStoredExtensionSecrets('test-ext', ID)).resolves.toBe(
+        false,
+      );
+    });
+
+    it('does not create workspace coordinates for user or non-sensitive settings', async () => {
+      await updateSetting(
+        sensitiveConfig,
+        ID,
+        'VAR2',
+        async () => 'user-secret',
+        ExtensionSettingScope.USER,
+      );
+      await updateSetting(
+        extConfig([setting(1)]),
+        ID,
+        'VAR1',
+        async () => 'plain',
+        ExtensionSettingScope.WORKSPACE,
+      );
+      expect(fs.existsSync(inventoryRoot())).toBe(false);
+      await expect(userKeychain().getSecret('VAR2')).resolves.toBe(
+        'user-secret',
+      );
+    });
+
+    it('does not write a new secret when its workspace record cannot be persisted', async () => {
+      await fsPromises.mkdir(Storage.getGlobalQwenDir(), { recursive: true });
+      await fsPromises.writeFile(inventoryRoot(), 'not a directory');
+      await expect(writeWorkspaceSecret()).rejects.toThrow();
+      await expect(workspaceKeychain().getSecret('VAR2')).resolves.toBeNull();
+    });
+
+    it.each(['invalid-json', 'wrong-identity', 'wrong-cwd', 'directory'])(
+      'fails closed on a %s workspace record without deleting secrets',
+      async (kind) => {
+        await writeWorkspaceSecret();
+        const [record] = await inventoryRecords();
+        if (kind === 'directory') {
+          await fsPromises.rm(record);
+          await fsPromises.mkdir(record);
+        } else if (kind === 'invalid-json') {
+          await fsPromises.writeFile(record, '{');
+        } else {
+          const content = JSON.parse(await fsPromises.readFile(record, 'utf8'));
+          if (kind === 'wrong-identity') content.extensionId = 'other-id';
+          else content.cwd = tempHomeDir;
+          await fsPromises.writeFile(record, JSON.stringify(content));
+        }
+        await expect(
+          hasStoredExtensionSecrets('test-ext', ID),
+        ).rejects.toThrow();
+        await expect(
+          clearStoredExtensionSecrets('test-ext', ID),
+        ).rejects.toThrow();
+        await expect(writeWorkspaceSecret()).rejects.toThrow();
+        await expect(workspaceKeychain().getSecret('VAR2')).resolves.toBe(
+          'workspace-secret',
+        );
+      },
+    );
+
+    it('propagates workspace inventory read failures before probing or clearing', async () => {
+      await writeWorkspaceSecret();
+      const failure = Object.assign(new Error('inventory permission denied'), {
+        code: 'EACCES',
+      });
+      vi.mocked(fsPromises.readFile).mockRejectedValueOnce(failure);
+      await expect(hasStoredExtensionSecrets('test-ext', ID)).rejects.toBe(
+        failure,
+      );
+      vi.mocked(fsPromises.readFile).mockRejectedValueOnce(failure);
+      await expect(clearStoredExtensionSecrets('test-ext', ID)).rejects.toBe(
+        failure,
+      );
+      await expect(workspaceKeychain().getSecret('VAR2')).resolves.toBe(
+        'workspace-secret',
+      );
+    });
+
+    it.each(['missing', 'not-directory'])(
+      'still probes and clears legacy credentials for a %s workspace',
+      async (kind) => {
+        const retiredPath = path.join(tempHomeDir, 'retired-workspace');
+        if (kind === 'not-directory')
+          await fsPromises.writeFile(retiredPath, 'file');
+        const cwd = path.join(retiredPath, 'workspace');
+        const serviceName = `Qwen Code Extensions test-ext alias-id ${cwd}`;
+        const storage = new KeychainTokenStorage(serviceName);
+        await storage.setSecret('TOKEN', 'retained-secret');
+
+        await expect(
+          hasStoredExtensionSecrets('test-ext', 'alias-id', [cwd]),
+        ).resolves.toBe(true);
+        await clearStoredExtensionSecrets('test-ext', 'alias-id', [cwd]);
+        await expect(storage.listSecrets()).resolves.toEqual([]);
+      },
+    );
+
+    it('fails closed on workspace resolution errors before deleting any credentials', async () => {
+      const storage = new KeychainTokenStorage(
+        'Qwen Code Extensions test-ext alias-id',
+      );
+      await storage.setSecret('TOKEN', 'retained-secret');
+      const inaccessibleCwd = path.join(tempHomeDir, 'inaccessible');
+      const failure = Object.assign(new Error('workspace permission denied'), {
+        code: 'EACCES',
+      });
+      vi.mocked(fsPromises.realpath).mockRejectedValueOnce(failure);
+
+      await expect(
+        hasStoredExtensionSecrets('test-ext', 'alias-id', [inaccessibleCwd]),
+      ).rejects.toBe(failure);
+      vi.mocked(fsPromises.realpath).mockRejectedValueOnce(failure);
+      await expect(
+        clearStoredExtensionSecrets('test-ext', 'alias-id', [inaccessibleCwd]),
+      ).rejects.toBe(failure);
+      await expect(storage.getSecret('TOKEN')).resolves.toBe('retained-secret');
+    });
+  });
+
   describe('updateSetting', () => {
     const config = extConfig([setting(1), setting(2, { sensitive: true })]);
     const mockRequestSetting = vi.fn();
@@ -678,6 +935,36 @@ describe('extensionSettings', () => {
 
       expect(await readText(expectedEnvPath)).toContain('VAR1=new-value1');
       await expectLinkReplaced(expectedEnvPath, symlinkTarget, 'VAR1=value1\n');
+    });
+
+    it('creates user settings storage before the first managed setting write', async () => {
+      await fsPromises.rm(extensionDir, { recursive: true, force: true });
+      const managedDir = path.join(
+        tempHomeDir,
+        'managed-packages',
+        config.name,
+      );
+      await fsPromises.mkdir(managedDir, { recursive: true });
+      const manifestPath = path.join(managedDir, 'qwen-extension.json');
+      const manifest = JSON.stringify(config);
+      await fsPromises.writeFile(manifestPath, manifest);
+      mockRequestSetting.mockResolvedValue('first-value');
+
+      await updateSetting(
+        config,
+        'managed-id',
+        'VAR1',
+        mockRequestSetting,
+        ExtensionSettingScope.USER,
+      );
+
+      expect(
+        await fsPromises.readFile(path.join(extensionDir, '.env'), 'utf-8'),
+      ).toContain('VAR1=first-value');
+      expect(await fsPromises.readdir(managedDir)).toEqual([
+        'qwen-extension.json',
+      ]);
+      expect(await fsPromises.readFile(manifestPath, 'utf-8')).toBe(manifest);
     });
 
     it('should update a non-sensitive setting in WORKSPACE scope', async () => {
@@ -732,6 +1019,54 @@ describe('extensionSettings', () => {
         VAR1: 'initial-value2',
         VAR2: 'new-value2',
       });
+    });
+
+    it('probes and clears both secret backends, not only the one HybridTokenStorage would pick', async () => {
+      const fileConfig: ExtensionConfig = {
+        name: 'file-ext',
+        version: '1.0.0',
+        settings: [
+          {
+            name: 'Token',
+            description: 'token',
+            envVar: 'FILE_TOKEN',
+            sensitive: true,
+          },
+        ],
+      };
+      // Seed through the file backend while it is forced, then unforce: the
+      // (mocked) keychain is available again, so a Hybrid-only probe looks at
+      // the wrong backend and misses the value the file store still holds.
+      const previousStorageOverride =
+        process.env['QWEN_CODE_FORCE_FILE_STORAGE'];
+      process.env['QWEN_CODE_FORCE_FILE_STORAGE'] = 'true';
+      try {
+        await updateSetting(
+          fileConfig,
+          'f1d',
+          'FILE_TOKEN',
+          async () => 'file-stored-secret',
+          ExtensionSettingScope.USER,
+        );
+      } finally {
+        if (previousStorageOverride === undefined) {
+          delete process.env['QWEN_CODE_FORCE_FILE_STORAGE'];
+        } else {
+          process.env['QWEN_CODE_FORCE_FILE_STORAGE'] = previousStorageOverride;
+        }
+      }
+
+      await expect(hasStoredExtensionSecrets('file-ext', 'f1d')).resolves.toBe(
+        true,
+      );
+      await clearStoredExtensionSecrets('file-ext', 'f1d');
+      await expect(hasStoredExtensionSecrets('file-ext', 'f1d')).resolves.toBe(
+        false,
+      );
+      const fileStorage = new FileTokenStorage(
+        'Qwen Code Extensions file-ext f1d',
+      );
+      await expect(fileStorage.listSecrets()).resolves.toEqual([]);
     });
 
     it('should update a sensitive setting in WORKSPACE scope', async () => {

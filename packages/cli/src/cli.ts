@@ -20,6 +20,7 @@ import {
   DEFAULT_COMMAND_DESC,
   QUERY_POSITIONAL,
   TOP_LEVEL_DEPRECATED_OPTIONS,
+  TOP_LEVEL_GLOBAL_OPTIONS,
   TOP_LEVEL_HELP_OPTIONS,
   TOP_LEVEL_USAGE,
 } from './config/top-level-options.js';
@@ -330,11 +331,24 @@ function firstPositionalArg(argv: readonly string[]): string | undefined {
   return undefined;
 }
 
+function firstMcpPositionalArg(argv: readonly string[]): string | undefined {
+  return firstPositionalArg(
+    argv.map((arg) =>
+      arg.replace(/^--managedExtensions(?==|$)/, '--managed-extensions'),
+    ),
+  );
+}
+
 function normalizeMcpFastPathArgv(argv: readonly string[]): readonly string[] {
-  if (argv[0] === 'mcp' && argv[1] === '--') {
-    return [argv[0], ...argv.slice(2)];
+  if (argv[0] !== 'mcp') return argv;
+  const delimiter = argv.indexOf('--', 1);
+  if (
+    delimiter === -1 ||
+    firstMcpPositionalArg(argv.slice(1, delimiter)) !== undefined
+  ) {
+    return argv;
   }
-  return argv;
+  return [...argv.slice(0, delimiter), ...argv.slice(delimiter + 1)];
 }
 
 export function resolveBootstrapRoute(
@@ -438,20 +452,33 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
   const argv: readonly string[] = normalizeMcpFastPathArgv(
     normalizeServeFastPathArgv(rawArgv),
   );
-  const hasSubcommand = argv.length > 1 && !argv[1]!.startsWith('-');
-  if (!hasSubcommand) {
+  // A subcommand is the first positional after `mcp`, wherever it sits:
+  // inspecting argv[1] alone misreads `mcp --managed-extensions <root> list`
+  // as flag-only and prints help with exit 0 while the requested mutation
+  // silently never runs. firstPositionalArg skips the known value slots.
+  const subcommand = firstMcpPositionalArg(argv.slice(1));
+  if (subcommand === undefined) {
     printMcpHelp();
     return;
   }
 
-  const [{ default: yargsInstance }, { mcpCommand }] = await Promise.all([
+  const [
+    { default: yargsInstance },
+    { mcpCommand },
+    { resolveManagedExtensionsDir },
+  ] = await Promise.all([
     import('yargs'),
     import('./commands/mcp.js'),
+    import('@qwen-code/qwen-code-core/extension/managed-extension-dir.js'),
   ]);
 
   const parser = yargsInstance([])
     .scriptName('qwen')
     .command(mcpCommand)
+    .option('managed-extensions', {
+      ...TOP_LEVEL_GLOBAL_OPTIONS['managed-extensions'],
+      coerce: resolveManagedExtensionsDir,
+    })
     .version(false)
     .help()
     .alias('h', 'help')
@@ -464,6 +491,11 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
       process.exitCode = 1;
     })
     .exitProcess(false);
+
+  // Preserve the server tail before the initial command-discovery parse.
+  if (subcommand === 'add') {
+    parser.parserConfiguration({ 'populate--': true });
+  }
 
   if (hasFlag(argv.slice(2), '--help', '-h')) {
     await parseYargsHelp(parser, argv);

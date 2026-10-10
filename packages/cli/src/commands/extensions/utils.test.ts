@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { getExtensionManager, extensionToOutputString } from './utils.js';
 import type { Extension, ExtensionManager } from '@qwen-code/qwen-code-core';
+import * as os from 'node:os';
 
 const mockRefreshCache = vi.fn();
 const mockExtensionManagerInstance = {
@@ -159,9 +160,9 @@ describe('getExtensionManager', () => {
 });
 
 describe('extensionToOutputString', () => {
-  const mockIsEnabled = vi.fn();
+  const mockLoadedActivation = vi.fn();
   const mockExtensionManager = {
-    isEnabled: mockIsEnabled,
+    getLoadedExtensionActivation: mockLoadedActivation,
   } as unknown as ExtensionManager;
 
   const createMockExtension = (overrides = {}): Extension => ({
@@ -177,7 +178,41 @@ describe('extensionToOutputString', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockIsEnabled.mockReturnValue(true);
+    mockLoadedActivation.mockReturnValue({ effective: 'enabled' });
+  });
+
+  it('formats user and workspace activation from the loaded snapshot', () => {
+    mockLoadedActivation.mockImplementation((_id, cwd) => ({
+      effective: cwd === '/workspace' ? 'enabled' : 'disabled',
+    }));
+    const result = extensionToOutputString(
+      createMockExtension(),
+      mockExtensionManager,
+      '/workspace',
+    );
+    expect(result).toContain('Enabled (User): false');
+    expect(result).toContain('Enabled (Workspace): true');
+    expect(result).toContain('✓');
+    expect(mockLoadedActivation).toHaveBeenNthCalledWith(
+      1,
+      'test-ext-id',
+      os.homedir(),
+    );
+    expect(mockLoadedActivation).toHaveBeenNthCalledWith(
+      2,
+      'test-ext-id',
+      '/workspace',
+    );
+  });
+
+  it('identifies managed source without install metadata', () => {
+    const result = extensionToOutputString(
+      createMockExtension({ source: 'managed' }),
+      mockExtensionManager,
+      '/workspace',
+    );
+    expect(result).toContain('Source: managed');
+    expect(result).toContain('(1.0.0)');
   });
 
   it('should include status icon when inline is false', () => {

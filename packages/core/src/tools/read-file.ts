@@ -641,8 +641,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
   ): string | null {
     // Normalize shell-escaped paths (e.g. "my\ file.txt" → "my file.txt")
     // that may reach the LLM via at-completion or manual typing.
-    const filePath = unescapePath(params.file_path.trim());
-    params.file_path = filePath;
+    let filePath = unescapePath(params.file_path.trim());
 
     if (!filePath) {
       return "The 'file_path' parameter must be non-empty.";
@@ -652,6 +651,8 @@ export class ReadFileTool extends BaseDeclarativeTool<
       return `File path must be absolute, but was relative: ${filePath}. You must provide an absolute path.`;
     }
 
+    filePath = path.resolve(filePath);
+    params.file_path = filePath;
     params.offset ??= undefined;
     params.limit ??= undefined;
     params.pages ??= undefined;

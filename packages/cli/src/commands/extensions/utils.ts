@@ -25,10 +25,14 @@ import chalk from 'chalk';
 import stripAnsi from 'strip-ansi';
 import { t, getCurrentLanguage } from '../../i18n/index.js';
 
-export async function getExtensionManager(): Promise<ExtensionManager> {
+export async function getExtensionManager(
+  managedExtensionsDir?: string,
+  options?: { allowManagedHandBack?: boolean },
+): Promise<ExtensionManager> {
   const workspaceDir = process.cwd();
   const settings = loadSettings(workspaceDir).merged;
   const extensionManager = new ExtensionManager({
+    managedExtensionsDir,
     workspaceDir,
     locale: getCurrentLanguage(),
     requestConsent: requestConsentOrFail.bind(
@@ -42,7 +46,7 @@ export async function getExtensionManager(): Promise<ExtensionManager> {
     ),
     proxy: resolveExtensionTelemetryProxy(settings.proxy),
   });
-  await extensionManager.refreshCache();
+  await extensionManager.refreshCache(options);
   return extensionManager;
 }
 
@@ -82,14 +86,12 @@ export function extensionToOutputString(
   inline = false,
 ): string {
   const cwd = workspaceDir;
-  const userEnabled = extensionManager.isEnabled(
-    extension.config.name,
-    os.homedir(),
-  );
-  const workspaceEnabled = extensionManager.isEnabled(
-    extension.config.name,
-    cwd,
-  );
+  const userEnabled =
+    extensionManager.getLoadedExtensionActivation(extension.id, os.homedir())
+      .effective === 'enabled';
+  const workspaceEnabled =
+    extensionManager.getLoadedExtensionActivation(extension.id, cwd)
+      .effective === 'enabled';
 
   const status = workspaceEnabled ? chalk.green('✓') : chalk.red('✗');
   const locale = getCurrentLanguage();
@@ -100,6 +102,9 @@ export function extensionToOutputString(
     output += `\n ${t('Description:')} ${stripAnsi(desc)}`;
   }
   output += `\n ${t('Path:')} ${extension.path}`;
+  if (extension.source === 'managed') {
+    output += `\n ${t('Source:')} managed`;
+  }
   if (extension.installMetadata) {
     output += `\n ${t('Source:')} ${redactUrlCredentials(extension.installMetadata.source)} (${t('Type:')} ${extension.installMetadata.type})`;
     if (extension.installMetadata.originSource) {

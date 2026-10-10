@@ -104,6 +104,68 @@ describe('FileCommandLoader', () => {
     mock.restore();
   });
 
+  it('hydrates managed command paths and prompts without changing source files', async () => {
+    const root = path.join(process.cwd(), 'managed-command');
+    const markdown = [
+      '---',
+      'description: Deploy with ${CLAUDE_PLUGIN_ROOT}',
+      '---',
+      'Use ${CLAUDE_PLUGIN_ROOT}/script and ${extensionPath}',
+    ].join('\n');
+    const source = [
+      'prompt = "Use ${CLAUDE_PLUGIN_ROOT}/script"',
+      'description = "Deploy with ${CLAUDE_PLUGIN_ROOT}"',
+    ].join('\n');
+    mock({
+      [root]: {
+        'qwen-extension.json': JSON.stringify({
+          commands: '${extensionPath}/actions',
+        }),
+        actions: { 'markdown.md': markdown, 'toml.toml': source },
+      },
+    });
+    const config = {
+      getFolderTrustFeature: () => false,
+      getFolderTrust: () => true,
+      getProjectRoot: () => process.cwd(),
+      getExtensions: () => [
+        { name: 'managed', path: root, source: 'managed', isActive: true },
+      ],
+    } as unknown as Config;
+    const commands = await new FileCommandLoader(config).loadCommands(signal);
+    expect(commands).toHaveLength(2);
+    for (const command of commands) {
+      expect(command.description).toBe(`[managed] Deploy with ${root}`);
+      const result = await command.action?.(createMockCommandContext(), '');
+      expect(result?.type).toBe('submit_prompt');
+      // Assert against the prompt text itself: JSON.stringify doubles every
+      // backslash, so a path assertion against the serialized result cannot
+      // pass on a Windows host.
+      const content =
+        (result as { content?: PromptPipelineContent } | undefined)?.content ??
+        [];
+      const text = content
+        .map((part) =>
+          typeof part === 'string'
+            ? part
+            : 'text' in part
+              ? (part.text ?? '')
+              : '',
+        )
+        .join('');
+      expect(text).toContain(root);
+      expect(text).not.toContain('${CLAUDE_PLUGIN_ROOT}');
+      expect(text).not.toContain('${extensionPath}');
+    }
+    const fs = await import('node:fs/promises');
+    expect(
+      await fs.readFile(path.join(root, 'actions/markdown.md'), 'utf8'),
+    ).toBe(markdown);
+    expect(
+      await fs.readFile(path.join(root, 'actions/toml.toml'), 'utf8'),
+    ).toBe(source);
+  });
+
   it('loads a single command from a file', async () => {
     const userCommandsDir = Storage.getUserCommandsDir();
     mock({

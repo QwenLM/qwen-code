@@ -231,6 +231,7 @@ export interface ChannelDaemonWorkerHandle {
 }
 
 export interface RunChannelDaemonWorkerOptions {
+  managedExtensions?: string;
   daemonUrl: string;
   daemonToken?: string;
   workspace: string;
@@ -537,7 +538,10 @@ export async function runChannelDaemonWorker(
     }
   }
 
-  await abortableStartup(loadChannelsFromExtensions(), startupSignal);
+  await abortableStartup(
+    loadChannelsFromExtensions(opts.managedExtensions),
+    startupSignal,
+  );
   const settings = loadSettings(daemonWorkspace, {
     skipLoadEnvironment: true,
   });
@@ -896,6 +900,7 @@ export async function runChannelDaemonWorker(
 }
 
 interface DaemonWorkerArgs {
+  managedExtensions?: string;
   channel?: string[];
 }
 
@@ -1084,6 +1089,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         throw new Error('--channel is required.');
       }
       const handle = await runChannelDaemonWorker({
+        managedExtensions: argv.managedExtensions,
         daemonUrl,
         daemonToken,
         promptAuthorization,

@@ -124,7 +124,7 @@ export const InstalledTab = ({
     }
     setLoading(true);
     try {
-      await extensionManager.refreshCache();
+      await extensionManager.refreshCache({ allowManagedHandBack: false });
       const extensions = extensionManager.getLoadedExtensions();
       const favorites = new Set(extensionManager.getFavorites());
       const scopes = extensionManager.getExtensionScopes();
