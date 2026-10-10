@@ -10,8 +10,12 @@ import type {
   ChildAgentRun,
   ChildAgentStopReason,
   ChildCompletion,
+  ChildSessionRun,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
-import { parseChildRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
+import {
+  isChildSessionRun,
+  parseChildRun,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import type { ChildAcceptance } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-acceptance-record.js';
 import { parseChildAcceptance } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-acceptance-record.js';
 import type {
@@ -50,6 +54,7 @@ import {
   managedTaskId,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
+import { hostedTeamMembership } from './hosted-team-session.js';
 import {
   stripDisplayControlChars,
   truncateNotificationLabel,
@@ -120,12 +125,14 @@ export function childLaunchAdmission(params: {
   readonly sameDefinition: boolean;
   readonly closing: boolean;
   readonly activeInScope: number;
+  readonly launchedInScope: number;
   readonly envelopeBytes: number;
 }): ChildAdmission {
   return admitChildLaunch({
     closing: params.closing,
     depth: 1,
     activeInScope: params.activeInScope,
+    launchedInScope: params.launchedInScope,
     envelopeBytes: params.envelopeBytes,
     workspaceMode: params.workspaceMode,
     sameDefinition: params.sameDefinition,
@@ -157,11 +164,16 @@ export function childResultNotificationText(params: {
   readonly taskId: string;
   readonly description: string;
   readonly text: string;
+  /** H4e-b1: the member name of a child run on a team roster. */
+  readonly teammate?: string;
 }): string {
   const head = [
     '<task-notification>',
     `<task-id>${escapeXml(params.taskId)}</task-id>`,
     '<kind>child_agent</kind>',
+    ...(params.teammate === undefined
+      ? []
+      : [`<teammate>${escapeXml(params.teammate)}</teammate>`]),
     '<status>completed</status>',
     `<summary>Child agent "${escapeXml(truncateNotificationLabel(params.description))}" finished.</summary>`,
     '<result>',
@@ -227,17 +239,25 @@ export class HostedChildAgentSession {
     return existing ? parseChildAcceptance(existing.record) : undefined;
   }
 
-  /** The non-terminal child agent runs of one owner scope. */
-  activeChildRunsOf(ownerScopeId: string): readonly ChildAgentRun[] {
+  /**
+   * Every child Session run one owner scope launched, ended or not. The
+   * quotas count child Sessions, so both child Session kinds count.
+   */
+  launchedChildRunsOf(ownerScopeId: string): readonly ChildSessionRun[] {
     return this.store.authority
       .extensionRecordsInDomain('child_run')
       .map((entry) => parseChildRun(entry.record))
       .filter(
-        (record): record is ChildAgentRun =>
-          record.kind === 'child_agent' &&
-          record.ownerScopeId === ownerScopeId &&
-          !isTerminalRunState(record.run.state),
+        (record): record is ChildSessionRun =>
+          isChildSessionRun(record) && record.ownerScopeId === ownerScopeId,
       );
+  }
+
+  /** The non-terminal child Session runs of one owner scope. */
+  activeChildRunsOf(ownerScopeId: string): readonly ChildSessionRun[] {
+    return this.launchedChildRunsOf(ownerScopeId).filter(
+      (record) => !isTerminalRunState(record.run.state),
+    );
   }
 
   /**
@@ -599,6 +619,10 @@ export class HostedChildAgentSession {
               text: (await this.store.resources.read(resultRef)).toString(
                 'utf8',
               ),
+              teammate: hostedTeamMembership(
+                this.store.authority.extensionRecordsInDomain('team_state'),
+                childRunId,
+              )?.name,
             }),
           }),
           'utf8',

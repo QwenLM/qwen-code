@@ -152,6 +152,10 @@ class ChildResultRelayStoreTest {
                 "accepted", "completed");
         insertRecordRow(scopeKey, session, "shell-x", "shell", null,
                 "running");
+        // H4c registers the workflow kind ahead of its runtime: neither
+        // the relay nor the close cascade acts on its rows yet.
+        insertRecordRow(scopeKey, session, "workflow-live", "workflow",
+                "planned", "pending");
         jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
                         + " session_id, agent_id, status, created_at,"
                         + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1,"
@@ -244,8 +248,7 @@ class ChildResultRelayStoreTest {
                         + " 'h', 1, ?, ?, ?, ?, ?, 1)",
                 scopeKey, recordId + "-key", TENANT, sessionId, recordId,
                 "resource-" + recordId,
-                "background_shell".equals(taskState) ? "background_shell"
-                        : "child_agent", taskState,
+                "shell".equals(kind) ? "background_shell" : kind, taskState,
                 deliveryState == null ? null : "session",
                 deliveryState);
     }
