@@ -8,7 +8,7 @@
 
 H4e-a 固定了团队可以提交什么:名册与生命周期(`team_state`)、任务板(`team_task`)、mailbox(`team_message`)与计划审批(`team_plan`),全部位于 lead Session 的 journal 中,全部禁用。还没有任何东西生产它们。在 Hosted 路径上,lead 可以启动 child agent(H4b),但无法为它们命名、把它们编成组、给它们一块任务板,也无法删除团队;`name` 在准入时作为 legacy 专属参数被拒绝,也没有声明任何团队工具。
 
-H4e-a 设计把整个运行时交给了 "H4e-b"。这一片太大,无法一次落地,其中一部分还要等尚未开始的工作。mailbox 中继、成员一侧的投递以及成员的续跑,都建立在 H4d-b(Session 消息运行时,见 [H4d-a 设计](2026-10-09-managed-session-messages.zh-CN.md))之上,而 H4d-b 尚无实现;计划审批与成员关停都以 mailbox 消息传递。因此 H4e-b 拆为三片:
+H4e-a 设计把整个运行时交给了 "H4e-b"。这一片太大,无法一次落地,其中一部分还要等尚未开始的工作。mailbox 中继、成员一侧的投递以及成员的续跑,都建立在 H4d-b(Session 消息运行时,见 [H4d-a 设计](2026-10-09-managed-session-messages.zh-CN.md))之上,而 H4d-b 在撰写本设计时尚无实现,此后已经落地([H4d-b 设计](2026-10-10-managed-session-message-runtime.zh-CN.md),#13822);计划审批与成员关停都以 mailbox 消息传递。因此 H4e-b 拆为三片:
 
 | 切片               | 范围                                                                                                                                                                                                                                     | 等待     |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
@@ -47,8 +47,8 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
    - **owner 与状态。** `in_progress` 需要 owner,与 Legacy 一致;lead 没有隐含的名字,因此必须指名一个。调用设置或更改的 owner 是 `leader` 或一个 run 尚未结束的成员;`""` 取消分配。run 已成功完成的成员,也可以被设为在该调用之后处于 `completed` 的任务的 owner,让任务板记下是谁完成的:成员必须先进入名册才能被指名,而实机验收表明一次性成员常常在 lead 的下一次调用到达之前就已完成,原规则下这样的成员永远无法成为其任务的 owner。失败或被取消的成员不能被设为 owner。把任务改到另一个未完成状态的调用,会以同样方式检查它保留的 owner,因此 run 已结束的成员永远不会落到未完成的工作上。成员的 run 结束后,任务仍保留原有的 owner,因此 lead 无需重新分配即可完成、修改或删除该任务。这正是常见的流程,因为一次性成员的汇报到达时,它已经结束。
    - **暂不投递任务分配。** 没有 mailbox 时,成员永远不会得知分配。`task_update` 把 owner 作为任务板事实记录下来,对运行中的成员,其回答会说明它没有收到通知。lead 在成员的启动提示中传达工作内容。
    - **删除**即 `status: "deleted"`,它结束任务的 run 并冻结任务。
-6. **`task_list` 显示任务板与名册。** 其 schema 沿用 Legacy(`status`、`owner` 与 `blockedBy` 过滤条件),每行为 `#<number> [<status>] @<owner> — <subject>`,并附上尚未解除的阻塞方。由于还没有 mailbox,它不像 Legacy 那样清空 leader 收件箱,而是在回答末尾附上名册:每个成员及其 run 状态(`running`、`completed`、`failed`、`cancelled`),读自其 `child_run` 记录。lead 由此得知成员失败了,或团队可以删除了。
-7. **`team_delete` 在有成员运行时拒绝;否则先关闭团队再删除。** Legacy 会强制中止其 teammate。在 Managed 路径上,lead 无法停止一个开启中 Session 的 child:唯一的停止途径是其自身 Session 的关闭级联,而公开的 child 取消属于 H4f。由于成员会自行结束,只要还有任何成员的 run 未结束,`team_delete` 就拒绝,并列出正在运行的成员。没有成员运行时,它以 `${callKey}:closing` 与 `${callKey}:deleted` 先后提交 `closing` 与 `deleted`。重放会完成停在 `closing` 的团队(决策 11),之后的 `team_delete` 也会完成它。一旦 H4f 为 child 取消提供了途径,`team_delete` 就可以请求停止正在运行的成员,而不是拒绝(见后续工作)。
+6. **`task_list` 显示任务板与名册。** 其 schema 沿用 Legacy(`status`、`owner` 与 `blockedBy` 过滤条件),每行为 `#<number> [<status>] @<owner> — <subject>`,并附上尚未解除的阻塞方。由于还没有 mailbox,它不像 Legacy 那样清空 leader 收件箱,而是在回答末尾附上名册:每个成员及其 run 状态(`running`、`completed`、`failed`、`cancelled`),读自其 `child_run` 记录。lead 由此得知成员失败了,或团队可以删除了。对以 `isolation: "worktree"` 启动的成员(#13841),`completed` 表示其 run 已 settle,与 merge 结果无关;merge 结果只通过通知里的 `<workspace>` 元素告知 lead。
+7. **`team_delete` 在有成员运行时拒绝;否则先关闭团队再删除。** Legacy 会强制中止其 teammate。在 Managed 路径上,lead 无法停止一个开启中 Session 的 child:唯一的停止途径是其自身 Session 的关闭级联,而公开的 child 取消属于 H4f。由于成员会自行结束,只要还有任何成员的 run 未结束,`team_delete` 就拒绝,并列出正在运行的成员。以 `isolation: "worktree"` 启动的成员(#13841)在其 merge 记录结果之前都算作运行中,而这个等待目前没有上限([worktree 准入](2026-10-10-managed-child-worktree-admission.zh-CN.md)开放问题 3),因此在此期间 `team_delete` 一直被拒绝,新的 `team_create` 也随之被拒绝;lead 自身的关闭从不等待它。没有成员运行时,它以 `${callKey}:closing` 与 `${callKey}:deleted` 先后提交 `closing` 与 `deleted`。重放会完成停在 `closing` 的团队(决策 11),之后的 `team_delete` 也会完成它。一旦 H4f 为 child 取消提供了途径,`team_delete` 就可以请求停止正在运行的成员,而不是拒绝(见后续工作)。
 8. **团队下的关闭级联沿用 H4b,关闭期间不写团队记录(#13745 E3)。** 成员是 `child_agent` run,因此关闭 lead Session 已经完成了 E3 要求的全部三件事。它经由 H4b 级联取消每个正在运行的成员(停止请求、成员 Session 自己的关闭、终态 `cancelled`/`stop_requested` 修订)。关闭级联不会打断成员进行中的 Turn:成员 Session 的关闭要等该 Turn 自己结束后才被接纳,在此之前 lead 一直处于 `closing`。它绝不会因孤儿结果复活 lead(H4b 决策 8 与 13)。它让每个成员的终态事实都能单独观察到,即该成员自己的 `child_run` 修订。团队自身的记录保持原样。团队的生命以其 lead Session 的生命为界,读者把 lead Session 处于 closing、closed 或 deleted 的团队视为已关闭。这回答了 H4e-a 的开放问题 3。在认领下提交 `closing` 与 `deleted` 只会重复 Session 自身的状态,还会放宽如今只放行 child 与 hook 记录的生命周期门禁。因此 Java 生命周期门禁不做改动。
 9. **审批遵循 Hosted 规则,只有一个例外。** `team_create`、`team_delete`、`task_create` 与 `task_update` 在 `default` 与 `auto-edit` 模式下请求审批,与预批准列表之外的每个 Hosted 工具一样,也与 Legacy 的任务板工具一样。`task_list` 只读取 journal,因此加入两种模式的预批准列表,与 `read_file` 和 `glob` 一样。带 `name` 的启动与任何 Agent 启动一样请求审批。`team_create`、`task_create` 与 `task_update` 同时加入 `HOSTED_INPUT_PREVIEW_TOOLS` 与 Java 的 `PREVIEW_TOOLS`,使审批界面显示要批准的团队名、subject、owner 与状态。
 10. **按 domain 启用,并在实机验收之后。** 每个团队 domain 恰好承载一项能力。因此与 `child_run`(H4b 决策 10)不同,普通的启用列表就是合适的门禁,不新增按能力的门禁。这回答了 #13745 分诊提出的门禁形态问题。H4e-b1 落地运行时(#13824)时 `team_state` 与 `team_task` 仍保持关闭,测试像 H4e-a 的测试套件那样放开门禁;它的启用变更在真实 Hosted 环境上完成实机验收之后,才把两者加入 `MANAGED_SESSION_ENABLED_DOMAINS`,这是 #13803 在 #13532 之后采用的顺序。`team_message` 与 `team_plan` 保持关闭。`verifyWorkspaceRestore` 的重开白名单放行 `team_state` 与 `team_task`。Java 只需要决策 9 的预览列表:它的 store 自 H4e-a 起就已校验团队记录体,因此 server 先行顺序成立。
@@ -56,14 +56,14 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
 
 ## 工具
 
-| 工具                 | 参数                                                                                                                 | 提交                                          | 与 Legacy 的差异                                                                      |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `team_create`        | `team_name`                                                                                                          | `team_state` 开启修订                         | 没有 `description`;名字作用域为 lead Session;没有陈旧团队回收                         |
-| `team_delete`        | 无                                                                                                                   | `team_state` 先 `closing`,再 `deleted`        | 有成员运行时拒绝,而不是中止它们                                                       |
-| 带 `name` 的 `agent` | `description`、`prompt`、`run_in_background`(不能为 `false`)、`name`                                                 | H4b `child_run` 启动,然后是 `team_state` 加入 | 没有团队时拒绝而不是忽略;一次性成员;没有 `plan_mode_required`、`read_only` 或 `model` |
-| `task_create`        | `subject`、`description`、`activeForm?`、`metadata?`                                                                 | `team_task` 开启修订,`pending`                | schema 无差异                                                                         |
-| `task_update`        | `taskId`、`status?`、`owner?`、`subject?`、`description?`、`activeForm?`、`metadata?`、`addBlocks?`、`addBlockedBy?` | 每个被改动的任务一个 `team_task` 修订         | 不投递分配;完成时无需写入依赖方;只有 lead 可用                                        |
-| `task_list`          | `status?`、`owner?`、`blockedBy?`                                                                                    | 无                                            | 附上名册及 run 状态,而不是清空收件箱                                                  |
+| 工具                 | 参数                                                                                                                         | 提交                                          | 与 Legacy 的差异                                                                      |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `team_create`        | `team_name`                                                                                                                  | `team_state` 开启修订                         | 没有 `description`;名字作用域为 lead Session;没有陈旧团队回收                         |
+| `team_delete`        | 无                                                                                                                           | `team_state` 先 `closing`,再 `deleted`        | 有成员运行时拒绝,而不是中止它们                                                       |
+| 带 `name` 的 `agent` | `description`、`prompt`、`run_in_background`(不能为 `false`)、`name`、`isolation?`(仅在提供 child Workspace 的主机上,#13841) | H4b `child_run` 启动,然后是 `team_state` 加入 | 没有团队时拒绝而不是忽略;一次性成员;没有 `plan_mode_required`、`read_only` 或 `model` |
+| `task_create`        | `subject`、`description`、`activeForm?`、`metadata?`                                                                         | `team_task` 开启修订,`pending`                | schema 无差异                                                                         |
+| `task_update`        | `taskId`、`status?`、`owner?`、`subject?`、`description?`、`activeForm?`、`metadata?`、`addBlocks?`、`addBlockedBy?`         | 每个被改动的任务一个 `team_task` 修订         | 不投递分配;完成时无需写入依赖方;只有 lead 可用                                        |
+| `task_list`          | `status?`、`owner?`、`blockedBy?`                                                                                            | 无                                            | 附上名册及 run 状态,而不是清空收件箱                                                  |
 
 ## 一个成员的生命周期
 
@@ -74,7 +74,7 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
 | 3–6  | dispatch、attach、settle、带名字通知的 accept | H4b relay,除名字标签外不变 |
 | 7    | 消费                                          | lead 的唤醒轮(H4b)         |
 
-第 1 步之后任何一步发生 lead 关闭,都会对该成员的 run 执行 H4b 级联(决策 8)。`team_delete` 等待每个成员走到第 4 步或以失败结束(决策 7)。
+以 `isolation: "worktree"` 启动的成员(#13841)还会在 dispatch 之前准备其 child Workspace,在提交结果之前完成 merge,其通知在名字标签旁另带一个 `<workspace>` 元素。第 1 步之后任何一步发生 lead 关闭,都会对该成员的 run 执行 H4b 级联(决策 8)。`team_delete` 等待每个成员走到 settle(第 5 步)或以失败结束(决策 7)。
 
 ## 非目标
 
@@ -106,7 +106,7 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
   - lead 在仍有成员运行时关闭,该成员被取消,而团队记录保持不变;
   - 在成员启动与加入之间杀掉 Harness:child 作为普通后台 child 继续运行,恰好只有一个 `child_run`,也永远不会出现第二个名册条目。
 - **实机验收结果**(2026-10-10,aarch64 Linux 主机;打包的 Spring 服务端(含 Store、Broker、relay 与协调器)、打包的 Hosted Harness、持久本地 worker、MariaDB,以及真实模型 `qwen3.8-max`,审批模式为 `default`;计划与各项结果见 `.qwen/e2e-tests/h4e-b1-team-lead-runtime.md`):
-  - 完整的团队流程已观察到。`team_state` 链为开启、两次加入、`closing`、`deleted`。两份汇报都带着 `<teammate>` 标签到达 lead:一次运行中在进行中的 Turn 内被消费,另一次作为唤醒 Turn 到达。第一次运行发现,两个成员都在 lead 用 `task_update` 分配之前就已完成,任务板因此拒绝把它们设为 owner。决策 5 的已完成成员规则解决了这一点,带上修复后的复跑把每个成员记为其已完成任务的 owner。验收之后的评审轮次收紧了重新打开任务的规则,并调整了部分回答文案;这些改动由单元测试覆盖,没有经过实机验收。
+  - 完整的团队流程已观察到。`team_state` 链为开启、两次加入、`closing`、`deleted`。两份汇报都带着 `<teammate>` 标签到达 lead:一次运行中在进行中的 Turn 内被消费,另一次作为唤醒 Turn 到达。第一次运行发现,两个成员都在 lead 用 `task_update` 分配之前就已完成,任务板因此拒绝把它们设为 owner。决策 5 的已完成成员规则解决了这一点,带上修复后的复跑把每个成员记为其已完成任务的 owner。验收之后的评审轮次收紧了重新打开任务的规则,并调整了部分回答文案;这些改动由单元测试覆盖,没有经过实机验收。验收在 #13841 之前进行,所用环境不提供 child Workspace,因此以 `isolation: "worktree"` 启动的成员只有单元测试覆盖;除非部署显式启用,child Workspace 保持关闭。
   - lead 在仍有成员运行时关闭,会取消该成员:它的 `child_run` 带着停止请求以 `cancelled` 结束,它的 Session 关闭,团队记录不变,lead 也从未被复活。关闭会等待成员的 Turn 结束(决策 8),这也包括成员正在等待的审批。
   - 在加入提交之前杀掉 Harness,留下一个 `child_run`、没有名册条目;在加入提交之后杀掉,留下一个 `child_run`、一个名册条目。两种情况下成员 Session 都会运行,但 lead 的 Turn 以 `managed_runtime_recovery_blocked` 失败,因此成员的结果永远到不了 lead(开放问题 5)。不建团队、改用不带名字的后台启动做同样的运行,结局相同。channel 收尾的回答(决策 11)没有覆盖到,因为该环境没有 channel 适配器。
   - 有成员运行时 `team_delete` 被拒绝,点名该成员,且不提交任何修订。`task_list` 不弹审批卡,`team_create`、`task_create`、`task_update` 与 Agent 的审批卡都显示输入预览。只从启用列表中去掉这两个 domain 的对照组不声明任何团队工具,也没有 `name`,传入 `name` 时以不支持参数的回答拒绝,且不提交任何记录。
