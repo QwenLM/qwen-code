@@ -50,7 +50,10 @@ import {
   type ToolResultManifest,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import { readManagedMessageBody } from '@qwen-code/qwen-code-core/managed-runtime/managed-message-chunks.js';
-import { parseChildRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
+import {
+  isChildSessionRun,
+  parseChildRun,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
   ResourceToolResultSegmentStore,
@@ -1417,7 +1420,7 @@ async function verifyWorkspaceRestore(
     // A child Session run (child agent or workflow) owns no output
     // manifest — its result travels the Session delivery line — so it has
     // no detached lineage to verify.
-    if ('kind' in record && record.kind !== 'shell') continue;
+    if ('kind' in record && isChildSessionRun(record)) continue;
     if (record.run.executionCallId !== null)
       detached.set(record.run.executionCallId, record.outputRef);
   }
