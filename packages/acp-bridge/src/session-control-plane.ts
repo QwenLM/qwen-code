@@ -11034,12 +11034,16 @@ export function createSessionControlPlane(
           );
         }
       }
+      const submittedPrompt = context?.submittedPrompt;
+      const hasValidDeclaration =
+        typeof submittedPrompt === 'string' &&
+        submittedPrompt.trim().length > 0;
+      const hasTextBlock = req.prompt.some(
+        (block) => isRecord(block) && block['type'] === 'text',
+      );
       const declaredChannelDisplayText =
-        context?.channelPrompt !== true &&
-        typeof context?.submittedPrompt === 'string' &&
-        context.submittedPrompt.trim().length > 0 &&
-        req.prompt.some((block) => isRecord(block) && block['type'] === 'text')
-          ? context.submittedPrompt
+        context?.channelPrompt !== true && hasValidDeclaration && hasTextBlock
+          ? submittedPrompt
           : undefined;
       const channelDisplayText = getChannelPromptDisplayText(
         entry,
