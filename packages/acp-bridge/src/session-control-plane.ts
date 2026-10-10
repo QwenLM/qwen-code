@@ -11036,7 +11036,9 @@ export function createSessionControlPlane(
       }
       const declaredChannelDisplayText =
         context?.channelPrompt !== true &&
-        typeof context?.submittedPrompt === 'string'
+        typeof context?.submittedPrompt === 'string' &&
+        context.submittedPrompt.trim().length > 0 &&
+        req.prompt.some((block) => isRecord(block) && block['type'] === 'text')
           ? context.submittedPrompt
           : undefined;
       const channelDisplayText = getChannelPromptDisplayText(
