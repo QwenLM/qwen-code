@@ -7,6 +7,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   type Dirent,
+  chmodSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -18,6 +19,7 @@ import { readdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import type { UnprovenSweepReport } from '../runtime/managed-quarantine-report.js';
 
 const debugLogger = createDebugLogger('MANAGED_RUNTIME_LEDGER');
 
@@ -459,9 +461,37 @@ function writeLedgerDocument(
   writeFileSync(
     temporary,
     JSON.stringify({ version: LEDGER_FILE_VERSION, worker, groups }),
-    'utf8',
+    // Worker pids, group ids and call ids are read-side hygiene: another
+    // local user who can traverse $HOME/.qwen should not read them, so the
+    // file (and, via rename, its finished shape) lands owner-only.
+    { encoding: 'utf8', mode: 0o600 },
   );
   renameSync(temporary, workFile);
+}
+
+/**
+ * The ledger directory, owner-only: it guards the same secrets as the files
+ * inside it. A recursive mkdirSync's mode would land on every ancestor it
+ * creates — the shared tmp tree above the ledger dir is not ours to tighten
+ * — and on none it finds existing, so the leaf alone is chmod'd, which also
+ * heals a loose directory an earlier build left behind.
+ */
+export function ensureLedgerDirectory(ledgerDir: string): void {
+  mkdirSync(ledgerDir, { recursive: true });
+  if (process.platform === 'win32') return;
+  try {
+    chmodSync(ledgerDir, 0o700);
+  } catch (error) {
+    // Best-effort: a truly unwritable dir fails the ledger write itself. But
+    // a chmod the owner or the mount refuses while the dir stays writable —
+    // a root-created leaf, sshfs/CIFS — leaves the ledger readable, and that
+    // degradation must not be silent.
+    debugLogger.warn(
+      `Managed Runtime ledger directory ${ledgerDir} could not be made owner-only: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }
 
 /**
@@ -488,7 +518,7 @@ export class ManagedRuntimeLedger {
     readonly worker: ManagedRuntimeLedgerWorkerRecord;
   }): ManagedRuntimeLedger {
     const ledger = new ManagedRuntimeLedger(options.workFile, options.worker);
-    mkdirSync(path.dirname(options.workFile), { recursive: true });
+    ensureLedgerDirectory(path.dirname(options.workFile));
     ledger.rewrite();
     return ledger;
   }
@@ -739,7 +769,10 @@ export type LedgerSweepVerdict =
   | 'held';
 
 /** A stop a sweep could not prove; the ledger stays on disk. */
-export class LedgerSweepUnprovenError extends Error {
+export class LedgerSweepUnprovenError
+  extends Error
+  implements UnprovenSweepReport
+{
   constructor(
     readonly workFile: string,
     readonly remaining: readonly number[],

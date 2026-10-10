@@ -43,6 +43,7 @@ import {
   ManagedRuntimeLedger,
   processGroupLiveness,
   queryProcessTable,
+  testInternals as ledgerTestInternals,
 } from './managed-runtime-ledger.js';
 import {
   ManagedMcpToolUnknownError,
@@ -206,8 +207,59 @@ describe.skipIf(process.platform === 'win32')(
       expect(ledger.outstandingGroups().map((group) => group.pgid)).toContain(
         pgid,
       );
+      // The memory view is only as good as its file: the on-disk document
+      // names the same group, proving the durable-first write carried it.
+      const onDisk = ledgerTestInternals.readLedgerDocument(ledgerFile);
+      expect(onDisk?.groups.map((group) => group.pgid)).toContain(pgid);
       await exec.close();
       strayGroups.delete(pgid);
+    });
+
+    it('kills in pid order when the ledger fails to record: never a settle-then-kill', async () => {
+      // The failure path has one admissible order: the ledger record is
+      // attempted and the kill is INITIATED before the caller hears the call
+      // failed. The kill is deliberately not awaited — post-SIGKILL reaping
+      // is scheduler-paced, so the group may still be running at the settle.
+      const events: string[] = [];
+      const realWait = ledger.waitForGroupExit.bind(ledger);
+      let killed: number | undefined;
+      const doubled = {
+        addGroup: () => {
+          events.push('record-fail');
+          throw new Error('ledger disk full');
+        },
+        outstandingGroups: ledger.outstandingGroups.bind(ledger),
+        waitForGroupExit: (pgid: number, budgetMs: number) => {
+          events.push('kill-started');
+          // The doubled addGroup keeps this group out of every ledger view,
+          // so the afterEach net is the only reaper left if the test fails
+          // before close().
+          strayGroups.add(pgid);
+          killed = pgid;
+          return realWait(pgid, budgetMs);
+        },
+        killOutstanding: ledger.killOutstanding.bind(ledger),
+        complete: ledger.complete.bind(ledger),
+        prune: ledger.prune.bind(ledger),
+        watch: ledger.watch.bind(ledger),
+      } as unknown as ManagedRuntimeLedger;
+      const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-b', {
+        ledger: doubled,
+        groupEvidenceTimeoutMs: 800,
+      });
+      const input = {
+        command: LONG_RUN,
+        description: 'long-running foreground process',
+      };
+      const result = await exec.execute(
+        reference('call-order', input),
+        'run_shell_command',
+        input,
+      );
+      expect(events.slice(0, 2)).toEqual(['record-fail', 'kill-started']);
+      expect(result.executionStatus).toBe('error');
+      await exec.close();
+      strayGroups.delete(killed!);
     });
 
     it('fails the call and kills the group when the ledger cannot record it', async () => {
@@ -245,8 +297,43 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.executionStatus).toBe('error');
       expect(result.error?.message).toContain('ledger disk full');
       expect(seen).toHaveLength(1);
-      // The callback killed the group it could not record.
-      expect(processGroupLiveness(seen[0]!)).toBe('gone');
+      // The kill must be INITIATED before the caller hears the failure. The
+      // ledger double never observes signalProcessGroup, so the oracle is
+      // the group leader's kernel state after a synchronous spin: long
+      // enough for a sent SIGKILL to land, and — a spin yields to the
+      // kernel but never to the event loop — proof that a kill deferred to
+      // a macrotask cannot have run. Linux-only: /proc is the readable
+      // kernel state.
+      if (process.platform === 'linux') {
+        const spinUntil = Date.now() + 40;
+        while (Date.now() < spinUntil) {
+          // Busy on purpose: yielding would let a deferred kill land here.
+        }
+        let state: string | undefined;
+        try {
+          const stat = readFileSync(`/proc/${seen[0]!}/stat`, 'utf8');
+          // `pid (comm) state …` — comm itself may hold spaces and parens,
+          // so the state is the first field after the LAST ')'.
+          state = stat
+            .slice(stat.lastIndexOf(')') + 1)
+            .trim()
+            .split(' ')[0];
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          state = undefined; // Reaped already: not running by any measure.
+        }
+        expect(state ?? 'gone').not.toMatch(/^[RS]$/);
+      }
+      // The callback killed the group it could not record. Post-SIGKILL
+      // reaping is scheduler-paced: assert the consequence it settles into,
+      // never the instant the kill lands.
+      const deathDeadline = Date.now() + 3_000;
+      while (processGroupLiveness(seen[0]!) !== 'gone') {
+        if (Date.now() > deathDeadline) {
+          throw new Error('the unrecorded group never died');
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
       await exec.close();
     });
 
