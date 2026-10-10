@@ -1103,6 +1103,13 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   resourceLinks?: DaemonResourceLink[];
   /** Original bounded ACP embedded text resources. */
   embeddedResources?: DaemonEmbeddedResource[];
+  /**
+   * Index-aligned with `embeddedResources`: for an entry whose untruncated
+   * text exceeded the text bound, the fingerprint of that untruncated text;
+   * `undefined` for the rest. A retained text is the bounded one, so this
+   * is what lets dedup recognise an oversized echo.
+   */
+  embeddedResourceFingerprints?: Array<string | undefined>;
   streaming?: boolean;
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */

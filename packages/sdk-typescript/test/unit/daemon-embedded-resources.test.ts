@@ -237,6 +237,154 @@ describe('daemon embedded text resources', () => {
     }
   });
 
+  it('re-measures the skeleton so the keys it keeps cannot defeat the ceiling', () => {
+    // The fallback keeps uri/text/mimeType and both `_meta` levels by
+    // explicit selection; an oversized payload parked in any of them must
+    // still be cut, or it pins the store over budget in the newest block,
+    // which trimming never evicts.
+    const maxRetainedBytes = 1024 * 1024;
+    const big = 'x'.repeat(4 * 1024 * 1024);
+    const cases: Array<{
+      content: Record<string, unknown>;
+      assertRetained: (retained: DaemonEmbeddedResource) => void;
+    }> = [
+      {
+        // Top-level `_meta` is an open index signature spread off the wire.
+        content: {
+          type: 'resource',
+          resource: { uri: 'context://example/meta', text: 'small' },
+          _meta: { payload: big },
+        },
+        assertRetained: (retained) =>
+          expect(retained).not.toHaveProperty('_meta'),
+      },
+      {
+        // A small `resource._meta` the replay contract keeps, beside an
+        // oversized `blob` at the same level.
+        content: {
+          type: 'resource',
+          resource: {
+            uri: 'context://example/blob',
+            text: '',
+            blob: big,
+            _meta: { tag: 'keep-me' },
+          },
+        },
+        assertRetained: (retained) => {
+          expect(retained.resource).not.toHaveProperty('blob');
+          expect(retained.resource['_meta']).toEqual({ tag: 'keep-me' });
+        },
+      },
+      {
+        content: {
+          type: 'resource',
+          resource: { uri: `context://example/${big}`, text: 'small' },
+        },
+        assertRetained: (retained) =>
+          expect(retained.resource.uri.length).toBeLessThanOrEqual(100_000),
+      },
+      {
+        content: {
+          type: 'resource',
+          resource: {
+            uri: 'context://example/mime',
+            text: 'small',
+            mimeType: big,
+          },
+        },
+        assertRetained: (retained) =>
+          expect(String(retained.resource.mimeType).length).toBeLessThanOrEqual(
+            100_000,
+          ),
+      },
+    ];
+    for (const { content, assertRetained } of cases) {
+      const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+      store.dispatch(normalizeDaemonEvent(frame(content))[0]!);
+      const snapshot = store.getSnapshot();
+      expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+      const block = snapshot.blocks.find((b) => b.kind === 'user');
+      if (!block || block.kind !== 'user') {
+        throw new Error('expected one retained user block');
+      }
+      assertRetained(block.embeddedResources![0]!);
+    }
+  });
+
+  it('deduplicates an identical oversized echo instead of retaining every copy', () => {
+    // A retained text is the bounded one, so an oversized echo can never
+    // text-match the stored entry: dedup must compare a fingerprint of the
+    // untruncated text, or every copy is retained in the newest block,
+    // which trimming never evicts.
+    const store = createDaemonTranscriptStore({ now: 1 });
+    const oversized = normalizeDaemonEvent(
+      frame({
+        type: 'resource',
+        resource: {
+          uri: 'context://example/large',
+          mimeType: 'text/plain',
+          text: 'x'.repeat(120 * 1024),
+        },
+      }),
+    )[0]!;
+    store.dispatch(oversized);
+    const firstBytes = store.getSnapshot().retainedBytes;
+    store.dispatch(oversized);
+    const snapshot = store.getSnapshot();
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(1);
+    expect(snapshot.retainedBytes).toBe(firstBytes);
+  });
+
+  it('does not skeletonize a writer-journaled payload on replay', () => {
+    // The writer journals a resource whose real JSON fits 256 KiB
+    // (`MAX_RECORDED_EMBEDDED_RESOURCES_BYTES`), and the offline projection
+    // is trim-free by bytes on purpose: replay must not skeletonize what
+    // the writer retained, nor report a text truncation that never happened.
+    const vendorResource = (payload: string) => ({
+      type: 'resource',
+      resource: {
+        uri: 'context://example/vendor',
+        mimeType: 'text/plain',
+        text: 'small',
+      },
+      vendorExtension: payload,
+    });
+    // Live store: a payload the writer journaled intact stays intact under
+    // the default byte budget.
+    const journaled = vendorResource('A'.repeat(200_000));
+    const store = createDaemonTranscriptStore({ now: 1 });
+    store.dispatch(normalizeDaemonEvent(frame(journaled))[0]!);
+    const block = store.getSnapshot().blocks.find((b) => b.kind === 'user');
+    expect(block).toMatchObject({ embeddedResources: [journaled] });
+
+    // Offline projection: even a payload above any ceiling survives,
+    // because the projection documents itself as trim-free by bytes.
+    const beyondCeiling = vendorResource('A'.repeat(400_000));
+    const projection = projectChatRecordsToDaemonTranscript([
+      {
+        uuid: 'first',
+        parentUuid: null,
+        sessionId: 'session-1',
+        timestamp: '2026-09-23T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [] },
+        daemonPromptId: 'prompt-1',
+        systemPayload: {
+          displayText: '',
+          hookContext: '',
+          embeddedResources: [beyondCeiling],
+        },
+      },
+    ]);
+    expect(projection.complete).toBe(true);
+    const [user] = projection.blocks.filter((b) => b.kind === 'user');
+    expect(user).toMatchObject({ embeddedResources: [beyondCeiling] });
+  });
+
   it('keeps oversized resources whose texts differ past the truncation point as separate entries', () => {
     // Both payloads truncate to the same 100k prefix; dedup must compare the
     // incoming untruncated text, or the second resource silently vanishes.

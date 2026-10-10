@@ -74,12 +74,18 @@ const MAX_TEXT_BLOCK_LENGTH = 100_000;
 const TEXT_TRUNCATED_SUFFIX = '\n[truncated]\n';
 /**
  * Retention ceiling for one embedded resource's non-text payload, in
- * `estimateRetainedBytes` units, sized as the text bound's byte equivalent.
- * The open index signature on DaemonEmbeddedResource lets a large `blob` or
- * vendor key ride past the text bound; past this ceiling only the display
- * skeleton and the `_meta` the replay contract preserves are retained.
+ * `estimateRetainedBytes` units (2 per string code unit). Sized to the
+ * writer-side journal bound — `MAX_RECORDED_EMBEDDED_RESOURCES_BYTES`
+ * (256 * 1024 real JSON bytes, packages/acp-bridge/src/
+ * embedded-resource-replay.ts; not importable from this browser-safe
+ * surface) — at the estimator's worst case of 2 units per single-byte code
+ * unit, so a non-text payload the writer journaled intact is not
+ * skeletonized on replay. The open index signature on
+ * DaemonEmbeddedResource lets a large `blob` or vendor key ride past the
+ * text bound; past this ceiling the resource falls back to the display
+ * skeleton, which is itself re-measured against the same ceiling.
  */
-const MAX_EMBEDDED_RESOURCE_EXTRA_BYTES = MAX_TEXT_BLOCK_LENGTH * 2;
+const MAX_EMBEDDED_RESOURCE_EXTRA_BYTES = 2 * 256 * 1024;
 const MAX_CLONE_DEPTH = 16;
 const truncationCallbacks = new WeakMap<
   DaemonTranscriptState,
@@ -417,18 +423,28 @@ function applyDaemonTranscriptEvent(
       if (event.meta) block.meta = { ...block.meta, ...event.meta };
       const resources = block.embeddedResources ?? [];
       const retained = boundEmbeddedResource(next, block, event.resource);
-      // Dedup against the *incoming* resource: a retained text is the bounded
-      // one, so it can only text-match an exact untruncated echo — two
-      // oversized payloads that differ past the truncation point no longer
-      // collapse into one entry. uri and text compare by identity first, so
-      // the per-entry scan stays cheap and full serialization runs only for
-      // a same-uri same-text candidate.
+      // Dedup against the *incoming* resource. A retained text is the
+      // bounded one, so it can only text-match an exact untruncated echo;
+      // an oversized echo instead matches on a fingerprint of the
+      // untruncated text, captured before the bounded clone was stored. Two
+      // payloads that differ only past the truncation point carry distinct
+      // fingerprints and stay separate. uri and text/fingerprint compare
+      // first, so the per-entry scan stays cheap and full serialization runs
+      // only for a same-uri same-content candidate.
+      const incomingText = event.resource.resource.text;
+      const incomingFingerprint =
+        incomingText.length > MAX_TEXT_BLOCK_LENGTH
+          ? fingerprintResourceText(incomingText)
+          : undefined;
+      const fingerprints = block.embeddedResourceFingerprints;
       let serializedRetained: string | undefined;
-      const duplicate = resources.some((candidate) => {
+      const duplicate = resources.some((candidate, index) => {
         if (candidate.resource.uri !== event.resource.resource.uri) {
           return false;
         }
-        if (candidate.resource.text !== event.resource.resource.text) {
+        if (incomingFingerprint !== undefined) {
+          if (fingerprints?.[index] !== incomingFingerprint) return false;
+        } else if (candidate.resource.text !== incomingText) {
           return false;
         }
         serializedRetained ??= JSON.stringify(retained);
@@ -436,6 +452,19 @@ function applyDaemonTranscriptEvent(
       });
       if (!duplicate) {
         block.embeddedResources = [...resources, cloneJsonLike(retained)];
+        if (incomingFingerprint !== undefined || fingerprints !== undefined) {
+          // Index-aligned with `embeddedResources`, which is append-only;
+          // COW clones share the array by reference, so append by
+          // replacement only.
+          const nextFingerprints: Array<string | undefined> = [
+            ...(fingerprints ?? []),
+          ];
+          while (nextFingerprints.length < resources.length) {
+            nextFingerprints.push(undefined);
+          }
+          nextFingerprints.push(incomingFingerprint);
+          block.embeddedResourceFingerprints = nextFingerprints;
+        }
       }
       block.updatedAt = next.now;
       if (event.eventId !== undefined) block.eventId = event.eventId;
@@ -2465,6 +2494,30 @@ function truncateText(
 }
 
 /**
+ * cyrb53 (public domain, by bryc) over the full text, prefixed with the
+ * length. Dedup compares this for oversized texts: the retained text is the
+ * bounded one, and two payloads that differ only past the truncation point
+ * must stay separate, so neither a length-only nor a truncated-prefix
+ * fingerprint is sufficient.
+ */
+function fingerprintResourceText(text: string): string {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ code, 2654435761);
+    h2 = Math.imul(h2 ^ code, 1597334677);
+  }
+  h1 =
+    Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^
+    Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 =
+    Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^
+    Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return `${text.length.toString(36)}:${(h2 >>> 0).toString(36)}:${(h1 >>> 0).toString(36)}`;
+}
+
+/**
  * Bounds one retained embedded resource like the sibling text-block paths:
  * the live echo caps block count only, and retention trimming never evicts
  * the newest block, so an unbounded resource would pin the store above
@@ -2475,7 +2528,10 @@ function truncateText(
  * The text bound alone is not sufficient: the open index signature lets a
  * large `blob` or vendor key ride through at either level, so the non-text
  * payload is capped as a whole and falls back to the display skeleton when
- * it exceeds the budget, reported through the same truncation channel.
+ * it exceeds the budget, reported through the same truncation channel. The
+ * skeleton is itself re-measured and clipped to the same ceiling, and the
+ * whole-object bound is skipped when the state's byte budget is infinite
+ * (the trim-free offline projection).
  */
 function boundEmbeddedResource(
   state: DaemonTranscriptState,
@@ -2497,11 +2553,17 @@ function boundEmbeddedResource(
             ),
           },
         };
-  const extraBytes =
-    estimateRetainedBytes(bounded) - bounded.resource.text.length * 2;
-  if (extraBytes <= MAX_EMBEDDED_RESOURCE_EXTRA_BYTES) return bounded;
-  reportTextTruncation(state, block.id, block.sourceRecordIds);
-  return {
+  // The byte ceiling is a live-retention bound: the offline/export
+  // projection runs with an infinite byte budget on purpose (trim-free by
+  // bytes), so a payload the writer journaled intact must survive replay
+  // there.
+  if (!Number.isFinite(state.maxRetainedBytes)) return bounded;
+  const extraBytesOf = (value: DaemonEmbeddedResource): number =>
+    estimateRetainedBytes(value) - value.resource.text.length * 2;
+  if (extraBytesOf(bounded) <= MAX_EMBEDDED_RESOURCE_EXTRA_BYTES) {
+    return bounded;
+  }
+  const skeleton: DaemonEmbeddedResource = {
     type: 'resource',
     ...(bounded['_meta'] !== undefined ? { _meta: bounded['_meta'] } : {}),
     resource: {
@@ -2515,6 +2577,49 @@ function boundEmbeddedResource(
         : {}),
     },
   };
+  // Every key the skeleton deliberately keeps is itself unbounded (`_meta`
+  // is an open index signature spread straight off the wire), so re-measure
+  // the skeleton and cut the remaining offenders in a fixed order. The
+  // uri/mimeType slices go through `truncateTextAtLimit`, which detaches
+  // the slice from the oversized parent's backing store; the 100k cut stays
+  // far above the largest legitimate in-repo uri (~779 chars).
+  let clipped =
+    Object.keys(bounded).length > Object.keys(skeleton).length ||
+    Object.keys(bounded.resource).length >
+      Object.keys(skeleton.resource).length;
+  if (extraBytesOf(skeleton) > MAX_EMBEDDED_RESOURCE_EXTRA_BYTES) {
+    if (skeleton['_meta'] !== undefined) {
+      delete skeleton['_meta'];
+      clipped = true;
+    }
+    if (
+      extraBytesOf(skeleton) > MAX_EMBEDDED_RESOURCE_EXTRA_BYTES &&
+      skeleton.resource['_meta'] !== undefined
+    ) {
+      delete skeleton.resource['_meta'];
+      clipped = true;
+    }
+    if (
+      extraBytesOf(skeleton) > MAX_EMBEDDED_RESOURCE_EXTRA_BYTES &&
+      skeleton.resource.uri.length > MAX_TEXT_BLOCK_LENGTH
+    ) {
+      skeleton.resource.uri = truncateTextAtLimit(skeleton.resource.uri);
+      clipped = true;
+    }
+    const mimeType = skeleton.resource.mimeType;
+    if (
+      extraBytesOf(skeleton) > MAX_EMBEDDED_RESOURCE_EXTRA_BYTES &&
+      typeof mimeType === 'string' &&
+      mimeType.length > MAX_TEXT_BLOCK_LENGTH
+    ) {
+      skeleton.resource.mimeType = truncateTextAtLimit(mimeType);
+      clipped = true;
+    }
+  }
+  if (clipped) {
+    reportTextTruncation(state, block.id, block.sourceRecordIds);
+  }
+  return skeleton;
 }
 
 function reportTextTruncation(
