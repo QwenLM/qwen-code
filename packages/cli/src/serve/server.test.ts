@@ -14,6 +14,7 @@ import {
   loadSettings as loadModelSettings,
   resetHomeEnvBootstrapForTesting,
 } from '../config/settings.js';
+import { trustedSystemSettingsDirs } from '../test-utils/trusted-system-settings.js';
 import { updateModelContextWindow } from './model-configuration.js';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -287,6 +288,9 @@ vi.mock('node:os', async (importOriginal) => {
 });
 vi.mock('node:fs', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:fs')>();
+  const { trustedSystemSettingsLstat } = await import(
+    '../test-utils/trusted-system-settings.js'
+  );
   const wrapped = ((...args: [fs.PathLike, fs.EncodingOption?]) =>
     mockWt.realpath && args[1] === undefined
       ? mockWt.realpath(String(args[0]))
@@ -299,6 +303,10 @@ vi.mock('node:fs', async (importOriginal) => {
   return {
     ...original,
     realpathSync: wrapped,
+    // The system settings overrides are only honored for a root-owned file,
+    // which a non-root test host cannot arrange for its temp fixtures; the
+    // fixtures stand in for administrator-created system files.
+    lstatSync: trustedSystemSettingsLstat(original.lstatSync.bind(original)),
   };
 });
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -5158,6 +5166,7 @@ describe('createServeApp', () => {
       brandSystemSettingsDir = await fsp.mkdtemp(
         path.join(os.tmpdir(), 'qwen-brand-system-'),
       );
+      trustedSystemSettingsDirs.add(brandSystemSettingsDir);
       await fsp.writeFile(
         path.join(brandSystemSettingsDir, 'settings.json'),
         '{}',
@@ -5189,6 +5198,7 @@ describe('createServeApp', () => {
         process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'] =
           previousSystemDefaultsPath;
       }
+      trustedSystemSettingsDirs.delete(brandSystemSettingsDir);
       await fsp.rm(brandWebShellDir, { recursive: true, force: true });
       await fsp.rm(brandSystemSettingsDir, { recursive: true, force: true });
     });
@@ -46382,6 +46392,7 @@ it.each(['patch', 'delete', 'delete-workspace'] as const)(
   '%s /workspace/models reloads siblings after a user write beside a workspace bucket',
   async (method) => {
     const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-r3-scope-'));
+    trustedSystemSettingsDirs.add(root);
     const home = path.join(root, 'home');
     const workspace = path.join(root, 'workspace');
     const sibling = path.join(root, 'sibling');
@@ -46420,6 +46431,11 @@ it.each(['patch', 'delete', 'delete-workspace'] as const)(
         modelProviders: { gemini: [{ id: 'workspace-model' }] },
       }),
     );
+    // Pin the system layers to empty files: the trust gate only honors an
+    // override whose file exists, so an absent file would fall back to the
+    // platform default, which is empty on CI but not on a managed host.
+    await fsp.writeFile(path.join(root, 'system.json'), '{}');
+    await fsp.writeFile(path.join(root, 'defaults.json'), '{}');
     const workspaceBefore = await fsp.readFile(workspacePath, 'utf8');
     const primaryReload = vi.fn().mockResolvedValue({ status: 'applied' });
     const siblingReload = vi.fn().mockResolvedValue({ status: 'applied' });
@@ -46511,6 +46527,7 @@ it.each(['patch', 'delete', 'delete-workspace'] as const)(
     } finally {
       await stopCreatedApps();
       vi.unstubAllEnvs();
+      trustedSystemSettingsDirs.delete(root);
       await fsp.rm(root, { recursive: true, force: true });
     }
   },

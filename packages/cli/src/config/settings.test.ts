@@ -235,6 +235,10 @@ describe('Settings Loading and Merging', () => {
       dev: 1,
       ino: 1,
       mode: 0o600,
+      // The mocked file stands in for a system settings file, which the
+      // trust gate only honors while it is root-owned.
+      uid: 0,
+      gid: 0,
     };
     (fs.lstatSync as Mock).mockReturnValue(regular);
     (fs.fstatSync as Mock).mockReturnValue(regular);
