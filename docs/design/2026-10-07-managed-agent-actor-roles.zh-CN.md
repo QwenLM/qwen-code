@@ -34,7 +34,8 @@ D4/D7 的强制执行各节描述的是它落地的改动。
 | 生命周期（close、archive、unarchive、delete）+ cwd 变更 | `POST …/close \| archive \| unarchive`、`DELETE`、`POST …/cwd`，及 WebShell 孪生                                      | `requireWorkspaceCreator`（先 can_read 再创建命令行）                           | 403 `session_operation_forbidden` |
 | Action（审批）回答                                      | `POST …/actions/{id}/responses`、WebShell `actions/respond`                                                           | `requireOwner`（creator_actor_key，回退创建命令）                               | 403 `action_forbidden`            |
 
-其余已实现的规则形态：绑定读取与全部 list/stream/catalog 路由要求 `can_read`（否则 404）；绑定创建要求 actor + `can_create` + `ACTIVE` Workspace（按失败点返回 401/404/403/409）；artifact 字节读取叠加部署策略门（`403 artifact_content_forbidden`）；Workspace 发现只列出 `can_read` 行（无 actor 返回 401）；legacy（未绑定）Session 与 agent 定义是**租户级**的 —— 租户内任何 actor 今天都可以改它们；内部 store/publication 路由准入 writer HMAC 凭据而非 actor。公开面是 `/v1/agents/**` 加 `/api/agent/web-shell/v1/**`（`PublicSurface`），由十个 Spring controller 实现 —— 第 10 节的矩阵枚举当前的 32 条公开 + 24 条 WebShell + 24 条内部路由（含 L3 两条授权入口，合计 80；这里上次写的是 #13088 之前的 77/21，L3 之前是 78）。
+<<<<<<< HEAD
+其余已实现的规则形态：绑定读取与全部 list/stream/catalog 路由要求 `can_read`（否则 404）；绑定创建要求 actor + `can_create` + `ACTIVE` Workspace（按失败点返回 401/404/403/409）；artifact 字节读取叠加部署策略门（`403 artifact_content_forbidden`）；Workspace 发现只列出 `can_read` 行（无 actor 返回 401）；legacy（未绑定）Session 与 agent 定义是**租户级**的 —— 租户内任何 actor 今天都可以改它们；内部 store/publication 路由准入 writer HMAC 凭据而非 actor。公开面是 `/v1/agents/**`、`/v1/agent-automations` 与 `/api/agent/web-shell/v1/**`（`PublicSurface`），由十一个 Spring controller 实现 —— 第 10 节的矩阵枚举当前的 39 条公开 + 24 条 WebShell + 24 条内部路由（含 L3 两条授权入口，门禁实计共 87 条；这里上次写的是 #13088 之前的 77/21 与 L3 之前的 78，H6b 自动化运行时为第十一个 controller 新增七条公开路由）。
 
 workspace registry/access 行没有任何生产置备路径 —— 今天只有测试与 fixture 入口写它们，部署环境靠带外方式写入；全仓没有 role 列、owner 列，也没有按租户存放 actor 的表。
 
@@ -185,16 +186,15 @@ A ∥ B 是安全的：文件不相交（A 纯新增；B 改 store 侧）。C �
 ## 10. Surface 路由矩阵（切片 A 注册表，双语摘要）
 
 与 L3 整合后的 `api/SurfaceRegistry.java` 携带 80 条路由常量：十个
-controller 的 32 公开 + 24 WebShell + 24 internal handler 方法（含
-L3 两条授权入口）。（第 2 节上一版正文里的 21 internal 已过时：
-#13088 新增 `receipts/verify`，L3 又加两条授权入口；门禁从扫描推导
-一切，计数只是信息，不是被断言的常量。）
+<<<<<<< HEAD
+controller 的 32 公开 + 24 WebShell + 24 internal handler 方法（含 L3 两条授权入口）。（第 2 节上一版正文里的 21 internal 已过时：
+#13088 新增 `receipts/verify`，L3 又加两条授权入口；门禁从扫描推导一切，计数只是信息，不是被断言的常量。）H6b 自动化运行时为第十一个 controller 增加七条公开 `/v1/agent-automations` 路由，注册表现合计 87 条：39 公开 + 24 WebShell + 24 internal。
 
-规则类按已实现的准入命名。切片 C 之后（契约 v1.37）：`WORKSPACE_CREATE`（2）、
-`READER`（24）、`READER_ACTOR`（6）、`READER_ACTOR_POLICY`（1）、`OPERATOR`
+规则类按已实现的准入命名。切片 C 之后（契约 v1.37）：`WORKSPACE_CREATE`(2)、
+`READER`（27 —— 自动化路由新增三条）、`READER_ACTOR`（6）、`READER_ACTOR_POLICY`（1）、`OPERATOR`
 —— submitter 族加 cwd 变更与 Action respond（8）、`OWNER`
-—— 仅 lifecycle 族（8）、`WORKSPACE_DISCOVERY`（4）、`TENANT_SCOPED`
-（3）、`INTERNAL_WRITER`（22）。设计列出的 `legacy_create` 与
+—— lifecycle 族及四条自动化变更（12）、`WORKSPACE_DISCOVERY`（4）、`TENANT_SCOPED`
+（3）、`INTERNAL_WRITER`（24）。设计列出的 `legacy_create` 与
 `legacy_tenant` 两个名字保留在类的文档里，作为 legacy 分支的名字：
 每条路由恰有一个规则类，按分离规则取的是绑定 Session 的类。下表的规则类列是
 切片 C 之后的矩阵；被它替换的切片前取值保存在 D4 表的「今天」列。
@@ -233,6 +233,13 @@ L3 两条授权入口）。（第 2 节上一版正文里的 21 internal 已过�
 | `POST /v1/agents`                                                                                                                | PUBLIC   | AGENT_DEFINITION_CREATE   | TENANT_SCOPED       |
 | `GET /v1/agents/{agentId}`                                                                                                       | PUBLIC   | AGENT_DEFINITION_GET      | TENANT_SCOPED       |
 | `POST /v1/agents/{agentId}`                                                                                                      | PUBLIC   | AGENT_DEFINITION_UPDATE   | TENANT_SCOPED       |
+| `POST /v1/agent-automations`                                                                                                     | PUBLIC   | AUTOMATION_CREATE         | OWNER               |
+| `GET /v1/agent-automations`                                                                                                      | PUBLIC   | AUTOMATION_LIST           | READER              |
+| `GET /v1/agent-automations/{automationId}`                                                                                       | PUBLIC   | AUTOMATION_GET            | READER              |
+| `POST /v1/agent-automations/{automationId}`                                                                                      | PUBLIC   | AUTOMATION_UPDATE         | OWNER               |
+| `DELETE /v1/agent-automations/{automationId}`                                                                                    | PUBLIC   | AUTOMATION_RETIRE         | OWNER               |
+| `POST /v1/agent-automations/{automationId}/runs`                                                                                 | PUBLIC   | AUTOMATION_RUN            | OWNER               |
+| `GET /v1/agent-automations/{automationId}/runs`                                                                                  | PUBLIC   | AUTOMATION_RUN_LIST       | READER              |
 | `POST /api/agent/web-shell/v1/tasks/query`                                                                                       | WEBSHELL | TASK_LIST                 | READER              |
 | `POST /api/agent/web-shell/v1/tasks/get`                                                                                         | WEBSHELL | TASK_GET                  | READER              |
 | `POST /api/agent/web-shell/v1/tasks/events/query`                                                                                | WEBSHELL | TASK_EVENT_LIST           | READER              |
