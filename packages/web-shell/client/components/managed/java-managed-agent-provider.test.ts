@@ -406,6 +406,33 @@ describe('createJavaManagedAgentProvider', () => {
     ]);
   });
 
+  it('forwards stream keep-alives to the subscribe caller', async () => {
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(
+            ': keepalive\r\n\r\nid: 9\nevent: turn.completed\ndata: {"sequence":9,"eventId":"evt_9","sessionId":"session-1","turnId":"turn-1","type":"turn.completed","createdAt":9,"data":{},"terminal":true}\n\n: keepalive\n\n',
+            { status: 200 },
+          ),
+        ),
+    });
+    const onAlive = vi.fn();
+    const events = [];
+    for await (const event of provider.subscribeEvents('session-1', {
+      clientId: 'client-1',
+      lastEventId: 8,
+      onAlive,
+    })) {
+      events.push(event);
+    }
+    expect(onAlive).toHaveBeenCalledTimes(2);
+    expect(events).toEqual([
+      expect.objectContaining({ id: 9, type: 'completed' }),
+    ]);
+  });
+
   it('turns a resync frame into a stream gap and stops', async () => {
     const provider = createJavaManagedAgentProvider({
       baseUrl: 'https://product.example',

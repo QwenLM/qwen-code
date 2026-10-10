@@ -371,6 +371,7 @@ export class JavaManagedAgentClient {
     request: Schemas['WebShellStreamRequest'],
     signal?: AbortSignal,
     onOpen?: () => void,
+    onAlive?: () => void,
   ): AsyncGenerator<JavaAgentEvent | JavaAgentResyncRequired> {
     const response = await this.request(
       '/events/stream',
@@ -423,7 +424,14 @@ export class JavaManagedAgentClient {
         const hasContent = frame
           .split(/\r?\n/)
           .some((line) => line && !line.startsWith(':'));
-        if (!hasContent) return undefined; // heartbeat or comment
+        if (!hasContent) {
+          // A complete heartbeat or comment frame is the server answering:
+          // on an idle Session it is the only sign of life the stream
+          // gives. A trailing fragment is a mid-frame disconnect, never a
+          // complete frame, so it does not count.
+          if (!trailing) onAlive?.();
+          return undefined;
+        }
         if (!trailing) {
           // A mid-stream frame with id/event lines but no data line is
           // malformed server output, not a heartbeat: count it as corrupt
