@@ -14774,6 +14774,21 @@ export function createSessionControlPlane(
       // Abort the prompt: for 'queued' prompts the FIFO will skip
       // dispatch on the `signal.aborted` check; for 'running' prompts
       // this triggers the cancel path.
+      target.userCancelRequested = true;
+      if (
+        target.abortController.signal.aborted &&
+        target.dispatched === true &&
+        entry.activePromptId === target.promptId
+      ) {
+        void forwardRunningPromptCancel(entry, target, {
+          sessionId,
+          _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'user' },
+        }).catch((err) => {
+          writeStderrLine(
+            `[pending-prompt] cancel upgrade failed after removePendingPrompt session=${sessionId}: ${extractErrorMessage(err)}`,
+          );
+        });
+      }
       target.abortController.abort(USER_CANCEL_ABORT_REASON);
       if (target.state === 'queued') {
         // A queued prompt never dispatches once aborted — safe to drop

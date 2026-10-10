@@ -521,12 +521,23 @@ describe('explicitly cancelled recorded turns', () => {
     },
   );
   it('refuses ambiguous prompt and terminal identities', () => {
+    const missingOwner = prompt();
+    delete missingOwner.daemonPromptId;
     for (const messages of [
+      [missingOwner, result()],
       [prompt(), prompt(), result()],
       [prompt(), result(), result()],
       [prompt(), { ...prompt(), promptId: 'other-client' }, result()],
     ]) {
-      expect(planFor(conversationFromRecords(messages)).canContinue).toBe(true);
+      const plan = buildSessionRecoveryPlan({
+        sessionId: 'session-1',
+        conversation: conversationFromRecords(messages),
+        options: { allowAutoContinue: true },
+      });
+      expect(plan.canContinue).toBe(true);
+      expect(plan.cancellationConfirmationId).toBe('daemon-1');
+      expect(plan.canAutoContinue).toBe(false);
+      expect(plan.requiresUserConfirmation).toBe(true);
     }
   });
   it('does not reuse a terminal that precedes its user record', () => {
@@ -550,10 +561,53 @@ describe('explicitly cancelled recorded turns', () => {
         promptIds: ['session-1########1', 'session-1########1'],
       },
     };
-    const plan = planFor(
-      conversationFromRecords([prompt(), result(), compression]),
-    );
+    const plan = buildSessionRecoveryPlan({
+      sessionId: 'session-1',
+      conversation: conversationFromRecords([prompt(), result(), compression]),
+      options: { allowAutoContinue: true },
+    });
     expect(plan.kind).toBe('interrupted_prompt');
+    expect(plan.cancellationConfirmationId).toBe('daemon-1');
+    expect(plan.canAutoContinue).toBe(false);
+    expect(plan.requiresUserConfirmation).toBe(true);
+  });
+  it('retains resolved legacy confirmation after a completed local command', () => {
+    const original = prompt();
+    const terminal = result();
+    delete (terminal.systemPayload as { cancelReason?: string }).cancelReason;
+    const command = {
+      ...record(2, userText('/docs')),
+      promptId: 'session-1########2',
+      daemonPromptId: 'daemon-2',
+    };
+    const output: ChatRecord = {
+      ...record(3, userText('')),
+      type: 'system',
+      subtype: 'slash_command',
+      message: undefined,
+      systemPayload: {
+        phase: 'result',
+        rawCommand: '/docs',
+        outputHistoryItems: [{ type: 'assistant', text: 'Documentation URL' }],
+      },
+    };
+    const plan = buildSessionRecoveryPlan({
+      sessionId: 'session-1',
+      conversation: conversationFromRecords([
+        original,
+        terminal,
+        command,
+        output,
+      ]),
+      options: { allowAutoContinue: true },
+    });
+    expect(structuredClone(plan.originalApiHistory)).toEqual([
+      original.message,
+    ]);
+    expect(plan.canContinue).toBe(true);
+    expect(plan.cancellationConfirmationId).toBe('daemon-1');
+    expect(plan.canAutoContinue).toBe(false);
+    expect(plan.requiresUserConfirmation).toBe(true);
   });
   it('ignores cold notifications while retaining cancellation provenance', () => {
     const plan = planFor(

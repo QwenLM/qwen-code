@@ -166,8 +166,7 @@ export function getLastApiPromptCancellation(
   const unknown =
     latest?.kind === 'result' &&
     latest.state === 'cancelled' &&
-    latest.cancelledAt !== undefined &&
-    latest.cancelReason === undefined
+    latest.cancelledAt !== undefined
       ? { reason: 'unknown' as const, promptId: latest.promptId }
       : undefined;
   const promptId = getLastApiHistoryPromptId(
@@ -211,9 +210,13 @@ export function getLastApiPromptCancellation(
     results[0]!.hint.cancelledAt === undefined
   )
     return unknown;
-  return results[0]!.hint.cancelReason === 'user'
-    ? { reason: 'user', promptId: owner.daemonPromptId }
-    : unknown;
+  const result = results[0]!.hint;
+  if (result.cancelReason === 'user') {
+    return { reason: 'user', promptId: owner.daemonPromptId };
+  }
+  return hints.findLast((hint) => hint?.kind === 'result') === result
+    ? { reason: 'unknown', promptId: result.promptId }
+    : undefined;
 }
 
 export function isLastApiPromptCancelled(
