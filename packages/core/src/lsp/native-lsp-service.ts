@@ -528,6 +528,16 @@ export class NativeLspService {
     };
   }
 
+  private canonicalDocumentUri(uri: string): string {
+    if (!/^file:/i.test(uri)) return uri;
+    try {
+      return pathToFileURL(fileURLToPath(uri)).toString();
+    } catch {
+      // Preserve malformed input for the existing scope refusal.
+      return uri;
+    }
+  }
+
   /**
    * Get ready server handles filtered by optional server name.
    * Each handle is guaranteed to have a valid connection.
@@ -628,6 +638,7 @@ export class NativeLspService {
   }
 
   private deferWorkspaceDocument(uri: string, cause?: unknown): void {
+    uri = this.canonicalDocumentUri(uri);
     for (const connection of new Set(this.lastConnections.values())) {
       const generations = this.callHierarchyGenerations.get(connection);
       const generation = generations?.get(uri);
@@ -725,6 +736,7 @@ export class NativeLspService {
     languageId?: string,
     force = false,
   ): { sent: boolean; opened: boolean; deferred?: boolean } {
+    uri = this.canonicalDocumentUri(uri);
     if (!/^file:/i.test(uri)) {
       return { sent: false, opened: false };
     }
@@ -1217,6 +1229,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspDefinition[]> {
+    location = { ...location, uri: this.canonicalDocumentUri(location.uri) };
     const handles = this.getReadyHandles(serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
@@ -1289,6 +1302,7 @@ export class NativeLspService {
     includeDeclaration = false,
     limit = 200,
   ): Promise<LspReference[]> {
+    location = { ...location, uri: this.canonicalDocumentUri(location.uri) };
     const handles = this.getReadyHandles(serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
@@ -1358,6 +1372,7 @@ export class NativeLspService {
     location: LspLocation,
     serverName?: string,
   ): Promise<LspHoverResult | null> {
+    location = { ...location, uri: this.canonicalDocumentUri(location.uri) };
     const handles = this.getReadyHandles(serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
@@ -1412,6 +1427,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 200,
   ): Promise<LspSymbolInformation[]> {
+    uri = this.canonicalDocumentUri(uri);
     const handles = this.getReadyHandles(serverName, uri);
     const requestParams = { textDocument: { uri } };
 
@@ -1495,6 +1511,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspDefinition[]> {
+    location = { ...location, uri: this.canonicalDocumentUri(location.uri) };
     const handles = this.getReadyHandles(serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
@@ -1717,6 +1734,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspCallHierarchyItem[]> {
+    location = { ...location, uri: this.canonicalDocumentUri(location.uri) };
     const handles = this.getReadyHandles(serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
@@ -1804,7 +1822,10 @@ export class NativeLspService {
               candidate,
               name,
             );
-            if (item) items.push(item);
+            if (item) {
+              item.uri = this.canonicalDocumentUri(item.uri);
+              items.push(item);
+            }
             if (items.length >= limit) break;
           }
           return items.slice(0, limit);
@@ -1838,6 +1859,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspCallHierarchyIncomingCall[]> {
+    item = { ...item, uri: this.canonicalDocumentUri(item.uri) };
     const targetServer = serverName ?? item.serverName;
     const handles = this.getReadyHandles(targetServer);
     this.assertServersAvailable(handles.length, targetServer);
@@ -1869,6 +1891,9 @@ export class NativeLspService {
         for (const call of response) {
           const normalized = this.normalizer.normalizeIncomingCall(call, name);
           if (normalized) {
+            normalized.from.uri = this.canonicalDocumentUri(
+              normalized.from.uri,
+            );
             normalized.from.documentRevision = revision.sign(normalized.from);
             calls.push(normalized);
             if (calls.length >= limit) {
@@ -1901,6 +1926,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspCallHierarchyOutgoingCall[]> {
+    item = { ...item, uri: this.canonicalDocumentUri(item.uri) };
     const targetServer = serverName ?? item.serverName;
     const handles = this.getReadyHandles(targetServer);
     this.assertServersAvailable(handles.length, targetServer);
@@ -1932,6 +1958,7 @@ export class NativeLspService {
         for (const call of response) {
           const normalized = this.normalizer.normalizeOutgoingCall(call, name);
           if (normalized) {
+            normalized.to.uri = this.canonicalDocumentUri(normalized.to.uri);
             normalized.to.documentRevision = revision.sign(normalized.to);
             calls.push(normalized);
             if (calls.length >= limit) {
@@ -1963,6 +1990,7 @@ export class NativeLspService {
     uri: string,
     serverName?: string,
   ): Promise<LspDiagnostic[]> {
+    uri = this.canonicalDocumentUri(uri);
     const handles = this.getReadyHandles(serverName, uri);
     const allDiagnostics: LspDiagnostic[] = [];
 
@@ -1982,9 +2010,11 @@ export class NativeLspService {
         );
 
         const items =
-          response && typeof response === 'object'
-            ? (response as Record<string, unknown>)['items']
-            : undefined;
+          response === null
+            ? []
+            : response && typeof response === 'object'
+              ? (response as Record<string, unknown>)['items']
+              : undefined;
         if (!Array.isArray(items)) {
           throw new Error('Invalid diagnostic report: expected an items array');
         }
@@ -2077,9 +2107,11 @@ export class NativeLspService {
         );
 
         const items =
-          response && typeof response === 'object'
-            ? (response as Record<string, unknown>)['items']
-            : undefined;
+          response === null
+            ? []
+            : response && typeof response === 'object'
+              ? (response as Record<string, unknown>)['items']
+              : undefined;
         if (!Array.isArray(items)) {
           throw new Error('Invalid diagnostic report: expected an items array');
         }
@@ -2149,6 +2181,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 20,
   ): Promise<LspCodeAction[]> {
+    uri = this.canonicalDocumentUri(uri);
     const handles = this.getReadyHandles(serverName, uri);
 
     for (const [name, handle] of handles) {

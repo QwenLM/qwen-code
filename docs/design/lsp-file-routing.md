@@ -53,6 +53,14 @@ transport. Workspace edits use the same fresh containment check as reads.
 
 ## Delivery and navigation
 
+Canonicalize syntactically equivalent file URI spellings (`file:/`, `FILE:///`
+and percent-encoding variants) with `fileURLToPath` / `pathToFileURL` before
+routing, synchronization and requests. State keys and outgoing document URIs
+share this spelling, including lifecycle deferral and restart replay. Preserve
+the symlink alias path; physical resolution still controls scope, not URI
+identity. Canonicalize returned hierarchy URIs before signing and emitting them,
+including nested incoming/outgoing items. Non-file result URIs remain unchanged.
+
 The shared synchronization entry point rechecks current containment before any
 read or notification. Document queries refuse deferred synchronization and check
 scope immediately before sending each request, including retries, and after each
@@ -127,6 +135,9 @@ The manual E2E harness uses real `WorkspaceContext` root normalization.
   only within a response, preserve fresh symlink checks on later requests, and
   distinguish an exhausted scan from no matching results. Explicit output limits
   above 1000 remain supported.
+- Equivalent file URI spellings share one didOpen, monotonic versions and one
+  lifecycle, replay once after restart, and defer the same state on scope loss.
+  Canonical server-echoed hierarchy items remain traversable after signing.
 - Regression tests must fail on baseline or targeted mutants; verification reports
   distinguish focused tests, build checks and blocked E2E/platform coverage.
 

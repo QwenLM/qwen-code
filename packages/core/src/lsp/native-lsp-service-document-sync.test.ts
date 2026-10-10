@@ -408,7 +408,13 @@ describe('NativeLspService disk document synchronization', () => {
       const [item] = await run(
         service.prepareCallHierarchy({ uri: target, range }),
       );
+      expect(item!.uri).toBe(uri);
       expect(item!.documentRevision).toBeDefined();
+      expect(connection.send).toHaveBeenCalledWith(didOpen('old'));
+      expect(connection.request).toHaveBeenCalledWith(
+        'textDocument/prepareCallHierarchy',
+        { textDocument: { uri }, position: range.start },
+      );
       await expect(run(service.incomingCalls(item!))).resolves.toEqual([]);
       expect(connection.request).toHaveBeenCalledWith(
         'callHierarchy/incomingCalls',
@@ -578,7 +584,6 @@ describe('NativeLspService disk document synchronization', () => {
 
       it.each([
         undefined,
-        null,
         [],
         {},
         { items: null },
@@ -612,9 +617,59 @@ describe('NativeLspService disk document synchronization', () => {
         },
       );
 
-      it('accepts a successful empty report as clean', async () => {
-        connection.request.mockResolvedValue({ kind: 'full', items: [] });
-        expect(await run(queryDiagnostics())).toEqual([]);
+      it.each([null, { kind: 'full', items: [] }])(
+        'accepts a successful empty report %j as clean',
+        async (report) => {
+          connection.request.mockResolvedValue(report);
+          expect(await run(queryDiagnostics())).toEqual([]);
+        },
+      );
+
+      it('retains empty-message diagnostics beside real errors', async () => {
+        const diagnostics = [
+          { range, message: '', code: 'unnecessary', tags: [1] },
+          { range, message: 'real error', severity: 1 },
+        ];
+        connection.request.mockResolvedValue({
+          kind: 'full',
+          items:
+            operation === 'diagnostics'
+              ? diagnostics
+              : [{ uri, kind: 'full', items: diagnostics }],
+        });
+        const result = await run(queryDiagnostics());
+        const retained =
+          operation === 'diagnostics'
+            ? result
+            : (result[0] as { diagnostics: unknown[] }).diagnostics;
+        expect(retained).toEqual([
+          expect.objectContaining({
+            message: '',
+            code: 'unnecessary',
+            tags: ['unnecessary'],
+          }),
+          expect.objectContaining({ message: 'real error', severity: 'error' }),
+        ]);
+      });
+
+      it('preserves earlier diagnostics when a later server returns null', async () => {
+        const other = createConnection();
+        other.request.mockResolvedValue(null);
+        useHandles([
+          ['test', handle],
+          ['other', { ...handle, connection: other }],
+        ]);
+        const diagnostic = { range, message: 'real error' };
+        connection.request.mockResolvedValue({
+          items:
+            operation === 'diagnostics'
+              ? [diagnostic]
+              : [{ uri, items: [diagnostic] }],
+        });
+        const result = await run(queryDiagnostics());
+        expect(result).toHaveLength(1);
+        expect(JSON.stringify(result)).toContain('real error');
+        expect(other.request).toHaveBeenCalled();
       });
 
       it('does not return partial diagnostics when another server fails', async () => {
@@ -654,7 +709,8 @@ describe('NativeLspService disk document synchronization', () => {
     { kind: 'full' },
     { kind: 'full', items: null },
     { kind: 'full', items: [null] },
-    { kind: 'full', items: [{ range, message: '' }] },
+    { kind: 'full', items: [{ range }] },
+    { kind: 'full', items: [{ range, message: 42 }] },
   ])('refuses an invalid in-scope workspace file report %j', async (report) => {
     connection.request.mockResolvedValue({
       items: [
@@ -680,12 +736,20 @@ describe('NativeLspService disk document synchronization', () => {
     expect(await workspaceDiagnostics()).toEqual([]);
   });
 
-  it('refuses malformed document diagnostics instead of silently dropping them', async () => {
-    connection.request.mockResolvedValue({ kind: 'full', items: [null] });
-    await expect(run(service.diagnostics(uri))).rejects.toThrow(
-      'Invalid diagnostic report: malformed diagnostic',
-    );
-  });
+  it.each([
+    null,
+    { message: 'missing range' },
+    { range },
+    { range, message: 42 },
+  ])(
+    'refuses malformed document diagnostics %j instead of silently dropping them',
+    async (item) => {
+      connection.request.mockResolvedValue({ kind: 'full', items: [item] });
+      await expect(run(service.diagnostics(uri))).rejects.toThrow(
+        'Invalid diagnostic report: malformed diagnostic',
+      );
+    },
+  );
 
   const queryMethods = [
     'definitions',
@@ -701,19 +765,153 @@ describe('NativeLspService disk document synchronization', () => {
   ] as const;
   async function query(
     method: (typeof queryMethods)[number],
+    target = uri,
   ): Promise<unknown> {
     if (method === 'documentSymbols' || method === 'diagnostics')
-      return service[method](uri);
+      return service[method](target);
     if (method === 'codeActions')
-      return service.codeActions(uri, range, { diagnostics: [] });
+      return service.codeActions(target, range, { diagnostics: [] });
     if (method === 'incomingCalls' || method === 'outgoingCalls') {
-      const items = await service.prepareCallHierarchy({ uri, range });
+      const items = await service.prepareCallHierarchy({ uri: target, range });
       if (!items[0])
         throw new Error(`prepareCallHierarchy returned no item for ${method}`);
       return service[method](items[0]);
     }
-    return service[method]({ uri, range });
+    return service[method]({ uri: target, range });
   }
+
+  it.each(queryMethods)(
+    'shares one document lifecycle across URI spellings for %s',
+    async (method) => {
+      await run(query(method));
+      fs.writeFileSync(file, 'changed');
+      for (const target of [
+        uri.replace('file:///', 'file:/'),
+        uri.replace('file:', 'FILE:'),
+        uri.replace('main.ts', '%6dain.ts'),
+      ]) {
+        await run(query(method, target));
+      }
+      const notifications = connection.send.mock.calls.map(([value]) => value);
+      expect(
+        notifications.filter(
+          (value) => value.method === 'textDocument/didOpen',
+        ),
+      ).toEqual([didOpen('old')]);
+      expect(
+        notifications.filter(
+          (value) => value.method === 'textDocument/didChange',
+        ),
+      ).toEqual([didChange('changed')]);
+      for (const { params } of connection.requests) {
+        const document = params as {
+          textDocument?: { uri: string };
+          item?: { uri: string };
+        };
+        expect(document.textDocument?.uri ?? document.item?.uri).toBe(uri);
+      }
+      const tracking = service as unknown as {
+        openedDocuments: Map<string, Map<string, unknown>>;
+        documentLifecycles: Map<string, Map<string, unknown>>;
+      };
+      expect([...tracking.openedDocuments.get('test')!.keys()]).toEqual([uri]);
+      expect([...tracking.documentLifecycles.get('test')!.keys()]).toEqual([
+        uri,
+      ]);
+      const replacement = replaceConnection();
+      await run(query(method, uri.replace('file:', 'FILE:')));
+      expect(
+        replacement.send.mock.calls
+          .filter(([value]) => value.method === 'textDocument/didOpen')
+          .map(([value]) => value),
+      ).toEqual([didOpen('changed')]);
+    },
+  );
+
+  it.each(['incomingCalls', 'outgoingCalls'] as const)(
+    'canonicalizes server-echoed hierarchy URIs before signing %s',
+    async (method) => {
+      const rawItem = {
+        name: 'fn',
+        kind: 12,
+        uri: uri.replace('file:///', 'file:/'),
+        range,
+        selectionRange: range,
+      };
+      connection.request.mockResolvedValueOnce([rawItem]);
+      const [item] = await prepare();
+      expect(item!.uri).toBe(uri);
+      expect(item!.documentRevision).toBeDefined();
+      connection.request.mockResolvedValueOnce([
+        method === 'incomingCalls'
+          ? {
+              from: { ...rawItem, uri: uri.replace('file:', 'FILE:') },
+              fromRanges: [range],
+            }
+          : {
+              to: { ...rawItem, uri: uri.replace('file:', 'FILE:') },
+              fromRanges: [range],
+            },
+      ]);
+      const nested =
+        method === 'incomingCalls'
+          ? (await run(service.incomingCalls(item!)))[0]!.from
+          : (await run(service.outgoingCalls(item!)))[0]!.to;
+      expect(nested.uri).toBe(uri);
+      expect(nested.documentRevision).toBeDefined();
+      connection.request.mockResolvedValueOnce([]);
+      await expect(run<unknown>(service[method](nested))).resolves.toEqual([]);
+    },
+  );
+
+  it('defers canonical state when scope is lost under an alternate spelling', async () => {
+    useTypescriptManager();
+    vi.spyOn(manager, 'warmupTypescriptServer').mockResolvedValue(undefined);
+    const extra = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-uri-scope-'));
+    const targetFile = path.join(extra, 'extra.ts');
+    const canonical = pathToFileURL(targetFile).toString();
+    const alternate = canonical.replace('file:', 'FILE:');
+    const workspace = (
+      service as unknown as { workspaceContext: WorkspaceContext }
+    ).workspaceContext;
+    try {
+      fs.writeFileSync(targetFile, 'extra');
+      workspace.addDirectory(extra);
+      const [item] = await prepare(canonical);
+      workspace.removeDirectory(extra);
+      connection.request.mockResolvedValueOnce([
+        { name: 'fn', kind: 12, location: { uri: alternate, range } },
+      ]);
+      expect(await run(service.workspaceSymbols('fn'))).toEqual([]);
+      const tracking = service as unknown as {
+        openedDocuments: Map<string, Map<string, unknown>>;
+        documentLifecycles: Map<
+          string,
+          Map<string, { pendingClose?: unknown }>
+        >;
+      };
+      expect(tracking.openedDocuments.get('test')!.has(canonical)).toBe(false);
+      expect(
+        tracking.documentLifecycles.get('test')!.get(canonical)?.pendingClose,
+      ).toBeDefined();
+      workspace.addDirectory(extra);
+      await expect(run(service.incomingCalls(item!))).rejects.toMatchObject(
+        againError(),
+      );
+      await hover(alternate);
+      expect(connection.send.mock.calls.map(([value]) => value)).toEqual([
+        didOpen('extra', 1, canonical),
+        {
+          jsonrpc: '2.0',
+          method: 'textDocument/didClose',
+          params: { textDocument: { uri: canonical } },
+        },
+        didOpen('extra', 2, canonical),
+      ]);
+    } finally {
+      fs.rmSync(extra, { recursive: true, force: true });
+    }
+  });
 
   describe('file-scoped server routing', () => {
     beforeEach(() => {

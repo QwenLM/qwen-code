@@ -56,11 +56,8 @@ export class LspResponseNormalizer {
       return null;
     }
 
-    const message =
-      typeof itemObj['message'] === 'string'
-        ? (itemObj['message'] as string)
-        : '';
-    if (!message) {
+    const message = itemObj['message'];
+    if (typeof message !== 'string') {
       return null;
     }
 

@@ -25,6 +25,8 @@ const resolvePath = (...segments: string[]) =>
   path.join(workspaceRoot, ...segments);
 const toUri = (filePath: string) => pathToFileURL(filePath).toString();
 const appPath = resolvePath('src', 'app.ts');
+const displayPath = (filePath: string) =>
+  path.relative(workspaceRoot, path.resolve(workspaceRoot, filePath));
 
 const lineSpan = (line: number, from: number, to: number) => ({
   start: { line, character: from },
@@ -331,7 +333,7 @@ describe('LspTool', () => {
 
         expectContains(
           result.llmContent,
-          '../outside/lib.ts:2:3 [test]',
+          `${displayPath('../outside/lib.ts')}:2:3 [test]`,
           'outside workspace',
           '/directory add',
         );
@@ -353,7 +355,7 @@ describe('LspTool', () => {
           client.definitions.mockResolvedValue([createLocation(appPath, 0, 0)]),
       );
       expect(result.llmContent).toContain(
-        'Definitions for ../outside/input.ts:5:10 [test]:',
+        `Definitions for ${displayPath('../outside/input.ts')}:5:10 [test]:`,
       );
       expect(result.llmContent).not.toContain('outside workspace');
     });
@@ -373,7 +375,9 @@ describe('LspTool', () => {
       for (const content of [result.llmContent, result.returnDisplay]) {
         expect(String(content).match(/outside workspace/g)).toHaveLength(2);
         expect(String(content).match(/\/directory add/g)).toHaveLength(1);
-        expect(content).toContain('../outside/b.ts:1:1 [outside workspace]');
+        expect(content).toContain(
+          `${displayPath('../outside/b.ts')}:1:1 [outside workspace]`,
+        );
       }
     });
 
@@ -402,7 +406,9 @@ describe('LspTool', () => {
         .build(at('goToDefinition'))
         .execute(abortSignal);
 
-      expect(result.llmContent).toContain('../extra/lib.ts:1:1');
+      expect(result.llmContent).toContain(
+        `${displayPath('../extra/lib.ts')}:1:1`,
+      );
       expect(result.llmContent).not.toContain('outside workspace');
     });
 
@@ -520,7 +526,7 @@ describe('LspTool', () => {
       );
       expectContains(
         result.llmContent,
-        'src/app.ts',
+        displayPath(appPath),
         'good-diagnostic',
         'unresolvable file',
       );
@@ -623,7 +629,7 @@ describe('LspTool', () => {
       );
       expectContains(
         result.llmContent,
-        '\nsrc/app.ts:',
+        `\n${displayPath(appPath)}:`,
         'untitled:buffer [non-file URI',
       );
       expect(result.llmContent).not.toContain('FILE:');

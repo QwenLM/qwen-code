@@ -76,7 +76,8 @@ prepare at a current location before traversal. Unrelated drifted or unreadable 
 healthy siblings. Root freshness and connection changes still reject the whole
 request, even for an empty result or request error. Non-file URIs remain unsigned
 and report “cannot be traversed; prepare at a file location instead”, not a
-retryable stale error. Ordinary non-file requests pass through unchanged.
+retryable stale error. Ordinary document queries reject non-file URIs under
+the [file routing contract](lsp-file-routing.md).
 
 ## Boundaries
 
@@ -95,7 +96,8 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   connection. A fixed delay does not prove server analysis has completed. Pending closes are retried without rediscovering documents. The tool's optional top-symbol
   reference lookup is document-targeted and also synchronizes.
 - No file watchers, edit-time feedback, IDE buffers, installation, workspace-wide
-  dependency freshness, or diagnostic push/pull redesign. Reads observe disk
+  dependency freshness, or push-diagnostic cache. Pull negotiation and failure
+  visibility are covered by the diagnostic failure contract below. Reads observe disk
   snapshots, not an atomic transaction with concurrent external writers. For
   disk-reading servers, unchanged text has no client-delivered version; external
   edits that return to identical text between observations cannot be detected.
@@ -118,10 +120,13 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   warmup errors; failure of a different warmup file does not prevent querying a
   synchronized target. Propagated failures reach the tool's existing failure
   message rather than claiming a clean or complete result. Successful empty
-  diagnostics still display as clean. Existing request/pull catches and public
-  query catches other than hierarchy provenance handling are unchanged and can
-  return empty arrays or null; these are **not evidence of clean diagnostics**.
-  Broader error result design remains PR2.
+  diagnostics still display as clean. Diagnostic request/pull catches now reject
+  RPC failures and invalid reports, retaining valid empty-message diagnostics
+  and accepting successful null results under the
+  [diagnostic failure contract](lsp-diagnostic-failures.md). Other public query
+  catches remain unchanged except for hierarchy provenance handling; their empty
+  arrays or null are not evidence of a successful analysis. Broader structured
+  error-result design remains deferred.
 - Notification delivery is not acknowledged by the transport. This change does
   not redesign asynchronous writes/closed connections.
 
@@ -159,7 +164,9 @@ nested items, line-shifting edits, sibling queries, disk-reading servers and
 in-flight response races. Workspace diagnostic ordering, result-limit scoping,
 and symbol retries are pinned. Actual-client/tool tests reject deleted tracked
 files, thrown sends, and unsupported workspace changes, including after an
-earlier server returned results, while preserving ordinary pull-request catches. Initialization tests exercise capability production through startup.
+earlier server returned results. Diagnostic report tests additionally preserve
+valid empty-message/null results and reject RPC failures and malformed reports.
+Initialization tests exercise capability production through startup.
 Mutation checks must kill each named mutant, all in `native-lsp-service.ts`
 unless another file is named, with the listed test going red: R1-5,
 `ensureDocumentSynchronized` returns a constant `true` instead of the open flag

@@ -19,16 +19,23 @@ Advertise `textDocument.diagnostic` with dynamic registration and related-docume
 support disabled. Use the existing pull request, normalization and tool output;
 do not add a push cache just to repair capability negotiation.
 
-A successful document report must contain an `items` array. Workspace reports
-must also contain an `items` array. Each file report for a current URI must
-contain its own `items` array without diagnostics lost during normalization;
+A non-null successful document or workspace report must contain an `items`
+array. A successful `null` workspace response is protocol-allowed; document
+`null` is accepted as an empty result for compatibility, not claimed as a
+protocol-valid document report. This does not accept RPC errors or missing
+results. Each file report for a current URI must contain its own `items` array
+without diagnostics lost during normalization. An empty-string diagnostic
+message is valid and retained; missing or non-string messages remain invalid;
 malformed or out-of-scope locations remain omitted by the existing URI filter.
 No previous result identifier is sent, so an
 unchanged document report without items cannot establish a current result.
 Unsupported methods, transport errors and invalid report envelopes fail the
 query with the server name and original reason. They must not become an empty
 or apparently complete partial result. Existing tool catches render those
-failures without changing the public diagnostic result types.
+failures without changing the public diagnostic result types. This supersedes
+the earlier request/pull-catch deferral in the
+[disk synchronization design](lsp-disk-document-sync.md); unrelated query catches
+and the broader structured error-result design remain outside this repair.
 
 ## Boundaries
 
@@ -50,7 +57,9 @@ out-of-scope filtering are unchanged.
   model. Missing model authentication and unavailable platforms are disclosed.
 - RPC rejection, timeout, connection closure and invalid report envelopes surface
   failure through document and workspace tools. Successful empty reports remain
-  valid, and an earlier server's results do not conceal a later server failure.
+  valid, including the successful `null` compatibility case, and an earlier
+  server's results do not conceal a later server failure. Empty-message
+  diagnostics and adjacent real errors are retained on both query paths.
 - Existing routing/scope/lifecycle tests, build, typecheck, bundle and scoped
   lint/format checks pass. Real macOS and Linux runs corroborate the protocol
   behavior where available; no claim is made about unexecuted Windows tests.
