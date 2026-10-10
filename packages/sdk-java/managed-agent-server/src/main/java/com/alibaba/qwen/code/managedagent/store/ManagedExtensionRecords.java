@@ -42,7 +42,7 @@ public final class ManagedExtensionRecords {
             "tool.receipt", "checkpoint.committed", "context.compacted",
             "cancel.requested", "turn.settled", "config.bound",
             "lifecycle.changed", "domain.committed", "message.delta",
-            "message.retracted");
+            "message.retracted", "operation.replayed");
     public static final int MAX_ID_BYTES = 512;
     public static final int MAX_TEXT_BYTES = 4096;
     public static final int MAX_GRANT_PHASES = 16;
@@ -143,6 +143,12 @@ public final class ManagedExtensionRecords {
     /** Run states after which no observation, output or run change may land. */
     static final List<String> TERMINAL = List.of("settled", "failed",
             "cancelled");
+
+    /** The terminal run states, as every binding and mirror rule names them. */
+    public static boolean isTerminalRunState(String state) {
+        return TERMINAL.contains(state);
+    }
+
     private static final Set<String> GRANT_KEYS = Set.of("sessionKey",
             "operationId", "domain", "operationRevision", "ownerId",
             "workspaceGeneration", "resourceScope", "leaseDurationMs",
@@ -422,13 +428,20 @@ public final class ManagedExtensionRecords {
         require(!"reserved".equals(state)
                 || execution == null && delivery.isNull(),
                 "run has nothing dispatched while reserved");
-        require(!"outcome_unknown".equals(execution)
-                && !"corrupt".equals(execution)
-                || "recovery_blocked".equals(state),
+        // The one failure that needs no proof: the run stopped inside its
+        // turn, so `failed` names the turn and `outcome_unknown` names what
+        // could not be known, and the pair stays visible (F3).
+        require(!("outcome_unknown".equals(execution)
+                        || "corrupt".equals(execution))
+                || "recovery_blocked".equals(state)
+                || "outcome_unknown".equals(execution)
+                        && "failed".equals(state),
                 "run stays recovery_blocked while its execution is unproven");
         require(!TERMINAL.contains(state) || execution == null
                 || "settled".equals(execution)
-                || "not_started_proven".equals(execution),
+                || "not_started_proven".equals(execution)
+                || "failed".equals(state)
+                        && "outcome_unknown".equals(execution),
                 "run ends only with an execution proven to have ended");
         require(!"settled".equals(state)
                 || !"not_started_proven".equals(execution),
@@ -1620,11 +1633,11 @@ public final class ManagedExtensionRecords {
                 .isEmpty(), label + " must be a non-empty string");
         String value = node.textValue();
         long loneSurrogates = 0;
+        boolean control = false;
         for (int index = 0; index < value.length(); index++) {
             char character = value.charAt(index);
-            require(character > 0x1f
-                    && (character < 0x7f || character > 0x9f),
-                    label + " must not contain control characters");
+            control |= character <= 0x1f
+                    || (character >= 0x7f && character <= 0x9f);
             if (Character.isHighSurrogate(character)) {
                 if (index + 1 < value.length()
                         && Character.isLowSurrogate(value.charAt(index + 1))) {
@@ -1636,9 +1649,12 @@ public final class ManagedExtensionRecords {
                 loneSurrogates++;
             }
         }
+        // The byte budget is checked before the control rule, the order
+        // boundedString applies, so an input breaking both reports one clause.
         require(value.getBytes(StandardCharsets.UTF_8).length
                 + 2L * loneSurrogates <= MAX_TEXT_BYTES,
                 label + " exceeds " + MAX_TEXT_BYTES + " UTF-8 bytes");
+        require(!control, label + " must not contain control characters");
         return value;
     }
 
@@ -1698,7 +1714,7 @@ public final class ManagedExtensionRecords {
         return value.longValueExact();
     }
 
-    private static void digest(JsonNode node, String label) {
+    static void digest(JsonNode node, String label) {
         require(node != null && node.isTextual()
                 && DIGEST.matcher(node.textValue()).matches(),
                 () -> label + " must be a lowercase SHA-256 hex digest");
