@@ -124,7 +124,7 @@ revalidation window: [English](../../../docs/design/2026-10-02-managed-agent-que
 
 ## Asynchronous tool publication verification
 
-Apply migration V63 and upgrade all servers before enabling
+Apply migration V65 and upgrade all servers before enabling
 `qwen.managed-agent.tool-publication.async-verification-enabled` (default
 `false`). Enable `journal-head-authorization` first; startup rejects async
 admission without it. `verification-concurrency` defaults to `2` and controls
