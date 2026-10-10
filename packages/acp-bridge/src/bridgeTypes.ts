@@ -216,6 +216,15 @@ export function parseBridgeManagedSessionStore(
       'managedSessionStore.baseUrl must be an HTTP(S) URL without credentials, query, or fragment',
     );
   }
+  if (
+    parsedBaseUrl.protocol === 'http:' &&
+    !isManagedSessionStoreLoopback(parsedBaseUrl.hostname) &&
+    record['allowInsecureHttp'] !== true
+  ) {
+    throw new TypeError(
+      'managedSessionStore.baseUrl must use HTTPS outside the loopback interface; pass allowInsecureHttp: true to opt in',
+    );
+  }
   const leaseDurationMs = record['leaseDurationMs'];
   if (
     typeof leaseDurationMs !== 'number' ||
@@ -251,6 +260,43 @@ export function parseBridgeManagedSessionStore(
     ...(allowInsecureHttp === undefined ? {} : { allowInsecureHttp }),
     leaseDurationMs,
   });
+}
+
+/**
+ * Loopback predicate for the session-store parser. The URL parser folds
+ * inet_aton short forms and case, but a four-label *name* whose labels are
+ * not all numeric (`127.foo.example.test`) survives verbatim, so the
+ * per-octet numeric test below is what keeps such a DNS name out of the
+ * 127/8 allowance; acp-bridge cannot import the CLI's isLoopbackBind and
+ * must keep this minimal. The `.localhost` arm mirrors core's
+ * isLoopbackHostname — the plaintext guard of the store this descriptor
+ * feeds, and the policy this parser must agree with; isLoopbackBind
+ * answers a different question (whether a `--hostname` value is a bindable
+ * loopback address) and correctly has no such arm. IPv4-mapped loopback
+ * (`[::ffff:127.0.0.1]`, canonicalized to `[::ffff:7f00:1]`) is deliberately
+ * outside this allowlist — both policies refuse the mapped spelling, so it
+ * must use HTTPS.
+ */
+function isManagedSessionStoreLoopback(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  if (
+    normalized === 'localhost' ||
+    normalized.endsWith('.localhost') ||
+    normalized === '127.0.0.1' ||
+    normalized === '::1' ||
+    normalized === '[::1]'
+  ) {
+    return true;
+  }
+  const octets = normalized.split('.');
+  return (
+    octets.length === 4 &&
+    octets[0] === '127' &&
+    octets.every(
+      (octet) =>
+        /^\d+$/u.test(octet) && Number(octet) >= 0 && Number(octet) <= 255,
+    )
+  );
 }
 
 function requireManagedSessionStoreString(
@@ -2030,12 +2076,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * session FIFO-serialize through a per-session queue.
    *
    * Admission contract: implementations must not be `async`. Admission
-   * failures such as `InvalidClientIdError`, `PromptQueueFullError`,
-   * `PromptIdConflictError`, and pre-aborted signals throw synchronously so
-   * HTTP routes can reject before returning 202. A retry with the same
-   * `promptId` and payload returns the original promise and must not abort
-   * the admitted turn. Deferred failures such as `SessionNotFoundError` may
-   * be returned as rejected promises.
+   * failures such as `InvalidClientIdError`, `PromptQueueFullError`, and
+   * pre-aborted signals throw synchronously so HTTP routes can reject
+   * before returning 202. Deferred failures such as `SessionNotFoundError`
+   * may be returned as rejected promises.
+   *
+   * Reserved contract (not yet implemented): promptId admission dedup — a
+   * `PromptIdConflictError` admission failure class, and a rule that a
+   * retry with the same `promptId` and payload returns the original
+   * promise without aborting the admitted turn. No implementation provides
+   * this today; the follow-up admission-dedup change must land it before
+   * any caller relies on it.
    */
   sendPrompt(
     sessionId: string,

@@ -635,6 +635,243 @@ class LocalProcessRuntimeProvisionerTest {
         }
     }
 
+    @Test
+    void observeReportsReadyForAnOwnedAliveLease() throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(
+                scope, null, LocalProcessRuntimeProvisioner.KIND);
+        RuntimeProvisionSeed seed = RuntimeProvisionSeed.create(
+                "binding-1", 1);
+        Set<Long> before = childPids();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString()),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            RuntimeResourceHandle handle = provisioner
+                    .ensureResource(request, seed, null)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS);
+            RuntimeLease lease = provisioner.provision(request, seed)
+                    .toCompletableFuture().get(30, TimeUnit.SECONDS);
+            RuntimeObservation observed = provisioner
+                    .reconcile(request, seed, handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.READY,
+                    observed.getOutcome());
+            assertEquals(lease.getEndpoint(), observed.getEndpoint());
+            assertEquals(seed.getLeaseId(), observed.getLeaseId());
+            assertEquals(seed.getEpoch(), observed.getEpoch());
+        } finally {
+            ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .forEach(ProcessHandle::destroyForcibly);
+            assertNoNewChildren(before);
+        }
+    }
+
+    @Test
+    void observeReportsNotFoundForADeadWorkerAndReapsItsEntry()
+            throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(
+                scope, null, LocalProcessRuntimeProvisioner.KIND);
+        RuntimeProvisionSeed seed = RuntimeProvisionSeed.create(
+                "binding-1", 1);
+        Set<Long> before = childPids();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString()),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            RuntimeResourceHandle handle = provisioner
+                    .ensureResource(request, seed, null)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS);
+            RuntimeLease lease = provisioner.provision(request, seed)
+                    .toCompletableFuture().get(30, TimeUnit.SECONDS);
+            ProcessHandle worker = ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .findFirst().orElseThrow();
+            worker.destroyForcibly();
+            worker.onExit().get(10, TimeUnit.SECONDS);
+            assertFalse(provisioner.isUsable(lease));
+            RuntimeObservation lost = provisioner
+                    .reconcile(request, seed, handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.NOT_FOUND,
+                    lost.getOutcome());
+            assertEquals(RuntimeRecoveryEvidence.Fact.JOURNAL_LOST,
+                    lost.getLossEvidence().fact());
+            assertEquals("owned-process-exit",
+                    lost.getLossEvidence().source());
+            // observe() callers may discard the verdict, so the reaped facts
+            // must keep the repeat read identical — never a one-shot
+            // NOT_FOUND that degrades into UNKNOWN retries.
+            RuntimeObservation repeated = provisioner
+                    .reconcile(request, seed, handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.NOT_FOUND,
+                    repeated.getOutcome());
+            assertEquals(lost.getLossEvidence().evidenceId(),
+                    repeated.getLossEvidence().evidenceId());
+            // The tombstone's only payload is the dead worker's pid: the
+            // repeat read must carry the same hostDomain the live-dead read
+            // built, not a constant.
+            assertEquals(lost.getLossEvidence().hostDomain(),
+                    repeated.getLossEvidence().hostDomain());
+            assertTrue(repeated.getLossEvidence().hostDomain()
+                    .endsWith(":" + worker.pid()));
+            assertFalse(provisioner.isUsable(lease));
+            // Only the reaped branch answers NOT_FOUND to a foreign seed; a
+            // retained dead entry would answer CONFLICT on the seed check
+            // first. This is what pins the migration itself.
+            RuntimeObservation foreignAfterReap = provisioner
+                    .reconcile(request,
+                            RuntimeProvisionSeed.create("binding-1", 2),
+                            handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.NOT_FOUND,
+                    foreignAfterReap.getOutcome());
+            provisioner.stop(lease);
+            RuntimeObservation released = provisioner
+                    .reconcile(request, seed, handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.UNKNOWN,
+                    released.getOutcome());
+        } finally {
+            ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .forEach(ProcessHandle::destroyForcibly);
+            assertNoNewChildren(before);
+        }
+    }
+
+    @Test
+    void tombstoneRetainsNoLeaseMaterialAcrossTheWholeIdentity()
+            throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(
+                scope, null, LocalProcessRuntimeProvisioner.KIND);
+        RuntimeProvisionSeed seed = RuntimeProvisionSeed.create(
+                "binding-1", 1);
+        Set<Long> before = childPids();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString()),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            RuntimeLease lease = provisioner.provision(request, seed)
+                    .toCompletableFuture().get(30, TimeUnit.SECONDS);
+            // Recreate the fence identity deterministically; the digest must
+            // carry no bearer material, yet stay a function of every
+            // ownership-key component (otherwise distinct leases would
+            // collapse onto one tombstone).
+            java.util.List<Object> key = java.util.List.of(
+                    lease.getRuntimeInstanceId(), lease.getEndpoint(),
+                    lease.getLeaseId(), lease.getEpoch(), lease.getToken());
+            String first = LocalProcessRuntimeProvisioner.tombstone(key);
+            String second = LocalProcessRuntimeProvisioner.tombstone(key);
+            assertEquals(first, second);
+            assertTrue(first.matches("[0-9a-f]{64}"),
+                    "tombstone must be a SHA-256 digest: " + first);
+            assertFalse(first.contains(lease.getToken()));
+            assertFalse(first.contains(lease.getEndpoint().toString()));
+            // ownershipKey order: runtimeInstanceId, endpoint, leaseId,
+            // epoch, token — each one must feed the digest.
+            Object[] mutatedComponents = {
+                lease.getRuntimeInstanceId() + "-x",
+                java.net.URI.create("http://127.0.0.1:"
+                        + (lease.getEndpoint().getPort() + 1)),
+                lease.getLeaseId() + "-x",
+                lease.getEpoch() + 1,
+                lease.getToken() + "-x",
+            };
+            for (int i = 0; i < mutatedComponents.length; i++) {
+                java.util.List<Object> mutated =
+                        new java.util.ArrayList<>(key);
+                mutated.set(i, mutatedComponents[i]);
+                assertFalse(
+                        first.equals(LocalProcessRuntimeProvisioner
+                                .tombstone(mutated)),
+                        "component " + i + " must feed the digest");
+            }
+        } finally {
+            ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .forEach(ProcessHandle::destroyForcibly);
+            assertNoNewChildren(before);
+        }
+    }
+
+    @Test
+    void observeReportsConflictForAForeignSeedOrHandleVersion()
+            throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(
+                scope, null, LocalProcessRuntimeProvisioner.KIND);
+        RuntimeProvisionSeed seed = RuntimeProvisionSeed.create(
+                "binding-1", 1);
+        Set<Long> before = childPids();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString()),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            RuntimeResourceHandle handle = provisioner
+                    .ensureResource(request, seed, null)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS);
+            RuntimeLease lease = provisioner.provision(request, seed)
+                    .toCompletableFuture().get(30, TimeUnit.SECONDS);
+            RuntimeObservation foreignSeed = provisioner
+                    .reconcile(request,
+                            RuntimeProvisionSeed.create("binding-1", 2),
+                            handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.CONFLICT,
+                    foreignSeed.getOutcome());
+            RuntimeResourceHandle v2Handle = new RuntimeResourceHandle(
+                    LocalProcessRuntimeProvisioner.KIND, 2,
+                    java.util.Map.of("provider", LocalProcessRuntimeProvisioner.KIND));
+            RuntimeObservation foreignVersion = provisioner
+                    .reconcile(request, seed, v2Handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.CONFLICT,
+                    foreignVersion.getOutcome());
+            // A conflicting observation must leave the owner's worker alone.
+            assertTrue(provisioner.isUsable(lease),
+                    "a conflicting observation must leave the owner's worker alone");
+            RuntimeObservation stillReady = provisioner
+                    .reconcile(request, seed, handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.READY,
+                    stillReady.getOutcome());
+        } finally {
+            ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .forEach(ProcessHandle::destroyForcibly);
+            assertNoNewChildren(before);
+        }
+    }
+
     private static void assertNoNewChildren(Set<Long> before)
             throws InterruptedException {
         long deadline = System.nanoTime()

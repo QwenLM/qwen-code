@@ -797,7 +797,26 @@ export class ManagedToolRuntime {
         result.postHook = { shouldStop: false, hookError };
       else result.failureHook = { hookError };
     }
-    entry.result = structuredClone(result);
+    try {
+      entry.result = structuredClone(result);
+    } catch (error) {
+      // A hook payload with non-cloneable values must not wedge the
+      // invocation: replace only the hook that ran, and preserve the stop
+      // directive the hook actually issued.
+      const hookError = `Cannot serialize managed tool hooks: ${String(error)}`;
+      entry.result = structuredClone({
+        ...result,
+        ...(result.postHook
+          ? {
+              postHook: {
+                shouldStop: result.postHook.shouldStop === true,
+                hookError,
+              },
+            }
+          : {}),
+        ...(result.failureHook ? { failureHook: { hookError } } : {}),
+      });
+    }
     return entry.result;
   }
 
@@ -930,6 +949,7 @@ function runtimeLocalOutcome(
     case ToolConfirmationOutcome.ProceedAlwaysTool:
     case ToolConfirmationOutcome.ProceedAlwaysProject:
     case ToolConfirmationOutcome.ProceedAlwaysUser:
+    case ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault:
       return ToolConfirmationOutcome.ProceedOnce;
     default:
       return outcome;

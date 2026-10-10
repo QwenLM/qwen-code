@@ -7,6 +7,7 @@ import java.io.InputStreamReader;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
@@ -57,7 +58,14 @@ public final class LocalProcessRuntimeProvisioner
             });
     private final ConcurrentMap<List<Object>, OwnedProcess> owned =
             new ConcurrentHashMap<>();
-    private final Set<List<Object>> issued = ConcurrentHashMap.newKeySet();
+    // Tombstones need only equality: store the SHA-256 of the canonical
+    // identity encoding rather than the lease material itself.
+    private final Set<String> issued = ConcurrentHashMap.newKeySet();
+    // A reaped worker's facts (pid), keyed by the same digest so no lease
+    // material is retained: observe() is a read callers may discard, so the
+    // NOT_FOUND verdict must stay reproducible after the entry is gone.
+    private final ConcurrentMap<String, Long> reaped =
+            new ConcurrentHashMap<>();
     // Workers the exit hook and close() must see that `owned` does not
     // cover: one still in its ready handshake (spawned, not yet issued —
     // that can take READY_TIMEOUT), and one already released but inside its
@@ -365,6 +373,7 @@ public final class LocalProcessRuntimeProvisioner
             // window it closes is inside the lock, so no test can reach the
             // interleaving from outside it.
             process = owned.remove(ownershipKey(lease));
+            reaped.remove(tombstone(ownershipKey(lease)));
             if (process != null && !terminated) {
                 starting.add(process);
             }
@@ -437,6 +446,7 @@ public final class LocalProcessRuntimeProvisioner
             terminateAll();
         }
         owned.clear();
+        reaped.clear();
         executor.shutdownNow();
         // A queued escalation does not run after that shutdown, and its
         // finally block was the only thing removing the entry it tracked.
@@ -490,7 +500,7 @@ public final class LocalProcessRuntimeProvisioner
             List<Object> key = ownershipKey(lease);
             // A dead worker's port can be reused, but its old lease may still
             // arrive for release. Never issue that identity again.
-            if (!issued.add(key)) {
+            if (!issued.add(tombstone(key))) {
                 throw new RuntimeBrokerException(409,
                         "runtime_broker_resource_conflict",
                         "Managed Runtime lease identity was already issued.",
@@ -773,7 +783,8 @@ public final class LocalProcessRuntimeProvisioner
         if (store != null) {
             return observeDurable(request, seed, handle, lastLease);
         }
-        if (handle != null && !KIND.equals(handle.getKind())) {
+        if (handle != null && (!KIND.equals(handle.getKind())
+                || handle.getVersion() != 1)) {
             return RuntimeObservation.conflict(handle);
         }
         if (lastLease == null || seed == null) {
@@ -781,12 +792,30 @@ public final class LocalProcessRuntimeProvisioner
         }
         OwnedProcess process = owned.get(ownershipKey(lastLease));
         if (process == null) {
-            return RuntimeObservation.unknown(handle);
+            Long reapedPid = reaped.get(tombstone(ownershipKey(lastLease)));
+            if (reapedPid == null) {
+                return RuntimeObservation.unknown(handle);
+            }
+            if (handle == null) {
+                return RuntimeObservation.notFound();
+            }
+            return RuntimeObservation.notFound(new RuntimeRecoveryEvidence(
+                    seed.getProvisionRequestId() + ":journal-lost",
+                    RuntimeRecoveryEvidence.Fact.JOURNAL_LOST, "owned-process-exit",
+                    Instant.now(), ownerDomain + ":" + reapedPid,
+                    seed.getProvisionRequestId(), seed.getProvisionalRuntimeId(),
+                    seed.getGatewayIncarnation(), seed.getLeaseId(), seed.getEpoch(), handle), null);
         }
         if (!process.seed.equals(seed)) {
             return RuntimeObservation.conflict(handle);
         }
         if (!process.process.isAlive()) {
+            // The worker is provably gone; holding its entry would leak the
+            // ownership record for the broker's lifetime, while dropping the
+            // fact entirely would make the NOT_FOUND verdict one-shot.
+            owned.remove(ownershipKey(lastLease), process);
+            reaped.put(tombstone(ownershipKey(lastLease)),
+                    process.process.pid());
             if (handle == null) {
                 return RuntimeObservation.notFound();
             }
@@ -841,6 +870,21 @@ public final class LocalProcessRuntimeProvisioner
         // distinct workers. The attested endpoint distinguishes those attempts.
         return List.of(lease.getRuntimeInstanceId(), lease.getEndpoint(),
                 lease.getLeaseId(), lease.getEpoch(), lease.getToken());
+    }
+
+    static String tombstone(List<Object> key) {
+        StringBuilder canonical = new StringBuilder();
+        for (Object component : key) {
+            canonical.append(String.valueOf(component)).append('\0');
+        }
+        try {
+            return java.util.HexFormat.of().formatHex(
+                    MessageDigest.getInstance("SHA-256")
+                            .digest(canonical.toString()
+                                    .getBytes(StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     private void attest(RuntimeProvisionRequest request,

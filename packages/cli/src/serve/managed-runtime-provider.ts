@@ -25,7 +25,10 @@ import {
   managedToolResponseMediaBytes,
   MAX_MANAGED_MEDIA_RESPONSE_BYTES,
 } from '../acp-integration/managed-tool-media.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { isLoopbackBind } from './loopback-binds.js';
+
+const debugLogger = createDebugLogger('MANAGED_RUNTIME_PROVIDER');
 
 interface ManagedGatewayToolRuntime {
   getManifest(signal: AbortSignal): Promise<BridgeManagedRuntimeToolManifest>;
@@ -269,7 +272,23 @@ function waitForLocalSession(
             try {
               await cleanup();
             } catch (error) {
-              throw new ManagedRuntimeSessionCleanupError(cleanup, error);
+              const cleanupError = new ManagedRuntimeSessionCleanupError(
+                cleanup,
+                error,
+              );
+              // When a non-release abort already settled this promise, the
+              // throw below lands on it as a no-op — so this log is the only
+              // surviving trace of the cleanup failure.
+              if (
+                signal.aborted &&
+                !(signal.reason instanceof ManagedRuntimeReleaseAbortError)
+              ) {
+                debugLogger.error(
+                  'Managed Runtime Session cleanup failed after abort.',
+                  error,
+                );
+              }
+              throw cleanupError;
             }
             reject(
               signal.aborted
@@ -614,8 +633,13 @@ export class LocalManagedRuntimeProvider implements ManagedRuntimeProvider {
         release.binding = await release.warmup.promise;
       } catch (error) {
         if (error instanceof ManagedRuntimeReleaseAbortError) return true;
-        if (error instanceof ManagedRuntimeSessionCleanupError)
+        if (error instanceof ManagedRuntimeSessionCleanupError) {
           release.cleanup = error.cleanup;
+          throw error;
+        }
+        // A transport-failed warmup must not wedge the release record: drop it
+        // so a retried release takes the resume-then-close path below.
+        release.warmup = undefined;
         throw error;
       }
     }
@@ -981,7 +1005,7 @@ export class RemoteManagedRuntimeProvider implements ManagedRuntimeProvider {
     this.retryWindowMs = validRetryOption(
       options.prepareRetryWindowMs,
       DEFAULT_PREPARE_RETRY_WINDOW_MS,
-      0,
+      1,
     );
     this.retryDelayMs = validRetryOption(
       options.prepareRetryDelayMs,
@@ -995,10 +1019,7 @@ export class RemoteManagedRuntimeProvider implements ManagedRuntimeProvider {
     );
   }
 
-  prepare(
-    request: ManagedRuntimePrepareRequest,
-    retryWindowMs = this.retryWindowMs,
-  ): ManagedRuntimeHandle {
+  prepare(request: ManagedRuntimePrepareRequest): ManagedRuntimeHandle {
     request = structuredClone(request);
     if (this.lifetime.signal.aborted) {
       throw new ManagedRuntimeProviderError(
@@ -1040,7 +1061,7 @@ export class RemoteManagedRuntimeProvider implements ManagedRuntimeProvider {
       // Release must await preparation before sending close. Aborting only its
       // HTTP response would leave a late-created Session without an owner.
       const signal = this.lifetime.signal;
-      const ready = this.prepareRemote(request, signal, retryWindowMs);
+      const ready = this.prepareRemote(request, signal, this.retryWindowMs);
       entry = { request: structuredClone(request), controller, ready };
       this.entries.set(request.sessionId, entry);
       void ready.catch(() => {
@@ -1137,7 +1158,28 @@ export class RemoteManagedRuntimeProvider implements ManagedRuntimeProvider {
       );
     }
     entry.v2 ??= this.createToolV2Client(entry);
-    await entry.ready;
+    try {
+      await entry.ready;
+    } catch (error) {
+      // A failed cold start must not pin the v2 marker: keep the entry
+      // re-preparable instead of converting the next release into a
+      // permanently closing one. A terminal entry's release retry re-sends
+      // v2 because `entry.terminal` is latched on the first release
+      // (`entry.terminal ||= terminal`) and read back as `sentTerminal`, not
+      // because the marker survives. The map eviction still gates on the
+      // in-flight release promise, not `releasing` — that flag stays set on
+      // the entry a *failed* release leaves behind, and such an entry must
+      // still be evictable.
+      if (entry.v2 !== undefined) delete entry.v2;
+      if (
+        this.entries.get(request.sessionId) === entry &&
+        entry.release === undefined &&
+        entry.terminal !== true
+      ) {
+        this.entries.delete(request.sessionId);
+      }
+      throw error;
+    }
     this.lifetime.signal.throwIfAborted();
     return entry.v2;
   }

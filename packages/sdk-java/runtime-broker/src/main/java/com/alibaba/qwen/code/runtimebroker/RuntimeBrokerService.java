@@ -801,8 +801,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         context.unlock();
                     }
                 });
-        return unknownWhenAdmissionClosed(started, harnessSessionId,
-                runtimeSessionId, executionId);
+        return mapFailure(unknownWhenAdmissionClosed(started, harnessSessionId,
+                runtimeSessionId, executionId), "runtime_broker_store_unavailable",
+                "Managed Runtime execution store is unavailable.");
     }
 
     public CompletionStage<ToolExecutionRecord> startExecution(
@@ -828,14 +829,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         context.unlock();
                     }
                 });
-        return unknownWhenAdmissionClosed(started, harnessSessionId,
-                runtimeSessionId, executionId);
+        return mapFailure(unknownWhenAdmissionClosed(started, harnessSessionId,
+                runtimeSessionId, executionId), "runtime_broker_store_unavailable",
+                "Managed Runtime execution store is unavailable.");
     }
 
     private CompletionStage<ToolExecutionRecord> createExecutionReceipt(
             String harnessSessionId, String runtimeSessionId, String key,
             Map<String, Object> reference, boolean dispatch) {
-        return safeStage(() -> {
+        // Clients replay an idempotent prepare once on retryable failure; an
+        // unmapped store outage must read as that class, not as a terminal
+        // 500 carrying an unclassified retryable flag.
+        return mapFailure(safeStage(() -> {
             ToolExecutionRecord receipt = executionRepository.findByIdempotencyKey(key);
             if (receipt != null && receipt.isTerminal()) {
                 requireOwnedExecution(harnessSessionId, runtimeSessionId,
@@ -849,7 +854,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             return requireReadySession(harnessSessionId, runtimeSessionId)
                     .thenApply(context -> createExecution(context, key, reference, dispatch));
-        });
+        }), "runtime_broker_store_unavailable",
+                "Managed Runtime execution store is unavailable.");
     }
 
     public CompletionStage<ToolExecutionRecord> getExecution(
@@ -858,7 +864,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
-        return safeStage(() -> {
+        return mapFailure(safeStage(() -> {
             ToolExecutionRecord saved = requireOwnedExecution(harnessSessionId,
                     runtimeSessionId, executionId);
             if (saved.isTerminal()) {
@@ -879,7 +885,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             .thenApply(context -> requireExecution(context,
                                     executionId)),
                     harnessSessionId, runtimeSessionId, executionId);
-        });
+        }), "runtime_broker_store_unavailable",
+                "Managed Runtime execution store is unavailable.");
     }
 
     public CompletionStage<Map<String, Object>> installPublisher(String harnessSessionId,
@@ -1041,7 +1048,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
-        return safeStage(() -> {
+        return mapFailure(safeStage(() -> {
             OwnedExecution owned = requireOwnership(harnessSessionId,
                     runtimeSessionId, executionId);
             ToolExecutionRecord stored = owned.record();
@@ -1176,7 +1183,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 });
                     }),
                     harnessSessionId, runtimeSessionId, executionId);
-        });
+        }), "runtime_broker_store_unavailable",
+                "Managed Runtime execution store is unavailable.");
     }
 
     private static boolean isPreparedProviderCancellation(ToolExecutionRecord record) {

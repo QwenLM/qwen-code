@@ -222,8 +222,11 @@ vi.mock(
     }) => {
       state.storeOptions.push(options);
       if (options.baseUrl.includes('rejected-store')) {
+        // A generic factory refusal. The descriptor under test carries
+        // allowInsecureHttp, so borrowing the real store's plaintext-gate
+        // message would pin a refusal production cannot produce here.
         throw new ManagedSessionRecordError(
-          'baseUrl uses plaintext HTTP on a non-loopback host; writer tokens would cross the wire unencrypted. Pass allowInsecureHttp: true to opt in.',
+          'store factory refused the descriptor.',
         );
       }
       const resourceStore = LocalManagedSessionResourceStore.create({
@@ -375,7 +378,7 @@ function headers<T extends supertest.Test>(request: T): T {
 
 function store() {
   return {
-    baseUrl: 'http://store.test',
+    baseUrl: 'https://store.test',
     tenantId: 'tenant',
     workspaceId: 'workspace',
     writerId: BOOT_ID,
@@ -918,7 +921,7 @@ describe('Hosted Harness no-tool session', () => {
     { tenantId: 'foreign' },
     { workspaceId: 'foreign' },
     { writerToken: 'f'.repeat(40) },
-    { baseUrl: 'http://foreign-store.test' },
+    { baseUrl: 'https://foreign-store.test' },
     { writerId: randomUUID() },
   ])(
     'refuses lifecycle adoption with a different original grant: %s',
@@ -10335,11 +10338,33 @@ describe('Hosted Harness no-tool session', () => {
       managedSessionStore: {
         ...store(),
         baseUrl: 'http://rejected-store.test',
+        // The bridge parser refuses cleartext off-loopback unless the
+        // descriptor carries the opt-in; the factory refusal is what this
+        // test drives to a 400.
+        allowInsecureHttp: true,
       },
     });
     expect(created.status).toBe(400);
     expect(created.body.error).toBe('invalid_managed_session_store');
-    expect(created.body.message).toContain('plaintext HTTP');
+    expect(created.body.message).toContain('store factory refused');
+  });
+
+  it('answers 400 when the bridge parser refuses a cleartext off-loopback store', async () => {
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: {
+        ...store(),
+        baseUrl: 'http://rejected-store.test',
+      },
+    });
+    // The bridge parser's own refusal fires before the store factory runs.
+    expect(created.status).toBe(400);
+    expect(created.body.error).toBe('invalid_managed_session_store');
+    expect(created.body.message).toContain(
+      'must use HTTPS outside the loopback interface',
+    );
   });
 
   it('answers 400 with the reason when the descriptor itself is rejected', async () => {
@@ -13825,7 +13850,7 @@ describe('Hosted Harness tool approvals', () => {
     for (const [changed, expected] of [
       [{ tenantId: 'other' }, 409],
       [{ workspaceId: 'other' }, 409],
-      [{ baseUrl: 'http://other-store.test' }, 409],
+      [{ baseUrl: 'https://other-store.test' }, 409],
     ] as const) {
       for (const recovery of [
         { passiveManagedRuntimeRecovery: true },

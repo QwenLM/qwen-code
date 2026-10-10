@@ -23,14 +23,124 @@ const fixture = JSON.parse(
   };
 };
 
+const valid = {
+  baseUrl: 'https://store.example.com/',
+  tenantId: 'tenant-1',
+  workspaceId: 'workspace-1',
+  writerId: 'writer-1',
+  leaseDurationMs: 60_000,
+};
+
 describe('parseBridgeManagedSessionStore', () => {
-  const valid = {
-    baseUrl: 'http://127.0.0.1:8080',
-    tenantId: 'tenant-a',
-    workspaceId: 'workspace-a',
-    writerId: 'writer-a',
-    leaseDurationMs: 60_000,
-  };
+  it('accepts a valid store and normalizes the trailing slash once', () => {
+    expect(parseBridgeManagedSessionStore(valid)).toEqual({
+      baseUrl: 'https://store.example.com',
+      tenantId: 'tenant-1',
+      workspaceId: 'workspace-1',
+      writerId: 'writer-1',
+      leaseDurationMs: 60_000,
+    });
+  });
+
+  it.each([
+    'http://127.0.0.1:8080',
+    'http://localhost:8080',
+    'http://broker.localhost:8080',
+    'http://[::1]:8080',
+    'http://127.0.0.2:8080',
+  ])('accepts cleartext loopback baseUrl %s', (baseUrl) => {
+    expect(parseBridgeManagedSessionStore({ ...valid, baseUrl }).baseUrl).toBe(
+      baseUrl,
+    );
+  });
+
+  it.each([
+    ['http://127.1', 'http://127.0.0.1'],
+    ['http://0x7f.1', 'http://127.0.0.1'],
+    ['http://LOCALHOST:8080', 'http://localhost:8080'],
+  ])(
+    'accepts canonicalized loopback spelling %s as %s',
+    (spelling, canonical) => {
+      expect(
+        parseBridgeManagedSessionStore({ ...valid, baseUrl: spelling }).baseUrl,
+      ).toBe(canonical);
+    },
+  );
+
+  it('accepts a brokered plaintext opt-in on a trusted network', () => {
+    expect(
+      parseBridgeManagedSessionStore({
+        ...valid,
+        baseUrl: 'http://10.0.0.1:8080',
+        allowInsecureHttp: true,
+      }).baseUrl,
+    ).toBe('http://10.0.0.1:8080');
+  });
+
+  it.each([
+    null,
+    'store',
+    [],
+    { ...valid, extra: true },
+    { ...valid, baseUrl: 'ftp://store.example.com' },
+    { ...valid, baseUrl: 'https://user:pw@store.example.com' },
+    { ...valid, baseUrl: 'https://store.example.com/?q=1' },
+    { ...valid, baseUrl: 'https://store.example.com/#frag' },
+    { ...valid, baseUrl: 'http://10.0.0.1:8080' },
+    { ...valid, baseUrl: 'http://store.example.com' },
+    { ...valid, baseUrl: 'http://169.254.0.1' },
+    { ...valid, baseUrl: 'http://127.0.0.1.evil.test' },
+    { ...valid, baseUrl: 'http://localhost.evil.test' },
+    { ...valid, baseUrl: 'http://notlocalhost' },
+    { ...valid, tenantId: 'bad tenant!' },
+    { ...valid, tenantId: '' },
+    { ...valid, tenantId: 'x'.repeat(129) },
+    { ...valid, workspaceId: 'bad\0id' },
+    { ...valid, writerId: 'bad\x07id' },
+    { ...valid, leaseDurationMs: 999 },
+    { ...valid, leaseDurationMs: 300_001 },
+    { ...valid, leaseDurationMs: 60_000.5 },
+    { ...valid, leaseDurationMs: '60000' },
+  ])('rejects %j', (input) => {
+    expect(() => parseBridgeManagedSessionStore(input)).toThrow();
+  });
+
+  // A dotted-quad check that only read the first label would accept these:
+  // the WHATWG parser leaves a four-label *name* starting with 127 verbatim,
+  // so only the per-octet numeric test refuses them. Assert the message so
+  // the row pins which rule fired.
+  it.each(['http://127.foo.example.test', 'http://127.0.0.a'])(
+    'refuses a four-label 127-prefixed DNS name %s without HTTPS',
+    (baseUrl) => {
+      expect(() =>
+        parseBridgeManagedSessionStore({ ...valid, baseUrl }),
+      ).toThrow('must use HTTPS outside the loopback interface');
+    },
+  );
+
+  it('refuses IPv4-mapped loopback without HTTPS', () => {
+    // Deliberately outside the loopback allowlist (see the predicate's
+    // comment): the mapped spelling canonicalizes to `[::ffff:7f00:1]` and
+    // must use HTTPS, matching the CLI's isLoopbackBind.
+    expect(() =>
+      parseBridgeManagedSessionStore({
+        ...valid,
+        baseUrl: 'http://[::ffff:127.0.0.1]:8080',
+      }),
+    ).toThrow('must use HTTPS outside the loopback interface');
+  });
+
+  it('rejects control characters and over-byte-limit string fields', () => {
+    expect(() =>
+      parseBridgeManagedSessionStore({ ...valid, tenantId: 'bad\x07tenant' }),
+    ).toThrow('tenantId');
+    expect(() =>
+      parseBridgeManagedSessionStore({
+        ...valid,
+        baseUrl: `https://${'x'.repeat(2100)}`,
+      }),
+    ).toThrow('baseUrl');
+  });
 
   it('round-trips the provisioned writer credential and insecure opt-in', () => {
     const parsed = parseBridgeManagedSessionStore(valid);
