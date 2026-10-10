@@ -1341,19 +1341,28 @@ class ChildResultRelayTest {
         assertThat(row.get().attempts()).isZero();
     }
 
-    // A child that never reads its waiting message — a blocked Session —
-    // holds its settlement only for a bounded stretch without activity.
+    // A child that never reads its waiting message — a blocked Session, or
+    // a turn queued behind a busy mount past the bound — holds its
+    // settlement only for a bounded stretch without activity, and then
+    // fails: its earlier turn's result would report the message as read.
     @Test
-    void stopsWaitingForAMessageTurnThatNeverComes() {
+    void failsAChildWhoseMessageTurnNeverComes() {
         watching();
         holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(1, Set.of(),
-                        now - 31 * 60_000L, null));
+                new ChildResultRelayStore.JournalTurns(1,
+                        Set.of("msg_1:message"), now - 31 * 60_000L, null));
+        when(store.edgeMessages(TENANT, PARENT, RUN, CHILD)).thenReturn(
+                new ChildResultRelayStore.EdgeMessages(0, 1,
+                        List.of("msg_1:message")));
         relay.scan();
         assertThat(harness.operations)
                 .extracting(operation -> operation.get("kind"))
-                .containsExactly("commit_result", "accept");
+                .containsExactly("fail");
+        assertThat(harness.operations.getFirst())
+                .containsEntry("stopReason", "child_failed")
+                .containsEntry("messageCount", 1);
+        verify(store, never()).terminalResultText(TENANT, CHILD, "turn-1");
     }
 
     // The settlement names the messages it saw, so the parent refuses it

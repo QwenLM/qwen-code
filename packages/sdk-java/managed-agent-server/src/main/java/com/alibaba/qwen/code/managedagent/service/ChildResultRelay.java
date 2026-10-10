@@ -446,14 +446,17 @@ public class ChildResultRelay {
             // reconciliation reloads a child a replaced Harness dropped —
             // but not past MESSAGE_TURN_WAIT_MS without any journal event.
             ChildResultRelayStore.JournalTurns journal = journalTurns(row);
-            if (journal != null) {
-                if (journal.pendingMessageInputs() > 0
-                        && now - journal.lastActivityAt()
-                                < MESSAGE_TURN_WAIT_MS) {
+            if (journal != null && journal.pendingMessageInputs() > 0) {
+                if (now - journal.lastActivityAt() < MESSAGE_TURN_WAIT_MS) {
                     relayStore.scheduleRetry(row, owner, now + HEARTBEAT_MS,
                             now + LEASE_MS, now);
                     return;
                 }
+                // The wait ran out with a message the child never answered:
+                // it fails, never settling from an earlier turn's result,
+                // which would report the message as acted on.
+                status = "FAILED";
+            } else if (journal != null) {
                 ChildResultRelayStore.SettledTurn last = journal.lastSettled();
                 if (last != null && "session_message".equals(last.source())) {
                     status = "completed".equals(last.outcome()) ? "COMPLETED"
