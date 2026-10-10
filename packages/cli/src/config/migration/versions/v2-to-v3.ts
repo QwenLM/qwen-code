@@ -184,7 +184,17 @@ export class V2ToV3Migration implements SettingsMigration {
 
       if (hasAnyBooleanValue) {
         // enableAutoUpdate = !hasAnyDisable (if any disable* was true, enable should be false)
-        setNestedPropertySafe(result, newPath, !hasAnyDisable);
+        const enableValue = !hasAnyDisable;
+        // Workspace scope may only tighten `general.enableAutoUpdate` (set it to
+        // `false`); emitting `true` there would always be discarded at load time,
+        // so omit the value entirely and leave the decision to lower scopes.
+        const isWorkspaceLoosening =
+          newPath === 'general.enableAutoUpdate' &&
+          enableValue === true &&
+          scope.toLowerCase() === 'workspace';
+        if (!isWorkspaceLoosening) {
+          setNestedPropertySafe(result, newPath, enableValue);
+        }
       }
     }
 
