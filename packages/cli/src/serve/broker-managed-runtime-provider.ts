@@ -111,19 +111,8 @@ interface BrokerExecutionFailure {
 // a different answer within the session, so it stays cached and later calls
 // replay it instead of re-driving a doomed prepare/start cycle.
 function isTransientBrokerFailure(error: unknown): boolean {
-  if (error instanceof BrokerResponseError) {
-    // execution_unknown is non-terminal unless the Broker marked it
-    // abandoned: the record can still reconcile to settled, so the
-    // invocation re-drives instead of replaying the 409 for the session's
-    // life. The abandoned (terminal runtime_lost) variant stays cached.
-    if (error.code === 'runtime_broker_execution_unknown' && !error.abandoned)
-      return true;
-    return error.status >= 500
-      ? error.retryable !== false
-      : error.retryable === true;
-  }
-  if (error instanceof BrokerWireError) return error.retryableByRedrive;
-  return error instanceof TypeError || error instanceof DOMException;
+  const policy = brokerRetryPolicy(error);
+  return policy === 'redrive' || policy === 'both';
 }
 
 // A response the client could not decode at all. An undecodable body (an LB
@@ -154,6 +143,44 @@ class BrokerResponseError extends Error {
     );
     this.name = 'BrokerResponseError';
   }
+}
+
+// Both retry axes of a Broker fault, derived once here instead of re-stated
+// per consumer: the submitExecution gate's in-band re-send is a skip-list
+// and the eviction sites' re-drive an allow-list, and a fault class missing
+// from exactly one of them fails in opposite directions — a doomed POST
+// re-sent in band, or a genuinely transient fault pinned for the session's
+// life. The axes stay distinct: a sub-500 retryable: true answer skips the
+// in-band retry but is re-driven.
+function brokerRetryPolicy(
+  error: unknown,
+): 'none' | 'in-band' | 'redrive' | 'both' {
+  if (error instanceof BrokerResponseError) {
+    // execution_unknown is non-terminal unless the Broker marked it
+    // abandoned: the record can still reconcile to settled, so the
+    // invocation re-drives instead of replaying the 409 for the session's
+    // life. The abandoned (terminal runtime_lost) variant stays cached.
+    const redrive =
+      (error.code === 'runtime_broker_execution_unknown' && !error.abandoned) ||
+      (error.status >= 500
+        ? error.retryable !== false
+        : error.retryable === true);
+    const inBand = error.status >= 500 && error.retryable !== false;
+    return inBand
+      ? redrive
+        ? 'both'
+        : 'in-band'
+      : redrive
+        ? 'redrive'
+        : 'none';
+  }
+  if (error instanceof BrokerWireError) {
+    return error.retryableByRedrive ? 'both' : 'none';
+  }
+  if (error instanceof TypeError || error instanceof DOMException) {
+    return 'both';
+  }
+  return 'in-band';
 }
 
 export interface ManagedRuntimeBrokerClientOptions {
@@ -537,12 +564,8 @@ export class ManagedRuntimeBrokerClient {
     try {
       response = await this.requestJson('POST', path, body, signal);
     } catch (error) {
-      if (
-        signal.aborted ||
-        (error instanceof BrokerResponseError &&
-          (error.status < 500 || error.retryable === false)) ||
-        (error instanceof BrokerWireError && !error.retryableByRedrive)
-      ) {
+      const policy = brokerRetryPolicy(error);
+      if (signal.aborted || policy === 'none' || policy === 'redrive') {
         throw error;
       }
       response = await this.requestJson('POST', path, body, signal);
@@ -595,16 +618,34 @@ export class ManagedRuntimeBrokerClient {
         signal,
       },
     );
+    // A declared over-limit response classifies identically on both status
+    // arms: cancel it without reading a byte instead of buffering a doomed
+    // error body up to the limit first.
+    const contentLength = Number(response.headers.get('content-length'));
+    if (
+      Number.isFinite(contentLength) &&
+      contentLength > MAX_BROKER_RESPONSE_BYTES
+    ) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new BrokerWireError(
+        'Managed Runtime Broker response exceeded its limit.',
+        false,
+      );
+    }
     if (!response.ok) {
       let code: string | undefined;
       let retryable: boolean | undefined;
       let reason: string | undefined;
       let abandoned = false;
+      // The read stays outside the classification try: an over-limit error
+      // body keeps its size classification instead of being erased into an
+      // unclassified refusal, while a merely undecodable one still falls
+      // through to the status-graded BrokerResponseError below.
+      const text = await readBoundedResponseText(
+        response,
+        MAX_BROKER_RESPONSE_BYTES,
+      );
       try {
-        const text = await readBoundedResponseText(
-          response,
-          MAX_BROKER_RESPONSE_BYTES,
-        );
         const body = record(JSON.parse(text) as unknown);
         if (
           typeof body['code'] === 'string' &&
@@ -647,12 +688,9 @@ export class ManagedRuntimeBrokerClient {
             details['terminal'] === true &&
             details['reason'] === 'runtime_lost';
         }
-      } catch (error) {
-        // An over-limit error body keeps its size classification: the limit
-        // is a deterministic property of the response, so it must stay
-        // cached rather than be re-driven as an unclassified failure.
-        if (error instanceof BrokerWireError) throw error;
-        await response.body?.cancel().catch(() => undefined);
+      } catch {
+        // An undecodable or shapeless error body stays unclassified: the
+        // refusal below is graded by status alone.
       }
       throw new BrokerResponseError(
         response.status,
@@ -660,17 +698,6 @@ export class ManagedRuntimeBrokerClient {
         retryable,
         reason,
         abandoned,
-      );
-    }
-    const contentLength = Number(response.headers.get('content-length'));
-    if (
-      Number.isFinite(contentLength) &&
-      contentLength > MAX_BROKER_RESPONSE_BYTES
-    ) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new BrokerWireError(
-        'Managed Runtime Broker response exceeded its limit.',
-        false,
       );
     }
     const text = await readBoundedResponseText(
@@ -1152,18 +1179,66 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         true,
       );
     };
+    // The receipt a read-only operation must reach. A live reservation that
+    // has already settled wins over the stale tombstone; but a reservation
+    // whose re-drive prepare was refused replays the refusal here, and a
+    // hung one would hold the caller for the whole request timeout — while
+    // the Broker still counts the tombstoned receipt as active, so cancel
+    // and status fall back to it. The tombstone is never pruned, so it may
+    // only answer for the digest that recorded it.
+    const resolveCallId = (
+      reference: ManagedToolInvocationReference,
+    ): Promise<
+      | {
+          readonly reserved: {
+            executionCallId: string;
+            status: ManagedToolInvocationStatus;
+          };
+        }
+      | { readonly executionCallId: string }
+    > => {
+      const resolved = resolveReadOnlyExecution(reference);
+      if (!('execution' in resolved)) return Promise.resolve(resolved);
+      const execution = resolved.execution;
+      const failed = entry.failedDigests.get(reference.invocationId);
+      const tombstoned =
+        failed !== undefined &&
+        failed.executionCallId !== undefined &&
+        failed.referenceDigest === execution.referenceDigest
+          ? failed.executionCallId
+          : undefined;
+      const reserved = execution.reserved.then(
+        (value) => ({ reserved: value }) as const,
+        (error: unknown) => {
+          if (tombstoned === undefined) throw error;
+          return { executionCallId: tombstoned } as const;
+        },
+      );
+      if (tombstoned === undefined) return reserved;
+      return Promise.race([
+        reserved,
+        // The extra hop matches the derivation above, so an already-settled
+        // reservation still wins the race; only a pending one yields to the
+        // tombstone.
+        Promise.resolve().then(
+          () => ({ executionCallId: tombstoned }) as const,
+        ),
+      ]);
+    };
     const readExecution = async (
       reference: ManagedToolInvocationReference,
       afterSeq?: number,
     ) => {
-      const resolved = resolveReadOnlyExecution(reference);
+      const resolved = await resolveCallId(reference);
       let executionCallId: string;
-      if ('execution' in resolved) {
-        const reserved = await resolved.execution.reserved;
-        if (reserved.status.state === 'settled' && afterSeq === undefined) {
-          return reserved.status;
+      if ('reserved' in resolved) {
+        if (
+          resolved.reserved.status.state === 'settled' &&
+          afterSeq === undefined
+        ) {
+          return resolved.reserved.status;
         }
-        executionCallId = reserved.executionCallId;
+        executionCallId = resolved.reserved.executionCallId;
       } else {
         executionCallId = resolved.executionCallId;
       }
@@ -1282,10 +1357,10 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
       execute: (reference) => startExecution(reference),
       status: (reference, afterSeq) => readExecution(reference, afterSeq),
       cancel: async (reference) => {
-        const resolved = resolveReadOnlyExecution(reference);
+        const resolved = await resolveCallId(reference);
         const executionCallId =
-          'execution' in resolved
-            ? (await resolved.execution.reserved).executionCallId
+          'reserved' in resolved
+            ? resolved.reserved.executionCallId
             : resolved.executionCallId;
         return this.client.cancelExecution(
           entry.request.sessionId,

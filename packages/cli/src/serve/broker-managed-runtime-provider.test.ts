@@ -1404,6 +1404,7 @@ describe('BrokerManagedRuntimeProvider', () => {
 
   it.each([
     ['declared content-length', true, 200] as const,
+    ['declared content-length', true, 503] as const,
     ['streamed body', false, 200] as const,
     ['streamed 5xx body', false, 503] as const,
   ])(
@@ -1464,6 +1465,65 @@ describe('BrokerManagedRuntimeProvider', () => {
       provider.dispose();
     },
   );
+
+  it('re-prepares an execution after an undecodable 5xx error body', async () => {
+    let prepares = 0;
+    const preparedStatus = {
+      state: 'prepared' as const,
+      cancelRequested: false,
+      lastSeq: 0,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+    };
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare')) {
+        // An ingress HTML drain page is transport-shaped: the parse failure
+        // must stay a status-graded BrokerResponseError — retried in band,
+        // then re-driven — and never widen into a cached BrokerWireError.
+        if (++prepares <= 2)
+          return new Response('<html>502 Bad Gateway</html>', {
+            status: 502,
+            headers: { 'content-type': 'text/html' },
+          });
+        return json(
+          envelope({ executionCallId: 'execution-1', status: preparedStatus }),
+        );
+      }
+      if (url.endsWith('/executions/execution-1:start'))
+        return json(
+          envelope({
+            executionCallId: 'execution-1',
+            status: {
+              ...preparedStatus,
+              state: 'settled',
+              result: { executionStatus: 'success' },
+            },
+          }),
+        );
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(client.execute(reference())).rejects.toThrow('502');
+    // Both prepares are the first execute's in-band retry: the parse
+    // failure was still converted to a status-graded BrokerResponseError.
+    expect(prepares).toBe(2);
+    await expect(client.execute(reference())).resolves.toMatchObject({
+      executionStatus: 'success',
+    });
+    expect(prepares).toBe(3);
+    provider.dispose();
+  });
 
   it('re-prepares an execution the Broker marked retryable below 500', async () => {
     let prepares = 0;
@@ -1628,6 +1688,241 @@ describe('BrokerManagedRuntimeProvider', () => {
     // Both the refused and the confirmed release are wire calls: a locally
     // resolved retry would leave this count at one.
     expect(requests.filter((url) => url.endsWith(':release'))).toHaveLength(2);
+    provider.dispose();
+  });
+
+  it('cancels and reads the tombstoned receipt when the re-driven reservation was refused', async () => {
+    const preparedStatus = {
+      state: 'prepared' as const,
+      cancelRequested: false,
+      lastSeq: 0,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+    };
+    const requests: string[] = [];
+    let prepares = 0;
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare')) {
+        // The first reservation succeeds; the re-drive's prepare is a
+        // declared, non-retryable refusal, so the rejecting reservation
+        // stays cached over the tombstone.
+        if (++prepares > 1)
+          return new Response(
+            JSON.stringify({
+              code: 'runtime_broker_overloaded',
+              error: 'Overloaded.',
+              retryable: false,
+            }),
+            { status: 503, headers: { 'content-type': 'application/json' } },
+          );
+        return json(
+          envelope({ executionCallId: 'execution-1', status: preparedStatus }),
+        );
+      }
+      if (url.endsWith('/executions/execution-1:start'))
+        return new Response('{}', { status: 503 });
+      if (url.endsWith('/executions/execution-1:cancel'))
+        return json(
+          envelope({
+            executionCallId: 'execution-1',
+            status: {
+              ...preparedStatus,
+              state: 'settled',
+              result: { executionStatus: 'cancelled' },
+            },
+          }),
+        );
+      if (url.includes('/executions/execution-1?'))
+        return json(
+          envelope({
+            executionCallId: 'execution-1',
+            status: {
+              ...preparedStatus,
+              state: 'settled',
+              result: { executionStatus: 'cancelled' },
+            },
+          }),
+        );
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    // The transient start failure evicts with execution-1 tombstoned.
+    await expect(client.execute(reference())).rejects.toThrow('503');
+    await expect(client.execute(reference())).rejects.toThrow('503');
+    expect(prepares).toBe(2);
+    // Awaiting the cached reservation would replay the prepare refusal and
+    // no cancel would ever reach the receipt the Broker counts as active.
+    await expect(client.cancel(reference())).resolves.toMatchObject({
+      state: 'settled',
+    });
+    expect(requests.filter((url) => url.endsWith(':cancel'))).toEqual([
+      expect.stringContaining('/executions/execution-1:cancel'),
+    ]);
+    await expect(client.status(reference())).resolves.toMatchObject({
+      state: 'settled',
+    });
+    expect(
+      requests.filter((url) => url.includes('/executions/execution-1?')),
+    ).toHaveLength(1);
+    provider.dispose();
+  });
+
+  it('cancels the tombstoned receipt without awaiting a hung re-driven reservation', async () => {
+    const preparedStatus = {
+      state: 'prepared' as const,
+      cancelRequested: false,
+      lastSeq: 0,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+    };
+    const requests: string[] = [];
+    let prepares = 0;
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare')) {
+        // The re-drive's prepare never answers: cancel must not block on
+        // the pending reservation for the whole request timeout.
+        if (++prepares > 1) return new Promise<Response>(() => {});
+        return json(
+          envelope({ executionCallId: 'execution-1', status: preparedStatus }),
+        );
+      }
+      if (url.endsWith('/executions/execution-1:start'))
+        return new Response('{}', { status: 503 });
+      if (url.endsWith('/executions/execution-1:cancel'))
+        return json(
+          envelope({
+            executionCallId: 'execution-1',
+            status: {
+              ...preparedStatus,
+              state: 'settled',
+              result: { executionStatus: 'cancelled' },
+            },
+          }),
+        );
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(client.execute(reference())).rejects.toThrow('503');
+    // The re-drive caches its pending reservation synchronously.
+    void client.execute(reference()).catch(() => undefined);
+    await expect(client.cancel(reference())).resolves.toMatchObject({
+      state: 'settled',
+    });
+    expect(requests.filter((url) => url.endsWith(':cancel'))).toEqual([
+      expect.stringContaining('/executions/execution-1:cancel'),
+    ]);
+    provider.dispose();
+  });
+
+  it('resolves a settled re-driven reservation over the stale tombstone', async () => {
+    const preparedStatus = {
+      state: 'prepared' as const,
+      cancelRequested: false,
+      lastSeq: 0,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+    };
+    const requests: string[] = [];
+    let prepares = 0;
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare')) {
+        // The re-drive answers with a FRESH call id (a Broker that does not
+        // replay the idempotency key): the live reservation, not the stale
+        // tombstone, is the invocation's receipt from then on.
+        return json(
+          envelope({
+            executionCallId: `execution-${++prepares}`,
+            status: preparedStatus,
+          }),
+        );
+      }
+      if (url.endsWith('/executions/execution-1:start'))
+        return new Response('{}', { status: 503 });
+      if (url.endsWith('/executions/execution-2:start'))
+        return json(
+          envelope({ executionCallId: 'execution-2', status: preparedStatus }),
+        );
+      if (url.endsWith('/executions/execution-2:cancel'))
+        return json(
+          envelope({
+            executionCallId: 'execution-2',
+            status: {
+              ...preparedStatus,
+              state: 'settled',
+              result: { executionStatus: 'cancelled' },
+            },
+          }),
+        );
+      if (url.includes('/executions/execution-2?'))
+        return json(
+          envelope({
+            executionCallId: 'execution-2',
+            status: {
+              ...preparedStatus,
+              state: 'settled',
+              result: { executionStatus: 'cancelled' },
+            },
+          }),
+        );
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    // The transient start failure tombstones execution-1; the re-drive
+    // reserves execution-2 while the tombstone stays behind. The :start
+    // request is program-order after the reservation settled.
+    await expect(client.execute(reference())).rejects.toThrow('503');
+    void client.execute(reference()).catch(() => undefined);
+    await vi.waitFor(() => {
+      expect(
+        requests.some((url) => url.endsWith('/executions/execution-2:start')),
+      ).toBe(true);
+    });
+    await expect(client.cancel(reference())).resolves.toMatchObject({
+      state: 'settled',
+    });
+    expect(requests.filter((url) => url.endsWith(':cancel'))).toEqual([
+      expect.stringContaining('/executions/execution-2:cancel'),
+    ]);
+    // A tombstone win would read execution-1, which the mock refuses.
+    await expect(client.status(reference())).resolves.toMatchObject({
+      state: 'settled',
+    });
     provider.dispose();
   });
 
