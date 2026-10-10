@@ -85,20 +85,27 @@ export async function execPDFCommandFromHandle(
           stop();
         }, options.timeout)
       : undefined;
-    child.once('close', (code) => {
+    child.once('close', (code, signal) => {
       clearTimeout(timer);
       clearTimeout(killTimer);
       options.signal?.removeEventListener('abort', abort);
+      // A blocked loop can set the timer before the child's own exit is
+      // delivered. Only a close with no exit code and a signal means the
+      // stop actually landed.
+      const reportedTimedOut = timedOut && code === null && signal !== null;
       resolve({
         stdout: Buffer.concat(stdout).toString('utf8'),
         stderr:
           Buffer.concat(stderr).toString('utf8') || failure?.message || '',
         code:
-          failure || options.signal?.aborted || timedOut || maxBufferExceeded
+          failure ||
+          options.signal?.aborted ||
+          reportedTimedOut ||
+          maxBufferExceeded
             ? 1
             : (code ?? 1),
         maxBufferExceeded,
-        timedOut,
+        timedOut: reportedTimedOut,
       });
     });
     if (options.signal?.aborted) abort();

@@ -88,6 +88,8 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   ReadFileToolParams,
   ToolResult
 > {
+  private recordedStats: Stats | undefined;
+
   constructor(
     private config: Config,
     params: ReadFileToolParams,
@@ -137,9 +139,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
     signal.throwIfAborted();
+    this.recordedStats = undefined;
     const fileSystem = this.config.getFileSystemService();
     if (!fileSystem.withReadFile) return this.executeContent(signal);
-    let admittedSource: FileReadSource | undefined;
     try {
       const result = await fileSystem.withReadFile(
         {
@@ -147,19 +149,13 @@ class ReadFileToolInvocation extends BaseToolInvocation<
           mediaDelivery: this.config.isOmniEnabled?.() ? 'omni' : 'inline',
           signal,
         },
-        (source) => {
-          admittedSource = source;
-          return this.executeContent(signal, source);
-        },
+        (source) => this.executeContent(signal, source),
       );
       signal.throwIfAborted();
       return result;
     } catch (error) {
-      if (!this.config.getFileReadCacheDisabled()) {
-        const cache = this.config.getFileReadCache();
-        if (admittedSource?.kind === 'descriptor')
-          cache.invalidate(admittedSource.stats);
-        else cache.invalidateByPath(path.resolve(this.params.file_path));
+      if (!this.config.getFileReadCacheDisabled() && this.recordedStats) {
+        this.config.getFileReadCache().invalidate(this.recordedStats);
       }
       signal.throwIfAborted();
       if (!(error instanceof FileReadOpenError)) throw error;
@@ -333,6 +329,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         full: isFullRead && !result.isTruncated,
         cacheable,
       });
+      this.recordedStats = recordStats;
       // Reading into a program does not prove the full text reached history.
       if (nestedRead) cache.markReadEvictedFromHistory(recordStats);
     }

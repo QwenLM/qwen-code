@@ -378,6 +378,36 @@ describe('ReadFileTool', () => {
       },
     );
 
+    it.skipIf(!['linux', 'darwin'].includes(process.platform))(
+      'keeps a prior full read when a later read fails before recording',
+      async () => {
+        const filePath = path.join(tempRootDir, 'prior-read.txt');
+        await fsp.writeFile(filePath, 'line1\nline2\n');
+        const service = new StandardFileSystemService();
+        const boundTool = new ReadFileTool(
+          makeConfig({ getFileSystemService: () => service }),
+        );
+        await boundTool
+          .build({ file_path: filePath, ...nullPagination })
+          .execute(abortSignal);
+        const recorded = fileReadCache.check(await fsp.stat(filePath));
+        expect(recorded.state).toBe('fresh');
+        service.withReadFile = async () => {
+          throw new Error('cancelled before record');
+        };
+        await expect(
+          boundTool
+            .build({ file_path: filePath, offset: 1, limit: 1 })
+            .execute(abortSignal),
+        ).rejects.toThrow('cancelled before record');
+        const after = fileReadCache.check(await fsp.stat(filePath));
+        expect(after.state).toBe('fresh');
+        if (after.state === 'fresh') {
+          expect(after.entry.lastReadWasFull).toBe(true);
+        }
+      },
+    );
+
     it('advertises audio and video support to the model', () => {
       expect(tool.description).toContain('audio, video');
       expect(tool.description).toContain(
