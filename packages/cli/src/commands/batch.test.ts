@@ -203,6 +203,30 @@ describe('batch-client', () => {
     ]);
   });
 
+  it('publishes a complete download without leaving a partial file', async () => {
+    const content = Buffer.from(
+      '{"custom_id":"0","text":"完整结果"}\n{"custom_id":"1"}\n',
+    );
+    const midpoint = Math.floor(content.length / 2);
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(content.subarray(0, midpoint));
+            controller.enqueue(content.subarray(midpoint));
+            controller.close();
+          },
+        }),
+      ),
+    );
+
+    const target = path.join(dir, 'output.jsonl');
+    await downloadRemoteFile(ep, 'out', target);
+
+    expect(fs.readFileSync(target)).toEqual(content);
+    expect(fs.existsSync(`${target}.part`)).toBe(false);
+  });
+
   it('leaves nothing under the final name when a download is cut short', async () => {
     // A truncated body written straight to the target looks complete: its
     // last line is still valid JSON, so a short paid result reads as whole.
