@@ -67,6 +67,7 @@ import type {
   LiveScreenContextCaptureHandler,
   LiveSpeakToUserHandler,
   LiveTaskToolRequestHandler,
+  WorkflowAncestorTrustHandler,
 } from './bridgeOptions.js';
 
 import {
@@ -76,6 +77,7 @@ import {
   MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS,
   MAX_SUB_SESSION_NAME_CHARS,
   MAX_SUB_SESSION_PROMPT_CHARS,
+  MAX_WORKFLOW_ANCESTOR_TRUST_DIRS,
 } from './bridgeOptions.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
@@ -255,6 +257,33 @@ function isExistingSessionScheduledTaskCreateErrorShape(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A workflow ancestor trust request names a chain of normalized absolute
+ * directories, each the parent of the one before, without repeats. Anything
+ * else is refused before the host policy sees it.
+ */
+function isWorkflowAncestorChain(value: unknown): value is string[] {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > MAX_WORKFLOW_ANCESTOR_TRUST_DIRS
+  ) {
+    return false;
+  }
+  return value.every(
+    (dir, index) =>
+      typeof dir === 'string' &&
+      dir.length > 0 &&
+      dir.length <= 4096 &&
+      !dir.includes('\0') &&
+      path.isAbsolute(dir) &&
+      path.resolve(dir) === dir &&
+      (index === 0 ||
+        (dir === path.dirname(value[index - 1] as string) &&
+          dir !== value[index - 1])),
+  );
 }
 
 function normalizeExternalToolGuardResult(
@@ -977,6 +1006,7 @@ export class BridgeClient implements Client {
     ) => Promise<boolean>,
     /** Invoked after the child reports that it started a Goal turn. */
     private readonly onGoalTurnStart?: (sessionId: string) => void,
+    private readonly workflowAncestorTrust?: WorkflowAncestorTrustHandler,
   ) {}
 
   async requestPermission(
@@ -1560,6 +1590,9 @@ export class BridgeClient implements Client {
     if (method === SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare) {
       return this.handleExternalToolGuardPrepare(params);
     }
+    if (method === SERVE_CONTROL_EXT_METHODS.workflowAncestorTrust) {
+      return this.handleWorkflowAncestorTrust(params);
+    }
     if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
       return this.handleTodoStopGuardContinuationClaim(params);
     }
@@ -1815,6 +1848,39 @@ export class BridgeClient implements Client {
       );
     }
     return normalizeExternalToolGuardResult(decision);
+  }
+
+  private async handleWorkflowAncestorTrust(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.workflowAncestorTrust) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.workflowAncestorTrust,
+      );
+    }
+    const ancestorDirs = params['ancestorDirs'];
+    if (
+      Object.keys(params).some(
+        (key) => key !== 'ancestorDirs' && key !== '_meta',
+      ) ||
+      !isWorkflowAncestorChain(ancestorDirs)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid workflow ancestor trust request',
+      );
+    }
+    const trusted: unknown = await this.workflowAncestorTrust(ancestorDirs);
+    if (
+      !Array.isArray(trusted) ||
+      trusted.length !== ancestorDirs.length ||
+      !trusted.every((value) => typeof value === 'boolean')
+    ) {
+      throw new Error(
+        'Workflow ancestor trust handler returned an invalid result.',
+      );
+    }
+    return { trusted: [...trusted] };
   }
 
   private handleTodoStopGuardContinuationClaim(

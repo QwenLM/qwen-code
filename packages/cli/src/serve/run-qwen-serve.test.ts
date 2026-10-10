@@ -9745,6 +9745,80 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('gives every runtime bridge its own workflow ancestor trust policy', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-workflow-ancestor-trust-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const explicitSecondary = path.join(tmpDir, 'explicit-secondary');
+    const restoredSecondary = path.join(tmpDir, 'restored-secondary');
+    for (const dir of [primary, explicitSecondary, restoredSecondary]) {
+      fs.mkdirSync(dir);
+    }
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeRuntimeBridge());
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(() =>
+      express(),
+    );
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        primaryWorkspace: canonicalizeWorkspace(primary),
+        workspaces: [canonicalizeWorkspace(restoredSecondary)],
+      }),
+    } as unknown as WorkspaceRegistrationStore;
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, explicitSecondary],
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        workspaceRegistrationStore: store,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      // Primary, startup secondary, and the restored (dynamic) runtime.
+      expect(createBridge).toHaveBeenCalledTimes(3);
+      const handlers = createBridge.mock.calls.map(
+        (call) =>
+          (call[0] as { workflowAncestorTrust?: unknown })
+            .workflowAncestorTrust,
+      );
+      expect(new Set(handlers).size).toBe(3);
+      for (const handler of handlers) {
+        expect(handler).toEqual(expect.any(Function));
+        const answer = await (
+          handler as (dirs: readonly string[]) => Promise<readonly boolean[]>
+        )([tmpDir]);
+        expect(answer).toHaveLength(1);
+        expect(typeof answer[0]).toBe('boolean');
+      }
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('continues with explicit workspaces when the registration store read fails', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-restored-read-error-')),

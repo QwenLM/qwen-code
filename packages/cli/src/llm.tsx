@@ -38,6 +38,7 @@ import {
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
   PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
 } from '@qwen-code/acp-bridge/externalToolGuard';
+import { WorkflowAncestorTrustHolder } from './acp-integration/workflow-ancestor-trust.js';
 import dns from 'node:dns';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -1050,6 +1051,12 @@ export async function main() {
     settingsWatcher?.startWatching();
 
     markAcpStartup('configConstructionStart');
+    // A daemon's ACP child takes workflow ancestor trust from the daemon:
+    // none until the parent proves its capability (see runAcpAgent).
+    const workflowAncestorTrust =
+      isAcpMode && privateAcpParentCapability !== undefined
+        ? new WorkflowAncestorTrustHolder()
+        : undefined;
     const config = await loadCliConfig(
       settings.merged,
       argv.acp || argv.experimentalAcp
@@ -1067,7 +1074,9 @@ export async function main() {
       undefined,
       settingsWatcher,
       undefined,
-      undefined,
+      workflowAncestorTrust
+        ? { workflowAncestorTrustProvider: workflowAncestorTrust.provider }
+        : undefined,
       buildEnabledSkillNamesProvider(settings),
     );
     markAcpStartup('configConstructionEnd');
@@ -1319,6 +1328,7 @@ export async function main() {
             privateAcpParentCapability !== undefined &&
             privateExternalToolGuardProvider ===
               EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
+          workflowAncestorTrust,
         });
       } finally {
         // Clean up child processes even when ACP setup or shutdown fails.

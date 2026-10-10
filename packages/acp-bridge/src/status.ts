@@ -279,6 +279,15 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * unless the daemon explicitly enabled required external guarding.
    */
   externalToolGuardPrepare: 'qwen/control/external_tool_guard/prepare',
+  /**
+   * Called by a private ACP CHILD UP into the parent while discovering saved
+   * workflows: which of a session's ancestor directories does the daemon's
+   * published trust policy trust? Params: `{ ancestorDirs }`, a chain of
+   * absolute directories, each the parent of the one before; result:
+   * `{ trusted }`, one boolean per directory. Unavailable unless the runtime
+   * that owns the channel installed the handler.
+   */
+  workflowAncestorTrust: 'qwen/control/workflow-ancestor-trust',
   sessionCd: 'qwen/control/session/cd',
   sessionManagedConversationBindingCommit:
     'qwen/control/session/managed-conversation-binding/commit',

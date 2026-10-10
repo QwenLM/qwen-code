@@ -1256,6 +1256,7 @@ import {
   MAX_PERMISSION_RULES_COUNT,
 } from '../config/permission-settings.js';
 import { loadCliConfig, SessionIdConflictError } from '../config/config.js';
+import { WorkflowAncestorTrustHolder } from './workflow-ancestor-trust.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import {
@@ -17239,6 +17240,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       name: 'deep-review',
       scriptPath,
       script,
+      source: 'project',
     });
 
     const agentPromise = runAcpAgent(
@@ -17304,6 +17306,140 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     expect(mockListSavedWorkflows).not.toHaveBeenCalled();
 
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('returns the path, tier and body of one resolution in a saved workflow detail', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      isWorkflowsEnabled: vi.fn().mockReturnValue(true),
+      getBareMode: vi.fn().mockReturnValue(false),
+      getFolderTrustFeature: vi.fn().mockReturnValue(false),
+    });
+    // A listing taken separately would name another file; the detail must
+    // not pair that path with the body the name resolves to.
+    mockListSavedWorkflows.mockResolvedValue([
+      {
+        name: 'shared',
+        source: 'user',
+        scriptPath: '/home/u/.qwen/workflows/shared.js',
+      },
+    ]);
+    mockResolveSavedWorkflowScript.mockResolvedValueOnce({
+      name: 'shared',
+      scriptPath: '/repo/packages/.qwen/workflows/shared.js',
+      script: 'return "PACKAGES";\n',
+      savedWorkflowName: 'shared',
+      source: 'project',
+    });
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    mockListSavedWorkflows.mockClear();
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionSavedWorkflow, {
+        sessionId,
+        name: 'shared',
+      }),
+    ).resolves.toMatchObject({
+      workflow: {
+        name: 'shared',
+        source: 'project',
+        scriptPath: '/repo/packages/.qwen/workflows/shared.js',
+        script: 'return "PACKAGES";\n',
+      },
+    });
+    expect(mockResolveSavedWorkflowScript).toHaveBeenCalledTimes(1);
+    expect(mockListSavedWorkflows).not.toHaveBeenCalled();
+    mockListSavedWorkflows.mockReset();
+    mockListSavedWorkflows.mockResolvedValue([]);
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('takes workflow ancestor trust from an authenticated private parent only', async () => {
+    await setupSessionMocks('11111111-1111-1111-1111-111111111111');
+    const holder = new WorkflowAncestorTrustHolder();
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      {
+        privateParentCapability: 'expected-capability',
+        workflowAncestorTrust: holder,
+      },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const extMethod = vi.fn(async () => ({ trusted: [true, false] }));
+    const agent = capturedAgentFactory!({
+      extMethod,
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    } as unknown as AgentSideConnectionLike) as AgentLike;
+    const dirs = ['/repo/packages', '/repo'];
+    // Before the parent proves its capability: denied, and nobody is asked.
+    await expect(holder.provider(dirs)).resolves.toEqual([false, false]);
+    expect(extMethod).not.toHaveBeenCalled();
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: { 'qwen-code/private-parent-capability': 'expected-capability' },
+    });
+    await expect(holder.provider(dirs)).resolves.toEqual([true, false]);
+    expect(extMethod).toHaveBeenCalledWith(
+      SERVE_CONTROL_EXT_METHODS.workflowAncestorTrust,
+      { ancestorDirs: dirs },
+    );
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const hostPolicy = vi.mocked(loadCliConfig).mock.calls.at(-1)?.[9] as
+      | { workflowAncestorTrustProvider?: unknown }
+      | undefined;
+    expect(hostPolicy?.workflowAncestorTrustProvider).toBe(holder.provider);
+    mockConnectionState.resolve();
+    await agentPromise;
+    // The connection is gone: back to denying.
+    extMethod.mockClear();
+    await expect(holder.provider(dirs)).resolves.toEqual([false, false]);
+    expect(extMethod).not.toHaveBeenCalled();
+  });
+
+  it('keeps the local trust rules for a direct ACP session', async () => {
+    await setupSessionMocks('11111111-1111-1111-1111-111111111111');
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      // A client that is not the daemon claiming the private identity.
+      _meta: { 'qwen-code/private-parent-capability': 'forged' },
+    });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const hostPolicy = vi.mocked(loadCliConfig).mock.calls.at(-1)?.[9] as
+      | Record<string, unknown>
+      | undefined;
+    expect(
+      hostPolicy !== undefined &&
+        Object.hasOwn(hostPolicy, 'workflowAncestorTrustProvider'),
+    ).toBe(false);
     mockConnectionState.resolve();
     await agentPromise;
   });

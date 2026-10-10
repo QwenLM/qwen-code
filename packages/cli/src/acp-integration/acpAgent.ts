@@ -377,6 +377,11 @@ import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
 import { isSshWorkspaceExtMethodAllowed } from './ssh-workspace-guards.js';
 import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import {
+  createParentWorkflowAncestorTrustProvider,
+  WorkflowAncestorTrustHolder,
+  type WorkflowAncestorTrustProvider,
+} from './workflow-ancestor-trust.js';
 import { isCrossSessionMessagingActive } from '../peerMessaging/enabled.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
@@ -3079,6 +3084,11 @@ export async function runAcpAgent(
     managedRuntimeEnvironment?: ConfigParameters['managedRuntimeEnvironment'];
     externalToolGuardRequired?: boolean;
     externalToolGuardProviderAttached?: boolean;
+    /**
+     * Saved-workflow ancestor trust shared with the bootstrap Config; bound
+     * to the parent once it proves the private capability.
+     */
+    workflowAncestorTrust?: WorkflowAncestorTrustHolder;
   },
 ) {
   if (config.getShellExecutionSandbox?.()) {
@@ -3111,6 +3121,12 @@ export async function runAcpAgent(
   delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV];
   delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
   const externalToolGuardRequired = options?.externalToolGuardRequired === true;
+  // A daemon's child asks the daemon which workflow ancestors are trusted;
+  // until the parent proves itself, and after it leaves, none is.
+  const workflowAncestorTrust =
+    privateParentCapability === undefined
+      ? undefined
+      : (options?.workflowAncestorTrust ?? new WorkflowAncestorTrustHolder());
   const externalToolGuardProviderAttached =
     options?.externalToolGuardProviderAttached === true;
   if (externalToolGuardRequired && privateParentCapability === undefined) {
@@ -3268,6 +3284,7 @@ export async function runAcpAgent(
         conversationsRuntimeProvenance,
         hostExecutionEngine,
         options?.managedRuntimeEnvironment,
+        workflowAncestorTrust,
       );
       return agentInstance;
     }, stream);
@@ -3536,6 +3553,7 @@ export async function runAcpAgent(
   const shutdownFailures: unknown[] = [];
   try {
     await connection.closed;
+    workflowAncestorTrust?.set(undefined);
     prepareFileWatchersForProcessExit();
     if (agentInstance?.isTrustedManagedParent()) {
       try {
@@ -4096,6 +4114,19 @@ class QwenAgent implements Agent {
     return this.privateParentState === 'trusted';
   }
 
+  /**
+   * A daemon child's Configs take their workflow ancestor trust from the
+   * daemon, never from local rules; a direct ACP session keeps the local
+   * rules of its own settings.
+   */
+  private workflowAncestorTrustHostPolicy():
+    | { workflowAncestorTrustProvider: WorkflowAncestorTrustProvider }
+    | undefined {
+    return this.workflowAncestorTrust
+      ? { workflowAncestorTrustProvider: this.workflowAncestorTrust.provider }
+      : undefined;
+  }
+
   private assertManagedSessionAdmission(engine?: SessionExecutionEngine): void {
     if (
       this.expectedPrivateParentCapability !== undefined &&
@@ -4461,7 +4492,7 @@ class QwenAgent implements Agent {
           undefined,
           undefined,
           undefined,
-          undefined,
+          this.workflowAncestorTrustHostPolicy(),
           buildEnabledSkillNamesProvider(settings),
         ),
       );
@@ -5291,6 +5322,8 @@ class QwenAgent implements Agent {
     private readonly conversationsRuntimeProvenance = false,
     private readonly hostExecutionEngine: SessionExecutionEngine = 'legacy',
     private readonly managedRuntimeEnvironment?: ConfigParameters['managedRuntimeEnvironment'],
+    /** Present exactly when a private parent is expected. */
+    private readonly workflowAncestorTrust?: WorkflowAncestorTrustHolder,
   ) {
     if (config.getShellExecutionSandbox?.()) {
       throw new Error(
@@ -5491,6 +5524,9 @@ class QwenAgent implements Agent {
           timingSafeEqual(suppliedBuffer, expectedBuffer)
         ) {
           this.privateParentState = 'trusted';
+          this.workflowAncestorTrust?.set(
+            createParentWorkflowAncestorTrustProvider(this.connection),
+          );
         } else {
           this.privateParentState = 'rejected';
           throw RequestError.invalidParams(
@@ -9202,16 +9238,17 @@ class QwenAgent implements Agent {
       workflow,
     });
     if (!this.canUseWorkflowControls(config)) return envelope(null);
-    const entry = (await listSavedWorkflows(config)).find(
-      (candidate) => candidate.name === name,
-    );
-    if (!entry) return envelope(null);
-    let script: string;
+    // One resolution supplies the path, the tier and the body together, so
+    // the detail never pairs one file's path with another file's script.
+    let resolved: Awaited<ReturnType<typeof resolveSavedWorkflowScript>>;
     try {
-      script = (await resolveSavedWorkflowScript(name, config)).script;
+      resolved = await resolveSavedWorkflowScript(name, config);
     } catch {
       return envelope(null);
     }
+    // A generated script is loadable by path only; a name never yields one.
+    if (resolved?.source === undefined) return envelope(null);
+    const { script, scriptPath, source } = resolved;
     let meta: ServeSessionSavedWorkflowDetail['meta'] = null;
     let metaError: string | undefined;
     try {
@@ -9222,9 +9259,9 @@ class QwenAgent implements Agent {
     return envelope({
       v: STATUS_SCHEMA_VERSION,
       sessionId,
-      name: entry.name,
-      source: entry.source,
-      scriptPath: entry.scriptPath,
+      name,
+      source,
+      scriptPath,
       script,
       meta,
       ...(metaError !== undefined ? { metaError } : {}),
@@ -15499,8 +15536,10 @@ class QwenAgent implements Agent {
         restoreOptions ||
         provisionalWorkspace ||
         agentHostReadOnly ||
-        executionEngine
+        executionEngine ||
+        this.workflowAncestorTrust
         ? {
+            ...this.workflowAncestorTrustHostPolicy(),
             ...(provisionalWorkspace
               ? { provisionalWorkspace: true as const }
               : {}),

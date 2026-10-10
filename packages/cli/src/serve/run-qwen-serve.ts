@@ -197,6 +197,7 @@ import {
   type WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
+import { createWorkflowAncestorTrustHandler } from './workflow-ancestor-trust.js';
 import type {
   ChannelDeliveryHandler,
   ChannelDeliveryHostResult,
@@ -5211,6 +5212,13 @@ async function runQwenServeImpl(
     settingsRuntime.environment.preResolveHomeEnvOverrides();
     const bootTrustSnapshot = await trustPolicy.readDaemonTrustPolicySnapshot();
     let latestTrustPolicySnapshot = bootTrustSnapshot;
+    // Counts monitor publications, so a runtime can tell whether the policy
+    // it was admitted under has been superseded since.
+    let trustPolicyPublications = 0;
+    const getPublishedTrustPolicy = () => ({
+      publications: trustPolicyPublications,
+      snapshot: latestTrustPolicySnapshot,
+    });
     const bootPrimaryTrustDecision = trustPolicy.evaluateDaemonWorkspaceTrust(
       bootTrustSnapshot,
       boundWorkspace,
@@ -6210,6 +6218,11 @@ async function runQwenServeImpl(
             }
           : { channelFactory }),
         externalToolGuard: daemonToolGuardHandler,
+        workflowAncestorTrust: createWorkflowAncestorTrustHandler({
+          generationGuard: primaryGenerationGuard,
+          admissionSnapshot: bootTrustSnapshot,
+          getPublished: getPublishedTrustPolicy,
+        }),
         onDiagnosticLine: diagnosticSink,
         telemetry: daemonTelemetry,
         ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
@@ -6818,6 +6831,11 @@ async function runQwenServeImpl(
             }
           : { channelFactory: secondaryChannelFactory }),
         externalToolGuard: daemonToolGuardHandler,
+        workflowAncestorTrust: createWorkflowAncestorTrustHandler({
+          generationGuard: secondaryGenerationGuard,
+          admissionSnapshot: bootTrustSnapshot,
+          getPublished: getPublishedTrustPolicy,
+        }),
         onDiagnosticLine: diagnosticSink,
         telemetry: createRuntimeBridgeTelemetry(secondaryWorkspaceHash),
         ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
@@ -7536,6 +7554,11 @@ async function runQwenServeImpl(
               }
             : { channelFactory: wsChannelFactory }),
           externalToolGuard: daemonToolGuardHandler,
+          workflowAncestorTrust: createWorkflowAncestorTrustHandler({
+            generationGuard,
+            admissionSnapshot: snapshot,
+            getPublished: getPublishedTrustPolicy,
+          }),
           onDiagnosticLine: diagnosticSink,
           telemetry: createRuntimeBridgeTelemetry(wsHash),
           ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
@@ -8708,6 +8731,7 @@ async function runQwenServeImpl(
       const trustMonitor = createDaemonTrustPolicyMonitor({
         onSnapshot: (snapshot) => {
           latestTrustPolicySnapshot = snapshot;
+          trustPolicyPublications += 1;
           return runWorkspaceTrustOperation(() =>
             trustReconciler.reconcile(snapshot),
           );

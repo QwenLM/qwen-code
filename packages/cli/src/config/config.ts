@@ -120,7 +120,10 @@ import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
 
-import { isWorkspaceTrusted } from './trustedFolders.js';
+import {
+  createWorkflowAncestorTrustProvider,
+  isWorkspaceTrusted,
+} from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
 import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
@@ -1641,6 +1644,32 @@ function warnAboutOutputStyle(warning: string): void {
   console.error(`WARNING: ${warning}`);
 }
 
+/**
+ * Who answers which ancestors of the session's directory may contribute saved
+ * workflows: the embedding host when it supplies the policy, else the local
+ * folder-trust rules of the session's settings. A session that reads no
+ * project-local code beyond its own directory (bare, safe mode, a read-only
+ * agent host, an SSH workspace) gets no ancestor at all.
+ */
+function resolveWorkflowAncestorTrustProvider(
+  settings: Settings,
+  hostPolicy:
+    | {
+        workflowAncestorTrustProvider?: ConfigParameters['workflowAncestorTrustProvider'];
+      }
+    | undefined,
+  restricted: boolean,
+): ConfigParameters['workflowAncestorTrustProvider'] {
+  if (restricted) return undefined;
+  if (
+    hostPolicy &&
+    Object.hasOwn(hostPolicy, 'workflowAncestorTrustProvider')
+  ) {
+    return hostPolicy.workflowAncestorTrustProvider;
+  }
+  return createWorkflowAncestorTrustProvider(settings);
+}
+
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -1716,6 +1745,12 @@ export async function loadCliConfig(
     managedRuntimeEnvironment?: ConfigParameters['managedRuntimeEnvironment'];
     /** How the host learns an unproven worker stop; see `ConfigParameters`. */
     onManagedEngineQuarantine?: ConfigParameters['onManagedEngineQuarantine'];
+    /**
+     * Saved-workflow ancestor trust owned by the host (a daemon's private
+     * ACP child asks its parent). Present but `undefined`, no ancestor is
+     * trusted; absent, the local trust rules decide.
+     */
+    workflowAncestorTrustProvider?: ConfigParameters['workflowAncestorTrustProvider'];
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
@@ -2578,6 +2613,11 @@ export async function loadCliConfig(
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
+    workflowAncestorTrustProvider: resolveWorkflowAncestorTrustProvider(
+      settings,
+      hostPolicy,
+      bareMode || safeMode || agentHostReadOnly || sshWorkspace !== undefined,
+    ),
     shellExecutionSandbox,
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {

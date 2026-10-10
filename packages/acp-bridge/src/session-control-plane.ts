@@ -4889,6 +4889,7 @@ export function createSessionControlPlane(
           return;
         void bridgeApi.cancelSession(sessionId).catch(() => undefined);
       },
+      opts.workflowAncestorTrust,
     );
     const connection = harness.createConnection(client, channel);
     // Add to `aliveChannels` + register the `channel.exited` handler

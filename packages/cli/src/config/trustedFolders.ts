@@ -162,7 +162,16 @@ export function loadTrustedFolders(): LoadedTrustedFolders {
   if (loadedTrustedFolders) {
     return loadedTrustedFolders;
   }
+  loadedTrustedFolders = readTrustedFoldersFile();
+  return loadedTrustedFolders;
+}
 
+/**
+ * Read and parse the trusted folders file now, bypassing the process cache
+ * {@link loadTrustedFolders} keeps. For a check that must see a rule another
+ * process (or an editor) changed since this one started.
+ */
+function readTrustedFoldersFile(): LoadedTrustedFolders {
   const errors: TrustedFoldersError[] = [];
   let userConfig: Record<string, TrustLevel> = {};
 
@@ -185,11 +194,10 @@ export function loadTrustedFolders(): LoadedTrustedFolders {
     });
   }
 
-  loadedTrustedFolders = new LoadedTrustedFolders(
+  return new LoadedTrustedFolders(
     { path: userPath, config: userConfig },
     errors,
   );
-  return loadedTrustedFolders;
 }
 
 export function saveTrustedFolders(
@@ -436,4 +444,51 @@ export function isWorkspaceTrusted(
       trustConfig,
     ),
   );
+}
+
+/**
+ * Whether one ancestor of a session's directory is trusted to contribute
+ * saved workflows: only an explicit trust rule (or a `TRUST_PARENT` rule
+ * below it) admits it. The IDE's trust covers the folder it has open, never
+ * that folder's parents, so it can only deny here.
+ */
+function isWorkflowAncestorTrusted(
+  folders: LoadedTrustedFolders,
+  ancestorDir: string,
+  ideTrust: boolean | undefined,
+): boolean {
+  if (ideTrust === false && arePathsEquivalent(ancestorDir, process.cwd())) {
+    return false;
+  }
+  return folders.isPathTrusted(ancestorDir) === true;
+}
+
+/**
+ * The saved-workflow ancestor trust policy of a local session (interactive,
+ * headless, or a direct ACP session), bound to the settings the session was
+ * admitted with. The rules file is read afresh on every lookup — not through
+ * the process cache — so a rule revoked or restored by another process
+ * applies to the next lookup of a long-running session; unreadable or
+ * invalid rules deny every ancestor. With folder trust disabled every
+ * ancestor is answered trusted — core still confines the search to the
+ * session's repository.
+ */
+export function createWorkflowAncestorTrustProvider(
+  settings: Settings,
+): (ancestorDirs: readonly string[]) => Promise<boolean[]> {
+  const folderTrustEnabled = isFolderTrustEnabled(settings);
+  return async (ancestorDirs) => {
+    if (!folderTrustEnabled) return ancestorDirs.map(() => true);
+    let folders: LoadedTrustedFolders;
+    try {
+      folders = readTrustedFoldersFile();
+    } catch {
+      return ancestorDirs.map(() => false);
+    }
+    if (folders.errors.length > 0) return ancestorDirs.map(() => false);
+    const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+    return ancestorDirs.map((dir) =>
+      isWorkflowAncestorTrusted(folders, dir, ideTrust),
+    );
+  };
 }
