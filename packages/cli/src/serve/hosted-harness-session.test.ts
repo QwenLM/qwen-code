@@ -5293,11 +5293,42 @@ describe('Hosted Harness no-tool session', () => {
       kind: 'accepted',
       inputId: 'msg_down:message',
     }).expect(202);
+    // The settlement must name the message it saw.
+    const unseen = await child({
+      kind: 'commit_result',
+      result: 'done',
+      receipt: '{}',
+    });
+    expect(unseen.status).toBe(409);
+    expect(unseen.body.code).toBe('child_messages_pending');
     await child({
       kind: 'commit_result',
       result: 'done',
       receipt: '{}',
+      messageCount: 1,
     }).expect(202);
+    // A target store that faltered is a retry, never the target's verdict.
+    const faltered = vi
+      .spyOn(HostedSessionMessageSession.prototype, 'receive')
+      .mockRejectedValueOnce(
+        new ManagedSessionStoreHttpError(503, 'store_unavailable', 'down'),
+      );
+    const content2 = Buffer.from('second question');
+    const storeDown = await message({
+      messageId: 'msg_late2',
+      kind: 'receive',
+      route: 'to_parent',
+      childRunId: 'run-1',
+      senderSessionId: CHILD_SESSION_ID,
+      contentBase64: content2.toString('base64'),
+      contentDigest: createHash('sha256').update(content2).digest('hex'),
+    });
+    expect(storeDown.status).toBe(503);
+    expect(storeDown.body.code).toBe('session_message_failed');
+    faltered.mockRestore();
+    const noReceipt = await message({ messageId: 'msg_down', kind: 'consume' });
+    expect(noReceipt.status).toBe(409);
+    expect(noReceipt.body.code).toBe('session_message_record');
     const content = Buffer.from('late question');
     const refused = await message({
       messageId: 'msg_late',
@@ -5308,9 +5339,9 @@ describe('Hosted Harness no-tool session', () => {
       contentBase64: content.toString('base64'),
       contentDigest: createHash('sha256').update(content).digest('hex'),
     });
-    // No such child run here: the target's own rules refuse it for good.
+    // No such child run here: refused for good, before anything publishes.
     expect(refused.status).toBe(409);
-    expect(refused.body.code).toBe('session_message_conflict');
+    expect(refused.body.code).toBe('session_message_record');
     expect(
       (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
         .status,
@@ -9269,6 +9300,7 @@ describe('Hosted Harness no-tool session', () => {
         'write_file',
         'edit',
         'run_shell_command',
+        'monitor',
         // H4b: a Shell-laned root Session advertises its Agent tool,
         // and (H4d-b) messages the child tasks it launched.
         'agent',

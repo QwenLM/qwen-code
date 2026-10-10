@@ -50,9 +50,12 @@ import {
   type ChildLaunchEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import {
+  MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS,
+  isInFlightMessage,
   isUndeliveredMessage,
   outboundMessageBody,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
+import type { SessionMessage } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import { parseSessionMessage } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import type { DefinitionPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
@@ -340,17 +343,22 @@ export class HostedChildAgentSession {
     }
   }
 
-  /** The parent's messages to one child run that still owe their handover. */
-  undeliveredMessagesTo(childRunId: string): number {
+  /** Every message this Session sent to one child run, in any state. */
+  messagesTo(childRunId: string): readonly SessionMessage[] {
     return this.store.authority
       .extensionRecordsInDomain('session_message')
       .map((entry) => parseSessionMessage(entry.record))
       .filter(
         (message) =>
+          message.direction === 'outbound' &&
           message.route === 'to_child' &&
-          message.childRunId === childRunId &&
-          isUndeliveredMessage(message),
-      ).length;
+          message.childRunId === childRunId,
+      );
+  }
+
+  /** The parent's messages to one child run that still owe their handover. */
+  undeliveredMessagesTo(childRunId: string): number {
+    return this.messagesTo(childRunId).filter(isUndeliveredMessage).length;
   }
 
   /**
@@ -452,6 +460,29 @@ export class HostedChildAgentSession {
           return {
             kind: 'refused',
             reason: `Child agent task ${headTask} is being stopped and cannot receive messages.`,
+          };
+        }
+        if (params.closing) {
+          return {
+            kind: 'refused',
+            reason: 'This Session is closing and sends no more messages.',
+          };
+        }
+        const sentBefore = this.messagesTo(head.childRunId);
+        const limits = MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS;
+        if (sentBefore.length >= limits.maxPerRun) {
+          return {
+            kind: 'refused',
+            reason: `Child agent task ${headTask} has received its ${limits.maxPerRun} messages (budget_exhausted).`,
+          };
+        }
+        if (
+          sentBefore.filter(isInFlightMessage).length >=
+          limits.maxInFlightPerRun
+        ) {
+          return {
+            kind: 'refused',
+            reason: `Child agent task ${headTask} has ${limits.maxInFlightPerRun} messages it has not read yet (count_limit); wait for its answer.`,
           };
         }
         const contentRef = await this.store.resources.publish(
@@ -636,7 +667,13 @@ export class HostedChildAgentSession {
    */
   async settleCompleted(
     childRunId: string,
-    params: { readonly result: Buffer; readonly receipt: Buffer },
+    params: {
+      readonly result: Buffer;
+      readonly receipt: Buffer;
+      /** The parent's messages to this run the caller saw before choosing
+       * the result; a later one holds the settlement (H4d-b). */
+      readonly messageCount?: number;
+    },
   ): Promise<ManagedSessionDurableRef> {
     if (params.result.byteLength > MANAGED_CHILD_LIMITS.maxResultBytes) {
       throw new ManagedSessionRecordError(
@@ -675,7 +712,10 @@ export class HostedChildAgentSession {
           `Child run ${childRunId} was already settled with a different result.`,
         );
       }
-      this.assertNoUndeliveredMessages(childRunId);
+      this.assertSettlementSawEveryMessage(
+        childRunId,
+        params.messageCount ?? 0,
+      );
       const resultRef = await this.store.resources.publish(
         'managed-child-result',
         params.result,
@@ -718,11 +758,20 @@ export class HostedChildAgentSession {
       readonly reason: ChildAgentRun['run']['reason'];
       readonly started: boolean;
       readonly childSessionId?: string;
+      /** Present when the caller chose the failure from the child's newest
+       * turn; a give-up never waits on a message. */
+      readonly messageCount?: number;
     },
   ): Promise<void> {
-    return this.revise(childRunId, (previous) =>
-      childFailBody(previous, params),
-    );
+    return this.revise(childRunId, (previous) => {
+      if (
+        params.messageCount !== undefined &&
+        !isTerminalRunState(previous.run.state)
+      ) {
+        this.assertSettlementSawEveryMessage(childRunId, params.messageCount);
+      }
+      return childFailBody(previous, params);
+    });
   }
 
   /** A stop was requested of the owner; set once, never cleared. */
@@ -902,11 +951,21 @@ export class HostedChildAgentSession {
     };
   }
 
-  private assertNoUndeliveredMessages(childRunId: string): void {
-    const pending = this.undeliveredMessagesTo(childRunId);
-    if (pending > 0) {
+  /**
+   * The settlement stands on the child's newest turn only if no message to
+   * the run still owes its handover and none opened after the caller read
+   * them: messages are never deleted, so a count above what the caller saw
+   * is a message its choice of result could not have accounted for.
+   */
+  private assertSettlementSawEveryMessage(
+    childRunId: string,
+    messageCount: number,
+  ): void {
+    const messages = this.messagesTo(childRunId);
+    const pending = messages.filter(isUndeliveredMessage).length;
+    if (pending > 0 || messages.length > messageCount) {
       throw new ChildMessagesPendingError(
-        `Child run ${childRunId} still owes the handover of ${pending} message(s).`,
+        `Child run ${childRunId} has ${messages.length} message(s), ${pending} still owing their handover; the settlement saw ${messageCount}.`,
       );
     }
   }

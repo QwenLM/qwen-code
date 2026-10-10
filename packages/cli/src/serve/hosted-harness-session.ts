@@ -87,6 +87,7 @@ import {
   ChildMessagesPendingError,
   HostedChildAgentSession,
 } from './hosted-child-agent-session.js';
+import { MANAGED_SESSION_MESSAGE_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import {
   HostedSessionMessageSession,
   SESSION_MESSAGE_INPUT_SOURCE,
@@ -5124,10 +5125,16 @@ export function registerHostedHarnessSessionRoutes(
           case 'commit_result': {
             const result = body?.['result'];
             const receipt = body?.['receipt'];
+            const messageCount = body?.['messageCount'];
             if (
               typeof result !== 'string' ||
               Buffer.byteLength(result, 'utf8') < 1 ||
-              receipt === undefined
+              receipt === undefined ||
+              !(
+                messageCount === undefined ||
+                (Number.isSafeInteger(messageCount) &&
+                  (messageCount as number) >= 0)
+              )
             ) {
               return error(res, 400, 'invalid_child_operation');
             }
@@ -5137,6 +5144,9 @@ export function registerHostedHarnessSessionRoutes(
                 typeof receipt === 'string' ? receipt : JSON.stringify(receipt),
                 'utf8',
               ),
+              ...(messageCount === undefined
+                ? {}
+                : { messageCount: messageCount as number }),
             });
             break;
           }
@@ -5178,6 +5188,7 @@ export function registerHostedHarnessSessionRoutes(
             const reason = body?.['reason'];
             const started = body?.['started'];
             const childSessionId = body?.['childSessionId'];
+            const messageCount = body?.['messageCount'];
             const QUOTA = [
               'count_limit',
               'rate_limit',
@@ -5201,6 +5212,11 @@ export function registerHostedHarnessSessionRoutes(
                 childSessionId === null ||
                 childSessionId === undefined ||
                 typeof childSessionId === 'string'
+              ) ||
+              !(
+                messageCount === undefined ||
+                (Number.isSafeInteger(messageCount) &&
+                  (messageCount as number) >= 0)
               )
             ) {
               return error(res, 400, 'invalid_child_operation');
@@ -5220,6 +5236,9 @@ export function registerHostedHarnessSessionRoutes(
                   | 'duration_limit') ?? null,
               started,
               ...(typeof childSessionId === 'string' ? { childSessionId } : {}),
+              ...(messageCount === undefined
+                ? {}
+                : { messageCount: messageCount as number }),
             });
             break;
           }
@@ -5330,7 +5349,11 @@ export function registerHostedHarnessSessionRoutes(
         case 'consumed':
         case 'cancelled':
         case 'rejected':
+        case 'unknown':
           await messages.settle(messageId, kind);
+          break;
+        case 'consume':
+          await messages.consume(messageId);
           break;
         case 'receive': {
           const route = body?.['route'];
@@ -5347,6 +5370,10 @@ export function registerHostedHarnessSessionRoutes(
             !HOSTED_UUID.test(senderSessionId) ||
             typeof content !== 'string' ||
             content.length < 1 ||
+            // The base64 of at most the 64 KiB content bound.
+            content.length >
+              Math.ceil(MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes / 3) *
+                4 ||
             typeof contentDigest !== 'string' ||
             !/^[0-9a-f]{64}$/.test(contentDigest)
           ) {
@@ -5370,6 +5397,18 @@ export function registerHostedHarnessSessionRoutes(
       const message = cause instanceof Error ? cause.message : String(cause);
       if (cause instanceof SessionMessageNotReadyError) {
         return error(res, 409, 'session_message_not_ready', message);
+      }
+      // A store that faltered or stopped writing is not the target's
+      // verdict on the message: the relay retries it, never rejects.
+      if (
+        cause instanceof ManagedSessionStoreHttpError ||
+        cause instanceof ManagedSessionStoreTransportError ||
+        cause instanceof ManagedSessionWritesStoppedError
+      ) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted message operation ${kind} of session ${req.params['id']} failed in its store: ${message}`,
+        );
+        return error(res, 503, 'session_message_failed', message);
       }
       if (cause instanceof ManagedSessionConflictError) {
         return error(res, 409, 'session_message_conflict', message);

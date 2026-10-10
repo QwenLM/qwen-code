@@ -13,7 +13,6 @@ import type {
   SessionMessage,
   SessionMessageRoute,
 } from './managed-session-message-record.js';
-import { MANAGED_SESSION_MESSAGE_LIMITS } from './managed-session-message-record.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
 
 // H4d-b of #12827: the pure construction side of the session message
@@ -112,7 +111,7 @@ export function outboundAcceptedBody(
 /** Any other single delivery step of an outbox entry. */
 export function outboundDeliveryBody(
   previous: SessionMessage,
-  state: 'consumed' | 'cancelled' | 'rejected',
+  state: 'consumed' | 'cancelled' | 'rejected' | 'unknown',
 ): SessionMessage {
   return Object.freeze({
     ...previous,
@@ -151,16 +150,35 @@ export function inboundConsumedBody(previous: SessionMessage): SessionMessage {
   });
 }
 
-/** Whether an outbox entry still owes its handover to the target. */
+/**
+ * The runtime's own bounds on one lineage edge, per direction: messages a
+ * sender may have in flight at once (not yet consumed, cancelled, rejected
+ * or given up), and messages it may send to one child run in all. They bound
+ * what a model can make the relay poll and what a ping-pong costs.
+ */
+export const MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS = Object.freeze({
+  maxInFlightPerRun: 8,
+  maxPerRun: 64,
+} as const);
+
+/**
+ * Whether an outbox entry still owes its handover to the target. An entry
+ * the relay gave up on moved to `unknown` (or `cancelled`), so it holds
+ * nothing any more.
+ */
 export function isUndeliveredMessage(message: SessionMessage): boolean {
   const state = message.run.delivery?.state;
   return (
     message.direction === 'outbound' &&
-    (state === 'planned' || state === 'accepting' || state === 'unknown')
+    (state === 'planned' || state === 'accepting')
   );
 }
 
-/** The bytes a sender may store, before any carrier bound applies. */
-export function sessionMessageContentFits(content: Buffer): boolean {
-  return content.byteLength <= MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes;
+/** Whether an outbox entry is still in flight: handed over or not, unread. */
+export function isInFlightMessage(message: SessionMessage): boolean {
+  const state = message.run.delivery?.state;
+  return (
+    message.direction === 'outbound' &&
+    (state === 'planned' || state === 'accepting' || state === 'accepted')
+  );
 }

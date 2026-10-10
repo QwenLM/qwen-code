@@ -61,6 +61,10 @@ public class ChildResultRelay {
     // 64 KiB bound with room for the record around it.
     private static final int CONTINUATION_INPUT_BYTES = 48 * 1024;
     private static final int CONTINUATION_CHAIN_LIMIT = 64;
+    /** How long a delivered message may wait for the turn that reads it
+     * without any activity in the child before it stops holding the
+     * child's settlement (a blocked child would hold it forever). */
+    private static final long MESSAGE_TURN_WAIT_MS = 30 * 60_000;
 
     private final ChildResultRelayStore relayStore;
     private final ManagedAgentService sessions;
@@ -299,7 +303,10 @@ public class ChildResultRelay {
                 throw new RelayRetry("continued run " + id
                         + "'s result is not readable yet");
             }
-            runs.add(new String[] {instruction, result});
+            // The earlier texts are data inside the history's own markup:
+            // escaped, so no earlier result can close a block or forge the
+            // next instruction.
+            runs.add(new String[] {escapeXml(instruction), escapeXml(result)});
             JsonNode previous = run.path("predecessorChildRunId");
             id = previous.isTextual() ? previous.textValue() : null;
         }
@@ -334,7 +341,8 @@ public class ChildResultRelay {
     }
 
     /** The longest code-point prefix of {@code text} that fits {@code
-     * budget} JSON bytes together with its truncation marker. */
+     * budget} JSON bytes together with its truncation marker, never ending
+     * inside an escaped entity. */
     private String fit(String text, int budget) {
         String marker = "\n… (truncated)";
         if (jsonBytes(text) <= budget) {
@@ -351,7 +359,17 @@ public class ChildResultRelay {
                 high = middle - 1;
             }
         }
-        return new String(points, 0, low) + marker;
+        String kept = new String(points, 0, low);
+        int entity = kept.lastIndexOf('&');
+        if (entity > kept.lastIndexOf(';')) {
+            kept = kept.substring(0, entity);
+        }
+        return kept + marker;
+    }
+
+    private static String escapeXml(String text) {
+        return text.replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;");
     }
 
     private int jsonBytes(String text) {
@@ -416,42 +434,48 @@ public class ChildResultRelay {
         long completedAt = turn.completedAt() == null ? 0L
                 : turn.completedAt();
         boolean journalTurn = false;
-        boolean ended = "COMPLETED".equals(status)
-                || "CANCELLED".equals(status) || "FAILED".equals(status);
-        // H4d-b: the child's last Turn is its result only once nothing on
-        // its edge still owes a handover and its own journal holds no input
-        // waiting for a Turn — a message's wake turn runs after the API
-        // Turn and is the child's newest answer, read from the journal it
-        // alone appears in. Both waits are the child's own runtime, not a
-        // failed step.
-        if (ended && relayStore.undeliveredEdgeMessages(row.tenantId(),
-                row.parentSessionId(), row.childRunId(),
-                row.childSessionId()) > 0) {
-            relayStore.scheduleRetry(row, owner, now + HEARTBEAT_MS,
-                    now + LEASE_MS, now);
-            return;
-        }
-        if (ended && relayStore.hasSessionMessages(row.tenantId(),
-                row.childSessionId())) {
-            ChildResultRelayStore.JournalTurns journal = relayStore
-                    .journalTurns(row.tenantId(), row.childSessionId());
-            if (journal.pendingInputs() > 0) {
+        Integer messageCount = null;
+        if ("COMPLETED".equals(status) || "CANCELLED".equals(status)
+                || "FAILED".equals(status)) {
+            // H4d-b: the child's result is its newest settled API or message
+            // turn, and only once nothing on its edge is still on its way.
+            // The journal is read first: a turn that messages the parent
+            // commits that outbox entry before it settles, so the edge read
+            // after an idle journal misses nothing the child sent. A message
+            // waiting for its turn holds the settlement — the message
+            // relay's reconciliation reloads a child a replaced Harness
+            // dropped — but not past MESSAGE_TURN_WAIT_MS of no activity.
+            ChildResultRelayStore.JournalTurns journal = journalTurns(row);
+            if (journal != null) {
+                if (journal.pendingMessageInputs() > 0
+                        && now - journal.lastActivityAt()
+                                < MESSAGE_TURN_WAIT_MS) {
+                    relayStore.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                            now + LEASE_MS, now);
+                    return;
+                }
+                ChildResultRelayStore.SettledTurn last = journal.lastSettled();
+                if (last != null && "session_message".equals(last.source())) {
+                    status = "completed".equals(last.outcome()) ? "COMPLETED"
+                            : "FAILED";
+                    turnId = last.turnId();
+                    completedAt = last.settledAt();
+                    journalTurn = true;
+                }
+            }
+            ChildResultRelayStore.EdgeMessages edge = relayStore.edgeMessages(
+                    row.tenantId(), row.parentSessionId(), row.childRunId(),
+                    row.childSessionId());
+            if (edge.undelivered() > 0) {
                 relayStore.scheduleRetry(row, owner, now + HEARTBEAT_MS,
                         now + LEASE_MS, now);
                 return;
             }
-            ChildResultRelayStore.SettledTurn last = journal.lastSettled();
-            if (last != null && "session_message".equals(last.source())) {
-                status = "completed".equals(last.outcome()) ? "COMPLETED"
-                        : "FAILED";
-                turnId = last.turnId();
-                completedAt = last.settledAt();
-                journalTurn = true;
-            }
+            messageCount = edge.toChild();
         }
         try {
             settleFrom(row, pending, status, turnId, completedAt, journalTurn,
-                    now);
+                    messageCount, now);
         } catch (DaemonHttpException error) {
             if (!"child_messages_pending".equals(error.getErrorCode())) {
                 throw error;
@@ -462,12 +486,27 @@ public class ChildResultRelay {
         }
     }
 
+    /** The child's journal turns, or null where a compacted journal of a
+     * child that never messaged leaves H4b's API Turn result alone. */
+    private ChildResultRelayStore.JournalTurns journalTurns(RelayRow row) {
+        try {
+            return relayStore.journalTurns(row.tenantId(),
+                    row.childSessionId());
+        } catch (IllegalStateException error) {
+            if (relayStore.hasSessionMessages(row.tenantId(),
+                    row.childSessionId())) {
+                throw error;
+            }
+            return null;
+        }
+    }
+
     private void settleFrom(RelayRow row, PendingChild pending,
             String status, String turnId, long completedAt,
-            boolean journalTurn, long now) {
+            boolean journalTurn, Integer messageCount, long now) {
         switch (status) {
             case "COMPLETED" -> complete(row, pending, status, turnId,
-                    completedAt, journalTurn, now);
+                    completedAt, journalTurn, messageCount, now);
             case "CANCELLED", "FAILED" -> {
                 // Close before the fail commit: a faltered admission now
                 // parks the row while delivery is still discoverable; the
@@ -483,6 +522,9 @@ public class ChildResultRelay {
                 fail.put("childRunId", row.childRunId());
                 fail.put("stopReason", "child_failed");
                 fail.put("started", true);
+                if (messageCount != null) {
+                    fail.put("messageCount", messageCount);
+                }
                 harness.runChildOperation(row.tenantId(),
                         row.parentSessionId(), fail);
                 finishOrRetainDebt(row, row.childSessionId(), closed, "done",
@@ -498,7 +540,17 @@ public class ChildResultRelay {
     }
 
     private void complete(RelayRow row, PendingChild pending, String status,
-            String turnId, long completedAt, boolean journalTurn, long now) {
+            String turnId, long completedAt, boolean journalTurn,
+            Integer messageCount, long now) {
+        JsonNode settled = relayStore.childRunBody(row.tenantId(),
+                row.parentSessionId(), row.childRunId());
+        if (settled != null && settled.path("resultRef").isObject()) {
+            // The result already committed (its reply was lost): the newest
+            // turn may have moved since, and a recomputed result would only
+            // conflict with the committed one, so the acceptance follows it.
+            accept(row, pending, now);
+            return;
+        }
         String text = journalTurn
                 ? relayStore.journalTurnText(row.tenantId(),
                         row.childSessionId(), turnId)
@@ -539,8 +591,16 @@ public class ChildResultRelay {
         commit.put("childRunId", row.childRunId());
         commit.put("result", text);
         commit.put("receipt", receipt);
+        if (messageCount != null) {
+            commit.put("messageCount", messageCount);
+        }
         harness.runChildOperation(row.tenantId(), row.parentSessionId(),
                 commit);
+        accept(row, pending, now);
+    }
+
+    /** The acceptance of a committed result, on its completion arm. */
+    private void accept(RelayRow row, PendingChild pending, long now) {
         // The acceptance rides the launch's own completion arm: a sent
         // child wakes the parent with a durable notification input; a
         // foreground child's acceptance commits alone and its answer

@@ -10,8 +10,10 @@ import { parseChildRun } from '@qwen-code/qwen-code-core/managed-runtime/managed
 import type { ManagedSessionInputRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import {
+  MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS,
   inboundConsumedBody,
   inboundMessageBody,
+  isInFlightMessage,
   outboundAcceptedBody,
   outboundDeliveryBody,
   outboundHandoverBody,
@@ -26,6 +28,7 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import {
   ManagedSessionRecordError,
+  type ManagedSessionEvent,
   type ManagedSessionKey,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
@@ -44,6 +47,17 @@ import type { HostedMonitorWakeTurn } from './hosted-monitor-wake.js';
 // and consumes it. Every write rides the child funnel's one writes chain,
 // so a message to a child and that child's settlement see one order. See
 // docs/design/2026-10-10-managed-session-message-runtime.md.
+
+/** The child funnel's store, plus the journal reads consumption needs. */
+export interface HostedSessionMessageStore extends HostedChildAgentStore {
+  readonly authority: HostedChildAgentStore['authority'] & {
+    readonly committedSequence: number;
+    eventsInSequenceRange(
+      from: number,
+      through: number,
+    ): readonly ManagedSessionEvent[];
+  };
+}
 
 /** The wake input source of a message's carrying input. */
 export const SESSION_MESSAGE_INPUT_SOURCE = 'session_message';
@@ -96,7 +110,7 @@ export function sessionMessageNotificationText(params: {
 
 export class HostedSessionMessageSession {
   constructor(
-    private readonly store: HostedChildAgentStore,
+    private readonly store: HostedSessionMessageStore,
     private readonly key: ManagedSessionKey,
     private readonly children: HostedChildAgentSession,
     /** Present exactly on a child Session, which may message its parent. */
@@ -148,6 +162,27 @@ export class HostedSessionMessageSession {
           );
         }
         return;
+      }
+      const sentBefore = this.store.authority
+        .extensionRecordsInDomain('session_message')
+        .map((entry) => parseSessionMessage(entry.record))
+        .filter(
+          (message) =>
+            message.direction === 'outbound' &&
+            message.childRunId === lineage.parentChildRunId,
+        );
+      const limits = MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS;
+      if (sentBefore.length >= limits.maxPerRun) {
+        throw new ManagedSessionRecordError(
+          `This Session has sent its parent ${limits.maxPerRun} messages (budget_exhausted).`,
+        );
+      }
+      if (
+        sentBefore.filter(isInFlightMessage).length >= limits.maxInFlightPerRun
+      ) {
+        throw new ManagedSessionRecordError(
+          `The parent has ${limits.maxInFlightPerRun} messages from this Session it has not read yet (count_limit).`,
+        );
       }
       const contentRef = await this.store.resources.publish(
         'managed-message-content',
@@ -213,12 +248,15 @@ export class HostedSessionMessageSession {
    */
   settle(
     messageId: string,
-    state: 'consumed' | 'cancelled' | 'rejected',
+    state: 'consumed' | 'cancelled' | 'rejected' | 'unknown',
   ): Promise<void> {
+    // `unknown` is the relay's give-up on a handed-over message whose
+    // receipt it could not prove either way.
     const from: Record<typeof state, readonly string[]> = {
       consumed: ['accepted'],
       cancelled: ['planned'],
       rejected: ['accepting', 'unknown'],
+      unknown: ['accepting'],
     };
     return this.revise(messageId, (previous) => {
       const current = previous.run.delivery?.state ?? '';
@@ -262,14 +300,17 @@ export class HostedSessionMessageSession {
           params.childRunId,
         );
         const record = run && parseChildRun(run.record);
-        if (record !== undefined && record.kind !== 'shell') {
-          if (record.childSessionId === null) {
-            throw new SessionMessageNotReadyError(
-              `Child run ${params.childRunId} has not attached yet.`,
-            );
-          }
-          fromTaskId = this.children.taskIdOf(params.childRunId);
+        if (record === undefined || record.kind === 'shell') {
+          throw new ManagedSessionRecordError(
+            'Session message must name a child Session run of this Session.',
+          );
         }
+        if (record.childSessionId === null) {
+          throw new SessionMessageNotReadyError(
+            `Child run ${params.childRunId} has not attached yet.`,
+          );
+        }
+        fromTaskId = this.children.taskIdOf(params.childRunId);
       } else if (
         this.lineage?.parentSessionId !== params.senderSessionId ||
         this.lineage.parentChildRunId !== params.childRunId
@@ -338,6 +379,43 @@ export class HostedSessionMessageSession {
       );
       return inputId;
     });
+  }
+
+  /**
+   * The relay's reconciliation of a receipt that stays accepted: consumed
+   * once the turn that read it settled completed (the commit after that
+   * turn may have been lost), not yet while it has not settled, and never
+   * when it ended otherwise. The call also reloads a Session a replaced
+   * Harness no longer holds, so its wake pump reads a waiting message.
+   */
+  async consume(messageId: string): Promise<void> {
+    const receipt = this.message(messageId);
+    if (receipt === undefined || receipt.direction !== 'inbound') {
+      throw new ManagedSessionRecordError(
+        `Session message ${messageId} has no receipt here.`,
+      );
+    }
+    if (receipt.run.delivery?.state === 'consumed') return;
+    const authority = this.store.authority;
+    const settled = authority
+      .eventsInSequenceRange(1, authority.committedSequence)
+      .filter(
+        (event) =>
+          event.kind === 'turn.settled' &&
+          event.payload['turnId'] === receipt.inputId,
+      )
+      .at(-1);
+    if (settled === undefined) {
+      throw new SessionMessageNotReadyError(
+        `Session message ${messageId} has not been read yet.`,
+      );
+    }
+    if (settled.payload['outcome'] !== 'completed') {
+      throw new ManagedSessionRecordError(
+        `Session message ${messageId}'s turn ended ${String(settled.payload['outcome'])}.`,
+      );
+    }
+    await this.markConsumed(receipt.inputId!);
   }
 
   /**

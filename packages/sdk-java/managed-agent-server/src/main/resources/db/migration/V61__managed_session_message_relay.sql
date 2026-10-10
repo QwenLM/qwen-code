@@ -20,3 +20,9 @@ CREATE TABLE qwen_managed_session_message_relay (
     PRIMARY KEY (sender_session_id, message_id),
     INDEX idx_session_message_relay_poll (state, next_retry_at)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
+-- The per-Session reads of the child result relay's completion rule (one
+-- Session's messages) would otherwise range over every Session's messages
+-- through the (domain, delivery_state) index.
+CREATE INDEX idx_managed_session_extension_session_domain
+    ON qwen_managed_session_extension_record (tenant_id, session_id, domain);

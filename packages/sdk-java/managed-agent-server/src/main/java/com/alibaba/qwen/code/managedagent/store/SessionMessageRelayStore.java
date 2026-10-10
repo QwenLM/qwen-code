@@ -30,11 +30,15 @@ public class SessionMessageRelayStore {
     public record Lineage(String parentSessionId, String parentChildRunId) {
     }
 
-    // Outbound entries only: a receipt opens accepted and has no ledger row
-    // (rows are keyed by the sender), so the accepted arm — the entries
-    // waiting for their target to consume them — joins on a `delivered`
-    // row, which only the relay's own handover can have written.
-    private static final String PENDING_SQL =
+    /** One outbox entry as committed now: its delivery and its body. */
+    public record CurrentRecord(String deliveryState,
+            String recordResourceId) {
+    }
+
+    // The entries still owing a handover. Only outbox entries reach these
+    // states (a receipt opens accepted), and a terminal ledger row means
+    // the relay already finished with the entry.
+    private static final String HANDOVER_SQL =
             "SELECT r.tenant_id, r.session_id, r.record_id, r.delivery_state,"
                     + " r.record_resource_id"
                     + " FROM qwen_managed_session_extension_record r"
@@ -42,16 +46,38 @@ public class SessionMessageRelayStore {
                     + " ON l.sender_session_id = r.session_id"
                     + " AND l.message_id = r.record_id"
                     + " WHERE r.domain = 'session_message'"
-                    + " AND ((r.delivery_state IN ('planned', 'accepting',"
-                    + " 'unknown') AND (l.state IS NULL OR l.state NOT IN"
-                    + " ('done', 'orphaned', 'unknown')))"
-                    + " OR (r.delivery_state = 'accepted'"
-                    + " AND l.state = 'delivered'))"
+                    + " AND r.delivery_state IN ('planned', 'accepting',"
+                    + " 'unknown')"
+                    + " AND (l.state IS NULL OR l.state NOT IN ('done',"
+                    + " 'orphaned', 'unknown'))"
                     + " AND (l.next_retry_at IS NULL OR l.next_retry_at <= ?)"
                     + " AND (l.claimed_until IS NULL OR l.claimed_until <= ?"
                     + " OR l.claimed_by = ?)"
                     + " ORDER BY r.created_at, r.session_id, r.record_id"
                     + " LIMIT ?";
+
+    // The entries handed over and waiting for their target to read them,
+    // driven from the ledger's own (state, next_retry_at) index, so the
+    // accepted entries that will never move again cost the scan nothing
+    // and the waiting ones never crowd a new handover off the page. A row
+    // still `relaying` over an accepted entry lost its advance after the
+    // sender's step committed; it waits like a `delivered` one.
+    private static final String AWAITING_SQL =
+            "SELECT r.tenant_id, r.session_id, r.record_id, r.delivery_state,"
+                    + " r.record_resource_id"
+                    + " FROM qwen_managed_session_message_relay l"
+                    + " JOIN qwen_managed_session_extension_record r"
+                    + " ON r.tenant_id = l.tenant_id"
+                    + " AND r.session_id = l.sender_session_id"
+                    + " AND r.domain = 'session_message'"
+                    + " AND r.record_id = l.message_id"
+                    + " WHERE l.state IN ('relaying', 'delivered')"
+                    + " AND l.next_retry_at <= ?"
+                    + " AND (l.claimed_until IS NULL OR l.claimed_until <= ?"
+                    + " OR l.claimed_by = ?)"
+                    + " AND r.delivery_state = 'accepted'"
+                    + " ORDER BY l.next_retry_at, l.sender_session_id,"
+                    + " l.message_id LIMIT ?";
 
     private final JdbcTemplate jdbc;
 
@@ -63,12 +89,36 @@ public class SessionMessageRelayStore {
      * leased to another worker. */
     public List<PendingMessage> findPendingMessages(String workerId, long now,
             int limit) {
-        return jdbc.query(PENDING_SQL, (result, row) -> new PendingMessage(
-                result.getString("tenant_id"), result.getString("session_id"),
-                result.getString("record_id"),
+        List<PendingMessage> page = new java.util.ArrayList<>(jdbc.query(
+                HANDOVER_SQL, this::pending, now, now, workerId, limit));
+        page.addAll(jdbc.query(AWAITING_SQL, this::pending, now, now,
+                workerId, limit));
+        return page;
+    }
+
+    private PendingMessage pending(java.sql.ResultSet result, int row)
+            throws java.sql.SQLException {
+        return new PendingMessage(result.getString("tenant_id"),
+                result.getString("session_id"), result.getString("record_id"),
                 result.getString("delivery_state"),
-                result.getString("record_resource_id")), now, now, workerId,
-                limit);
+                result.getString("record_resource_id"));
+    }
+
+    /** One outbox entry's delivery and body as committed now, for the
+     * worker that claimed it: the page's own snapshot can be a revision
+     * behind, and a body without the target it fixed reads wrong. */
+    public CurrentRecord currentRecord(String tenantId, String sessionId,
+            String messageId) {
+        List<CurrentRecord> rows = jdbc.query(
+                "SELECT delivery_state, record_resource_id FROM"
+                        + " qwen_managed_session_extension_record"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND domain = 'session_message' AND record_id = ?",
+                (result, row) -> new CurrentRecord(
+                        result.getString("delivery_state"),
+                        result.getString("record_resource_id")),
+                tenantId, sessionId, messageId);
+        return rows.isEmpty() ? null : rows.getFirst();
     }
 
     /** One record's delivery state as committed now, in any journal. */

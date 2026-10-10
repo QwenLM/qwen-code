@@ -88,6 +88,7 @@ import {
   MANAGED_CHILD_LIMITS,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import {
   managedExtensionRecordKey,
   managedTaskId,
@@ -1448,10 +1449,7 @@ export class HostedWorkspaceToolTurn {
               'Hosted child agent run_in_background=true is unavailable while the Session’s Hook catalog or MCP owner holds the Workspace mount, which ends when the Session closes; launch after the owner closes or from a Session without the mount held.';
           } else if (
             !agentBackground &&
-            calls.some(
-              (other) =>
-                other.name !== 'agent' && other.name !== 'send_message',
-            )
+            calls.some((other) => other.name !== 'agent')
           ) {
             // The same one-batch candidacy: a non-agent sibling holds the
             // mount for exactly the wait the foreground answer needs.
@@ -2859,7 +2857,11 @@ export class HostedWorkspaceToolTurn {
           executionCallId: callKey,
         });
       } catch (cause) {
-        if (!(cause instanceof ManagedSessionRecordError)) throw cause;
+        if (
+          !(cause instanceof ManagedSessionRecordError) ||
+          cause instanceof ManagedSessionConflictError
+        )
+          throw cause;
         return answer(
           `The message to the parent was refused: ${cause.message}`,
           true,
@@ -2872,14 +2874,26 @@ export class HostedWorkspaceToolTurn {
       );
     }
     const taskId = (request.call.args['task_id'] as string).trim();
-    const route = await this.childAgents!.sendToChild({
-      taskId,
-      text,
-      messageId,
-      continuationRunId: callKey,
-      executionCallId: callKey,
-      closing: authority.currentActivation?.phase !== 'active',
-    });
+    let route: Awaited<ReturnType<HostedChildAgentSession['sendToChild']>>;
+    try {
+      route = await this.childAgents!.sendToChild({
+        taskId,
+        text,
+        messageId,
+        continuationRunId: callKey,
+        executionCallId: callKey,
+        closing: authority.currentActivation?.phase !== 'active',
+      });
+    } catch (cause) {
+      // A refusal the store makes at commit (a closing Session, a rule the
+      // authority holds) is the call's answer, never a failed turn.
+      if (
+        !(cause instanceof ManagedSessionRecordError) ||
+        cause instanceof ManagedSessionConflictError
+      )
+        throw cause;
+      return answer(`The message was refused: ${cause.message}`, true);
+    }
     if (route.kind === 'refused') return answer(route.reason, true);
     this.agentDispatched.add(request.call.callId);
     if (route.kind === 'message') {

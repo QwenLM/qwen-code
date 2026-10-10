@@ -41,8 +41,11 @@ public class SessionMessageRelay {
     private static final int SCAN_LIMIT = 50;
     private static final int MAX_ATTEMPTS = 64;
     private static final long LEASE_MS = 30_000;
-    /** The gap for a wait on the other side — an attach, a consumption. */
+    /** The gap for a wait on the other side — an attach, a busy parent. */
     private static final long HEARTBEAT_MS = 5_000;
+    /** The gap while a handed-over message waits to be read. */
+    private static final long AWAIT_MS = 15_000;
+    private static final long MAX_BACKOFF_MS = 300_000;
 
     private final SessionMessageRelayStore store;
     private final ChildResultRelayStore records;
@@ -92,39 +95,55 @@ public class SessionMessageRelay {
         if (row == null || row.nextRetryAt() > now) {
             return;
         }
-        String delivery = store.deliveryState(row.tenantId(),
-                row.senderSessionId(), row.messageId());
-        if (delivery == null) {
-            delivery = pending.deliveryState();
-        }
-        String senderStatus = records.sessionStatus(row.tenantId(),
-                row.senderSessionId());
-        if (!"ACTIVE".equals(senderStatus)) {
-            // A closing or gone sender's journal takes no further revision:
-            // the entry stays as committed, classified on this side. One
-            // already accepted was delivered — H4b closes a child right
-            // after its settlement — and the target's receipt stays the
-            // consumption truth.
-            String reason = senderStatus == null ? "sender session is gone"
-                    : "sender session is " + senderStatus;
-            store.classify(row, owner,
-                    "accepted".equals(delivery) ? "done" : "orphaned",
-                    reason, now);
+        // The page is a snapshot: another worker can have advanced the
+        // entry since, so the delivery and the body it decides by are the
+        // ones committed now.
+        SessionMessageRelayStore.CurrentRecord current = store.currentRecord(
+                row.tenantId(), row.senderSessionId(), row.messageId());
+        if (current == null) {
             return;
         }
         try {
             JsonNode body = readJson(records.readResource(row.tenantId(),
-                    pending.recordResourceId()), "message body");
-            switch (delivery) {
+                    current.recordResourceId()), "message body");
+            String senderStatus = records.sessionStatus(row.tenantId(),
+                    row.senderSessionId());
+            if (!"ACTIVE".equals(senderStatus)) {
+                // A closing or gone sender's journal takes no further
+                // revision: the entry stays as committed, classified here.
+                // One its target already received was delivered — H4b
+                // closes a child right after its settlement — and the
+                // target's receipt stays the consumption truth.
+                String target = body.path("targetSessionId").isTextual()
+                        ? body.path("targetSessionId").textValue() : null;
+                boolean delivered = "accepted".equals(current.deliveryState())
+                        || target != null && store.deliveryState(
+                                row.tenantId(), target, row.messageId()) != null;
+                store.classify(row, owner, delivered ? "done" : "orphaned",
+                        senderStatus == null ? "sender session is gone"
+                                : "sender session is " + senderStatus,
+                        now);
+                return;
+            }
+            switch (current.deliveryState()) {
                 case "planned" -> handover(row, body, now);
                 case "accepting", "unknown" -> deliver(row, body,
-                        body.path("targetSessionId").asText(), now);
+                        target(body), now);
                 case "accepted" -> awaitConsumption(row, body, now);
                 default -> store.classify(row, owner, "done", null, now);
             }
         } catch (RuntimeException error) {
-            defer(row, error, now);
+            defer(row, current, error, now);
         }
+    }
+
+    private static String target(JsonNode body) {
+        JsonNode target = body.path("targetSessionId");
+        if (!target.isTextual()) {
+            throw new IllegalStateException(
+                    "a handed-over message names no target");
+        }
+        return target.textValue();
     }
 
     /** Fixes the target: the attached child of the run, or the sender's
@@ -140,8 +159,10 @@ public class SessionMessageRelay {
                         + " is not readable yet");
             }
             if (ManagedExtensionRecords.isTerminalRunState(
-                    run.path("run").path("state").asText())) {
-                // The run ended before the handover: never handed over.
+                    run.path("run").path("state").asText())
+                    || run.path("stopRequested").asBoolean(false)) {
+                // The run ended, or is being stopped, before the handover:
+                // never handed over, and no wake for a child going away.
                 senderOperation(row, "cancelled", Map.of());
                 store.classify(row, owner, "done",
                         "child run ended before the handover", now);
@@ -224,9 +245,10 @@ public class SessionMessageRelay {
                 if ("session_message_record".equals(error.getErrorCode())
                         || "session_message_conflict"
                                 .equals(error.getErrorCode())) {
-                    // The target's rules refuse this message for good: a
-                    // receipt committed already answers its replay, so a
-                    // conflict is never this message's own redelivery.
+                    // The target's own rules refuse this message for good
+                    // (its store's faults answer 503 and retry): a receipt
+                    // committed already answers its replay, so a conflict
+                    // is never this message's own redelivery.
                     senderOperation(row, "rejected", Map.of());
                     store.classify(row, owner, "done", error.getMessage(),
                             now);
@@ -236,13 +258,20 @@ public class SessionMessageRelay {
             }
         }
         senderOperation(row, "accepted", Map.of("inputId", inputId));
-        store.advance(row, owner, "delivered", target, now + HEARTBEAT_MS,
+        store.advance(row, owner, "delivered", target, now + AWAIT_MS,
                 now + LEASE_MS, now);
     }
 
-    /** The sender's last step follows the target's own receipt. */
+    /**
+     * The sender's last step follows the target's own receipt. The target
+     * is asked to reconcile it: consumed once the turn that read it
+     * completed (that commit may have been lost after the turn), not yet
+     * while it waits — the call itself reloads a Session a replaced
+     * Harness no longer holds, so its wake pump runs the waiting input —
+     * and never when the turn ended otherwise.
+     */
     private void awaitConsumption(MessageRow row, JsonNode body, long now) {
-        String target = body.required("targetSessionId").asText();
+        String target = target(body);
         if ("consumed".equals(store.deliveryState(row.tenantId(), target,
                 row.messageId()))) {
             senderOperation(row, "consumed", Map.of());
@@ -256,8 +285,27 @@ public class SessionMessageRelay {
                     "target session closed before consuming", now);
             return;
         }
-        store.scheduleRetry(row, owner, now + HEARTBEAT_MS, now + LEASE_MS,
-                now);
+        Map<String, Object> consume = new LinkedHashMap<>();
+        consume.put("operationId", UUID.randomUUID().toString());
+        consume.put("messageId", row.messageId());
+        consume.put("kind", "consume");
+        try {
+            harness.runMessageOperation(row.tenantId(), target, consume);
+        } catch (DaemonHttpException error) {
+            if ("session_message_not_ready".equals(error.getErrorCode())) {
+                store.scheduleRetry(row, owner, now + AWAIT_MS,
+                        now + LEASE_MS, now);
+                return;
+            }
+            if ("session_message_record".equals(error.getErrorCode())) {
+                // The turn that read it ended without completing: the
+                // receipt stays accepted, never widened into consumption.
+                store.classify(row, owner, "done", error.getMessage(), now);
+                return;
+            }
+            throw error;
+        }
+        store.scheduleRetry(row, owner, now, now + LEASE_MS, now);
     }
 
     private void senderOperation(MessageRow row, String kind,
@@ -271,8 +319,40 @@ public class SessionMessageRelay {
                 operation);
     }
 
-    private void defer(MessageRow row, RuntimeException error, long now) {
+    /**
+     * A failed step counts an attempt. Past the bound the relay gives up,
+     * but first ends the entry on its sender, so nothing still reads it as
+     * owing a handover (the child it holds would never settle): a message
+     * never handed over is cancelled; a handed-over one is accepted when
+     * its receipt exists and otherwise unknown. A give-up whose sender
+     * step faltered owes it and retries, never classifying over it.
+     */
+    private void defer(MessageRow row,
+            SessionMessageRelayStore.CurrentRecord current,
+            RuntimeException error, long now) {
         if (row.attempts() + 1 >= MAX_ATTEMPTS) {
+            try {
+                String state = current.deliveryState();
+                if ("planned".equals(state)) {
+                    senderOperation(row, "cancelled", Map.of());
+                } else if ("accepting".equals(state)
+                        || "unknown".equals(state)) {
+                    JsonNode body = readJson(records.readResource(
+                            row.tenantId(), current.recordResourceId()),
+                            "message body");
+                    if (store.deliveryState(row.tenantId(), target(body),
+                            row.messageId()) != null) {
+                        senderOperation(row, "accepted",
+                                Map.of("inputId", row.messageId() + ":message"));
+                    } else if ("accepting".equals(state)) {
+                        senderOperation(row, "unknown", Map.of());
+                    }
+                }
+            } catch (RuntimeException settlement) {
+                store.defer(row, owner, now + MAX_BACKOFF_MS,
+                        settlement.getMessage(), now + LEASE_MS, now);
+                return;
+            }
             store.classify(row, owner, "unknown", error.getMessage(), now);
             LOG.warn("session message relay gives up tenant={} sender={}"
                             + " message={} after={} failure={}",
@@ -280,7 +360,7 @@ public class SessionMessageRelay {
                     row.attempts(), error.getMessage());
             return;
         }
-        long delay = Math.min(300_000L,
+        long delay = Math.min(MAX_BACKOFF_MS,
                 1_000L * (1L << Math.min(row.attempts(), 8)));
         store.defer(row, owner, now + delay, error.getMessage(),
                 now + LEASE_MS, now);

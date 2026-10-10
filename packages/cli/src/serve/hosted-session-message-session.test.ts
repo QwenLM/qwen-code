@@ -140,10 +140,12 @@ async function attach(
 async function complete(
   children: HostedChildAgentSession,
   childRunId = 'run-1',
+  messageCount = 0,
 ): Promise<void> {
   await children.settleCompleted(childRunId, {
     result: Buffer.from(`result of ${childRunId}`),
     receipt: Buffer.from('{}'),
+    messageCount,
   });
 }
 
@@ -165,6 +167,30 @@ function send(
 
 function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex');
+}
+
+/** Settles the turn a message's input started, as the wake runner does. */
+async function settleTurn(
+  session: ManagedSession,
+  turnId: string,
+  state: 'completed' | 'cancelled',
+): Promise<void> {
+  await session.sink.write({
+    uuid: randomUUID(),
+    parentUuid: null,
+    sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+    timestamp: new Date().toISOString(),
+    type: 'system',
+    cwd: '/workspace',
+    version: 'test',
+    subtype: 'turn_result',
+    systemPayload: {
+      promptId: turnId,
+      state,
+      stopReason: 'end_turn',
+      endedAt: Date.now(),
+    },
+  });
 }
 
 function inputs(session: ManagedSession) {
@@ -219,9 +245,15 @@ describe('send_message to a child task (H4d-b)', () => {
     );
     await parent.messages.accepted('msg_call-9', 'msg_call-9:message');
     expect(parent.children.undeliveredMessagesTo('run-1')).toBe(0);
-    await complete(parent.children);
+    // A settlement that did not see the message (it opened after the
+    // caller's read and was handed over since) is refused all the same.
+    await expect(complete(parent.children, 'run-1', 0)).rejects.toThrow(
+      ChildMessagesPendingError,
+    );
+    await complete(parent.children, 'run-1', 1);
     expect(parent.children.record('run-1')?.run.state).toBe('settled');
-    // A failure never waits on a message: the relay cancels what it holds.
+    // A failure chosen from the child's newest turn names what it saw; a
+    // give-up names nothing and never waits.
     await launch(parent.children, 'run-2');
     await attach(parent.children, 'run-2', randomUUID());
     await parent.children.sendToChild({
@@ -232,12 +264,39 @@ describe('send_message to a child task (H4d-b)', () => {
       executionCallId: 'prompt:call-10',
       closing: false,
     });
+    await expect(
+      parent.children.settleFailed('run-2', {
+        stopReason: 'child_failed',
+        reason: null,
+        started: true,
+        messageCount: 1,
+      }),
+    ).rejects.toThrow(ChildMessagesPendingError);
     await parent.children.settleFailed('run-2', {
       stopReason: 'child_failed',
       reason: null,
       started: true,
     });
     expect(parent.children.record('run-2')?.run.state).toBe('failed');
+  });
+
+  it('bounds the messages in flight and in all per child run', async () => {
+    const parent = await side(PARENT);
+    await launch(parent.children);
+    for (let index = 0; index < 8; index++) {
+      expect(await send(parent.children, `m${index}`, `call-${index}`)).toEqual(
+        { kind: 'message', childRunId: 'run-1' },
+      );
+    }
+    const crowded = await send(parent.children, 'one too many', 'call-8');
+    expect(JSON.stringify(crowded)).toContain('count_limit');
+    // A message read (or ended) frees its place; the lifetime budget stays.
+    await parent.messages.settle('msg_call-0', 'cancelled');
+    expect(await send(parent.children, 'room again', 'call-9')).toEqual({
+      kind: 'message',
+      childRunId: 'run-1',
+    });
+    expect(parent.children.messagesTo('run-1')).toHaveLength(9);
   });
 
   it('continues a completed child with the message as its next prompt', async () => {
@@ -312,6 +371,8 @@ describe('send_message to a child task (H4d-b)', () => {
     expect(JSON.stringify(unknown)).toContain('No child agent task');
     const oversized = await send(parent.children, 'x'.repeat(33 * 1024));
     expect(JSON.stringify(oversized)).toContain('byte_limit');
+    const closingMessage = await send(parent.children, 'more', 'call-4', true);
+    expect(JSON.stringify(closingMessage)).toContain('closing');
     await attach(parent.children);
     await complete(parent.children);
     const closing = await send(parent.children, 'more', 'call-2', true);
@@ -436,7 +497,14 @@ describe('the session message funnel (H4d-b)', () => {
         contentDigest: sha256('another question'),
       }),
     ).rejects.toThrow(ManagedSessionConflictError);
-    await parent.messages.markConsumed('msg_from-child:message');
+    // The relay's reconciliation: nothing read it yet, then its turn
+    // completed and the receipt follows (the commit after it was lost).
+    await expect(parent.messages.consume('msg_from-child')).rejects.toThrow(
+      SessionMessageNotReadyError,
+    );
+    await settleTurn(parent.session, 'msg_from-child:message', 'completed');
+    await parent.messages.consume('msg_from-child');
+    await parent.messages.consume('msg_from-child');
     await parent.messages.markConsumed('msg_from-child:message');
     await parent.messages.markConsumed('unrelated:input');
     const inbound = parseSessionMessage(
@@ -444,6 +512,42 @@ describe('the session message funnel (H4d-b)', () => {
     );
     expect(inbound.direction).toBe('inbound');
     expect(inbound.run.delivery?.state).toBe('consumed');
+  });
+
+  it('never consumes a message whose reading turn ended otherwise', async () => {
+    const parent = await side(PARENT);
+    await launch(parent.children);
+    await attach(parent.children);
+    await parent.messages.receive({
+      messageId: 'msg_q',
+      route: 'to_parent',
+      childRunId: 'run-1',
+      senderSessionId: CHILD,
+      content: Buffer.from('question'),
+      contentDigest: sha256('question'),
+    });
+    await settleTurn(parent.session, 'msg_q:message', 'cancelled');
+    await expect(parent.messages.consume('msg_q')).rejects.toThrow(
+      'ended cancelled',
+    );
+    expect(parent.messages.message('msg_q')?.run.delivery?.state).toBe(
+      'accepted',
+    );
+  });
+
+  it('refuses a message from an unknown child run before publishing', async () => {
+    const parent = await side(PARENT);
+    await expect(
+      parent.messages.receive({
+        messageId: 'msg_stray',
+        route: 'to_parent',
+        childRunId: 'run-none',
+        senderSessionId: CHILD,
+        content: Buffer.from('hi'),
+        contentDigest: sha256('hi'),
+      }),
+    ).rejects.toThrow('must name a child Session run');
+    expect(inputs(parent.session)).toHaveLength(0);
   });
 
   it('refuses content that does not match its digest', async () => {
@@ -506,6 +610,20 @@ describe('the session message funnel (H4d-b)', () => {
     ) as { text: string };
     expect(text.text).toContain('<from>parent</from>');
     expect(text.text).toContain('send_message with to "parent"');
+    for (let index = 0; index < 7; index++) {
+      await child.messages.sendToParent({
+        text: `progress ${index}`,
+        messageId: `msg_up${index}`,
+        executionCallId: `turn:call-${index + 2}`,
+      });
+    }
+    await expect(
+      child.messages.sendToParent({
+        text: 'one too many',
+        messageId: 'msg_up_over',
+        executionCallId: 'turn:call-99',
+      }),
+    ).rejects.toThrow('count_limit');
     const root = await side(randomUUID());
     await expect(
       root.messages.sendToParent({

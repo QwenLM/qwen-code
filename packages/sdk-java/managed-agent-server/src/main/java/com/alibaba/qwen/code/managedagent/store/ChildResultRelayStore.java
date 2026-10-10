@@ -217,49 +217,76 @@ public class ChildResultRelayStore {
             long settledAt) {
     }
 
-    /** What a Session's journal proves about its Turns: how many accepted
-     * inputs still wait for their Turn to settle, and the newest settled
-     * Turn (null while none settled). */
-    public record JournalTurns(int pendingInputs, SettledTurn lastSettled) {
+    /**
+     * What a child Session's journal proves about the turns that decide its
+     * result: how many messages it accepted still wait for the turn that
+     * reads them, when it last accepted an input or settled a turn, and its
+     * newest settled API or message turn (null while none settled). Other
+     * wake inputs — a Monitor's, an automation's — neither hold nor decide.
+     */
+    public record JournalTurns(int pendingMessageInputs, long lastActivityAt,
+            SettledTurn lastSettled) {
     }
 
-    // The outbox entries the message relay still owes a handover: a
-    // message the relay gave up on or orphaned no longer holds anything.
-    private static final String UNDELIVERED_MESSAGES_SQL =
-            "SELECT r.record_resource_id"
-                    + " FROM qwen_managed_session_extension_record r"
-                    + " LEFT JOIN qwen_managed_session_message_relay m"
-                    + " ON m.sender_session_id = r.session_id"
-                    + " AND m.message_id = r.record_id"
-                    + " WHERE r.tenant_id = ? AND r.session_id = ?"
-                    + " AND r.domain = 'session_message'"
-                    + " AND r.delivery_state IN ('planned', 'accepting',"
-                    + " 'unknown')"
-                    + " AND (m.state IS NULL OR m.state NOT IN ('done',"
-                    + " 'orphaned', 'unknown'))";
+    /** The messages on one parent–child edge, as committed now. */
+    public record EdgeMessages(int undelivered, int toChild) {
+    }
+
+    private static final String MESSAGES_SQL =
+            "SELECT delivery_state, record_resource_id"
+                    + " FROM qwen_managed_session_extension_record"
+                    + " WHERE tenant_id = ? AND session_id = ?"
+                    + " AND domain = 'session_message'";
 
     /**
-     * H4d-b: the messages on one parent–child edge that still owe their
-     * handover — the parent's to this run, and every one the child sent
-     * (a child's outbox entries all go to its parent). A child settles only
-     * once none are left, so no message lands behind its last Turn. An
-     * unreadable body counts as owed: it cannot prove it is elsewhere.
+     * H4d-b: the messages on one parent–child edge. `undelivered` counts
+     * those still owing their handover — the parent's to this run and every
+     * one the child sent (a child's outbox entries all go to its parent);
+     * `toChild` counts every message the parent sent this run, in any
+     * state, which the settlement names so the parent can refuse it over a
+     * message opened after this read. An unreadable body cannot prove which
+     * edge it is on and owes a retry.
      */
-    public int undeliveredEdgeMessages(String tenantId, String parentSessionId,
+    public EdgeMessages edgeMessages(String tenantId, String parentSessionId,
             String childRunId, String childSessionId) {
-        int owed = 0;
-        for (String resource : jdbc.query(UNDELIVERED_MESSAGES_SQL,
-                (result, row) -> result.getString("record_resource_id"),
+        int undelivered = 0;
+        int toChild = 0;
+        for (Map<String, Object> row : jdbc.queryForList(MESSAGES_SQL,
                 tenantId, parentSessionId)) {
-            JsonNode body = readTree(readResource(tenantId, resource));
-            if (body == null || "to_child".equals(body.path("route").asText())
-                    && childRunId.equals(body.path("childRunId").asText())) {
-                owed++;
+            JsonNode body = body(tenantId, row);
+            if (!"outbound".equals(body.path("direction").asText())
+                    || !"to_child".equals(body.path("route").asText())
+                    || !childRunId.equals(body.path("childRunId").asText())) {
+                continue;
+            }
+            toChild++;
+            if (owesHandover((String) row.get("delivery_state"))) {
+                undelivered++;
             }
         }
-        return owed + jdbc.query(UNDELIVERED_MESSAGES_SQL,
-                (result, row) -> result.getString("record_resource_id"),
-                tenantId, childSessionId).size();
+        for (Map<String, Object> row : jdbc.queryForList(MESSAGES_SQL,
+                tenantId, childSessionId)) {
+            if (owesHandover((String) row.get("delivery_state"))) {
+                undelivered++;
+            }
+        }
+        return new EdgeMessages(undelivered, toChild);
+    }
+
+    /** Planned or being handed over: a receipt never reaches either. */
+    private static boolean owesHandover(String deliveryState) {
+        return "planned".equals(deliveryState)
+                || "accepting".equals(deliveryState);
+    }
+
+    private JsonNode body(String tenantId, Map<String, Object> row) {
+        JsonNode body = readTree(readResource(tenantId,
+                (String) row.get("record_resource_id")));
+        if (body == null) {
+            throw new IllegalStateException(
+                    "a session message body is not readable yet");
+        }
+        return body;
     }
 
     /** Whether a Session's journal holds any session message at all. */
@@ -273,31 +300,42 @@ public class ChildResultRelayStore {
     }
 
     /**
-     * H4d-b: the Turns a Session's own journal proves — the wake turns
-     * that read its messages never become API Turns, so the journal is
-     * their only record. A compacted journal cannot prove what it dropped
-     * and answers by refusal, never by guess.
+     * H4d-b: the turns a child Session's own journal proves — the wake
+     * turns that read its messages never become API Turns, so the journal
+     * is their only record. A compacted journal cannot prove what it
+     * dropped and answers by refusal, never by guess.
      */
     public JournalTurns journalTurns(String tenantId, String sessionId) {
         Set<String> pending = new HashSet<>();
         Map<String, String> sources = new HashMap<>();
         SettledTurn[] last = {null};
+        long[] activity = {0};
         forEachJournalEvent(tenantId, sessionId, event -> {
             JsonNode payload = event.path("payload");
             String turnId = payload.path("turnId").asText(null);
             String kind = event.path("kind").asText();
             if ("input.accepted".equals(kind)) {
-                pending.add(turnId);
-                sources.put(turnId, payload.path("source").asText(null));
+                String source = payload.path("source").asText(null);
+                sources.put(turnId, source);
+                if ("session_message".equals(source)) {
+                    pending.add(turnId);
+                }
+                activity[0] = Math.max(activity[0],
+                        event.path("occurredAt").asLong(0));
             } else if ("turn.settled".equals(kind)) {
                 pending.remove(turnId);
-                last[0] = new SettledTurn(turnId,
-                        payload.path("outcome").asText(null),
-                        sources.get(turnId),
+                activity[0] = Math.max(activity[0],
                         event.path("occurredAt").asLong(0));
+                String source = sources.get(turnId);
+                if ("session_message".equals(source)
+                        || "hosted-harness".equals(source)) {
+                    last[0] = new SettledTurn(turnId,
+                            payload.path("outcome").asText(null), source,
+                            event.path("occurredAt").asLong(0));
+                }
             }
         });
-        return new JournalTurns(pending.size(), last[0]);
+        return new JournalTurns(pending.size(), activity[0], last[0]);
     }
 
     /** The joined text of the newest assistant message one journal Turn

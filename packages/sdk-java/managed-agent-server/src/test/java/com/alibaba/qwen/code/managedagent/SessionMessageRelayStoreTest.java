@@ -211,24 +211,53 @@ class SessionMessageRelayStoreTest {
     }
 
     @Test
-    void countsOnlyTheMessagesOnOneEdgeThatStillOweAHandover() {
+    void countsTheMessagesOnOneEdgeAndThoseStillOwingAHandover() {
         String parent = UUID.randomUUID().toString();
         String child = UUID.randomUUID().toString();
-        assertThat(records.undeliveredEdgeMessages(TENANT, parent, "run-1",
-                child)).isZero();
+        assertThat(records.edgeMessages(TENANT, parent, "run-1", child))
+                .isEqualTo(new ChildResultRelayStore.EdgeMessages(0, 0));
         message(parent, "msg_a", "planned", outbound("to_child", "run-1"));
         message(parent, "msg_b", "accepting", outbound("to_child", "run-2"));
         message(parent, "msg_c", "accepted", outbound("to_child", "run-1"));
-        message(parent, "msg_d", "planned", outbound("to_child", "run-1"));
-        MessageRow givenUp = store.claim(TENANT, parent, "msg_d", "owner",
-                31_000, 1_000);
-        store.classify(givenUp, "owner", "unknown", "gave up", 1_000);
+        // A given-up entry the relay ended on its sender holds nothing.
+        message(parent, "msg_d", "unknown", outbound("to_child", "run-1"));
+        message(parent, "msg_f", "accepted",
+                "{\"direction\":\"inbound\",\"route\":\"to_parent\","
+                        + "\"childRunId\":\"run-1\"}");
         message(child, "msg_e", "accepting", outbound("to_parent", "run-1"));
-        assertThat(records.undeliveredEdgeMessages(TENANT, parent, "run-1",
-                child)).isEqualTo(2);
+        assertThat(records.edgeMessages(TENANT, parent, "run-1", child))
+                .isEqualTo(new ChildResultRelayStore.EdgeMessages(2, 3));
         assertThat(records.hasSessionMessages(TENANT, child)).isTrue();
         assertThat(records.hasSessionMessages(TENANT,
                 UUID.randomUUID().toString())).isFalse();
+    }
+
+    @Test
+    void refusesToCountAnEdgeOverAnUnreadableBody() {
+        String parent = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+                        + " (session_scope_key, record_key, tenant_id,"
+                        + " workspace_id, session_id, domain, record_id,"
+                        + " operation_hash, revision, record_resource_id,"
+                        + " delivery_target, delivery_state, created_at)"
+                        + " VALUES ('scope', ?, ?, 'workspace', ?,"
+                        + " 'session_message', 'msg_x', 'h', 1, 'missing',"
+                        + " 'session', 'planned', 1)",
+                parent + "/msg_x", TENANT, parent);
+        assertThatThrownBy(() -> records.edgeMessages(TENANT, parent,
+                "run-1", UUID.randomUUID().toString()))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    // A ledger row still `relaying` over an accepted entry lost its advance
+    // after the sender's step committed: it is waiting, never stranded.
+    @Test
+    void pagesAnAcceptedEntryWhoseLedgerAdvanceWasLost() {
+        String sender = UUID.randomUUID().toString();
+        message(sender, "msg_lost", "accepted", outbound("to_child", "r"));
+        store.claim(TENANT, sender, "msg_lost", "owner-a", 31_000, 1_000);
+        assertThat(store.findPendingMessages("owner-a", 1_000, 50).stream()
+                .map(PendingMessage::messageId)).contains("msg_lost");
     }
 
     @Test
@@ -237,18 +266,23 @@ class SessionMessageRelayStoreTest {
         journal(child, 1, input("turn-api", "hosted-harness"),
                 settled("turn-api", "completed", 10));
         journal(child, 2, input("msg_1:message", "session_message"));
+        // A Monitor's waiting input neither holds the child nor decides it.
+        journal(child, 3, input("mon:notify:1", "monitor"));
         JournalTurns pending = records.journalTurns(TENANT, child);
-        assertThat(pending.pendingInputs()).isEqualTo(1);
+        assertThat(pending.pendingMessageInputs()).isEqualTo(1);
+        assertThat(pending.lastActivityAt()).isEqualTo(10);
         assertThat(pending.lastSettled().turnId()).isEqualTo("turn-api");
         assertThat(pending.lastSettled().source()).isEqualTo("hosted-harness");
         resource(child, "assistant-old", chatRecord("turn-api", "first"));
         resource(child, "assistant-new",
                 chatRecord("msg_1:message", "updated"));
-        journal(child, 3, assistant("assistant-old", "managed-message"),
+        journal(child, 4, assistant("assistant-old", "managed-message"),
                 assistant("assistant-new", "managed-message"),
-                settled("msg_1:message", "completed", 20));
+                settled("msg_1:message", "completed", 20),
+                settled("mon:notify:1", "completed", 30));
         JournalTurns idle = records.journalTurns(TENANT, child);
-        assertThat(idle.pendingInputs()).isZero();
+        assertThat(idle.pendingMessageInputs()).isZero();
+        assertThat(idle.lastActivityAt()).isEqualTo(30);
         assertThat(idle.lastSettled()).isEqualTo(
                 new ChildResultRelayStore.SettledTurn("msg_1:message",
                         "completed", "session_message", 20));
