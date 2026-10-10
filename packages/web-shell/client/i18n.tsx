@@ -1187,6 +1187,15 @@ const EN: Messages = {
   'workspaceHost.local': 'Local',
   'workspaceHost.remote': 'Remote',
   'workspaceHost.openHost': (v) => `Open ${v?.host ?? ''}`,
+  'workspaceHost.statusOffline': 'offline',
+  'workspaceHost.statusUnauthorized': 'unauthorized',
+  'workspaceHost.focused': 'connected',
+  'workspaceHost.focusedHint':
+    'This page is connected to this daemon — the chat runs against it.',
+  'workspaceHost.offlineHint':
+    'This host could not be reached; showing its last known projects.',
+  'workspaceHost.unauthorizedHint':
+    'The saved credential was rejected. Open this host to sign in again.',
   'daemon.connection.invalid': 'Enter a valid HTTP or HTTPS origin.',
   'daemon.connection.notReady':
     'The daemon did not accept the connection; the stored credential was left unchanged.',
@@ -5448,6 +5457,14 @@ const ZH: Messages = {
   'workspaceHost.local': '本地',
   'workspaceHost.remote': '远程',
   'workspaceHost.openHost': (v) => `打开 ${v?.host ?? ''}`,
+  'workspaceHost.statusOffline': '离线',
+  'workspaceHost.statusUnauthorized': '未授权',
+  'workspaceHost.focused': '已连接',
+  'workspaceHost.focusedHint': '本页面正连到这台 daemon，会话在这里运行。',
+  'workspaceHost.offlineHint':
+    '无法连接这台主机，当前显示的是最近一次已知的项目。',
+  'workspaceHost.unauthorizedHint':
+    '此主机保存的凭据已被拒绝，请打开该主机重新登录。',
   'daemon.connection.invalid': '请输入有效的 HTTP 或 HTTPS origin。',
   'daemon.connection.notReady': 'Daemon 未接受该连接，已保存的凭据未被修改。',
   'daemon.connection.authFailed':

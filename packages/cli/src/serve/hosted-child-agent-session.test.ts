@@ -15,7 +15,9 @@ import { managedExtensionRecordKey } from '@qwen-code/qwen-code-core/managed-run
 import {
   CHILD_NOTIFICATION_INLINE_LIMIT,
   childResultNotificationText,
+  childWorkspaceOutcomeText,
   HostedChildAgentSession,
+  parseChildWorkspaceReceipt,
   type ChildAgentLaunchParams,
 } from './hosted-child-agent-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
@@ -157,6 +159,7 @@ function launchParams(
     description: 'audit the diff',
     prompt: 'review the change',
     definition: DEFINITION,
+    workspaceMode: 'shared',
     workingDirectory: '.',
     executionCallId: 'call-1',
     ...overrides,
@@ -216,6 +219,253 @@ describe('childResultNotificationText', () => {
     expect(notification).toContain(
       '<result>first line\nsecond line\n- item A</result>',
     );
+  });
+});
+
+const CHILD_WORKSPACE_ID = 'a'.repeat(32);
+const RESULT_PIN = `refs/qwen/child-workspaces/${CHILD_WORKSPACE_ID}/result`;
+
+function receipt(workspace?: Record<string, unknown>): Buffer {
+  return Buffer.from(
+    JSON.stringify({
+      childSessionId: 'session-child',
+      turnId: 'turn-c1',
+      status: 'completed',
+      completedAt: 1,
+      ...(workspace === undefined ? {} : { workspace }),
+    }),
+    'utf8',
+  );
+}
+
+describe('child Workspace receipt (#13753 I2)', () => {
+  it('reads each outcome the relay reports', () => {
+    expect(
+      parseChildWorkspaceReceipt(
+        receipt({
+          mode: 'worktree',
+          childWorkspaceId: CHILD_WORKSPACE_ID,
+          outcome: 'merged',
+          code: 'merged',
+        }),
+      ),
+    ).toEqual({
+      outcome: 'merged',
+      code: 'merged',
+      conflictPaths: [],
+      omittedConflictPaths: 0,
+    });
+    expect(
+      parseChildWorkspaceReceipt(
+        receipt({
+          mode: 'worktree',
+          childWorkspaceId: CHILD_WORKSPACE_ID,
+          outcome: 'conflicted',
+          code: 'conflicted',
+          conflictPaths: ['src/a.ts', 'b.md'],
+          omittedConflictPaths: 3,
+          resultRef: RESULT_PIN,
+        }),
+      ),
+    ).toEqual({
+      outcome: 'conflicted',
+      code: 'conflicted',
+      conflictPaths: ['src/a.ts', 'b.md'],
+      omittedConflictPaths: 3,
+      resultRef: RESULT_PIN,
+    });
+    expect(
+      parseChildWorkspaceReceipt(
+        receipt({
+          mode: 'worktree',
+          childWorkspaceId: CHILD_WORKSPACE_ID,
+          outcome: 'blocked',
+          code: 'child_workspace_diverged',
+        }),
+      ),
+    ).toMatchObject({ outcome: 'blocked', code: 'child_workspace_diverged' });
+  });
+
+  it('answers nothing for a receipt off the shape', () => {
+    const valid = {
+      mode: 'worktree',
+      childWorkspaceId: CHILD_WORKSPACE_ID,
+      outcome: 'merged',
+      code: 'merged',
+    };
+    for (const bytes of [
+      Buffer.from('not json', 'utf8'),
+      Buffer.from('null', 'utf8'),
+      receipt(),
+      receipt({ ...valid, mode: 'shared' }),
+      receipt({ ...valid, outcome: 'landed' }),
+      receipt({ ...valid, code: 'Merged; rm -rf' }),
+      receipt({ ...valid, conflictPaths: 'src/a.ts' }),
+      receipt({ ...valid, conflictPaths: [1] }),
+      receipt({ ...valid, resultRef: 'refs/heads/main' }),
+      receipt({ ...valid, omittedConflictPaths: -1 }),
+      receipt({ ...valid, omittedConflictPaths: 1.5 }),
+      receipt({ ...valid, omittedConflictPaths: '2' }),
+      Buffer.from('{"workspace":[]}', 'utf8'),
+    ]) {
+      expect(parseChildWorkspaceReceipt(bytes)).toBeUndefined();
+    }
+  });
+
+  it('renders the outcome for the model, quoting and bounding the paths', () => {
+    expect(
+      childWorkspaceOutcomeText({
+        outcome: 'merged',
+        code: 'merged',
+        conflictPaths: [],
+        omittedConflictPaths: 0,
+      }),
+    ).toBe('merged into this Workspace as uncommitted changes.');
+    expect(
+      childWorkspaceOutcomeText({
+        outcome: 'blocked',
+        code: 'child_workspace_diverged',
+        conflictPaths: [],
+        omittedConflictPaths: 0,
+        resultRef: RESULT_PIN,
+      }),
+    ).toBe(
+      `merge blocked (child_workspace_diverged); the child's changes did not land; the child's work is kept at ${RESULT_PIN}.`,
+    );
+    expect(
+      childWorkspaceOutcomeText({
+        outcome: 'discarded',
+        code: 'discarded',
+        conflictPaths: [],
+        omittedConflictPaths: 0,
+      }),
+    ).toBe("discarded; the child's changes did not land.");
+    // A child chose these names: display controls are stripped and each
+    // name is quoted, so a newline cannot forge a line of its own.
+    expect(
+      childWorkspaceOutcomeText({
+        outcome: 'conflicted',
+        code: 'conflicted',
+        conflictPaths: [
+          'src/a.ts',
+          'evil\u202e\nname',
+          'line\u2028para\u2029end',
+        ],
+        omittedConflictPaths: 0,
+        resultRef: RESULT_PIN,
+      }),
+    ).toBe(
+      `merge conflicted at "src/a.ts", "evil\\nname", "line\\u2028para\\u2029end"; the child's changes did not land; the child's work is kept at ${RESULT_PIN}.`,
+    );
+    // The receipt's own omissions count toward the paths left unnamed.
+    expect(
+      childWorkspaceOutcomeText({
+        outcome: 'conflicted',
+        code: 'conflicted',
+        conflictPaths: ['a.ts'],
+        omittedConflictPaths: 4,
+      }),
+    ).toBe(
+      `merge conflicted at "a.ts", and 4 more; the child's changes did not land.`,
+    );
+    const many = childWorkspaceOutcomeText({
+      outcome: 'conflicted',
+      code: 'conflicted',
+      conflictPaths: Array.from(
+        { length: 100 },
+        (_, index) => `${'d'.repeat(200)}/${index}`,
+      ),
+      omittedConflictPaths: 0,
+    });
+    expect(Buffer.byteLength(many, 'utf8')).toBeLessThan(5 * 1024);
+    expect(many).toMatch(/, and \d+ more; /);
+    expect(childWorkspaceOutcomeText(undefined)).toContain(
+      'the merge outcome is unavailable',
+    );
+  });
+
+  it('puts the outcome beside the status in the notification', () => {
+    const notification = childResultNotificationText({
+      taskId: TASK_ID,
+      description: 'audit',
+      text: 'done',
+      workspace: 'merge conflicted at "<a>"; kept.',
+    });
+    expect(notification).toContain(
+      '<status>completed</status>\n<workspace>merge conflicted at &quot;&lt;a&gt;&quot;; kept.</workspace>\n<summary>',
+    );
+    expect(
+      childResultNotificationText({
+        taskId: TASK_ID,
+        description: 'audit',
+        text: 'done',
+      }),
+    ).not.toContain('<workspace>');
+  });
+
+  it("carries a worktree child's outcome into its wake notification", async () => {
+    for (const workspaceMode of ['worktree', 'shared'] as const) {
+      const harness = await createHarness();
+      await withAuthority(harness, async (authority) => {
+        const children = new HostedChildAgentSession(
+          { authority, resources: harness.store },
+          sessionKey,
+        );
+        await children.admit(launchParams({ workspaceMode }));
+        expect(children.record('run-1')!.workspaceMode).toBe(workspaceMode);
+        await children.dispatchStarted('run-1', {
+          dispatchId: 'dispatch-1',
+          runtime: BINDING,
+        });
+        await children.attach('run-1', 'session-child');
+        await children.settleCompleted('run-1', {
+          result: Buffer.from('done', 'utf8'),
+          receipt: receipt({
+            mode: 'worktree',
+            childWorkspaceId: CHILD_WORKSPACE_ID,
+            outcome: 'merged',
+            code: 'merged',
+          }),
+        });
+        await children.accept('run-1', {
+          notification: { description: 'audit the diff' },
+        });
+        const input = authority
+          .readEvents({ afterSequence: 0, limit: 64 })
+          .find((event) => event.kind === 'input.accepted')!;
+        const contentRef = (input.payload as Record<string, unknown>)[
+          'contentRef'
+        ] as Parameters<typeof harness.store.read>[0];
+        const text = JSON.parse(
+          (await harness.store.read(contentRef)).toString('utf8'),
+        ).text as string;
+        // Only the record's own mode decides: a shared child's receipt
+        // never speaks for a Workspace it did not have.
+        if (workspaceMode === 'worktree') {
+          expect(text).toContain(
+            '<workspace>merged into this Workspace as uncommitted changes.</workspace>',
+          );
+        } else {
+          expect(text).not.toContain('<workspace>');
+        }
+      });
+    }
+  });
+
+  it('refuses a replayed launch that names another isolation', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      await children.admit(launchParams({ workspaceMode: 'worktree' }));
+      await children.admit(launchParams({ workspaceMode: 'worktree' }));
+      await expect(
+        children.admit(launchParams({ workspaceMode: 'shared' })),
+      ).rejects.toThrow('different evidence');
+      expect(children.record('run-1')!.workspaceMode).toBe('worktree');
+    });
   });
 });
 

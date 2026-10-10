@@ -57,6 +57,26 @@ public class ManagedArtifactConfiguration {
     }
 
     /**
+     * The session message relay's own tick (H4d-b): like the child result
+     * relay, its page runs sequential harness calls on two Sessions per
+     * message, which must stall neither that relay nor the recoveries.
+     */
+    @Bean
+    public ThreadPoolTaskScheduler messageRelayScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("message-relay-").build();
+    }
+
+    /**
+     * The child Workspace scan's own tick (#13753 I1): its steps run Git
+     * for up to the Git timeout each, which must stall neither the relay
+     * nor the shared recoveries.
+     */
+    @Bean
+    public ThreadPoolTaskScheduler childWorkspaceScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("child-workspace-").build();
+    }
+
+    /**
      * The recovery tick runs blocking JDBC, so it must never share the
      * one-thread default pool. Gated exactly like the Broker bean that carries
      * the tick: a deployment with the Broker off must not pay for an idle

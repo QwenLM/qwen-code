@@ -41,6 +41,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final DaemonApprovalMode approvalMode;
     private final ManagedActionStore actions;
     private final WriterCredentialPolicy credentials;
+    /** #13753 I2: this control plane serves child Workspaces (startup checks the shape). */
+    private final boolean childWorkspaces;
     private volatile HostedHarnessClient client;
     private final ReentrantLock clientLock = new ReentrantLock();
     // Sessions whose takeover load reported parked Runtime work that no
@@ -74,6 +76,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         this.actions = actions;
         this.workspaceExecution = workspaceExecution;
         this.credentials = new WriterCredentialPolicy(properties);
+        this.childWorkspaces = properties.getRuntimeBroker().isChildWorkspacesEnabled();
         if (this.properties.getToken() == null
                 || this.properties.getToken().isBlank()
                 || this.properties.getCapabilityDigest() == null
@@ -155,7 +158,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         HarnessSessionRef ref = attachments.get(key);
         if (ref == null) {
             ref = client().loadSession(new LoadHarnessSession(session.sessionId(), managedSessionStore(session),
-                    false, toolProfile(session), false).forLifecycle(operation.operationId(), operation.claimGeneration()));
+                    false, toolProfile(session), false).withChildWorkspaces(childWorkspaces)
+                    .forLifecycle(operation.operationId(), operation.claimGeneration()));
             attachments.put(key, ref);
         }
         var authority = Map.<String, Object>of("operationId", operation.operationId(), "claimGeneration", operation.claimGeneration());
@@ -488,15 +492,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             // the Workspace checks submit and continueManagedRuntime run
             // apply to every relay.
             requireReadyForNewWork(tenantId, sessionId, false);
-            if (!attachments.containsKey(new AttachmentKey(tenantId, sessionId))
-                    && sessions.requireSession(tenantId, sessionId)
-                            .harnessBootId() != null) {
-                // A Session a prior control-plane process attached: a plain
-                // load answers hosted_session_already_attached until the
-                // Harness evicts it, so re-attach through the takeover load
-                // a Turn uses (HarnessCoordinator.runClaimed).
-                recoverManagedRuntime(tenantId, sessionId, false);
-            }
+            reattachTakenOver(tenantId, sessionId);
             // Resolve the attachment BEFORE fetching the client: the
             // resolution may block on a create/load round trip, and an
             // adoption closing the captured client during that window
@@ -521,6 +517,99 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
+        }
+    }
+
+    @Override
+    public void runMessageOperation(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        try {
+            // A receipt admits an input and wakes a turn in its target, and
+            // the consume reconciliation reloads a Session whose wake pump
+            // then runs the waiting input: both drive new work, so they take
+            // the automation relay's Workspace checks. The sender's own
+            // steps are journal writes. Every verb re-attaches a Session a
+            // prior control-plane process attached, since the relay's
+            // ledger outlives that process.
+            Object kind = body.get("kind");
+            if ("stop".equals(kind)) {
+                // Resolve the attachment before fetching the client: the
+                // load can adopt a new generation, which closes the old one.
+                HarnessSessionRef ref = messageStopAttachment(tenantId,
+                        sessionId);
+                client().runMessageOperation(ref, body);
+                return;
+            }
+            if ("receive".equals(kind) || "consume".equals(kind)) {
+                requireReadyForNewWork(tenantId, sessionId, false);
+            }
+            reattachTakenOver(tenantId, sessionId);
+            HarnessSessionRef ref = attachment(tenantId, sessionId, true);
+            client().runMessageOperation(ref, body);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    /**
+     * H4f × H4d-b: the attachment a stopped run's message stop goes
+     * through. A Session this process does not hold is loaded with its
+     * message inputs already stopped, so the load's wake pump never starts
+     * one before the stop arrives; a Session an earlier process attached
+     * re-attaches passively, driving nothing. It is authorized by the
+     * committed stop its caller read, not by a CANCELLING Turn (message
+     * work never makes one) or a grant that may have changed since.
+     */
+    private HarnessSessionRef messageStopAttachment(String tenantId,
+            String sessionId) {
+        AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+        HarnessSessionRef cached = attachments.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        SessionRecord session = sessions.requireSession(tenantId, sessionId);
+        if (session.workspace() != null) {
+            if (!isWorkspaceFilesAvailable()) {
+                throw new IllegalStateException("Hosted Workspace files are disabled");
+            }
+            if (actions == null) {
+                throw new IllegalStateException("Hosted Workspace Sessions"
+                        + " require the Managed Action store");
+            }
+            workspaceExecution.authorizeCommittedStop(session);
+        }
+        HarnessSessionRef attached = client().loadSession(
+                new LoadHarnessSession(session.sessionId(),
+                        managedSessionStore(session),
+                        session.harnessBootId() != null, toolProfile(session),
+                        false, false).withChildWorkspaces(childWorkspaces)
+                        .withStoppedMessages());
+        if (session.workspace() != null && !actions.approvalMode(tenantId,
+                sessionId).equals(attached.getApprovalMode())) {
+            throw new IllegalStateException(
+                    "Hosted Harness did not confirm the Session approval mode");
+        }
+        attachments.put(key, attached);
+        if (attached.getRuntimeRecovery() != null) {
+            pendingRecovery.add(key);
+        } else {
+            pendingRecovery.remove(key);
+        }
+        return attached;
+    }
+
+    /**
+     * A Session a prior control-plane process attached: a plain load
+     * answers hosted_session_already_attached until the Harness evicts it,
+     * so re-attach through the takeover load a Turn uses
+     * (HarnessCoordinator.runClaimed).
+     */
+    private void reattachTakenOver(String tenantId, String sessionId) {
+        if (!attachments.containsKey(new AttachmentKey(tenantId, sessionId))
+                && sessions.requireSession(tenantId, sessionId)
+                        .harnessBootId() != null) {
+            recoverManagedRuntime(tenantId, sessionId, false);
         }
     }
 
@@ -645,7 +734,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                                                             session.tenantId(),
                                                             session.sessionId())))
                             .approvalTimeoutMs(properties.getApprovalTimeout().toMillis())
-                            .toolProfile(toolProfile(session));
+                            .toolProfile(toolProfile(session))
+                            .childWorkspaces(childWorkspaces);
             ManagedSessionStoreConnection store = managedSessionStore(
                     session);
             if (store != null) {
@@ -688,7 +778,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         ManagedSessionStoreConnection store = managedSessionStore(session);
         return client().loadSession(new LoadHarnessSession(session.sessionId(), store,
                 passiveManagedRuntimeRecovery, profile,
-                driveRuntimeRecovery, cancellationTakeover));
+                driveRuntimeRecovery, cancellationTakeover)
+                .withChildWorkspaces(childWorkspaces));
     }
 
     @Override

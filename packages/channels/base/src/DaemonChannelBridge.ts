@@ -1150,6 +1150,15 @@ export class DaemonChannelBridge
       }
       case 'tool_call':
       case 'tool_call_update': {
+        const lifecycleMeta = isRecord(update['_meta'])
+          ? update['_meta']
+          : undefined;
+        if (
+          lifecycleMeta?.['toolLifecycle'] !== undefined &&
+          update['status'] === undefined &&
+          update['content'] === undefined
+        )
+          break;
         const toolCallId = getString(update['toolCallId']);
         const explicitKind = getString(update['kind']);
         const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;

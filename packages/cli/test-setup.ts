@@ -57,6 +57,21 @@ delete process.env['QWEN_HOME'];
 // one explicitly.
 delete process.env['QWEN_SERVE_MAX_WORKSPACES'];
 
+// The operator's home directory is ambient state too, and the operator
+// settings read (config/execution-sandbox-settings.ts) fails CLOSED on a
+// malformed `~/.qwen/settings.json`: on a machine whose real user settings
+// file is corrupt — observed on the shared autofix verification runners —
+// every test that loads settings or starts a serve stack fails with a
+// FatalConfigError it has nothing to do with. Pinning QWEN_HOME to an empty
+// per-file directory keeps the suite off the operator's settings. Tests that
+// exercise QWEN_HOME resolution itself set or delete the variable in-body.
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+process.env['QWEN_HOME'] = fs.mkdtempSync(
+  path.join(os.tmpdir(), 'qwen-cli-test-home-'),
+);
+
 import { configure } from '@testing-library/react';
 
 import './src/test-utils/customMatchers.js';
