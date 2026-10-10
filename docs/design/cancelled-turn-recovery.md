@@ -26,7 +26,7 @@ A live daemon cancellation requires the user-cancel abort reason and binds once 
 
 Use a controlled loopback provider and a real built daemon: execute one read_file, hold the next provider response, explicitly Cancel, restart and request continuation. It must reject continuation and make no provider request. In the paired SIGKILL control, no terminal is persisted and continuation must remain accepted and execute normally. Also check live status, a later identical unanswered prompt, abandoned branches, compression, replay:none/recent/all, same-length replacement, unknown/duplicate identities and history gaps.
 
-Also verify that transport-close and prompt deadlines remain recoverable, while direct ACP cancellation remains explicit. Retry a cancelled prompt, interrupt the new attempt, and confirm the old cancellation cannot suppress it; cancel the new attempt explicitly and confirm it is suppressed, with and without compression. A malformed numeric prompt identity must leave finite index cache accounting. A failed durable attempt write must stop resumed execution before a provider call.
+Also verify that transport-close and prompt deadlines remain recoverable, while direct ACP cancellation remains explicit. Retry admission arms only after a turn error — a cancelled turn's retry is admitted as an ordinary new prompt — so retry an errored prompt, interrupt the new attempt, and confirm the old terminal cannot suppress it; cancel the new attempt explicitly and confirm it is suppressed, with and without compression. A malformed numeric prompt identity must leave finite index cache accounting. A failed durable attempt write must stop resumed execution before a provider call.
 
 ## Risks and remaining work
 
