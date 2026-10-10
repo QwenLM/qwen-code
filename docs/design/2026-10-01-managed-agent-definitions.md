@@ -115,6 +115,9 @@ v1.28 first.
 3. How do `tools` and `permission_policy` map onto the frozen Hosted tool
    profiles and the approval mode a Session pins today?
 
+[AgentDefinition execution (D8b and D8c)](2026-10-07-managed-agent-definition-execution.md)
+proposes answers to these questions.
+
 ## 6. Verification
 
 - `ManagedAgentDefinitionTest`: creation and replay, unchanged and changed

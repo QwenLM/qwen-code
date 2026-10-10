@@ -12,16 +12,24 @@ public final class LoadHarnessSession {
     private final boolean driveRuntimeRecovery;
     private final boolean cancellationTakeover;
     private Map<String, Object> lifecycleAuthority;
+    private Map<String, Object> agentDefinition;
     private boolean stopMessages;
-    private boolean childWorkspaces;
 
     /**
      * #13753 I2: a copy that tells the Hosted side this control plane
      * serves child Workspaces (see {@link CreateHarnessSession.Builder#childWorkspaces}).
      */
+    private boolean childWorkspaces;
+
+    public LoadHarnessSession withAgentDefinition(Map<String, Object> value) {
+        this.agentDefinition = value == null ? null : Map.copyOf(value);
+        return this;
+    }
+
     public LoadHarnessSession withChildWorkspaces(boolean value) {
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover);
+        copy.agentDefinition = agentDefinition;
         copy.lifecycleAuthority = lifecycleAuthority;
         copy.childWorkspaces = value;
         copy.stopMessages = stopMessages;
@@ -34,6 +42,7 @@ public final class LoadHarnessSession {
         }
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover);
+        copy.agentDefinition = agentDefinition;
         copy.lifecycleAuthority = Map.of("operationId", operationId, "claimGeneration", claimGeneration);
         copy.childWorkspaces = childWorkspaces;
         copy.stopMessages = stopMessages;
@@ -45,6 +54,7 @@ public final class LoadHarnessSession {
     public LoadHarnessSession withStoppedMessages() {
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover);
+        copy.agentDefinition = agentDefinition;
         copy.lifecycleAuthority = lifecycleAuthority;
         copy.childWorkspaces = childWorkspaces;
         copy.stopMessages = true;
@@ -127,6 +137,9 @@ public final class LoadHarnessSession {
         }
         if (cancellationTakeover) {
             result.put("cancellationTakeover", true);
+        }
+        if (agentDefinition != null) {
+            result.put("agentDefinition", agentDefinition);
         }
         if (stopMessages) {
             result.put("stopMessages", true);

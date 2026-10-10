@@ -92,6 +92,7 @@ public final class ApiModels {
     public record PublicSession(String id, String object,
             @JsonProperty("agent_id") String agentId,
             @JsonProperty("agent_revision") String agentRevision,
+            @JsonProperty("agent_digest") String agentDefinitionDigest,
             String status,
             @JsonProperty("created_at") long createdAt,
             @JsonProperty("updated_at") long updatedAt,

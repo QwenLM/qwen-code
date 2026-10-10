@@ -68,7 +68,13 @@ final class WorkspaceRecoveryReader {
                     && text(ref, "digest").equals(row.get("sha256")), "resource_reference_conflict");
             if ("MYSQL_INLINE".equals(row.get("storage_kind"))) {
                 boolean published = "PUBLISHED".equals(row.get("state"))
-                        && Set.of("managed-tool-result-content", "managed-tool-result-manifest", "managed-tool-result-page").contains(text(ref, "kind"));
+                        && (Set.of("managed-tool-result-content", "managed-tool-result-manifest",
+                                "managed-tool-result-page").contains(text(ref, "kind"))
+                        // The digest-addressed instructions resource never
+                        // commits; it stays PUBLISHED for its whole life.
+                        || "managed-agent-instructions".equals(text(ref, "kind"))
+                                && number(row, "byte_length") >= 0
+                                && number(row, "byte_length") <= 64 * 1024);
                 check(("REFERENCED".equals(row.get("state")) || published) && row.get("object_key") == null
                         && row.get("object_version_id") == null && row.get("encryption_key_id") == null,
                         "resource_layout_unsupported");

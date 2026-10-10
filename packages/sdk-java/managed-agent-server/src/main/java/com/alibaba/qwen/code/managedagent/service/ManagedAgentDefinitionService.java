@@ -20,8 +20,9 @@ import org.springframework.stereotype.Service;
 
 /**
  * Stores AgentDefinition revisions (D8a). Definitions are tenant-scoped and
- * immutable once stored; Sessions do not use them yet (D8b), and no field
- * changes Harness execution (D8c).
+ * immutable once stored; a Session pinned to a stored revision executes it
+ * (D8b), and its permission_policy/tools fields fix that Session's approval
+ * mode and tool profile.
  */
 @Service
 public class ManagedAgentDefinitionService {

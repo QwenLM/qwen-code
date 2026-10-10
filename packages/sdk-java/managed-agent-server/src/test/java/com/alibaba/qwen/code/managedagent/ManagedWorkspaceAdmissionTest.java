@@ -24,6 +24,7 @@ import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.RequestDigests;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
@@ -722,18 +723,24 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     @Test
-    void emptyBoundCreationOutsideTheProfileIsNotAdmittedForLaterTurns() {
+    void boundLaterTurnAdmissionReadsTheAgentPinAndFrozenProfile() {
         String tenant = "tenant-" + UUID.randomUUID();
         register(tenant, "ws-a", "storage-a",
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-a", "actor-a", true);
         String digest = "sha256:" + "a".repeat(64);
-        // Empty bound creation skips the execution-profile validation by
-        // design, so a non qwen-code agent_id can be bound; the later-Turn
-        // admission gate is what must refuse it.
-        String sessionId = store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create", digest, "another-agent", null, null,
+        // A Session pinned to a compiled stored definition (D8c-1) passes
+        // the later-Turn gate exactly like qwen-code.
+        String agentId = "agent_" + "b".repeat(32);
+        new ManagedAgentDefinitionStore(jdbc).create(tenant, "def",
+                "def-digest", agentId, "c".repeat(64),
+                "{\"model\":{},\"instructions\":\"\","
+                        + "\"tools\":[{\"type\":\"hosted_profile\","
+                        + "\"profile\":\"hosted-workspace-files/1\"}],"
+                        + "\"permission_policy\":{}}", 1L);
+        String pinnedId = store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create", digest, agentId, null, null,
                 List.of(), null, new WorkspaceSelection("ws-a", "."))
                 .sessionId();
         // A Session whose snapshotted profile refs are not the frozen pair
@@ -758,12 +765,12 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentService enabled = new ManagedAgentService(store,
                 new RequestDigests(), null, enabledHarness, registry);
 
-        assertThat(enabled.getWebShellSession(tenant, "actor-a", sessionId)
-                .capabilities().workspaceTurns()).isFalse();
+        assertThat(enabled.getWebShellSession(tenant, "actor-a", pinnedId)
+                .capabilities().workspaceTurns()).isTrue();
         assertThat(enabled.getWebShellSession(tenant, "actor-a", driftedId)
                 .capabilities().workspaceTurns()).isFalse();
         assertThatThrownBy(() -> enabled.submitTurn(tenant, "actor-a",
-                "later", sessionId,
+                "later", driftedId,
                 List.of(new InputBlock("text", "go"))))
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode())

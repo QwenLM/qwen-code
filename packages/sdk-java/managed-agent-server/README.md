@@ -40,7 +40,8 @@ a spec operation and a registry entry ([actor-roles design](../../../docs/design
 Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
 `1`) when they are created. `POST /v1/agents`, `GET /v1/agents/{id}` and
 `POST /v1/agents/{id}` store tenant-scoped, immutable AgentDefinition
-revisions; Sessions do not use them yet. Every response carries `X-Request-Id`, which error
+revisions; a Session pinned to one executes that stored revision (see "Stored
+agent execution" below). Every response carries `X-Request-Id`, which error
 envelopes repeat as `request_id` and the logs print. Events keep the schema and
 projection versions they were accepted with. They keep their Item and Part
 identity too, except after Harness recovery retracts output: the retracted
@@ -1061,3 +1062,11 @@ Do not recreate or move the directory, change `QWEN_HOME`, or modify retained ba
 Promotion increments mount revision once. Successful `prepare` and `promote` commits clear the migration's previous error code. Update the deployment's Workspace root and restart Broker/Harness with the original QWEN_HOME before opening admission. An old deployment mapping fails closed. New file Turns and undo use fresh Runtime identities. Source rows, messages, journal, keys and backup names remain unchanged. Failure preserves the fence; missing stop proof, unsupported profiles or drift require diagnosis. Reverse migration is a new verified operation at a higher revision.
 
 The target marker is the sole manifest exception and must match the copied source marker or the exact operation-pinned target marker. Do not hand-edit it. No online drain, directory copying, public migration route, Shell/MCP/Hook migration or source-lost recovery is provided. Uninitialized retained members without a verifiable frozen private definition are refused. Production Linux/MySQL acceptance evidence must be recorded separately from injected-identity tests.
+
+### Stored agent execution
+
+Sessions pin a stored AgentDefinition revision and digest at admission. `permission_policy` and `tools` select the Session's immutable approval mode and hosted tool profile. `model` accepts `{}` or `{ "id": "configured-model" }`; `instructions` accepts UTF-8 text up to 64 KiB. Skills, MCP servers, environment templates and per-definition approval timeouts remain unsupported and are refused explicitly.
+
+Set `QWEN_MANAGED_AGENT_DEFINITION_MODELS` to comma-separated IDs configured in the Harness's deployment `modelProviders`; it defaults to empty. Each ID must resolve to one configured provider route with deployment credentials. An absent or ambiguous route or unresolved credentials fails the Turn with `model_unavailable` before inference. Credentials never belong in definitions. Enable and configure the Managed Session Store for stored-definition execution; instructions are delivered as digest-addressed resource references and verified on load.
+
+`QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` defaults to `hosted-workspace-files/1`. Before opting into `hosted-workspace-files/2`, drain old workers and upgrade every provisioner according to #13166. Empty permission policies inherit the deployment approval mode (default `yolo`); use `default` for deployments that require approval.

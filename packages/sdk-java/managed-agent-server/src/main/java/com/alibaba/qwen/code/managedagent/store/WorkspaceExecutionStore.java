@@ -136,7 +136,7 @@ public class WorkspaceExecutionStore {
         String expectedStatus = authority == null && !legacyClose ? "ACTIVE" : session.status();
         if (binding == null || !(legacyClose ? "CLOSING".equals(session.status()) : authority == null ? "ACTIVE".equals(session.status())
                 : java.util.List.of("CLOSING", "DELETING").contains(session.status()))
-                || session.deletedAt() != null || !"qwen-code".equals(session.agentId())
+                || session.deletedAt() != null || !executableAgent(session.agentId(), session.agentDefinitionDigest())
                 || !session.tenantId().equals(binding.getTenantId())
                 || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
                         binding.getContextConfigRef())) {
@@ -146,7 +146,9 @@ public class WorkspaceExecutionStore {
         // Verdicts per matched row: 0 structural mismatch, 1 refused only by
         // operator-mutable grant or registry state, 2 authorized.
         List<Integer> grants = jdbc.query("SELECT s.tenant_id, s.session_id,"
-                + " s.agent_id AS session_agent, s.status AS session_status,"
+                + " s.agent_id AS session_agent,"
+                + " s.agent_definition_digest AS session_definition_digest,"
+                + " s.status AS session_status,"
                 + " s.deleted_at AS session_deleted_at,"
                 + " s.workspace_id AS session_workspace,"
                 + " s.workspace_generation AS session_generation,"
@@ -180,7 +182,8 @@ public class WorkspaceExecutionStore {
                 (row, index) -> {
                     boolean structural = session.tenantId().equals(row.getString("tenant_id"))
                             && session.sessionId().equals(row.getString("session_id"))
-                            && "qwen-code".equals(row.getString("session_agent"))
+                            && executableAgent(row.getString("session_agent"),
+                                    row.getString("session_definition_digest"))
                             && expectedStatus.equals(row.getString("session_status"))
                             && row.getObject("session_deleted_at") == null
                             && binding.getWorkspaceId().equals(row.getString("session_workspace"))
@@ -516,6 +519,12 @@ public class WorkspaceExecutionStore {
                         }
                     }, key);
         });
+    }
+
+    // qwen-code, or a Session that pinned a compiled definition (D8c-1).
+    private static boolean executableAgent(String agentId,
+            String agentDefinitionDigest) {
+        return "qwen-code".equals(agentId) || agentDefinitionDigest != null;
     }
 
     public static RuntimeBrokerException unavailable() {
