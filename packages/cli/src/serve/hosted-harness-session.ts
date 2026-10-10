@@ -2625,7 +2625,6 @@ export function registerHostedHarnessSessionRoutes(
     // its wake pump starts none of its message inputs, not even the first
     // pass this load kicks before the stop itself arrives.
     const stopMessages = body?.['stopMessages'] === true;
-    if (resident && stopMessages) resident.messagesStopped = true;
     const passiveRecovery = body?.['passiveManagedRuntimeRecovery'] === true;
     const driveRecovery = body?.['driveRuntimeRecovery'] === true;
     const takeoverFlags = passiveRecovery || driveRecovery;
@@ -2797,6 +2796,9 @@ export function registerHostedHarnessSessionRoutes(
       error(res, 409, 'hosted_session_already_attached');
       return;
     }
+    // Only a load that passed the identity and admission checks above may
+    // stop a resident Session's messages: a refused one changes nothing.
+    if (resident && stopMessages) resident.messagesStopped = true;
     // A continuation load redriven after a lost reply is answered from the
     // Session it already attached: the writer fence above proves this load
     // targets this generation, and no continue/cancel can have been admitted
@@ -5454,6 +5456,15 @@ export function registerHostedHarnessSessionRoutes(
     } finally {
       session.mcpBusy = false;
     }
+    // What is left owed is a message turn that crashed in an earlier
+    // process: its aftermath, which the pump no longer picks for a stopped
+    // Session, settles it.
+    const authority = session.managed.authority;
+    for (const input of pendingSessionInputs(
+      authority.eventsInSequenceRange(1, authority.committedSequence),
+    ))
+      if (input.source === SESSION_MESSAGE_INPUT_SOURCE)
+        await session.wakeAftermath?.(input.turnId);
   };
 
   // One message verb onto the Session's journal, for the route below.

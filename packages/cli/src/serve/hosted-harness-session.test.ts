@@ -5188,6 +5188,7 @@ describe('Hosted Harness no-tool session', () => {
     build: (sides: {
       children: HostedChildAgentSession;
       messages: HostedSessionMessageSession;
+      managed: Awaited<ReturnType<typeof openManagedSession>>;
     }) => Promise<void>,
   ): Promise<void> {
     const key = {
@@ -5268,6 +5269,7 @@ describe('Hosted Harness no-tool session', () => {
           children,
           undefined,
         ),
+        managed,
       });
     } finally {
       await managed.close().catch(() => undefined);
@@ -5557,7 +5559,11 @@ describe('Hosted Harness no-tool session', () => {
     const server = await app(true);
     const loaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
-    ).send({ managedSessionStore: store(), stopMessages: true });
+    ).send({
+      managedSessionStore: store(),
+      passiveManagedRuntimeRecovery: true,
+      stopMessages: true,
+    });
     expect(loaded.status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     expect(state.model).not.toHaveBeenCalled();
@@ -5574,6 +5580,104 @@ describe('Hosted Harness no-tool session', () => {
           event.payload['turnId'] === 'msg_up:message',
       )?.payload,
     ).toMatchObject({ outcome: 'cancelled', stopReason: 'stop_requested' });
+    expect(state.model).not.toHaveBeenCalled();
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+  });
+
+  // A load refused by the resident Session's identity checks stops
+  // nothing; one that passes them stops its messages from then on.
+  it("stops a resident Session's messages only by a load it admits", async () => {
+    const { server, receive } = await loadMessageParent();
+    const load = (descriptor: Record<string, unknown>) =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+        managedSessionStore: descriptor,
+        passiveManagedRuntimeRecovery: true,
+        stopMessages: true,
+      });
+    const wrongTenant = await load({ ...store(), tenantId: 'another' });
+    expect(wrongTenant.status).toBe(409);
+    const wrongStore = await load({
+      ...store(),
+      baseUrl: 'http://another-store.test',
+    });
+    expect(wrongStore.status).toBe(409);
+    expect(wrongStore.body.code).toBe('hosted_session_store_mismatch');
+    expect((await receive('msg_runs')).status).toBe(202);
+    await vi.waitFor(
+      async () =>
+        expect(
+          (await journalEvents()).find(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === 'msg_runs:message',
+          )?.payload['outcome'],
+        ).toBe('completed'),
+      { timeout: 10_000, interval: 50 },
+    );
+    const calls = state.model.mock.calls.length;
+    const admitted = await load(store());
+    expect(admitted.status).toBe(200);
+    expect((await receive('msg_held')).status).toBe(202);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(state.model.mock.calls.length).toBe(calls);
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+  });
+
+  // A message turn that died inside its attempt in an earlier process is
+  // not a waiting input: the pump no longer picks it for a stopped
+  // Session, so the stop runs its aftermath and nothing stays owed.
+  it('settles the crashed message turn of a stopped run', async () => {
+    const content = Buffer.from('which branch should I use?');
+    await prewriteMessageSession(async ({ messages, managed }) => {
+      await messages.receive({
+        messageId: 'msg_up',
+        route: 'to_parent',
+        childRunId: 'run-1',
+        senderSessionId: CHILD_SESSION_ID,
+        content,
+        contentDigest: createHash('sha256').update(content).digest('hex'),
+      });
+      await managed.sink.write({
+        uuid: randomUUID(),
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: state.root,
+        version: 'hosted-harness/1',
+        daemonPromptId: 'msg_up:message',
+        message: { role: 'user', parts: [{ text: 'which branch?' }] },
+      });
+    });
+    mockBrokerBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      passiveManagedRuntimeRecovery: true,
+      stopMessages: true,
+    });
+    expect(loaded.status).toBe(200);
+    const stopped = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/messages/operations`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({ operationId: randomUUID(), kind: 'stop' });
+    expect(stopped.status).toBe(202);
+    expect(
+      (await journalEvents()).some(
+        (event) =>
+          event.kind === 'turn.settled' &&
+          event.payload['turnId'] === 'msg_up:message',
+      ),
+    ).toBe(true);
     expect(state.model).not.toHaveBeenCalled();
     expect(
       (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))

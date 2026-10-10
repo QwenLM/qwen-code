@@ -359,6 +359,47 @@ class SessionMessageRelayTest {
                 .isEqualTo("to_parent");
     }
 
+    // H4f: a stopped run's child is wound down by the child relay; none of
+    // its own outbox steps may attach (and so load) it, and its entry
+    // classifies once it closes.
+    @Test
+    void leavesAStoppedChildsOwnMessageToItsClose() {
+        row.set(new MessageRow(TENANT, CHILD, MESSAGE, null, "relaying",
+                "owner", 31_000L, 0, 0, null));
+        pending.set(new PendingMessage(TENANT, CHILD, MESSAGE, "planned",
+                "resource-message"));
+        body("to_parent", CHILD, null);
+        when(store.lineage(TENANT, CHILD))
+                .thenReturn(new Lineage(PARENT, "run-1"));
+        childRun("running", CHILD, true);
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().attempts()).isZero();
+        when(records.sessionStatus(TENANT, CHILD)).thenReturn("CLOSING");
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().state()).isEqualTo("orphaned");
+    }
+
+    // The consume reconciliation would reload a stopped run's child and
+    // start the message its stop is settling: it waits for the close.
+    @Test
+    void neverReloadsAStoppedRunsChildToConsume() {
+        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "accepted",
+                "resource-message"));
+        body("to_child", PARENT, CHILD);
+        when(store.deliveryState(TENANT, CHILD, MESSAGE))
+                .thenReturn("accepted");
+        childRun("running", CHILD, true);
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().attempts()).isZero();
+        when(records.sessionStatus(TENANT, CHILD)).thenReturn("CLOSED");
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().state()).isEqualTo("done");
+    }
+
     @Test
     void holdsAChildMessageThatItsParentCannotTakeYet() {
         pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "accepting",

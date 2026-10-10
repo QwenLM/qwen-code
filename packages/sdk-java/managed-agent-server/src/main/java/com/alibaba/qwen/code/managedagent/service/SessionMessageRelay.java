@@ -137,6 +137,16 @@ public class SessionMessageRelay {
                         now);
                 return;
             }
+            if ("to_parent".equals(body.required("route").asText())
+                    && childRunStopped(row, body)) {
+                // H4f: a stopped run's child is the child relay's to wind
+                // down. Its own outbox steps would attach it, and a load
+                // could start a message the stop is settling, so the entry
+                // waits for that child to close and then classifies above.
+                store.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                        now + LEASE_MS, now);
+                return;
+            }
             switch (current.deliveryState()) {
                 case "planned" -> handover(row, body, now);
                 case "accepting", "unknown" -> deliver(row, body,
@@ -147,6 +157,22 @@ public class SessionMessageRelay {
         } catch (RuntimeException error) {
             defer(row, error, now);
         }
+    }
+
+    /** Whether the message's child run carries a committed stop request. */
+    private boolean childRunStopped(MessageRow row, JsonNode body) {
+        String parent = row.senderSessionId();
+        if ("to_parent".equals(body.required("route").asText())) {
+            SessionMessageRelayStore.Lineage lineage = store.lineage(
+                    row.tenantId(), row.senderSessionId());
+            if (lineage == null) {
+                return false;
+            }
+            parent = lineage.parentSessionId();
+        }
+        JsonNode run = records.childRunBody(row.tenantId(), parent,
+                body.required("childRunId").asText());
+        return run != null && run.path("stopRequested").asBoolean(false);
     }
 
     /** The receipt's input, as the Hosted side derives it
@@ -339,6 +365,15 @@ public class SessionMessageRelay {
             // sides: nothing widens it into consumption.
             store.classify(row, owner, "done",
                     "target session closed before consuming", now);
+            return;
+        }
+        if ("to_child".equals(body.required("route").asText())
+                && childRunStopped(row, body)) {
+            // H4f: the consume would reload a child the Harness dropped and
+            // start the message its stop is settling; the child's close
+            // classifies the entry instead.
+            store.scheduleRetry(row, owner, now + AWAIT_MS, now + LEASE_MS,
+                    now);
             return;
         }
         Map<String, Object> consume = new LinkedHashMap<>();

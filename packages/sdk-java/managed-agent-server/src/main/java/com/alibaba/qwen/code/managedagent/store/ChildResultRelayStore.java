@@ -416,9 +416,13 @@ public class ChildResultRelayStore {
             String turnId = payload.path("turnId").asText(null);
             String kind = event.path("kind").asText();
             // Any event is activity: a long turn commits its model
-            // attempts, tool steps and messages as it goes.
-            activity[0] = Math.max(activity[0],
-                    event.path("occurredAt").asLong(0));
+            // attempts, tool steps and messages as it goes. A resident
+            // Session's lease renewals are not: they would keep a blocked
+            // child alive forever.
+            if (!"activation.changed".equals(kind)) {
+                activity[0] = Math.max(activity[0],
+                        event.path("occurredAt").asLong(0));
+            }
             if ("input.accepted".equals(kind)) {
                 String source = payload.path("source").asText(null);
                 sources.put(turnId, source);

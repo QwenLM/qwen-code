@@ -340,6 +340,12 @@ class SessionMessageRelayStoreTest {
                 + "\"payload\":{\"attemptId\":\"a\",\"state\":\"started\"}}");
         assertThat(records.journalTurns(TENANT, child).lastActivityAt())
                 .isEqualTo(50);
+        // A resident Session's lease renewal is not the child's work: it
+        // would keep a blocked child alive forever.
+        journal(child, 6, "{\"kind\":\"activation.changed\",\"occurredAt\":90,"
+                + "\"payload\":{\"phase\":\"active\"}}");
+        assertThat(records.journalTurns(TENANT, child).lastActivityAt())
+                .isEqualTo(50);
         assertThat(idle.lastSettled()).isEqualTo(
                 new ChildResultRelayStore.SettledTurn("msg_1:message",
                         "completed", "session_message", 20));

@@ -529,8 +529,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             // ledger outlives that process.
             Object kind = body.get("kind");
             if ("stop".equals(kind)) {
-                client().runMessageOperation(
-                        messageStopAttachment(tenantId, sessionId), body);
+                // Resolve the attachment before fetching the client: the
+                // load can adopt a new generation, which closes the old one.
+                HarnessSessionRef ref = messageStopAttachment(tenantId,
+                        sessionId);
+                client().runMessageOperation(ref, body);
                 return;
             }
             if ("receive".equals(kind) || "consume".equals(kind)) {
@@ -546,18 +549,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     /**
-     * A Session a prior control-plane process attached: a plain load
-     * answers hosted_session_already_attached until the Harness evicts it,
-     * so re-attach through the takeover load a Turn uses
-     * (HarnessCoordinator.runClaimed).
-     */
-    /**
      * H4f × H4d-b: the attachment a stopped run's message stop goes
-     * through. A Session this Harness does not hold is loaded with its
+     * through. A Session this process does not hold is loaded with its
      * message inputs already stopped, so the load's wake pump never starts
      * one before the stop arrives; a Session an earlier process attached
-     * re-attaches passively, driving nothing, and the stop takes the
-     * cancellation authorization, since it ends work rather than starts it.
+     * re-attaches passively, driving nothing. It is authorized by the
+     * committed stop its caller read, not by a CANCELLING Turn (message
+     * work never makes one) or a grant that may have changed since.
      */
     private HarnessSessionRef messageStopAttachment(String tenantId,
             String sessionId) {
@@ -566,8 +564,17 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (cached != null) {
             return cached;
         }
-        SessionRecord session = requireRecoverableSession(tenantId,
-                sessionId, true);
+        SessionRecord session = sessions.requireSession(tenantId, sessionId);
+        if (session.workspace() != null) {
+            if (!isWorkspaceFilesAvailable()) {
+                throw new IllegalStateException("Hosted Workspace files are disabled");
+            }
+            if (actions == null) {
+                throw new IllegalStateException("Hosted Workspace Sessions"
+                        + " require the Managed Action store");
+            }
+            workspaceExecution.authorizeCommittedStop(session);
+        }
         HarnessSessionRef attached = client().loadSession(
                 new LoadHarnessSession(session.sessionId(),
                         managedSessionStore(session),
@@ -587,6 +594,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         return attached;
     }
 
+    /**
+     * A Session a prior control-plane process attached: a plain load
+     * answers hosted_session_already_attached until the Harness evicts it,
+     * so re-attach through the takeover load a Turn uses
+     * (HarnessCoordinator.runClaimed).
+     */
     private void reattachTakenOver(String tenantId, String sessionId) {
         if (!attachments.containsKey(new AttachmentKey(tenantId, sessionId))
                 && sessions.requireSession(tenantId, sessionId)

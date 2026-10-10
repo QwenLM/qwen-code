@@ -339,15 +339,7 @@ public class ChildResultRelay {
             return false;
         }
         if (messagesOwed || !"CANCELLED".equals(status) && !stoppedHere) {
-            // Only an accepted or running Turn takes the cancel; one that
-            // is already cancelling owns its outcome — look again on the
-            // heartbeat rather than re-driving a command with no effect.
-            if ("ACCEPTED".equals(turn.status())
-                    || "RUNNING".equals(turn.status())) {
-                sessions.cancelChildTurn(row.tenantId(),
-                        row.parentSessionId(), child, row.childRunId(),
-                        turn.turnId());
-            }
+            RuntimeException stopFailure = null;
             if (messagesOwed) {
                 // The child's waiting message inputs settle cancelled and a
                 // message turn in flight is aborted; the journal shows when
@@ -355,6 +347,9 @@ public class ChildResultRelay {
                 Map<String, Object> stop = new LinkedHashMap<>();
                 stop.put("operationId", UUID.randomUUID().toString());
                 stop.put("kind", "stop");
+                // The stop goes first: its own load carries it, so a child
+                // the Harness no longer holds is attached with its message
+                // inputs stopped before the Turn cancel's load can start one.
                 try {
                     harness.runMessageOperation(row.tenantId(), child, stop);
                 } catch (DaemonHttpException error) {
@@ -365,9 +360,23 @@ public class ChildResultRelay {
                             .equals(error.getErrorCode())
                             && !"hosted_session_closing"
                                     .equals(error.getErrorCode())) {
-                        throw error;
+                        stopFailure = error;
                     }
+                } catch (RuntimeException error) {
+                    stopFailure = error;
                 }
+            }
+            // Only an accepted or running Turn takes the cancel; one that
+            // is already cancelling owns its outcome — look again on the
+            // heartbeat rather than re-driving a command with no effect.
+            if ("ACCEPTED".equals(turn.status())
+                    || "RUNNING".equals(turn.status())) {
+                sessions.cancelChildTurn(row.tenantId(),
+                        row.parentSessionId(), child, row.childRunId(),
+                        turn.turnId());
+            }
+            if (stopFailure != null) {
+                throw stopFailure;
             }
             relayStore.scheduleRetry(row, owner, now + HEARTBEAT_MS,
                     now + LEASE_MS, now);

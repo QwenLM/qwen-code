@@ -21,6 +21,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -1757,6 +1758,36 @@ class ChildResultRelayTest {
         verify(childCloses, never()).admitChildClose(anyString(),
                 anyString(), anyString(), anyString());
         assertThat(harness.operations).isEmpty();
+    }
+
+    // The stop goes out before the Turn cancel, whose own load would attach
+    // a dropped child without it; a stop that fails still lets the cancel
+    // out, and then counts its attempt.
+    @Test
+    void theMessageStopPrecedesTheTurnCancelAndNeverBlocksIt() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "RUNNING", null, null, true, "epoch-1"));
+        holdsMessages();
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(1,
+                        Set.of("msg_1:message"), now, null));
+        List<Integer> stopsSeenByTheCancel = new ArrayList<>();
+        Mockito.doAnswer(ignored -> {
+            stopsSeenByTheCancel.add(harness.messageOperations.size());
+            return null;
+        }).when(sessions).cancelChildTurn(TENANT, PARENT, CHILD, RUN,
+                "turn-1");
+        relay.scan();
+        assertThat(stopsSeenByTheCancel).containsExactly(1);
+        harness.refuseMessageCode = "session_message_failed";
+        relay.scan();
+        verify(sessions, Mockito.times(2)).cancelChildTurn(TENANT, PARENT,
+                CHILD, RUN, "turn-1");
+        assertThat(row.get().attempts()).isEqualTo(1);
     }
 
     // A child waiting on its recovery takes no stop yet: the heartbeat asks

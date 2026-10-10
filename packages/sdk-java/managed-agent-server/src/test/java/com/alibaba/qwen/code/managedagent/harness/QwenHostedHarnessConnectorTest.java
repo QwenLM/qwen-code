@@ -699,8 +699,8 @@ class QwenHostedHarnessConnectorTest {
 
     // H4f × H4d-b: a stopped run's message stop must never start the work
     // it stops. A Session this process does not hold loads passively with
-    // its message inputs already stopped, under the cancellation grant,
-    // and a held one takes the stop directly.
+    // its message inputs already stopped, under the committed stop's own
+    // authorization, and a held one takes the stop directly.
     @Test
     void aMessageStopLoadsTheSessionWithItsMessagesAlreadyStopped() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
@@ -725,7 +725,10 @@ class QwenHostedHarnessConnectorTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
-        // A revoked grant refuses new work, never a stop.
+        // The child's task Turn already ended, so there is no CANCELLING
+        // Turn for a cancellation grant: the stop must not need one, nor
+        // the mount a new-work grant verifies.
+        doThrow(WorkspaceExecutionStore.unavailable()).when(execution).authorizeCancellation(session);
         doThrow(WorkspaceExecutionStore.unavailable()).when(execution).authorize(session);
         QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
         ReflectionTestUtils.setField(connector, "client", client);
@@ -741,8 +744,9 @@ class QwenHostedHarnessConnectorTest {
                 .containsEntry("stopMessages", true)
                 .containsEntry("passiveManagedRuntimeRecovery", true)
                 .doesNotContainKey("driveRuntimeRecovery");
-        verify(execution).authorizeCancellation(session);
+        verify(execution).authorizeCommittedStop(session);
         verify(execution, never()).authorize(session);
+        verify(execution, never()).authorizeCancellation(session);
         verify(client, times(1)).runMessageOperation(attached, stop);
 
         // Held now: the next stop goes straight to the Session.
