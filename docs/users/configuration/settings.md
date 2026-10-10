@@ -870,11 +870,20 @@ export QWEN_UPDATE_BASE_URL="https://downloads.example.com/qwen-code"
 qwen update
 ```
 
-For version `0.23.0`, the updater downloads the platform archive, `SHA256SUMS`, and `SHA256SUMS.sig` from `<base-url>/v0.23.0/`. Host these files using the same names and directory layout as an official release. Existing checksum and signature checks still apply, including `QWEN_REQUIRE_SIGNATURE=1` when a signature is required.
+For version `0.23.0`, the updater downloads the platform archive, `SHA256SUMS`, and `SHA256SUMS.sig` from `<base-url>/v0.23.0/`; OpenTUI preview (bun runtime) installs request the flavor archive (`qwen-code-<target>-opentui-preview`) instead of the plain `qwen-code-<target>` name. Host these files using the same names and directory layout as an official release, and keep the archive's `manifest.json` verbatim: before activation the updater verifies that its `name` is `@qwen-code/qwen-code`, its `target` matches the installation's platform target (e.g. `linux-x64`), its `version` equals the requested release, and its `runtime` matches the installed build, and that the archive ships the executable launcher (`bin/qwen`, or `bin/qwen.cmd` on Windows targets), the bundled runtime, and the `lib/cli-entry.js` entry point the launcher executes. A re-packaged archive that normalizes these fields differently is rejected even when its checksum is valid. Existing checksum and signature checks still apply, including `QWEN_REQUIRE_SIGNATURE=1` when a signature is required.
 
 The URL must use HTTPS and cannot contain credentials, a query string, or a fragment. Surrounding whitespace and trailing slashes are removed. An empty or whitespace-only value preserves the built-in download sources and their fallback order. When a custom root is set, a failed download does not fall back to the built-in sources.
 
 Configure this variable in the launching shell or a user-level `.env` file. It is rejected from project `.env` and `.qwen/.env` files and from the top-level `settings.json` `env` section at every scope. A user-level `.env` value is loaded at startup; restart Qwen Code after changing it.
+
+To install a selected release without querying the npm registry, combine the download source with an exact target version:
+
+```bash
+QWEN_UPDATE_BASE_URL="https://downloads.example.com/qwen-code" \
+  qwen update --target-version 0.23.1
+```
+
+`--target-version` accepts a concrete stable or prerelease version, optionally prefixed with `v`. It rejects mutable tags such as `latest` and `nightly`. Explicit targets permit same-version reinstalls and downgrades; the downloaded archive's manifest must match the requested release and the downloaded executable must report the requested version before activation. The selection applies to that update only and is not persisted: background and on-exit automatic updates move a standalone installation forward again on the next session, so keeping an exact older version requires setting [`general.enableAutoUpdate`](#general) to `false`. For non-standalone installations, the command returns an error directing you to install the selected version manually using your installation method. Omitting the option preserves normal version discovery.
 
 This setting applies to `qwen update`, `/update`, and automatic standalone updates. It does not change npm registry version discovery. It is separate from the installer's `QWEN_INSTALL_BASE_URL`, which points directly to a version-specific directory.
 

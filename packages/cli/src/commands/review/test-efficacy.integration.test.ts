@@ -2672,6 +2672,12 @@ process.exit(r.status === null ? 1 : r.status);
 `,
         );
         chmodSync(join(shimDir, 'git'), 0o755);
+        // An extensionless shim inherits its module system from the nearest
+        // ancestor package.json: one with `type: module` above tmpdir (some
+        // CI images ship /tmp/package.json that way) loads this CJS body as
+        // ESM, `require` is undefined, and the shim dies before forwarding
+        // — the stamp assertion then fails on a screen that was never asked.
+        writeFileSync(join(shimDir, 'package.json'), '{"type":"commonjs"}');
         process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
 
         const got = runOneHunkProbe(
