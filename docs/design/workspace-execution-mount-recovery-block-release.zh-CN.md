@@ -38,4 +38,4 @@
 - 真栈 IT（`HostedWorkspaceConcurrencyIT#mountReleaseFreesHeldStorageAndKeepsTheSessionReady`）：持有者占用时竞争 acquire 应答 `workspace_busy`；有未结算执行时窄释放拒绝 `runtime_session_busy`，结算后成功；挂载行持有者列清空；Runtime Session 保持 `READY`；竞争方获得挂载；持有者随后的完整释放完成。
 - 用 issue 的复现方法重跑物理 rig：block 模式下全本轮次 2.6 秒在首次 acquire 即获租并结算，被阻塞会话与此前完全一致地上报 blocked（`workspace_busy` 计数为 0，修复前为 207）；control 模式不变；仅撤下 `await toolTurn?.releaseForRecoveryBlock();` 一行即按修复前 journal 指纹恢复楔死（机制恢复的见证——无 `:release-mount` 调用，挂载等待日志在案），恢复该行后楔死再次消失（rig 证据保存在 `.qwen/issues/13800-repro/`）。
 
-恢复机制——去掉那一行——见证套件与 rig 都会失败：单元见证看不到 `releaseMount` 调用，IT 看到租约持有者钉住，rig 楔死。包 build/typecheck/lint 与触及的套件（`hosted-workspace-tool-turn`、`hosted-workspace-broker`、`hosted-harness-session`、runtime-broker、managed-agent-server、挂载释放 IT）通过。
+恢复机制——去掉那一行——见证套件与 rig 都会失败：单元见证看不到 `releaseMount` 调用，IT 看到租约持有者钉住，rig 楔死。包 build/typecheck/lint/checkstyle 与触及的套件（`hosted-workspace-tool-turn`、`hosted-workspace-broker`、`hosted-harness-session`、runtime-broker、managed-agent-server、挂载释放 IT）在最终 head 通过。
