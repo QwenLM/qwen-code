@@ -14826,6 +14826,11 @@ export class Session implements SessionContext {
           }
           let wasAutoModeManualFallback = false;
           let autoModeFallback: AutoModeFallbackConfirmation | undefined;
+          // Set when the fallback came from the deterministic destructive
+          // guard rather than the classifier, whose escalation shares the same
+          // reason code. Mirrors the scheduler's gate so a PermissionRequest
+          // hook cannot waive the guard on this path either.
+          let autoModeFallbackRequiresHuman = false;
           // Recovery state follows the input whose classification was last
           // decided, so approving a fallback resets the right counters.
           const updateAutoModeFallback = (
@@ -14834,7 +14839,10 @@ export class Session implements SessionContext {
           ) => {
             wasAutoModeManualFallback = false;
             autoModeFallback = undefined;
+            autoModeFallbackRequiresHuman = false;
             if (outcome?.kind !== 'fallback') return;
+            autoModeFallbackRequiresHuman =
+              outcome.requiresHumanDecision === true;
             wasAutoModeManualFallback =
               isDenialFallbackReason(outcome.reason) ||
               outcome.reason === 'classifier_unavailable' ||
@@ -15095,7 +15103,8 @@ export class Session implements SessionContext {
 
               if (
                 hookResult.hasDecision &&
-                (!hookResult.shouldAllow || !requiresUserInteraction)
+                (!hookResult.shouldAllow ||
+                  (!requiresUserInteraction && !autoModeFallbackRequiresHuman))
               ) {
                 hookHandled = true;
                 if (hookResult.shouldAllow) {
@@ -15255,8 +15264,8 @@ export class Session implements SessionContext {
                         );
                       }
                       // AUTO mode judges the replacement like any input: its
-                      // own allow rule, else the classifier. Only a block
-                      // overrides this hook's one-time allow.
+                      // own allow rule, else the classifier. A block denies it;
+                      // a destructive guard fallback still needs a human.
                       const replacementParams = replacement.params as Record<
                         string,
                         unknown
@@ -15307,17 +15316,29 @@ export class Session implements SessionContext {
                       trackAgentInvocation();
                     }
 
-                    await confirmationDetails.onConfirm(
-                      ToolConfirmationOutcome.ProceedOnce,
-                    );
-                    const hookConfirmationCancellation =
-                      cancelBeforeExecutionIfAborted(toolName);
-                    if (hookConfirmationCancellation) {
-                      return hookConfirmationCancellation;
+                    if (autoModeFallbackRequiresHuman) {
+                      if (autoModeFallback) {
+                        confirmationDetails =
+                          decorateAutoModeFallbackConfirmation(
+                            confirmationDetails,
+                            autoModeFallback.reason,
+                            autoModeFallback.message,
+                          );
+                      }
+                      hookHandled = false;
+                    } else {
+                      await confirmationDetails.onConfirm(
+                        ToolConfirmationOutcome.ProceedOnce,
+                      );
+                      const hookConfirmationCancellation =
+                        cancelBeforeExecutionIfAborted(toolName);
+                      if (hookConfirmationCancellation) {
+                        return hookConfirmationCancellation;
+                      }
+                      recordAutoModeFallbackResolution(
+                        ToolConfirmationOutcome.ProceedOnce,
+                      );
                     }
-                    recordAutoModeFallbackResolution(
-                      ToolConfirmationOutcome.ProceedOnce,
-                    );
                   }
                 } else {
                   return earlyErrorResponse(
