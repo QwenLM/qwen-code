@@ -348,6 +348,7 @@ export async function collectHistoryReplayUpdates({
   limits,
   suppressRestoreAskUserQuestion,
   finalizeDangling,
+  branchPointsByAssistantUuid,
 }: {
   sessionId: string;
   config?: Config;
@@ -372,8 +373,14 @@ export async function collectHistoryReplayUpdates({
    * path and non-live loads pass true.
    */
   finalizeDangling?: boolean;
+  /**
+   * Branch checkpoints keyed by assistant record uuid, stamped onto the
+   * replayed updates so a session restored from disk still offers Branch.
+   */
+  branchPointsByAssistantUuid?: Readonly<Record<string, string>>;
 }): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
   const updates: SessionUpdate[] = [];
+  let replayError: string | undefined;
   try {
     const initial = parseTranscriptReplayState(replayState, logger);
     // Prefer live chat when it is initialized (authoritative after startChat
@@ -405,16 +412,18 @@ export async function collectHistoryReplayUpdates({
     });
   } catch (error) {
     if (error instanceof HistoryReplayLimitError) throw error;
-    const replayError = error instanceof Error ? error.message : String(error);
+    replayError = error instanceof Error ? error.message : String(error);
     logger?.warn(
       '[historyReplay] History replay failed for session %s (partial updates: %d):',
       sessionId,
       updates.length,
       error,
     );
-    return { updates, replayError };
   }
-  return { updates };
+  if (branchPointsByAssistantUuid) {
+    stampBranchPoints(updates, branchPointsByAssistantUuid);
+  }
+  return replayError === undefined ? { updates } : { updates, replayError };
 }
 
 function liftSessionUpdateTimestamp(update: SessionUpdate): SessionUpdate {
@@ -451,6 +460,52 @@ function readTranscriptSourceRecordIds(
   const sourceRecordIds = transcript?.['sourceRecordIds'];
   if (!Array.isArray(sourceRecordIds)) return undefined;
   return sourceRecordIds.filter((id): id is string => typeof id === 'string');
+}
+
+// A checkpoint marks the END of its source record, which can replay as
+// several chunks (text/thought/text). Only the LAST visible assistant chunk
+// of the record may expose the branch point: an earlier chunk would restore
+// the record's later content when branched from, and an empty-text usage
+// chunk normalizes to `assistant.usage`, which drops the metadata.
+function stampBranchPoints(
+  updates: SessionUpdate[],
+  branchPoints: Readonly<Record<string, string>>,
+): void {
+  const lastChunkIndexByRecordId = new Map<string, number>();
+  updates.forEach((update, index) => {
+    if (update.sessionUpdate !== 'agent_message_chunk') return;
+    const text = (update as { content?: { text?: unknown } }).content?.text;
+    if (typeof text !== 'string' || text.length === 0) return;
+    for (const recordId of readTranscriptSourceRecordIds(update) ?? []) {
+      // Own-property check: transcript record uuids are untrusted input,
+      // and names like 'toString' would otherwise pass via the prototype
+      // chain.
+      if (Object.hasOwn(branchPoints, recordId)) {
+        lastChunkIndexByRecordId.set(recordId, index);
+      }
+    }
+  });
+  const decoratedIndexes = new Set<number>();
+  for (const [recordId, index] of lastChunkIndexByRecordId) {
+    if (decoratedIndexes.has(index)) continue;
+    decoratedIndexes.add(index);
+    const value = updates[index] as unknown as Record<string, unknown>;
+    const meta =
+      value['_meta'] && typeof value['_meta'] === 'object'
+        ? (value['_meta'] as Record<string, unknown>)
+        : undefined;
+    const transcript =
+      meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
+        ? (meta['qwenTranscript'] as Record<string, unknown>)
+        : undefined;
+    value['_meta'] = {
+      ...meta,
+      qwenTranscript: {
+        ...transcript,
+        branchRecordId: branchPoints[recordId],
+      },
+    };
+  }
 }
 
 export async function replayTranscriptRecordPage({
@@ -501,48 +556,7 @@ export async function replayTranscriptRecordPage({
   }
 
   if (page.branchPointsByAssistantUuid) {
-    const branchPoints = page.branchPointsByAssistantUuid;
-    // A checkpoint marks the END of its source record, which can replay as
-    // several chunks (text/thought/text). Only the LAST visible assistant
-    // chunk of the record may expose the branch point: an earlier chunk
-    // would restore the record's later content when branched from, and an
-    // empty-text usage chunk normalizes to `assistant.usage`, which drops
-    // the metadata.
-    const lastChunkIndexByRecordId = new Map<string, number>();
-    updates.forEach((update, index) => {
-      if (update.sessionUpdate !== 'agent_message_chunk') return;
-      const text = (update as { content?: { text?: unknown } }).content?.text;
-      if (typeof text !== 'string' || text.length === 0) return;
-      for (const recordId of readTranscriptSourceRecordIds(update) ?? []) {
-        // Own-property check: transcript record uuids are untrusted input,
-        // and names like 'toString' would otherwise pass via the prototype
-        // chain.
-        if (Object.hasOwn(branchPoints, recordId)) {
-          lastChunkIndexByRecordId.set(recordId, index);
-        }
-      }
-    });
-    const decoratedIndexes = new Set<number>();
-    for (const [recordId, index] of lastChunkIndexByRecordId) {
-      if (decoratedIndexes.has(index)) continue;
-      decoratedIndexes.add(index);
-      const value = updates[index] as unknown as Record<string, unknown>;
-      const meta =
-        value['_meta'] && typeof value['_meta'] === 'object'
-          ? (value['_meta'] as Record<string, unknown>)
-          : undefined;
-      const transcript =
-        meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
-          ? (meta['qwenTranscript'] as Record<string, unknown>)
-          : undefined;
-      value['_meta'] = {
-        ...meta,
-        qwenTranscript: {
-          ...transcript,
-          branchRecordId: branchPoints[recordId],
-        },
-      };
-    }
+    stampBranchPoints(updates, page.branchPointsByAssistantUuid);
   }
 
   const nextCursor =
