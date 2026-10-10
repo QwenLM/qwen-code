@@ -37,6 +37,7 @@ import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-ru
 import { resetManagedRuntimeDispatchGatesForTest } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-dispatch-gate.js';
 import type { HarnessAgentWaitRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import {
+  answerResumedTurnCalls,
   fillParkedRoundAgentGaps,
   recoverHostedRuntimeTurn,
   settleCancelledAgentWaitRuns,
@@ -44,6 +45,7 @@ import {
 } from './hosted-runtime-recovery.js';
 import { parkNeedsNoRuntimeSettlement } from './hosted-harness-session.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { HostedTeamSession } from './hosted-team-session.js';
 import {
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
   HostedWorkspaceToolTurn,
@@ -74,6 +76,26 @@ const broker = vi.hoisted(() => ({
   registerPublisher: vi.fn().mockResolvedValue('1'),
   fileHistory: vi.fn(),
 }));
+// H4e-b1: the team domains are not enabled for submission yet; the
+// interrupted-team-call cases commit team records ahead of enablement.
+vi.mock(
+  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
+      >();
+    return {
+      ...actual,
+      assertManagedSessionDomainEnabled: (
+        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
+      ) => {
+        if (domain === 'team_state' || domain === 'team_task') return;
+        actual.assertManagedSessionDomainEnabled(domain);
+      },
+    };
+  },
+);
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
@@ -1212,6 +1234,172 @@ describe('hosted child wait recovery (#13708)', () => {
       expect(results).toHaveLength(2);
     } finally {
       await replacement.close();
+    }
+  });
+
+  function teamsOf(session: ManagedSession): HostedTeamSession {
+    return new HostedTeamSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+    );
+  }
+
+  // A batch of team calls parks nothing, so in yolo mode the checkpoint
+  // never binds the Turn: the settlement still answers what committed and
+  // leaves every other call to the answer core's orphan repair gives.
+  it('the interrupted-turn settlement answers committed team calls on a checkpoint the Turn never bound', async () => {
+    const first = await open('boot-1', true);
+    try {
+      const contentRef = await first.resources.publish(
+        'managed-input',
+        Buffer.from(JSON.stringify([{ type: 'text', text: 'team up' }])),
+      );
+      const admissionRef = await first.resources.publish(
+        'managed-admission',
+        Buffer.from(JSON.stringify({ promptId: PROMPT_ID, digest: 'x' })),
+      );
+      await first.authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: PROMPT_ID,
+          sessionKey,
+          contentDigest: DIGEST,
+        },
+        {
+          inputId: PROMPT_ID,
+          turnId: PROMPT_ID,
+          source: 'hosted-harness',
+          contentRef,
+          admissionRef,
+          deadline: null,
+          wakeReason: 'input',
+        },
+      );
+      await createManagedHarnessHandle(first).ensureRunnable();
+      const call = (id: string, name: string) => ({
+        functionCall: { id, name, args: {} },
+      });
+      await first.sink.write({
+        uuid: 'assistant-1',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'assistant',
+        cwd: root,
+        version: 'test',
+        daemonPromptId: PROMPT_ID,
+        message: {
+          role: 'model',
+          parts: [
+            call('call-2', 'team_create'),
+            call('call-3', 'task_create'),
+            call('call-6', 'read_file'),
+          ],
+        },
+      });
+      const teams = teamsOf(first);
+      await teams.run(
+        'team_create',
+        { team_name: 'review' },
+        `${PROMPT_ID}:call-2`,
+      );
+      await teams.run(
+        'task_create',
+        { subject: 'Audit', description: 'a' },
+        `${PROMPT_ID}:call-3`,
+      );
+      const verdict = await first.authority.harnessRunAuthorization();
+      expect(
+        verdict.status === 'runnable'
+          ? verdict.checkpoint.identity.turnId
+          : null,
+      ).not.toBe(PROMPT_ID);
+    } finally {
+      await first.close();
+    }
+    resetManagedRuntimeDispatchGatesForTest();
+    const replacement = await open('boot-2', false);
+    try {
+      const settle = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions: undefined,
+        toolProfile: true,
+        children: childrenOf(replacement),
+        teams: teamsOf(replacement),
+      });
+      expect(settle.kind).toBe('ready');
+      const answers = new Map(
+        toolResultEntries(await replacement.sink.project()).flatMap((entry) =>
+          (entry.message?.parts ?? []).map((part) => [
+            part.functionResponse?.id,
+            JSON.stringify(part.functionResponse?.response),
+          ]),
+        ),
+      );
+      expect(answers.get('call-2')).toContain('committed its team change');
+      expect(answers.get('call-3')).toContain('committed its team change');
+      // A call that committed nothing keeps the answer its route gives.
+      expect(answers.has('call-6')).toBe(false);
+    } finally {
+      await replacement.close();
+    }
+  }, 10_000);
+
+  // A resuming route answers only the calls no Runtime settlement ever
+  // will: a team or agent call that committed nothing is told it never
+  // ran, a Runtime call stays with the checkpoint, and an admitted
+  // foreground child is never told it did not start.
+  it('answers a resumed Turn whole except its Runtime calls and admitted children', async () => {
+    const session = await open('boot-1', true);
+    try {
+      await park(session, false);
+      await session.sink.write({
+        uuid: 'assistant-1',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'assistant',
+        cwd: root,
+        version: 'test',
+        daemonPromptId: PROMPT_ID,
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'call-1', name: 'agent', args: {} } },
+            { functionCall: { id: 'call-2', name: 'read_file', args: {} } },
+            { functionCall: { id: 'call-3', name: 'task_create', args: {} } },
+            { functionCall: { id: 'call-4', name: 'agent', args: {} } },
+          ],
+        },
+      });
+      expect(
+        await answerResumedTurnCalls({
+          session,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          children: childrenOf(session),
+          teams: teamsOf(session),
+        }),
+      ).toBe(2);
+      const answers = new Map(
+        toolResultEntries(await session.sink.project()).flatMap((entry) =>
+          (entry.message?.parts ?? []).map((part) => [
+            part.functionResponse?.id,
+            JSON.stringify(part.functionResponse?.response),
+          ]),
+        ),
+      );
+      // call-1 is the admitted foreground child the wait owns.
+      expect(answers.has('call-1')).toBe(false);
+      expect(answers.has('call-2')).toBe(false);
+      expect(answers.get('call-3')).toContain('The tool call never ran');
+      expect(answers.get('call-4')).toContain('The tool call never ran');
+    } finally {
+      await session.close();
     }
   });
 
