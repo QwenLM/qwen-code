@@ -87,6 +87,7 @@ import {
 } from './hosted-hook-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { HostedTeamSession } from './hosted-team-session.js';
 import { HostedMonitorSession } from './hosted-monitor-session.js';
 import {
   AutomationNotFoundError,
@@ -258,6 +259,8 @@ interface HostedSession {
   /** H6: the Session's automation definitions and runs, on every profile. */
   automations?: HostedAutomationSession;
   childAgents?: HostedChildAgentSession;
+  /** H4e-b1: the lead's team funnel, beside its child orchestrator. */
+  teams?: HostedTeamSession;
   /** Depth of this Session in its child tree; absent or 0 is the root. */
   childDepth?: number;
   /** Tool-arm results answered by a turn; flushed at that turn's settle. */
@@ -1656,6 +1659,9 @@ async function verifyWorkspaceRestore(
         // H5: channel routes and deliveries, parsed by their own bodies.
         'channel_route',
         'channel_delivery',
+        // H4e-b1: the lead's team and its board, parsed by their bodies.
+        'team_state',
+        'team_task',
       ].includes(event.payload['domain'] as string)
     )
       throw new Error('Hosted recovery domain is unsupported.');
@@ -2264,6 +2270,7 @@ async function executeHostedTurn(
                     depth: session.childDepth ?? 0,
                     queueConsumption: (childRunId) =>
                       session.childConsumption.add(childRunId),
+                    teams: session.teams,
                   },
                 },
               )
@@ -3160,7 +3167,7 @@ export function registerHostedHarnessSessionRoutes(
         // H4b: the Session's own child orchestrator, on the Shell lanes
         // the notification wake is proven over — files profiles keep their
         // exact current surface (their child admission is its own gate).
-        if (session.shell || session.backgroundLane)
+        if (session.shell || session.backgroundLane) {
           session.childAgents = new HostedChildAgentSession(
             {
               authority: session.managed.authority,
@@ -3168,6 +3175,14 @@ export function registerHostedHarnessSessionRoutes(
             },
             session.managed.authority.sessionHeader.sessionKey,
           );
+          session.teams = new HostedTeamSession(
+            {
+              authority: session.managed.authority,
+              resources: session.managed.resources,
+            },
+            session.managed.authority.sessionHeader.sessionKey,
+          );
+        }
       }
       if (
         session.toolProfile &&
@@ -5613,6 +5628,7 @@ export function registerHostedHarnessSessionRoutes(
               depth: session.childDepth ?? 0,
               queueConsumption: (childRunId) =>
                 session.childConsumption.add(childRunId),
+              teams: session.teams,
             },
           },
         );

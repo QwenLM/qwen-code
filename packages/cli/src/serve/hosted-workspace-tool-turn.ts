@@ -81,6 +81,20 @@ import type {
 import type { HostedChildRunSession } from './hosted-child-run-session.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { childLaunchAdmission } from './hosted-child-agent-session.js';
+import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
+import type { HostedTeamSession } from './hosted-team-session.js';
+import {
+  HOSTED_AGENT_NAME_PROPERTY,
+  HOSTED_TEAM_TOOLS,
+  hostedTeamCallCommitted,
+  hostedTeamName,
+  hostedTeamToolArgsError,
+  hostedTeammateAdmissionError,
+  hostedTeammateStartedText,
+  isHostedTeamTool,
+  runHostedTeamTool,
+  type HostedTeamToolName,
+} from './hosted-team-tools.js';
 import {
   encodeChildLaunchEnvelope,
   MANAGED_CHILD_LIMITS,
@@ -227,6 +241,19 @@ function childAgentAdmissionsEnabled(): boolean {
   }
 }
 
+// H4e-b1: the team tools and the Agent tool's `name` exist only while both
+// domains they commit are enabled; until then the Agent tool keeps refusing
+// `name` as a legacy argument.
+function teamAdmissionsEnabled(): boolean {
+  try {
+    assertManagedSessionDomainEnabled('team_state');
+    assertManagedSessionDomainEnabled('team_task');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export interface HostedApprovalTurnOptions {
   settings: HostedApprovalSettings;
   waiters: HostedApprovalWaiters;
@@ -366,6 +393,9 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'edit',
   'run_shell_command',
   'agent',
+  'team_create',
+  'task_create',
+  'task_update',
 ];
 
 /**
@@ -397,6 +427,25 @@ export const HOSTED_AGENT_TOOL: FunctionDeclaration = {
     },
     required: ['description', 'prompt'],
     additionalProperties: false,
+  },
+};
+
+/**
+ * H4e-b1: the Agent tool as a team lead declares it — `name` spawns a
+ * named, one-shot, background member of the Session's open team.
+ */
+export const HOSTED_AGENT_TOOL_FOR_TEAMS: FunctionDeclaration = {
+  ...HOSTED_AGENT_TOOL,
+  parametersJsonSchema: {
+    ...(HOSTED_AGENT_TOOL.parametersJsonSchema as Record<string, unknown>),
+    properties: {
+      ...(
+        HOSTED_AGENT_TOOL.parametersJsonSchema as {
+          properties: Record<string, unknown>;
+        }
+      ).properties,
+      name: HOSTED_AGENT_NAME_PROPERTY,
+    },
   },
 };
 function physicalToolStatus(
@@ -575,6 +624,7 @@ export class HostedWorkspaceToolTurn {
   private readonly monitors?: HostedMonitorSession;
   private readonly backgroundLane?: HostedShellTurnOptions;
   private readonly childAgents?: HostedChildAgentSession;
+  private readonly teams?: HostedTeamSession;
   private readonly childDepth: number;
   private readonly childConsumption: (childRunId: string) => void;
 
@@ -615,6 +665,7 @@ export class HostedWorkspaceToolTurn {
         readonly funnel: HostedChildAgentSession;
         readonly depth: number;
         readonly queueConsumption: (childRunId: string) => void;
+        readonly teams?: HostedTeamSession;
       };
     },
   ) {
@@ -626,6 +677,7 @@ export class HostedWorkspaceToolTurn {
     this.monitors = extras?.monitors;
     this.backgroundLane = extras?.backgroundLane;
     this.childAgents = extras?.childAgents?.funnel;
+    this.teams = extras?.childAgents?.teams;
     this.childDepth = extras?.childAgents?.depth ?? 0;
     this.childConsumption =
       extras?.childAgents?.queueConsumption ?? (() => undefined);
@@ -689,10 +741,26 @@ export class HostedWorkspaceToolTurn {
       (this.shell !== undefined || this.backgroundLane !== undefined) &&
       this.childDepth === 0 &&
       childAgentAdmissionsEnabled()
-        ? [HOSTED_AGENT_TOOL]
+        ? this.teamsAdmitted()
+          ? [HOSTED_AGENT_TOOL_FOR_TEAMS, ...HOSTED_TEAM_TOOLS]
+          : [HOSTED_AGENT_TOOL]
         : []),
     ];
     return this.advertised;
+  }
+
+  // H4e-b1: the team tools stand exactly where the Agent tool does — a
+  // Shell-laned root Session with its own child orchestrator — and only
+  // while both team domains are enabled, so a member never sees them.
+  private teamsAdmitted(): boolean {
+    return (
+      this.childAgents !== undefined &&
+      this.teams !== undefined &&
+      (this.shell !== undefined || this.backgroundLane !== undefined) &&
+      this.childDepth === 0 &&
+      childAgentAdmissionsEnabled() &&
+      teamAdmissionsEnabled()
+    );
   }
 
   // The mount the Session already holds counts exactly like this Turn's
@@ -1016,6 +1084,13 @@ export class HostedWorkspaceToolTurn {
         // otherwise read as a hybrid between the two before the third hop.
         this.childAgents?.record(this.childRunIdFor(call.callId)) !==
           undefined ||
+        // H4e-b1: a team call's evidence is the command it committed.
+        (this.teams !== undefined &&
+          hostedTeamCallCommitted(
+            this.teams,
+            call.name,
+            this.childRunIdFor(call.callId),
+          )) ||
         intents.some((entry) => entry.payload['ordinal'] === ordinal);
       const response = responses.find(
         (part) => part.functionResponse?.id === call.callId,
@@ -1241,6 +1316,7 @@ export class HostedWorkspaceToolTurn {
         let monitorAdmitted = false;
         let agentAdmitted = false;
         let agentBackground = true;
+        let teamAdmitted = false;
         if (mcpInput) {
           input = { ...mcpInput.input };
         } else if (isShell) {
@@ -1417,10 +1493,20 @@ export class HostedWorkspaceToolTurn {
             (this.shell !== undefined || this.backgroundLane !== undefined) &&
             this.childDepth === 0 &&
             childAgentAdmissionsEnabled();
+          const teams = this.teamsAdmitted();
           const unsupportedKey = Object.keys(args).find(
             (key) =>
-              !['description', 'prompt', 'run_in_background'].includes(key),
+              ![
+                'description',
+                'prompt',
+                'run_in_background',
+                ...(teams ? ['name'] : []),
+              ].includes(key),
           );
+          const teammate =
+            args['name'] === undefined
+              ? undefined
+              : hostedTeamName(args['name'], 'Teammate');
           const backgroundValue = args['run_in_background'];
           agentBackground = !(
             backgroundValue === false ||
@@ -1443,6 +1529,31 @@ export class HostedWorkspaceToolTurn {
           } else if (backgroundIllFormed) {
             validationError =
               'Hosted child agent run_in_background must be a boolean.';
+          } else if (teammate?.error !== undefined) {
+            validationError = teammate.error;
+          } else if (teammate !== undefined && !agentBackground) {
+            validationError =
+              'Parameter "run_in_background" cannot be false for a named teammate: teammates always run in the background and report by notification. Omit "name" for a child whose result returns inline.';
+          } else if (
+            teammate !== undefined &&
+            source.some(
+              (other) =>
+                other.callId !== call.callId &&
+                other.name === 'agent' &&
+                hostedTeamName(other.args['name'], 'Teammate').name ===
+                  teammate.name,
+            )
+          ) {
+            validationError = `Teammate names in one batch must be distinct; "${teammate.name}" appears more than once.`;
+          } else if (
+            teammate !== undefined &&
+            source.some(
+              (other) =>
+                other.name === 'team_create' || other.name === 'team_delete',
+            )
+          ) {
+            validationError =
+              'A batch that spawns a teammate cannot also create or delete the team; spawn teammates in a later turn.';
           } else if (!agentBackground && this.sessionHoldsMount()) {
             // v1: a foreground child waits out the parent's own wait, and
             // the shared Workspace's mount is held by exactly that wait —
@@ -1488,6 +1599,13 @@ export class HostedWorkspaceToolTurn {
             validationError = 'Hosted child agent requires a nonempty prompt.';
           }
           input = { ...args };
+        } else if (isHostedTeamTool(call.name)) {
+          // H4e-b1: a team tool only reads and writes the lead's journal.
+          teamAdmitted = this.teamsAdmitted();
+          validationError = teamAdmitted
+            ? hostedTeamToolArgsError(call.name, call.args)
+            : 'Hosted agent teams are unavailable on this Session profile.';
+          input = { ...call.args };
         } else {
           const file = call.args['file_path'];
           input = { ...call.args };
@@ -1532,6 +1650,7 @@ export class HostedWorkspaceToolTurn {
           monitoring: mcpInput === undefined && monitorAdmitted,
           agent: mcpInput === undefined && agentAdmitted,
           agentBackground,
+          team: mcpInput === undefined && teamAdmitted,
         };
       });
     };
@@ -1590,7 +1709,10 @@ export class HostedWorkspaceToolTurn {
     // (parent turn held, child tool call queued behind it forever). v1
     // therefore takes the mount only for a batch with at least one
     // non-agent tool.
-    if (!this.acquired && requests.some((request) => request.agent !== true)) {
+    if (
+      !this.acquired &&
+      requests.some((request) => request.agent !== true && !request.team)
+    ) {
       // Acquisition may have taken effect even when its reply is lost.
       await this.acquire(false, signal);
     }
@@ -1846,7 +1968,7 @@ export class HostedWorkspaceToolTurn {
         // A child-agent launch has no Runtime execution to reserve: the
         // control plane's relay owns its side effect, so it never enters
         // the Broker pipeline below.
-        if (request.agent) continue;
+        if (request.agent || request.team) continue;
         if (request.mcp) {
           const renewed = this.mcp!.toolInput(
             request.call.name,
@@ -2210,6 +2332,10 @@ export class HostedWorkspaceToolTurn {
           responses.push(
             ...(await this.acceptChildAgent(request, model, signal, messageId)),
           );
+          continue;
+        }
+        if (request.team) {
+          responses.push(...(await this.runTeamTool(request, model, signal)));
           continue;
         }
         const executionCallId = reserved.get(index)!;
@@ -2771,6 +2897,72 @@ export class HostedWorkspaceToolTurn {
   }
 
   /**
+   * H4e-b1: join a just-launched child to the open team, right after its
+   * launch and under its run id, so a replay finishes an interrupted join.
+   * Answers why it did not join, when it cannot: H4e-a admits only a live
+   * run, and the relay may already have ended it.
+   */
+  private async joinTeammate(
+    childRunId: string,
+    teammate: string,
+  ): Promise<string | undefined> {
+    const teams = this.teams!;
+    if (teams.memberOf(childRunId) !== undefined) return undefined;
+    const team = teams.openTeam();
+    const refusal = hostedTeammateAdmissionError(team, teammate);
+    if (refusal !== undefined) return refusal;
+    const run = this.childAgents!.record(childRunId);
+    if (run === undefined || isTerminalRunState(run.run.state))
+      return 'its child run had already ended.';
+    await teams.joinTeam(team!.teamId, { name: teammate, childRunId });
+    return undefined;
+  }
+
+  /**
+   * H4e-b1: one admitted team tool call. It touches no Workspace: every
+   * write goes through the lead's team funnel under the call's key.
+   */
+  private async runTeamTool(
+    request: { call: ToolCallRequestInfo },
+    model: string,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    if (signal.aborted) {
+      const skipped = convertToFunctionErrorResponse(
+        request.call.name,
+        request.call.callId,
+        [],
+        'The turn was cancelled before this team tool ran.',
+      );
+      await this.commit('tool_result', skipped, model);
+      return skipped;
+    }
+    const children = this.childAgents!;
+    const result = await runHostedTeamTool(
+      {
+        teams: this.teams!,
+        childRun: (childRunId) => children.record(childRunId),
+        callKey: this.childRunIdFor(request.call.callId),
+      },
+      request.call.name as HostedTeamToolName,
+      request.call.args,
+    );
+    if (!result.error) this.agentDispatched.add(request.call.callId);
+    const parts = result.error
+      ? convertToFunctionErrorResponse(
+          request.call.name,
+          request.call.callId,
+          [],
+          result.text,
+        )
+      : convertToFunctionResponse(request.call.name, request.call.callId, [
+          { text: result.text },
+        ]);
+    await this.commit('tool_result', parts, model);
+    return parts;
+  }
+
+  /**
    * H4b: launch one child Session and complete the call through its own
    * arm. The intent commits before any physical effect; the control
    * plane's relay owns creation and delivery from there. The launch is
@@ -2830,6 +3022,29 @@ export class HostedWorkspaceToolTurn {
       if (!(cause instanceof ManagedSessionRecordError)) throw cause;
       envelopeBytes = Number.POSITIVE_INFINITY;
     }
+    // H4e-b1: a named launch joins the Session's open team. Its team checks
+    // run beside H4b's own and, like them, for a new launch only: a replayed
+    // launch passed them already and finishes its join below.
+    const teammate =
+      request.call.args['name'] === undefined
+        ? undefined
+        : hostedTeamName(request.call.args['name'], 'Teammate').name!;
+    if (teammate !== undefined && children.record(childRunId) === undefined) {
+      const refusal = hostedTeammateAdmissionError(
+        this.teams!.openTeam(),
+        teammate,
+      );
+      if (refusal !== undefined) {
+        const refused = convertToFunctionErrorResponse(
+          request.call.name,
+          request.call.callId,
+          [],
+          refusal,
+        );
+        await this.commit('tool_result', refused, model);
+        return refused;
+      }
+    }
     // Quotas gate NEW children only: a re-driven batch names the same
     // run id, and `children.admit` answers that replay identically —
     // counting the replayed child against `count_limit` or the launch
@@ -2867,6 +3082,10 @@ export class HostedWorkspaceToolTurn {
       executionCallId: childRunId,
     });
     this.agentDispatched.add(request.call.callId);
+    const joinRefusal =
+      teammate === undefined
+        ? undefined
+        : await this.joinTeammate(childRunId, teammate);
     if (!request.agentBackground) {
       // The durable wait (#13708): a restarted Harness re-enters it from
       // the checkpoint instead of declining the parked Turn. The intent
@@ -2901,7 +3120,14 @@ export class HostedWorkspaceToolTurn {
     const started = convertToFunctionResponse(
       request.call.name,
       request.call.callId,
-      [{ text: hostedAgentBackgroundStartedText(taskId) }],
+      [
+        {
+          text:
+            teammate === undefined
+              ? hostedAgentBackgroundStartedText(taskId)
+              : hostedTeammateStartedText(taskId, teammate, joinRefusal),
+        },
+      ],
     );
     await this.commit('tool_result', started, model);
     return started;

@@ -44,6 +44,7 @@ import {
 } from './hosted-runtime-recovery.js';
 import { parkNeedsNoRuntimeSettlement } from './hosted-harness-session.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { HostedTeamSession } from './hosted-team-session.js';
 import {
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
   HostedWorkspaceToolTurn,
@@ -74,6 +75,26 @@ const broker = vi.hoisted(() => ({
   registerPublisher: vi.fn().mockResolvedValue('1'),
   fileHistory: vi.fn(),
 }));
+// H4e-b1: the team domains are not enabled for submission yet; the named
+// orphan cases plant a team ahead of enablement.
+vi.mock(
+  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
+      >();
+    return {
+      ...actual,
+      assertManagedSessionDomainEnabled: (
+        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
+      ) => {
+        if (domain === 'team_state' || domain === 'team_task') return;
+        actual.assertManagedSessionDomainEnabled(domain);
+      },
+    };
+  },
+);
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
@@ -238,10 +259,13 @@ describe('hosted child wait recovery (#13708)', () => {
   };
 
   /** Parks a live session at the durable wait, then closes it (the wedge). */
-  async function parkWedged(withAssistantRound = false): Promise<void> {
+  async function parkWedged(
+    withAssistantRound = false,
+    callTwoArgs: Record<string, unknown> = {},
+  ): Promise<void> {
     const session = await open('boot-1', true);
     try {
-      await park(session, withAssistantRound);
+      await park(session, withAssistantRound, callTwoArgs);
     } finally {
       await session.close();
     }
@@ -255,6 +279,7 @@ describe('hosted child wait recovery (#13708)', () => {
   async function park(
     session: ManagedSession,
     withAssistantRound: boolean,
+    callTwoArgs: Record<string, unknown> = {},
   ): Promise<void> {
     const harness = createManagedHarnessHandle(session);
     const authority = session.authority;
@@ -321,7 +346,9 @@ describe('hosted child wait recovery (#13708)', () => {
           role: 'model',
           parts: [
             { functionCall: { id: 'call-1', name: 'agent', args: {} } },
-            { functionCall: { id: 'call-2', name: 'agent', args: {} } },
+            {
+              functionCall: { id: 'call-2', name: 'agent', args: callTwoArgs },
+            },
           ],
         },
       });
@@ -1151,6 +1178,79 @@ describe('hosted child wait recovery (#13708)', () => {
       await replacement.close();
     }
   });
+
+  // H4e-b1: the fill answers a named launch it is not replaying: the
+  // member joined only if its join committed before the interruption.
+  for (const joined of [false, true]) {
+    it(`a named background orphan says whether it ${joined ? 'joined' : 'never joined'} its team`, async () => {
+      await parkWedged(true, { name: 'Alice' });
+      const orphanRunId = `${PROMPT_ID}:call-2`;
+      const first = await open('boot-2', false);
+      try {
+        await settleTheChild(first);
+        await resumeTurn(first, []).resumeAgentWaitRuns(
+          [{ ...waitRun, functionCallId: 'call-1' }],
+          'recovered',
+          new AbortController().signal,
+        );
+        await childrenOf(first).admit({
+          childRunId: orphanRunId,
+          ownerScopeId: SESSION_ID,
+          rootSessionId: SESSION_ID,
+          completion: 'sent',
+          description: 'background audit',
+          prompt: 'review later',
+          definition: {
+            definitionId: 'hosted-agent/hosted-workspace-files/1',
+            definitionRevision: 1,
+            definitionDigest:
+              first.authority.sessionHeader.definitionRef.digest,
+          },
+          workingDirectory: '.',
+          executionCallId: orphanRunId,
+        });
+        const teams = new HostedTeamSession(
+          { authority: first.authority, resources: first.resources },
+          first.authority.sessionHeader.sessionKey,
+        );
+        await teams.createTeam('team-1', 'review');
+        if (joined)
+          await teams.joinTeam('team-1', {
+            name: 'alice',
+            childRunId: orphanRunId,
+          });
+      } finally {
+        await first.close();
+      }
+      const replacement = await open('boot-3', false);
+      try {
+        expect(
+          await fillParkedRoundAgentGaps({
+            managed: replacement,
+            sessionId: SESSION_ID,
+            promptId: PROMPT_ID,
+            cwd: root,
+            gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+            children: childrenOf(replacement),
+          }),
+        ).toBe(1);
+        const answer = JSON.stringify(
+          toolResultEntries(await replacement.sink.project()).find((entry) =>
+            entry.message?.parts?.some(
+              (part) => part.functionResponse?.id === 'call-2',
+            ),
+          )?.message?.parts,
+        );
+        expect(answer).toContain(
+          joined
+            ? 'Teammate \\"alice\\" started in the background'
+            : 'did not join the team as \\"alice\\": the turn was interrupted before the join.',
+        );
+      } finally {
+        await replacement.close();
+      }
+    });
+  }
 
   it('the interrupted-turn settlement folds the wait and answers the gaps, replayed silently (R1-3)', async () => {
     await parkWedged(true);

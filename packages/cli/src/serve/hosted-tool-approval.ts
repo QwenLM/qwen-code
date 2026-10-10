@@ -37,8 +37,9 @@ export interface HostedApprovalSettings {
 const PREAPPROVED_TOOLS: Readonly<
   Record<Exclude<HostedApprovalMode, 'yolo'>, readonly string[]>
 > = {
-  default: ['read_file'],
-  'auto-edit': ['read_file', 'write_file', 'edit'],
+  // H4e-b1: task_list only reads the lead's journal.
+  default: ['read_file', 'task_list'],
+  'auto-edit': ['read_file', 'write_file', 'edit', 'task_list'],
 };
 
 // `glob` ships with the `/2` search profiles, so those pre-approve it and no

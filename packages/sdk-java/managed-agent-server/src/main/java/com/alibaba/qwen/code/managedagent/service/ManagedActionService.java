@@ -36,7 +36,7 @@ public class ManagedActionService {
     private static final int INPUT_PREVIEW_BYTES = 8192;
     private static final Set<String> PREVIEW_TOOLS =
             Set.of("read_file", "write_file", "edit", "run_shell_command",
-                    "agent");
+                    "agent", "team_create", "task_create", "task_update");
     private final ManagedAgentService sessions;
     private final ManagedActionStore actions;
     private final ManagedExtensionRecordStore resources;

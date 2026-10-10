@@ -423,6 +423,53 @@ class SessionLifecycleCoordinatorTest {
         }
     }
 
+    // H4e-b1 (#13745 E3): a team member is a child_agent run, so the lead's
+    // close cascades over it like any child, and the team's own records
+    // are never written during close — the lifecycle gate admits none.
+    @Test
+    void aLeadWithAnOpenTeamCancelsItsMemberAndWritesNoTeamRecord() {
+        World world = closingWorld("team-");
+        liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
+        for (String[] record : new String[][] {
+                {"team_state", "team-1"}, {"team_task", "team-1#1"}}) {
+            world.jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+                            + " (session_scope_key, record_key, tenant_id,"
+                            + " workspace_id, session_id, domain, record_id,"
+                            + " operation_hash, revision, record_resource_id,"
+                            + " created_at)"
+                            + " VALUES ('scope-parent', ?, 'tenant',"
+                            + " 'workspace', ?, ?, ?, 'h', 1, ?, 1)",
+                    record[1] + "-key", world.session, record[0], record[1],
+                    "res-" + record[1]);
+        }
+        var harness = new CascadingHarness(true, false);
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(world.store,
+                    new ManagedSessionStore(world.jdbc), harness,
+                    warmer(true, false), world.relayStore, new ObjectMapper(),
+                    admissions(world.store, warmer(true, false)),
+                    brokerProvider(null), executor,
+                    Clock.systemUTC(), world.properties);
+            try {
+                redispatchUntil(coordinator, world, "COMPLETED");
+                assertThat(world.store.requireSession("tenant", world.child)
+                        .status()).isEqualTo("CLOSED");
+                assertThat(harness.operations)
+                        .extracting(op -> op.get("kind"))
+                        .containsSequence("cancel", "close_scope")
+                        .allMatch(kind -> List.of("dispatch_started", "attach",
+                                "cancel", "close_scope").contains(kind));
+                assertThat(world.jdbc.queryForList("SELECT revision FROM"
+                                + " qwen_managed_session_extension_record"
+                                + " WHERE session_id = ? AND domain LIKE"
+                                + " 'team_%'", Long.class, world.session))
+                        .containsExactly(1L, 1L);
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
     @Test
     void aChildThatCannotCloseLeavesTheParentCloseReArmed() {
         World world = closingWorld("stuck-");

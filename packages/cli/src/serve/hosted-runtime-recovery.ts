@@ -44,6 +44,11 @@ import {
   truncateHostedGlobResponse,
 } from './hosted-workspace-tool-turn.js';
 import {
+  hostedTeamName,
+  hostedTeammateOfRun,
+  hostedTeammateStartedText,
+} from './hosted-team-tools.js';
+import {
   endHostedAction,
   readHostedActionOptions,
 } from './hosted-tool-approval.js';
@@ -625,9 +630,36 @@ export async function fillParkedRoundAgentGaps(input: {
               hostedChildRunIdFor(input.promptId, callId),
           ),
         );
+        // H4e-b1: a named launch the interruption left unanswered joined
+        // its team only if the join committed; the fill is not a replay of
+        // the call, so it says which, and never joins on its own.
+        const named = part.functionCall?.args?.['name'];
+        const teammate =
+          named === undefined
+            ? undefined
+            : hostedTeamName(named, 'Teammate').name;
+        const joined =
+          teammate === undefined
+            ? undefined
+            : hostedTeammateOfRun(
+                input.managed.authority,
+                admitted.run.executionCallId ??
+                  hostedChildRunIdFor(input.promptId, callId),
+              );
         await writeFold(
           convertToFunctionResponse(name, callId, [
-            { text: hostedAgentBackgroundStartedText(taskId) },
+            {
+              text:
+                teammate === undefined
+                  ? hostedAgentBackgroundStartedText(taskId)
+                  : hostedTeammateStartedText(
+                      taskId,
+                      teammate,
+                      joined === undefined
+                        ? 'the turn was interrupted before the join.'
+                        : undefined,
+                    ),
+            },
           ]),
         );
         filled += 1;

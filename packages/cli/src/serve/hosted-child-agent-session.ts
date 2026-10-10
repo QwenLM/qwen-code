@@ -53,6 +53,7 @@ import {
   managedExtensionRecordKey,
   managedTaskId,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
+import { parseTeamState } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
 import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
 import {
   stripDisplayControlChars,
@@ -163,13 +164,20 @@ export function childResultNotificationText(params: {
   readonly taskId: string;
   readonly description: string;
   readonly text: string;
+  /** H4e-b1: the team member name the child run joined as, if any. */
+  readonly teammate?: string;
 }): string {
   const head = [
     '<task-notification>',
     `<task-id>${escapeXml(params.taskId)}</task-id>`,
     '<kind>child_agent</kind>',
+    ...(params.teammate === undefined
+      ? []
+      : [`<teammate>${escapeXml(params.teammate)}</teammate>`]),
     '<status>completed</status>',
-    `<summary>Child agent "${escapeXml(truncateNotificationLabel(params.description))}" finished.</summary>`,
+    params.teammate === undefined
+      ? `<summary>Child agent "${escapeXml(truncateNotificationLabel(params.description))}" finished.</summary>`
+      : `<summary>Teammate "${escapeXml(params.teammate)}" finished "${escapeXml(truncateNotificationLabel(params.description))}".</summary>`,
     '<result>',
   ].join('\n');
   const tail = '</result>\n</task-notification>';
@@ -613,6 +621,7 @@ export class HostedChildAgentSession {
               text: (await this.store.resources.read(resultRef)).toString(
                 'utf8',
               ),
+              teammate: this.teammateOf(childRunId),
             }),
           }),
           'utf8',
@@ -625,6 +634,19 @@ export class HostedChildAgentSession {
       ),
       wakeReason: 'input',
     };
+  }
+
+  /** H4e-b1: the name a child run joined its lead's team as, if any. */
+  private teammateOf(childRunId: string): string | undefined {
+    for (const entry of this.store.authority.extensionRecordsInDomain(
+      'team_state',
+    )) {
+      const member = parseTeamState(entry.record).members.find(
+        (each) => each.childRunId === childRunId,
+      );
+      if (member !== undefined) return member.name;
+    }
+    return undefined;
   }
 
   private mustRecord(childRunId: string): ChildAgentRun {

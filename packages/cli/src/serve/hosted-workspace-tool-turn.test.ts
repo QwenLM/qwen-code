@@ -50,6 +50,7 @@ import {
   HOSTED_AGENT_TOOL,
   type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
+import { HOSTED_TEAM_TOOLS } from './hosted-team-tools.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import {
   HOSTED_TOOL_APPROVAL_POLICY,
@@ -3314,10 +3315,14 @@ it('admits exactly the declared native tools to the version 2 input preview', ()
     'edit',
     'run_shell_command',
     'agent',
+    'team_create',
+    'task_create',
+    'task_update',
   ]);
   const declared = [
     ...HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name),
     HOSTED_AGENT_TOOL.name,
+    ...HOSTED_TEAM_TOOLS.map((tool) => tool.name),
   ];
   for (const name of HOSTED_INPUT_PREVIEW_TOOLS)
     expect(declared).toContain(name);

@@ -2,7 +2,7 @@
 
 [English](2026-10-10-managed-agent-team-lead-runtime.md) | [简体中文](2026-10-10-managed-agent-team-lead-runtime.zh-CN.md)
 
-状态:提议中。本文档在实现开始之前固定决策;其中描述的内容尚未实现。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 **H4e** 的第一个运行时切片,即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段,由 [#13745](https://github.com/QwenLM/qwen-code/issues/13745) 跟踪。它建立在 H4b([child Session 运行时](2026-10-07-managed-child-session-runtime.zh-CN.md),#13550)与 H4e-a([团队记录契约](2026-10-10-managed-agent-teams.zh-CN.md),#13811)之上,首次生产后者的四个团队记录体与 lead Session 规则。
+状态:运行时已实现,`team_state` 与 `team_task` 仍不开放提交。已落地:五个团队工具、Agent 工具的 `name`、lead 的团队漏斗、带名字的成员通知、重开白名单,以及审批与预览列表,并有放开 domain 门禁的测试。仍待完成:决策 10 的最后一步,即在实机验收之后启用这两个 domain。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 **H4e** 的第一个运行时切片,即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段,由 [#13745](https://github.com/QwenLM/qwen-code/issues/13745) 跟踪。它建立在 H4b([child Session 运行时](2026-10-07-managed-child-session-runtime.zh-CN.md),#13550)与 H4e-a([团队记录契约](2026-10-10-managed-agent-teams.zh-CN.md),#13811)之上,首次生产后者的四个团队记录体与 lead Session 规则。
 
 ## 问题与范围
 

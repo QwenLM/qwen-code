@@ -2,7 +2,7 @@
 
 [English](2026-10-10-managed-agent-team-lead-runtime.md) | [简体中文](2026-10-10-managed-agent-team-lead-runtime.zh-CN.md)
 
-Status: proposed. This document pins the decisions before implementation begins; nothing it describes is implemented yet. This is the first runtime slice of **H4e** of [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380), tracked by [#13745](https://github.com/QwenLM/qwen-code/issues/13745). It builds on H4b ([child Session runtime](2026-10-07-managed-child-session-runtime.md), #13550) and H4e-a ([team record contract](2026-10-10-managed-agent-teams.md), #13811), whose four team bodies and lead-Session rules it produces for the first time.
+Status: the runtime is implemented, with `team_state` and `team_task` still disabled for submission. Landed: the five team tools, the Agent tool's `name`, the lead's team funnel, the labeled member notification, the reopen whitelist, and the approval and preview lists, with tests that lift the domain gate. Still pending: the last step of decision 10, enabling both domains after a physical acceptance pass. This is the first runtime slice of **H4e** of [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380), tracked by [#13745](https://github.com/QwenLM/qwen-code/issues/13745). It builds on H4b ([child Session runtime](2026-10-07-managed-child-session-runtime.md), #13550) and H4e-a ([team record contract](2026-10-10-managed-agent-teams.md), #13811), whose four team bodies and lead-Session rules it produces for the first time.
 
 ## Problem and scope
 
