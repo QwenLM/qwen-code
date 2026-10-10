@@ -127,6 +127,13 @@ public class ManagedAgentProperties {
                             + " a supported Harness, Session Store and Session-isolated"
                             + " local-process Broker with Workspace mounts");
         }
+        // A definition Session publishes its instructions through the
+        // Session Store at Harness create, so the Harness implies the
+        // Store even when Workspace files are off (D8c-2).
+        if (harness.isEnabled() && !sessionStore.isEnabled()) {
+            throw new IllegalStateException(
+                    "Hosted Harness requires the Managed Session Store");
+        }
         if (automation.isEnabled()) {
             // A non-positive value fails at tick time, nearly silently:
             // 0 slots per tick stops every scheduled fire behind one

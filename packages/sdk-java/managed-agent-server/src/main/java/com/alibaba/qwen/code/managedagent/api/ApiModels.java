@@ -603,7 +603,8 @@ public final class ApiModels {
 
     /**
      * An AgentDefinition revision's content (D8a). The server stores and
-     * digests it; no field changes Session execution yet.
+     * digests it; a Session pinned to a revision executes its
+     * permission_policy, tools, model and instructions (D8b/D8c).
      */
     public record AgentDefinitionRequest(
             @NotNull Map<String, Object> model,

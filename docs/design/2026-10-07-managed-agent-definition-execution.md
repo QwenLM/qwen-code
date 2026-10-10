@@ -246,7 +246,7 @@ The original plan splits delivery into two slices. Both slices are now implement
 
 1. **PR A, D8b and D8c-1 (Java only):** pinning, compilation of the approval
    mode and tool profile, the refusal rules, the new column (the next free
-   Flyway version on `main` at merge time) and contract 1.34. Definitions then
+   Flyway version on `main` at merge time) and contract 1.41. Definitions then
    have their first real effect: selecting the approval mode, and `files/2`
    on deployments that have opted in.
 2. **PR B, D8c-2 (Java and Hosted Harness):** delivery, pinning,

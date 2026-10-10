@@ -74,7 +74,7 @@ final class WorkspaceRecoveryReader {
                         // commits; it stays PUBLISHED for its whole life.
                         || "managed-agent-instructions".equals(text(ref, "kind"))
                                 && number(row, "byte_length") >= 0
-                                && number(row, "byte_length") <= 64 * 1024);
+                                && number(row, "byte_length") <= ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES);
                 check(("REFERENCED".equals(row.get("state")) || published) && row.get("object_key") == null
                         && row.get("object_version_id") == null && row.get("encryption_key_id") == null,
                         "resource_layout_unsupported");

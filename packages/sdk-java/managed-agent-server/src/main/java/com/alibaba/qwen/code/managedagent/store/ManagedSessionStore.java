@@ -781,7 +781,7 @@ public class ManagedSessionStore {
             String workspaceId, String sessionId, String instructions) {
         validateScope(tenantId, workspaceId, sessionId);
         byte[] bytes = instructions.getBytes(StandardCharsets.UTF_8);
-        if (bytes.length > 64 * 1024) {
+        if (bytes.length > ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES) {
             throw payloadTooLarge("Agent instructions exceed 64 KiB.");
         }
         String digest = sha256(bytes);
@@ -1437,7 +1437,8 @@ public class ManagedSessionStore {
                     || "PUBLISHED".equals(resource.state()) && resource.schemaVersion() == 1
                         && (resource.byteLength() > 0 && resource.byteLength() <= toolResultLimit(resource.kind())
                             || "managed-agent-instructions".equals(resource.kind())
-                                && resource.byteLength() >= 0 && resource.byteLength() <= 64 * 1024))
+                                && resource.byteLength() >= 0
+                                && resource.byteLength() <= ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES))
                 || resource.bytes() == null
                 || resource.objectKey() != null
                 || resource.objectVersionId() != null

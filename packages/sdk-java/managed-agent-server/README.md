@@ -37,8 +37,10 @@ The test-tree `SurfaceRegistry` names every mounted route, internal ones
 included, with its admission rule class; `SurfaceRegistryGateTest` fails any
 mounted route the registry lacks, so a new public or WebShell route needs both
 a spec operation and a registry entry ([actor-roles design](../../../docs/design/2026-10-07-managed-agent-actor-roles.md), D5).
-Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
-`1`) when they are created. `POST /v1/agents`, `GET /v1/agents/{id}` and
+Sessions created for the built-in `qwen-code` agent record the agent revision
+from `QWEN_MANAGED_AGENT_REVISION` (default `1`); a Session pinned to a stored
+definition records the revision it resolved at admission. `POST /v1/agents`,
+`GET /v1/agents/{id}` and
 `POST /v1/agents/{id}` store tenant-scoped, immutable AgentDefinition
 revisions; a Session pinned to one executes that stored revision (see "Stored
 agent execution" below). Every response carries `X-Request-Id`, which error

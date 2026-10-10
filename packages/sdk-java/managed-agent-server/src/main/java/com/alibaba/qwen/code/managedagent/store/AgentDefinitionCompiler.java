@@ -57,7 +57,8 @@ final class AgentDefinitionCompiler {
         }
         Object instructions = definition.get("instructions");
         if (instructions != null && (!(instructions instanceof String text)
-                || text.getBytes(StandardCharsets.UTF_8).length > 64 * 1024)) {
+                || text.getBytes(StandardCharsets.UTF_8).length
+                        > ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES)) {
             throw unsupported("instructions");
         }
         String approvalMode = deploymentApprovalMode;

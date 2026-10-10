@@ -598,7 +598,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 new LoadHarnessSession(session.sessionId(),
                         managedSessionStore(session),
                         session.harnessBootId() != null, toolProfile(session),
-                        false, false).withChildWorkspaces(childWorkspaces)
+                        false, false)
+                        .withAgentDefinition(agentDefinition(session, false))
+                        .withChildWorkspaces(childWorkspaces)
                         .withStoppedMessages());
         if (session.workspace() != null && !actions.approvalMode(tenantId,
                 sessionId).equals(attached.getApprovalMode())) {
