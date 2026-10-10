@@ -551,7 +551,7 @@ function stripWorkspaceOverrides(
 
 type TightenOnlyEntry = (typeof WORKSPACE_TIGHTEN_ONLY_SETTINGS)[number];
 
-type TightenOnlyVerdict =
+export type TightenOnlyVerdict =
   | { kept: true }
   | { kept: false; reason: 'system-sets' }
   | {
@@ -604,6 +604,33 @@ function tightenOnlyVerdict(
   if (rank > baseline) return { kept: true };
   if (rank === baseline) return { kept: false, reason: 'same' };
   return { kept: false, reason: 'looser', against };
+}
+
+/**
+ * Verdict for a workspace-scope write of `key` with `value`, or `undefined`
+ * when the key is not tighten-only. Write routes consult this so they can
+ * refuse a write the merge strips at every load: persisting it answers 200
+ * with the value never taking effect and leaves a dead committable entry in
+ * the repository.
+ *
+ * The requested value stands in for the workspace file — the merge judges the
+ * value a write would leave there, not the one currently on disk. `kept` and
+ * `same` writes stay acceptable: `same` merely repeats the value already in
+ * force and loses nothing.
+ */
+export function workspaceTightenOnlyWriteVerdict(
+  key: string,
+  value: unknown,
+  scopes: { system: Settings; systemDefaults: Settings; user: Settings },
+): TightenOnlyVerdict | undefined {
+  const entry = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+    (candidate) => `${candidate.section}.${candidate.key}` === key,
+  );
+  if (!entry) return undefined;
+  const workspaceCandidate = {
+    [entry.section]: { [entry.key]: value },
+  } as unknown as Settings;
+  return tightenOnlyVerdict(entry, workspaceCandidate, scopes);
 }
 
 /**

@@ -16,6 +16,7 @@ import {
   getDialogSettingKeys,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
   WORKSPACE_TIGHTEN_ONLY_SETTINGS,
+  WORKSPACE_TIGHTEN_ONLY_SETTING_KEYS,
   // Business logic utilities
   TEST_ONLY,
   settingExistsInScope,
@@ -1241,6 +1242,8 @@ describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
       'agents.crossSessionInbound',
       'general.enableAutoUpdate',
     ]);
+    // The derived export feeds the daemon write guard; it must stay in sync.
+    expect(WORKSPACE_TIGHTEN_ONLY_SETTING_KEYS).toEqual(keys);
     for (const key of keys) {
       expect(WORKSPACE_RESTRICTED_SETTING_KEYS).not.toContain(key);
     }

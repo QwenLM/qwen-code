@@ -373,6 +373,12 @@ export const WORKSPACE_TIGHTEN_ONLY_SETTINGS = [
   readonly strictness: (value: unknown) => number;
 }>;
 
+/** The tighten-only settings as flattened dotted keys, e.g. `general.enableAutoUpdate`. */
+export const WORKSPACE_TIGHTEN_ONLY_SETTING_KEYS: readonly string[] =
+  WORKSPACE_TIGHTEN_ONLY_SETTINGS.map(
+    ({ section, key }) => `${section}.${key}`,
+  );
+
 /** The restricted settings as flattened dotted keys, e.g. `tools.workflowsEnabled`. */
 export const WORKSPACE_RESTRICTED_SETTING_KEYS: readonly string[] =
   WORKSPACE_RESTRICTED_SETTINGS.map(({ section, key }) => `${section}.${key}`);
