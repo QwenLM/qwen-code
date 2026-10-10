@@ -4967,6 +4967,11 @@ export class LlmClient {
           // shell inspection stagnation, and per-turn tool-call cap). These fire
           // before the skipLoopDetection gate so they cannot be bypassed by
           // configuration.
+          // The budget records before those checks run: a halted batch's
+          // over-count is harmless only because every core halt is terminal
+          // (the halt branch below returns the turn, and the next interaction
+          // resets the budget). Keep any future non-terminal core halt from
+          // silently counting calls that never executed.
           if (
             event.type === LlmEventType.ToolCallRequest &&
             !duplicateLoopGuardRequest
@@ -4980,7 +4985,13 @@ export class LlmClient {
             );
           } else if (event.type === LlmEventType.Finished) {
             this.toolExplorationBudget.commit();
-          } else if (event.type === LlmEventType.Retry) {
+          } else if (
+            event.type === LlmEventType.Retry ||
+            event.type === LlmEventType.ModelFallback
+          ) {
+            // A model fallback restarts the attempt from scratch exactly
+            // like a retry (Turn clears pendingToolCalls for both), so the
+            // failed attempt's reads must not stay counted.
             this.toolExplorationBudget.rollback();
           }
           const alwaysOnLoop =

@@ -760,8 +760,14 @@ export class LoopDetectionService {
     // cannot push it over the threshold. The adaptive cap's repeat tracker is
     // cleared (consistent with how the heuristic path clears
     // globalToolCallCounts on retry): the replayed calls re-populate it, and a
-    // stuck pattern simply re-accumulates toward the threshold.
-    if (event.type === LlmEventType.Retry) {
+    // stuck pattern simply re-accumulates toward the threshold. A model
+    // fallback restarts the attempt from scratch exactly like a retry (Turn
+    // clears pendingToolCalls for both), so the discarded attempt's calls
+    // must not stay counted here either.
+    if (
+      event.type === LlmEventType.Retry ||
+      event.type === LlmEventType.ModelFallback
+    ) {
       this.turnToolCallTotal = this.turnToolCallTotalCommitted;
       this.resetToolCallCount();
       this.capKeyCounts.clear();
