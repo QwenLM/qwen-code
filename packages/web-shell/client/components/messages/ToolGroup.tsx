@@ -179,13 +179,15 @@ export function extractDiff(tool: ACPToolCall): string {
   const rawFileDiff = getRawFileDiff(tool);
   if (rawFileDiff) return rawFileDiff;
 
+  // Pending previews stay compact; settled and confirmed diffs retain full context.
+  const buildDiff =
+    tool.status === 'pending' || tool.status === 'in_progress'
+      ? buildContextBoundedDiff
+      : buildUnifiedDiff;
+
   if (tool.content) {
     const diffBlock = tool.content.find((b) => b.type === 'diff');
     if (diffBlock && diffBlock.type === 'diff') {
-      const buildDiff =
-        tool.status === 'pending' || tool.status === 'in_progress'
-          ? buildContextBoundedDiff
-          : buildUnifiedDiff;
       return buildDiff(diffBlock.oldText || '', diffBlock.newText || '');
     }
   }
@@ -202,10 +204,6 @@ export function extractDiff(tool: ACPToolCall): string {
     typeof previewNewText === 'string' ||
     typeof previewOldText === 'string'
   ) {
-    const buildDiff =
-      tool.status === 'pending' || tool.status === 'in_progress'
-        ? buildContextBoundedDiff
-        : buildUnifiedDiff;
     return buildDiff(
       typeof previewOldText === 'string' ? previewOldText : '',
       typeof previewNewText === 'string' ? previewNewText : '',

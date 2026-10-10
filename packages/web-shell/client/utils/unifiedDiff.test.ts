@@ -28,6 +28,37 @@ describe('buildContextBoundedDiff', () => {
     const diff = buildContextBoundedDiff('', 'line\n'.repeat(2_000));
     expect(diff).toContain('Diff omitted because it is too large');
     expect(diff).not.toContain('@@');
+    expect(parseUnifiedDiff(diff).lines).toMatchObject([{ type: 'header' }]);
+  });
+
+  it('omits raw payloads over the character budget before trimming', () => {
+    const oldLines = Array.from(
+      { length: 40_000 },
+      (_, i) => `payload_line_${i}`,
+    );
+    const newLines = [...oldLines];
+    newLines[20_000] = 'changed';
+    const oldText = oldLines.join('\n');
+    const newText = newLines.join('\n');
+    expect(oldText.length + newText.length).toBeGreaterThan(100_000);
+
+    const diff = buildContextBoundedDiff(oldText, newText);
+    expect(diff).toContain(
+      'Diff omitted because it is too large to display safely.',
+    );
+    expect(parseUnifiedDiff(diff).lines).toMatchObject([{ type: 'header' }]);
+  });
+
+  it('omits rendered output over the character budget with few rows', () => {
+    const oldText = 'a'.repeat(49_997);
+    const newText = 'b'.repeat(49_997);
+    expect(oldText.length + newText.length).toBeLessThanOrEqual(100_000);
+
+    const diff = buildContextBoundedDiff(oldText, newText);
+    expect(diff).toContain(
+      'Diff omitted because it is too large to display safely.',
+    );
+    expect(parseUnifiedDiff(diff).lines).toMatchObject([{ type: 'header' }]);
   });
 
   it.each([

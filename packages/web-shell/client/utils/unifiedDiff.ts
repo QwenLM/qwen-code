@@ -66,7 +66,7 @@ export function buildContextBoundedDiff(
   oldText: string,
   newText: string,
 ): string {
-  const omitted = ' Diff omitted because it is too large to display safely.';
+  const omitted = '\\ Diff omitted because it is too large to display safely.';
   if (oldText.length + newText.length > 100_000) return omitted;
   const oldLines = splitLines(oldText);
   const newLines = splitLines(newText);
