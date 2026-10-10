@@ -261,6 +261,7 @@ const workerBuild = esbuild.build({
   entryPoints: {
     fzfWorker: 'packages/core/src/utils/filesearch/fzfWorker.ts',
     'glob-search-worker': 'packages/core/src/tools/glob-search-worker.ts',
+    'mod-worker': 'packages/core/src/mods/mod-worker.ts',
   },
   bundle: true,
   outdir: 'dist',

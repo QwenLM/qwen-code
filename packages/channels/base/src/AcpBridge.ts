@@ -540,6 +540,12 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           typeof update['kind'] === 'string' ? update['kind'] : '';
         const meta = update['_meta'] as Record<string, unknown> | undefined;
         if (
+          meta?.['toolLifecycle'] !== undefined &&
+          update['status'] === undefined &&
+          update['content'] === undefined
+        )
+          break;
+        if (
           type === 'tool_call_update' &&
           !explicitKind &&
           update['status'] === 'in_progress' &&

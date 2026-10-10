@@ -272,6 +272,8 @@ export async function settlePendingMonitorInputs(params: {
   /** The notification sources to settle; H5 adds `channel` and H6 adds
    * `automation` to the monitor family. */
   readonly sources?: readonly string[];
+  /** Why the inputs never ran; a close by default. */
+  readonly stopReason?: string;
 }): Promise<number> {
   const sources = params.sources ?? ['monitor', 'child_agent'];
   // The whole committed prefix, not a bounded page: a notification input
@@ -305,7 +307,7 @@ export async function settlePendingMonitorInputs(params: {
       systemPayload: {
         promptId: input.turnId,
         state: 'cancelled',
-        stopReason: 'session_closing',
+        stopReason: params.stopReason ?? 'session_closing',
         endedAt: Date.now(),
       },
     };
