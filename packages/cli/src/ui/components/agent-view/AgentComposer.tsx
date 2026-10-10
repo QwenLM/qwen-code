@@ -24,6 +24,9 @@ import {
   ApprovalMode,
   APPROVAL_MODES,
 } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { AgentCore } from '@qwen-code/qwen-code-core/agents/runtime/agent-core.js';
+import { tokenLimit } from '@qwen-code/qwen-code-core/core/tokenLimits.js';
 import {
   useAgentViewState,
   useAgentViewActions,
@@ -76,6 +79,34 @@ export function getAgentComposerLayoutKey(parts: {
     parts.queuedMessageCount,
     parts.inputText,
   ].join('|');
+}
+
+/**
+ * The context window the agent tab's usage line is sized against. An agent
+ * on the session's model shares the session's window. An agent on its own
+ * model gets that model's window: the one its registry entry declares, else
+ * the model's known limit. Its runtime config is no guide here, because a
+ * same-provider agent inherits the session's window when the registry
+ * declares none, and a cross-provider agent has no window at all.
+ */
+export function getAgentContextWindowSize(
+  config: Pick<Config, 'getContentGeneratorConfig' | 'getModel'> &
+    Partial<Pick<Config, 'getModelsConfig'>>,
+  core: Pick<AgentCore, 'modelConfig' | 'runtimeView'> | undefined,
+): number | undefined {
+  const sessionConfig = config.getContentGeneratorConfig();
+  const agentModel = core?.modelConfig.model;
+  if (!agentModel || agentModel === config.getModel()) {
+    return sessionConfig?.contextWindowSize;
+  }
+  const route = core?.runtimeView?.contentGeneratorConfig ?? sessionConfig;
+  const declared = route?.authType
+    ? config
+        .getModelsConfig?.()
+        ?.getResolvedModel(route.authType, agentModel, route.baseUrl)
+        ?.generationConfig.contextWindowSize
+    : undefined;
+  return declared ?? tokenLimit(agentModel, 'input');
 }
 
 // ─── Component ──────────────────────────────────────────────
@@ -380,9 +411,10 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
         <AgentFooter
           approvalMode={agentApprovalMode}
           promptTokenCount={lastPromptTokenCount}
-          contextWindowSize={
-            config.getContentGeneratorConfig()?.contextWindowSize
-          }
+          contextWindowSize={getAgentContextWindowSize(
+            config,
+            interactiveAgent?.getCore(),
+          )}
           terminalWidth={terminalWidth}
         />
       </Box>
