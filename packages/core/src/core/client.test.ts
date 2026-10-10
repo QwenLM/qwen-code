@@ -8446,7 +8446,9 @@ Other open files:
       expect(reminderIndex).toBeGreaterThanOrEqual(0);
       const responseIndex = reminderRequest.findIndex(
         (part) =>
-          typeof part === 'object' && part !== null && 'functionResponse' in part,
+          typeof part === 'object' &&
+          part !== null &&
+          'functionResponse' in part,
       );
       expect(reminderIndex).toBeGreaterThan(responseIndex);
 
@@ -8456,7 +8458,8 @@ Other open files:
       await run([fnResponse('read_file', { ok: true })], promptId, {
         type: SendMessageType.ToolResult,
       });
-      const afterReminderRequest = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+      const afterReminderRequest = mockTurnRunFn.mock
+        .lastCall?.[1] as unknown[];
       expect(explorationReminders(afterReminderRequest)).toHaveLength(0);
 
       // A new user interaction resets the phase: the count starts over, so
@@ -8595,7 +8598,10 @@ Other open files:
       await run([{ text: 'explore' }], promptId);
 
       mockTurnRunFn.mockReturnValueOnce(
-        turnStream(toolCallRequest('call-2', 'read_file', { path: 'b' }), stopped()),
+        turnStream(
+          toolCallRequest('call-2', 'read_file', { path: 'b' }),
+          stopped(),
+        ),
       );
       await run([fnResponse('read_file', { ok: true })], promptId, {
         type: SendMessageType.ToolResult,
