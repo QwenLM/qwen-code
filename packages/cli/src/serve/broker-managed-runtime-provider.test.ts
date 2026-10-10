@@ -1296,7 +1296,7 @@ describe('BrokerManagedRuntimeProvider', () => {
     provider.dispose();
   });
 
-  it('re-prepares an execution after a Broker request timeout', async () => {
+  it('re-prepares an execution after a transport fault on a live request signal', async () => {
     let prepares = 0;
     const preparedStatus = {
       state: 'prepared' as const,
@@ -1311,9 +1311,11 @@ describe('BrokerManagedRuntimeProvider', () => {
       if (url.endsWith('tool-sessions:acquire'))
         return json(envelope({ acquired: true }));
       if (url.endsWith('/executions:prepare')) {
-        // A Broker stalled past BROKER_REQUEST_TIMEOUT_MS rejects with a
-        // DOMException (undici's TimeoutError): transport-shaped, so the
-        // rejected reservation must be evicted, not cached for the session.
+        // A DOMException rejection while the request signal is still live —
+        // not the request timeout: a real timeout aborts the composite
+        // signal before fetch rejects, and the gate then skips the in-band
+        // retry. Transport-shaped, so the rejected reservation must be
+        // evicted, not cached for the session.
         if (++prepares <= 2)
           throw new DOMException(
             'The operation was aborted due to timeout',
@@ -1355,17 +1357,63 @@ describe('BrokerManagedRuntimeProvider', () => {
     provider.dispose();
   });
 
+  it('does not re-drive a prepare in-band after its signal aborts', async () => {
+    let prepares = 0;
+    let rejectPrepare: ((reason?: unknown) => void) | undefined;
+    const fetchImpl = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url.endsWith('tool-sessions:acquire'))
+        return Promise.resolve(json(envelope({ acquired: true })));
+      if (url.endsWith('/executions:prepare')) {
+        // The first prepare parks until dispose() aborts the request signal;
+        // a later prepare rejects at once, so a missing signal.aborted gate
+        // fails as a second prepare instead of hanging.
+        if (++prepares === 1)
+          return new Promise<Response>((_resolve, reject) => {
+            rejectPrepare = reject;
+          });
+        return Promise.reject(
+          new DOMException(
+            'The operation was aborted due to timeout',
+            'TimeoutError',
+          ),
+        );
+      }
+      return Promise.reject(new Error(`Unexpected Broker request: ${url}`));
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    const execution = client.execute(reference());
+    expect(rejectPrepare).toBeDefined();
+    provider.dispose();
+    rejectPrepare?.(
+      new DOMException(
+        'The operation was aborted due to timeout',
+        'TimeoutError',
+      ),
+    );
+    await expect(execution).rejects.toThrow('aborted due to timeout');
+    expect(prepares).toBe(1);
+  });
+
   it.each([
-    ['declared content-length', true] as const,
-    ['streamed body', false] as const,
+    ['declared content-length', true, 200] as const,
+    ['streamed body', false, 200] as const,
+    ['streamed 5xx body', false, 503] as const,
   ])(
     'caches an over-limit Broker body (%s) instead of re-driving it',
-    async (_label, declareLength) => {
+    async (_label, declareLength, status) => {
       let prepares = 0;
       const overLimit = () => {
         if (declareLength)
           return new Response('{}', {
-            status: 200,
+            status,
             headers: {
               'content-type': 'application/json',
               'content-length': String(9 * 1024 * 1024),
@@ -1379,7 +1427,7 @@ describe('BrokerManagedRuntimeProvider', () => {
               controller.close();
             },
           }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
+          { status, headers: { 'content-type': 'application/json' } },
         );
       };
       const fetchImpl = vi.fn<typeof fetch>(async (input) => {
@@ -1407,12 +1455,12 @@ describe('BrokerManagedRuntimeProvider', () => {
         name: 'BrokerWireError',
         message: expect.stringContaining('exceeded its limit'),
       });
-      expect(prepares).toBe(2);
+      expect(prepares).toBe(1);
       await expect(client.execute(reference())).rejects.toMatchObject({
         name: 'BrokerWireError',
         message: expect.stringContaining('exceeded its limit'),
       });
-      expect(prepares).toBe(2);
+      expect(prepares).toBe(1);
       provider.dispose();
     },
   );

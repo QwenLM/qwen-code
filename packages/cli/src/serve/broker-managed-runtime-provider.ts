@@ -540,7 +540,8 @@ export class ManagedRuntimeBrokerClient {
       if (
         signal.aborted ||
         (error instanceof BrokerResponseError &&
-          (error.status < 500 || error.retryable === false))
+          (error.status < 500 || error.retryable === false)) ||
+        (error instanceof BrokerWireError && !error.retryableByRedrive)
       ) {
         throw error;
       }
@@ -646,7 +647,11 @@ export class ManagedRuntimeBrokerClient {
             details['terminal'] === true &&
             details['reason'] === 'runtime_lost';
         }
-      } catch {
+      } catch (error) {
+        // An over-limit error body keeps its size classification: the limit
+        // is a deterministic property of the response, so it must stay
+        // cached rather than be re-driven as an unclassified failure.
+        if (error instanceof BrokerWireError) throw error;
         await response.body?.cancel().catch(() => undefined);
       }
       throw new BrokerResponseError(
