@@ -94,6 +94,19 @@ public interface HarnessConnector extends AutoCloseable {
                 "Child operations are unavailable");
     }
 
+    /**
+     * H5b/H5c: one channel operation onto the Session's journal, from the
+     * control plane's channel service (submit_input, claim_delivery,
+     * segment_receipt, settle_delivery, cancel_delivery, resend_delivery).
+     * The Hosted side settles it before answering, and the answer carries
+     * the operation's result.
+     */
+    default Map<String, Object> runChannelOperation(String tenantId,
+            String sessionId, Map<String, Object> body) {
+        throw new UnsupportedOperationException(
+                "Channel operations are unavailable");
+    }
+
     void rename(String tenantId, String sessionId, String title);
 
     /**
