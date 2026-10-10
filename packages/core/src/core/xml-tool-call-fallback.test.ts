@@ -1025,6 +1025,28 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     expect(result.remainingText).toBe('');
   });
 
+  it('does not excise a quoted value the block never consumed', () => {
+    // The flat scan binds the unclosed `command` value to the nested
+    // documentation element's closer, so the dispatched argument absorbs that
+    // raw markup. The nested element is a quoted-value range lying inside this
+    // block, but the block's own parameter scan never owned it: excising it
+    // from `unquotedParameters` hid the `<function=` opener from the
+    // rejected-opener guard. See #13492.
+    const text =
+      '<invoke name="shell">' +
+      PARAM_OPEN +
+      ' name="command">run\n' +
+      param('doc', '<function=b>' + FN_CLOSE) +
+      '\n' +
+      CLOSE;
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
   it('keeps a value-quoted call inert when the rescan steps over it', () => {
     // Fuzz-derived witness for the #13515 guard: on this input the close-tag
     // rescan never lands inside the quoted call, so the `valueSpans` skip is

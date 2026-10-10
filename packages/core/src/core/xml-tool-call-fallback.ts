@@ -447,6 +447,11 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     let cursor = 0;
     // Text-coordinate spans of the parameter elements this block consumed.
     const parameterSpans: Array<[number, number]> = [];
+    // Only the quoted values this block's own scan consumed may be excised
+    // from `unquotedParameters`: excising every quoted value that merely lies
+    // inside the block hides a call opener the flat scan dispatched verbatim
+    // inside an argument.
+    const consumedQuotedValues: Array<[number, number]> = [];
     PARAMETER_PATTERN.lastIndex = 0;
     let paramMatch: RegExpExecArray | null;
     while ((paramMatch = PARAMETER_PATTERN.exec(paramsBlock)) !== null) {
@@ -457,6 +462,7 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       let value = paramMatch[3];
       let parameterEnd = paramMatch.index + paramMatch[0].length;
       if (ownedRange) {
+        consumedQuotedValues.push(ownedRange);
         parameterEnd = ownedRange[1] - paramsStart;
         value = paramsBlock.slice(
           paramMatch.index + openTagEnd(paramMatch[0]),
@@ -475,8 +481,7 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     outsideParameters += paramsBlock.slice(cursor);
     let unquotedParameters = '';
     cursor = paramsStart;
-    for (const [start, end] of quotedValueRanges) {
-      if (start < paramsStart || end > closeStart) continue;
+    for (const [start, end] of consumedQuotedValues) {
       unquotedParameters += text.slice(cursor, start);
       cursor = end;
     }
