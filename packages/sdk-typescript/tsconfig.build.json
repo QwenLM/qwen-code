@@ -8,7 +8,14 @@
     "declarationMap": false,
     "sourceMap": false,
     "emitDeclarationOnly": true,
-    "removeComments": false
+    "removeComments": false,
+    // Reset the paths inherited from tsconfig.json: they map core subpaths to
+    // core sources for the cli bundle's esbuild discovery, but in this plain
+    // declaration build they would pull those sources into the program,
+    // re-root the inferred rootDir above this package, and nest every emitted
+    // .d.ts under dist/sdk-typescript/src/ (dropping dist/daemon/index.d.ts).
+    // Resolving core through its exports map keeps the dist layout stable.
+    "paths": {}
   },
   "include": ["src/**/*.ts"],
   "exclude": ["node_modules", "dist", "test", "**/*.test.ts", "**/*.spec.ts"]

@@ -61,6 +61,51 @@ function resolveSingle(records: ChatRecord[]): BranchPoint | undefined {
 }
 
 describe('branch points', () => {
+  it('creates and recovers checkpoints for turns with internal Code Mode evidence', () => {
+    const records = [
+      record('calls', null, 'assistant', [
+        { functionCall: { id: 'outer', name: 'exec', args: {} } },
+      ]),
+      ...[
+        ['nested-read', 'read_file'],
+        ['nested-goal', 'get_goal'],
+      ].map(
+        ([id, name], index): ChatRecord => ({
+          ...record(id, index === 0 ? 'calls' : 'nested-read', 'tool_result', [
+            {
+              functionResponse: { id, name, response: { output: 'internal' } },
+            },
+          ]),
+          subtype: 'code_mode_tool_result',
+          provenance: name === 'get_goal' ? 'goal_runtime' : 'tool_result',
+        }),
+      ),
+      record('outer-result', 'nested-goal', 'tool_result', [
+        {
+          functionResponse: {
+            id: 'outer',
+            name: 'exec',
+            response: { output: 'ok' },
+          },
+        },
+      ]),
+      record('answer', 'outer-result', 'assistant', [{ text: 'done' }]),
+    ];
+    expect(
+      resolveCompletedTurnBranchCandidateFromRecords({
+        records,
+        startExclusiveRecordUuid: null,
+        pendingCallsAtStart: [],
+      }),
+    ).toEqual({
+      startExclusiveRecordUuid: null,
+      endInclusiveRecordUuid: 'answer',
+      assistantRecordUuid: 'answer',
+    });
+    expect(
+      resolveSingle([...records, checkpoint('c1', 'answer', 'answer')]),
+    ).toMatchObject({ checkpointUuid: 'c1', assistantRecordUuid: 'answer' });
+  });
   it('resolves a durable checkpoint for a completed text turn', () => {
     const user = record('u1', null, 'user', [{ text: 'question' }]);
     const assistant = record('a1', 'u1', 'assistant', [{ text: 'answer' }]);

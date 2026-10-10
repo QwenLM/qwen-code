@@ -22,7 +22,7 @@ import {
 
 import { getMemoryBaseDir } from '../memory/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
-import { isGitRepository } from '../utils/gitUtils.js';
+import { isGitRepository, NO_EXEC_CONFIG } from '../utils/gitUtils.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import type { FileExclusions } from '../utils/ignorePatterns.js';
@@ -447,6 +447,10 @@ class GrepToolInvocation extends BaseToolInvocation<
         // `fatal: no pattern given` -- and that failure is swallowed by the
         // fallback below, which has the same flaw with a quieter symptom.
         const gitArgs = [
+          // `git grep` refreshes the index, which is what runs a
+          // repository-planted `core.fsmonitor` helper; only the `--untracked`
+          // below keeps this particular argv from doing so.
+          ...NO_EXEC_CONFIG,
           'grep',
           '--untracked',
           '-n',
@@ -680,7 +684,7 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
     super(
       GrepTool.Name,
       ToolDisplayNames.GREP,
-      'A powerful search tool for finding patterns in files\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Case-insensitive by default\n  - Use Agent tool for open-ended searches requiring multiple rounds\n',
+      'A powerful search tool for finding patterns in files\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Case-insensitive by default\n',
       Kind.Search,
       {
         properties: {

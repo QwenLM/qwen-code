@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { WebShellCustomizationProvider } from '../../customization';
 import { act, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -50,6 +51,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 }));
 
 const { TurnOutputs } = await import('./TurnOutputs');
+const styles = (await import('./TurnOutputs.module.css')).default;
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -103,7 +105,7 @@ afterEach(() => {
 });
 
 describe('TurnOutputs artifact downloads', () => {
-  it('shows Download for every available workspace artifact kind', () => {
+  it('shows Download for available and changed workspace artifact kinds', () => {
     const kinds = [
       'file',
       'link',
@@ -116,16 +118,18 @@ describe('TurnOutputs artifact downloads', () => {
       'document',
       'other',
     ];
-    const artifacts = kinds.map(
-      (kind, index) =>
-        ({
-          id: `artifact-${index}`,
-          kind,
-          storage: 'workspace',
-          status: 'available',
-          title: `${kind} artifact`,
-          workspacePath: `output/${kind}`,
-        }) as DaemonSessionArtifact,
+    const artifacts = kinds.flatMap((kind, index) =>
+      ['available', 'changed'].map(
+        (status) =>
+          ({
+            id: `artifact-${index}-${status}`,
+            kind,
+            storage: 'workspace',
+            status,
+            title: `${kind} ${status} artifact`,
+            workspacePath: `output/${kind}`,
+          }) as DaemonSessionArtifact,
+      ),
     );
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -166,12 +170,12 @@ describe('TurnOutputs artifact downloads', () => {
       Array.from(container.querySelectorAll('button')).filter(
         (button) => button.textContent?.trim() === 'Download',
       ),
-    ).toHaveLength(kinds.length);
+    ).toHaveLength(artifacts.length);
 
     act(() => root.unmount());
   });
 
-  it('downloads workspace bytes with the artifact basename', async () => {
+  it('downloads current changed workspace bytes with the artifact basename', async () => {
     const click = vi
       .spyOn(HTMLAnchorElement.prototype, 'click')
       .mockImplementation(() => {});
@@ -191,8 +195,10 @@ describe('TurnOutputs artifact downloads', () => {
                 id: 'artifact-1',
                 kind: 'pdf',
                 storage: 'workspace',
-                status: 'available',
+                status: 'changed',
                 title: 'Report',
+                sizeBytes: 3,
+                metadata: { 'qwen.workspace.sizeBytes': 2 },
                 workspacePath: 'reports/report.pdf',
                 mimeType: 'application/pdf',
               } as DaemonSessionArtifact,
@@ -216,12 +222,18 @@ describe('TurnOutputs artifact downloads', () => {
 
     expect(readFileBytes).toHaveBeenCalledWith('reports/report.pdf', {
       offset: 0,
-      maxBytes: 100 * 1024,
+      maxBytes: 256 * 1024,
     });
     expect(click).toHaveBeenCalledOnce();
     expect(click.mock.instances[0]?.download).toBe('report.pdf');
     expect(createdBlobs[0]?.type).toBe('application/pdf');
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:artifact');
+    const savedContent = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsText(createdBlobs[0]!);
+    });
+    expect(savedContent).toBe('abc');
 
     act(() => root.unmount());
   });
@@ -273,7 +285,7 @@ describe('TurnOutputs artifact downloads', () => {
     expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
     expect(secondaryReadFileBytes).toHaveBeenCalledWith('report.txt', {
       offset: 0,
-      maxBytes: 100 * 1024,
+      maxBytes: 256 * 1024,
     });
     expect(readFileBytes).not.toHaveBeenCalled();
     expect(click).toHaveBeenCalledOnce();
@@ -378,7 +390,8 @@ describe('TurnOutputs artifact downloads', () => {
         .querySelector<HTMLButtonElement>('button[title="changed.ts"]')
         ?.click();
       container
-        .querySelector<HTMLButtonElement>('button[title="Secondary artifact"]')
+        .querySelector<HTMLElement>('[title="report.txt"]')
+        ?.querySelector('button')
         ?.click();
       container
         .querySelector<HTMLButtonElement>('button[title="Secondary schedule"]')
@@ -480,7 +493,7 @@ describe('TurnOutputs artifact downloads', () => {
     act(() => root.unmount());
   });
 
-  it('does not show Download for managed, pending, or pathless artifacts', () => {
+  it('does not show Download for managed, unavailable, or pathless artifacts', () => {
     const artifacts = [
       {
         id: 'workspace-1',
@@ -505,6 +518,14 @@ describe('TurnOutputs artifact downloads', () => {
         status: 'pending',
         title: 'pending artifact',
         workspacePath: 'output/pending.txt',
+      },
+      {
+        id: 'missing-1',
+        kind: 'file',
+        storage: 'workspace',
+        status: 'missing',
+        title: 'missing artifact',
+        workspacePath: 'output/missing.txt',
       },
       {
         id: 'pathless-1',
@@ -618,7 +639,7 @@ describe('TurnOutputs artifact downloads', () => {
     expect(click).not.toHaveBeenCalled();
   });
 
-  it('disables Open for a missing workspace artifact and shows the recorded path', () => {
+  it('disables Open for a missing workspace artifact without showing its path', () => {
     const onOpenArtifact = vi.fn();
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -654,13 +675,267 @@ describe('TurnOutputs artifact downloads', () => {
       (button) => button.textContent?.trim() === 'Open',
     );
     expect(open?.disabled).toBe(true);
-    expect(container.textContent).toContain(
+    expect(open?.querySelector('svg')).not.toBeNull();
+    expect(container.textContent).not.toContain('w/agent/report.csv');
+    expect(open?.title).toBe('');
+    expect(open?.parentElement?.title).toBe(
       'File not found in the workspace · w/agent/report.csv',
     );
 
     act(() => open?.click());
     expect(onOpenArtifact).not.toHaveBeenCalled();
 
+    act(() => root.unmount());
+  });
+
+  it('opens a recorded link through the external opener instead of the panel', () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const onOpenRequest = vi.fn();
+    const onOpenArtifact = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-link"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'recorded-link',
+                kind: 'link',
+                storage: 'external_url',
+                status: 'available',
+                title: 'Recorded link',
+                url: 'https://platform.example.com/detail?id=7',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onOpenRequest={onOpenRequest}
+            onReviewChanges={() => {}}
+            onOpenArtifact={onOpenArtifact}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    // The card keeps a single control: the address it opens.
+    expect(container.querySelectorAll('button, a')).toHaveLength(1);
+    const link = container.querySelector('a');
+    expect(link?.textContent?.trim()).toBe('Open');
+    expect(link?.getAttribute('href')).toBe(
+      'https://platform.example.com/detail?id=7',
+    );
+    expect(link?.getAttribute('target')).toBe('_blank');
+    expect(link?.getAttribute('rel')).toBe('noopener noreferrer');
+
+    act(() => {
+      link?.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }),
+      );
+    });
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://platform.example.com/detail?id=7',
+    });
+    expect(onOpenRequest).not.toHaveBeenCalled();
+    expect(onOpenArtifact).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+    delete (window as { __TAURI__?: unknown }).__TAURI__;
+  });
+
+  it('shows a workspace file by its filename and keeps a link title', () => {
+    const onOpenRequest = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const workspaceArtifact = {
+      id: 'pptx',
+      kind: 'document',
+      storage: 'workspace',
+      status: 'available',
+      title: 'artifact_test 节点创建报告 PPT',
+      workspacePath: 'w/agent/artifact_test_节点创建报告.pptx',
+    } as DaemonSessionArtifact;
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-1"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              workspaceArtifact,
+              {
+                id: 'link-1',
+                kind: 'link',
+                storage: 'external_url',
+                status: 'available',
+                title: 'Table details',
+                url: 'https://example.com/orders',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onOpenRequest={onOpenRequest}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain('artifact_test_节点创建报告.pptx');
+    expect(container.textContent).not.toContain(
+      'artifact_test 节点创建报告 PPT',
+    );
+    expect(container.textContent).toContain('Table details');
+    expect(
+      container.querySelector('[title="artifact_test_节点创建报告.pptx"]'),
+    ).not.toBeNull();
+    const download = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Download',
+    );
+    expect(download?.getAttribute('title')).toBe(
+      'Download artifact_test_节点创建报告.pptx',
+    );
+
+    const open = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Open',
+    );
+    act(() => open?.click());
+    expect(onOpenRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'artifact',
+        title: 'artifact_test_节点创建报告.pptx',
+        artifact: workspaceArtifact,
+      }),
+    );
+
+    act(() => root.unmount());
+  });
+
+  it('ellipsizes artifact names without clamping scheduled-task titles', () => {
+    const taskTitle =
+      'Daily dependency audit and summary post for the platform team';
+    const artifact = {
+      id: 'artifact-1',
+      kind: 'file',
+      storage: 'workspace',
+      status: 'available',
+      title: 'Quarterly report',
+      workspacePath: 'reports/summary.html',
+    } as DaemonSessionArtifact;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-titles"
+            changes={[]}
+            artifacts={[artifact]}
+            scheduledTasks={[
+              {
+                id: 'task-1',
+                toolCallId: 'task-call',
+                title: taskTitle,
+                cron: '0 9 * * *',
+                prompt: 'audit',
+                recurring: true,
+                durable: true,
+              },
+            ]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const nodes = [...container.querySelectorAll('div')];
+    const artifactTitle = nodes.find(
+      (node) => node.textContent === 'summary.html',
+    );
+    const scheduledTitle = nodes.find((node) => node.textContent === taskTitle);
+    expect(artifactTitle?.className.split(/\s+/)).toEqual(
+      expect.arrayContaining([styles.title, styles.artifactTitle]),
+    );
+    expect(scheduledTitle?.className.split(/\s+/)).toContain(styles.title);
+    expect(scheduledTitle?.className.split(/\s+/)).not.toContain(
+      styles.artifactTitle,
+    );
+
+    act(() => root.unmount());
+  });
+});
+
+describe('host artifact visibility', () => {
+  it('filters before counting and updates without mutating the source artifacts', () => {
+    const artifacts = Array.from({ length: 6 }, (_, i) => ({
+      id: `a${i}`,
+      title: `Report ${i}`,
+      kind: 'file',
+      storage: 'workspace',
+      status: 'available',
+      workspacePath: `/primary/report-${i}.txt`,
+    })) as DaemonSessionArtifact[];
+    const originalArtifacts = structuredClone(artifacts);
+    artifacts.forEach(Object.freeze);
+    Object.freeze(artifacts);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const filterArtifact = vi.fn(
+      (artifact: DaemonSessionArtifact) => Number(artifact.id.slice(1)) >= 2,
+    );
+    const render = (filter = filterArtifact) =>
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <WebShellCustomizationProvider value={{ filterArtifact: filter }}>
+              <TurnOutputs
+                turnId="turn-1"
+                sourceSessionId="session-1"
+                changes={[]}
+                artifacts={artifacts}
+                scheduledTasks={[]}
+                onReviewChanges={() => {}}
+                onOpenArtifact={() => {}}
+                onOpenScheduledTask={() => {}}
+              />
+            </WebShellCustomizationProvider>
+          </I18nProvider>,
+        ),
+      );
+    render();
+    expect(container.textContent).not.toContain('report-0.txt');
+    expect(container.textContent).toContain('report-2.txt');
+    expect(container.textContent).not.toContain('report-5.txt');
+    expect(filterArtifact).toHaveBeenCalledWith(artifacts[0], {
+      turnId: 'turn-1',
+      sourceSessionId: 'session-1',
+    });
+    const more = Array.from(container.querySelectorAll('button')).find(
+      (button) => /1.*more|more.*1/i.test(button.textContent ?? ''),
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain('report-5.txt');
+    render(vi.fn(() => false));
+    expect(container.textContent).toBe('');
+    render();
+    expect(container.textContent).toContain('report-2.txt');
+    expect(artifacts).toEqual(originalArtifacts);
     act(() => root.unmount());
   });
 });

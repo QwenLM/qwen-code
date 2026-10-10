@@ -268,8 +268,13 @@ describe('scheduled-task keepalive', () => {
       boundWorkspace: workspace,
       intervalMs: 60_000,
     });
-    await expect(ka.tick()).resolves.toBeUndefined();
+    expect(ka.activeWork).toBe(false);
+    const tick = ka.tick();
+    expect(ka.activeWork).toBe(true);
     ka.stop();
+    expect(ka.activeWork).toBe(true);
+    await expect(tick).resolves.toBeUndefined();
+    expect(ka.activeWork).toBe(false);
     expect(beats).toEqual([]);
   });
 

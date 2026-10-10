@@ -1,0 +1,10 @@
+Qwen Browser Use
+Copyright 2026 Qwen Team
+
+This product includes code adapted from Microsoft Playwright, Copyright (c)
+Microsoft Corporation, licensed under the Apache License, Version 2.0.
+
+Upstream revision: 350d24a344b07543fdc4014339a7871fd1c1b227
+Upstream files:
+- packages/playwright-core/src/tools/mcp/browserModel.ts
+- packages/playwright-core/src/tools/mcp/cdpRelayV2.ts

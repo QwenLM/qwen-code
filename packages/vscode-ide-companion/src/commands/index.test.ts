@@ -256,6 +256,62 @@ describe('registerNewCommands', () => {
     );
   });
 
+  // R3-2: every existing showDiff case leaves permissionRequestId undefined, so
+  // the hop that binds a diff to a pending approval was never exercised.
+  it('showDiff forwards a defined permission request id', async () => {
+    workspaceMock.workspaceFolders = [
+      { uri: { fsPath: '/workspace' }, name: 'workspace', index: 0 },
+    ];
+
+    registerNewCommands(
+      context as never,
+      log,
+      diffManager as never,
+      () => [],
+      vi.fn() as never,
+    );
+
+    await getRegisteredHandler(showDiffCommand)({
+      path: '/workspace/src/app.ts',
+      oldText: 'old',
+      newText: 'new',
+      readOnly: true,
+      permissionRequestId: 'req-42',
+    });
+
+    expect(diffManager.showDiff).toHaveBeenCalledWith(
+      '/workspace/src/app.ts',
+      'old',
+      'new',
+      { readOnly: true, permissionRequestId: 'req-42' },
+    );
+  });
+
+  // R3-3: the close side of the same binding. Without the id, closeDiff would
+  // close any diff for that path, including one owned by another approval.
+  it('closeDiff forwards a defined permission request id', async () => {
+    workspaceMock.workspaceFolders = [
+      { uri: { fsPath: '/workspace' }, name: 'workspace', index: 0 },
+    ];
+    const closeDiff = vi.fn().mockResolvedValue(undefined);
+
+    registerNewCommands(
+      context as never,
+      log,
+      { showDiff: vi.fn(), closeDiff } as never,
+      () => [],
+      vi.fn() as never,
+    );
+
+    await getRegisteredHandler(closeDiffCommand)('src/foo.ts', 'req-42');
+
+    expect(closeDiff).toHaveBeenCalledWith(
+      '/workspace/src/foo.ts',
+      true,
+      'req-42',
+    );
+  });
+
   it('showDiff forwards the readOnly flag', async () => {
     workspaceMock.workspaceFolders = [
       { uri: { fsPath: '/workspace' }, name: 'workspace', index: 0 },

@@ -1,0 +1,33 @@
+{
+  "instance": {
+    "schemaVersion": 4,
+    "repositoryRoot": "/workspace/project",
+    "dialectPath": "/administrator/write.dialect.json",
+    "endpoint": {
+      "origin": "https://memory.example.com",
+      "basePath": "/api",
+      "allowInsecureHttp": false
+    },
+    "credentialEnv": "SYNTHETIC_MEMORY_TOKEN",
+    "scope": {
+      "userId": "repository-memory"
+    },
+    "timeoutMs": 1000
+  },
+  "dialect": {
+    "writeDialectVersion": 1,
+    "id": "synthetic-write-v1",
+    "auth": "authorization-token",
+    "create": {
+      "path": "/memories",
+      "userIdLocation": "json",
+      "agentIdLocation": "omit",
+      "appIdLocation": "omit"
+    },
+    "response": {
+      "completion": "records",
+      "collection": "results",
+      "idField": "id"
+    }
+  }
+}

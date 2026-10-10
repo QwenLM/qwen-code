@@ -72,8 +72,9 @@ try {
 SDK operations are asynchronous and require a native library matching the host
 OS and architecture. The package postinstall downloads the SDK library and
 Node runtime from the exact same-version `qwen-cua-driver` GitHub Release and
-verifies the archive against that release's `checksums.txt`. It caches only
-those two files; it does not install the driver application or daemon. The
+verifies the archive against that release's `checksums.txt`. It caches the native library and Node adapter. On Windows it also stages the
+UIAccess worker under Program Files and requires a valid trusted signature. It
+does not install the driver application or daemon. The
 macOS payload requires macOS 13 or newer.
 Desktop calls return a typed `ToolResult` with text,
 images, verification/error metadata, and `structuredJson` / `rawJson` for

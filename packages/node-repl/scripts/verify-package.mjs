@@ -196,8 +196,8 @@ try {
     const instructions = client.getInstructions() ?? '';
     if (
       instructions.length === 0 ||
-      instructions.length >= 2048 ||
-      !instructions.includes('session-persistent JavaScript kernel') ||
+      instructions.length >= 256 ||
+      !instructions.includes('One persistent JavaScript kernel') ||
       instructions.includes('Computer Use')
     ) {
       throw new Error(

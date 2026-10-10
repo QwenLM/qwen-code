@@ -96,6 +96,8 @@ Auto-memory files live at `~/.qwen/projects/<project>/memory/`. All branches of 
 
 Everything saved is plain markdown — you can open, edit, or delete any file at any time.
 
+`MEMORY.md` is a compact index, rather than the full memory store. Its generated body and the portion loaded into prompts share a limit of 200 lines and 25,000 UTF-16 code units; truncation notices are added separately. Line endings are normalized before prompt budgeting. Under size pressure, complete ordinary entries (up to 150 code units) get space before longer entries, and retained entries keep their original order. An entry that cannot fit is skipped whole, so its Markdown link is never cut in the middle. Keep detail in the linked topic files.
+
 #### Pinned memory
 
 Put hand-curated documents that automatic memory maintenance should preserve
@@ -115,8 +117,10 @@ Automatic extraction is instructed to leave pinned records and their valid
 index entries unchanged, while Dream is instructed to skip `pinned/` during
 consolidation. Both automatic extraction and forked Dream workers, including
 background cleanup, enforce the pinned-file boundary on their write and edit
-tools, including paths that resolve through a symlink into `pinned/`; their
-existing read-only shell policy blocks command-line deletion. You still control
+tools, including paths that resolve through a symlink into `pinned/`.
+Command-line deletion is closed off too: only the project Dream worker holds a
+shell, and its policy is read-only, while automatic extraction and the
+user-memory Dream worker hold no shell at all. You still control
 these files directly and can remove them with an explicit `/forget` request.
 
 > **Note:** The visible `/dream` slash command runs on the main Agent. It
@@ -143,6 +147,24 @@ You can also set them in `~/.qwen/settings.json` (applies to all projects) or `.
   }
 }
 ```
+
+### Structured recall (opt-in)
+
+By default Qwen reads memory as a flat `MEMORY.md` index. The structured protocol replaces that with a hierarchical memory tree, injects only the subtree relevant to your current request, and gives Qwen a `search_memory` tool to pull full entries on demand — which costs fewer tokens once a memory collection grows past a handful of files.
+
+It is off by default. Turn it on in `settings.json` (restart required):
+
+```json
+{
+  "memory": {
+    "enableStructuredRecall": true
+  }
+}
+```
+
+or for a single run with `QWEN_CODE_MEMORY_STRUCTURED_RECALL=1`.
+
+Turning it on starts a background metadata migration: each memory file gains the frontmatter (category, keywords, usage scenarios) that recall needs. It runs in small batches of at most 10 files per turn and only rewrites frontmatter, never the body of a note. While the setting is off the migration is never scheduled, so nothing is rewritten and no background model calls are made.
 
 ### Team memory (shared with collaborators)
 
@@ -209,6 +231,10 @@ Opens the Memory panel. From here you can:
 - Open your personal QWEN.md (`~/.qwen/QWEN.md`)
 - Open the project QWEN.md
 - Browse the auto-memory folder
+
+### `/memory migrate-team`
+
+Migrates the **team memory** tier (`.qwen/team-memory/`) to the structured metadata format: each file gains the frontmatter (name, description, category, keywords, usage scenarios) that memory recall needs. Personal and project memory are migrated automatically in the background once [structured recall](#structured-recall-opt-in) is enabled; team memory is shared through git, so the rewrite runs only on explicit request and shows up as a reviewable commit. Run it once per repository in a trusted workspace with team memory enabled.
 
 ### `/init`
 

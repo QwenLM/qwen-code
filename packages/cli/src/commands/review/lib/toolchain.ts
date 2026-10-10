@@ -12,7 +12,8 @@ export interface ToolchainRunArgs {
   changedFiles: string[];
   timeout: number;
   /**
-   * Gates the adapter's dependency-acquisition step — npm's `npm ci` today.
+   * Gates the adapter's dependency-acquisition step — `npm ci`, or pnpm for a
+   * pnpm lockfile, today.
    */
   install: boolean;
   buildOnly?: boolean;

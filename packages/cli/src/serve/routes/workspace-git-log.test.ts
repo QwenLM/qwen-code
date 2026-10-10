@@ -56,6 +56,7 @@ const ENTRY = {
   subject: 'do a thing',
   refs: 'HEAD -> main',
   parents: ['0000000000000000000000000000000000000000'],
+  commitDate: 1_700_000_000,
 };
 
 describe('workspace Git log routes', () => {
@@ -136,6 +137,7 @@ describe('workspace Git log routes', () => {
     expect(fetchGitLogMock).toHaveBeenCalledWith('/work/main', {
       limit: 200,
       skip: 30,
+      all: false,
     });
   });
 
@@ -152,6 +154,7 @@ describe('workspace Git log routes', () => {
     expect(fetchGitLogMock).toHaveBeenCalledWith('/work/main', {
       limit: 50,
       skip: 0,
+      all: false,
     });
   });
 
@@ -168,6 +171,7 @@ describe('workspace Git log routes', () => {
     expect(fetchGitLogMock).toHaveBeenCalledWith('/work/main', {
       limit: 1,
       skip: 0,
+      all: false,
     });
   });
 
@@ -185,6 +189,7 @@ describe('workspace Git log routes', () => {
       limit: 50,
       skip: 0,
       range: 'main..HEAD',
+      all: false,
     });
   });
 
@@ -200,6 +205,7 @@ describe('workspace Git log routes', () => {
     expect(fetchGitLogMock).toHaveBeenCalledWith('/work/main', {
       limit: 50,
       skip: 0,
+      all: false,
     });
 
     fetchGitLogMock.mockClear();
@@ -207,6 +213,7 @@ describe('workspace Git log routes', () => {
     expect(fetchGitLogMock).toHaveBeenCalledWith('/work/main', {
       limit: 50,
       skip: 0,
+      all: false,
     });
   });
 
@@ -344,6 +351,7 @@ describe('workspace Git log routes', () => {
     expect(fetchGitLogMock).toHaveBeenCalledWith('/work/secondary', {
       limit: 50,
       skip: 0,
+      all: false,
     });
   });
 

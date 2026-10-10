@@ -22,7 +22,63 @@ describe('loadSimpleGit', () => {
     const second = loadSimpleGit();
 
     expect(second).toBe(first);
-    await expect(first).resolves.toEqual({ CheckRepoActions, simpleGit });
+    const loaded = await first;
+    expect(loaded.CheckRepoActions).toBe(CheckRepoActions);
+
+    loaded.simpleGit('/repo');
+    expect(simpleGit).toHaveBeenCalledWith('/repo', {
+      config: ['core.fsmonitor=', 'log.showSignature=false'],
+      unsafe: { allowUnsafeFsMonitor: true },
+    });
+  });
+
+  it('keeps the guard last and preserves caller options', async () => {
+    const simpleGit = vi.fn();
+    vi.doMock('simple-git', () => ({
+      CheckRepoActions: { IS_REPO_ROOT: 'root' },
+      simpleGit,
+    }));
+    const { loadSimpleGit } = await import('./load-simple-git.js');
+    const { simpleGit: guarded } = await loadSimpleGit();
+
+    guarded('/repo', {
+      config: ['core.quotepath=false'],
+      unsafe: { allowUnsafeHooksPath: true },
+    });
+
+    // Git honours the last `-c` for a key, so ours has to come after any the
+    // caller supplied.
+    expect(simpleGit).toHaveBeenCalledWith('/repo', {
+      config: [
+        'core.quotepath=false',
+        'core.fsmonitor=',
+        'log.showSignature=false',
+      ],
+      unsafe: { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true },
+    });
+  });
+
+  it('guards the options-only and no-argument overloads', async () => {
+    const simpleGit = vi.fn();
+    vi.doMock('simple-git', () => ({
+      CheckRepoActions: { IS_REPO_ROOT: 'root' },
+      simpleGit,
+    }));
+    const { loadSimpleGit } = await import('./load-simple-git.js');
+    const { simpleGit: guarded } = await loadSimpleGit();
+
+    guarded({ baseDir: '/repo' });
+    expect(simpleGit).toHaveBeenLastCalledWith({
+      baseDir: '/repo',
+      config: ['core.fsmonitor=', 'log.showSignature=false'],
+      unsafe: { allowUnsafeFsMonitor: true },
+    });
+
+    guarded();
+    expect(simpleGit).toHaveBeenLastCalledWith({
+      config: ['core.fsmonitor=', 'log.showSignature=false'],
+      unsafe: { allowUnsafeFsMonitor: true },
+    });
   });
 
   it('unwraps a default-only CommonJS chunk', async () => {
@@ -37,9 +93,12 @@ describe('loadSimpleGit', () => {
     }));
     const { loadSimpleGit } = await import('./load-simple-git.js');
 
-    await expect(loadSimpleGit()).resolves.toEqual({
-      CheckRepoActions: simpleGit.CheckRepoActions,
-      simpleGit,
+    const loaded = await loadSimpleGit();
+    expect(loaded.CheckRepoActions).toBe(simpleGit.CheckRepoActions);
+    loaded.simpleGit('/repo');
+    expect(simpleGit).toHaveBeenCalledWith('/repo', {
+      config: ['core.fsmonitor=', 'log.showSignature=false'],
+      unsafe: { allowUnsafeFsMonitor: true },
     });
   });
 

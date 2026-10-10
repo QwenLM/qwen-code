@@ -26,16 +26,25 @@ const require = createRequire(import.meta.url);
 const { Agent } = require('../packages/core/node_modules/undici/index.js');
 
 const ITERATIONS = parseInt(process.env['ITERATIONS'] ?? '3', 10);
-const REQUEST_TIMEOUT_MS = parseInt(process.env['REQUEST_TIMEOUT_MS'] ?? '5000', 10);
+const REQUEST_TIMEOUT_MS = parseInt(
+  process.env['REQUEST_TIMEOUT_MS'] ?? '5000',
+  10,
+);
 
 const DEFAULT_ENDPOINTS = [
-  { url: 'https://api.openai.com',                              label: 'OpenAI' },
-  { url: 'https://api.anthropic.com',                          label: 'Anthropic' },
-  { url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', label: 'DashScope (openai-compatible)' },
+  { url: 'https://api.openai.com', label: 'OpenAI' },
+  { url: 'https://api.anthropic.com', label: 'Anthropic' },
+  {
+    url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    label: 'DashScope (openai-compatible)',
+  },
 ];
 
 const extraUrls = process.env['BENCHMARK_URLS']
-  ? process.env['BENCHMARK_URLS'].split(' ').filter(Boolean).map((url) => ({ url, label: url }))
+  ? process.env['BENCHMARK_URLS']
+      .split(' ')
+      .filter(Boolean)
+      .map((url) => ({ url, label: url }))
   : [];
 
 const ENDPOINTS = [...DEFAULT_ENDPOINTS, ...extraUrls];
@@ -146,10 +155,10 @@ for (const endpoint of ENDPOINTS) {
 console.log('\n\n=== Results ===\n');
 console.log(
   'Endpoint'.padEnd(36) +
-  'Cold (avg)'.padStart(12) +
-  'Warm (avg)'.padStart(12) +
-  'Saved'.padStart(10) +
-  'Improvement'.padStart(13),
+    'Cold (avg)'.padStart(12) +
+    'Warm (avg)'.padStart(12) +
+    'Saved'.padStart(10) +
+    'Improvement'.padStart(13),
 );
 console.log('─'.repeat(83));
 
@@ -157,10 +166,10 @@ for (const r of results) {
   const status = r.pct >= 30 ? '✓' : r.pct >= 10 ? '~' : '✗';
   console.log(
     r.label.slice(0, 35).padEnd(36) +
-    fmt(r.avgCold).padStart(12) +
-    fmt(r.avgWarm).padStart(12) +
-    fmt(r.saved).padStart(10) +
-    `${r.pct.toFixed(1)}% ${status}`.padStart(13),
+      fmt(r.avgCold).padStart(12) +
+      fmt(r.avgWarm).padStart(12) +
+      fmt(r.saved).padStart(10) +
+      `${r.pct.toFixed(1)}% ${status}`.padStart(13),
   );
 }
 

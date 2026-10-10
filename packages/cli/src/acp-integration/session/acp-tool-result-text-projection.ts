@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  isShellResultDisplay,
+  mapShellResultText,
+} from '@qwen-code/qwen-code-core/shellResult';
 import { Buffer } from 'node:buffer';
+import { isDeepStrictEqual } from 'node:util';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import { isA2uiToolMeta } from '@qwen-code/acp-bridge/bridgeClient';
 import {
@@ -292,8 +297,38 @@ export function projectAcpToolResultUpdate(
   }
 
   const projectedContent = content ? projectContent(content) : undefined;
-  const projectedRawOutput =
+  let projectedRawOutput: unknown =
     typeof rawOutput === 'string' ? projectRawOutput(rawOutput) : undefined;
+  if (isShellResultDisplay(rawOutput)) {
+    const structured = mapShellResultText(rawOutput, (text) => text);
+    projectedRawOutput = isDeepStrictEqual(structured, rawOutput)
+      ? rawOutput
+      : structured;
+    if (
+      Buffer.byteLength(JSON.stringify(structured), 'utf8') >
+      ACP_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET
+    ) {
+      const payloadBytes: number[] = [];
+      const skeleton = mapShellResultText(structured, (text) => {
+        payloadBytes.push(jsonStringPayloadByteLength(text));
+        return '';
+      });
+      const budgets = allocatePayloadBudgets(
+        payloadBytes,
+        ACP_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET -
+          Buffer.byteLength(JSON.stringify(skeleton), 'utf8'),
+      )!;
+      let index = 0;
+      projectedRawOutput = mapShellResultText(structured, (text) =>
+        truncateJsonStringPayload(
+          text,
+          jsonStringPayloadByteLength(text),
+          budgets[index++],
+          ACP_TOOL_RESULT_TEXT_TRUNCATION_MARKER,
+        ),
+      );
+    }
+  }
   const contentChanged =
     projectedContent !== undefined && projectedContent !== content;
   const rawOutputChanged =

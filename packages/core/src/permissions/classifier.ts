@@ -29,6 +29,7 @@ import {
   STAGE2_SUFFIX,
 } from './classifier-prompts/system-prompt.js';
 import { buildClassifierContents } from './classifier-transcript.js';
+import type { TrustedUserAnswerSnapshot } from './trusted-user-answers.js';
 
 // Tag-scoped logger so an operator debugging "every AUTO call gets
 // unavailable=true" can grep for [CLASSIFIER] in the debug log and see
@@ -64,6 +65,8 @@ export interface ClassifierInput {
    *  tool results — see classifier-transcript module. Forwarded by reference
    *  (read-only). */
   messages: readonly Content[];
+  /** Genuine answers accepted by this session's built-in question host. */
+  trustedUserAnswers?: TrustedUserAnswerSnapshot;
   config: Config;
   signal: AbortSignal;
 }
@@ -152,6 +155,7 @@ export async function classifyAction(
       input.messages,
       input.config.getToolRegistry(),
       { toolName: input.toolName, toolParams: input.toolParams },
+      input.trustedUserAnswers,
     );
     baseSystemPrompt = buildClassifierSystemPrompt(input.config);
   } catch (err) {

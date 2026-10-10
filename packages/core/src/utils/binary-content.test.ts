@@ -32,7 +32,6 @@ describe('isBinaryContentType', () => {
     ['application/x-yaml', false],
     ['application/x-ndjson', false],
     ['application/toml', false],
-    ['application/json', false],
     ['', false],
     ['application/wasm', true],
     ['application/vnd.ms-powerpoint', true],
@@ -176,10 +175,16 @@ describe('sniffFileKind', () => {
   const GZ = Buffer.from([0x1f, 0x8b, 0x08]);
   const TEXT = Buffer.from('plain old text');
   const URL = 'https://example.com/files/download';
+  const OCTET = 'application/octet-stream';
+
+  /** Named-field call; omitted headers are empty and the URL is generic. */
+  const sniff = (
+    bytes: Buffer,
+    { contentType = '', contentDisposition = '', url = URL } = {},
+  ) => sniffFileKind(bytes, contentType, contentDisposition, url);
 
   it('identifies PDFs by magic bytes regardless of content type', () => {
-    const kind = sniffFileKind(PDF, 'application/octet-stream', '', URL);
-    expect(kind).toEqual({
+    expect(sniff(PDF, { contentType: OCTET })).toEqual({
       extension: 'pdf',
       mimeType: 'application/pdf',
       magicMatched: true,
@@ -188,53 +193,48 @@ describe('sniffFileKind', () => {
   });
 
   it('refines ZIP magic to office extensions via Content-Disposition', () => {
-    const kind = sniffFileKind(
-      ZIP,
-      'application/octet-stream',
-      'attachment; filename="report.xlsx"',
-      URL,
-    );
+    const kind = sniff(ZIP, {
+      contentType: OCTET,
+      contentDisposition: 'attachment; filename="report.xlsx"',
+    });
     expect(kind.extension).toBe('xlsx');
     expect(kind.magicMatched).toBe(true);
   });
 
   it('refines ZIP magic to office extensions via URL path', () => {
-    const kind = sniffFileKind(
-      ZIP,
-      'application/octet-stream',
-      '',
-      'https://example.com/deck.pptx',
-    );
+    const kind = sniff(ZIP, {
+      contentType: OCTET,
+      url: 'https://example.com/deck.pptx',
+    });
     expect(kind.extension).toBe('pptx');
   });
 
   it('falls back to zip for unrefined ZIP containers', () => {
-    expect(sniffFileKind(ZIP, '', '', URL).extension).toBe('zip');
+    expect(sniff(ZIP).extension).toBe('zip');
   });
 
   it('refines ZIP magic via the declared Content-Type when names are generic', () => {
-    const kind = sniffFileKind(
-      ZIP,
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      '',
-      URL, // generic /files/download — no useful extension
-    );
+    // The default URL is a generic /files/download with no useful extension.
+    const kind = sniff(ZIP, {
+      contentType:
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
     expect(kind.extension).toBe('xlsx');
   });
 
   it('reports how the extension was determined', () => {
     expect(
-      sniffFileKind(TEXT, '', 'attachment; filename="fw.bin"', URL)
+      sniff(TEXT, { contentDisposition: 'attachment; filename="fw.bin"' })
         .extensionSource,
     ).toBe('name');
     expect(
-      sniffFileKind(TEXT, 'application/pdf', '', URL).extensionSource,
+      sniff(TEXT, { contentType: 'application/pdf' }).extensionSource,
     ).toBe('mime');
-    expect(sniffFileKind(TEXT, '', '', URL).extensionSource).toBe('fallback');
+    expect(sniff(TEXT).extensionSource).toBe('fallback');
   });
 
   it('identifies gzip by magic bytes', () => {
-    expect(sniffFileKind(GZ, '', '', URL).extension).toBe('gz');
+    expect(sniff(GZ).extension).toBe('gz');
   });
 
   it.each([
@@ -243,8 +243,7 @@ describe('sniffFileKind', () => {
     // RAR5: Rar!\x1A\x07\x01\x00
     [Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00])],
   ])('identifies RAR archives by magic bytes', (bytes) => {
-    const kind = sniffFileKind(bytes, 'application/octet-stream', '', URL);
-    expect(kind).toEqual({
+    expect(sniff(bytes, { contentType: OCTET })).toEqual({
       extension: 'rar',
       mimeType: 'application/vnd.rar',
       magicMatched: true,
@@ -253,99 +252,70 @@ describe('sniffFileKind', () => {
   });
 
   it('refines ZIP magic to jar via filename or Content-Type', () => {
-    const byName = sniffFileKind(
-      ZIP,
-      'application/octet-stream',
-      'attachment; filename="library.jar"',
-      URL,
-    );
+    const byName = sniff(ZIP, {
+      contentType: OCTET,
+      contentDisposition: 'attachment; filename="library.jar"',
+    });
     expect(byName.extension).toBe('jar');
     expect(byName.magicMatched).toBe(true);
     // Every real JAR carries ZIP magic, so the java-archive mime mapping
     // must survive the ZIP refinement rather than degrade to .zip.
-    const byMime = sniffFileKind(ZIP, 'application/java-archive', '', URL);
+    const byMime = sniff(ZIP, { contentType: 'application/java-archive' });
     expect(byMime.extension).toBe('jar');
   });
 
   it.each([
-    [
-      Buffer.concat([
-        Buffer.from([0x89]),
-        Buffer.from('PNG\r\n'),
-        Buffer.from([0x1a, 0x0a]),
-      ]),
-      'png',
-      'image/png',
-    ],
+    [Buffer.from('\x89PNG\r\n\x1a\n', 'latin1'), 'png', 'image/png'],
     [Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00]), 'jpg', 'image/jpeg'],
     [Buffer.from('GIF89a....'), 'gif', 'image/gif'],
-    [
-      Buffer.concat([
-        Buffer.from('RIFF'),
-        Buffer.from([0, 0, 0, 0]),
-        Buffer.from('WEBPVP8 '),
-      ]),
-      'webp',
-      'image/webp',
-    ],
+    [Buffer.from('RIFF\0\0\0\0WEBPVP8 '), 'webp', 'image/webp'],
   ])('identifies image magic bytes → %s', (bytes, ext, mime) => {
-    const kind = sniffFileKind(bytes as Buffer, '', '', URL);
+    const kind = sniff(bytes as Buffer);
     expect(kind.extension).toBe(ext);
     expect(kind.mimeType).toBe(mime);
     expect(kind.magicMatched).toBe(true);
   });
 
   it('uses RFC 5987 filename* when present', () => {
-    const kind = sniffFileKind(
-      TEXT,
-      'application/octet-stream',
-      "attachment; filename*=UTF-8''r13031cp.pdf",
-      URL,
-    );
+    const kind = sniff(TEXT, {
+      contentType: OCTET,
+      contentDisposition: "attachment; filename*=UTF-8''r13031cp.pdf",
+    });
     expect(kind.extension).toBe('pdf');
     expect(kind.magicMatched).toBe(false);
     // RFC 5987 allows a non-empty language tag between the quotes.
     expect(
-      sniffFileKind(TEXT, '', "attachment; filename*=UTF-8'en'report.xlsx", URL)
-        .extension,
+      sniff(TEXT, {
+        contentDisposition: "attachment; filename*=UTF-8'en'report.xlsx",
+      }).extension,
     ).toBe('xlsx');
   });
 
   it('recognizes archive extensions from headerless URLs', () => {
-    const kind = sniffFileKind(
-      TEXT,
-      '',
-      '',
-      'https://example.com/backup/archive.tar',
-    );
+    const kind = sniff(TEXT, { url: 'https://example.com/backup/archive.tar' });
     expect(kind.extension).toBe('tar');
     expect(kind.extensionSource).toBe('name');
   });
 
   it('uses the URL extension when headers say nothing', () => {
-    const kind = sniffFileKind(
-      TEXT,
-      'application/octet-stream',
-      '',
-      'https://example.com/audio/track.mp3?sig=abc',
-    );
+    const kind = sniff(TEXT, {
+      contentType: OCTET,
+      url: 'https://example.com/audio/track.mp3?sig=abc',
+    });
     expect(kind.extension).toBe('mp3');
   });
 
   it('falls back to the content-type map, then bin', () => {
-    expect(sniffFileKind(TEXT, 'application/pdf', '', URL).extension).toBe(
+    expect(sniff(TEXT, { contentType: 'application/pdf' }).extension).toBe(
       'pdf',
     );
-    expect(sniffFileKind(TEXT, 'who/knows', '', URL).extension).toBe('bin');
+    expect(sniff(TEXT, { contentType: 'who/knows' }).extension).toBe('bin');
   });
 
   it('ignores unknown extensions in filenames', () => {
-    const kind = sniffFileKind(
-      TEXT,
-      '',
-      'attachment; filename="script.exe"',
-      URL,
-    );
+    const kind = sniff(TEXT, {
+      contentDisposition: 'attachment; filename="script.exe"',
+    });
     expect(kind.extension).toBe('bin');
   });
 });

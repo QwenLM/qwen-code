@@ -1,0 +1,263 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
+import { probeMediaMetadata, type MediaProbeResult } from './ffmpeg.js';
+
+/** Media modality handled by the omni pipeline. */
+export type OmniModality = 'image' | 'audio' | 'video';
+
+/** Result of content recognition for a local media file. */
+export interface RecognizedMedia {
+  /** Modality derived from the sniffed container type. */
+  modality: OmniModality;
+  /** Authoritative MIME type detected from content (sniff), not extension. */
+  detectedMimeType: string;
+  /** File size in bytes. */
+  sizeBytes: number;
+  /** ffprobe/header metadata (fields populated per modality). */
+  metadata: MediaProbeResult;
+}
+
+interface SniffedType {
+  mimeType: string;
+  modality: OmniModality;
+}
+
+function bmffBrandType(brand: string): SniffedType {
+  if (brand.startsWith('qt')) {
+    return { mimeType: 'video/quicktime', modality: 'video' };
+  }
+  // M4A/M4B audio brands inside ISO BMFF.
+  if (brand.startsWith('M4A') || brand.startsWith('M4B')) {
+    return { mimeType: 'audio/mp4', modality: 'audio' };
+  }
+  return { mimeType: 'video/mp4', modality: 'video' };
+}
+
+/**
+ * Content-sniffed media type detection (magic bytes). Returns null when the
+ * header does not match a supported container. Covers:
+ * video — MP4/MOV (ISO BMFF), WebM/Matroska (EBML), AVI (RIFF);
+ * image — JPEG, PNG, WebP (RIFF), GIF;
+ * audio — MP3 (ID3 or frame sync), WAV (RIFF), FLAC, OGG, M4A (BMFF brand).
+ */
+export function sniffMediaType(header: Buffer): SniffedType | null {
+  if (header.length >= 12) {
+    if (header.subarray(4, 8).toString('latin1') === 'ftyp') {
+      return bmffBrandType(header.subarray(8, 12).toString('latin1'));
+    }
+    const riff = header.subarray(0, 4).toString('latin1') === 'RIFF';
+    if (riff) {
+      const kind = header.subarray(8, 12).toString('latin1');
+      if (kind === 'AVI ') {
+        return { mimeType: 'video/x-msvideo', modality: 'video' };
+      }
+      if (kind === 'WAVE') {
+        return { mimeType: 'audio/wav', modality: 'audio' };
+      }
+      if (kind === 'WEBP') {
+        return { mimeType: 'image/webp', modality: 'image' };
+      }
+      return null;
+    }
+  }
+  if (header.length >= 8) {
+    // PNG
+    if (header.readUInt32BE(0) === 0x89504e47) {
+      return { mimeType: 'image/png', modality: 'image' };
+    }
+  }
+  if (header.length >= 6) {
+    // GIF: the full 6-byte GIF87a/GIF89a signature. Matching only the
+    // 3-byte "GIF" prefix would classify plain text starting with "GIF"
+    // (e.g. "GIF export notes.txt") as an image.
+    const gifSig = header.subarray(0, 6).toString('latin1');
+    if (gifSig === 'GIF87a' || gifSig === 'GIF89a') {
+      return { mimeType: 'image/gif', modality: 'image' };
+    }
+  }
+  if (header.length >= 4) {
+    // EBML (WebM/Matroska)
+    if (header.readUInt32BE(0) === 0x1a45dfa3) {
+      return { mimeType: 'video/webm', modality: 'video' };
+    }
+    // FLAC
+    if (header.subarray(0, 4).toString('latin1') === 'fLaC') {
+      return { mimeType: 'audio/flac', modality: 'audio' };
+    }
+    // OGG
+    if (header.subarray(0, 4).toString('latin1') === 'OggS') {
+      return { mimeType: 'audio/ogg', modality: 'audio' };
+    }
+  }
+  if (header.length >= 3) {
+    // JPEG
+    if (header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) {
+      return { mimeType: 'image/jpeg', modality: 'image' };
+    }
+    // MP3: ID3 tag or bare MPEG frame sync (0xFFEx/0xFFFx).
+    if (header.subarray(0, 3).toString('latin1') === 'ID3') {
+      return { mimeType: 'audio/mpeg', modality: 'audio' };
+    }
+    // 0xFF 0xFE is the UTF-16 LE BOM and also passes the sync mask
+    // (0xFE & 0xE0 === 0xE0). Per the MPEG audio header 0xFF 0xFE is
+    // technically VALID (version bits 11 = MPEG-1, layer bits 11 = Layer I,
+    // CRC-protected) — the reserved encodings are version 01 and layer 00 —
+    // so this exclusion deliberately trades away that rare shape
+    // (CRC-protected Layer I) to keep UTF-16 LE text files from sniffing as
+    // audio, preserving the "null for non-media" contract for callers
+    // without a secondary modality gate.
+    if (
+      header[0] === 0xff &&
+      header[1] !== 0xfe &&
+      (header[1]! & 0xe0) === 0xe0
+    ) {
+      // Layer bits 00 are RESERVED in MPEG audio but mandatory in an ADTS
+      // header — an .aac stream starts 0xFFF with layer 00, so this shape
+      // is ADTS AAC, not MP3. Mislabeling it audio/mpeg would make the
+      // transcribe tool announce `format: "mp3"` for AAC bytes.
+      if ((header[1]! & 0x06) === 0) {
+        return { mimeType: 'audio/aac', modality: 'audio' };
+      }
+      return { mimeType: 'audio/mpeg', modality: 'audio' };
+    }
+  }
+  return null;
+}
+
+/** S1-compat: video-only sniff. */
+export function sniffVideoMimeType(header: Buffer): string | null {
+  const sniffed = sniffMediaType(header);
+  return sniffed?.modality === 'video' ? sniffed.mimeType : null;
+}
+
+/** Map a detected MIME type to the canonical object-store extension. */
+export function extensionForMime(mimeType: string): string {
+  const sniffTable: Record<string, string> = {
+    'video/mp4': '.mp4',
+    'video/quicktime': '.mov',
+    'video/webm': '.webm',
+    'video/x-msvideo': '.avi',
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/webp': '.webp',
+    'image/gif': '.gif',
+    'audio/mpeg': '.mp3',
+    'audio/aac': '.aac',
+    'audio/wav': '.wav',
+    'audio/flac': '.flac',
+    'audio/ogg': '.ogg',
+    'audio/mp4': '.m4a',
+    // Non-media policy artifacts (transcripts) promoted into objects/.
+    'text/plain': '.txt',
+  };
+  return sniffTable[mimeType] ?? '.bin';
+}
+
+/** @deprecated S1 name kept for existing imports. */
+export const extensionForVideoMime = extensionForMime;
+
+/** Stream a file through SHA-256 without loading it into memory. */
+export async function hashFileSha256(
+  filePath: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const hash = createHash('sha256');
+  await pipeline(createReadStream(filePath, signal ? { signal } : {}), hash);
+  return hash.digest('hex');
+}
+
+/** Number of header bytes read for content sniffing. */
+const SNIFF_BYTES = 4096;
+
+/**
+ * Cheap pre-gate: sniff a file's header and report the detected modality,
+ * or null when the content is not a supported media container. Used by
+ * fileUtils to decide omni-vs-legacy BEFORE committing to the fail-closed
+ * pipeline — a legitimate .bmp/.tiff (no sniff support) must fall back to
+ * the baseline inline path, not hard-fail.
+ */
+export async function sniffFileModality(
+  filePath: string,
+): Promise<OmniModality | null> {
+  let handle;
+  try {
+    handle = await fs.open(filePath, 'r');
+  } catch {
+    return null;
+  }
+  try {
+    const stat = await handle.stat();
+    const buf = Buffer.alloc(Math.min(SNIFF_BYTES, stat.size));
+    await handle.read(buf, 0, buf.length, 0);
+    return sniffMediaType(buf)?.modality ?? null;
+  } catch {
+    return null;
+  } finally {
+    // A rejecting close() (EIO/ESTALE on network mounts) must not break the
+    // never-throws contract of this pre-gate.
+    await handle.close().catch(() => {});
+  }
+}
+
+/**
+ * Recognize a local media file: content sniff (magic bytes) and ffprobe
+ * metadata. Throws when the content does not sniff as a supported media
+ * container or when probing fails — the omni pipeline fails closed on
+ * unrecognizable input. Error messages carry the file's basename only
+ * (they can reach model-visible content).
+ *
+ * Hashing is deliberately NOT part of recognition: the token guard runs on
+ * this result, and an input it rejects must not have paid a full-file
+ * SHA-256 first. The pipeline hashes after the guard passes.
+ *
+ * When `expectedModality` is given, a successful sniff of a DIFFERENT
+ * modality is rejected (e.g. an .mp3 that is actually an mp4 container).
+ */
+export async function recognizeMediaFile(
+  filePath: string,
+  options?: { expectedModality?: OmniModality; signal?: AbortSignal },
+): Promise<RecognizedMedia> {
+  const { expectedModality, signal } = options ?? {};
+  const handle = await fs.open(filePath, 'r');
+  let header: Buffer;
+  let sizeBytes: number;
+  try {
+    const stat = await handle.stat();
+    sizeBytes = stat.size;
+    const buf = Buffer.alloc(Math.min(SNIFF_BYTES, stat.size));
+    await handle.read(buf, 0, buf.length, 0);
+    header = buf;
+  } finally {
+    await handle.close();
+  }
+
+  const sniffed = sniffMediaType(header);
+  if (!sniffed) {
+    throw new Error(
+      `File content does not match a supported media container: ${path.basename(filePath)}`,
+    );
+  }
+  if (expectedModality && sniffed.modality !== expectedModality) {
+    throw new Error(
+      `File content sniffs as ${sniffed.modality} (${sniffed.mimeType}) but was referenced as ${expectedModality}: ${path.basename(filePath)}`,
+    );
+  }
+
+  const metadata = await probeMediaMetadata(filePath, sniffed.modality, signal);
+
+  return {
+    modality: sniffed.modality,
+    detectedMimeType: sniffed.mimeType,
+    sizeBytes,
+    metadata,
+  };
+}

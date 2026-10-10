@@ -16,8 +16,9 @@ import { useLayoutEffect } from 'react';
 import { useRenderer } from '@opentui/react';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Config } from '@qwen-code/qwen-code-core';
-import { getAllGeminiMdFilenames, Storage } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { getAllGeminiMdFilenames } from '@qwen-code/qwen-code-core/utils/memory-constants.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { STATUS_LINE_PRESET_ITEMS } from '../statusLinePresets.js';
 import { C } from './theme.js';
@@ -68,7 +69,13 @@ const Shell = ({
     paddingRight={2}
     paddingTop={1}
     paddingBottom={1}
-    marginTop={1}
+    // A shrinkable frame lets a short region squeeze its text rows to zero
+    // and paint them over each other; staying natural height keeps the rows
+    // contiguous for the region's clip to cut at the tail, as ink does for
+    // /stats. The clip cuts child text but not the frame's own border
+    // strokes, so a frame taller than the region still paints its border
+    // past it, and a body with an explicit height windows itself from the
+    // region budget instead of relying on the clip (Decision 71).
     flexShrink={0}
   >
     <box flexDirection="row" justifyContent="space-between">
@@ -108,6 +115,8 @@ export function OpenTuiMemoryDialog(props: {
   config?: Config;
   settings: LoadedSettings;
   onClose: () => void;
+  /** The popup region's row budget; the memory body does not window, so it is ignored. */
+  availableTerminalHeight?: number;
 }) {
   const { config, settings, onClose } = props;
   useEsc(onClose);
@@ -156,6 +165,8 @@ export function OpenTuiMemoryDialog(props: {
 export function OpenTuiStatusLineDialog(props: {
   settings: LoadedSettings;
   onClose: () => void;
+  /** The popup region's row budget; the statusline body does not window, so it is ignored. */
+  availableTerminalHeight?: number;
 }) {
   const { onClose } = props;
   useEsc(onClose);

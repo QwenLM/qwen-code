@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as tls from 'node:tls';
+import yargs from 'yargs/yargs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelWebhookTask } from '@qwen-code/channel-base';
 import {
@@ -148,6 +149,41 @@ describe('createChannelWorkerSupervisor', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllEnvs();
+  });
+
+  it('passes flag-shaped channel names through the real worker parser as values', async () => {
+    const { daemonWorkerCommand } = await import(
+      '../commands/channel/daemon-worker.js'
+    );
+    const child = new FakeChild();
+    const spawnWorker = vi.fn((_execPath: string, _argv: string[]) => child);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      daemonToken: 'secret-token',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['--insecure'] },
+      spawnWorker,
+    });
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: child.pid,
+      channels: ['--insecure'],
+    });
+    await started;
+    try {
+      const handler = vi.fn();
+      const parsed = await yargs(spawnWorker.mock.calls[0]![1].slice(3))
+        .exitProcess(false)
+        .command({ ...daemonWorkerCommand, command: '$0', handler })
+        .parseAsync();
+      expect(handler).toHaveBeenCalledOnce();
+      expect(parsed['channel']).toEqual(['--insecure']);
+      expect(parsed).not.toHaveProperty('insecure');
+    } finally {
+      await supervisor.stop();
+    }
   });
 
   it('accepts loop MCP registration before the worker ready signal', async () => {
@@ -314,10 +350,8 @@ describe('createChannelWorkerSupervisor', () => {
         '/repo/dist/index.js',
         'channel',
         'daemon-worker',
-        '--channel',
-        'telegram',
-        '--channel',
-        'feishu',
+        '--channel=telegram',
+        '--channel=feishu',
       ],
       expect.objectContaining({
         env: expect.objectContaining({

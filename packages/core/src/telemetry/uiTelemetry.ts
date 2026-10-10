@@ -365,6 +365,44 @@ export class UiTelemetryService extends EventEmitter {
     return this.#sessionMetrics.get(sessionId) ?? createInitialMetrics();
   }
 
+  /**
+   * Output tokens this session has been charged for so far, across every
+   * model and every source — the main loop and every subagent, because each
+   * content generator logs its API responses under the session that owns it.
+   * Read straight from the live bucket (no clone): the workflow token budget
+   * polls it on every `agent()` dispatch.
+   */
+  getTotalOutputTokens(sessionId: string): number {
+    const metrics = this.#sessionMetrics.get(sessionId);
+    if (!metrics) return 0;
+    let total = 0;
+    for (const model of Object.values(metrics.models)) {
+      total += model.tokens.candidates;
+    }
+    return total;
+  }
+
+  restoreSessionModelMetrics(
+    sessionId: string,
+    models: SessionMetrics['models'],
+  ): void {
+    const restoredTotal = Object.values(models).reduce(
+      (total, model) => total + model.tokens.candidates,
+      0,
+    );
+    // A warm owner already includes these requests. A cold owner restores
+    // the Session ledger without charging historical requests to this process.
+    if (this.getTotalOutputTokens(sessionId) >= restoredTotal) return;
+    const metrics =
+      this.#sessionMetrics.get(sessionId) ?? createInitialMetrics();
+    metrics.models = cloneSessionMetrics({
+      ...createInitialMetrics(),
+      models,
+    }).models;
+    this.#sessionMetrics.set(sessionId, metrics);
+    this.#closedSessions.delete(sessionId);
+  }
+
   recordSkillInvocation(
     skillName: string,
     success: boolean,

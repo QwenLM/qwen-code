@@ -7,6 +7,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -15,6 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 const workflow = readFileSync(
   '.github/workflows/qwen-fleet-shepherd.yml',
@@ -23,11 +25,15 @@ const workflow = readFileSync(
 
 // GNU `date -u -d` shim for the behavioral replays — on macOS hosts BSD date
 // lacks `-d`, so route it through node. Shared by every date-shim replay
-// (R7-4): a fix to the shim must land once, not diverge across copies.
-// Answers ONLY the +%s call shape it emulates (R9-9): any other format
-// falls through to the system date, so a format-string mutation cannot
-// hide behind the shim.
-const gnuDateShim = `date() { if [[ "$1" == '-u' && "$2" == '-d' && "$4" == '+%s' ]]; then node -e 'console.log(Math.floor(new Date(process.argv[1]).getTime()/1000))' "$3"; else command date "$@"; fi; }`;
+// (R7-4/R2-10): a fix to the shim must land once, not diverge across copies —
+// so the shim keeps GNU's two traps faithfully: `date -d ""` SUCCEEDS (today
+// 00:00, emulated as NOW_EPOCH - 43200 — inside the lever's age window at the
+// fixtures' noon) and an unparsable date exits NON-zero. A 'NaN'-with-rc-0
+// copy is not a bash number ($(( NOW_EPOCH - NaN )) reads it as 0) and would
+// bless behavior no host produces. Answers ONLY the +%s call shape it
+// emulates (R9-9): any other format falls through to the system date, so a
+// format-string mutation cannot hide behind the shim.
+const gnuDateShim = `date() { if [[ "$1" == '-u' && "$2" == '-d' && "$4" == '+%s' ]]; then node -e 'const a = process.argv[1]; const t = a === "" ? Number(process.env.NOW_EPOCH) - 43200 : Math.floor(new Date(a).getTime() / 1000); if (Number.isNaN(t)) process.exit(1); console.log(t)' "$3"; else command date "$@"; fi; }`;
 
 // The `wedged` predicate is defined once in the workflow and reused by the
 // in-flight count, the census, and the liveness re-dispatch guard; tests
@@ -42,6 +48,31 @@ const inflightProgram = workflow
     /SCAN_INFLIGHT="\$\(jq -r --arg lvrun "\$\{PREV_LIVENESS_RUN\}" --arg now "\$\{NOW_EPOCH\}" --arg zmin "\$\{ZOMBIE_QUEUED_MINUTES\}" "\$\{ZOMBIE_JQ\}"'([\s\S]*?)' \/tmp\/scan-runs\.json/,
   )?.[1]
   ?.replace(/\n {12}/g, '\n');
+
+// The `review-address (<pr>, …)` display-name contract, extracted from the
+// PRODUCER (R2-7): GitHub builds a matrix job's display name from the job id
+// plus the matrix values joined in the target object's key order, so the
+// busy rail's prefix capture stands on (a) no job-level `name:`, (b) exactly
+// one matrix dimension, (c) `pr` emitted first. Extracted once here so the
+// contract test below and the rail's fixture names cannot drift apart.
+const autofixTargetsKeys = [
+  ...(
+    readFileSync('.github/workflows/qwen-autofix.yml', 'utf8').match(
+      /TARGETS="\$\(jq -c \\[\s\S]*?'\. \+ \[\{([^}]*)\}\]'/,
+    )?.[1] ?? ''
+  ).matchAll(/(\w+): \$/g),
+].map((m) => m[1]);
+
+// The rail fixtures' job names are BUILT from the producer's key order: a
+// key reorder (or a renamed first key) on the qwen-autofix.yml side turns
+// the rail replays red here instead of leaving the rail to capture nothing —
+// fail-OPEN — in production.
+const reviewAddressJob = (pr, status = 'in_progress') => ({
+  name: `review-address (${autofixTargetsKeys
+    .map((k) => (k === 'pr' ? pr : 'x'))
+    .join(', ')})`,
+  status,
+});
 
 describe('fleet shepherd workflow', () => {
   it('runs checkout-free — every read goes through the API', () => {
@@ -86,11 +117,12 @@ describe('fleet shepherd workflow', () => {
       '--json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup',
     );
     // Per-PR metadata still rides the list calls — the sole gh pr view is
-    // live_skip's labels-only recheck immediately before a mutation, whose
-    // exported payload the auto-release scope check rides (no second read).
+    // live_skip's recheck immediately before a mutation, whose exported
+    // payload the auto-release scope check and the no-op notice's live
+    // state/head guard ride (no second read).
     expect(workflow.split('gh pr view').length - 1).toBe(1);
     expect(workflow).toContain(
-      'gh pr view "${pr}" --repo "${REPO}" --json labels',
+      'gh pr view "${pr}" --repo "${REPO}" --json labels,state,headRefOid',
     );
     expect(workflow).toContain(
       'index($a) != null) and ([.labels[]?.name] | index($b) != null)\' <<< "${LIVE_LABELS_JSON}"',
@@ -1775,9 +1807,12 @@ exit 1`;
     expect(workflow).toContain('select((.created_at // "") > $term)');
     // Tick summary and dashboard header report the same counters (R1-12).
     expect(workflow).toContain(
-      '✅ tick complete (syncs=${SYNCS} dispatches=${DISPATCHES} releases=${RELEASES} cleanups=${CLEANUPS})',
+      '✅ tick complete (syncs=${SYNCS} dispatches=${DISPATCHES} releases=${RELEASES} cleanups=${CLEANUPS} noop_notices=${NOTICES} closes=${CLOSES} noop_probe_failures=${PROBE_FAILS})',
     );
     expect(workflow).toContain('cleanups: ${CLEANUPS}');
+    expect(workflow).toContain(
+      'no-op notices: ${NOTICES} · closes: ${CLOSES} · no-op probe failures: ${PROBE_FAILS}',
+    );
     // Dynamic note text is sanitized before it reaches the printf '%b'
     // table: backslashes first (else %b expands them), then pipes.
     expect(workflow).toContain('SAFE_NOTE="${NOTE//\\\\/\\\\\\\\}"');
@@ -1957,6 +1992,26 @@ exit 1`;
     for (const h of transient) expect(matches(h)).toBe('false');
   });
 
+  it('pins the review-address job-name contract against qwen-autofix.yml — the busy rail’s input (R2-7)', () => {
+    // The rail matches GitHub's generated matrix display name
+    // `review-address (<pr>, …)`. The contract is exactly: no job-level
+    // `name:` (it would replace the generated name), exactly one matrix
+    // dimension (a second would append values), and `pr` FIRST in the
+    // targets object (the rail's capture is prefix-anchored). A drift on the
+    // producer side fails HERE, not silently in production — there the
+    // rail's gh run view SUCCEEDS on a renamed job and captures nothing,
+    // which reads as "nothing live": fail-OPEN onto a close under a working
+    // agent.
+    const autofixDoc = parse(
+      readFileSync('.github/workflows/qwen-autofix.yml', 'utf8'),
+    );
+    const addressJob = autofixDoc.jobs['review-address'];
+    expect(addressJob).toBeTruthy();
+    expect(addressJob.name).toBeUndefined();
+    expect(Object.keys(addressJob.strategy.matrix)).toEqual(['target']);
+    expect(autofixTargetsKeys[0]).toBe('pr');
+  });
+
   it('pins the previously mutation-tested gaps from review round 2', () => {
     // R2-7: days_since() is behaviorally replayed (the /86400 → /3600
     // mutation must fail) — the shared module-scope GNU date shim applies.
@@ -2123,7 +2178,7 @@ exit 1`;
     );
     // R2-20: live_skip exports the payload the scope check rides.
     expect(workflow).toContain(
-      'LIVE_LABELS_JSON="$(gh pr view "${pr}" --repo "${REPO}" --json labels',
+      'LIVE_LABELS_JSON="$(gh pr view "${pr}" --repo "${REPO}" --json labels,state,headRefOid',
     );
     // R2-12/R5-9: the labeled-event merge lives in compute_resume_ts with a
     // tie-safe comparison — an event at-or-newer than other evidence wins.
@@ -2358,5 +2413,1185 @@ exit 1`;
         { conclusion: 'FAILURE', name: 'Lint', detailsUrl: 'u1' },
       ]),
     ).toBe('');
+  });
+
+  it('closes a proven no-op in two steps, on the conflict lever’s rails', () => {
+    // The lever exists, is capped, timed, and documented in the header list.
+    expect(workflow).toContain("MAX_NOOP_CLOSES_PER_TICK: '3'");
+    expect(workflow).toContain("NOOP_NOTICE_GRACE_SEC: '600'");
+    expect(workflow).toContain("NOOP_NOTICE_MAX_AGE_SEC: '86400'");
+    expect(workflow).toContain('• no-op merge      → close it.');
+    // The probe reads GitHub's OWN test merge (one GraphQL call, no
+    // checkout) and compares its tree with its BASE parent's tree —
+    // parents.nodes[0] is the base side of a test merge, and its oid names
+    // the main the verdict is against. nodes[1] is the HEAD side: it must
+    // equal the fleet snapshot's head, or the test merge was built from an
+    // older head and its equal tree would be a verdict for a head the notice
+    // does not name (R2-1 — structural, not an observation about GitHub's
+    // rebuild timing). The same read says whether the PR was
+    // ever closed, which is what the at-most-once guard stands on.
+    expect(workflow).toContain('potentialMergeCommit {');
+    // …and the head the verdict is FOR: both the live headRefOid AND the
+    // head-side parent of the test merge it was built from.
+    expect(workflow).toMatch(
+      /pullRequest\(number: \$pr\) \{\n\s+headRefOid\n\s+potentialMergeCommit \{/,
+    );
+    expect(workflow).toContain('elif $p.headRefOid != $head then "head-moved"');
+    expect(workflow).toContain(
+      'elif ($p.potentialMergeCommit.parents.nodes[1].oid // "") != $head then "head-moved"',
+    );
+    expect(workflow).toContain(
+      'parents(first: 2) { nodes { oid tree { oid } } }',
+    );
+    // filteredCount, NOT totalCount: totalCount ignores itemTypes and counts
+    // the whole timeline, which would read every PR as "closed before" and
+    // switch the lever off for the entire fleet.
+    expect(workflow).toMatch(
+      /timelineItems\(itemTypes: \[CLOSED_EVENT\], last: 1\) \{\n\s+filteredCount\n\s+\}/,
+    );
+    expect(workflow).toContain(
+      '($p.timelineItems.filteredCount | type) != "number"',
+    );
+    expect(workflow).toContain(
+      '-f owner="${REPO%/*}" -f name="${REPO#*/}" -F pr="${pr}"',
+    );
+    // gh's stderr is KEPT (R1-2): it is the only thing that tells a lost PAT
+    // scope or a rate limit from the benign wait for a test merge.
+    expect(workflow).toContain('}\' 2> /tmp/noop-err)"; then');
+    // Lever ordering: only on a MERGEABLE snapshot (CONFLICTING has no test
+    // merge; UNKNOWN is still computing) of an autofix/* branch (the bot
+    // account also carries PRs a person or another agent is driving, and
+    // nothing here can see that work), after the conflict lever and BEFORE the
+    // stale-base sync, and it does not gate on PENDING — the close is what
+    // cancels a review run spent on an empty diff. The snapshot's
+    // needs-human flag rides along as the third argument.
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{MERGEABLE\}" == "CONFLICTING" \]\]; then[\s\S]*?elif \[\[ "\$\{MERGEABLE\}" == "MERGEABLE" && "\$\{BRANCH\}" == autofix\/\* \]\] && noop_merge "\$\{PR\}" "\$\{HEAD\}"; then\n\s+STATUS_NOTE='no-op vs main'\n\s+noop_close_lever "\$\{PR\}" "\$\{HEAD\}" "\$\{NH_PREFIX:\+parked\}"\n\n\s+# 3\) stale base[\s\S]{0,400}elif \[\[ "\$\{MERGEABLE\}" == "MERGEABLE" && "\$\{BEHIND\}" -ge/,
+    );
+    // Markers: bot-authored, keyed by head SHA.
+    expect(workflow).toContain('<!-- fleet-shepherd noop-notice sha=%s -->');
+    expect(workflow).toContain('<!-- fleet-shepherd noop-close sha=%s -->');
+    expect(workflow).toContain(
+      '--arg m "<!-- fleet-shepherd noop-notice sha=${head} -->"',
+    );
+    // The comment history is paginated and its pages MERGED (R1-4): GitHub
+    // returns comments oldest-first, so a page-1-only read (or `.[0] // []`)
+    // never sees the bot's own notice on a long thread and would re-post it
+    // every tick, forever, without ever closing.
+    expect(workflow).toMatch(
+      /issues\/\$\{pr\}\/comments" --paginate 2> \/dev\/null \| jq -s 'add \/\/ \[\]' > \/tmp\/noop-ic\.json/,
+    );
+    // Rails, in order: parked snapshot; reopened (anything but an explicit
+    // "false" from the probe hands off) — both with no further read; then
+    // the history and the notice's age window; the close budget BEFORE any
+    // live read; and before BOTH writes, in this order, the live-runs busy
+    // rail, the live label recheck and the live needs-human recheck; the
+    // live head right before the close.
+    expect(workflow).toMatch(
+      /if \[\[ -n "\$\{parked\}" \]\]; then[\s\S]{0,200}if \[\[ "\$\{NOOP_REOPENED\}" != 'false' \]\]; then[\s\S]{0,600}issues\/\$\{pr\}\/comments" --paginate/,
+    );
+    // …and the notice rides live_skip's ONE read for a live state+head
+    // guard (R2-4): a PR closed or pushed since the fleet snapshot gets no
+    // notice. The guard sits AFTER live_parked, so an unparsable payload
+    // keeps its truthful note, and BEFORE the write.
+    expect(workflow).toMatch(
+      /if noop_must_wait "\$\{pr\}"; then\n\s+:\n\s+elif live_skip "\$\{pr\}"; then\n\s+ACTION_NOTE="\$\(skip_note 'no-op notice'\)"\n\s+elif live_parked; then\n\s+ACTION_NOTE="\$\{LIVE_PARKED_NOTE\}"\n\s+elif \[\[ "\$\(jq -r '\.state \/\/ ""' <<< "\$\{LIVE_LABELS_JSON\}"\)" != "OPEN" \|\| "\$\(jq -r '\.headRefOid \/\/ ""' <<< "\$\{LIVE_LABELS_JSON\}"\)" != "\$\{head\}" \]\]; then\n(?:\s+#[^\n]*\n)*\s+ACTION_NOTE='PR no longer open at this head — no notice'\n\s+elif act "#\$\{pr\}: post no-op notice"/,
+    );
+    expect(workflow).toMatch(
+      /CLOSES\}" -ge "\$\{MAX_NOOP_CLOSES_PER_TICK\}" \]\]; then\n\s+ACTION_NOTE='close budget reached this tick'\n\s+elif noop_must_wait "\$\{pr\}"; then\n\s+:\n\s+elif live_skip "\$\{pr\}"; then[\s\S]{0,120}elif live_parked; then\n\s+ACTION_NOTE="\$\{LIVE_PARKED_NOTE\}"\n\s+elif ! live="\$\(gh api "repos\/\$\{REPO\}\/pulls\/\$\{pr\}"/,
+    );
+    // The busy rail is the lever's OWN read of the runs that are live — never
+    // the shared SHEP_BUSY, whose newest-50 window a long address run
+    // scrolls out of while it is still working. Every not-yet-final run
+    // status is listed, with the workflow token, and the answer starts as
+    // 'unknown' so any early return fails closed.
+    expect(workflow).toContain(
+      'for st in in_progress queued pending waiting requested waiting pending queued in_progress; do',
+    );
+    // …through the Runs API, not `gh run list --status` (R2-2): gh's
+    // client-side status allow-list rejects 'pending' before 2.65.0, and the
+    // API filter is server-side on every gh version. The REST envelope's run
+    // id field is `id`, NOT the gh CLI's `databaseId`.
+    expect(workflow).toMatch(
+      /env GITHUB_TOKEN="\$\{ACTIONS_TOKEN\}" gh api \\\n\s+"repos\/\$\{REPO\}\/actions\/workflows\/qwen-autofix\.yml\/runs\?status=\$\{st\}&per_page=100" \\\n\s+--jq '\.workflow_runs\[\]\.id' 2>> \/tmp\/noop-live-err/,
+    );
+    expect(workflow).toMatch(
+      /address_runs_live\(\) \{[\s\S]{0,200}NOOP_LIVE_PRS='unknown'\n(?:\s+#[^\n]*\n)*\s+for st in/,
+    );
+    // Every status is listed before any jobs are read, out and back (a run
+    // that changes status once mid-sweep is caught by one of the two
+    // passes), the ids are de-duplicated, and a FULL page is unknown — the
+    // cut drops the oldest runs, the long address jobs.
+    expect(workflow).toMatch(
+      /for st in in_progress queued [^\n]* queued in_progress; do[\s\S]*?-ge 100 \]\]; then\n\s+return 0\n[\s\S]*?\n {12}done\n {12}ids="\$\(sort -u <<< "\$\{ids\}"\)" \|\| return 0\n {12}while IFS= read -r id; do[\s\S]*?gh run view "\$\{id\}"/,
+    );
+    // A rail that cannot be read is annotated once per tick, like the probe
+    // — and names gh's first stderr line, so a dead rail never reads as the
+    // benign full-page case (R2-3). Both rail reads keep stderr in that file.
+    expect(workflow.match(/2>> \/tmp\/noop-live-err/g)).toHaveLength(2);
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{NOOP_LIVE_PRS\}" == 'unknown' \]\]; then\n\s+RAIL_ERR="\$\(grep -m 1 '\[\^\[:space:\]\]' \/tmp\/noop-live-err 2> \/dev\/null \| tr -d '\\r' \|\| true\)"\n\s+RAIL_ERR="\$\{RAIL_ERR:0:200\}"\n\s+echo "::warning::live autofix runs could not be read this tick \(a failed or full run listing, a failed jobs read, or a failed de-duplication step\)\$\{RAIL_ERR:\+ — last error: \$\{RAIL_ERR\}\}/,
+    );
+    const leverFn = workflow.match(
+      /noop_close_lever\(\) \{[\s\S]*?\n {10}\}/,
+    )?.[0];
+    expect(leverFn).toBeTruthy();
+    expect(leverFn).not.toContain('SHEP_BUSY');
+    expect(leverFn).not.toContain('BUSY_OK');
+    // live_parked demands a payload that really carries a labels list.
+    expect(workflow).toContain(
+      'if (.labels | type) == "array" then ([.labels[].name] | index($l) != null) else "unparsable" end',
+    );
+    // The live head rides REST — the sole `gh pr view` stays live_skip's.
+    expect(workflow).toContain(
+      'gh api "repos/${REPO}/pulls/${pr}" --jq \'"\\(.state) \\(.head.sha)"\'',
+    );
+    // Close FIRST, comment second (R1-1): a bundled `gh pr close --comment`
+    // posts before closing, so a failed close would leave a false "Closed
+    // as a no-op" comment behind, once per tick.
+    expect(workflow).not.toContain(
+      'gh pr close "${pr}" --repo "${REPO}" --comment',
+    );
+    expect(workflow).toMatch(
+      /elif act "#\$\{pr\}: close as no-op" gh pr close "\$\{pr\}" --repo "\$\{REPO\}"; then\n\s+CLOSES=\$\(\( CLOSES \+ 1 \)\)\n\s+if act "#\$\{pr\}: post no-op close comment"/,
+    );
+    // Counters move only on a write that HAPPENED (act's real rc).
+    expect(workflow).toMatch(
+      /elif act "#\$\{pr\}: post no-op notice"[\s\S]*?; then\n\s+NOTICES=\$\(\( NOTICES \+ 1 \)\)/,
+    );
+    expect(workflow).toContain('NOTICES=0');
+    expect(workflow).toContain('CLOSES=0');
+    expect(workflow).toContain('PROBE_FAILS=0');
+    expect(workflow).toContain("PROBE_FAIL_FIRST=''");
+    // The probe state is reset PER PR, inside the walk — hoisted to the tick
+    // prologue, one PR's failed probe would be reported on every later row,
+    // including PRs that were never probed.
+    expect(workflow).toMatch(
+      /while IFS= read -r ROW; do[\s\S]*?STATUS_NOTE='idle'\n\s+ACTION_NOTE='—'\n\s+NOOP_STATE=''\n/,
+    );
+    // A probe that gave no answer is reported as deferral — never "has a
+    // diff" — and the row says WHICH: the benign wait and a dead probe must
+    // not read alike. Failures are also counted and warned ONCE per tick,
+    // only when there are any, naming the first cause.
+    expect(workflow).toMatch(
+      /case "\$\{NOOP_STATE\}" in\n\s+no-test-merge\) PROBE_NOTE='no test merge yet — no-op probe deferred this tick' ;;\n\s+head-moved\) PROBE_NOTE='head moved since the fleet snapshot — no-op probe deferred this tick' ;;\n\s+api-failure \| unparsable\) PROBE_NOTE="no-op probe FAILED \(\$\{NOOP_STATE\}\) — close lever deferred this tick" ;;\n\s+esac/,
+    );
+    expect(workflow).toMatch(
+      /ACTION_NOTE="\$\{ACTION_NOTE\} · \$\{PROBE_NOTE\}"\n\s+fi\n\s+fi\n\n\s+echo "🐑 #\$\{PR\} \[\$\{STATUS_NOTE\}\]/,
+    );
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{PROBE_FAILS\}" -gt 0 \]\]; then\n\s+echo "::warning::no-op probe failed for \$\{PROBE_FAILS\} PR\(s\) this tick \(first: \$\{PROBE_FAIL_FIRST\}\)/,
+    );
+  });
+
+  it('behaviorally proves noop_merge() answers no-op ONLY for an equal-tree test merge, and names every other cause', () => {
+    const fn = workflow.match(/noop_merge\(\) \{[\s\S]*?\n {10}\}/)?.[0];
+    const failed = workflow.match(
+      /noop_probe_failed\(\) \{[\s\S]*?\n {10}\}/,
+    )?.[0];
+    expect(fn).toBeTruthy();
+    expect(failed).toBeTruthy();
+    const HEAD_OID = 'a'.repeat(40);
+    const probe = ({ body, rc = 0, stderr = '', script }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'noop-merge-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/bin/bash',
+            // One log line per call: fold the newlines that a multi-line
+            // GraphQL query would otherwise spread over several lines.
+            'printf \'%s\\n\' "${*//$\'\\n\'/ }" >> "$GH_LOG"',
+            'printf \'%s\' "$PMC_BODY"',
+            '[[ -n "$PMC_ERR" ]] && printf \'%b\\n\' "$PMC_ERR" >&2',
+            `exit ${rc}`,
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        // Production's shared /tmp/noop-err is rewritten into THIS case's
+        // temp dir (R10-2).
+        const fns = [failed, fn]
+          .map((f) => f.replace(/\n {10}/g, '\n'))
+          .join('\n')
+          .replaceAll('/tmp/noop-err', join(dir, 'noop-err'));
+        expect(fns).not.toContain('/tmp/noop-err');
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -eo pipefail\n${fns}\nPROBE_FAILS=0\nPROBE_FAIL_FIRST=''\n${script ?? `if noop_merge 7 ${HEAD_OID}; then echo RC=0; else echo RC=$?; fi`}\necho "STATE=$NOOP_STATE"\necho "BASE=$NOOP_BASE"\necho "REOPENED=$NOOP_REOPENED"\necho "FAILS=$PROBE_FAILS"\necho "FIRST=$PROBE_FAIL_FIRST"\necho FIRST_END`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              REPO: 'QwenLM/qwen-code',
+              GH_LOG: join(dir, 'gh.log'),
+              PMC_ERR: stderr,
+              PMC_BODY: typeof body === 'string' ? body : JSON.stringify(body),
+            },
+            encoding: 'utf8',
+          },
+        );
+        return {
+          rc: out.match(/^RC=(\d+)$/m)?.[1],
+          state: out.match(/^STATE=(.*)$/m)?.[1],
+          base: out.match(/^BASE=(.*)$/m)?.[1],
+          reopened: out.match(/^REOPENED=(.*)$/m)?.[1],
+          fails: out.match(/^FAILS=(.*)$/m)?.[1],
+          // Everything up to the end marker — not `.*`: a JS dot stops at a
+          // CR (hiding exactly what the CR case is about) and at a newline
+          // (hiding a second stderr line, which would start a fresh log line
+          // inside the ::warning:: and could be parsed as a workflow command).
+          first: out.match(/^FIRST=([\s\S]*?)\nFIRST_END$/m)?.[1],
+          log: readFileSync(join(dir, 'gh.log'), 'utf8'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const BASE_OID = 'b'.repeat(40);
+    const pr = (
+      potentialMergeCommit,
+      timelineItems = { filteredCount: 0 },
+      headRefOid = HEAD_OID,
+    ) => ({
+      data: {
+        repository: {
+          pullRequest: { headRefOid, potentialMergeCommit, timelineItems },
+        },
+      },
+    });
+    // nodes[0] is the BASE side of a test merge, nodes[1] the HEAD side —
+    // the binding the R2-1 check stands on.
+    const merge = (mtree, btree) => ({
+      tree: { oid: mtree },
+      parents: {
+        nodes: [{ oid: BASE_OID, tree: { oid: btree } }, { oid: HEAD_OID }],
+      },
+    });
+    const equal = probe({ body: pr(merge('t1', 't1')) });
+    expect(equal).toMatchObject({
+      rc: '0',
+      state: 'noop',
+      fails: '0',
+      // The verdict names the main it is against, and says whether the PR
+      // was ever closed.
+      base: 'bbbbbbbbb',
+      reopened: 'false',
+    });
+    // ONE GraphQL read with a numeric PR variable, asking for the test
+    // merge's tree, its base parent's oid and tree, its head-side parent's
+    // oid (the verdict's binding to the noticed head), and the close-event
+    // count.
+    expect(equal.log.trim().split('\n')).toHaveLength(1);
+    expect(equal.log).toMatch(
+      /^api graphql .*-F pr=7 .*potentialMergeCommit[\s\S]*parents\(first: 2\)[\s\S]*CLOSED_EVENT/,
+    );
+    expect(probe({ body: pr(merge('t1', 't2')) })).toMatchObject({
+      rc: '1',
+      state: 'changes',
+      fails: '0',
+    });
+    // Closed before — by anyone, any number of times: an OPEN PR with a
+    // close event was reopened.
+    for (const filteredCount of [1, 3]) {
+      expect(
+        probe({ body: pr(merge('t1', 't1'), { filteredCount }) }),
+      ).toMatchObject({ rc: '0', state: 'noop', fails: '0', reopened: 'true' });
+    }
+    // A verdict for ANOTHER head is not a verdict: the PR was pushed to
+    // between the fleet snapshot and this read. Benign — the next tick sees
+    // the new head — even when the test merge GitHub returned is equal-tree.
+    expect(
+      probe({ body: pr(merge('t1', 't1'), undefined, 'c'.repeat(40)) }),
+    ).toMatchObject({ rc: '1', state: 'head-moved', fails: '0', first: '' });
+    // …and in its usual shape right after a push: the head has moved AND the
+    // test merge is not built yet. The head is what the row should name.
+    expect(probe({ body: pr(null, undefined, 'c'.repeat(40)) })).toMatchObject({
+      rc: '1',
+      state: 'head-moved',
+      fails: '0',
+    });
+    // The binding is STRUCTURAL (R2-1): a test merge whose HEAD-side parent
+    // is not the snapshot head was built from an older head — defer, even
+    // when its tree answers equal. Removing the jq elif turns this red.
+    expect(
+      probe({
+        body: pr({
+          tree: { oid: 't1' },
+          parents: {
+            nodes: [
+              { oid: BASE_OID, tree: { oid: 't1' } },
+              { oid: 'c'.repeat(40) },
+            ],
+          },
+        }),
+      }),
+    ).toMatchObject({ rc: '1', state: 'head-moved', fails: '0', first: '' });
+    // …and a MISSING head-side parent fails closed the same way — a
+    // deferral, never a verdict.
+    expect(
+      probe({
+        body: pr({
+          tree: { oid: 't1' },
+          parents: { nodes: [{ oid: BASE_OID, tree: { oid: 't1' } }] },
+        }),
+      }),
+    ).toMatchObject({ rc: '1', state: 'head-moved', fails: '0' });
+    // The BENIGN non-answer — GitHub has not built the test merge yet —
+    // defers without counting as a failure.
+    expect(probe({ body: pr(null) })).toMatchObject({
+      rc: '1',
+      state: 'no-test-merge',
+      fails: '0',
+      first: '',
+    });
+    // Every GENUINE failure defers too (never "no-op", never "changes"), but
+    // is counted and names its cause — an API failure with gh's own first
+    // non-blank stderr line, even when the body it printed looks equal-tree.
+    expect(
+      probe({
+        body: pr(merge('t1', 't1')),
+        rc: 1,
+        stderr:
+          '\\n  \\ngh: Resource not accessible by personal access token (HTTP 403)\\nsecond line',
+      }),
+    ).toMatchObject({
+      rc: '1',
+      state: 'api-failure',
+      fails: '1',
+      first:
+        '#7 api-failure: gh: Resource not accessible by personal access token (HTTP 403)',
+    });
+    expect(probe({ body: pr(merge('t1', 't1')), rc: 1 })).toMatchObject({
+      rc: '1',
+      state: 'api-failure',
+      fails: '1',
+      first: '#7 api-failure: gh exited non-zero with no message',
+    });
+    // gh's line is capped at 200 characters and carries no CR.
+    const long = probe({
+      body: pr(merge('t1', 't1')),
+      rc: 1,
+      stderr: `${'x'.repeat(300)}\\r`,
+    });
+    expect(long.first).toBe(`#7 api-failure: ${'x'.repeat(200)}`);
+    // …and a CRLF-terminated line loses its CR (a short line, so the cap
+    // cannot be what removed it).
+    expect(
+      probe({ body: pr(merge('t1', 't1')), rc: 1, stderr: 'gh: boom\\r' })
+        .first,
+    ).toBe('#7 api-failure: gh: boom');
+    const noTimeline = pr(merge('t1', 't1'));
+    delete noTimeline.data.repository.pullRequest.timelineItems;
+    for (const body of [
+      pr({ tree: { oid: 't1' }, parents: { nodes: [{}, { oid: HEAD_OID }] } }),
+      pr({
+        tree: null,
+        parents: {
+          nodes: [{ oid: BASE_OID, tree: { oid: 't1' } }, { oid: HEAD_OID }],
+        },
+      }),
+      pr({
+        tree: { oid: 't1' },
+        parents: { nodes: [{ tree: { oid: 't1' } }, { oid: HEAD_OID }] },
+      }),
+      // An equal-tree answer WITHOUT a usable close-event count is not an
+      // answer: the at-most-once guard would have nothing to stand on.
+      noTimeline,
+      pr(merge('t1', 't1'), {}),
+      pr(merge('t1', 't1'), { filteredCount: null }),
+      pr(merge('t1', 't1'), { filteredCount: '1' }),
+      pr(merge('t1', 't1'), { totalCount: 5 }),
+      // …and so is one that does not say which head it is about.
+      pr(merge('t1', 't1'), undefined, null),
+      { data: { repository: null } },
+      [],
+      'not json',
+    ]) {
+      expect(probe({ body })).toMatchObject({
+        rc: '1',
+        state: 'unparsable',
+        fails: '1',
+        first:
+          '#7 unparsable: the response carries no pullRequest node, head or close-event count, or its test merge has no tree or no base parent',
+      });
+    }
+    // The per-tick summary names the FIRST cause and counts them all.
+    expect(
+      probe({
+        body: 'not json',
+        script:
+          'noop_merge 7 x || true\nNOOP_STATE=api-failure\nnoop_probe_failed 9 later\necho RC=1',
+      }),
+    ).toMatchObject({
+      fails: '2',
+      first:
+        '#7 unparsable: the response carries no pullRequest node, head or close-event count, or its test merge has no tree or no base parent',
+    });
+  });
+
+  // The lever replay shared by the cases below: the functions are
+  // extracted VERBATIM and run under production's strict mode with a fake
+  // `gh` whose call log is what the assertions read.
+  const leverHarness = () => {
+    const grab = (name) =>
+      workflow.match(new RegExp(`${name}\\(\\) \\{[\\s\\S]*?\\n {10}\\}`))?.[0];
+    const parts = [
+      'act',
+      'live_skip',
+      'skip_note',
+      'live_parked',
+      'address_runs_live',
+      'noop_must_wait',
+      'noop_close_lever',
+    ].map(grab);
+    for (const p of parts) expect(p).toBeTruthy();
+    const railWarning = workflow.match(
+      / {10}if \[\[ "\$\{NOOP_LIVE_PRS\}" == 'unknown' \]\]; then\n {12}RAIL_ERR=[\s\S]*?\n {10}fi/,
+    )?.[0];
+    expect(railWarning).toBeTruthy();
+    const HEAD = 'a'.repeat(40);
+    const NOTICE = `<!-- fleet-shepherd noop-notice sha=${HEAD} -->`;
+    const CLOSED = `<!-- fleet-shepherd noop-close sha=${HEAD} -->`;
+    const NOW = Date.parse('2026-09-21T12:00:00Z') / 1000;
+    const ago = (sec) =>
+      new Date((NOW - sec) * 1000).toISOString().replace('.000Z', 'Z');
+    const bot = (body, created_at = ago(1200)) => ({
+      user: { login: 'qwen-code-dev-bot' },
+      created_at,
+      body,
+    });
+    const human = (body, created_at = ago(1200)) => ({
+      user: { login: 'wenshao' },
+      created_at,
+      body,
+    });
+    const run = ({
+      comments = [],
+      pages,
+      commentsFail = false,
+      live = `open ${HEAD}`,
+      liveFail = false,
+      labels = [],
+      labelsBody,
+      labelsFail = false,
+      parked = '',
+      reopened = 'false',
+      graceSec = '600',
+      // Live autofix runs by status: { in_progress: [{ id, jobs }], … }.
+      liveRuns = {},
+      // Runs that a status listing returns only from its SECOND call on.
+      liveRunsSecondPass = {},
+      runsFail = '',
+      jobsFail = false,
+      sortFail = false,
+      // Extra bash run right after the lever, in the same tick.
+      after = '',
+      closes = '0',
+      dryRun = 'false',
+      closeRc = 0,
+      commentRc = 0,
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'noop-lever-'));
+      try {
+        // `gh api --paginate` prints one JSON array per page, back to back.
+        writeFileSync(
+          join(dir, 'comments.json'),
+          pages
+            ? pages.map((p) => JSON.stringify(p)).join('')
+            : JSON.stringify(comments),
+        );
+        writeFileSync(
+          join(dir, 'labels.json'),
+          // state/headRefOid ride the same live_skip read (R2-4): the
+          // notice branch refuses a PR no longer open at the head.
+          labelsBody ??
+            JSON.stringify({ labels, state: 'OPEN', headRefOid: HEAD }),
+        );
+        for (const [name, runs] of [
+          ...Object.entries(liveRuns),
+          ...Object.entries(liveRunsSecondPass).map(([st, rs]) => [
+            `${st}.2`,
+            [...(liveRuns[st] ?? []), ...rs],
+          ]),
+        ]) {
+          // What the Runs API read `--jq '.workflow_runs[].id'` prints: one
+          // id a line.
+          writeFileSync(
+            join(dir, `runs-${name}`),
+            runs.map((r) => `${r.id}\n`).join(''),
+          );
+          for (const r of runs) {
+            writeFileSync(
+              join(dir, `jobs-${r.id}.json`),
+              typeof r.jobs === 'string'
+                ? r.jobs
+                : JSON.stringify({ jobs: r.jobs }),
+            );
+          }
+        }
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/bin/bash',
+            // One log line per call: fold the newlines of a bilingual body.
+            'printf \'%s\\n\' "${*//$\'\\n\'/ }" >> "$GH_LOG"',
+            'case "$1 $2" in',
+            '  "pr view") [[ "$LABELS_FAIL" == true ]] && exit 1; cat "$FIX/labels.json" ;;',
+            // The two WRITES go out under the bot PAT — the marker dedup
+            // stands on the notice's author being the bot (R2-11). A
+            // "harmonise the credential" edit routing a write through the
+            // workflow token must fail HERE, not silently 403 in production.
+            '  "pr comment") [[ "$GITHUB_TOKEN" == bot-pat ]] || exit 1; exit "$COMMENT_RC" ;;',
+            '  "pr close") [[ "$GITHUB_TOKEN" == bot-pat ]] || exit 1; exit "$CLOSE_RC" ;;',
+            // The sweep rides the Runs API (R2-2): $2 carries
+            // ?status=<st>&per_page=100. Emulate the server's documented
+            // status enum — a value outside it fails the replay the way the
+            // API's 422 fails production, never "no live runs".
+            '  "api repos/QwenLM/qwen-code/actions/workflows/qwen-autofix.yml/runs?status="*) [[ "$GITHUB_TOKEN" == workflow-token ]] || exit 1; st="${2#*status=}"; st="${st%%&*}"; [[ " in_progress queued pending waiting requested completed action_required cancelled failure neutral skipped stale startup_failure success timed_out " == *" $st "* ]] || { echo "gh: invalid status $st" >&2; exit 1; }; [[ "$RUNS_FAIL" == "$st" ]] && { echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; }; n=$(( $(cat "$FIX/calls-$st" 2> /dev/null || echo 0) + 1 )); echo "$n" > "$FIX/calls-$st"; f="$FIX/runs-$st"; [[ "$n" -ge 2 && -f "$f.2" ]] && f="$f.2"; [[ -f "$f" ]] && cat "$f"; exit 0 ;;',
+            // Failure arms carry a stderr line, like gh: the rail keeps it
+            // and the tick warning names its first line (R2-3).
+            '  "run view") [[ "$GITHUB_TOKEN" == workflow-token ]] || exit 1; [[ "$JOBS_FAIL" == true ]] && { echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; }; cat "$FIX/jobs-$3.json" ;;',
+            '  "api repos/QwenLM/qwen-code/issues/7/comments") [[ "$COMMENTS_FAIL" == true ]] && exit 1; cat "$FIX/comments.json" ;;',
+            '  "api repos/QwenLM/qwen-code/pulls/7") [[ "$LIVE_FAIL" == true ]] && exit 1; printf \'%s\\n\' "$LIVE_OUT" ;;',
+            '  *) echo "unexpected gh $*" >&2; exit 99 ;;',
+            'esac',
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        if (sortFail) {
+          writeFileSync(join(dir, 'sort'), '#!/bin/bash\nexit 2\n');
+          chmodSync(join(dir, 'sort'), 0o755);
+        }
+        // Production's shared /tmp/noop-ic.json is rewritten into THIS
+        // case's temp dir (R10-2): concurrent suite runs on one machine
+        // must not corrupt each other's comment fixtures.
+        const fns = parts
+          .map((f) => f.replace(/\n {10}/g, '\n'))
+          .join('\n')
+          .replaceAll('/tmp/noop-ic.json', join(dir, 'noop-ic.json'))
+          .replaceAll('/tmp/noop-live-err', join(dir, 'noop-live-err'));
+        expect(fns).not.toContain('/tmp/noop-ic.json');
+        expect(fns).not.toContain('/tmp/noop-live-err');
+        // The tick-level rail warning replays too (R2-3): a rail that failed
+        // must name gh's first stderr line, so a dead rail never reads as
+        // the benign full-page case.
+        const railWarn = railWarning
+          .trimStart()
+          .replace(/\n {10}/g, '\n')
+          .replaceAll('/tmp/noop-live-err', join(dir, 'noop-live-err'));
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -eo pipefail\n${gnuDateShim}\n${fns}\nNOOP_LIVE_PRS=''\nCLOSES=${closes}\nNOTICES=0\nNOOP_REOPENED='${reopened}'\nNOOP_BASE='abc123456'\nnoop_close_lever 7 ${HEAD} '${parked}'\n${after}\n${railWarn}\necho "NOTE=$ACTION_NOTE"\necho "NOTICES=$NOTICES CLOSES=$CLOSES"`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              REPO: 'QwenLM/qwen-code',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              SKIP_LABEL: 'autofix/skip',
+              NEEDS_HUMAN_LABEL: 'autofix/needs-human',
+              MAX_NOOP_CLOSES_PER_TICK: '3',
+              NOOP_NOTICE_GRACE_SEC: graceSec,
+              NOOP_NOTICE_MAX_AGE_SEC: '86400',
+              NOW_EPOCH: String(NOW),
+              ACTIONS_TOKEN: 'workflow-token',
+              GITHUB_TOKEN: 'bot-pat',
+              RUNS_FAIL: runsFail,
+              JOBS_FAIL: String(jobsFail),
+              DRY_RUN: dryRun,
+              GH_LOG: join(dir, 'gh.log'),
+              FIX: dir,
+              LIVE_OUT: live,
+              LIVE_FAIL: String(liveFail),
+              COMMENTS_FAIL: String(commentsFail),
+              LABELS_FAIL: String(labelsFail),
+              CLOSE_RC: String(closeRc),
+              COMMENT_RC: String(commentRc),
+            },
+            encoding: 'utf8',
+          },
+        );
+        const log = existsSync(join(dir, 'gh.log'))
+          ? readFileSync(join(dir, 'gh.log'), 'utf8').split('\n')
+          : [];
+        return {
+          note: out.match(/^NOTE=(.*)$/m)?.[1],
+          counters: out
+            .match(/^NOTICES=(\d+) CLOSES=(\d+)$/m)
+            ?.slice(1)
+            .join('/'),
+          writes: log.filter((l) => /^pr (comment|close) /.test(l)),
+          calls: log.filter(Boolean).length,
+          views: log.filter((l) => l.startsWith('pr view ')).length,
+          out,
+          warnings: [...out.matchAll(/^::warning::(.*)$/gm)].map((m) => m[1]),
+          // The listings ride the Runs API (R2-2); the jobs reads stay
+          // gh run view.
+          runReads: log.filter(
+            (l) =>
+              /^run view /.test(l) ||
+              l.startsWith('api repos/QwenLM/qwen-code/actions/workflows/'),
+          ).length,
+          runOrder: log
+            .filter(
+              (l) =>
+                /^run view /.test(l) ||
+                l.startsWith('api repos/QwenLM/qwen-code/actions/workflows/'),
+            )
+            .map((l) => (l.startsWith('run view ') ? 'view' : 'list'))
+            .join(','),
+          liveReads: log.filter((l) =>
+            l.startsWith('api repos/QwenLM/qwen-code/pulls/7 '),
+          ).length,
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    return {
+      run,
+      bot,
+      human,
+      ago,
+      HEAD,
+      NOTICE,
+      CLOSED,
+      NOTICED:
+        'no-op notice posted — closes on a later tick unless the head moves',
+    };
+  };
+
+  it('behaviorally proves the no-op lever notices first, closes later as two ordered writes, and at most once', () => {
+    const { run, bot, human, HEAD, NOTICE, CLOSED, NOTICED } = leverHarness();
+    // Step 1: no notice on the PR → the bot posts one keyed by the head,
+    // bilingual, naming the main the verdict is against and promising only
+    // what the code guarantees (R1-3), and closes nothing (no live head read
+    // is spent either).
+    let r = run({});
+    expect(r.note).toBe(NOTICED);
+    expect(r.counters).toBe('1/0');
+    expect(r.writes).toHaveLength(1);
+    expect(r.writes[0]).toMatch(
+      /^pr comment 7 --repo QwenLM\/qwen-code --body 🫥 No-op detected/,
+    );
+    expect(r.writes[0]).toContain(NOTICE);
+    expect(r.writes[0]).toContain('中文说明');
+    expect(r.writes[0]).toContain(
+      `test merge of head \`${HEAD}\` into \`main\` (as of \`abc123456\`, the \`main\` it was built against)`,
+    );
+    expect(r.writes[0]).toContain(
+      `head \`${HEAD}\` 与 \`main\`（以 \`abc123456\` 为准`,
+    );
+    expect(r.writes[0]).toContain(
+      'closes this PR on a later tick: no sooner than 10 minutes from now, usually within about 20.',
+    );
+    expect(r.writes[0]).toContain(
+      'or the per-tick close cap postpones it, and the `autofix/needs-human` label parks it for a human. To keep it open, add the `autofix/skip` label — the fleet-wide opt-out: the PR leaves the dashboard and every shepherd lever until it is removed.',
+    );
+    expect(r.writes[0]).toContain(
+      '带有 `autofix/needs-human` 标签则交由人工处理。如需保留，请添加 `autofix/skip` 标签（车队级退出开关：标签存续期间，本 PR 不出现在仪表盘上，也不经过任何 shepherd 杠杆）。',
+    );
+    expect(r.writes[0]).toContain(
+      '会在之后的某个 tick 关闭本 PR：最早在 10 分钟之后，通常在约 20 分钟内。',
+    );
+    expect(r.writes[0]).not.toContain('on its next tick');
+    expect(r.writes[0]).not.toContain('%s');
+    expect(r.liveReads).toBe(0);
+    // The floor in the text is RENDERED from the variable, in both languages.
+    r = run({ graceSec: '1200' });
+    expect(r.writes[0]).toContain('no sooner than 20 minutes from now');
+    expect(r.writes[0]).toContain('最早在 20 分钟之后');
+    // Step 2: the bot's notice for THIS head is old enough and the head is
+    // still the live head of an open PR → close FIRST, then the marker
+    // comment as a separate write.
+    r = run({ comments: [bot(`… ${NOTICE}`)] });
+    expect(r.note).toBe('closed as no-op');
+    expect(r.counters).toBe('0/1');
+    expect(r.writes).toHaveLength(2);
+    expect(r.writes[0]).toBe('pr close 7 --repo QwenLM/qwen-code');
+    expect(r.writes[1]).toMatch(
+      /^pr comment 7 --repo QwenLM\/qwen-code --body 🫥 Closed as a no-op/,
+    );
+    expect(r.writes[1]).toContain(CLOSED);
+    expect(r.writes[1]).toContain('中文说明');
+    expect(r.writes[1]).toContain('into `main` (as of `abc123456`)');
+    expect(r.writes[1]).toContain(
+      `将 head \`${HEAD}\` 合入 \`main\`（以 \`abc123456\` 为准）`,
+    );
+    expect(r.writes[1]).toContain('closes a PR as a no-op only once');
+    expect(r.writes[1]).toContain('只会按空壳关闭一次');
+    expect(r.writes[1]).not.toContain('%s');
+    expect(r.liveReads).toBe(1);
+    // A failed close posts NO closing comment — it would be false text,
+    // re-posted every tick.
+    r = run({ comments: [bot(NOTICE)], closeRc: 1 });
+    expect(r.note).toBe('no-op close FAILED — will retry next tick');
+    expect(r.counters).toBe('0/0');
+    expect(r.writes).toEqual(['pr close 7 --repo QwenLM/qwen-code']);
+    // A lost closing comment after a real close still counts the close.
+    r = run({ comments: [bot(NOTICE)], commentRc: 1 });
+    expect(r.note).toBe(
+      'closed as no-op — the closing comment FAILED to post (the close stands)',
+    );
+    expect(r.counters).toBe('0/1');
+    // AT MOST ONCE per PR (R1-1): the probe read the PR's own close events;
+    // a PR that was closed before — by this lever, by triage, by anyone — is
+    // open again only because a human reopened it: hands off at any head,
+    // spending no further read and no write. It does not depend on the
+    // closing comment having been posted, and an UNKNOWN answer hands off
+    // too (fail closed).
+    for (const reopened of ['true', '']) {
+      r = run({ comments: [bot(NOTICE)], reopened });
+      expect(r.note).toBe('closed before and reopened — left to a human');
+      expect(r.calls).toBe(0);
+    }
+    r = run({ reopened: 'true' });
+    expect(r.calls).toBe(0);
+    // Comments GitHub returns with a null body or a deleted author do not
+    // break the history read.
+    r = run({
+      comments: [
+        { user: null, created_at: '2026-09-01T00:00:00Z', body: null },
+        {
+          user: { login: 'qwen-code-dev-bot' },
+          created_at: '2026-09-01T00:00:00Z',
+          body: null,
+        },
+        bot(NOTICE),
+      ],
+    });
+    expect(r.note).toBe('closed as no-op');
+    // Only the BOT's own notice counts: a human pasting the marker cannot
+    // pull the close forward.
+    r = run({ comments: [human(NOTICE)] });
+    expect(r.note).toBe(NOTICED);
+    expect(r.writes[0]).toMatch(/^pr comment /);
+    // A notice for ANOTHER head is stale: a fresh notice, never a close.
+    r = run({
+      comments: [
+        bot(`… <!-- fleet-shepherd noop-notice sha=${'b'.repeat(40)} -->`),
+      ],
+    });
+    expect(r.note).toBe(NOTICED);
+    expect(r.writes[0]).toMatch(/^pr comment /);
+    // The comment history is read across pages (R1-4): 100 older comments
+    // fill page 1 and the bot's notice sits on page 2 — it must be seen.
+    r = run({
+      pages: [
+        Array.from({ length: 100 }, (_, i) => human(`comment ${i}`)),
+        [bot(NOTICE)],
+      ],
+    });
+    expect(r.note).toBe('closed as no-op');
+    // Dry-run performs no write on either step.
+    r = run({ comments: [bot(NOTICE)], dryRun: 'true' });
+    expect(r.writes).toHaveLength(0);
+    r = run({ dryRun: 'true' });
+    expect(r.writes).toHaveLength(0);
+  });
+
+  it('behaviorally proves the no-op close waits out a notice that is too new and re-posts one that is too old', () => {
+    const { run, bot, ago, NOTICE, NOTICED } = leverHarness();
+    // The reaction window is enforced on the notice's OWN timestamp (R1-5),
+    // in both directions. Too new → defer, spending no live read.
+    let r = run({ comments: [bot(NOTICE, ago(30))] });
+    expect(r.note).toBe(
+      'no-op notice is 30s old — closes once it is 600s old, unless the head moves',
+    );
+    expect(r.writes).toHaveLength(0);
+    expect(r.calls).toBe(1);
+    r = run({ comments: [bot(NOTICE, ago(599))] });
+    expect(r.writes).toHaveLength(0);
+    r = run({ comments: [bot(NOTICE, ago(600))] });
+    expect(r.note).toBe('closed as no-op');
+    // A notice from the future (clock skew) is "too new", never a close.
+    r = run({ comments: [bot(NOTICE, ago(-3600))] });
+    expect(r.writes).toHaveLength(0);
+    // Too old → the warning is spent: a fresh notice, not a close…
+    r = run({ comments: [bot(NOTICE, ago(30 * 86400))] });
+    expect(r.note).toBe(NOTICED);
+    expect(r.writes).toHaveLength(1);
+    expect(r.writes[0]).toMatch(/^pr comment /);
+    r = run({ comments: [bot(NOTICE, ago(86400))] });
+    expect(r.note).toBe('closed as no-op');
+    r = run({ comments: [bot(NOTICE, ago(86401))] });
+    expect(r.note).toBe(NOTICED);
+    // …and the NEWEST notice for the head is the one that counts.
+    r = run({ comments: [bot(NOTICE, ago(30 * 86400)), bot(NOTICE)] });
+    expect(r.note).toBe('closed as no-op');
+    r = run({ comments: [bot(NOTICE), bot(NOTICE, ago(30))] });
+    expect(r.writes).toHaveLength(0);
+    // A notice that exists but cannot be dated defers: never "old enough"
+    // (a close), never "absent" (a duplicate notice every tick). The shim
+    // keeps GNU's trap — `date -d ""` succeeds with an in-window epoch — so
+    // the missing and empty shapes pass ONLY because the lever tests for
+    // emptiness itself.
+    for (const created_at of [undefined, '', 'garbage-date']) {
+      r = run({
+        comments: [
+          { user: { login: 'qwen-code-dev-bot' }, created_at, body: NOTICE },
+        ],
+      });
+      expect(r.note).toBe(
+        'notice timestamp unreadable — fail closed, no close',
+      );
+      expect(r.writes).toHaveLength(0);
+    }
+  });
+
+  it('behaviorally proves the no-op lever’s busy rail reads the autofix runs that ARE live, all of them, and fails closed', () => {
+    const { run, bot, NOTICE } = leverHarness();
+    let r;
+    // A live review-address job for THIS PR defers BOTH writes — whatever
+    // state its run is in (running, queued behind a runner, pending in a
+    // concurrency group) — and the lever finds it by listing the runs that
+    // ARE live, not by looking through a window of recent ones.
+    const job = (name, status = 'in_progress') => ({ name, status });
+    const BUSY = 'review-address in flight — deferring the no-op lever';
+    for (const status of ['in_progress', 'queued', 'pending']) {
+      for (const comments of [[bot(NOTICE)], []]) {
+        r = run({
+          comments,
+          // Production is a matrix: one run holds several live address
+          // jobs, more runs follow it, and other statuses hold other PRs.
+          // THIS PR's job is read FIRST of all of them, so an accumulator
+          // that keeps only the last job, or resets per run, cannot pass.
+          liveRuns: {
+            [status]: [
+              { id: 900, jobs: [job('route', 'completed')] },
+              {
+                id: 901,
+                jobs: [
+                  reviewAddressJob(7, status),
+                  reviewAddressJob(12117, status),
+                  reviewAddressJob(11679, status),
+                ],
+              },
+              {
+                id: 906,
+                jobs: [reviewAddressJob(11989)],
+              },
+            ],
+            requested: [
+              {
+                id: 907,
+                jobs: [reviewAddressJob(5, 'queued')],
+              },
+            ],
+          },
+        });
+        expect(r.note).toBe(BUSY);
+        expect(r.writes).toHaveLength(0);
+        expect(r.views).toBe(0);
+        // The sweep lists every status out and back (nine listings) before
+        // the first jobs read, and reads each run once although the second
+        // pass lists it again.
+        expect(r.runOrder).toBe(`${'list,'.repeat(9)}view,view,view,view`);
+      }
+    }
+    // …and when THIS PR's job is the LAST of its run's jobs, so stopping at a
+    // run's first address job cannot pass either.
+    r = run({
+      comments: [bot(NOTICE)],
+      liveRuns: {
+        in_progress: [
+          {
+            id: 908,
+            jobs: [
+              reviewAddressJob(12117),
+              reviewAddressJob(11679),
+              reviewAddressJob(7),
+            ],
+          },
+        ],
+      },
+    });
+    expect(r.note).toBe(BUSY);
+    expect(r.writes).toHaveLength(0);
+    // A job for ANOTHER PR (token match, not substring: 17 is not 7), or a
+    // job for this PR that already completed, does not defer.
+    r = run({
+      comments: [bot(NOTICE)],
+      liveRuns: {
+        in_progress: [
+          {
+            id: 902,
+            jobs: [reviewAddressJob(17), reviewAddressJob(7, 'completed')],
+          },
+        ],
+      },
+    });
+    expect(r.note).toBe('closed as no-op');
+    // …and the rail's SUCCESSFUL answer is loud (R2-5): the tick log names
+    // the PRs it defers for, like the sibling busy line — a deferral that
+    // lasts days must not leave "which run holds it?" unanswerable.
+    r = run({
+      comments: [bot(NOTICE)],
+      liveRuns: {
+        in_progress: [
+          { id: 911, jobs: [reviewAddressJob(7), reviewAddressJob(12)] },
+        ],
+      },
+    });
+    expect(r.note).toBe(BUSY);
+    expect(r.out).toContain(
+      '🫥 no-op rail: live review-address for PR(s): 7 12 ',
+    );
+    // A run that was nowhere on the way out — it changed status between two
+    // listings — is caught on the way back.
+    r = run({
+      comments: [bot(NOTICE)],
+      liveRunsSecondPass: {
+        in_progress: [
+          {
+            id: 909,
+            jobs: [reviewAddressJob(7)],
+          },
+        ],
+      },
+    });
+    expect(r.note).toBe(BUSY);
+    expect(r.writes).toHaveLength(0);
+    // All five not-yet-final statuses are listed, every tick that reaches a
+    // write — and ANY failed or unparsable read is unknown busy-state, which
+    // defers (fail closed), never "nothing is running".
+    r = run({ comments: [bot(NOTICE)] });
+    expect(r.runReads).toBe(9);
+    // …but only ONCE per tick: the next PR that needs the answer reuses it.
+    r = run({ comments: [bot(NOTICE)], after: 'noop_must_wait 8 || true' });
+    expect(r.note).toBe('closed as no-op');
+    expect(r.runReads).toBe(9);
+    const UNKNOWN =
+      'live autofix runs unreadable — busy-state unknown, deferring the no-op lever';
+    for (const broken of [
+      // Even the de-duplication of the run ids: if it fails, the rail is
+      // unknown, never "nothing is running".
+      {
+        sortFail: true,
+        liveRuns: {
+          in_progress: [
+            {
+              id: 910,
+              jobs: [reviewAddressJob(7)],
+            },
+          ],
+        },
+      },
+      { runsFail: 'in_progress' },
+      { runsFail: 'requested' },
+      {
+        jobsFail: true,
+        liveRuns: { queued: [{ id: 903, jobs: [] }] },
+      },
+      { liveRuns: { queued: [{ id: 904, jobs: '{}' }] } },
+      { liveRuns: { queued: [{ id: 905, jobs: 'not json' }] } },
+    ]) {
+      for (const comments of [[bot(NOTICE)], []]) {
+        r = run({ comments, ...broken });
+        expect(r.note).toBe(UNKNOWN);
+        expect(r.writes).toHaveLength(0);
+        expect(r.views).toBe(0);
+      }
+    }
+    // …and the tick-level warning names the rail's own stderr (R2-3): a
+    // token that lost Actions scope must not read as the benign full-page
+    // case.
+    r = run({ comments: [bot(NOTICE)], runsFail: 'queued' });
+    expect(r.note).toBe(UNKNOWN);
+    expect(r.warnings.join('\n')).toContain(
+      'live autofix runs could not be read this tick',
+    );
+    expect(r.warnings.join('\n')).toContain(
+      'last error: gh: Resource not accessible by integration (HTTP 403)',
+    );
+  });
+
+  it('behaviorally proves a full page of live runs is unknown busy-state, and one short of full is read through', () => {
+    const { run, bot, NOTICE } = leverHarness();
+    const UNKNOWN =
+      'live autofix runs unreadable — busy-state unknown, deferring the no-op lever';
+    let r;
+    // A FULL page of one status may be a truncated one: unknown, with no
+    // jobs read at all. One short of full is read through.
+    const manyRuns = (n) =>
+      Array.from({ length: n }, (_, i) => ({ id: 2000 + i, jobs: [] }));
+    r = run({ comments: [bot(NOTICE)], liveRuns: { queued: manyRuns(100) } });
+    expect(r.note).toBe(UNKNOWN);
+    expect(r.runOrder).not.toContain('view');
+    r = run({ comments: [bot(NOTICE)], liveRuns: { queued: manyRuns(99) } });
+    expect(r.note).toBe('closed as no-op');
+    expect(r.runReads).toBe(9 + 99);
+  });
+
+  it('behaviorally proves the no-op lever defers on every parked, unreadable, budgeted or moved state', () => {
+    const { run, bot, HEAD, NOTICE, NOTICED } = leverHarness();
+    // A PR parked for a human is neither noticed nor closed — not from the
+    // snapshot (no read at all), and not from the LIVE labels on either
+    // write path (a label applied after enumeration).
+    let r = run({ comments: [bot(NOTICE)], parked: 'parked' });
+    expect(r.note).toBe(
+      'parked (autofix/needs-human) — a no-op, left to the human decision',
+    );
+    expect(r.calls).toBe(0);
+    const PARKED_LIVE =
+      'parked (autofix/needs-human, live) — a no-op, left to the human decision';
+    r = run({
+      comments: [bot(NOTICE)],
+      labels: [{ name: 'autofix/needs-human' }],
+    });
+    expect(r.note).toBe(PARKED_LIVE);
+    expect(r.writes).toHaveLength(0);
+    expect(r.liveReads).toBe(0);
+    r = run({ labels: [{ name: 'autofix/needs-human' }] });
+    expect(r.note).toBe(PARKED_LIVE);
+    expect(r.writes).toHaveLength(0);
+    // The live parked check fails CLOSED, and says so truthfully: a label
+    // payload that answered but cannot be parsed stops the write without
+    // being worded as a maintainer's label.
+    r = run({ comments: [bot(NOTICE)], labelsBody: 'not json' });
+    expect(r.note).toBe('label payload unparsable — fail closed, no write');
+    expect(r.writes).toHaveLength(0);
+    r = run({ labelsBody: 'not json' });
+    expect(r.note).toBe('label payload unparsable — fail closed, no write');
+    expect(r.writes).toHaveLength(0);
+    // …and so does a payload that parses but carries no labels LIST, which
+    // live_skip alone would have read as "no skip label".
+    for (const labelsBody of ['{}', '{"labels":null}', '[]']) {
+      r = run({ comments: [bot(NOTICE)], labelsBody });
+      expect(r.note).toBe('label payload unparsable — fail closed, no write');
+      expect(r.writes).toHaveLength(0);
+    }
+    // The head moved since the notice → no close (that push would have
+    // landed on a closed PR); the notice for the new head follows next tick.
+    r = run({ comments: [bot(NOTICE)], live: `open ${'c'.repeat(40)}` });
+    expect(r.note).toBe(
+      'head moved since the notice (now ccccccccc) — re-evaluating next tick',
+    );
+    expect(r.writes).toHaveLength(0);
+    // Closed by someone else meanwhile → nothing to close.
+    r = run({ comments: [bot(NOTICE)], live: `closed ${HEAD}` });
+    expect(r.note).toBe('PR no longer open (closed) — nothing to close');
+    expect(r.writes).toHaveLength(0);
+    // Every unreadable input defers in the fail-closed direction, with NO
+    // write: the live head, and the comment history (pipefail carries the gh
+    // failure through the jq merge).
+    r = run({ comments: [bot(NOTICE)], liveFail: true });
+    expect(r.note).toBe('live head unreadable — fail closed, no close');
+    expect(r.writes).toHaveLength(0);
+    // The NOTICE also guards on the live state and head riding live_skip's
+    // one read (R2-4): a PR a human closed or pushed to since the fleet
+    // snapshot must not get a comment promising a close that will never
+    // come — and no second live read is spent.
+    r = run({
+      labelsBody: JSON.stringify({
+        labels: [],
+        state: 'CLOSED',
+        headRefOid: HEAD,
+      }),
+    });
+    expect(r.note).toBe('PR no longer open at this head — no notice');
+    expect(r.writes).toHaveLength(0);
+    expect(r.views).toBe(1);
+    expect(r.liveReads).toBe(0);
+    r = run({
+      labelsBody: JSON.stringify({
+        labels: [],
+        state: 'OPEN',
+        headRefOid: 'b'.repeat(40),
+      }),
+    });
+    expect(r.note).toBe('PR no longer open at this head — no notice');
+    expect(r.writes).toHaveLength(0);
+    r = run({ comments: [bot(NOTICE)], commentsFail: true });
+    expect(r.note).toBe('marker read failed — deferring the no-op lever');
+    expect(r.writes).toHaveLength(0);
+    expect(r.views).toBe(0);
+    // A page that is not a comment array (the marks jq then fails) is the
+    // same deferral — and, because the lever runs in the loop BODY under
+    // errexit, the assignment must sit inside the condition or a garbled
+    // page would abort the whole tick instead of deferring one PR.
+    r = run({ comments: { message: 'boom' } });
+    expect(r.note).toBe('marker read failed — deferring the no-op lever');
+    expect(r.writes).toHaveLength(0);
+    // The budget is checked BEFORE the live label read and the live head
+    // read — an exhausted tick spends no more API calls…
+    r = run({ comments: [bot(NOTICE)], closes: '3' });
+    expect(r.note).toBe('close budget reached this tick');
+    expect(r.views).toBe(0);
+    expect(r.liveReads).toBe(0);
+    expect(r.runReads).toBe(0);
+    expect(r.writes).toHaveLength(0);
+    // …and it caps CLOSES only (R1-6): notices are uncapped, so an exhausted
+    // close budget still posts the first notice (and no close).
+    r = run({ closes: '3' });
+    expect(r.note).toBe(NOTICED);
+    expect(r.counters).toBe('1/3');
+    expect(r.writes).toHaveLength(1);
+    expect(r.writes[0]).toMatch(/^pr comment /);
+    // The live label recheck precedes BOTH writes, reason-aware, and an
+    // unreadable label state fails closed.
+    r = run({ comments: [bot(NOTICE)], labels: [{ name: 'autofix/skip' }] });
+    expect(r.note).toBe(
+      'autofix/skip present (live) — consent withdrawn, no no-op close',
+    );
+    expect(r.writes).toHaveLength(0);
+    r = run({ labels: [{ name: 'autofix/skip' }] });
+    expect(r.note).toBe(
+      'autofix/skip present (live) — consent withdrawn, no no-op notice',
+    );
+    expect(r.writes).toHaveLength(0);
+    r = run({ labelsFail: true });
+    expect(r.note).toBe(
+      'label state unreadable — fail closed, no no-op notice',
+    );
+    expect(r.writes).toHaveLength(0);
+    r = run({ comments: [bot(NOTICE)], labelsFail: true });
+    expect(r.note).toBe('label state unreadable — fail closed, no no-op close');
+    expect(r.writes).toHaveLength(0);
+    // A failed notice post never counts and is retried next tick.
+    r = run({ commentRc: 1 });
+    expect(r.note).toBe('no-op notice post FAILED — will retry next tick');
+    expect(r.counters).toBe('0/0');
+  });
+
+  it('behaviorally proves the row says WHICH non-answer the probe gave, on an idle row and on a busy one', () => {
+    const tail = workflow.match(
+      /( {12}PROBE_NOTE=''\n[\s\S]*?\n {12}fi)\n\n {12}echo "🐑/,
+    )?.[1];
+    expect(tail).toBeTruthy();
+    const note = (state, action) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail\nNOOP_STATE='${state}'\nACTION_NOTE='${action}'\n${tail}\nprintf '%s' "$ACTION_NOTE"`,
+        ],
+        { encoding: 'utf8' },
+      );
+    // An otherwise idle row (the placeholder dash) is REPLACED by the note…
+    expect(note('no-test-merge', '—')).toBe(
+      'no test merge yet — no-op probe deferred this tick',
+    );
+    expect(note('head-moved', '—')).toBe(
+      'head moved since the fleet snapshot — no-op probe deferred this tick',
+    );
+    expect(note('api-failure', '—')).toBe(
+      'no-op probe FAILED (api-failure) — close lever deferred this tick',
+    );
+    // …and a row another lever already wrote on gets it APPENDED.
+    expect(note('unparsable', 'synced with main')).toBe(
+      'synced with main · no-op probe FAILED (unparsable) — close lever deferred this tick',
+    );
+    // A probe that answered (or never ran) leaves the row alone.
+    for (const state of ['', 'noop', 'changes']) {
+      expect(note(state, '—')).toBe('—');
+      expect(note(state, 'synced with main')).toBe('synced with main');
+    }
   });
 });

@@ -76,21 +76,27 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async listSessionGroups() {
+    async listSessionGroups(workspaceCwd) {
       const client = requireClient(getClient, 'List session groups failed');
-      const cwd = getWorkspaceCwd();
-      if (!cwd) return { groups: [], colorOptions: [] };
+      const currentCwd = getWorkspaceCwd();
+      const targetCwd = workspaceCwd ?? currentCwd;
+      if (!targetCwd) return { groups: [], colorOptions: [] };
       return withActionTimeout(
-        client.listSessionGroups(cwd),
+        workspaceCwd && workspaceCwd !== currentCwd
+          ? client.workspaceByCwd(workspaceCwd).listSessionGroups()
+          : client.listSessionGroups(targetCwd),
         'List session groups timed out',
       );
     },
 
-    async createSessionGroup(input) {
+    async createSessionGroup(input, workspaceCwd) {
       const client = requireClient(getClient, 'Create session group failed');
-      const cwd = requireWorkspaceCwd(getWorkspaceCwd);
+      const currentCwd = getWorkspaceCwd();
+      const targetCwd = workspaceCwd ?? requireWorkspaceCwd(getWorkspaceCwd);
       return withActionTimeout(
-        client.createSessionGroup(cwd, input),
+        workspaceCwd && workspaceCwd !== currentCwd
+          ? client.workspaceByCwd(workspaceCwd).createSessionGroup(input)
+          : client.createSessionGroup(targetCwd, input),
         'Create session group timed out',
       );
     },
@@ -543,6 +549,22 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async loadExtensionSummaries() {
+      const client = requireClient(getClient, 'Load extensions failed');
+      return withActionTimeout(
+        client.workspaceExtensionSummaries(),
+        'Load extensions timed out',
+      );
+    },
+
+    async loadExtensionDetails(name) {
+      const client = requireClient(getClient, 'Load extension details failed');
+      return withActionTimeout(
+        client.workspaceExtensionDetails(name),
+        'Load extension details timed out',
+      );
+    },
+
     async loadToolsStatus() {
       const client = requireClient(getClient, 'Load tools failed');
       return withActionTimeout(client.workspaceTools(), 'Load tools timed out');
@@ -588,18 +610,18 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async loadMemoryStatus() {
+    async loadMemoryStatus(options) {
       const client = requireClient(getClient, 'Load memory failed');
       return withActionTimeout(
-        client.workspaceMemory(),
+        client.workspaceMemory(options),
         'Load memory timed out',
       );
     },
 
-    async readWorkspaceFile(filePath) {
+    async readWorkspaceFile(filePath, opts) {
       const client = requireClient(getClient, 'Read workspace file failed');
       return withActionTimeout(
-        client.readWorkspaceFile(filePath),
+        client.readWorkspaceFile(filePath, opts),
         'Read workspace file timed out',
       );
     },
@@ -699,10 +721,13 @@ export function createDaemonWorkspaceActions({
       };
     },
 
-    async loadProviders() {
+    async loadProviders(workspaceCwd) {
       const client = requireClient(getClient, 'Load providers failed');
+      const cwd = getWorkspaceCwd();
       return withActionTimeout(
-        client.workspaceProviders(),
+        workspaceCwd && workspaceCwd !== cwd
+          ? client.workspaceByCwd(workspaceCwd).workspaceProviders()
+          : client.workspaceProviders(),
         'Load providers timed out',
       );
     },

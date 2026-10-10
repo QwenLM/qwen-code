@@ -12,6 +12,7 @@ import type { PermissionCheckContext } from '../permissions/types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { ToolCallConfirmationDetails } from '../tools/tools.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
+import type { PlanModeShellDecision } from './plan-mode-shell-policy.js';
 import {
   decoratePlanModeShellConfirmation,
   evaluatePlanModeShellPolicy,
@@ -74,6 +75,29 @@ async function evaluate(
     signal: options.signal ?? new AbortController().signal,
   });
 }
+
+/** Re-validates `decision` for `command`, with fresh signal and args unless given. */
+function validateContext(
+  config: Config,
+  decision: PlanModeShellDecision,
+  command: string,
+  options: {
+    requestArgs?: Record<string, unknown>;
+    invocationParams?: Record<string, unknown>;
+    signal?: AbortSignal;
+  } = {},
+) {
+  return validatePlanModeShellContext({
+    config,
+    decision,
+    requestArgs: options.requestArgs ?? { command },
+    invocationParams: options.invocationParams ?? { command },
+    signal: options.signal ?? new AbortController().signal,
+  });
+}
+
+const permissionConfig = (evaluatePermission: PermissionManager['evaluate']) =>
+  createConfig({ permissionManager: { evaluate: evaluatePermission } });
 
 function execConfirmation(): ToolCallConfirmationDetails {
   return {
@@ -143,13 +167,7 @@ describe('plan-mode shell policy', () => {
     const signal = new AbortController().signal;
 
     await expect(
-      validatePlanModeShellContext({
-        config,
-        decision,
-        requestArgs: { command: 'git status' },
-        invocationParams: { command: 'git status' },
-        signal,
-      }),
+      validateContext(config, decision, 'git status', { signal }),
     ).resolves.toBeUndefined();
 
     mode = ApprovalMode.DEFAULT;
@@ -157,30 +175,18 @@ describe('plan-mode shell policy', () => {
     mode = ApprovalMode.PLAN;
     revision++;
     await expect(
-      validatePlanModeShellContext({
-        config,
-        decision,
-        requestArgs: { command: 'git status' },
-        invocationParams: { command: 'git status' },
-        signal,
-      }),
+      validateContext(config, decision, 'git status', { signal }),
     ).resolves.toBe(STALE_MESSAGE);
 
     const freshDecision = await evaluate('git status', { config });
     await expect(
-      validatePlanModeShellContext({
-        config,
-        decision: freshDecision,
+      validateContext(config, freshDecision, 'git status', {
         requestArgs: { command: 'git diff' },
-        invocationParams: { command: 'git status' },
         signal,
       }),
     ).resolves.toBe(STALE_MESSAGE);
     await expect(
-      validatePlanModeShellContext({
-        config,
-        decision: freshDecision,
-        requestArgs: { command: 'git status' },
+      validateContext(config, freshDecision, 'git status', {
         invocationParams: { command: 'git diff' },
         signal,
       }),
@@ -197,11 +203,7 @@ describe('plan-mode shell policy', () => {
 
     targetDir = '/workspace/two';
     await expect(
-      validatePlanModeShellContext({
-        config,
-        decision: ambientDecision,
-        requestArgs: { command: "python -c 'print(1)'" },
-        invocationParams: { command: "python -c 'print(1)'" },
+      validateContext(config, ambientDecision, "python -c 'print(1)'", {
         signal,
       }),
     ).resolves.toBe(STALE_MESSAGE);
@@ -210,108 +212,71 @@ describe('plan-mode shell policy', () => {
       command: "python -c 'print(1)'",
       directory: '/workspace/fixed',
     };
-    const explicitDecision = await evaluate(explicitArgs.command, {
-      config,
+    const explicit = {
       requestArgs: explicitArgs,
       invocationParams: explicitArgs,
+    };
+    const explicitDecision = await evaluate(explicitArgs.command, {
+      config,
+      ...explicit,
     });
     targetDir = '/workspace/three';
     await expect(
-      validatePlanModeShellContext({
-        config,
-        decision: explicitDecision,
-        requestArgs: explicitArgs,
-        invocationParams: explicitArgs,
+      validateContext(config, explicitDecision, explicitArgs.command, {
+        ...explicit,
         signal,
       }),
     ).resolves.toBeUndefined();
   });
 
   it('fails closed when current permission rules deny or throw', async () => {
-    const denyConfig = createConfig({
-      permissionManager: { evaluate: vi.fn().mockResolvedValue('deny') },
-    });
+    const denyConfig = permissionConfig(vi.fn().mockResolvedValue('deny'));
     const denyDecision = await evaluate('git status', { config: denyConfig });
     await expect(
-      validatePlanModeShellContext({
-        config: denyConfig,
-        decision: denyDecision,
-        requestArgs: { command: 'git status' },
-        invocationParams: { command: 'git status' },
-        signal: new AbortController().signal,
-      }),
+      validateContext(denyConfig, denyDecision, 'git status'),
     ).resolves.toBe(STALE_MESSAGE);
 
-    const errorConfig = createConfig({
-      permissionManager: { evaluate: vi.fn().mockRejectedValue(new Error()) },
-    });
+    const errorConfig = permissionConfig(
+      vi.fn().mockRejectedValue(new Error()),
+    );
     const errorDecision = await evaluate('git status', {
       config: errorConfig,
     });
     await expect(
-      validatePlanModeShellContext({
-        config: errorConfig,
-        decision: errorDecision,
-        requestArgs: { command: 'git status' },
-        invocationParams: { command: 'git status' },
-        signal: new AbortController().signal,
-      }),
+      validateContext(errorConfig, errorDecision, 'git status'),
     ).resolves.toBe(STALE_MESSAGE);
   });
 
   it.each(['allow', 'ask', 'default'] as const)(
     'keeps the selected route when permission recheck returns %s',
     async (permission) => {
-      const config = createConfig({
-        permissionManager: {
-          evaluate: vi.fn().mockResolvedValue(permission),
-        },
-      });
+      const config = permissionConfig(vi.fn().mockResolvedValue(permission));
       const decision = await evaluate('git status', { config });
 
       await expect(
-        validatePlanModeShellContext({
-          config,
-          decision,
-          requestArgs: { command: 'git status' },
-          invocationParams: { command: 'git status' },
-          signal: new AbortController().signal,
-        }),
+        validateContext(config, decision, 'git status'),
       ).resolves.toBeUndefined();
     },
   );
 
   it('rechecks the frozen cwd and tool params needed by virtual denies', async () => {
     const evaluatePermission = vi.fn().mockResolvedValue('deny');
-    const config = createConfig({
-      permissionManager: { evaluate: evaluatePermission },
-    });
-    const requestArgs = { command: 'git status' };
-    const invocationParams = {
-      command: 'git status',
-      directory: '/workspace',
+    const config = permissionConfig(evaluatePermission);
+    const args = {
+      requestArgs: { command: 'git status' },
+      invocationParams: { command: 'git status', directory: '/workspace' },
     };
-    const decision = await evaluate('git status', {
-      config,
-      requestArgs,
-      invocationParams,
-    });
+    const decision = await evaluate('git status', { config, ...args });
 
     await expect(
-      validatePlanModeShellContext({
-        config,
-        decision,
-        requestArgs,
-        invocationParams,
-        signal: new AbortController().signal,
-      }),
+      validateContext(config, decision, 'git status', args),
     ).resolves.toBe(STALE_MESSAGE);
     expect(evaluatePermission).toHaveBeenCalledWith(
       expect.objectContaining({
         toolName: ToolNames.SHELL,
         command: 'git status',
         cwd: '/workspace',
-        toolParams: invocationParams,
+        toolParams: args.invocationParams,
       }),
     );
   });
@@ -322,17 +287,11 @@ describe('plan-mode shell policy', () => {
       controller.abort();
       return Promise.reject(new Error('late permission rejection'));
     });
-    const config = createConfig({
-      permissionManager: { evaluate: evaluatePermission },
-    });
+    const config = permissionConfig(evaluatePermission);
     const decision = await evaluate('git status', { config });
 
     await expect(
-      validatePlanModeShellContext({
-        config,
-        decision,
-        requestArgs: { command: 'git status' },
-        invocationParams: { command: 'git status' },
+      validateContext(config, decision, 'git status', {
         signal: controller.signal,
       }),
     ).rejects.toThrow('aborted');

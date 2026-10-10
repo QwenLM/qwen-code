@@ -1446,6 +1446,13 @@
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "app_context": {
+            "description": "Use the compact macOS application observation with contextual menus.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "include_screenshot": {
             "description": "Default true. Set false to skip the screenshot and return the tree only.",
             "type": "boolean"
@@ -2330,6 +2337,180 @@
       }
     },
     {
+      "name": "paste",
+      "description": "Paste plain text, Markdown, or HTML into the exact app window, then restore the previous clipboard if no external change replaced it. macOS only.",
+      "platforms": [
+        "macos"
+      ],
+      "capabilities": [
+        "input.keyboard.paste",
+        "clipboard.read",
+        "clipboard.write"
+      ],
+      "annotations": {
+        "read_only": false,
+        "destructive": true,
+        "idempotent": false,
+        "open_world": true
+      },
+      "schema_mode": "canonical_runtime",
+      "cursor_semantics": {
+        "action": "text"
+      },
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "app_context": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "format": {
+            "default": "text",
+            "enum": [
+              "text",
+              "md",
+              "html"
+            ],
+            "type": "string"
+          },
+          "pid": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "text": {
+            "type": "string"
+          },
+          "window_id": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pid",
+          "window_id",
+          "text"
+        ],
+        "type": "object"
+      },
+      "success_output_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery": {
+            "additionalProperties": false,
+            "properties": {
+              "delivered_count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "mode": {
+                "enum": [
+                  "background",
+                  "foreground",
+                  "not_applicable",
+                  "unknown"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "effect": {
+            "enum": [
+              "confirmed",
+              "partial",
+              "unverifiable",
+              "suspected_noop",
+              "refused"
+            ],
+            "type": "string"
+          },
+          "escalation": {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "enum": [
+                  "route_unavailable",
+                  "delivery_failed",
+                  "effect_unconfirmed",
+                  "suspected_noop",
+                  "permission_required"
+                ],
+                "type": "string"
+              },
+              "target": {
+                "enum": [
+                  "pixel",
+                  "foreground",
+                  "page",
+                  "session"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "target",
+              "reason"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "evidence": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "value_readback",
+                    "window_change"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "route": {
+            "enum": [
+              "accessibility",
+              "synthetic_events",
+              "global_input",
+              "system_api",
+              "dom",
+              "trusted_input"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "effect",
+          "route"
+        ],
+        "type": "object"
+      }
+    },
+    {
       "name": "perform_secondary_action",
       "description": "Perform one explicitly named action advertised by the exact current accessibility element. Missing, ambiguous, disabled, or stale actions fail closed without a pixel fallback.",
       "platforms": [
@@ -2829,6 +3010,190 @@
           "x",
           "y",
           "direction"
+        ],
+        "type": "object"
+      },
+      "success_output_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery": {
+            "additionalProperties": false,
+            "properties": {
+              "delivered_count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "mode": {
+                "enum": [
+                  "background",
+                  "foreground",
+                  "not_applicable",
+                  "unknown"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "effect": {
+            "enum": [
+              "confirmed",
+              "partial",
+              "unverifiable",
+              "suspected_noop",
+              "refused"
+            ],
+            "type": "string"
+          },
+          "escalation": {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "enum": [
+                  "route_unavailable",
+                  "delivery_failed",
+                  "effect_unconfirmed",
+                  "suspected_noop",
+                  "permission_required"
+                ],
+                "type": "string"
+              },
+              "target": {
+                "enum": [
+                  "pixel",
+                  "foreground",
+                  "page",
+                  "session"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "target",
+              "reason"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "evidence": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "value_readback",
+                    "window_change"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "route": {
+            "enum": [
+              "accessibility",
+              "synthetic_events",
+              "global_input",
+              "system_api",
+              "dom",
+              "trusted_input"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "effect",
+          "route"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "select_text",
+      "description": "Select one unique text match in the exact accessibility element, optionally constrained by adjacent prefix/suffix, or place its caret before/after the match. macOS only.",
+      "platforms": [
+        "macos"
+      ],
+      "capabilities": [
+        "accessibility.text.select",
+        "accessibility.element_tokens"
+      ],
+      "annotations": {
+        "read_only": false,
+        "destructive": true,
+        "idempotent": true,
+        "open_world": true
+      },
+      "schema_mode": "canonical_runtime",
+      "cursor_semantics": {
+        "action": "text"
+      },
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "element_token": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "pid": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "prefix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "selection": {
+            "default": "text",
+            "enum": [
+              "text",
+              "cursor_before",
+              "cursor_after"
+            ],
+            "type": "string"
+          },
+          "suffix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "window_id": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pid",
+          "window_id",
+          "element_token",
+          "text"
         ],
         "type": "object"
       },

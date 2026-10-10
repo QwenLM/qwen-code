@@ -47,7 +47,7 @@ const RUNNER_CONFIG = /(?:^|\/)vitest(?:\.[^/]*)?\.config\.[cm]?[jt]s$/i;
 
 // The dependency and script manifests: a changed `test:ci`, a native module, or
 // an optional per-platform dependency changes what each lane executes.
-const MANIFEST = new Set(['package.json', 'package-lock.json']);
+const MANIFEST = new Set(['package.json', 'pnpm-lock.yaml']);
 
 // Source subtrees whose subject IS the host.
 //

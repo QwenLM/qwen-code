@@ -16,6 +16,7 @@ import {
   shouldUsePlanOnlyReminderInSubagentContext,
   isSubagentLikeExecutionContext,
   SUBAGENT_PLAN_LIFECYCLE_TOOLS,
+  toolConfigAllowsSkill,
 } from './subagent-plan-tool-policy.js';
 
 describe('subagent plan tool policy', () => {
@@ -216,5 +217,53 @@ describe('subagent plan tool policy', () => {
     expect(logger.warn).toHaveBeenCalledWith(
       `[ExitPlanModeTool] Blocked plan lifecycle tool call from subagent: ${ToolNames.EXIT_PLAN_MODE}`,
     );
+  });
+
+  describe('toolConfigAllowsSkill', () => {
+    it.each([
+      ['no tool config', undefined],
+      ['a wildcard', { tools: ['*'] }],
+      ['an explicit list naming skill', { tools: [ToolNames.SKILL] }],
+      [
+        'a blocklist that leaves skill alone',
+        { tools: ['*'], disallowedTools: [ToolNames.SHELL] },
+      ],
+    ])('allows skills for %s', (_label, toolConfig) => {
+      expect(toolConfigAllowsSkill(toolConfig)).toBe(true);
+    });
+
+    it.each([
+      ['an explicit list without skill', { tools: [ToolNames.READ_FILE] }],
+      [
+        'a wildcard with skill disallowed',
+        { tools: ['*'], disallowedTools: [ToolNames.SKILL] },
+      ],
+      [
+        'an explicit list naming skill and disallowing it',
+        { tools: [ToolNames.SKILL], disallowedTools: [ToolNames.SKILL] },
+      ],
+      // prepareTools declares exactly the inline entries here; nothing is
+      // inherited from the registry.
+      ['an inline-only declaration set', { tools: [{ name: 'custom' }] }],
+      // An explicit empty list is the documented deny-all contract, so it
+      // inherits nothing — no tools at all, and no skill tool.
+      ['an empty list', { tools: [] }],
+    ])('withholds skills for %s', (_label, toolConfig) => {
+      expect(toolConfigAllowsSkill(toolConfig)).toBe(false);
+    });
+
+    it('credits the exec gateway only under CodeModeOnly', () => {
+      const execList = { tools: [ToolNames.EXEC, ToolNames.READ_FILE] };
+      expect(toolConfigAllowsSkill(execList, true)).toBe(true);
+      expect(toolConfigAllowsSkill(execList, false)).toBe(false);
+      expect(toolConfigAllowsSkill(execList)).toBe(false);
+      expect(
+        toolConfigAllowsSkill(
+          { ...execList, disallowedTools: [ToolNames.SKILL] },
+          true,
+        ),
+      ).toBe(false);
+      expect(toolConfigAllowsSkill({ tools: [] }, true)).toBe(false);
+    });
   });
 });

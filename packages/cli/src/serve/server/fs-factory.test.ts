@@ -5,6 +5,7 @@
  */
 
 import { promises as fsp, realpathSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -257,6 +258,44 @@ describe('parseNewFileModePolicy (QWEN_SERVE_NEW_FILE_MODE)', () => {
 });
 
 describe('resolveBridgeFsFactory env-var wiring (QWEN_SERVE_NEW_FILE_MODE)', () => {
+  it('selects the SSH boundary and rejects injected, multiple or broken anchor boundaries', async () => {
+    const root = await fsp.realpath(await mkScratch());
+    vi.stubEnv('QWEN_HOME', root);
+    try {
+      const url = 'ssh://host/srv/project';
+      const anchor = path.join(
+        root,
+        'ssh-workspaces',
+        createHash('sha256').update(url).digest('hex'),
+        'workspace',
+      );
+      await fsp.mkdir(anchor, { recursive: true });
+      const descriptor = path.join(anchor, '..', 'connection.json');
+      await fsp.writeFile(descriptor, JSON.stringify({ url }));
+      const input = {
+        boundWorkspaces: [anchor],
+        trusted: false,
+        emit: vi.fn(),
+      };
+      const factory = resolveBridgeFsFactory(input);
+      expect(factory.sshWorkspace).toEqual({
+        host: 'host',
+        directory: '/srv/project',
+      });
+      expect(() => factory.assertCanWrite()).toThrow('not trusted');
+      expect(() =>
+        resolveBridgeFsFactory({ ...input, injected: factory }),
+      ).toThrow('own filesystem boundary');
+      expect(() =>
+        resolveBridgeFsFactory({ ...input, boundWorkspaces: [anchor, root] }),
+      ).toThrow('own filesystem boundary');
+      await fsp.unlink(descriptor);
+      expect(() => resolveBridgeFsFactory(input)).toThrow();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   // Guards the seam between the documented env var and the daemon: every
   // production call site omits `newFileMode`, so `resolveBridgeFsFactory`
   // must derive the policy from `process.env` itself. A regression that

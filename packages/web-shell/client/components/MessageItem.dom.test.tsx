@@ -3,13 +3,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
+import { TurnCallsProvider } from '../turnCallsContext';
 import {
   WebShellCustomizationProvider,
   type WebShellAssistantTurnFooterRenderInfo,
   type WebShellCustomization,
 } from '../customization';
-import type { Message } from '../adapters/types';
+import type { ACPToolCall, Message } from '../adapters/types';
 import { summaryRunId } from './summaryRunId';
+import timestampStyles from './MessageTimestamp.module.css';
+import { TranscriptRenderModeProvider } from '../transcriptRenderMode';
 
 vi.mock('../WebShellContexts', async () => {
   const { createContext } = await import('react');
@@ -19,32 +22,41 @@ vi.mock('../WebShellContexts', async () => {
 // Stub the message body components so MessageItem's own wiring — not the bodies
 // — is under test. UserMessage/AssistantMessage throw on a sentinel so we can
 // drive the message-level ErrorBoundary (the real one, imported below); the
-// rest are inert. MessageTimestamp is a passthrough so its chrome doesn't
-// interfere with querying the fallback.
-vi.mock('./MessageTimestamp', async () => {
-  const React = await import('react');
-  return {
-    MessageTimestamp: ({
-      children,
-      toolGroupSpacing,
-    }: {
-      children: React.ReactNode;
-      toolGroupSpacing?: boolean;
-    }) =>
-      React.createElement(
-        'div',
-        { 'data-tool-group-spacing': String(toolGroupSpacing === true) },
-        children,
-      ),
-    formatTimestamp: () => '',
-  };
-});
+// rest are inert. MessageTimestamp remains real to verify row spacing.
+const captured = vi.hoisted(() => ({
+  userMessageProps: null as null | {
+    editing?: boolean;
+    submittingEdit?: boolean;
+  },
+}));
+
 vi.mock('./messages/UserMessage', async () => {
   const React = await import('react');
   return {
-    UserMessage: ({ content }: { content: string }) => {
-      if (content.includes('__BOOM__')) throw new Error('user boom');
-      return React.createElement('div', { 'data-testid': 'user-ok' }, content);
+    UserMessage: (props: {
+      content: string;
+      editing?: boolean;
+      submittingEdit?: boolean;
+      onEditSubmit?: (content: string) => void;
+    }) => {
+      if (props.content.includes('__BOOM__')) throw new Error('user boom');
+      captured.userMessageProps = props;
+      return React.createElement(
+        'div',
+        { 'data-testid': 'user-ok' },
+        props.content,
+        props.editing
+          ? React.createElement(
+              'button',
+              {
+                'data-testid': 'edit-submit',
+                onClick: () => props.onEditSubmit?.(props.content),
+                type: 'button',
+              },
+              'submit',
+            )
+          : null,
+      );
     },
   };
 });
@@ -94,10 +106,19 @@ vi.mock('./messages/SystemMessage', () => ({ SystemMessage: () => null }));
 vi.mock('./messages/ToolGroup', async () => {
   const React = await import('react');
   return {
-    ToolGroup: ({ compactSummary }: { compactSummary?: boolean }) =>
+    ToolGroup: ({
+      compactSummary,
+      tools,
+    }: {
+      compactSummary?: boolean;
+      tools: ACPToolCall[];
+    }) =>
       React.createElement('div', {
         'data-testid': 'tool-group',
         'data-compact-summary': String(compactSummary === true),
+        'data-agent-ready': String(
+          (tools[0]?.subTools?.[0] ?? tools[0])?.subagentSessionReady,
+        ),
       }),
   };
 });
@@ -160,6 +181,53 @@ const toolMsg = (id: string): Message => ({
 function item(message: Message) {
   return <MessageItem message={message} />;
 }
+
+it.each([false, true])(
+  'propagates readiness-only changes with nested=%s',
+  (nested) => {
+    const agent: ACPToolCall = {
+      callId: 'agent-1',
+      toolName: 'agent',
+      status: 'in_progress',
+      subagentSessionReady: false,
+    };
+    const tools = nested
+      ? [{ ...agent, callId: 'parent', subTools: [agent] }]
+      : [agent];
+    const message: Message = {
+      id: 'agent-message',
+      role: 'tool_group',
+      tools,
+      timestamp: 0,
+    };
+    const { root, container } = renderWithRoot(
+      <I18nProvider language="en">{item(message)}</I18nProvider>,
+    );
+    expect(
+      container
+        .querySelector('[data-testid="tool-group"]')
+        ?.getAttribute('data-agent-ready'),
+    ).toBe('false');
+    const readyAgent = { ...agent, subagentSessionReady: true };
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          {item({
+            ...message,
+            tools: nested
+              ? [{ ...tools[0], subTools: [readyAgent] }]
+              : [readyAgent],
+          })}
+        </I18nProvider>,
+      ),
+    );
+    expect(
+      container
+        .querySelector('[data-testid="tool-group"]')
+        ?.getAttribute('data-agent-ready'),
+    ).toBe('true');
+  },
+);
 
 describe('MessageItem error isolation', () => {
   it('renders a healthy message normally (no fallback)', () => {
@@ -294,20 +362,14 @@ describe('MessageItem tool group spacing', () => {
       <I18nProvider language="en">{item(toolMsg('default'))}</I18nProvider>,
     );
 
-    expect(
-      compact.firstElementChild?.getAttribute('data-tool-group-spacing'),
-    ).toBe('true');
-    expect(
-      regular.firstElementChild?.getAttribute('data-tool-group-spacing'),
-    ).toBe('false');
-    expect(
-      compactAssistant.firstElementChild?.getAttribute(
-        'data-tool-group-spacing',
-      ),
-    ).toBe('false');
-    expect(
-      defaultTool.firstElementChild?.getAttribute('data-tool-group-spacing'),
-    ).toBe('false');
+    expect(compact.firstElementChild?.classList).toContain(
+      timestampStyles.toolGroupSpacing,
+    );
+    for (const container of [regular, compactAssistant, defaultTool]) {
+      expect(container.firstElementChild?.classList).not.toContain(
+        timestampStyles.toolGroupSpacing,
+      );
+    }
   });
 });
 
@@ -443,4 +505,160 @@ describe('MessageItem assistant turn footer', () => {
       RENDER_ERROR,
     );
   });
+});
+
+describe('MessageItem background notification spacing', () => {
+  it.each(['interactive', 'document'] as const)(
+    'keeps consecutive notification rows without hover times in %s mode',
+    (mode) => {
+      const messages = [
+        'background_task_completed',
+        'background_notification_turn_started',
+      ].map((source) => ({
+        id: source,
+        role: 'system' as const,
+        content: 'Background task',
+        timestamp: Date.now(),
+        source,
+      }));
+      const container = render(
+        <I18nProvider language="en">
+          <TranscriptRenderModeProvider value={mode}>
+            {messages.map((message) => (
+              <MessageItem key={message.id} message={message} />
+            ))}
+          </TranscriptRenderModeProvider>
+        </I18nProvider>,
+      );
+      const rows = Array.from(container.children).filter((element) =>
+        element.classList.contains(timestampStyles.row),
+      );
+      expect(rows).toHaveLength(mode === 'interactive' ? 2 : 0);
+      expect(container.querySelectorAll('[data-user-selectable]')).toHaveLength(
+        2,
+      );
+      expect(container.querySelector('span[aria-hidden="true"]')).toBeNull();
+    },
+  );
+});
+
+describe('MessageItem inline message editing', () => {
+  function renderEditableUserMessage(
+    onSubmitUserMessageEdit: (content: string) => boolean | Promise<boolean>,
+  ): HTMLElement {
+    return render(
+      <I18nProvider language="en">
+        <MessageItem
+          message={userMsg('u1', 'hello')}
+          onEditUserMessage={() => undefined}
+          onSubmitUserMessageEdit={onSubmitUserMessageEdit}
+        />
+      </I18nProvider>,
+    );
+  }
+
+  it('closes the editor once the resend is accepted', async () => {
+    const onSubmitUserMessageEdit = vi.fn().mockResolvedValue(true);
+    const container = renderEditableUserMessage(onSubmitUserMessageEdit);
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit message"]')
+        ?.click();
+    });
+    expect(captured.userMessageProps?.editing).toBe(true);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="edit-submit"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(onSubmitUserMessageEdit).toHaveBeenCalledWith('hello');
+    expect(captured.userMessageProps?.editing).toBe(false);
+  });
+
+  it('keeps the editor open when the resend is refused', async () => {
+    const onSubmitUserMessageEdit = vi.fn().mockResolvedValue(false);
+    const container = renderEditableUserMessage(onSubmitUserMessageEdit);
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit message"]')
+        ?.click();
+    });
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="edit-submit"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    // The refusal must not drop the user's text on the floor.
+    expect(captured.userMessageProps?.editing).toBe(true);
+    expect(captured.userMessageProps?.submittingEdit).toBe(false);
+  });
+});
+
+it.each([
+  [undefined, 'ordinary prompt', true],
+  ['cron', 'scheduled prompt', true],
+  ['goal_runtime', 'continue goal', false],
+  ['goal_control', 'goal card', false],
+  ['cron', '', false],
+] as const)(
+  'exposes Tool calls only for a navigation prompt (%s)',
+  (source, content, visible) => {
+    const onOpen = vi.fn();
+    const view = render(
+      <I18nProvider language="en">
+        <TurnCallsProvider onOpen={onOpen}>
+          <MessageItem
+            message={{
+              id: 'prompt',
+              role: 'user',
+              content,
+              timestamp: 0,
+              ...(source ? { source } : {}),
+            }}
+          />
+        </TurnCallsProvider>
+      </I18nProvider>,
+    );
+    const entry = view.querySelector<HTMLButtonElement>(
+      '[aria-label="View tool calls"]',
+    );
+    expect(Boolean(entry)).toBe(visible);
+    if (entry) {
+      act(() => entry.click());
+      expect(onOpen).toHaveBeenCalledWith('prompt');
+    }
+  },
+);
+
+it('updates the Tool calls entry when the user message source is filled in', () => {
+  const onOpen = vi.fn();
+  const row = (source?: string) => (
+    <I18nProvider language="en">
+      <TurnCallsProvider onOpen={onOpen}>
+        <MessageItem
+          message={{
+            id: 'prompt',
+            role: 'user',
+            content: 'Same text',
+            timestamp: 0,
+            source,
+          }}
+        />
+      </TurnCallsProvider>
+    </I18nProvider>
+  );
+  const { root, container } = renderWithRoot(row());
+  expect(
+    container.querySelector('[aria-label="View tool calls"]'),
+  ).not.toBeNull();
+  act(() => root.render(row('goal_runtime')));
+  expect(container.querySelector('[aria-label="View tool calls"]')).toBeNull();
 });

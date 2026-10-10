@@ -10,11 +10,9 @@
  */
 
 import { useEffect, useRef } from 'react';
-import {
-  type Config,
-  DEFAULT_TOKEN_LIMIT,
-  computeThresholds,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { DEFAULT_TOKEN_LIMIT } from '@qwen-code/qwen-code-core/core/tokenLimits.js';
+import { computeThresholds } from '@qwen-code/qwen-code-core/services/chatCompressionService.js';
 import {
   StreamingState,
   MessageType,

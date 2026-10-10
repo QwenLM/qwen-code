@@ -298,9 +298,11 @@ bounded Realtime connection for the user's enable action; status polling and
 Host readiness must never open provider connections or retry billable traffic.
 
 The settings UI reuses WebShell primitives and adds one compact Live Voice
-card to Experimental settings. The card owns only enablement, masked key
-replacement, shortcut capture, install progress, and permission/readiness
-status. Native permission actions remain in the Host, and ordinary WebShell
+card to Experimental settings. The card owns enablement, the Realtime base URL
+(empty for the default; DashScope and `*.maas.aliyuncs.com` hosts only), masked
+key replacement, the Realtime model and voice, shortcut capture, install
+progress, and permission/readiness status. The base URL and model follow a
+`realtimeOnly` route when one is selected and are then read-only. Native permission actions remain in the Host, and ordinary WebShell
 dictation remains visible and unchanged.
 
 Release publishing must include notarized arm64 and x64 Host ZIP/DMG assets and

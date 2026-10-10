@@ -15,9 +15,13 @@ import {
   type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,
+  type ResumeSessionRequest,
   type SubscribeOptions,
+  type WorktreeResetSessionRequest,
 } from './DaemonClient.js';
+import { parseDaemonBackgroundTurn } from './types.js';
 import type {
+  DaemonBackgroundTurn,
   DaemonForkSessionResult,
   DaemonEvent,
   DaemonRewindResult,
@@ -38,6 +42,7 @@ import type {
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
+  DaemonContinueSessionResult,
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
   ReasoningSelection,
@@ -49,6 +54,10 @@ import type {
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
   DaemonSessionArtifactsEnvelope,
+  SessionSourceInput,
+  SessionSourcesResult,
+  SessionSourceUpsertResult,
+  SessionSourceRemoveResult,
   DaemonSessionState,
   DaemonSession,
   DaemonSessionStatsStatus,
@@ -56,6 +65,7 @@ import type {
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
+  DaemonWorkflowActionInput,
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionSavedWorkflowStatus,
   HeartbeatResult,
@@ -248,6 +258,8 @@ export class DaemonSessionClient {
   readonly replayPartial: boolean;
   readonly replayError: string | undefined;
   readonly hasActivePrompt: boolean;
+  readonly backgroundTurn?: DaemonBackgroundTurn;
+  readonly hasRunningBackgroundTasks?: boolean;
   readonly historyHasMore: boolean;
   /**
    * Fallback pagination anchor from the daemon load response (see
@@ -300,6 +312,10 @@ export class DaemonSessionClient {
         : { kind: 'workspace', workspaceCwd: opts.session.workspaceCwd };
     this.state = { ...(opts.state ?? {}) };
     this.hasActivePrompt = opts.hasActivePrompt ?? false;
+    this.backgroundTurn = parseDaemonBackgroundTurn(
+      opts.session.backgroundTurn,
+    );
+    this.hasRunningBackgroundTasks = opts.session.hasRunningBackgroundTasks;
     this.historyHasMore = opts.historyHasMore ?? false;
     this.historyAnchorRecordId = opts.historyAnchorRecordId;
     this.replayDegraded = opts.replayDegraded ?? false;
@@ -430,7 +446,7 @@ export class DaemonSessionClient {
   static async resume(
     client: DaemonClient,
     sessionId: string,
-    req: RestoreSessionRequest = {},
+    req: ResumeSessionRequest = {},
     clientId?: string,
   ): Promise<DaemonSessionClient> {
     const {
@@ -447,6 +463,41 @@ export class DaemonSessionClient {
       state,
       lastEventId: serverLastEventId ?? 0,
       eventEpoch,
+    });
+  }
+
+  /**
+   * Transfer a worktree session's checkout ownership to a fresh replacement
+   * session and return a client bound to the replacement's identity. That
+   * client carries whatever `clientId` the response had: a fresh transfer
+   * mints and registers an owner-style one for the spawn it performs, while
+   * an idempotent resume of a committed transfer returns none. The
+   * registration is not an attachment (the replacement's attach count is
+   * unaffected), but it is a client registration, and a non-empty one is what
+   * holds the daemon's idle cleanup off — so detach a minted id you do not
+   * keep using, or the replacement stays live indefinitely. A registered
+   * attachment still requires the normal restore surface: load or resume the
+   * replacement, passing the minted id to reuse that registration instead of
+   * adding a second one. The replacement is a brand-new conversation; the
+   * superseded session keeps its transcript on the daemon and is never
+   * restored again (its restore surfaces `worktree_session_superseded`). The
+   * existing reattach identity guard applies to the replacement client
+   * unchanged.
+   */
+  static async resetWorktree(
+    client: DaemonClient,
+    sessionId: string,
+    req: WorktreeResetSessionRequest = {},
+  ): Promise<DaemonSessionClient> {
+    const session = await client.resetWorktreeSession(sessionId, req);
+    return new DaemonSessionClient({
+      client,
+      session,
+      hasActivePrompt: session.hasActivePrompt,
+      // The replacement is freshly created: seed from the start of its bus
+      // so events fired during the transfer window are not skipped.
+      lastEventId: 0,
+      eventEpoch: session.eventEpoch,
     });
   }
 
@@ -523,12 +574,19 @@ export class DaemonSessionClient {
   }
 
   /**
-   * Present when this client was created with a `modelServiceId`: `false`
-   * means the spawn-time model switch failed and the session is running on
-   * the agent default model.
+   * Only present on a fresh spawn (`attached: false`) that carried
+   * `modelServiceId` or `startupConfig`; an attach omits the key or, when
+   * it coalesced with an in-flight spawn, reports the spawn owner's
+   * outcome. Startup preparation succeeds only with true; legacy false
+   * means the switch was rejected (surfaced via `model_switch_failed`)
+   * and the session uses the agent default model.
    */
   get modelApplied(): DaemonSession['modelApplied'] {
     return this.session.modelApplied;
+  }
+
+  get startupConfigApplied(): DaemonSession['startupConfigApplied'] {
+    return this.session.startupConfigApplied;
   }
 
   get lastEventId(): number | undefined {
@@ -646,6 +704,19 @@ export class DaemonSessionClient {
     return accepted;
   }
 
+  /** Return continuation admission; terminal results arrive on the event stream. */
+  async continueSession(
+    signal?: AbortSignal,
+  ): Promise<DaemonContinueSessionResult> {
+    signal?.throwIfAborted();
+    return await this.withClientIdSelfHeal(() =>
+      this.client.continueSession(this.sessionId, {
+        clientId: this.clientId,
+        signal,
+      }),
+    );
+  }
+
   async uploadAttachment(
     data: Blob,
     name: string,
@@ -747,19 +818,37 @@ export class DaemonSessionClient {
           });
     this.reattaching = resume.then(async (session) => {
       if (this.session.worktreeState === 'persisted-v1') {
-        const sameWorktree =
-          session.worktreeState === 'persisted-v1' &&
-          session.worktree?.path === this.session.worktree?.path;
-        if (!sameWorktree) {
-          await this.client
-            .detachSession(session.sessionId, session.clientId)
-            .catch(() => {});
-          throw new Error(
-            `Daemon lost durable worktree identity for session ${this.sessionId}`,
-          );
+        if (!session.worktree) {
+          // The daemon resumed the session with no worktree object at all —
+          // most often a legitimate exit (exit_worktree removes the sidecar
+          // without notifying this client), but also a cleared in-memory
+          // association or a provenance that skips sidecar restore. The
+          // client cannot distinguish these, so it drops the cached claim and
+          // lets the caller's identity gate re-establish the truth on its
+          // next load or selection. The heal does not gate this call's retry:
+          // `withClientIdSelfHeal` re-runs the pending operation right after
+          // the reattach, so one turn can still execute in a directory this
+          // client can no longer attest. A caller that requires worktree
+          // attestation must re-verify it before dispatching, not rely on the
+          // dropped claim. A response that still carries `worktree` metadata
+          // is never treated as proof of exit.
+          this.session.worktree = undefined;
+          this.session.worktreeState = undefined;
+        } else {
+          const sameWorktree =
+            session.worktreeState === 'persisted-v1' &&
+            session.worktree.path === this.session.worktree?.path;
+          if (!sameWorktree) {
+            await this.client
+              .detachSession(session.sessionId, session.clientId)
+              .catch(() => {});
+            throw new Error(
+              `Daemon lost durable worktree identity for session ${this.sessionId}`,
+            );
+          }
+          this.session.worktree = session.worktree;
+          this.session.worktreeState = session.worktreeState;
         }
-        this.session.worktree = session.worktree;
-        this.session.worktreeState = session.worktreeState;
       }
       // Refresh only the client identity; leave the SSE cursor and ACP state intact.
       this.session.clientId = session.clientId;
@@ -793,6 +882,26 @@ export class DaemonSessionClient {
    */
   heartbeat(): Promise<HeartbeatResult> {
     return this.client.heartbeat(this.sessionId, this.clientId);
+  }
+
+  listSources(): Promise<SessionSourcesResult> {
+    return this.client.listSessionSources(this.sessionId, this.clientId);
+  }
+
+  upsertSource(source: SessionSourceInput): Promise<SessionSourceUpsertResult> {
+    return this.client.upsertSessionSource(
+      this.sessionId,
+      source,
+      this.clientId,
+    );
+  }
+
+  removeSource(sourceId: string): Promise<SessionSourceRemoveResult> {
+    return this.client.removeSessionSource(
+      this.sessionId,
+      sourceId,
+      this.clientId,
+    );
   }
 
   artifacts(): Promise<DaemonSessionArtifactsEnvelope> {
@@ -905,12 +1014,16 @@ export class DaemonSessionClient {
     message: string,
     opts?: {
       signal?: AbortSignal;
+      eventDetailMode?: 'full' | 'summary';
       messageId?: string;
       content?: PromptContentBlock[];
     },
   ): Promise<DaemonMidTurnMessageResult> {
     return this.client.enqueueMidTurnMessage(this.sessionId, message, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(opts?.eventDetailMode !== undefined
+        ? { eventDetailMode: opts.eventDetailMode }
+        : {}),
       ...(opts?.messageId ? { messageId: opts.messageId } : {}),
       ...(opts?.content && opts.content.length > 0
         ? { content: opts.content }
@@ -1087,7 +1200,15 @@ export class DaemonSessionClient {
 
   controlWorkflowTask(
     taskId: string,
-    action: 'pause' | 'resume' | 'retry' | 'rerun' | 'delete-history',
+    action:
+      | 'pause'
+      | 'resume'
+      | 'retry'
+      | 'rerun'
+      | 'delete-history'
+      | 'run-saved'
+      | 'run-script',
+    input?: DaemonWorkflowActionInput,
   ): Promise<{
     changed: boolean;
     status?: DaemonSessionWorkflowTaskStatus['status'];
@@ -1098,6 +1219,7 @@ export class DaemonSessionClient {
       taskId,
       action,
       this.clientId,
+      input,
     );
   }
 

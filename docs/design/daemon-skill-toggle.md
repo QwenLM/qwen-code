@@ -1,8 +1,10 @@
 # Daemon Skill Toggle
 
+[English](daemon-skill-toggle.md) | [简体中文](daemon-skill-toggle.zh-CN.md)
+
 ## Goal
 
-Expose workspace Skill settings writes through daemon REST and the TypeScript SDK, including immediate refresh of active ACP sessions without making the runtime Skill catalog an ownership source.
+Expose workspace Skill settings writes through daemon REST and the TypeScript SDK, including immediate refresh of active ACP sessions. The runtime Skill catalog supplies identity for enable guards, but does not restrict which names may be persisted.
 
 ## Public contract
 
@@ -16,9 +18,13 @@ The response contains the trimmed requested name, requested state, whether persi
 
 ## Semantics
 
-The API changes workspace `skills.disabled` and `skills.enabled` by name without consulting the runtime Skill catalog. Enabling a default-disabled Skill writes an explicit opt-in; disabling it removes the opt-in and writes a hard workspace disable. Updating one target removes target duplicates and case variants without deleting orphan entries for unavailable Skills. A name may be disabled before installation, while hidden from user invocation, or while its Extension is inactive. Enabling removes an existing workspace disable or records an opt-in for an effective `skills.defaultDisabled` entry. An existing workspace `skills.enabled` declaration is preserved and normalized to the requested casing. With no existing workspace declaration and no effective `skills.defaultDisabled` entry, enable is a no-op (`changed: false`). A second identical request is also a no-op.
+The API changes workspace `skills.disabled` and `skills.enabled` by name without requiring the name to be present in the runtime Skill catalog. Enabling a default-disabled Skill writes an explicit opt-in; disabling it removes the opt-in and writes a hard workspace disable. Updating one target removes target duplicates and case variants without deleting orphan entries for unavailable Skills. A name may be disabled before installation, while hidden from user invocation, or while its Extension is inactive. Enabling removes an existing workspace disable or records an opt-in for an effective `skills.defaultDisabled` entry. An existing workspace `skills.enabled` declaration is preserved and normalized to the requested casing. With no existing workspace declaration and no effective `skills.defaultDisabled` entry, enable is a no-op (`changed: false`). A second identical request is also a no-op.
 
-A hard `skills.disabled` entry inherited from a higher scope remains authoritative for effective availability, but does not prevent workspace scope from recording or removing its own declaration. Workspace declarations otherwise participate in the usual `skills.disabled > skills.enabled > skills.defaultDisabled` resolution and can override higher-scope `skills.defaultDisabled` or `skills.enabled` entries. The route retains request-shape, authentication, client identity, workspace trust, and runtime-generation gates; none of those require a Skill catalog lookup.
+Before an enable guard is evaluated, the persistence closure reads the workspace Skill status once for the whole single or batch request. A catalog entry at `level: 'extension'` with `extensionName` supplies both its registry name and its authored name after the known extension prefix; an entry at any other level has only its registry spelling. An unknown name, an uninitialized status, or a failed status read falls back to the previous punctuation-derived alias behavior. This fallback preserves legacy bare-name blocks for unavailable extension Skills. Daemon-local status omits extension Skills when no live ACP child has supplied a catalog, so those names remain on the fallback path until extension enumeration is available locally. Disables do not read the catalog.
+
+Batch enables repeatedly reconsider refused names against the evolving final workspace lists until no list changes or every name has an outcome. This fixpoint makes results independent of request order, including multi-step legacy-alias chains, while retaining one settings write.
+
+A hard `skills.disabled` entry inherited from a higher scope remains authoritative for effective availability, but does not prevent workspace scope from recording or removing its own declaration. Workspace declarations otherwise participate in the usual `skills.disabled > skills.enabled > skills.defaultDisabled` resolution and can override higher-scope `skills.defaultDisabled` or `skills.enabled` entries. The route retains request-shape, authentication, client identity, workspace trust, and runtime-generation gates. Catalog identity resolution stays inside the persistence closure and does not add route-level validation.
 
 The workspace read-modify-write happens inside the daemon's per-workspace settings lock. A failed write stops before refresh and event publication.
 
@@ -31,7 +37,7 @@ The workspace read-modify-write happens inside the daemon's per-workspace settin
 ## Activation flow
 
 1. Validate the request name, authorization, workspace trust, client identity, and runtime generation.
-2. Under the workspace settings lock, re-read every scope, compute the resulting workspace declaration changes, and commit them in at most one write.
+2. Under the workspace settings lock, resolve enable identities from one catalog read, re-read every scope, compute the resulting workspace declaration changes, and commit them in at most one write.
 3. If no declaration changed, return `changed: false` without cache invalidation, refresh, or event publication.
 4. Otherwise, invalidate the daemon's cached skill status.
 5. If an ACP child is live, invoke `qwen/control/workspace/skills/refresh`.
@@ -56,6 +62,7 @@ An in-flight model request cannot be rewritten. Subsequent skill execution check
 ## Failure behavior
 
 - Persistence failure: the HTTP request fails; no ACP refresh and no event.
+- Skill-status read unavailable during enable: persistence uses the legacy punctuation-derived alias and continues; the request does not fail closed.
 - No child after a declaration changed: persistence succeeds with `deferred`; the next child loads the setting at startup.
 - No declaration change: the response reports `changed: false`; no refresh or event occurs. `activation` still reflects whether a child was live, but no activation work is needed.
 - Per-session refresh failure: persistence remains committed; successful sessions stay refreshed and the response is `partial`.

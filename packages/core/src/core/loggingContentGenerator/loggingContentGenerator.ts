@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
+import { startRequestLifecycle } from '../../telemetry/request-lifecycle.js';
 import {
   GenerateContentResponse,
   type Content,
@@ -230,12 +232,15 @@ export class LoggingContentGenerator implements ContentGenerator {
   }
 
   private logApiRequest(
+    executionId: string,
     contents: Content[],
     model: string,
     promptId: string,
     sessionId: string,
   ): void {
-    const requestText = JSON.stringify(contents);
+    const requestText = this.config.getTelemetryLogPromptsEnabled()
+      ? JSON.stringify(contents)
+      : undefined;
     logApiRequest(
       this.config,
       new ApiRequestEvent(
@@ -243,12 +248,14 @@ export class LoggingContentGenerator implements ContentGenerator {
         promptId,
         requestText,
         subagentNameContext.getStore(),
+        executionId,
       ),
       sessionId,
     );
   }
 
   private _logApiResponse(
+    executionId: string,
     responseId: string,
     durationMs: number,
     model: string,
@@ -268,9 +275,10 @@ export class LoggingContentGenerator implements ContentGenerator {
         prompt_id,
         this.generatorAuthType,
         usageMetadata,
-        responseText,
+        this.config.getTelemetryLogPromptsEnabled() ? responseText : undefined,
         subagentNameContext.getStore(),
         ttftMs,
+        executionId,
       ),
       sessionId,
       identity
@@ -284,6 +292,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   }
 
   private _logApiError(
+    executionId: string,
     responseId: string | undefined,
     durationMs: number,
     error: unknown,
@@ -303,6 +312,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     logApiError(
       this.config,
       new ApiErrorEvent({
+        executionId,
         responseId: errorResponseId,
         model,
         durationMs,
@@ -325,6 +335,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   }
 
   private safelyLogApiError(
+    executionId: string,
     responseId: string | undefined,
     durationMs: number,
     error: unknown,
@@ -344,6 +355,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     }
     try {
       this._logApiError(
+        executionId,
         responseId,
         durationMs,
         error,
@@ -357,6 +369,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   }
 
   private safelyLogApiResponse(
+    executionId: string,
     responseId: string,
     durationMs: number,
     model: string,
@@ -368,6 +381,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   ): void {
     try {
       this._logApiResponse(
+        executionId,
         responseId,
         durationMs,
         model,
@@ -388,6 +402,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   ): Promise<GenerateContentResponse> {
     // Phase 4b — snapshot retry context in the synchronous prelude BEFORE any
     // await. ALS frame from `retryWithBackoff` is guaranteed to be active here.
+    const executionId = randomUUID();
     const retrySnapshot = snapshotRetryMetadata();
     const isInternal = isInternalPromptId(userPromptId);
     const contextUsage = this.snapshotContextUsage(req, isInternal);
@@ -418,6 +433,12 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     const startTime = Date.now();
     const session = this.startCaptureSession();
+    const lifecycle = startRequestLifecycle(
+      this.config,
+      executionId,
+      userPromptId,
+      req.model,
+    );
     let responseCompleted = false;
     let abortedBeforeResponseCompletion =
       req.config?.abortSignal?.aborted ?? false;
@@ -435,6 +456,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       const response = await context.with(spanContext, async () => {
         if (!isInternal) {
           this.logApiRequest(
+            executionId,
             this.toContents(req.contents),
             req.model,
             userPromptId,
@@ -445,12 +467,16 @@ export class LoggingContentGenerator implements ContentGenerator {
           this.wrapped.generateContent(req, userPromptId),
         );
         responseCompleted = true;
+        lifecycle.finish(
+          abortedBeforeResponseCompletion ? 'cancelled' : 'success',
+        );
         const durationMs = Date.now() - startTime;
         const responseText = isInternal
           ? undefined
           : this.extractResponseText(result, MAX_RESPONSE_TEXT_LENGTH);
         if (!abortedBeforeResponseCompletion) {
           this.safelyLogApiResponse(
+            executionId,
             result.responseId ?? '',
             durationMs,
             result.modelVersion || req.model,
@@ -498,6 +524,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       // a real upstream failure that merely races an abort remains an error.
       const cancelled =
         (req.config?.abortSignal?.aborted ?? false) && isAbortError(error);
+      lifecycle.finish(cancelled ? 'cancelled' : 'error');
       endLLMRequestSpan(llmSpan, {
         success: false,
         cancelled,
@@ -514,6 +541,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       });
       await context.with(spanContext, async () => {
         this.safelyLogApiError(
+          executionId,
           '',
           durationMs,
           error,
@@ -553,6 +581,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     // resolved and the frame has exited. Threaded as a parameter to
     // loggingStreamWrapper so its closure carries the snapshot to all later
     // endLLMRequestSpan callsites (success / error / idle-timeout / abort).
+    const executionId = randomUUID();
     const retrySnapshot = snapshotRetryMetadata();
     const isInternal = isInternalPromptId(userPromptId);
     const contextUsage = this.snapshotContextUsage(req, isInternal);
@@ -588,6 +617,12 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     const startTime = Date.now();
     const session = this.startCaptureSession();
+    const lifecycle = startRequestLifecycle(
+      this.config,
+      executionId,
+      userPromptId,
+      req.model,
+    );
 
     let streamRequest: {
       stream: AsyncGenerator<GenerateContentResponse>;
@@ -601,6 +636,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       streamRequest = await context.with(spanContext, async () => {
         if (!isInternal) {
           this.logApiRequest(
+            executionId,
             this.toContents(req.contents),
             req.model,
             userPromptId,
@@ -621,6 +657,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       const observedFinishReasons = exchange.controller.finalize(false);
       context.with(spanContext, () =>
         this.safelyLogApiError(
+          executionId,
           '',
           durationMs,
           error,
@@ -632,6 +669,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       );
       const cancelled =
         (req.config?.abortSignal?.aborted ?? false) && isAbortError(error);
+      lifecycle.finish(cancelled ? 'cancelled' : 'error');
       endLLMRequestSpan(llmSpan, {
         success: false,
         cancelled,
@@ -667,8 +705,10 @@ export class LoggingContentGenerator implements ContentGenerator {
         })
       : undefined;
 
-    return bindAsyncGeneratorToContext(
+    const wrapped = bindAsyncGeneratorToContext(
       this.loggingStreamWrapper(
+        executionId,
+        lifecycle,
         stream,
         startTime,
         requestIssuedAtMs,
@@ -683,6 +723,52 @@ export class LoggingContentGenerator implements ContentGenerator {
       ),
       spanContext,
     );
+    let iterated = false;
+    const result: AsyncGenerator<GenerateContentResponse> = {
+      next: (...args: [] | [unknown]) => {
+        iterated = true;
+        return wrapped.next(...args);
+      },
+      return: async (value) => {
+        try {
+          if (!iterated)
+            await context.with(spanContext, () => stream.return(value));
+          return await wrapped.return(value);
+        } catch (error) {
+          lifecycle.finish('error');
+          throw error;
+        } finally {
+          lifecycle.finish(
+            req.config?.abortSignal?.aborted ? 'cancelled' : 'interrupted',
+          );
+        }
+      },
+      throw: async (error) => {
+        try {
+          if (!iterated) {
+            await context.with(spanContext, () => stream.return(undefined));
+          }
+          return await wrapped.throw(error);
+        } catch (actualError) {
+          lifecycle.finish(
+            req.config?.abortSignal?.aborted && isAbortError(actualError)
+              ? 'cancelled'
+              : 'error',
+          );
+          throw actualError;
+        } finally {
+          lifecycle.finish(
+            req.config?.abortSignal?.aborted && isAbortError(error)
+              ? 'cancelled'
+              : 'error',
+          );
+        }
+      },
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+    };
+    return result;
   }
 
   private startCaptureSession(): {
@@ -708,6 +794,8 @@ export class LoggingContentGenerator implements ContentGenerator {
   }
 
   private async *loggingStreamWrapper(
+    executionId: string,
+    lifecycle: ReturnType<typeof startRequestLifecycle>,
     stream: AsyncGenerator<GenerateContentResponse>,
     startTime: number,
     requestIssuedAtMs: number,
@@ -889,7 +977,9 @@ export class LoggingContentGenerator implements ContentGenerator {
         resetSpanTimeout?.();
         yield response;
       }
+      abortedBeforeStreamCompletion ||= abortSignal?.aborted === true;
       streamCompleted = true;
+      lifecycle.finish(abortedBeforeStreamCompletion ? 'cancelled' : 'success');
       refreshLateUsageMetadata();
       if (spanEndTimeout !== undefined) {
         clearTimeout(spanEndTimeout);
@@ -922,6 +1012,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       // during incident response.
       if (!spanEndedByTimeout && !abortedBeforeStreamCompletion) {
         this.safelyLogApiResponse(
+          executionId,
           firstResponseId,
           durationMs,
           firstModelVersion || model,
@@ -942,6 +1033,13 @@ export class LoggingContentGenerator implements ContentGenerator {
     } catch (error) {
       errorOccurred = true;
       lastError = error;
+      abortedBeforeStreamCompletion ||=
+        !streamCompleted && abortSignal?.aborted === true;
+      lifecycle.finish(
+        abortedBeforeStreamCompletion && isAbortError(error)
+          ? 'cancelled'
+          : 'error',
+      );
       // Same gating as the success path above: if the idle timeout already
       // closed the span as failed, do not emit a parallel api_error log
       // (the span is the canonical signal). Otherwise we'd produce the
@@ -950,6 +1048,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       if (!spanEndedByTimeout) {
         const durationMs = Date.now() - startTime;
         this.safelyLogApiError(
+          executionId,
           firstResponseId,
           durationMs,
           error,
@@ -968,6 +1067,20 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       throw error;
     } finally {
+      abortedBeforeStreamCompletion ||=
+        !streamCompleted && abortSignal?.aborted === true;
+      const cancelled =
+        abortedBeforeStreamCompletion &&
+        (lastError === undefined || isAbortError(lastError));
+      lifecycle.finish(
+        cancelled
+          ? 'cancelled'
+          : errorOccurred
+            ? 'error'
+            : streamCompleted
+              ? 'success'
+              : 'interrupted',
+      );
       abortSignal?.removeEventListener('abort', markStreamAborted);
       if (spanEndTimeout !== undefined) {
         clearTimeout(spanEndTimeout);
@@ -978,9 +1091,6 @@ export class LoggingContentGenerator implements ContentGenerator {
       // own ended guard, but we want to avoid pretending the final token
       // counts were recorded — they weren't, the span is the timeout one.
       if (span && !spanEndedByTimeout) {
-        const cancelled =
-          abortedBeforeStreamCompletion &&
-          (lastError === undefined || isAbortError(lastError));
         const observedFinishReasons = exchangeController?.finalize(
           !errorOccurred && !cancelled && streamCompleted,
         );

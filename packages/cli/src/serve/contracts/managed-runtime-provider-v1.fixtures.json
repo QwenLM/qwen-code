@@ -1,0 +1,858 @@
+{
+  "protocol": "managed-runtime-provider/1",
+  "cases": [
+    {
+      "name": "acquire-0",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "acquire"
+        }
+      }
+    },
+    {
+      "name": "release-1",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "release"
+        }
+      }
+    },
+    {
+      "name": "manifest-2",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "manifest"
+        }
+      }
+    },
+    {
+      "name": "history-3",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "history"
+        }
+      }
+    },
+    {
+      "name": "begin-turn-4",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "begin-turn",
+          "identity": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1"
+          }
+        }
+      }
+    },
+    {
+      "name": "prepare-5",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "prepare",
+          "identity": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1"
+          },
+          "toolName": "read_file",
+          "input": {
+            "file_path": "note.txt"
+          }
+        }
+      }
+    },
+    {
+      "name": "confirmation-6",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "confirmation",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "invocationId": "invocation-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        }
+      }
+    },
+    {
+      "name": "preflight-7",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "preflight",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "invocationId": "invocation-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        }
+      }
+    },
+    {
+      "name": "execute-8",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "execute",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "invocationId": "invocation-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        }
+      }
+    },
+    {
+      "name": "status-9",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "status",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "invocationId": "invocation-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        }
+      }
+    },
+    {
+      "name": "cancel-10",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "cancel",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "invocationId": "invocation-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        }
+      }
+    },
+    {
+      "name": "status-11",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "status",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "invocationId": "invocation-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "afterSequence": 0
+        }
+      }
+    },
+    {
+      "name": "confirm-12",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "confirm",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "invocationId": "invocation-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "outcome": "proceed_once",
+          "phase": "permission",
+          "payload": {
+            "permissionRules": ["Read"]
+          }
+        }
+      }
+    },
+    {
+      "name": "bind-history-13",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "bind-history",
+          "binding": {
+            "ownerSessionId": "550e8400-e29b-41d4-a716-446655440301",
+            "ownerRuntimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "executionCwd": "/workspace",
+            "snapshots": []
+          }
+        }
+      }
+    },
+    {
+      "name": "checkpoint-14",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "checkpoint",
+          "promptId": "turn-1"
+        }
+      }
+    },
+    {
+      "name": "confirm-proceed-once-and-switch-15",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "confirm",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "invocationId": "invocation-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "outcome": "proceed_once_and_switch_to_default"
+        }
+      }
+    },
+    {
+      "name": "confirm-proceed-always-16",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "confirm",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "invocationId": "invocation-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "outcome": "proceed_always"
+        }
+      }
+    },
+    {
+      "name": "confirm-proceed-always-server-17",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "confirm",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "invocationId": "invocation-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "outcome": "proceed_always_server"
+        }
+      }
+    },
+    {
+      "name": "confirm-proceed-always-tool-18",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "confirm",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "invocationId": "invocation-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "outcome": "proceed_always_tool"
+        }
+      }
+    },
+    {
+      "name": "confirm-proceed-always-project-19",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "confirm",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "invocationId": "invocation-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "outcome": "proceed_always_project"
+        }
+      }
+    },
+    {
+      "name": "confirm-proceed-always-user-20",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "confirm",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "invocationId": "invocation-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "outcome": "proceed_always_user"
+        }
+      }
+    },
+    {
+      "name": "confirm-modify-with-editor-21",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "confirm",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "invocationId": "invocation-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "outcome": "modify_with_editor"
+        }
+      }
+    },
+    {
+      "name": "confirm-cancel-22",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "confirm",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "invocationId": "invocation-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "outcome": "cancel"
+        }
+      }
+    },
+    {
+      "name": "prepare-modification-23",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "prepare",
+          "identity": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-2",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1"
+          },
+          "toolName": "edit",
+          "input": {
+            "file_path": "/workspace/note.txt",
+            "old_string": "old",
+            "new_string": "new"
+          },
+          "modification": {
+            "source": {
+              "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+              "promptId": "turn-1",
+              "callId": "call-1",
+              "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "policyRevision": "policy-1",
+              "invocationId": "invocation-1",
+              "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "newContent": "new content\n"
+          }
+        }
+      }
+    },
+    {
+      "name": "prepare-media-24",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "prepare",
+          "identity": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-3",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1"
+          },
+          "toolName": "read_file",
+          "input": {
+            "file_path": "/workspace/image.png"
+          },
+          "mediaContext": {
+            "inputModalities": {
+              "image": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "acquire-continuation-25",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "continuation"
+        },
+        "operation": {
+          "kind": "acquire"
+        }
+      }
+    },
+    {
+      "name": "extra-envelope",
+      "valid": false,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "acquire"
+        },
+        "extra": true
+      }
+    },
+    {
+      "name": "wrong-version",
+      "valid": false,
+      "request": {
+        "protocolVersion": 2,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "acquire"
+        }
+      }
+    },
+    {
+      "name": "wrong-protocol",
+      "valid": false,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/2",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "acquire"
+        }
+      }
+    },
+    {
+      "name": "extra-session",
+      "valid": false,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap",
+          "cwd": "/tmp"
+        },
+        "operation": {
+          "kind": "acquire"
+        }
+      }
+    },
+    {
+      "name": "wrong-turn-kind",
+      "valid": false,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "other"
+        },
+        "operation": {
+          "kind": "acquire"
+        }
+      }
+    },
+    {
+      "name": "extra-operation",
+      "valid": false,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "acquire",
+          "input": {}
+        }
+      }
+    },
+    {
+      "name": "unknown-operation",
+      "valid": false,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "shell"
+        }
+      }
+    },
+    {
+      "name": "foreign-reference",
+      "valid": false,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "execute",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440399",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "invocationId": "invocation-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        }
+      }
+    },
+    {
+      "name": "reference-payload",
+      "valid": false,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "execute",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "invocationId": "invocation-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "input": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "missing-reference-field",
+      "valid": false,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "execute",
+          "reference": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-1",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1",
+            "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        }
+      }
+    },
+    {
+      "name": "array-turn-kind",
+      "valid": false,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": ["bootstrap"]
+        },
+        "operation": {
+          "kind": "acquire"
+        }
+      }
+    },
+    {
+      "name": "fractional-version",
+      "valid": false,
+      "request": {
+        "protocolVersion": 1.1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "acquire"
+        }
+      }
+    }
+  ]
+}

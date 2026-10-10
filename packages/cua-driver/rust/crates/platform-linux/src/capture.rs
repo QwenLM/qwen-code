@@ -20,7 +20,8 @@
 
 use anyhow::{anyhow, bail, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection as _;
@@ -33,6 +34,7 @@ const MAX_CAPTURE_BYTES: usize = 1 << 30;
 /// After MIT-SHM init/extension failure, same-DISPLAY may be probed again only
 /// after this backoff. Request/capture failures never use this path.
 const XSHM_INIT_RETRY_BACKOFF: Duration = Duration::from_secs(30);
+const IMPORT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Capture a window by X11 XID. Returns raw PNG bytes.
 pub fn screenshot_window_bytes(xid: u64) -> Result<Vec<u8>> {
@@ -87,19 +89,67 @@ fn capture_window_with_backends(
 }
 
 fn capture_via_import(xid: u64) -> Result<Vec<u8>> {
-    let out = Command::new("import")
-        .args(["-window", &xid.to_string(), "png:-"])
-        .output()
+    capture_import_target(&xid.to_string())
+}
+
+fn capture_import_target(target: &str) -> Result<Vec<u8>> {
+    let mut child = Command::new("import")
+        .args(["-window", target, "png:-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| anyhow!("failed to launch ImageMagick import: {e}"))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = child.stdout.take().expect("piped import stdout");
+    let stderr = child.stderr.take().expect("piped import stderr");
+    let (status, stdout, stderr) = std::thread::scope(|scope| -> Result<_> {
+        fn read(mut pipe: impl Read) -> std::io::Result<Vec<u8>> {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).map(|_| bytes)
+        }
+        // Drain both pipes while waiting: a PNG can exceed the pipe capacity.
+        let stdout = scope.spawn(move || read(stdout));
+        let stderr = scope.spawn(move || read(stderr));
+        let deadline = Instant::now() + IMPORT_TIMEOUT;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                result => {
+                    // A destroyed XID can leave import holding an X server grab.
+                    // Kill and reap it before returning so other clients recover.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break match result {
+                        Err(error) => {
+                            Err(anyhow!("failed to wait for ImageMagick import: {error}"))
+                        }
+                        _ => Err(anyhow!(
+                            "ImageMagick import timed out after {IMPORT_TIMEOUT:?}"
+                        )),
+                    };
+                }
+            }
+        };
+        let stdout = stdout
+            .join()
+            .map_err(|_| anyhow!("import stdout reader panicked"))??;
+        let stderr = stderr
+            .join()
+            .map_err(|_| anyhow!("import stderr reader panicked"))??;
+        Ok((status?, stdout, stderr))
+    })?;
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
         let detail = stderr.trim().chars().take(512).collect::<String>();
-        bail!("ImageMagick import exited {}: {detail}", out.status);
+        bail!("ImageMagick import exited {status}: {detail}");
     }
-    if out.stdout.is_empty() {
+    if stdout.is_empty() {
         bail!("ImageMagick import returned empty stdout");
     }
-    Ok(out.stdout)
+    Ok(stdout)
 }
 
 // ── shared pixel conversion ───────────────────────────────────────────────
@@ -875,13 +925,8 @@ fn screenshot_display_bytes_with_dispatch(
 /// loop forever once we're on Wayland).
 pub(crate) fn screenshot_display_bytes_x11() -> Result<Vec<u8>> {
     // Try `import -window root png:-` (ImageMagick).
-    let out = Command::new("import")
-        .args(["-window", "root", "png:-"])
-        .output();
-    if let Ok(o) = out {
-        if o.status.success() && !o.stdout.is_empty() {
-            return Ok(o.stdout);
-        }
+    if let Ok(bytes) = capture_import_target("root") {
+        return Ok(bytes);
     }
     // Fallback: x11rb XGetImage on the root window.
     use x11rb::connection::Connection;
@@ -1426,6 +1471,72 @@ mod tests {
     fn percentile_micros(samples: &mut [u128], percentile: usize) -> u128 {
         samples.sort_unstable();
         samples[(samples.len() - 1) * percentile / 100]
+    }
+
+    #[test]
+    #[ignore = "requires an isolated X11 display and ImageMagick import"]
+    fn live_destroyed_window_capture_releases_server_and_recovers() {
+        use x11rb::protocol::xproto::{ConnectionExt as _, CreateGCAux, ImageFormat};
+
+        let display = std::env::var("DISPLAY").expect("isolated DISPLAY must be set");
+        let fixture = create_live_fixture(&display, 256, 128);
+        let gc = fixture.conn.generate_id().unwrap();
+        fixture
+            .conn
+            .create_gc(gc, fixture.window, &CreateGCAux::new())
+            .unwrap();
+        let mut seed = 7u32;
+        let pixels: Vec<u8> = (0..256 * 128 * 4)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed as u8
+            })
+            .collect();
+        fixture
+            .conn
+            .put_image(
+                ImageFormat::Z_PIXMAP,
+                fixture.window,
+                gc,
+                256,
+                128,
+                0,
+                0,
+                0,
+                24,
+                &pixels,
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        let png = capture_via_import(u64::from(fixture.window)).expect("capture large image");
+        assert!(png.len() > 65_536, "exercise concurrent stdout draining");
+        fixture
+            .conn
+            .destroy_window(fixture.window)
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let started = Instant::now();
+        let error = screenshot_window_bytes(u64::from(fixture.window))
+            .expect_err("destroyed window must fail");
+        assert!(started.elapsed() < IMPORT_TIMEOUT + Duration::from_secs(2));
+        assert!(error.to_string().contains("ImageMagick import"));
+        fixture
+            .conn
+            .get_input_focus()
+            .unwrap()
+            .reply()
+            .expect("server grab released");
+        let next = create_live_fixture(&display, 120, 80);
+        let png = screenshot_window_bytes(u64::from(next.window)).expect("capture after failure");
+        assert_eq!(
+            cua_driver_core::image_utils::png_dimensions(&png).unwrap(),
+            (120, 80)
+        );
     }
 
     /// Live correctness and bounded-performance evidence against three Xvfb

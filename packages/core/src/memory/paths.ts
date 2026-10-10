@@ -22,6 +22,9 @@ export const AUTO_MEMORY_PINNED_DIRNAME = 'pinned';
 export const AUTO_MEMORY_METADATA_FILENAME = 'meta.json';
 export const AUTO_MEMORY_EXTRACT_CURSOR_FILENAME = 'extract-cursor.json';
 export const AUTO_MEMORY_CONSOLIDATION_LOCK_FILENAME = 'consolidation.lock';
+export const USER_AUTO_MEMORY_METADATA_FILENAME = 'user-memory-meta.json';
+export const USER_AUTO_MEMORY_CONSOLIDATION_LOCK_FILENAME =
+  'user-memory-consolidation.lock';
 
 /**
  * Top-level directory name (under getMemoryBaseDir()) for the user-level
@@ -170,6 +173,33 @@ export function getAutoMemoryTrustedAnchor(projectRoot: string): string {
     : getMemoryBaseDir();
 }
 
+export function getProjectAutoMemoryRoots(
+  projectRoot: string,
+  trustedProject: boolean,
+): string[] {
+  const configuredRoot = getAutoMemoryRoot(projectRoot);
+  const localRoot = path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
+  if (path.resolve(configuredRoot) === path.resolve(localRoot)) {
+    return trustedProject ? [configuredRoot] : [];
+  }
+  return trustedProject ? [configuredRoot, localRoot] : [configuredRoot];
+}
+
+export function getMemoryRootTrustedAnchor(root: string): string {
+  const baseDir = path.resolve(getMemoryBaseDir());
+  const resolvedRoot = path.resolve(root);
+  const relativeToBase = path.relative(baseDir, resolvedRoot);
+  if (
+    relativeToBase === '' ||
+    (!relativeToBase.startsWith(`..${path.sep}`) &&
+      relativeToBase !== '..' &&
+      !path.isAbsolute(relativeToBase))
+  ) {
+    return baseDir;
+  }
+  return path.dirname(path.dirname(resolvedRoot));
+}
+
 /**
  * Returns the project-level state directory that holds auxiliary files
  * (meta.json, extract-cursor.json, consolidation.lock) for the given project.
@@ -260,6 +290,17 @@ export function getUserAutoMemoryRoot(): string {
 
 export function getUserAutoMemoryIndexPath(): string {
   return path.join(getUserAutoMemoryRoot(), AUTO_MEMORY_INDEX_FILENAME);
+}
+
+export function getUserAutoMemoryMetadataPath(): string {
+  return path.join(getMemoryBaseDir(), USER_AUTO_MEMORY_METADATA_FILENAME);
+}
+
+export function getUserAutoMemoryConsolidationLockPath(): string {
+  return path.join(
+    getMemoryBaseDir(),
+    USER_AUTO_MEMORY_CONSOLIDATION_LOCK_FILENAME,
+  );
 }
 
 export function getUserAutoMemoryTopicPath(type: AutoMemoryType): string {

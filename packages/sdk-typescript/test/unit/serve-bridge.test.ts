@@ -22,6 +22,7 @@ import type {
   SessionEventStream,
 } from '../../src/daemon-mcp/serve-bridge/types.js';
 import { DaemonClient } from '../../src/daemon/DaemonClient.js';
+import type { DaemonEvent } from '../../src/daemon/types.js';
 
 // --- Helpers ---
 
@@ -445,6 +446,192 @@ describe('serve-bridge', () => {
       // Collector should be cleared after prompt completes
       expect(fakeStream.activeCollector).toBeNull();
     });
+
+    it.each([
+      {
+        source: 'background_task_completed',
+        qwenDiscreteMessage: true,
+        backgroundTask: { taskId: 'worker', status: 'completed' },
+      },
+      { backgroundTurn: { turnId: 'bg-1' } },
+    ])('excludes background chunks (%j)', async (backgroundMeta) => {
+      const { state } = makeMockState({
+        defaultSessionId: 'test-session',
+        fetchReply: (req) =>
+          req.url.includes('/prompt')
+            ? jsonResponse(200, { stopReason: 'end_turn' })
+            : jsonResponse(404, {}),
+      });
+
+      const frames: Array<Record<string, unknown>> = [
+        {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'answer' },
+          },
+        },
+        {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Background agent "worker" completed.',
+            },
+            _meta: backgroundMeta,
+          },
+        },
+        {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: ' tail' },
+            _meta: { usage: { input: 1, output: 2 } },
+          },
+        },
+      ];
+      const { startEventStream, stopEventStream } = await import(
+        '../../src/daemon-mcp/serve-bridge/sse.js'
+      );
+      vi.spyOn(state.client, 'subscribeEvents').mockImplementation(
+        // The collector is installed by the prompt tool just before the
+        // prompt RPC; hold the stream until it exists so every frame lands
+        // inside the collection window.
+        async function* (_sessionId: string, opts?: { signal?: AbortSignal }) {
+          const stream = state.eventStreams.get('test-session');
+          while (stream && !stream.activeCollector) {
+            await new Promise((resolve) => setImmediate(resolve));
+          }
+          for (const frame of frames) {
+            const event: DaemonEvent = {
+              v: 1,
+              type: 'session_update',
+              data: frame,
+            };
+            yield event;
+          }
+          // The production stream is persistent: stay open until
+          // stopEventStream aborts, so exhaustion does not read as a
+          // disconnect mid-prompt.
+          await new Promise<void>((_, reject) => {
+            opts?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            );
+          });
+        },
+      );
+      startEventStream(state, 'test-session');
+      try {
+        const { agentTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+        );
+        const promptTool = agentTools(state).find(
+          (t: { name: string }) => t.name === 'prompt',
+        );
+        const result = await promptTool.handler({ prompt: 'test' }, {});
+        const parsed = JSON.parse(result.content[0].text);
+        expect(parsed.stop_reason).toBe('end_turn');
+        // The background completion frame is neither answer text nor the
+        // turn's final frame: the response is the model text alone.
+        expect(parsed.response).toBe('answer tail');
+      } finally {
+        stopEventStream(state, 'test-session');
+      }
+    });
+
+    it.each(['started', 'ended', 'unknown'])(
+      'keeps the prompt collector open for lifecycle %s frames',
+      async (phase) => {
+        const { state } = makeMockState({
+          defaultSessionId: 'test-session',
+          fetchReply: () => jsonResponse(200, { stopReason: 'end_turn' }),
+        });
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const { startEventStream, stopEventStream } = await import(
+          '../../src/daemon-mcp/serve-bridge/sse.js'
+        );
+        vi.spyOn(state.client, 'subscribeEvents').mockImplementation(
+          async function* (_sessionId, opts) {
+            while (!state.eventStreams.get('test-session')?.activeCollector) {
+              await new Promise((resolve) => setImmediate(resolve));
+            }
+            yield {
+              v: 1,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: '' },
+                  _meta: {
+                    executionLifecycle: {
+                      v: phase === 'unknown' ? 99 : 1,
+                      phase,
+                    },
+                  },
+                },
+              },
+            } as DaemonEvent;
+            await gate;
+            yield {
+              v: 1,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'complete answer' },
+                },
+              },
+            } as DaemonEvent;
+            yield {
+              v: 1,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: '' },
+                  _meta: { usage: { input: 1, output: 2 } },
+                },
+              },
+            } as DaemonEvent;
+            await new Promise<void>((_, reject) =>
+              opts?.signal?.addEventListener('abort', () =>
+                reject(new DOMException('aborted', 'AbortError')),
+              ),
+            );
+          },
+        );
+        startEventStream(state, 'test-session');
+        const { agentTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+        );
+        let finished = false;
+        const pending = agentTools(state)
+          .find((t: { name: string }) => t.name === 'prompt')
+          .handler({ prompt: 'test' }, {})
+          .then((result: { content: Array<{ text: string }> }) => {
+            finished = true;
+            return result;
+          });
+        try {
+          await new Promise((resolve) => setImmediate(resolve));
+          expect(
+            state.eventStreams.get('test-session')?.activeCollector?.resolved,
+          ).toBe(false);
+          expect(finished).toBe(false);
+          release();
+          const result = await pending;
+          expect(JSON.parse(result.content[0].text)).toMatchObject({
+            stop_reason: 'end_turn',
+            response: 'complete answer',
+          });
+        } finally {
+          release();
+          stopEventStream(state, 'test-session');
+          await pending;
+        }
+      },
+    );
 
     it('should throw if no SSE stream exists for the session', async () => {
       const { state } = makeMockState({

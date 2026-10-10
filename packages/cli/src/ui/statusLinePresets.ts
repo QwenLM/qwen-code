@@ -431,6 +431,10 @@ export function buildStatusLinePresetLines(
   config: StatusLinePresetConfig,
   data: StatusLinePresetData,
 ): string[] {
-  const line = buildStatusLinePresetParts(config, data).join(' \u00b7 ');
+  // Dynamic path fields may contain line breaks, but valid horizontal
+  // whitespace must survive unchanged.
+  const line = buildStatusLinePresetParts(config, data)
+    .join(' \u00b7 ')
+    .replace(/[\n\r\v\f\u0085\u2028\u2029]+/g, ' ');
   return line ? [line] : [];
 }

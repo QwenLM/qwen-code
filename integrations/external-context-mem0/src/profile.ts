@@ -62,7 +62,8 @@ export function renderResult(sourceItems: readonly ExternalContextItem[]): {
 } {
   const items: ExternalContextItem[] = [];
   for (const source of sourceItems) {
-    if (!source.id || !source.content) continue;
+    if (!source.id || !source.content || Array.from(source.id).length > 128)
+      continue;
     const item = compactItem(source);
     items.push(item);
     if (!fitNewestItem(items)) {
@@ -97,7 +98,7 @@ function unicodeBoundPattern(maximumCharacters: number): RegExp {
 
 function compactItem(source: ExternalContextItem): ExternalContextItem {
   const item: ExternalContextItem = {
-    id: truncate(source.id, 128),
+    id: source.id,
     content: truncate(source.content, MAX_CONTENT_CHARACTERS),
   };
   if (source.title) item.title = truncate(source.title, 200);

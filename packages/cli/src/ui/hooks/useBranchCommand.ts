@@ -17,6 +17,7 @@ import {
 import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
+  computeResumedPromptCountSeed,
 } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -70,6 +71,7 @@ export interface UseBranchCommandOptions {
     'clearItems' | 'loadHistory' | 'addItem'
   >;
   startNewSession: (sessionId: string) => void;
+  seedPromptCount: (count: number) => void;
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
@@ -100,6 +102,7 @@ export function useBranchCommand(
     config,
     historyManager,
     startNewSession,
+    seedPromptCount,
     clearPendingState,
     setSessionName,
     remount,
@@ -274,6 +277,13 @@ export function useBranchCommand(
           collapsePreviewCount,
         );
         startNewSession(newSessionId);
+        // startNewSession resets the counter, so seed afterward.
+        seedPromptCount(
+          computeResumedPromptCountSeed(
+            resumed.conversation.messages,
+            newSessionId,
+          ),
+        );
         uiSwapped = true;
         config.getLlmClient()?.commitTelemetrySwap?.();
         clearPendingState?.();
@@ -379,6 +389,7 @@ export function useBranchCommand(
       config,
       historyManager,
       startNewSession,
+      seedPromptCount,
       clearPendingState,
       setSessionName,
       remount,

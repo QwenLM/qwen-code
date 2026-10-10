@@ -12,7 +12,10 @@ import {
   toolResultArtifactState,
   toolResultPartDiagnosticValues,
   TOOL_RESULT_BOUNDARY_EVENT_NAME,
+  type ToolResultBoundaryObserverOptions,
+  type ToolResultBoundaryValue,
 } from './tool-result-boundary-diagnostics.js';
+import { fnResponse } from '../test-utils/model-fixtures.js';
 
 function parseEvent(line: string): Record<string, unknown> {
   return JSON.parse(
@@ -24,13 +27,32 @@ function eventValues(event: Record<string, unknown>) {
   return event['values'] as Array<Record<string, unknown>>;
 }
 
+/** Enabled observer with a spied debug logger; `options` override defaults. */
+function setup(options: ToolResultBoundaryObserverOptions = {}) {
+  const debug = vi.fn();
+  const observe = createToolResultBoundaryObserver({
+    enabled: () => true,
+    logger: { debug, isEnabled: () => true },
+    ...options,
+  });
+  const event = (index: number) =>
+    parseEvent(debug.mock.calls[index][0] as string);
+  return { debug, observe, event };
+}
+
+const display = (value: string): ToolResultBoundaryValue => ({
+  representation: 'display',
+  value,
+});
+const modelText = (value: string): ToolResultBoundaryValue => ({
+  representation: 'model_text',
+  value,
+});
+
 describe('tool-result boundary diagnostics', () => {
   it('records exact sizes and process-local HMACs without raw values or identifiers', () => {
-    const debug = vi.fn();
-    const observe = createToolResultBoundaryObserver({
-      enabled: () => true,
+    const { debug, observe } = setup({
       hmacKey: Buffer.alloc(32, 7),
-      logger: { debug, isEnabled: () => true },
       thresholdBytes: 0,
     });
     const secret = 'secret "汉😀\ud800" output';
@@ -38,7 +60,7 @@ describe('tool-result boundary diagnostics', () => {
     expect(
       observe({
         stage: 'producer',
-        values: [{ representation: 'display', value: secret }],
+        values: [display(secret)],
         artifacts: [{ state: 'reusable', kinds: ['file', 'image'] }],
         sessionId: 'secret-session-id',
         promptId: 'secret-prompt-id',
@@ -85,17 +107,14 @@ describe('tool-result boundary diagnostics', () => {
   });
 
   it('normalizes untrusted artifact summaries at the log sink', () => {
-    const debug = vi.fn();
-    const observe = createToolResultBoundaryObserver({
-      enabled: () => true,
+    const { debug, observe, event } = setup({
       hmacKey: Buffer.alloc(32, 8),
-      logger: { debug, isEnabled: () => true },
       thresholdBytes: 0,
     });
 
     observe({
       stage: 'producer',
-      values: [{ representation: 'display', value: 'eligible' }],
+      values: [display('eligible')],
       artifacts: [
         {
           state: '/private/secret-state',
@@ -104,40 +123,36 @@ describe('tool-result boundary diagnostics', () => {
       ] as unknown as Parameters<typeof observe>[0]['artifacts'],
     });
 
-    const line = debug.mock.calls[0][0] as string;
-    expect(parseEvent(line)).toMatchObject({
+    expect(event(0)).toMatchObject({
       artifacts: [{ state: 'undecided', kinds: ['file', 'unknown'] }],
     });
-    expect(line).not.toContain('/private/secret');
+    expect(debug.mock.calls[0][0] as string).not.toContain('/private/secret');
 
     observe({
       stage: 'producer',
-      values: [{ representation: 'display', value: 'eligible' }],
+      values: [display('eligible')],
       artifacts: [{ state: 'none', kinds: [] }],
     });
-    expect(parseEvent(debug.mock.calls[1][0] as string)).toMatchObject({
+    expect(event(1)).toMatchObject({
       artifacts: [{ state: 'none', kinds: [] }],
     });
   });
 
   it('keeps unchanged HMACs equal and changes the first mutated value', () => {
-    const debug = vi.fn();
-    const observe = createToolResultBoundaryObserver({
-      enabled: () => true,
+    const { debug, observe, event } = setup({
       hmacKey: Buffer.alloc(32, 9),
-      logger: { debug, isEnabled: () => true },
       thresholdBytes: 0,
     });
 
     observe({
       stage: 'finalizer_input',
       mutated: true,
-      values: [{ representation: 'model_text', value: 'same-value' }],
+      values: [modelText('same-value')],
     });
     observe({
       stage: 'finalizer_output',
       mutated: true,
-      values: [{ representation: 'model_text', value: 'same-value' }],
+      values: [modelText('same-value')],
     });
     observe({
       stage: 'headless_projection_output',
@@ -146,126 +161,86 @@ describe('tool-result boundary diagnostics', () => {
     });
 
     const hashes = debug.mock.calls.map(
-      ([line]) =>
-        eventValues(parseEvent(line as string))[0]['hmacSha256'] as string,
+      (_, index) => eventValues(event(index))[0]['hmacSha256'] as string,
     );
     expect(hashes[0]).toBe(hashes[1]);
     expect(hashes[2]).not.toBe(hashes[1]);
-    expect(parseEvent(debug.mock.calls[0][0] as string)['mutated']).toBe(true);
+    expect(event(0)['mutated']).toBe(true);
   });
 
   it('hashes equal values identically across representations', () => {
-    const debug = vi.fn();
-    const observe = createToolResultBoundaryObserver({
-      enabled: () => true,
+    const { observe, event } = setup({
       hmacKey: Buffer.alloc(32, 2),
-      logger: { debug, isEnabled: () => true },
       thresholdBytes: 0,
     });
 
     observe({
       stage: 'producer',
-      values: [
-        { representation: 'model_text', value: 'same-value' },
-        { representation: 'display', value: 'same-value' },
-      ],
+      values: [modelText('same-value'), display('same-value')],
     });
 
-    const values = eventValues(parseEvent(debug.mock.calls[0][0] as string));
+    const values = eventValues(event(0));
     expect(values[0]['hmacSha256']).toBe(values[1]['hmacSha256']);
   });
 
   it('hashes legacy and canonical tool names identically', () => {
-    const debug = vi.fn();
-    const observe = createToolResultBoundaryObserver({
-      enabled: () => true,
+    const { observe, event } = setup({
       hmacKey: Buffer.alloc(32, 4),
-      logger: { debug, isEnabled: () => true },
       thresholdBytes: 0,
     });
 
     for (const toolName of ['task', 'agent']) {
-      observe({
-        stage: 'producer',
-        toolName,
-        values: [{ representation: 'display', value: 'eligible' }],
-      });
+      observe({ stage: 'producer', toolName, values: [display('eligible')] });
     }
 
-    const hashes = debug.mock.calls.map(
-      ([line]) => parseEvent(line as string)['toolNameHmacSha256'],
-    );
-    expect(hashes[0]).toBe(hashes[1]);
+    expect(event(0)['toolNameHmacSha256']).toBe(event(1)['toolNameHmacSha256']);
   });
 
   it('hashes distinct lone-surrogate code units differently', () => {
-    const debug = vi.fn();
-    const observe = createToolResultBoundaryObserver({
-      enabled: () => true,
+    const { observe, event } = setup({
       hmacKey: Buffer.alloc(32, 3),
-      logger: { debug, isEnabled: () => true },
       thresholdBytes: 0,
     });
 
     observe({
       stage: 'producer',
-      values: [
-        { representation: 'display', value: '\ud800' },
-        { representation: 'display', value: '\udc00' },
-      ],
+      values: [display('\ud800'), display('\udc00')],
     });
 
-    const values = eventValues(parseEvent(debug.mock.calls[0][0] as string));
+    const values = eventValues(event(0));
     expect(values[0]['hmacSha256']).not.toBe(values[1]['hmacSha256']);
     expect(values.map((value) => value['slot'])).toEqual([0, 1]);
   });
 
   it('reuses its lazily generated HMAC key across events', () => {
-    const debug = vi.fn();
-    const observe = createToolResultBoundaryObserver({
-      enabled: () => true,
-      logger: { debug, isEnabled: () => true },
-      thresholdBytes: 0,
-    });
+    const { observe, event } = setup({ thresholdBytes: 0 });
     const observation = {
       stage: 'producer' as const,
       sessionId: 'same-session',
-      values: [{ representation: 'display' as const, value: 'eligible' }],
+      values: [display('eligible')],
     };
 
     observe(observation);
     observe(observation);
 
-    expect(
-      parseEvent(debug.mock.calls[0][0] as string)['sessionHmacSha256'],
-    ).toBe(parseEvent(debug.mock.calls[1][0] as string)['sessionHmacSha256']);
+    expect(event(0)['sessionHmacSha256']).toBe(event(1)['sessionHmacSha256']);
   });
 
   it('executes enabled value and mutation thunks', () => {
-    const debug = vi.fn();
-    const values = vi.fn(() => [
-      { representation: 'display' as const, value: 'small' },
-    ]);
+    const values = vi.fn(() => [display('small')]);
     const mutated = vi.fn(() => true);
-    const observe = createToolResultBoundaryObserver({
-      enabled: () => true,
-      hmacKey: Buffer.alloc(32, 6),
-      logger: { debug, isEnabled: () => true },
-    });
+    const { observe, event } = setup({ hmacKey: Buffer.alloc(32, 6) });
 
     expect(observe({ stage: 'producer', mutated, values })).toBe(true);
     expect(values).toHaveBeenCalledOnce();
     expect(mutated).toHaveBeenCalledOnce();
-    expect(parseEvent(debug.mock.calls[0][0] as string)['mutated']).toBe(true);
+    expect(event(0)['mutated']).toBe(true);
   });
 
   it('matches native JSON byte accounting under fixed-seed fuzzing', () => {
-    const debug = vi.fn();
-    const observe = createToolResultBoundaryObserver({
-      enabled: () => true,
+    const { observe, event } = setup({
       hmacKey: Buffer.alloc(32, 1),
       logLimit: 500,
-      logger: { debug, isEnabled: () => true },
       thresholdBytes: 0,
     });
     const atoms = [
@@ -281,7 +256,7 @@ describe('tool-result boundary diagnostics', () => {
       '\x1f',
       '\x7f',
       'é',
-      '\u07ff',
+      '߿',
       '汉',
       '😀',
       '\ud800',
@@ -299,31 +274,19 @@ describe('tool-result boundary diagnostics', () => {
       for (let index = 0; index < length; index++) {
         value += atoms[random() % atoms.length];
       }
-      observe({
-        stage: 'producer',
-        values: [{ representation: 'model_text', value }],
-      });
-      const summary = eventValues(
-        parseEvent(debug.mock.calls.at(-1)?.[0] as string),
-      )[0];
-      expect(summary['jsonUtf8Bytes']).toBe(
+      observe({ stage: 'producer', values: [modelText(value)] });
+      expect(eventValues(event(sampleIndex))[0]['jsonUtf8Bytes']).toBe(
         Buffer.byteLength(JSON.stringify(value), 'utf8'),
       );
     }
   });
 
   it('is lazy and silent while disabled or below the threshold', () => {
-    const disabledValues = vi.fn(() => [
-      { representation: 'display' as const, value: 'secret' },
-    ]);
+    const disabledValues = vi.fn(() => [display('secret')]);
     const disabledMutation = vi.fn(() => true);
-    const disabledDebug = vi.fn();
-    const disabled = createToolResultBoundaryObserver({
-      enabled: () => false,
-      logger: { debug: disabledDebug, isEnabled: () => true },
-    });
+    const disabled = setup({ enabled: () => false });
     expect(
-      disabled({
+      disabled.observe({
         stage: 'producer',
         mutated: disabledMutation,
         values: disabledValues,
@@ -331,30 +294,17 @@ describe('tool-result boundary diagnostics', () => {
     ).toBe(false);
     expect(disabledValues).not.toHaveBeenCalled();
     expect(disabledMutation).not.toHaveBeenCalled();
-    expect(disabledDebug).not.toHaveBeenCalled();
+    expect(disabled.debug).not.toHaveBeenCalled();
 
-    const belowDebug = vi.fn();
-    const below = createToolResultBoundaryObserver({
-      enabled: () => true,
-      logger: { debug: belowDebug, isEnabled: () => true },
-      thresholdBytes: 100,
-    });
+    const below = setup({ thresholdBytes: 100 });
     expect(
-      below({
-        stage: 'producer',
-        values: [{ representation: 'display', value: 'small' }],
-      }),
+      below.observe({ stage: 'producer', values: [display('small')] }),
     ).toBe(false);
-    expect(belowDebug).not.toHaveBeenCalled();
+    expect(below.debug).not.toHaveBeenCalled();
   });
 
   it('emits only above the 65,536-byte JSON-string threshold', () => {
-    const debug = vi.fn();
-    const observe = createToolResultBoundaryObserver({
-      enabled: () => true,
-      hmacKey: Buffer.alloc(32, 4),
-      logger: { debug, isEnabled: () => true },
-    });
+    const { debug, observe, event } = setup({ hmacKey: Buffer.alloc(32, 4) });
 
     for (const [valueLength, expected] of [
       [65_533, false],
@@ -364,123 +314,87 @@ describe('tool-result boundary diagnostics', () => {
       expect(
         observe({
           stage: 'producer',
-          values: [
-            { representation: 'display', value: 'a'.repeat(valueLength) },
-          ],
+          values: [display('a'.repeat(valueLength))],
         }),
       ).toBe(expected);
     }
     expect(debug).toHaveBeenCalledTimes(1);
-    expect(
-      eventValues(parseEvent(debug.mock.calls[0][0] as string))[0],
-    ).toMatchObject({ jsonUtf8Bytes: 65_537 });
+    expect(eventValues(event(0))[0]).toMatchObject({ jsonUtf8Bytes: 65_537 });
   });
 
   it('emits when any value exceeds the threshold', () => {
-    const debug = vi.fn();
-    const observe = createToolResultBoundaryObserver({
-      enabled: () => true,
-      hmacKey: Buffer.alloc(32, 4),
-      logger: { debug, isEnabled: () => true },
-    });
+    const { debug, observe } = setup({ hmacKey: Buffer.alloc(32, 4) });
 
     expect(
       observe({
         stage: 'producer',
-        values: [
-          { representation: 'display', value: 'a'.repeat(65_535) },
-          { representation: 'display', value: 'small' },
-        ],
+        values: [display('a'.repeat(65_535)), display('small')],
       }),
     ).toBe(true);
     expect(debug).toHaveBeenCalledOnce();
   });
 
-  it('rate-limits eligible events and reports the suppressed count', () => {
-    let currentTime = 0;
-    const debug = vi.fn();
-    const observe = createToolResultBoundaryObserver({
-      enabled: () => true,
+  /** One-event-per-100ms limiter whose clock the test moves with `setTime`. */
+  function rateLimited(startTime: number) {
+    let currentTime = startTime;
+    const { debug, observe, event } = setup({
       hmacKey: Buffer.alloc(32, 5),
       logLimit: 1,
-      logger: { debug, isEnabled: () => true },
       now: () => currentTime,
       thresholdBytes: 0,
       windowMs: 100,
     });
-    const observation = {
-      stage: 'producer' as const,
-      values: [{ representation: 'display' as const, value: 'large' }],
+    const emit = () =>
+      observe({ stage: 'producer', values: [display('large')] });
+    const setTime = (time: number) => {
+      currentTime = time;
     };
+    return { debug, event, emit, setTime };
+  }
 
-    expect(observe(observation)).toBe(true);
-    expect(observe(observation)).toBe(true);
-    expect(observe(observation)).toBe(true);
+  it('rate-limits eligible events and reports the suppressed count', () => {
+    const { debug, event, emit, setTime } = rateLimited(0);
+
+    expect(emit()).toBe(true);
+    expect(emit()).toBe(true);
+    expect(emit()).toBe(true);
     expect(debug).toHaveBeenCalledTimes(1);
-    currentTime = 100;
-    expect(observe(observation)).toBe(true);
+    setTime(100);
+    expect(emit()).toBe(true);
     expect(debug).toHaveBeenCalledTimes(2);
-    expect(parseEvent(debug.mock.calls[1][0] as string)).toMatchObject({
-      suppressedCount: 2,
-    });
-    currentTime = 200;
-    expect(observe(observation)).toBe(true);
-    expect(parseEvent(debug.mock.calls[2][0] as string)).not.toHaveProperty(
-      'suppressedCount',
-    );
+    expect(event(1)).toMatchObject({ suppressedCount: 2 });
+    setTime(200);
+    expect(emit()).toBe(true);
+    expect(event(2)).not.toHaveProperty('suppressedCount');
   });
 
   it('skips value measurement for rate-limited mutated events', () => {
-    const values = vi.fn(() => [
-      { representation: 'display' as const, value: 'secret' },
-    ]);
-    const observe = createToolResultBoundaryObserver({
-      enabled: () => true,
-      logLimit: 0,
-      logger: { debug: vi.fn(), isEnabled: () => true },
-    });
+    const values = vi.fn(() => [display('secret')]);
+    const { observe } = setup({ logLimit: 0 });
 
     expect(observe({ stage: 'producer', mutated: true, values })).toBe(true);
     expect(values).not.toHaveBeenCalled();
   });
 
   it('starts a new rate-limit window when the clock moves backward', () => {
-    let currentTime = 100;
-    const debug = vi.fn();
-    const observe = createToolResultBoundaryObserver({
-      enabled: () => true,
-      hmacKey: Buffer.alloc(32, 5),
-      logLimit: 1,
-      logger: { debug, isEnabled: () => true },
-      now: () => currentTime,
-      thresholdBytes: 0,
-      windowMs: 100,
-    });
-    const observation = {
-      stage: 'producer' as const,
-      values: [{ representation: 'display' as const, value: 'large' }],
-    };
+    const { debug, event, emit, setTime } = rateLimited(100);
 
-    expect(observe(observation)).toBe(true);
-    expect(observe(observation)).toBe(true);
-    currentTime = 50;
-    expect(observe(observation)).toBe(true);
+    expect(emit()).toBe(true);
+    expect(emit()).toBe(true);
+    setTime(50);
+    expect(emit()).toBe(true);
     expect(debug).toHaveBeenCalledTimes(2);
-    expect(parseEvent(debug.mock.calls[1][0] as string)).toMatchObject({
-      suppressedCount: 1,
-    });
+    expect(event(1)).toMatchObject({ suppressedCount: 1 });
   });
 
   it('swallows diagnostic failures', () => {
-    const throwingLogger = {
-      debug: () => {
-        throw new Error('log failed');
+    const { observe } = setup({
+      logger: {
+        debug: () => {
+          throw new Error('log failed');
+        },
+        isEnabled: () => true,
       },
-      isEnabled: () => true,
-    };
-    const observe = createToolResultBoundaryObserver({
-      enabled: () => true,
-      logger: throwingLogger,
       thresholdBytes: 0,
     });
 
@@ -493,10 +407,7 @@ describe('tool-result boundary diagnostics', () => {
       }),
     ).not.toThrow();
     expect(() =>
-      observe({
-        stage: 'producer',
-        values: [{ representation: 'display', value: 'eligible' }],
-      }),
+      observe({ stage: 'producer', values: [display('eligible')] }),
     ).not.toThrow();
   });
 
@@ -518,22 +429,14 @@ describe('tool-result boundary diagnostics', () => {
       state: 'reusable',
       kinds: ['file', 'image', 'unknown'],
     });
-    expect(
-      JSON.stringify(
-        toolResultBoundaryArtifact(
-          ['/private/result.txt'],
-          [{ kind: '/private/secret-kind' }],
-        ),
+    const serialized = JSON.stringify(
+      toolResultBoundaryArtifact(
+        ['/private/result.txt'],
+        [{ kind: '/private/secret-kind' }],
       ),
-    ).not.toContain('/private/result.txt');
-    expect(
-      JSON.stringify(
-        toolResultBoundaryArtifact(
-          ['/private/result.txt'],
-          [{ kind: '/private/secret-kind' }],
-        ),
-      ),
-    ).not.toContain('/private/secret-kind');
+    );
+    expect(serialized).not.toContain('/private/result.txt');
+    expect(serialized).not.toContain('/private/secret-kind');
     expect(
       toolResultBoundaryArtifact(
         undefined,
@@ -558,30 +461,17 @@ describe('tool-result boundary diagnostics', () => {
     expect(
       toolResultPartDiagnosticValues([
         { text: 'top' },
-        {
-          functionResponse: {
-            name: 'tool',
-            response: { output: 'output', error: 'error' },
-          },
-        },
+        fnResponse('tool', { output: 'output', error: 'error' }),
       ]),
-    ).toEqual([
-      { representation: 'model_text', value: 'top' },
-      { representation: 'model_text', value: 'output' },
-      { representation: 'model_text', value: 'error' },
-    ]);
+    ).toEqual([modelText('top'), modelText('output'), modelText('error')]);
     expect(toolResultPartDiagnosticValues('plain')).toEqual([
-      { representation: 'model_text', value: 'plain' },
+      modelText('plain'),
     ]);
     expect(toolResultPartDiagnosticValues(['plain', { text: 'top' }])).toEqual([
-      { representation: 'model_text', value: 'plain' },
-      { representation: 'model_text', value: 'top' },
+      modelText('plain'),
+      modelText('top'),
     ]);
-    expect(toolResultPartDiagnosticValues(undefined)).toEqual([
-      { representation: 'model_text', value: '' },
-    ]);
-    expect(toolResultPartDiagnosticValues(null)).toEqual([
-      { representation: 'model_text', value: '' },
-    ]);
+    expect(toolResultPartDiagnosticValues(undefined)).toEqual([modelText('')]);
+    expect(toolResultPartDiagnosticValues(null)).toEqual([modelText('')]);
   });
 });

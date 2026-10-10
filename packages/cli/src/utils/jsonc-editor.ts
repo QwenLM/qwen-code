@@ -19,7 +19,7 @@ import {
   type ParseError,
 } from 'jsonc-parser';
 import { writeStderrLine } from './stdioHelpers.js';
-import { writeWithBackupSync } from './writeWithBackup.js';
+import { writeWithBackupSync } from './write-with-backup.js';
 
 const PARSE_OPTIONS = { allowTrailingComma: true } as const;
 
@@ -35,8 +35,8 @@ const PARSE_OPTIONS = { allowTrailingComma: true } as const;
  * object exactly — keys present in the original but not in updates are
  * removed, preventing zombie keys after migrations.
  *
- * Uses writeWithBackupSync internally for atomic temp-file + rename writes,
- * preventing file corruption if the process crashes mid-write.
+ * Uses writeWithBackupSync to publish complete bytes with one rename, keeping
+ * the existing file readable if the process stops before publication.
  *
  * @returns true if the file was successfully written, false if the write
  * was refused (e.g. the result would not be valid JSON or file not parseable).

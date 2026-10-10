@@ -23,6 +23,7 @@ import {
   bootAcpLiveStack,
   deferred,
   startLiveCall,
+  waitForLiveResponseAfter,
   withTimeout,
   type AcpLiveStack,
   type Deferred,
@@ -53,15 +54,28 @@ describeE2E('qwen-live M4 — ACP steering', () => {
     callId: string,
     args: Record<string, unknown>,
   ): Promise<Record<string, unknown>> => {
-    conn.functionCall({
+    const fromIndex = stack.fakeDash.inbox.length;
+    conn.queueFunctionCall({
       name,
       argumentsJson: JSON.stringify(args),
       callId,
     });
+    conn.speakTranscript(`Please ${name}: ${JSON.stringify(args)}`);
     const receiptMessage = await stack.fakeDash.waitForMessage(
       (message) => functionCallOutputOf(message)?.callId === callId,
-      { timeoutMs: 30_000, description: `${name} receipt ${callId}` },
+      {
+        fromIndex,
+        timeoutMs: 30_000,
+        description: `${name} receipt ${callId}`,
+      },
     );
+    if (name !== 'handoff') {
+      await waitForLiveResponseAfter(
+        stack,
+        receiptMessage,
+        'tool_continuation',
+      );
+    }
     return JSON.parse(functionCallOutputOf(receiptMessage)!.output) as Record<
       string,
       unknown
@@ -171,6 +185,17 @@ describeE2E('qwen-live M4 — ACP steering', () => {
       },
     );
     expect(contextTextOf(complete)).toContain('slow acp task finished');
+    const spoken = await stack.fakeDash.waitForMessage(
+      (message) => {
+        const text = contextTextOf(message);
+        return (
+          text?.startsWith('[SPEAK_TO_USER] ') === true &&
+          text.includes('slow acp task finished')
+        );
+      },
+      { fromIndex: stack.fakeDash.inbox.indexOf(complete) + 1 },
+    );
+    await waitForLiveResponseAfter(stack, spoken, 'backend_speech');
   });
 
   it('accepts a plain handoff to the now-idle acp session', async () => {

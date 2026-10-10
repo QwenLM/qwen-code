@@ -1,0 +1,10 @@
+ALTER TABLE qwen_tool_publication ADD COLUMN gc_generation BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE qwen_tool_publication ADD COLUMN gc_owner VARCHAR(36);
+ALTER TABLE qwen_tool_publication ADD COLUMN gc_claim_until BIGINT;
+ALTER TABLE qwen_tool_publication ADD COLUMN gc_cursor VARCHAR(256) NOT NULL DEFAULT '';
+ALTER TABLE qwen_tool_publication ADD COLUMN gc_next_at BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE qwen_tool_publication ADD COLUMN gc_blocker VARCHAR(64);
+ALTER TABLE qwen_tool_publication ADD COLUMN collected_at BIGINT;
+ALTER TABLE qwen_tool_publication ADD COLUMN collected_bytes BIGINT;
+ALTER TABLE qwen_tool_publication ADD COLUMN released_held_bytes BIGINT;
+CREATE INDEX idx_output_collection ON qwen_tool_publication (retention_state, gc_next_at);

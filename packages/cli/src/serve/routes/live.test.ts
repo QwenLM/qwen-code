@@ -61,6 +61,7 @@ class FakeSocket extends EventEmitter {
           instanceNonce: 'host_instance_nonce_0001',
           permissions: {
             microphone: 'granted',
+            camera: 'granted',
             accessibility: 'granted',
             screenRecording: 'granted',
           },
@@ -124,10 +125,8 @@ describe('Live routes', () => {
       connectReady(coordinator);
       const app = express();
       app.use(express.json());
-      registerLiveRoutes(app, {
-        coordinator,
-        mutate: () => ((_req, _res, next) => next()) as RequestHandler,
-        ensureRuntimeReady: async () => {
+      coordinator.setHandlers({
+        beforeStart: async () => {
           throw new ConversationRuntimeOwnershipError(
             'conversation_runtime_in_use',
             true,
@@ -138,6 +137,10 @@ describe('Live routes', () => {
             },
           );
         },
+      });
+      registerLiveRoutes(app, {
+        coordinator,
+        mutate: () => ((_req, _res, next) => next()) as RequestHandler,
       });
 
       const response = await request(app).post(route).send({});

@@ -12,6 +12,9 @@ import {
   resetUtf8BomCache,
   detectLineEnding,
   ensureCrlfLineEndings,
+  type CoreReadTextCursorRequest,
+  type CoreReadTextFileHandleRequest,
+  type CoreWriteTextFileRequest,
 } from './fileSystemService.js';
 import { encodeTextFileContent } from './sync-file-encoding.js';
 
@@ -73,16 +76,54 @@ describe('StandardFileSystemService', () => {
     vi.restoreAllMocks();
   });
 
+  type ReadResult = Awaited<ReturnType<typeof readFileWithLineAndLimit>>;
+  const mockRead = (content: string, over: Partial<ReadResult> = {}) =>
+    vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
+      content,
+      bom: false,
+      encoding: 'utf-8',
+      originalLineCount: 1,
+      originalLineCountExact: true,
+      truncatedByBytes: false,
+      ...over,
+    });
+  async function write(
+    path: string,
+    content: string,
+    _meta?: CoreWriteTextFileRequest['_meta'],
+  ) {
+    vi.mocked(fs.writeFile).mockResolvedValue();
+    await fileSystem.writeTextFile({
+      path,
+      content,
+      ...(_meta ? { _meta } : {}),
+    });
+  }
+  // Writes `content` and expects `expected` to reach fs.writeFile as UTF-8 text.
+  async function expectWrite(
+    path: string,
+    content: string,
+    expected: string,
+    _meta?: CoreWriteTextFileRequest['_meta'],
+  ) {
+    await write(path, content, _meta);
+    expect(fs.writeFile).toHaveBeenCalledWith(path, expected, 'utf-8');
+  }
+  // Asserts the first fs.writeFile call wrote a Buffer to /test/file.txt.
+  function writtenBuffer(): Buffer {
+    const [writtenPath, data] = vi.mocked(fs.writeFile).mock.calls[0];
+    expect(writtenPath).toBe('/test/file.txt');
+    expect(data).toBeInstanceOf(Buffer);
+    return data as Buffer;
+  }
+  const onHost = (platform: string, encoding?: string | null) => {
+    mockPlatform.mockReturnValue(platform);
+    if (encoding !== undefined) mockGetSystemEncoding.mockReturnValue(encoding);
+  };
+
   describe('readTextFile', () => {
     it('should read file content and return ReadTextFileResponse', async () => {
-      vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
-        content: 'Hello, World!',
-        bom: false,
-        encoding: 'utf-8',
-        originalLineCount: 1,
-        originalLineCountExact: true,
-        truncatedByBytes: false,
-      });
+      mockRead('Hello, World!');
 
       const result = await fileSystem.readTextFile({ path: '/test/file.txt' });
 
@@ -96,14 +137,7 @@ describe('StandardFileSystemService', () => {
     });
 
     it('should pass limit and line params to readFileWithLineAndLimit', async () => {
-      vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
-        content: 'line 5',
-        bom: false,
-        encoding: 'utf-8',
-        originalLineCount: 100,
-        originalLineCountExact: true,
-        truncatedByBytes: false,
-      });
+      mockRead('line 5', { originalLineCount: 100 });
 
       const result = await fileSystem.readTextFile({
         path: '/test/file.txt',
@@ -120,19 +154,9 @@ describe('StandardFileSystemService', () => {
     });
 
     it('should preserve explicit line zero for offset reads', async () => {
-      vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
-        content: 'line 1',
-        bom: false,
-        encoding: 'utf-8',
-        originalLineCount: 100,
-        originalLineCountExact: true,
-        truncatedByBytes: false,
-      });
+      mockRead('line 1', { originalLineCount: 100 });
 
-      await fileSystem.readTextFile({
-        path: '/test/file.txt',
-        line: 0,
-      });
+      await fileSystem.readTextFile({ path: '/test/file.txt', line: 0 });
 
       expect(readFileWithLineAndLimit).toHaveBeenCalledWith({
         path: '/test/file.txt',
@@ -142,14 +166,7 @@ describe('StandardFileSystemService', () => {
     });
 
     it('should pass maxOutputBytes and return byte-truncation metadata', async () => {
-      vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
-        content: 'partial',
-        bom: false,
-        encoding: 'utf-8',
-        originalLineCount: 100,
-        originalLineCountExact: true,
-        truncatedByBytes: true,
-      });
+      mockRead('partial', { originalLineCount: 100, truncatedByBytes: true });
 
       const result = await fileSystem.readTextFile({
         path: '/test/file.txt',
@@ -169,14 +186,7 @@ describe('StandardFileSystemService', () => {
 
     it('should pass cached stats to readFileWithLineAndLimit', async () => {
       const stats = { size: 123 } as import('node:fs').Stats;
-      vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
-        content: 'line 1',
-        bom: false,
-        encoding: 'utf-8',
-        originalLineCount: 1,
-        originalLineCountExact: true,
-        truncatedByBytes: false,
-      });
+      mockRead('line 1');
 
       await fileSystem.readTextFile({
         path: '/test/file.txt',
@@ -197,24 +207,35 @@ describe('StandardFileSystemService', () => {
     // behaviour is covered against real files in `read-text-range.test.ts`
     // and at the real boundary in `workspace-file-system.test.ts`; only the
     // argument validation below needs a unit test, and it needs no mock.
+    const handleRead = (over: Partial<CoreReadTextFileHandleRequest>) =>
+      fileSystem.readTextFileFromHandle({
+        fileHandle: {} as import('node:fs/promises').FileHandle,
+        fileSize: 300_000,
+        limit: 20,
+        maxOutputBytes: 262_144,
+        maxScanBytes: 8 * 1024 * 1024,
+        ...over,
+      });
+    const cursorRead = (over: Partial<CoreReadTextCursorRequest>) =>
+      fileSystem.readTextCursorFromHandle({
+        fileHandle: {} as import('node:fs/promises').FileHandle,
+        startOffset: 0,
+        fileSize: 300_000,
+        limit: 20,
+        maxOutputBytes: 262_144,
+        maxSnapBytes: 8 * 1024 * 1024,
+        ...over,
+      });
+
     it.each([
       ['maxOutputBytes', { maxOutputBytes: Number.POSITIVE_INFINITY }],
       ['maxScanBytes', { maxScanBytes: Number.POSITIVE_INFINITY }],
       ['maxOutputBytes', { maxOutputBytes: 0 }],
       ['maxScanBytes', { maxScanBytes: -1 }],
     ])('should reject a handle read with unbounded %s', async (bound, over) => {
-      const fileHandle = {} as import('node:fs/promises').FileHandle;
-
-      await expect(
-        fileSystem.readTextFileFromHandle({
-          fileHandle,
-          fileSize: 300_000,
-          limit: 20,
-          maxOutputBytes: 262_144,
-          maxScanBytes: 8 * 1024 * 1024,
-          ...over,
-        }),
-      ).rejects.toThrow(new RegExp(`positive finite ${bound}`));
+      await expect(handleRead(over)).rejects.toThrow(
+        new RegExp(`positive finite ${bound}`),
+      );
     });
 
     it.each([
@@ -222,17 +243,9 @@ describe('StandardFileSystemService', () => {
       ['a zero limit', 0],
       ['a negative limit', -1],
     ])('should reject %s on a handle read', async (_label, limit) => {
-      const fileHandle = {} as import('node:fs/promises').FileHandle;
-
-      await expect(
-        fileSystem.readTextFileFromHandle({
-          fileHandle,
-          fileSize: 300_000,
-          limit,
-          maxOutputBytes: 262_144,
-          maxScanBytes: 8 * 1024 * 1024,
-        }),
-      ).rejects.toThrow(/positive integer limit or Infinity/);
+      await expect(handleRead({ limit })).rejects.toThrow(
+        /positive integer limit or Infinity/,
+      );
     });
 
     it.each([
@@ -241,18 +254,9 @@ describe('StandardFileSystemService', () => {
       ['line', { line: -1 }],
       ['line', { line: 1.5 }],
     ])('should reject invalid handle-bound %s', async (field, over) => {
-      const fileHandle = {} as import('node:fs/promises').FileHandle;
-
-      await expect(
-        fileSystem.readTextFileFromHandle({
-          fileHandle,
-          fileSize: 300_000,
-          limit: 1,
-          maxOutputBytes: 262_144,
-          maxScanBytes: 8 * 1024 * 1024,
-          ...over,
-        }),
-      ).rejects.toThrow(new RegExp(field));
+      await expect(handleRead({ limit: 1, ...over })).rejects.toThrow(
+        new RegExp(field),
+      );
     });
 
     it.each([
@@ -261,19 +265,9 @@ describe('StandardFileSystemService', () => {
       ['maxSnapBytes', { maxSnapBytes: Number.POSITIVE_INFINITY }],
       ['maxSnapBytes', { maxSnapBytes: 0 }],
     ])('should reject invalid cursor-bound %s', async (bound, over) => {
-      const fileHandle = {} as import('node:fs/promises').FileHandle;
-
-      await expect(
-        fileSystem.readTextCursorFromHandle({
-          fileHandle,
-          startOffset: 0,
-          fileSize: 300_000,
-          limit: 20,
-          maxOutputBytes: 262_144,
-          maxSnapBytes: 8 * 1024 * 1024,
-          ...over,
-        }),
-      ).rejects.toThrow(new RegExp(`positive finite ${bound}`));
+      await expect(cursorRead(over)).rejects.toThrow(
+        new RegExp(`positive finite ${bound}`),
+      );
     });
 
     it.each([
@@ -282,48 +276,20 @@ describe('StandardFileSystemService', () => {
       ['fileSize', { fileSize: -1 }],
       ['fileSize', { fileSize: 1.5 }],
     ])('should reject invalid cursor-bound %s', async (field, over) => {
-      const fileHandle = {} as import('node:fs/promises').FileHandle;
-
-      await expect(
-        fileSystem.readTextCursorFromHandle({
-          fileHandle,
-          startOffset: 0,
-          fileSize: 300_000,
-          limit: 20,
-          maxOutputBytes: 262_144,
-          maxSnapBytes: 8 * 1024 * 1024,
-          ...over,
-        }),
-      ).rejects.toThrow(new RegExp(field));
+      await expect(cursorRead(over)).rejects.toThrow(new RegExp(field));
     });
 
     it.each([2.5, 0, -1])(
       'should reject invalid cursor-bound limit %s',
       async (limit) => {
-        const fileHandle = {} as import('node:fs/promises').FileHandle;
-
-        await expect(
-          fileSystem.readTextCursorFromHandle({
-            fileHandle,
-            startOffset: 0,
-            fileSize: 300_000,
-            limit,
-            maxOutputBytes: 262_144,
-            maxSnapBytes: 8 * 1024 * 1024,
-          }),
-        ).rejects.toThrow(/positive integer limit/);
+        await expect(cursorRead({ limit })).rejects.toThrow(
+          /positive integer limit/,
+        );
       },
     );
 
     it('should return encoding info for GBK file', async () => {
-      vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
-        content: '你好世界',
-        bom: false,
-        encoding: 'gb18030',
-        originalLineCount: 1,
-        originalLineCountExact: true,
-        truncatedByBytes: false,
-      });
+      mockRead('你好世界', { encoding: 'gb18030' });
 
       const result = await fileSystem.readTextFile({ path: '/test/gbk.txt' });
 
@@ -359,71 +325,31 @@ describe('StandardFileSystemService', () => {
     });
 
     it('should write file content using fs', async () => {
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
-      await fileSystem.writeTextFile({
-        path: '/test/file.txt',
-        content: 'Hello, World!',
-      });
-
-      expect(fs.writeFile).toHaveBeenCalledWith(
-        '/test/file.txt',
-        'Hello, World!',
-        'utf-8',
-      );
+      await expectWrite('/test/file.txt', 'Hello, World!', 'Hello, World!');
     });
 
     it('should write file with BOM when bom option is true', async () => {
-      vi.mocked(fs.writeFile).mockResolvedValue();
+      await write('/test/file.txt', 'Hello, World!', { bom: true });
 
-      await fileSystem.writeTextFile({
-        path: '/test/file.txt',
-        content: 'Hello, World!',
-        _meta: { bom: true },
-      });
-
-      // Verify that fs.writeFile was called with a Buffer that starts with BOM
-      const writeCall = vi.mocked(fs.writeFile).mock.calls[0];
-      expect(writeCall[0]).toBe('/test/file.txt');
-      expect(writeCall[1]).toBeInstanceOf(Buffer);
-      const buffer = writeCall[1] as Buffer;
+      // fs.writeFile got a Buffer that starts with the BOM.
+      const buffer = writtenBuffer();
       expect(buffer[0]).toBe(0xef);
       expect(buffer[1]).toBe(0xbb);
       expect(buffer[2]).toBe(0xbf);
     });
 
     it('should write file without BOM when bom option is false', async () => {
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
-      await fileSystem.writeTextFile({
-        path: '/test/file.txt',
-        content: 'Hello, World!',
-        _meta: { bom: false },
+      await expectWrite('/test/file.txt', 'Hello, World!', 'Hello, World!', {
+        bom: false,
       });
-
-      expect(fs.writeFile).toHaveBeenCalledWith(
-        '/test/file.txt',
-        'Hello, World!',
-        'utf-8',
-      );
     });
 
     it('should not duplicate BOM when content already has BOM character', async () => {
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
       // Content that includes the BOM character (as readTextFile would return)
-      const contentWithBOM = '\uFEFF' + 'Hello';
-      await fileSystem.writeTextFile({
-        path: '/test/file.txt',
-        content: contentWithBOM,
-        _meta: { bom: true },
-      });
+      await write('/test/file.txt', '﻿' + 'Hello', { bom: true });
 
-      // Verify that fs.writeFile was called with a Buffer that has only one BOM
-      const writeCall = vi.mocked(fs.writeFile).mock.calls[0];
-      expect(writeCall[0]).toBe('/test/file.txt');
-      expect(writeCall[1]).toBeInstanceOf(Buffer);
-      const buffer = writeCall[1] as Buffer;
+      // fs.writeFile got a Buffer with exactly one BOM.
+      const buffer = writtenBuffer();
       // First three bytes should be BOM
       expect(buffer[0]).toBe(0xef);
       expect(buffer[1]).toBe(0xbb);
@@ -445,182 +371,98 @@ describe('StandardFileSystemService', () => {
     });
 
     it('should write file with non-UTF-8 encoding using iconv-lite', async () => {
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
-      await fileSystem.writeTextFile({
-        path: '/test/file.txt',
-        content: '你好世界',
-        _meta: { encoding: 'gbk' },
-      });
-
-      // Verify that fs.writeFile was called with a Buffer (iconv-encoded)
-      const writeCall = vi.mocked(fs.writeFile).mock.calls[0];
-      expect(writeCall[0]).toBe('/test/file.txt');
-      expect(writeCall[1]).toBeInstanceOf(Buffer);
+      await write('/test/file.txt', '你好世界', { encoding: 'gbk' });
+      // fs.writeFile got an iconv-encoded Buffer.
+      writtenBuffer();
     });
 
     it('should write file as UTF-8 when encoding is utf-8', async () => {
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
-      await fileSystem.writeTextFile({
-        path: '/test/file.txt',
-        content: 'Hello',
-        _meta: { encoding: 'utf-8' },
+      await expectWrite('/test/file.txt', 'Hello', 'Hello', {
+        encoding: 'utf-8',
       });
-
-      expect(fs.writeFile).toHaveBeenCalledWith(
-        '/test/file.txt',
-        'Hello',
-        'utf-8',
-      );
     });
 
     it('should preserve UTF-16LE BOM when writing back a UTF-16LE file', async () => {
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
-      await fileSystem.writeTextFile({
-        path: '/test/file.txt',
-        content: 'Hello',
-        _meta: { encoding: 'utf-16le', bom: true },
+      await write('/test/file.txt', 'Hello', {
+        encoding: 'utf-16le',
+        bom: true,
       });
 
-      // iconv-lite encodes as UTF-16LE; with bom:true the FF FE BOM is prepended
-      const writeCall = vi.mocked(fs.writeFile).mock.calls[0];
-      expect(writeCall[0]).toBe('/test/file.txt');
-      expect(writeCall[1]).toBeInstanceOf(Buffer);
-      const buf = writeCall[1] as Buffer;
-      // First two bytes must be the UTF-16LE BOM: FF FE
+      // iconv-lite encodes as UTF-16LE; with bom:true the FF FE BOM is
+      // prepended, so the first two bytes must be FF FE.
+      const buf = writtenBuffer();
       expect(buf[0]).toBe(0xff);
       expect(buf[1]).toBe(0xfe);
     });
 
     it('should not add BOM when writing UTF-16LE file without bom flag', async () => {
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
-      await fileSystem.writeTextFile({
-        path: '/test/file.txt',
-        content: 'Hello',
-        _meta: { encoding: 'utf-16le', bom: false },
+      await write('/test/file.txt', 'Hello', {
+        encoding: 'utf-16le',
+        bom: false,
       });
 
-      // No BOM prepended — raw iconv-encoded buffer written directly
-      const writeCall = vi.mocked(fs.writeFile).mock.calls[0];
-      expect(writeCall[0]).toBe('/test/file.txt');
-      expect(writeCall[1]).toBeInstanceOf(Buffer);
-      const buf = writeCall[1] as Buffer;
-      // First two bytes should NOT be FF FE (the UTF-16LE BOM)
+      // No BOM prepended: the raw iconv-encoded buffer is written directly,
+      // so the first two bytes should NOT be FF FE (the UTF-16LE BOM).
+      const buf = writtenBuffer();
       expect(!(buf[0] === 0xff && buf[1] === 0xfe)).toBe(true);
     });
 
     it('should convert LF to CRLF when writing .bat files on Windows', async () => {
-      mockPlatform.mockReturnValue('win32');
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
-      await fileSystem.writeTextFile({
-        path: '/test/script.bat',
-        content: '@echo off\necho hello\nexit /b 0\n',
-      });
-
-      expect(fs.writeFile).toHaveBeenCalledWith(
+      onHost('win32');
+      await expectWrite(
         '/test/script.bat',
+        '@echo off\necho hello\nexit /b 0\n',
         '@echo off\r\necho hello\r\nexit /b 0\r\n',
-        'utf-8',
       );
     });
 
     it('should convert LF to CRLF when writing .cmd files on Windows', async () => {
-      mockPlatform.mockReturnValue('win32');
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
-      await fileSystem.writeTextFile({
-        path: '/test/script.cmd',
-        content: '@echo off\necho hello\n',
-      });
-
-      expect(fs.writeFile).toHaveBeenCalledWith(
+      onHost('win32');
+      await expectWrite(
         '/test/script.cmd',
+        '@echo off\necho hello\n',
         '@echo off\r\necho hello\r\n',
-        'utf-8',
       );
     });
 
     it('should not double-convert existing CRLF in .bat files on Windows', async () => {
-      mockPlatform.mockReturnValue('win32');
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
-      await fileSystem.writeTextFile({
-        path: '/test/script.bat',
-        content: '@echo off\r\necho hello\r\n',
-      });
-
-      expect(fs.writeFile).toHaveBeenCalledWith(
+      onHost('win32');
+      await expectWrite(
         '/test/script.bat',
         '@echo off\r\necho hello\r\n',
-        'utf-8',
+        '@echo off\r\necho hello\r\n',
       );
     });
 
     it('should handle mixed line endings in .bat files on Windows', async () => {
-      mockPlatform.mockReturnValue('win32');
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
-      await fileSystem.writeTextFile({
-        path: '/test/script.bat',
-        content: 'line1\r\nline2\nline3\r\n',
-      });
-
-      expect(fs.writeFile).toHaveBeenCalledWith(
+      onHost('win32');
+      await expectWrite(
         '/test/script.bat',
+        'line1\r\nline2\nline3\r\n',
         'line1\r\nline2\r\nline3\r\n',
-        'utf-8',
       );
     });
 
     it('should be case-insensitive for .BAT extension on Windows', async () => {
-      mockPlatform.mockReturnValue('win32');
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
-      await fileSystem.writeTextFile({
-        path: '/test/SCRIPT.BAT',
-        content: 'echo hello\n',
-      });
-
-      expect(fs.writeFile).toHaveBeenCalledWith(
-        '/test/SCRIPT.BAT',
-        'echo hello\r\n',
-        'utf-8',
-      );
+      onHost('win32');
+      await expectWrite('/test/SCRIPT.BAT', 'echo hello\n', 'echo hello\r\n');
     });
 
     it('should not convert line endings for non-.bat/.cmd files on Windows', async () => {
-      mockPlatform.mockReturnValue('win32');
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
-      await fileSystem.writeTextFile({
-        path: '/test/script.sh',
-        content: '#!/bin/bash\necho hello\n',
-      });
-
-      expect(fs.writeFile).toHaveBeenCalledWith(
+      onHost('win32');
+      await expectWrite(
         '/test/script.sh',
         '#!/bin/bash\necho hello\n',
-        'utf-8',
+        '#!/bin/bash\necho hello\n',
       );
     });
 
     it('should not convert line endings for .bat files on non-Windows', async () => {
-      mockPlatform.mockReturnValue('darwin');
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
-      await fileSystem.writeTextFile({
-        path: '/test/script.bat',
-        content: '@echo off\necho hello\n',
-      });
-
-      expect(fs.writeFile).toHaveBeenCalledWith(
+      onHost('darwin');
+      await expectWrite(
         '/test/script.bat',
         '@echo off\necho hello\n',
-        'utf-8',
+        '@echo off\necho hello\n',
       );
     });
   });
@@ -631,44 +473,34 @@ describe('StandardFileSystemService', () => {
     });
 
     it('should return true for .ps1 files on Windows with non-UTF-8 code page', () => {
-      mockPlatform.mockReturnValue('win32');
-      mockGetSystemEncoding.mockReturnValue('gbk');
-
+      onHost('win32', 'gbk');
       expect(needsUtf8Bom('/test/script.ps1')).toBe(true);
     });
 
     it('should return true for .PS1 files (case-insensitive)', () => {
-      mockPlatform.mockReturnValue('win32');
-      mockGetSystemEncoding.mockReturnValue('gbk');
-
+      onHost('win32', 'gbk');
       expect(needsUtf8Bom('/test/SCRIPT.PS1')).toBe(true);
     });
 
     it('should return false for .ps1 files on Windows with UTF-8 code page', () => {
-      mockPlatform.mockReturnValue('win32');
-      mockGetSystemEncoding.mockReturnValue('utf-8');
-
+      onHost('win32', 'utf-8');
       expect(needsUtf8Bom('/test/script.ps1')).toBe(false);
     });
 
     it('should return false for .ps1 files on non-Windows', () => {
-      mockPlatform.mockReturnValue('darwin');
-
+      onHost('darwin');
       expect(needsUtf8Bom('/test/script.ps1')).toBe(false);
     });
 
     it('should return false for non-.ps1 files on Windows with non-UTF-8 code page', () => {
-      mockPlatform.mockReturnValue('win32');
-      mockGetSystemEncoding.mockReturnValue('gbk');
-
+      onHost('win32', 'gbk');
       expect(needsUtf8Bom('/test/script.sh')).toBe(false);
       expect(needsUtf8Bom('/test/file.txt')).toBe(false);
       expect(needsUtf8Bom('/test/script.bat')).toBe(false);
     });
 
     it('should cache the platform/encoding check across calls', () => {
-      mockPlatform.mockReturnValue('win32');
-      mockGetSystemEncoding.mockReturnValue('gbk');
+      onHost('win32', 'gbk');
 
       needsUtf8Bom('/test/script.ps1');
       needsUtf8Bom('/test/other.ps1');
@@ -678,153 +510,97 @@ describe('StandardFileSystemService', () => {
     });
 
     it('should treat null system encoding as non-UTF-8', () => {
-      mockPlatform.mockReturnValue('win32');
-      mockGetSystemEncoding.mockReturnValue(null);
-
+      onHost('win32', null);
       expect(needsUtf8Bom('/test/script.ps1')).toBe(true);
     });
   });
 
   describe('detectLineEnding', () => {
-    it('should detect CRLF line endings', () => {
-      expect(detectLineEnding('line1\r\nline2\r\n')).toBe('crlf');
-    });
-
-    it('should detect LF line endings', () => {
-      expect(detectLineEnding('line1\nline2\n')).toBe('lf');
-    });
-
-    it('should return lf for content with no line endings', () => {
-      expect(detectLineEnding('single line')).toBe('lf');
-    });
-
-    it('should return lf for empty content', () => {
-      expect(detectLineEnding('')).toBe('lf');
-    });
-
-    it('should detect CRLF even in mixed content', () => {
-      expect(detectLineEnding('line1\r\nline2\nline3')).toBe('crlf');
+    it.each([
+      ['should detect CRLF line endings', 'line1\r\nline2\r\n', 'crlf'],
+      ['should detect LF line endings', 'line1\nline2\n', 'lf'],
+      [
+        'should return lf for content with no line endings',
+        'single line',
+        'lf',
+      ],
+      ['should return lf for empty content', '', 'lf'],
+      [
+        'should detect CRLF even in mixed content',
+        'line1\r\nline2\nline3',
+        'crlf',
+      ],
+    ])('%s', (_title, content, expected) => {
+      expect(detectLineEnding(content)).toBe(expected);
     });
   });
 
   describe('ensureCrlfLineEndings', () => {
-    it('should convert LF to CRLF', () => {
-      expect(ensureCrlfLineEndings('line1\nline2\n')).toBe(
+    it.each([
+      ['should convert LF to CRLF', 'line1\nline2\n', 'line1\r\nline2\r\n'],
+      [
+        'should not double-convert existing CRLF',
         'line1\r\nline2\r\n',
-      );
-    });
-
-    it('should not double-convert existing CRLF', () => {
-      expect(ensureCrlfLineEndings('line1\r\nline2\r\n')).toBe(
         'line1\r\nline2\r\n',
-      );
-    });
-
-    it('should handle mixed line endings', () => {
-      expect(ensureCrlfLineEndings('line1\r\nline2\nline3\r\n')).toBe(
+      ],
+      [
+        'should handle mixed line endings',
+        'line1\r\nline2\nline3\r\n',
         'line1\r\nline2\r\nline3\r\n',
-      );
-    });
-
-    it('should handle content with no line endings', () => {
-      expect(ensureCrlfLineEndings('single line')).toBe('single line');
+      ],
+      [
+        'should handle content with no line endings',
+        'single line',
+        'single line',
+      ],
+    ])('%s', (_title, content, expected) => {
+      expect(ensureCrlfLineEndings(content)).toBe(expected);
     });
   });
 
   describe('writeTextFile with lineEnding preservation', () => {
     it('should convert LF to CRLF when lineEnding is crlf', async () => {
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
-      await fileSystem.writeTextFile({
-        path: '/test/file.txt',
-        content: 'line1\nline2\n',
-        _meta: { lineEnding: 'crlf' },
-      });
-
-      expect(fs.writeFile).toHaveBeenCalledWith(
+      await expectWrite(
         '/test/file.txt',
+        'line1\nline2\n',
         'line1\r\nline2\r\n',
-        'utf-8',
+        {
+          lineEnding: 'crlf',
+        },
       );
     });
 
     it('should not convert line endings when lineEnding is lf', async () => {
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
-      await fileSystem.writeTextFile({
-        path: '/test/file.txt',
-        content: 'line1\nline2\n',
-        _meta: { lineEnding: 'lf' },
+      await expectWrite('/test/file.txt', 'line1\nline2\n', 'line1\nline2\n', {
+        lineEnding: 'lf',
       });
-
-      expect(fs.writeFile).toHaveBeenCalledWith(
-        '/test/file.txt',
-        'line1\nline2\n',
-        'utf-8',
-      );
     });
 
     it('should not convert line endings when lineEnding is not specified', async () => {
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
-      await fileSystem.writeTextFile({
-        path: '/test/file.txt',
-        content: 'line1\nline2\n',
-      });
-
-      expect(fs.writeFile).toHaveBeenCalledWith(
-        '/test/file.txt',
-        'line1\nline2\n',
-        'utf-8',
-      );
+      await expectWrite('/test/file.txt', 'line1\nline2\n', 'line1\nline2\n');
     });
 
     it('should preserve CRLF for non-bat files on non-Windows when lineEnding is crlf', async () => {
-      mockPlatform.mockReturnValue('linux');
-      vi.mocked(fs.writeFile).mockResolvedValue();
-
-      await fileSystem.writeTextFile({
-        path: '/test/file.cs',
-        content: 'using System;\nclass Foo {}\n',
-        _meta: { lineEnding: 'crlf' },
-      });
-
-      expect(fs.writeFile).toHaveBeenCalledWith(
+      onHost('linux');
+      await expectWrite(
         '/test/file.cs',
+        'using System;\nclass Foo {}\n',
         'using System;\r\nclass Foo {}\r\n',
-        'utf-8',
+        { lineEnding: 'crlf' },
       );
     });
   });
 
   describe('readTextFile with lineEnding detection', () => {
     it('should detect CRLF line ending in file content', async () => {
-      vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
-        content: 'line1\r\nline2\r\n',
-        bom: false,
-        encoding: 'utf-8',
-        originalLineCount: 3,
-        originalLineCountExact: true,
-        truncatedByBytes: false,
-      });
-
+      mockRead('line1\r\nline2\r\n', { originalLineCount: 3 });
       const result = await fileSystem.readTextFile({ path: '/test/file.txt' });
-
       expect(result._meta?.lineEnding).toBe('crlf');
     });
 
     it('should detect LF line ending in file content', async () => {
-      vi.mocked(readFileWithLineAndLimit).mockResolvedValue({
-        content: 'line1\nline2\n',
-        bom: false,
-        encoding: 'utf-8',
-        originalLineCount: 3,
-        originalLineCountExact: true,
-        truncatedByBytes: false,
-      });
-
+      mockRead('line1\nline2\n', { originalLineCount: 3 });
       const result = await fileSystem.readTextFile({ path: '/test/file.txt' });
-
       expect(result._meta?.lineEnding).toBe('lf');
     });
   });

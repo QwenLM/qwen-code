@@ -70,6 +70,18 @@ function seedOpentuiPackages(root) {
   writeFileSync(join(treeSitterDir, 'tree-sitter.wasm'), 'wasm');
 }
 
+function seedLinuxPlatformPackages(root) {
+  for (const name of ['core-linux-x64', 'core-linux-x64-musl']) {
+    const platformDir = join(root, 'node_modules', '@opentui', name);
+    mkdirSync(platformDir, { recursive: true });
+    writeFileSync(
+      join(platformDir, 'package.json'),
+      JSON.stringify({ name: `@opentui/${name}` }),
+    );
+    writeFileSync(join(platformDir, 'libopentui.so'), 'native');
+  }
+}
+
 describe('copyOpenTuiAssets', () => {
   it('copies the runtime assets under the exact OTUI_ASSET_ROOT keys', () => {
     const root = mkdtempSync(join(tmpdir(), 'opentui-bundle-assets-'));
@@ -145,4 +157,33 @@ describe('copyOpenTuiAssets', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  // npm installs both Linux flavors on a glibc host — only `libc` separates
+  // them — and the musl library then aborts AppImage packaging, because
+  // linuxdeploy runs `ldd` over every ELF in the tree and no glibc system
+  // resolves its `libc.so`.
+  it.each([
+    { musl: false, kept: 'core-linux-x64', dropped: 'core-linux-x64-musl' },
+    { musl: true, kept: 'core-linux-x64-musl', dropped: 'core-linux-x64' },
+  ])(
+    'copies only the Linux library for this host libc (musl: $musl)',
+    ({ musl, kept, dropped }) => {
+      const root = mkdtempSync(join(tmpdir(), 'opentui-bundle-assets-'));
+      try {
+        writeFileSync(join(root, 'package.json'), JSON.stringify({}));
+        seedOpentuiPackages(root);
+        seedLinuxPlatformPackages(root);
+
+        const copied = copyOpenTuiAssets({ root, musl });
+
+        expect(copied).toContain(`@opentui/${kept}/libopentui.so`);
+        expect(copied).not.toContain(`@opentui/${dropped}/libopentui.so`);
+        const dest = join(root, 'dist', 'opentui-assets', '@opentui');
+        expect(existsSync(join(dest, kept, 'libopentui.so'))).toBe(true);
+        expect(existsSync(join(dest, dropped))).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

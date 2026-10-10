@@ -1299,6 +1299,84 @@ describe('DataProcessor', () => {
       });
     });
 
+    it('keeps nested Code Mode writes out of file and line totals', async () => {
+      const base = {
+        sessionId: 'session1',
+        uuid: '',
+        parentUuid: null,
+        cwd: '',
+        version: '',
+      };
+      const mockRecords: ChatRecord[] = [
+        {
+          ...base,
+          timestamp: '2025-01-15T10:00:00Z',
+          type: 'tool_result',
+          toolCallResult: {
+            callId: 'outer',
+            resultDisplay: {
+              fileName: '/workspace/direct.txt',
+              fileDiff: '',
+              originalContent: '',
+              newContent: '',
+              diffStat: {
+                model_added_lines: 2,
+                model_removed_lines: 0,
+                model_added_chars: 0,
+                model_removed_chars: 0,
+                user_added_lines: 0,
+                user_removed_lines: 0,
+                user_added_chars: 0,
+                user_removed_chars: 0,
+              },
+            },
+          },
+        },
+        {
+          ...base,
+          timestamp: '2025-01-15T10:01:00Z',
+          type: 'tool_result',
+          subtype: 'code_mode_tool_result',
+          toolCallResult: {
+            callId: 'outer:code:1',
+            resultDisplay: {
+              fileName: '/workspace/nested.txt',
+              fileDiff: '',
+              originalContent: '',
+              newContent: '',
+              diffStat: {
+                model_added_lines: 12,
+                model_removed_lines: 2,
+                model_added_chars: 0,
+                model_removed_chars: 0,
+                user_added_lines: 0,
+                user_removed_lines: 0,
+                user_added_chars: 0,
+                user_removed_chars: 0,
+              },
+            },
+          },
+        },
+      ];
+
+      mockedReadJsonlFile.mockResolvedValue(mockRecords);
+
+      const files = [{ path: '/test/chat.jsonl', mtime: 1234567890 }];
+      const result = await (
+        dataProcessor as unknown as {
+          generateMetrics(
+            files: Array<{ path: string; mtime: number }>,
+          ): Promise<unknown>;
+        }
+      ).generateMetrics(files);
+
+      expect(result).toMatchObject({
+        totalFiles: 1,
+        totalLinesAdded: 2,
+        totalLinesRemoved: 0,
+      });
+    });
+
     it('reports the wall-clock time of the most recent user interaction', async () => {
       const early = '2025-01-15T09:12:00Z';
       const late = '2025-01-16T14:37:00Z';

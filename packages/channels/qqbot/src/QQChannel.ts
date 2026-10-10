@@ -19,10 +19,10 @@ import {
   sanitizeSenderName,
   sanitizePromptText,
   sanitizeLogText,
-  stripMessagePrefix,
   truncateCodePoints,
 } from '@qwen-code/channel-base';
 import type {
+  Attachment,
   ChannelConfig,
   ChannelBaseOptions,
   ChannelAgentBridge,
@@ -40,16 +40,27 @@ import {
   renameSync,
   unlinkSync,
 } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OpCode, Intent } from './types.js';
 import type {
   QQChannelConfig,
+  QQMessageAttachment,
   QQMessageEvent,
   QQGroupMessageEvent,
   GroupAddRobotEvent,
   GroupDelRobotEvent,
   GroupMsgToggleEvent,
 } from './types.js';
+import {
+  QQ_IMAGE_MAX_BYTES,
+  QQ_MAX_ATTACHMENTS,
+  QQ_VIDEO_MAX_BYTES,
+  classifyQQAttachment,
+  downloadQQAttachment,
+} from './media.js';
 import {
   getCredsFilePath,
   loadCredentials,
@@ -100,6 +111,69 @@ interface QQStreamState {
 /** Validate chatId to prevent SSRF when constructing URLs. */
 export function isValidChatId(id: string): boolean {
   return /^[A-Za-z0-9_-]+$/.test(id) && id.length <= 128;
+}
+
+interface QQInboundMedia {
+  attachment: QQMessageAttachment;
+  kind: 'image' | 'video';
+}
+
+/** Attachments actually handled: the per-message cap applies everywhere. */
+function cappedMedia(media: QQInboundMedia[]): QQInboundMedia[] {
+  return media.slice(0, QQ_MAX_ATTACHMENTS);
+}
+
+/** Placeholder for a media-only message: images win when both are present. */
+function mediaPlaceholder(media: QQInboundMedia[]): string {
+  return cappedMedia(media).some((entry) => entry.kind === 'image')
+    ? '(image)'
+    : '(video)';
+}
+
+/** Truncate to a byte budget without splitting a code point. */
+function truncateToBytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  let result = '';
+  let bytes = 0;
+  for (const char of text) {
+    const size = Buffer.byteLength(char);
+    if (bytes + size > maxBytes) break;
+    result += char;
+    bytes += size;
+  }
+  return result;
+}
+
+function canonicalExtension(kind: 'image' | 'video', mimeType: string): string {
+  switch (mimeType) {
+    case 'image/jpeg':
+      return '.jpg';
+    case 'image/png':
+      return '.png';
+    case 'image/gif':
+      return '.gif';
+    case 'video/mp4':
+      return '.mp4';
+    default:
+      return kind === 'image' ? '.jpg' : '.mp4';
+  }
+}
+
+/**
+ * Build the on-disk name from the resolved MIME: the read tool classifies
+ * media by extension, so a sender-supplied extension must never win. The stem
+ * is capped by bytes, not code points, to stay under the 255-byte limit.
+ */
+function attachmentFileName(
+  name: string | undefined,
+  kind: 'image' | 'video',
+  mimeType: string,
+): string {
+  const base = (name ?? '').split(/[\\/]/).pop() ?? '';
+  const stem = base.replace(/\.[^.]*$/, '');
+  const cleaned = stem.replace(/[^\p{L}\p{N}._-]/gu, '_').replace(/^\.+/, '_');
+  const safeStem = truncateToBytes(cleaned, 200) || `qq_${kind}`;
+  return `${safeStem}${canonicalExtension(kind, mimeType)}`;
 }
 
 export class QQChannel extends ChannelBase {
@@ -225,7 +299,6 @@ export class QQChannel extends ChannelBase {
   private flushingSessions: Set<string> = new Set();
   private pendingStreamDelete: Set<string> = new Set();
   private _reconnectId: number = 0;
-  private blockStreaming: boolean = false;
   private flushedSessions: Set<string> = new Set();
   /**
    * Sessions with a prompt turn currently in flight, tracked via
@@ -233,9 +306,7 @@ export class QQChannel extends ChannelBase {
    *
    * This is the discriminator the cron textChunk handler uses to tell
    * "prompt-response chunk" from "cron/non-prompt chunk". streamState
-   * cannot serve that role (#6094): it is never populated when
-   * blockStreaming is 'on' (onResponseChunk early-returns), so prompt
-   * chunks leak into cronBuffer; and a residual entry from a finished
+   * cannot serve that role (#6094): a residual entry from a finished
    * turn's unsettled flush silently blocks cron delivery. This set is
    * reliable because ChannelBase always brackets a prompt turn with
    * onPromptStart and onPromptEnd (onPromptEnd runs in the prompt path's
@@ -298,7 +369,6 @@ export class QQChannel extends ChannelBase {
       );
       this.qqConfig.bufferFlushLength = QQChannel.MAX_BUFFER_LENGTH;
     }
-    this.blockStreaming = this.config.blockStreaming === 'on';
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
     // In standalone mode (no external router), use the per-channel
     // sessions path so the channel owns its own session file.
@@ -333,9 +403,8 @@ export class QQChannel extends ChannelBase {
       // Sessions with an active prompt turn belong to the prompt path
       // (which delivers the response itself) — never capture their chunks
       // into the cron buffer. Keyed on activePromptSessions rather than
-      // streamState (#6094): streamState is empty under blockStreaming:'on'
-      // (prompt chunks would be duplicated) and can linger after a turn
-      // ends (cron chunks would be silently dropped).
+      // streamState (#6094): streamState can linger after a turn ends,
+      // which would silently drop cron chunks.
       if (this.activePromptSessions.has(sessionId)) return;
       let entry = this.cronBuffer.get(sessionId);
       if (!entry) {
@@ -1110,7 +1179,6 @@ export class QQChannel extends ChannelBase {
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): void {
-    if (this.blockStreaming) return;
     let state = this.streamState.get(sessionId);
     if (!state) {
       const messageId =
@@ -2449,10 +2517,9 @@ export class QQChannel extends ChannelBase {
     safeName: string;
     cleanText: string;
     commandText: string;
+    routeText: string;
+    body: string;
     text: string;
-    displayText: string;
-    displayTextOffset?: number;
-    messagePrefixText?: string;
     senderName: string;
   } | null {
     // Keep identity values out of the display-name position. In particular,
@@ -2492,26 +2559,12 @@ export class QQChannel extends ChannelBase {
       this.extractBotOpenId(event.mentions, chatId);
     }
 
-    if (!cleanText) return null;
+    if (!cleanText && this.inboundMedia(event).length === 0) return null;
 
     const effectiveIsAtBot = forceAtMention ?? isAtBot;
 
-    const configuredPrefix = this.configuredMessagePrefix();
-    // Keep prefix matching on the pre-sanitized text: prompt sanitization can
-    // peel a leading bracket tag and must neither create nor destroy a match.
-    // Slash commands still discard mention tokens before dispatch.
-    const prefixSourceText =
-      this.qqConfig.allowMention !== false ? safeDisplayText : safeCleanText;
-    const strippedCommandText = configuredPrefix
-      ? stripMessagePrefix(prefixSourceText, configuredPrefix)
-      : safeCleanText;
-    const rawCommandText = (strippedCommandText ?? safeCleanText)
-      .replace(/<@[^>]{1,64}>/g, '')
-      .trim();
-    const isSlash =
-      effectiveIsAtBot &&
-      strippedCommandText !== undefined &&
-      rawCommandText.startsWith('/');
+    const rawCommandText = safeCleanText.replace(/<@[^>]{1,64}>/g, '').trim();
+    const isSlash = effectiveIsAtBot && rawCommandText.startsWith('/');
     const commandText = sanitizePromptText(rawCommandText);
 
     // Deliberately NOT hard-blocking bot messages — QQ Bot API may deliver
@@ -2579,36 +2632,12 @@ export class QQChannel extends ChannelBase {
         ? `(${truncateCodePoints(sanitizeSenderName(senderIdentity), 8)}…)`
         : '';
     const head = `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderTag}]: `;
-    // The prompt body and `displayText` are the same string by
-    // construction. The base prefix filter rewrites the user-authored
-    // segment inside `text`, which it can only do if it can find it
-    // there -- and deriving the two from different mention-stripping
-    // passes made `<@other> <@bot> /review hi` unlocatable, costing the
-    // whole `[atMention=…] [sender]:` wrapper and the OPENID suffix.
-    // With `allowMention` off, every mention token is dropped from both
-    // rather than leaving raw openids in the prompt.
-    // Prefix matching uses `messagePrefixText` below while `displayText`
-    // remains the sanitized segment that is safe to splice into the prompt.
-    const payloadText = isSlash
-      ? commandText
-      : sanitizePromptText(strippedCommandText ?? prefixSourceText);
-    const messagePrefixText =
-      configuredPrefix && strippedCommandText !== undefined
-        ? `${configuredPrefix} ${payloadText}`
-        : configuredPrefix
-          ? prefixSourceText
-          : undefined;
-    const displayText = sanitizePromptText(
-      isSlash && messagePrefixText ? messagePrefixText : prefixSourceText,
+    const body = sanitizePromptText(
+      this.qqConfig.allowMention !== false ? safeDisplayText : safeCleanText,
     );
     const text = isSlash
-      ? sanitizePromptText(messagePrefixText ?? safeCleanText)
-      : `${head}${displayText}${suffixFromBotOpenId}`;
-    // Where that segment sits, so the filter splices at an exact range
-    // instead of searching: both the nick and the body are
-    // attacker-controlled here, and a nick equal to the body would
-    // otherwise put the first match inside the sender tag.
-    const displayTextOffset = isSlash ? undefined : head.length;
+      ? sanitizePromptText(safeCleanText)
+      : `${head}${body}${suffixFromBotOpenId}`;
 
     return {
       isAtBot: effectiveIsAtBot,
@@ -2616,17 +2645,93 @@ export class QQChannel extends ChannelBase {
       safeName,
       cleanText,
       commandText,
+      routeText: sanitizePromptText(safeDisplayText),
+      body,
       text,
-      displayText,
-      ...(displayTextOffset !== undefined ? { displayTextOffset } : {}),
-      ...(messagePrefixText !== undefined ? { messagePrefixText } : {}),
       senderName,
     };
   }
 
+  /** All supported attachments of a message, in event order. */
+  private inboundMedia(event: QQMessageEvent): QQInboundMedia[] {
+    return (event.attachments ?? [])
+      .map((attachment) => ({
+        attachment,
+        kind: classifyQQAttachment(attachment.content_type),
+      }))
+      .filter((entry): entry is QQInboundMedia => entry.kind !== undefined);
+  }
+
+  private dispatchInbound(
+    envelope: Envelope,
+    media: QQInboundMedia[],
+  ): Promise<void> {
+    if (media.length === 0) return this.handleInbound(envelope);
+    return this.prepareThenHandleInbound(envelope, () =>
+      this.attachInboundMedia(envelope, media),
+    );
+  }
+
+  private async attachInboundMedia(
+    envelope: Envelope,
+    media: QQInboundMedia[],
+  ): Promise<void> {
+    const selected = cappedMedia(media);
+    if (selected.length < media.length) {
+      process.stderr.write(
+        `[QQ:${this.name}] skipping ${media.length - selected.length} attachment(s): over the per-message limit of ${QQ_MAX_ATTACHMENTS}\n`,
+      );
+    }
+    const attachments: Attachment[] = [];
+    for (const { attachment, kind } of selected) {
+      try {
+        const { buffer, mimeType } = await downloadQQAttachment(
+          attachment.url,
+          kind === 'image' ? QQ_IMAGE_MAX_BYTES : QQ_VIDEO_MAX_BYTES,
+          attachment.content_type,
+        );
+        const fileName = attachmentFileName(
+          attachment.filename,
+          kind,
+          mimeType,
+        );
+        const dir = join(tmpdir(), 'channel-files', randomUUID());
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        const filePath = join(dir, fileName);
+        await writeFile(filePath, buffer, { mode: 0o600 });
+        if (kind === 'image') {
+          // The image entry carries the picture for an image-capable model; the
+          // file entry only exists so a text-only model still gets a path.
+          attachments.push({
+            type: 'image',
+            data: buffer.toString('base64'),
+            mimeType,
+            fileName,
+          });
+          attachments.push({ type: 'file', filePath, mimeType, fileName });
+          continue;
+        }
+        attachments.push({ type: 'video', filePath, mimeType, fileName });
+      } catch (err) {
+        process.stderr.write(
+          `[QQ:${this.name}] skipping ${kind} attachment: ${sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            160,
+          )}\n`,
+        );
+      }
+    }
+    if (attachments.length > 0) envelope.attachments = attachments;
+    if (envelope.syntheticText && attachments.length === 0) {
+      envelope.text = '(User sent media but download failed)';
+    }
+  }
+
   private handleC2C(event: QQMessageEvent): void {
     if (this.isDuplicate(event.id)) return;
-    if (!event.content?.trim()) return;
+    const media = this.inboundMedia(event);
+    const rawContent = event.content ?? '';
+    if (!rawContent.trim() && media.length === 0) return;
     if (!event.author) {
       process.stderr.write(
         `[QQ:${this.name}] C2C message dropped: missing author\n`,
@@ -2654,43 +2759,36 @@ export class QQChannel extends ChannelBase {
     this.setReplyMsgId(chatId, event.id);
     const senderName = event.author.username || event.author.id || 'QQ User';
     const safeName = sanitizeSenderName(senderName);
-    const cleanText = event.content.trim();
+    const cleanText = rawContent.trim();
     // Strip system-reserved tags that could be forged by users
     const safeContent = cleanText
       .replace(/\[atMention=[^\]]*]/g, '')
       .replace(/\[botOpenId:[^\]]*]/g, '')
       .replace(/\[bot]/g, '');
-    const configuredPrefix = this.configuredMessagePrefix();
-    const strippedCommandText = configuredPrefix
-      ? stripMessagePrefix(safeContent, configuredPrefix)
-      : safeContent;
-    const rawCommandText = strippedCommandText ?? safeContent;
-    const isSlash = rawCommandText.startsWith('/');
-    const commandText = sanitizePromptText(rawCommandText);
-    const displayText = sanitizePromptText(safeContent);
-    const messagePrefixText =
-      configuredPrefix && strippedCommandText !== undefined
-        ? `${configuredPrefix} ${commandText}`
-        : configuredPrefix
-          ? safeContent
-          : undefined;
-    const text = isSlash
-      ? displayText
-      : `[atMention=true] [${safeName}]: ${displayText}`;
-    this.handleInbound({
+    const isSlash = safeContent.startsWith('/');
+    const body = sanitizePromptText(safeContent);
+    const mediaOnly = !body && media.length > 0;
+    const text = mediaOnly
+      ? mediaPlaceholder(media)
+      : isSlash || this.config.messageRoutes
+        ? body
+        : `[atMention=true] [${safeName}]: ${body}`;
+    const envelope: Envelope = {
       channelName: this.name,
       senderId: chatId,
       senderName,
       chatId,
       text,
-      displayText,
-      ...(messagePrefixText !== undefined ? { messagePrefixText } : {}),
       messageId: event.id,
       isGroup: false,
       isMentioned: true,
       isReplyToBot: false,
-      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
-    }).catch((e) =>
+      ...(mediaOnly ? { syntheticText: true as const } : {}),
+      ...(isSlash || this.config.messageRoutes
+        ? {}
+        : { alreadyPrefixed: true as const }),
+    };
+    this.dispatchInbound(envelope, media).catch((e) =>
       process.stderr.write(
         `[QQ:${this.name}] C2C handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
       ),
@@ -2737,15 +2835,10 @@ export class QQChannel extends ChannelBase {
       forceAtMention: true,
     });
     if (!result) return;
-    const {
-      isSlash,
-      text,
-      displayText,
-      displayTextOffset,
-      commandText,
-      senderName,
-      safeName,
-    } = result;
+    const { isSlash, text, commandText, routeText, senderName, safeName } =
+      result;
+    const media = this.inboundMedia(event);
+    const mediaOnly = result.body === '' && media.length > 0;
 
     // Deduplicate before handleInbound — prepareGroupMessage already ran
     // so side effects (extractBotOpenId) are applied regardless of dedup.
@@ -2773,23 +2866,26 @@ export class QQChannel extends ChannelBase {
       return;
     }
     this.setReplyMsgId(chatId, event.id);
-    this.handleInbound({
+    const envelope: Envelope = {
       channelName: this.name,
       senderId,
       senderName,
       chatId,
-      text,
-      displayText,
-      ...(displayTextOffset !== undefined ? { displayTextOffset } : {}),
-      ...(result.messagePrefixText !== undefined
-        ? { messagePrefixText: result.messagePrefixText }
-        : {}),
+      text: mediaOnly
+        ? mediaPlaceholder(media)
+        : this.config.messageRoutes
+          ? routeText
+          : text,
       messageId: event.id,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: true,
-      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
-    }).catch((e) =>
+      ...(mediaOnly ? { syntheticText: true as const } : {}),
+      ...(isSlash || this.config.messageRoutes
+        ? {}
+        : { alreadyPrefixed: true as const }),
+    };
+    this.dispatchInbound(envelope, media).catch((e) =>
       process.stderr.write(
         `[QQ:${this.name}] Group handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
       ),
@@ -2832,13 +2928,14 @@ export class QQChannel extends ChannelBase {
     const {
       isSlash,
       text,
-      displayText,
-      displayTextOffset,
       commandText,
+      routeText,
       senderName,
       isAtBot,
       safeName,
     } = result;
+    const media = this.inboundMedia(event);
+    const mediaOnly = result.body === '' && media.length > 0;
 
     // @-bot messages always pass through (passive reply).
     // Non-@-bot messages are subject to active-message and keyword policies.
@@ -2932,23 +3029,26 @@ export class QQChannel extends ChannelBase {
     // Set replyMsgId for all messages that pass the policy gate,
     // not just @-bot ones.
     this.setReplyMsgId(chatId, event.id);
-    this.handleInbound({
+    const envelope: Envelope = {
       channelName: this.name,
       chatId,
-      text,
-      displayText,
-      ...(displayTextOffset !== undefined ? { displayTextOffset } : {}),
-      ...(result.messagePrefixText !== undefined
-        ? { messagePrefixText: result.messagePrefixText }
-        : {}),
+      text: mediaOnly
+        ? mediaPlaceholder(media)
+        : this.config.messageRoutes
+          ? routeText
+          : text,
       senderId,
       senderName,
       messageId: event.id,
       isGroup: true,
       isMentioned: isAtBot,
       isReplyToBot: isAtBot,
-      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
-    }).catch((e) => {
+      ...(mediaOnly ? { syntheticText: true as const } : {}),
+      ...(isSlash || this.config.messageRoutes
+        ? {}
+        : { alreadyPrefixed: true as const }),
+    };
+    this.dispatchInbound(envelope, media).catch((e) => {
       process.stderr.write(
         `[QQ:${this.name}] handleGroupAll error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
       );

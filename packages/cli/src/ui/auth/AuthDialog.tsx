@@ -16,16 +16,19 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { t } from '../../i18n/index.js';
+import { getRawModelProviders } from '../../config/loadedSettingsAdapter.js';
 import {
   findProviderById,
   findProviderByCredentials,
-  findExistingProviderModels,
-  getDefaultModelIds,
-  customProvider,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
-  type ProviderConfig,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/providers/all-providers.js';
+import { customProvider } from '@qwen-code/qwen-code-core/providers/presets/custom-provider.js';
+import {
+  findExistingProviderModels,
+  getDefaultModelIds,
+} from '@qwen-code/qwen-code-core/providers/provider-config.js';
+import type { ProviderConfig } from '@qwen-code/qwen-code-core/providers/types.js';
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
 
@@ -92,6 +95,7 @@ function providerToItem(config: ProviderConfig) {
 
 function getStepLabel(step: string | null, p: ProviderConfig): string {
   if (step === 'protocol') return t('Protocol');
+  if (step === 'wireApi') return t('API');
   if (step === 'baseUrl') {
     if (p.uiLabels?.baseUrlStepTitle) return t(p.uiLabels.baseUrlStepTitle);
     return Array.isArray(p.baseUrl) ? t('Endpoint') : t('Base URL');
@@ -134,7 +138,17 @@ export function AuthDialog(): React.JSX.Element {
   const [mainIndex, setMainIndex] = useState<number | null>(null);
   const [subMenuIndex, setSubMenuIndex] = useState<Record<string, number>>({});
 
-  const setupFlow = useProviderSetupFlow(handleProviderSubmit);
+  const setupFlow = useProviderSetupFlow(
+    handleProviderSubmit,
+    settings.merged.modelProviders,
+    settings.merged.providerProtocol,
+    {
+      authType: settings.merged.security?.auth?.selectedType,
+      id: settings.merged.model?.name,
+      baseUrl: settings.merged.model?.baseUrl,
+    },
+    getRawModelProviders(settings),
+  );
 
   // -- Navigation -----------------------------------------------------------
 
@@ -173,11 +187,23 @@ export function AuthDialog(): React.JSX.Element {
 
   const existingEnv = (settings.merged.env ?? {}) as Record<string, string>;
 
-  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
-    const saved = findExistingProviderModels(
+  // The saved route and ids the wizard reopens with. Both must come from the
+  // same lookup: seeding the ids of a Responses install while the API step
+  // defaults to Chat Completions would restamp them onto the other wire.
+  const findSavedModels = (providerConfig: ProviderConfig) =>
+    findExistingProviderModels(
       providerConfig,
-      settings.merged.modelProviders as Record<string, unknown> | undefined,
+      settings.merged.modelProviders,
+      settings.merged.providerProtocol,
+      {
+        authType: settings.merged.security?.auth?.selectedType,
+        id: settings.merged.model?.name,
+        baseUrl: settings.merged.model?.baseUrl,
+      },
     );
+
+  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
+    const saved = findSavedModels(providerConfig);
     if (!saved) return [];
     const builtinIds = new Set(getDefaultModelIds(providerConfig));
     return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
@@ -189,7 +215,7 @@ export function AuthDialog(): React.JSX.Element {
     if (!providerConfig) return;
     setupFlow.start(
       providerConfig,
-      undefined,
+      findSavedModels(providerConfig)?.protocol,
       existingEnv,
       getExistingModelIds(providerConfig),
     );
@@ -247,7 +273,7 @@ export function AuthDialog(): React.JSX.Element {
       case 'CUSTOM_PROVIDER':
         setupFlow.start(
           customProvider,
-          undefined,
+          findSavedModels(customProvider)?.protocol,
           existingEnv,
           getExistingModelIds(customProvider),
         );

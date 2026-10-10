@@ -19,10 +19,14 @@ The optional Phase 4 Mem0 variant adds an administrator-only
 `context_remember({ content })` surface with a separate content-visible
 confirmation Hook. Its detailed design is in
 [Direct External Context Mem0 Write](./direct-external-context-mem0-write.md).
+Versioned Mem0-compatible request mappings are defined in
+[Direct External Context Mem0 Presets](./direct-external-context-mem0-presets.md).
 
-The extension supports two explicit read adapters:
+The extension supports three explicit read paths:
 
-- Mem0 Platform V3 Search for repository-shared agent memory.
+- The legacy fixed-endpoint Mem0 Platform V3 adapter.
+- A bounded `mem0` adapter whose reviewed built-in preset selects Mem0
+  Platform V3, stock Mem0 OSS REST, or Aliyun PolarDB Mem0.
 - Generic HTTP Search V1 for an existing knowledge base, RAG service, or
   enterprise search endpoint.
 
@@ -144,9 +148,11 @@ The interface deliberately contains no tenant, user, repository, namespace,
 application ID, or arbitrary filter. The explicit provider factory binds those
 values from administrator-controlled configuration before a tool call.
 
-Neither interface is a public package API. Adding another provider requires a
-reviewed adapter and an explicit factory case. Generic HTTP remains
-search-only; write semantics are deliberately provider-specific.
+Neither interface is a public package API. Adding another provider family
+requires a reviewed adapter and an explicit factory case. A Mem0-family wire
+contract that fits the bounded preset grammar instead adds one immutable
+built-in preset with contract tests. Generic HTTP remains search-only; write
+semantics are deliberately provider-specific.
 
 ## Runtime behavior
 
@@ -245,6 +251,12 @@ and a shorter provider timeout.
 }
 ```
 
+New Mem0-compatible deployments use `type: "mem0"` with a versioned preset,
+an `endpoint` containing separately validated `origin` and `basePath`, a
+`credentialEnv`, and a fixed `scope`. The complete schema and compatibility
+policy are defined in the Mem0 preset design. The legacy
+`mem0-platform-v3` shape above remains accepted.
+
 The managed launcher must control the configuration path and credential. An
 MCP subprocess does not reload either value, but Qwen can restart the
 subprocess after a disconnect or explicit MCP restart. The configuration path,
@@ -322,6 +334,21 @@ can change later ranking. A deployment requiring search to have no semantic
 provider-side state change must verify that Memory Decay remains disabled.
 Provider audit or access logs may still be retained. See
 [Mem0 Memory Decay](https://docs.mem0.ai/platform/features/memory-decay).
+
+### Versioned Mem0-compatible Search
+
+The `mem0` adapter selects one immutable built-in preset at startup. The
+initial presets cover Mem0 Platform V3, the stock Mem0 OSS REST server, and
+Aliyun PolarDB Mem0. Each preset fixes authentication, search and direct-import
+paths, scope placement, limit field, response fields, and write outcome
+semantics. Instance configuration cannot override those fields.
+
+The endpoint uses a separately validated origin and static base path. Search
+always sends at most five results, never follows redirects, never retries, and
+does not probe or fall back between protocol versions. Scope remains fixed
+outside model input. See
+[Direct External Context Mem0 Presets](./direct-external-context-mem0-presets.md)
+for the exact mappings and extension boundary.
 
 ### Generic HTTP Search V1
 
@@ -445,7 +472,8 @@ The optional auto-recall profile is implemented separately in
 The optional Mem0 write variant is implemented separately in
 [Direct External Context Mem0 Write](./direct-external-context-mem0-write.md).
 The broader proposal in #7585 retains possible additional provider-specific
-adapters where the Generic HTTP contract is not sufficient.
+Extensions where neither Generic HTTP nor the bounded Mem0 preset contract is
+sufficient.
 
 The remaining items are not latent switches in either direct profile. They
 require separate review and implementation.
@@ -473,3 +501,4 @@ require separate review and implementation.
 
 - [Mem0 Organizations & Projects](https://docs.mem0.ai/api-reference/organizations-projects)
 - [Mem0 Search Memories](https://docs.mem0.ai/api-reference/memory/search-memories)
+- [Mem0 OSS server](https://github.com/mem0ai/mem0/tree/main/server)

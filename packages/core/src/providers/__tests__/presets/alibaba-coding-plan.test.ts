@@ -76,4 +76,10 @@ describe('coding plan provider', () => {
       }),
     ).toBe(false);
   });
+
+  it('declares no built-in web search backend', () => {
+    // Whether the Coding Plan endpoints serve the Responses API search tools
+    // has not been verified; declaring it would turn the tool on implicitly.
+    expect(codingPlanProvider.webSearch).toBeUndefined();
+  });
 });

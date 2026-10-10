@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { liveMessage } from '@qwen-code/qwen-live/i18n';
 import { describe, it } from 'node:test';
 import {
   LiveGlobalShortcut,
@@ -76,7 +77,7 @@ describe('LiveGlobalShortcut', () => {
     assert.deepEqual(state, {
       accelerator: 'Command+Shift+E',
       healthy: false,
-      error: 'That shortcut is already in use.',
+      error: liveMessage('host.error.shortcutInUse'),
     });
     assert.deepEqual(value.unregistered, []);
     value.callbacks.get('Command+E')?.();
@@ -93,7 +94,7 @@ describe('LiveGlobalShortcut', () => {
       {
         accelerator: 'Command+E',
         healthy: false,
-        error: 'That shortcut is already in use.',
+        error: liveMessage('host.error.shortcutInUse'),
       },
     ]);
     failed.shortcut.replace('Command+E');

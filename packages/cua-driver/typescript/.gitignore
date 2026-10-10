@@ -5,3 +5,4 @@ src/native/*.dylib
 src/native/*.so
 src/native/*.dll
 computer-use/SKILL.md
+computer-use/references/

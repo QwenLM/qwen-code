@@ -7,6 +7,7 @@
 export function getDefaultApiKeyEnvVar(authType: string | undefined): string {
   switch (authType) {
     case 'openai':
+    case 'openai-responses':
       return 'OPENAI_API_KEY';
     case 'anthropic':
       return 'ANTHROPIC_API_KEY';
@@ -22,6 +23,7 @@ export function getDefaultApiKeyEnvVar(authType: string | undefined): string {
 export function getDefaultModelEnvVar(authType: string | undefined): string {
   switch (authType) {
     case 'openai':
+    case 'openai-responses':
       return 'OPENAI_MODEL';
     case 'anthropic':
       return 'ANTHROPIC_MODEL';

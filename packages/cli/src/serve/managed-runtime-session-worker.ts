@@ -1,0 +1,1411 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { spawn } from 'node:child_process';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync } from 'node:fs';
+import http from 'node:http';
+import path from 'node:path';
+import { createInterface } from 'node:readline';
+import {
+  ProcessExitError,
+  ProcessRegistry,
+  type TrackedChildProcess,
+} from '@qwen-code/acp-bridge/processRegistry';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import {
+  MANAGED_RUNTIME_TOOL_NAMES,
+  ManagedRuntimeOutcomeUnknownError,
+  type ExecutionEnvironment,
+} from '@qwen-code/qwen-code-core/services/execution-environment.js';
+import { LocalExecutionEnvironment } from '@qwen-code/qwen-code-core/services/local-execution-environment.js';
+import {
+  managedToolDigest,
+  managedToolFailureMessage,
+  managedToolResponseParts,
+} from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import type { ToolResult } from '@qwen-code/qwen-code-core/tools/tools.js';
+import type { ToolErrorType } from '@qwen-code/qwen-code-core/tools/tool-error.js';
+import { promptIdContext } from '@qwen-code/qwen-code-core/utils/promptIdContext.js';
+import {
+  isNodeOptionsEnvKey,
+  processBootLoaderEnv,
+} from '../config/shared-env-keys.js';
+import type {
+  ManagedRuntimeWorkerBoot,
+  ManagedRuntimeWorkerReady,
+} from './managed-runtime-attestation-worker.js';
+import {
+  LedgerSweepRetiredError,
+  LedgerSweepUnprovenError,
+  MANAGED_RUNTIME_LEDGER_ENV,
+  processGroupLiveness,
+  startLedgerReaper,
+  sweepStaleLedgers,
+  sweepWorkerLedger,
+  type LedgerReaperVerdict,
+  type LedgerSweepVerdict,
+} from './managed-runtime-ledger.js';
+import type {
+  ManagedToolReference,
+  ManagedToolResultPayload,
+} from './managed-runtime-tool-executor.js';
+
+const READY_TIMEOUT_MS = 30_000;
+/** How long a cancelled call may take to settle before its outcome is unknown. */
+const CANCEL_SETTLE_TIMEOUT_MS = 15_000;
+const STATUS_POLL_MS = 100;
+/** How long a broken call waits for its worker's exit to be observed. */
+const EXIT_GRACE_MS = 100;
+/** Every request but `execute`, which answers when its call settles. */
+const CONTROL_REQUEST_TIMEOUT_MS = 10_000;
+/** Above the worker's result bound, so no answer it may give is cut off. */
+export const MANAGED_RUNTIME_RESPONSE_LIMIT_BYTES = 2 * 1024 * 1024;
+const LOCAL_CAPABILITY_DIGEST = `sha256:${createHash('sha256')
+  .update('qwen-code/managed-session-runtime/1')
+  .digest('hex')}`;
+type RouteKey = 'attest' | 'execute' | 'status' | 'cancel' | 'acknowledge';
+
+export interface StartedWorker {
+  readonly tracked: TrackedChildProcess;
+  readonly url: URL;
+  readonly boot: ManagedRuntimeWorkerBoot;
+  readonly routes: ReadonlyMap<string, string>;
+  /** The header in which the worker names its incarnation, in lower case. */
+  readonly incarnationHeader: string;
+  /**
+   * Aborted once the worker exited: its port may then belong to any process,
+   * so nothing is sent there again.
+   */
+  readonly gone: AbortSignal;
+  /** The ledger file this worker keeps its Shell process groups in. */
+  readonly ledgerPath?: string;
+}
+
+/**
+ * How the session's workers report to their host an engine that can admit no
+ * new Managed sessions: `report` on a stop that could not be proven, `lift`
+ * with the same reason once the reaper proves it.
+ */
+export interface ManagedEngineQuarantineSink {
+  report(reason: Error): void;
+  lift(reason: Error): void;
+}
+
+/** The session-worker's shares of the environment's options. */
+export interface ManagedSessionRuntimeWorkerOptions {
+  /** Where each worker incarnation's ledger file lives; set by the host. */
+  readonly ledgerDir?: string;
+  readonly quarantine?: ManagedEngineQuarantineSink;
+}
+
+interface WorkerResponse {
+  readonly status: number;
+  readonly body: unknown;
+}
+
+/** The worker could not be reached, or answered outside the protocol. */
+class WorkerTransportError extends Error {
+  /** Whether the request never reached the worker, so nothing ran. */
+  readonly undelivered: boolean;
+
+  constructor(message: string, options?: ErrorOptions, undelivered?: boolean) {
+    super(message, options);
+    this.undelivered =
+      undelivered ??
+      (options?.cause as NodeJS.ErrnoException | undefined)?.code ===
+        'ECONNREFUSED';
+  }
+}
+
+// Node reads `_` for `-` in option names, so `--inspect_brk` opens one too.
+const INSPECT_FLAGS: ReadonlySet<string> = new Set([
+  '--inspect',
+  '--inspect-brk',
+  '--inspect-brk-node',
+  '--inspect-wait',
+  '--inspect-port',
+  '--debug-port',
+]);
+// An options file would give the worker again what was removed from its
+// environment, such as an inspector flag in NODE_OPTIONS.
+const OPTIONS_FILE_FLAGS: ReadonlySet<string> = new Set([
+  '--env-file',
+  '--env-file-if-exists',
+  '--experimental-config-file',
+  '--experimental-default-config-file',
+]);
+// These take their value as the next entry unless it follows `=`.
+const SEPARATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  '--inspect-port',
+  '--debug-port',
+  '--env-file',
+  '--env-file-if-exists',
+  '--experimental-config-file',
+]);
+
+/** The positions of the options the worker must not start with. */
+function withheldOptionIndexes(options: readonly string[]): Set<number> {
+  const indexes = new Set<number>();
+  for (let index = 0; index < options.length; index++) {
+    const option = options[index]!;
+    if (!option.startsWith('--')) continue;
+    const flag = option.split('=', 1)[0]!.replaceAll('_', '-');
+    if (!INSPECT_FLAGS.has(flag) && !OPTIONS_FILE_FLAGS.has(flag)) continue;
+    indexes.add(index);
+    if (SEPARATE_VALUE_FLAGS.has(flag) && !option.includes('=')) {
+      indexes.add(++index);
+    }
+  }
+  return indexes;
+}
+
+/**
+ * The Node options the worker starts with: these without the inspector flags,
+ * which would open a debugger, or stop at the first line until one attaches,
+ * and without options files.
+ */
+export function workerExecArgv(options: readonly string[]): string[] {
+  const indexes = withheldOptionIndexes(options);
+  return options.filter((_, index) => !indexes.has(index));
+}
+
+/**
+ * A `NODE_OPTIONS` value without its inspector flags, or the value itself when
+ * it holds none. Node splits the value at spaces outside double quotes, where
+ * a backslash escapes the next character; every option kept is copied as
+ * written, so a quoted path keeps its spacing.
+ */
+export function nodeOptionsWithoutInspectFlags(value: string): string {
+  const entries: Array<{ option: string; written: string }> = [];
+  let option = '';
+  let written = '';
+  let quoted = false;
+  const endEntry = (): void => {
+    // As in Node, an entry such as `""` names no option.
+    if (option !== '') entries.push({ option, written });
+    option = '';
+    written = '';
+  };
+  for (let index = 0; index < value.length; index++) {
+    const char = value[index]!;
+    if (char === ' ' && !quoted) {
+      endEntry();
+      continue;
+    }
+    written += char;
+    if (char === '"') {
+      quoted = !quoted;
+    } else if (char === '\\' && quoted && index + 1 < value.length) {
+      option += value[++index];
+      written += value[index];
+    } else {
+      option += char;
+    }
+  }
+  endEntry();
+  const indexes = withheldOptionIndexes(entries.map((entry) => entry.option));
+  if (indexes.size === 0) return value;
+  return entries
+    .filter((_, index) => !indexes.has(index))
+    .map((entry) => entry.written)
+    .join(' ');
+}
+
+export interface ManagedRuntimeWorkerLaunch {
+  /** The node binary and arguments that start the worker command. */
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly env?: NodeJS.ProcessEnv;
+}
+
+/** The worker command of the CLI this process runs. */
+export function currentCliWorkerLaunch(): ManagedRuntimeWorkerLaunch {
+  const cliEntry = process.env['QWEN_CLI_ENTRY'] || process.argv[1];
+  if (!cliEntry) {
+    throw new Error('The Managed Runtime worker needs the CLI entry script.');
+  }
+  // The worker boots as this process did, with the loader vars its boot
+  // scrub removed; the worker scrubs them from its own commands.
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...Object.fromEntries(processBootLoaderEnv),
+  };
+  // Node reads inspector flags from NODE_OPTIONS too, where execArgv does not
+  // show them, and on Windows under any spelling of its name.
+  for (const key of Object.keys(env)) {
+    const nodeOptions = env[key];
+    if (!isNodeOptionsEnvKey(key) || nodeOptions === undefined) continue;
+    const kept = nodeOptionsWithoutInspectFlags(nodeOptions);
+    if (kept === nodeOptions) continue;
+    if (kept !== '') env[key] = kept;
+    else delete env[key];
+  }
+  return {
+    command: process.execPath,
+    args: [
+      ...workerExecArgv(process.execArgv),
+      cliEntry,
+      'managed-runtime-worker',
+    ],
+    env,
+  };
+}
+
+/**
+ * The Runtime worker of one Managed session: `qwen managed-runtime-worker`
+ * with boot v1, started on the first call and bound to the session's
+ * directory. The session owns it exclusively; its process tree is tracked so
+ * closing proves every known process group gone.
+ */
+export class ManagedSessionRuntimeWorker {
+  private readonly registry = new ProcessRegistry();
+  private starting?: Promise<StartedWorker>;
+  private closed = false;
+  /** Every ledger file this session ever named, swept when the worker exits. */
+  private readonly ledgerPaths = new Set<string>();
+
+  constructor(
+    private readonly sessionId: string,
+    private readonly directory: string,
+    private readonly launch: () => ManagedRuntimeWorkerLaunch = currentCliWorkerLaunch,
+    private readonly cancelSettleTimeoutMs = CANCEL_SETTLE_TIMEOUT_MS,
+    private readonly options: ManagedSessionRuntimeWorkerOptions = {},
+  ) {}
+
+  /**
+   * Runs one call to its settled result. A call the worker refused or could
+   * not start resolves `not_started`; a call whose outcome cannot be learned
+   * rejects with {@link ManagedRuntimeOutcomeUnknownError}. `callId`, the
+   * host's id for the call, names it in the worker's journal too.
+   *
+   * Journal-free convenience for tests: the dispatched session's calls run
+   * through `createManagedRuntimeEnvironment`, which admits and settles
+   * durably around this same path. Nobody may dispatch a Managed session's
+   * call through this method — nothing it writes proves the call ran.
+   */
+  async execute(
+    toolName: string,
+    input: Record<string, unknown>,
+    signal: AbortSignal,
+    callId: string = randomUUID(),
+  ): Promise<ManagedToolResultPayload> {
+    signal.throwIfAborted();
+    const worker = await this.ensureStarted(signal);
+    // A session closed or a call cancelled while the worker started is not
+    // sent.
+    if (worker === undefined) {
+      return { executionStatus: 'cancelled', responseParts: [] };
+    }
+    return this.executeIn(
+      worker,
+      toolName,
+      JSON.parse(JSON.stringify(input)) as Record<string, unknown>,
+      signal,
+      this.referenceFor(callId, input),
+    );
+  }
+
+  /**
+   * The session's worker, started on its first use. A call cancelled while it
+   * starts resolves undefined and is not sent; the worker goes on starting
+   * for the session's next call. The caller reads the incarnation for the
+   * binding it writes before dispatching.
+   */
+  async ensureStarted(signal: AbortSignal): Promise<StartedWorker | undefined> {
+    signal.throwIfAborted();
+    let stopWatching = () => {};
+    const cancelled = new Promise<undefined>((resolve) => {
+      const onAbort = () => resolve(undefined);
+      signal.addEventListener('abort', onAbort, { once: true });
+      stopWatching = () => signal.removeEventListener('abort', onAbort);
+    });
+    let worker: StartedWorker | undefined;
+    try {
+      worker = await Promise.race([this.start(), cancelled]);
+    } catch (error) {
+      if (this.closed) {
+        throw new Error('The Managed session is closing.', { cause: error });
+      }
+      throw error;
+    } finally {
+      stopWatching();
+    }
+    // A session closed while the worker started gets no more calls.
+    if (this.closed) throw new Error('The Managed session is closing.');
+    if (worker === undefined || signal.aborted) return undefined;
+    return worker;
+  }
+
+  /**
+   * Runs one call on an already started worker, so the binding the caller
+   * committed names the very worker the call goes to. A worker that died
+   * meanwhile answers undelivered: the call is reported not started instead
+   * of being quietly handed to the next generation it has no binding for.
+   */
+  async executeIn(
+    worker: StartedWorker,
+    toolName: string,
+    input: Record<string, unknown>,
+    signal: AbortSignal,
+    reference: ManagedToolReference,
+  ): Promise<ManagedToolResultPayload> {
+    signal.throwIfAborted();
+    let settled = false;
+    let cancelling: Promise<void> | undefined;
+    // A cancelled call that has not settled by then has an unknown outcome.
+    const giveUp = new AbortController();
+    // Ends the cancel retries however the call ended.
+    const ended = new AbortController();
+    let giveUpTimer: NodeJS.Timeout | undefined;
+    const cancel = () => {
+      giveUpTimer = setTimeout(
+        () => giveUp.abort(),
+        this.cancelSettleTimeoutMs,
+      );
+      cancelling = (async () => {
+        // A cancel can overtake its call: until the worker has recorded the
+        // call, it does not know the reference.
+        while (!ended.signal.aborted && !giveUp.signal.aborted) {
+          const answer = await this.request(worker, 'cancel', {
+            protocolVersion: 2,
+            reference,
+          }).catch(() => undefined);
+          if (
+            (answer?.body as { state?: unknown } | undefined)?.state !==
+            'unknown'
+          ) {
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, STATUS_POLL_MS));
+        }
+      })();
+    };
+    signal.addEventListener('abort', cancel, { once: true });
+    try {
+      let response: WorkerResponse | undefined;
+      try {
+        response = await this.request(
+          worker,
+          'execute',
+          { protocolVersion: 2, reference, toolName, input },
+          giveUp.signal,
+        );
+      } catch (error) {
+        if (!(error instanceof WorkerTransportError)) throw error;
+        if (error.undelivered) {
+          // The worker was gone before the call reached it.
+          this.forget(worker);
+          settled = true;
+          return {
+            executionStatus: 'not_started',
+            responseParts: [],
+            error: { message: 'The Runtime worker was not running.' },
+          };
+        }
+        // A broken connection often means the worker died: let its exit
+        // land before asking anything on the port it held.
+        await exitOrTimeout(worker.gone, EXIT_GRACE_MS);
+      }
+      if (response?.status === 200) {
+        const result = settledResult(response.body);
+        if (result) {
+          settled = true;
+          return result;
+        }
+      } else if (
+        response !== undefined &&
+        response.status >= 400 &&
+        response.status < 500
+      ) {
+        // The worker refuses a call before it journals or runs it.
+        settled = true;
+        return {
+          executionStatus: 'not_started',
+          responseParts: [],
+          error: { message: refusalMessage(response.body) },
+        };
+      }
+      const result = await this.awaitSettlement(
+        worker,
+        reference,
+        giveUp.signal,
+      );
+      settled = true;
+      return result;
+    } finally {
+      ended.abort();
+      signal.removeEventListener('abort', cancel);
+      clearTimeout(giveUpTimer);
+      if (!settled) await cancelling;
+    }
+  }
+
+  /** The reference identifying one call, built once and reused wholesale. */
+  referenceFor(
+    callId: string,
+    params: Record<string, unknown>,
+  ): ManagedToolReference {
+    const normalized = JSON.parse(JSON.stringify(params)) as Record<
+      string,
+      unknown
+    >;
+    return {
+      sessionId: this.sessionId,
+      promptId: promptIdContext.getStore() ?? 'unknown',
+      callId,
+      argsDigest: `sha256:${managedToolDigest(normalized)}`,
+    };
+  }
+
+  /**
+   * Tells the worker its caller settled a call durably, so the worker may
+   * drop the call's payload. Best-effort: nothing depends on it landing — a
+   * worker that never hears it is as correct, and as large, as before. A
+   * replaced worker generation answers unknown, which changes nothing either.
+   */
+  async acknowledge(reference: ManagedToolReference): Promise<void> {
+    let worker: StartedWorker | undefined;
+    try {
+      worker = this.starting !== undefined ? await this.starting : undefined;
+    } catch {
+      return;
+    }
+    if (worker === undefined || this.closed) return;
+    try {
+      await this.request(worker, 'acknowledge', {
+        protocolVersion: 2,
+        reference,
+      });
+    } catch {
+      // The committed outcome stands; the payload stays with the worker.
+    }
+  }
+
+  /**
+   * Terminates the process tree of every worker the session started and
+   * waits until each is gone. Then sweeps every ledger its workers kept:
+   * whatever the registry could not name, the ledger does.
+   */
+  async close(): Promise<void> {
+    this.closed = true;
+    // A worker that is starting is in the registry from its spawn on, and a
+    // launch that has not spawned yet finds the registry draining.
+    const failures: unknown[] = [];
+    try {
+      await this.registry.shutdown();
+    } catch (error) {
+      // A worker that had to be killed, as Windows always does, is gone all
+      // the same; only a tree that could not be proven gone is a failure.
+      const parts = error instanceof AggregateError ? error.errors : [error];
+      failures.push(
+        ...parts.filter((part) => !(part instanceof ProcessExitError)),
+      );
+    }
+    for (const ledgerPath of [...this.ledgerPaths]) {
+      // A path whose unproven sweep already armed a reaper is the reaper's
+      // to settle: re-sweeping it here pays a second proof budget over the
+      // same groups and re-reports a quarantine that is already counted.
+      if (this.unprovenLedgerPaths.has(ledgerPath)) continue;
+      try {
+        await this.sweepLedgerOnce(ledgerPath);
+      } catch (error) {
+        failures.push(toRuntimeError(error));
+      }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'The Runtime worker did not stop.');
+    }
+  }
+
+  /** Ledger paths whose unproven stop is already reported and being retried. */
+  private readonly unprovenLedgerPaths = new Set<string>();
+
+  /**
+   * Reports a stop the ledger's sweep could not prove: the engine is
+   * quarantined while a reaper keeps retrying, and lifted with the same
+   * reason once every group the ledger names is gone. One report per ledger
+   * path at a time — the exit hook and close() race each other to it.
+   */
+  private reportUnproven(ledgerPath: string, reason: Error): void {
+    if (this.unprovenLedgerPaths.has(ledgerPath)) return;
+    this.unprovenLedgerPaths.add(ledgerPath);
+    this.options.quarantine?.report(reason);
+    // The groups the last failure named: a sweep that finds the file gone
+    // has proven nothing about them, so the lift waits for their own
+    // deaths; a retired ledger can never be proven. They accumulate, never
+    // replace: a later failure that names fewer groups — a transient read
+    // error names none — must not forget the ones earlier failures left
+    // outstanding.
+    let lastNamed = unprovenGroupsOf(reason);
+    let sawRetired = sweepRetiredLedger(reason);
+    startLedgerReaper(
+      async (): Promise<LedgerReaperVerdict> => {
+        let verdict: LedgerSweepVerdict;
+        try {
+          // No exitWitnessed here: the witness is fresh only at the exit it
+          // names, and a retry minutes later must judge by the live table
+          // alone — or signal nothing where no table can be read — rather
+          // than SIGKILL whatever now answers on a recycled id.
+          verdict = await sweepWorkerLedger(ledgerPath);
+        } catch (error) {
+          sawRetired = sawRetired || sweepRetiredLedger(error);
+          lastNamed = [...new Set([...lastNamed, ...unprovenGroupsOf(error)])];
+          throw error;
+        }
+        if (verdict === 'proven') return 'proven';
+        const alive = lastNamed.filter(
+          (pgid) => processGroupLiveness(pgid) !== 'gone',
+        );
+        if (alive.length === 0) {
+          // Nothing was ever named — the file itself was unreadable, or set
+          // aside — so an empty probe over a vanished file is no proof: the
+          // stop stays unprovable and the quarantine stands.
+          return sawRetired || lastNamed.length === 0 ? 'terminal' : 'proven';
+        }
+        lastNamed = alive;
+        return 'unproven';
+      },
+      () => {
+        this.unprovenLedgerPaths.delete(ledgerPath);
+        this.options.quarantine?.lift(reason);
+      },
+    );
+  }
+
+  /**
+   * Sweeps one ledger exactly once per task: the exit-hook sweep, the
+   * close() path and a launch-failure inline sweep all join the one already
+   * running, never a second one over it.
+   */
+  private readonly sweepsInFlight = new Map<string, Promise<void>>();
+
+  private async sweepLedgerOnce(ledgerPath: string): Promise<void> {
+    const inFlight = this.sweepsInFlight.get(ledgerPath);
+    if (inFlight !== undefined) return inFlight;
+    const promise = (async () => {
+      try {
+        await sweepWorkerLedger(ledgerPath, { exitWitnessed: true });
+      } catch (error) {
+        this.reportUnproven(ledgerPath, toRuntimeError(error));
+        throw error;
+      }
+    })();
+    this.sweepsInFlight.set(ledgerPath, promise);
+    try {
+      await promise;
+    } finally {
+      if (this.sweepsInFlight.get(ledgerPath) === promise) {
+        this.sweepsInFlight.delete(ledgerPath);
+      }
+    }
+  }
+
+  /**
+   * Sweeps the ledger of a worker that exited between calls: whatever it
+   * left running is no session's future work, so its groups die now.
+   */
+  private async sweepDeadWorkerLedger(worker: StartedWorker): Promise<void> {
+    if (!worker.ledgerPath) return;
+    await this.sweepLedgerOnce(worker.ledgerPath).catch(() => undefined);
+  }
+
+  private async awaitSettlement(
+    worker: StartedWorker,
+    reference: ManagedToolReference,
+    giveUp: AbortSignal,
+  ): Promise<ManagedToolResultPayload> {
+    while (true) {
+      // A worker that exited cannot answer for the call, and its port may now
+      // belong to another process; one being closed is about to.
+      if (worker.gone.aborted || this.closed) {
+        throw new ManagedRuntimeOutcomeUnknownError(
+          'The Runtime worker exited during a tool call.',
+        );
+      }
+      // One last look once the wait is over: the call may just have settled.
+      const lastLook = giveUp.aborted;
+      let response: WorkerResponse;
+      try {
+        response = await this.request(worker, 'status', {
+          protocolVersion: 2,
+          reference,
+        });
+      } catch (error) {
+        throw new ManagedRuntimeOutcomeUnknownError(
+          'The Runtime worker stopped answering for a tool call.',
+          { cause: error },
+        );
+      }
+      const body = response.body as { state?: unknown } | undefined;
+      if (response.status !== 200 || body?.state === 'unknown') {
+        throw new ManagedRuntimeOutcomeUnknownError(
+          'The Runtime worker does not know how a tool call ended.',
+        );
+      }
+      const result = settledResult(response.body);
+      if (result) return result;
+      if (lastLook) {
+        throw new ManagedRuntimeOutcomeUnknownError(
+          'A cancelled Runtime tool call did not settle.',
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, STATUS_POLL_MS));
+    }
+  }
+
+  private start(): Promise<StartedWorker> {
+    if (this.closed) {
+      return Promise.reject(new Error('The Managed session is closing.'));
+    }
+    if (this.starting) return this.starting;
+    const starting = this.launchWorker();
+    this.starting = starting;
+    // A worker that failed to start, or exited between calls, is replaced;
+    // one that exited with a ledger full of groups is swept, however it died.
+    const forget = () => {
+      if (this.starting === starting && !this.closed) this.starting = undefined;
+    };
+    void starting.then(
+      (worker) => worker.tracked.exited.then(() => this.sweepAfterExit(worker)),
+      forget,
+    );
+    return starting;
+  }
+
+  /**
+   * Fires when a worker's exit is witnessed — start()'s own observation, the
+   * dominant between-calls path — and sweeps its ledger exactly once, with
+   * its replacement clearing `starting` only on the session's behalf.
+   */
+  private sweepAfterExit(worker: StartedWorker): void {
+    void this.sweepDeadWorkerLedger(worker);
+    void this.starting?.then(
+      (current) => {
+        if (current === worker && !this.closed) this.starting = undefined;
+      },
+      // A replacement that failed to start has no exit to witness.
+      () => undefined,
+    );
+  }
+
+  /** Stops `worker` and lets the next call start a new one in its place. */
+  private forget(worker: StartedWorker): void {
+    // Replaced at once, not after the termination window: a replacement may
+    // already be queued behind a call that met this worker hung. The exit
+    // hook owns the ledger sweep alone — the same single-sweep rule as on
+    // every witnessed exit.
+    void this.starting?.then(
+      (current) => {
+        if (current === worker && !this.closed) this.starting = undefined;
+      },
+      () => undefined,
+    );
+    void worker.tracked.terminate().catch(() => undefined);
+  }
+
+  private async launchWorker(): Promise<StartedWorker> {
+    const boot: ManagedRuntimeWorkerBoot = {
+      type: 'boot',
+      version: 1,
+      token: randomBytes(32).toString('hex'),
+      runtimeInstanceId: this.sessionId,
+      runtimeIncarnation: randomUUID(),
+      leaseId: randomUUID(),
+      epoch: 1,
+      provisionRequestId: randomUUID(),
+      tenantId: 'local',
+      workspaceId: 'local',
+      workspaceGeneration: '1',
+      workspaceCwd: this.directory,
+      capabilityDigest: LOCAL_CAPABILITY_DIGEST,
+      isolationClass: 'session',
+    };
+    // Loaded on first use: the route table brings the worker's HTTP stack.
+    const { MANAGED_RUNTIME_INCARNATION_HEADER, OWNED_MANAGED_RUNTIME_ROUTES } =
+      await import('./managed-runtime-attestation-contract.js');
+    const routes = new Map<string, string>(
+      OWNED_MANAGED_RUNTIME_ROUTES.map((route) => [route.key, route.path]),
+    );
+    const launch = this.launch();
+    const ledgerPath = this.options.ledgerDir
+      ? path.join(this.options.ledgerDir, `${boot.runtimeIncarnation}.json`)
+      : undefined;
+    if (ledgerPath !== undefined) {
+      // Fail before spawn: a worker without its ledger cannot be swept.
+      mkdirSync(path.dirname(ledgerPath), { recursive: true });
+      this.ledgerPaths.add(ledgerPath);
+      launchedLedgerPaths.add(ledgerPath);
+    }
+    const reservation = this.registry.reserve();
+    let child;
+    try {
+      child = spawn(launch.command, [...launch.args], {
+        cwd: this.directory,
+        env:
+          ledgerPath === undefined
+            ? (launch.env ?? process.env)
+            : {
+                ...(launch.env ?? process.env),
+                [MANAGED_RUNTIME_LEDGER_ENV]: ledgerPath,
+              },
+        // The IPC channel carries no messages: the worker exits when it closes.
+        stdio: ['pipe', 'pipe', 'inherit', 'ipc'],
+        detached: process.platform !== 'win32',
+        windowsHide: true,
+      });
+    } catch (error) {
+      reservation.cancel();
+      if (ledgerPath !== undefined) launchedLedgerPaths.delete(ledgerPath);
+      throw error;
+    }
+    const tracked = reservation.attach(child, { ownsProcessTree: true });
+    const gone = new AbortController();
+    void tracked.exited.then(
+      () => gone.abort(),
+      () => gone.abort(),
+    );
+    try {
+      child.stdin!.on('error', () => undefined);
+      child.stdin!.end(JSON.stringify(boot));
+      const ready = await readReady(child.stdout!, tracked);
+      if (
+        ready.type !== 'ready' ||
+        ready.version !== 1 ||
+        ready.runtimeInstanceId !== boot.runtimeInstanceId ||
+        ready.runtimeIncarnation !== boot.runtimeIncarnation ||
+        ready.leaseId !== boot.leaseId ||
+        ready.epoch !== boot.epoch ||
+        typeof ready.url !== 'string' ||
+        !/^http:\/\/127\.0\.0\.1:\d+$/u.test(ready.url)
+      ) {
+        throw new Error('The Managed Runtime worker is not the one started.');
+      }
+      const worker = {
+        tracked,
+        url: new URL(ready.url),
+        boot,
+        routes,
+        incarnationHeader: MANAGED_RUNTIME_INCARNATION_HEADER.toLowerCase(),
+        gone: gone.signal,
+        ledgerPath,
+      };
+      const attested = await this.request(worker, 'attest', {
+        protocolVersion: 2,
+        provisionRequestId: boot.provisionRequestId,
+        tenantId: boot.tenantId,
+        workspaceId: boot.workspaceId,
+        workspaceGeneration: boot.workspaceGeneration,
+        workspaceCwd: boot.workspaceCwd,
+        capabilityDigest: boot.capabilityDigest,
+        isolationClass: boot.isolationClass,
+      });
+      const identity = attested.body as Record<string, unknown> | undefined;
+      if (
+        attested.status !== 200 ||
+        identity?.['runtimeIncarnation'] !== boot.runtimeIncarnation ||
+        identity?.['leaseId'] !== boot.leaseId
+      ) {
+        throw new Error('The Managed Runtime worker failed attestation.');
+      }
+      return worker;
+    } catch (error) {
+      await tracked.terminate().catch(() => undefined);
+      if (ledgerPath !== undefined) {
+        // The failed worker may have written its ledger already; with the
+        // skip-set entry it would stay invisible to every future sweep.
+        launchedLedgerPaths.delete(ledgerPath);
+        void this.sweepLedgerOnce(ledgerPath).catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
+  private request(
+    worker: StartedWorker,
+    route: RouteKey,
+    body: unknown,
+    stop?: AbortSignal,
+  ): Promise<WorkerResponse> {
+    if (worker.gone.aborted) {
+      // Nothing is sent to a port the worker no longer holds.
+      return Promise.reject(
+        new WorkerTransportError('The Runtime worker exited.', undefined, true),
+      );
+    }
+    const payload = Buffer.from(JSON.stringify(body));
+    return new Promise((resolve, reject) => {
+      const request = http.request(
+        {
+          host: worker.url.hostname,
+          port: worker.url.port,
+          path: worker.routes.get(route),
+          method: 'POST',
+          // A fresh connection per call: a reused socket the worker closed
+          // would fail a call the worker never saw.
+          agent: false,
+          headers: {
+            Authorization: `Bearer ${worker.boot.token}`,
+            'Cache-Control': 'no-store',
+            'Content-Type': 'application/json',
+            'Content-Length': payload.byteLength,
+            'X-Qwen-Managed-Lease-Id': worker.boot.leaseId,
+            'X-Qwen-Managed-Lease-Epoch': String(worker.boot.epoch),
+          },
+        },
+        (response) => {
+          // Attestation proved who listens on the port; from then on only
+          // the worker can name its incarnation, which no request carries.
+          // An answer read as a result or a state must name it. A refusal
+          // needs not: whoever sent it, the request did not run.
+          if (
+            route !== 'attest' &&
+            response.statusCode === 200 &&
+            response.headers[worker.incarnationHeader] !==
+              worker.boot.runtimeIncarnation
+          ) {
+            reject(
+              new WorkerTransportError(
+                'The Runtime worker did not answer as itself.',
+              ),
+            );
+            request.destroy();
+            return;
+          }
+          const chunks: Buffer[] = [];
+          let size = 0;
+          response.on('data', (chunk: Buffer) => {
+            size += chunk.byteLength;
+            if (size > MANAGED_RUNTIME_RESPONSE_LIMIT_BYTES) {
+              response.destroy(
+                new WorkerTransportError(
+                  'Runtime worker response is too large.',
+                ),
+              );
+              return;
+            }
+            chunks.push(chunk);
+          });
+          response.on('error', (error) =>
+            reject(new WorkerTransportError(error.message, { cause: error })),
+          );
+          response.on('end', () => {
+            let parsed: unknown;
+            try {
+              const text = Buffer.concat(chunks).toString('utf8');
+              parsed = text.length > 0 ? JSON.parse(text) : undefined;
+            } catch (error) {
+              reject(
+                new WorkerTransportError(
+                  'Runtime worker response is invalid.',
+                  {
+                    cause: error,
+                  },
+                ),
+              );
+              return;
+            }
+            resolve({ status: response.statusCode ?? 0, body: parsed });
+          });
+        },
+      );
+      request.on('error', (error) =>
+        reject(new WorkerTransportError(error.message, { cause: error })),
+      );
+      const exited = () =>
+        request.destroy(new WorkerTransportError('The Runtime worker exited.'));
+      worker.gone.addEventListener('abort', exited, { once: true });
+      request.on('close', () =>
+        worker.gone.removeEventListener('abort', exited),
+      );
+      if (stop) {
+        const abandon = () =>
+          request.destroy(new WorkerTransportError('Abandoned the request.'));
+        if (stop.aborted) abandon();
+        else stop.addEventListener('abort', abandon, { once: true });
+        request.on('close', () => stop.removeEventListener('abort', abandon));
+      } else {
+        request.setTimeout(CONTROL_REQUEST_TIMEOUT_MS, () =>
+          request.destroy(new WorkerTransportError('The request timed out.')),
+        );
+      }
+      request.end(payload);
+    });
+  }
+}
+
+/** Whether `candidate` is `root` or lies below it. */
+function isWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(
+    path.resolve(root),
+    path.resolve(root, candidate),
+  );
+  return (
+    relative !== '..' &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+function exitOrTimeout(gone: AbortSignal, ms: number): Promise<void> {
+  if (gone.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      gone.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    gone.addEventListener('abort', done, { once: true });
+  });
+}
+
+function readReady(
+  stdout: NodeJS.ReadableStream,
+  tracked: TrackedChildProcess,
+): Promise<ManagedRuntimeWorkerReady> {
+  const lines = createInterface({ input: stdout, crlfDelay: Infinity });
+  return new Promise<ManagedRuntimeWorkerReady>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error, ready?: ManagedRuntimeWorkerReady) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(ready!);
+    };
+    const timer = setTimeout(
+      () => finish(new Error('The Managed Runtime worker did not get ready.')),
+      READY_TIMEOUT_MS,
+    );
+    timer.unref();
+    lines.on('line', (line) => {
+      // Later output is drained so the worker never blocks on its pipe.
+      if (settled) return;
+      try {
+        finish(undefined, JSON.parse(line) as ManagedRuntimeWorkerReady);
+      } catch {
+        finish(new Error('The Managed Runtime worker is not ready.'));
+      }
+    });
+    void tracked.exited.then(() =>
+      finish(
+        new Error('The Managed Runtime worker exited before it was ready.'),
+      ),
+    );
+  });
+}
+
+function toRuntimeError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function settledResult(body: unknown): ManagedToolResultPayload | undefined {
+  const view = body as
+    | { state?: unknown; result?: ManagedToolResultPayload }
+    | undefined;
+  return view?.state === 'settled' && view.result ? view.result : undefined;
+}
+
+function refusalMessage(body: unknown): string {
+  const error = (body as { error?: unknown } | undefined)?.error;
+  return typeof error === 'string'
+    ? error
+    : 'The Runtime worker refused the tool call.';
+}
+
+/** The tool result the host reports for a worker's settled payload. */
+export function toToolResult(payload: ManagedToolResultPayload): ToolResult {
+  const parts = managedToolResponseParts(payload.responseParts);
+  const text = parts
+    .map((part) => (part as { text?: unknown }).text)
+    .filter((value): value is string => typeof value === 'string')
+    .join('\n');
+  if (payload.executionStatus === 'success') {
+    return { llmContent: parts, returnDisplay: text };
+  }
+  // A call that never ran says so: it is no tool failure, and nothing it
+  // would have done took effect.
+  const message = managedToolFailureMessage(payload);
+  return {
+    llmContent: parts.length > 0 ? parts : message,
+    returnDisplay: text || message,
+    error: {
+      message,
+      // The worker's tools report the same error types, such as a timeout.
+      ...(payload.error?.type
+        ? { type: payload.error.type as ToolErrorType }
+        : {}),
+    },
+  };
+}
+
+/** The ledgers every worker of this process was ever launched with. */
+const launchedLedgerPaths = new Set<string>();
+
+/** Ledger dirs whose failed startup sweep already has a reaper armed. */
+const armedStaleSweeps = new Set<string>();
+
+/**
+ * Ledger dirs whose installation-time sweep is already running, so two
+ * environments created in the same window share its pass instead of paying
+ * a second full directory sweep on the child's single thread.
+ */
+const dirSweepsInFlight = new Map<string, Promise<LedgerSweepVerdict | void>>();
+
+/**
+ * The startup-side sweep of a project's ledger directory, run at every
+ * environment creation: it judges only ledgers this process never launched
+ * (the skip set is live by reference, grown before every spawn), so a
+ * sibling child's crash-debris finds one of these sweeps however long this
+ * child has been up. Its own workers' ledgers have their own sweeps,
+ * however they end. A failure quarantines the engine, and one reaper per
+ * directory keeps retrying while its remainders stay unproven.
+ */
+function sweepStaleRuntimeLedgers(
+  ledgerDir: string,
+  quarantine: ManagedEngineQuarantineSink,
+): void {
+  if (dirSweepsInFlight.has(ledgerDir)) return;
+  const options = { skip: launchedLedgerPaths };
+  const sweeping = sweepStaleLedgers(ledgerDir, options).catch(
+    (error: unknown) => {
+      if (armedStaleSweeps.has(ledgerDir)) return;
+      armedStaleSweeps.add(ledgerDir);
+      const reason = toRuntimeError(error);
+      quarantine.report(reason);
+      // The lift is pinned to what armed the quarantine. The files the
+      // rejection named must each be judged clean by a sweep themselves — a
+      // directory-level 'proven' an unrelated ledger earned lifts nothing,
+      // and a file gone without a judgement proves nothing either: the groups
+      // the failures named answer by liveness instead. A retired ledger can
+      // never be proven, so a retirement the rejection carries makes the end
+      // terminal — but only after everything else the directory held has been
+      // proven, since a provable group keeps its retries. A file any sweep
+      // ever judged keeps its proof and never re-enters the liveness ladder
+      // (its ids may now answer for another job).
+      // The lift is pinned per file: the groups a rejection still names as
+      // unproven are attributed to the ledger that named them, because one
+      // ledger's later proof is no evidence about another ledger's stop.
+      let sawRetired = sweepRetiredLedger(error);
+      const armedFiles = new Set(workFilesOf(error));
+      const namedByFile = new Map<string, Set<number>>();
+      const recordNames = (failure: unknown): void => {
+        const failures =
+          failure instanceof AggregateError ? failure.errors : [failure];
+        for (const each of failures) {
+          if (
+            each instanceof LedgerSweepUnprovenError &&
+            each.remaining.length > 0
+          ) {
+            const named = namedByFile.get(each.workFile) ?? new Set<number>();
+            for (const pgid of each.remaining) named.add(pgid);
+            namedByFile.set(each.workFile, named);
+          }
+        }
+      };
+      recordNames(error);
+      const provenFiles = new Set<string>();
+      startLedgerReaper(
+        async (): Promise<LedgerReaperVerdict> => {
+          // The files this pass itself judged clean.
+          const judged = new Set<string>();
+          try {
+            await sweepStaleLedgers(ledgerDir, options, (workFile) => {
+              judged.add(workFile);
+              provenFiles.add(workFile);
+            });
+          } catch (retryError) {
+            sawRetired = sawRetired || sweepRetiredLedger(retryError);
+            // Accumulate, never replace: a failure that names fewer groups —
+            // or none, a ledger nobody could read — must not forget the ones
+            // earlier failures left outstanding.
+            recordNames(retryError);
+            for (const workFile of workFilesOf(retryError)) {
+              armedFiles.add(workFile);
+            }
+            throw retryError;
+          }
+          const vanished: string[] = [];
+          for (const workFile of armedFiles) {
+            if (provenFiles.has(workFile) || judged.has(workFile)) continue;
+            if (!existsSync(workFile)) {
+              vanished.push(workFile);
+              continue;
+            }
+            // Present but unjudged on a resolving pass — it landed between
+            // the readdir and the judgement; the next tick judges it.
+            return 'unproven';
+          }
+          // A retirement never reaches this line: the retired ledger was
+          // renamed away, so its armed path always fails existsSync above
+          // and the end answers through the liveness check below.
+          if (vanished.length === 0) return 'proven';
+          // A file vanishing without ever being judged proves nothing by
+          // itself, so it answers only from the groups its own failures
+          // ever named: a sibling ledger's dead groups are no evidence
+          // about this one's stop. A file that named nothing — unreadable
+          // at every read and deleted from outside the sweep — has no
+          // provable stop behind it at all: the fact stays terminal, as
+          // the single-ledger reaper holds it.
+          let namedAlive = 0;
+          let unevidenced = false;
+          for (const workFile of vanished) {
+            const named = namedByFile.get(workFile);
+            if (named === undefined) {
+              unevidenced = true;
+              continue;
+            }
+            const alive = [...named].filter(
+              (pgid) => processGroupLiveness(pgid) !== 'gone',
+            );
+            namedByFile.set(workFile, new Set(alive));
+            namedAlive += alive.length;
+          }
+          if (namedAlive > 0) return 'unproven';
+          return unevidenced || sawRetired ? 'terminal' : 'proven';
+        },
+        () => {
+          armedStaleSweeps.delete(ledgerDir);
+          quarantine.lift(reason);
+        },
+      );
+    },
+  );
+  dirSweepsInFlight.set(ledgerDir, sweeping);
+  void sweeping.finally(() => {
+    if (dirSweepsInFlight.get(ledgerDir) === sweeping) {
+      dirSweepsInFlight.delete(ledgerDir);
+    }
+  });
+}
+
+/** The ledger files a sweep rejection names. */
+function workFilesOf(error: unknown): string[] {
+  const failures = error instanceof AggregateError ? error.errors : [error];
+  return failures.flatMap((failure) =>
+    failure instanceof LedgerSweepUnprovenError ||
+    failure instanceof LedgerSweepRetiredError
+      ? [failure.workFile]
+      : [],
+  );
+}
+
+/** The group ids a sweep rejection still names as unproven. */
+function unprovenGroupsOf(error: unknown): number[] {
+  const failures = error instanceof AggregateError ? error.errors : [error];
+  return [
+    ...new Set(
+      failures.flatMap((failure) =>
+        failure instanceof LedgerSweepUnprovenError
+          ? [...failure.remaining]
+          : [],
+      ),
+    ),
+  ];
+}
+
+/** Whether a sweep rejection set a ledger aside unprovable. */
+function sweepRetiredLedger(error: unknown): boolean {
+  const failures = error instanceof AggregateError ? error.errors : [error];
+  return failures.some((failure) => failure instanceof LedgerSweepRetiredError);
+}
+
+/**
+ * The environment of a Managed session's tools: each call is prepared and
+ * permission-checked in this process with the real tool, then runs with its
+ * final parameters in the session's Runtime worker. An unknown outcome
+ * blocks the session.
+ */
+export function createManagedRuntimeEnvironment(
+  config: Config,
+  launch?: () => ManagedRuntimeWorkerLaunch,
+): ExecutionEnvironment {
+  // The worker is bound to this directory for its lifetime, so the host
+  // judges a Shell `directory` against the same one.
+  const sessionDirectory = config.getTargetDir();
+  const ledgerDir = path.join(
+    config.storage.getProjectTempDir(),
+    'managed-runtime',
+  );
+  const quarantine: ManagedEngineQuarantineSink = {
+    report: (reason) => config.reportManagedEngineQuarantine(reason),
+    lift: (reason) => config.clearManagedEngineQuarantine(reason),
+  };
+  // The stale ledgers an earlier child left behind are swept in the
+  // background at every environment creation. One sweep cannot gate the
+  // admission it runs with: a stop it cannot prove quarantines the engine
+  // for every admission AFTER the report — a session just admitted has its
+  // own ledger and its own close-time sweep, so it is never untracked work.
+  sweepStaleRuntimeLedgers(ledgerDir, quarantine);
+  const worker = new ManagedSessionRuntimeWorker(
+    config.getSessionId(),
+    sessionDirectory,
+    launch,
+    CANCEL_SETTLE_TIMEOUT_MS,
+    { ledgerDir, quarantine },
+  );
+  const prepared = new LocalExecutionEnvironment(config, {
+    toolNames: MANAGED_RUNTIME_TOOL_NAMES,
+    run: async (call, signal) => {
+      // The durable outcome writer exists for every recorded Managed
+      // session; without one there is nothing to dispatch against.
+      const outcomes = config.getManagedRuntimeOutcomes();
+      if (!outcomes) {
+        throw new Error('This Managed session records no log.');
+      }
+      const started = await worker.ensureStarted(signal);
+      // A call cancelled while the worker started is not sent and commits
+      // nothing, including its admission.
+      if (!started) {
+        return toToolResult({
+          executionStatus: 'cancelled',
+          responseParts: [],
+        });
+      }
+      // The parameters as the wire carries them, once, so the intent, the
+      // binding and the worker all name the same payload.
+      const params = JSON.parse(JSON.stringify(call.params)) as Record<
+        string,
+        unknown
+      >;
+      const promptId = promptIdContext.getStore() ?? 'unknown';
+      // The durable log keys the call by the scheduler's function-call id —
+      // the id the recorded history names — so a restored tool_result can be
+      // matched to the model call it answers. The invocation's own id only
+      // ever named the preparation inside this environment.
+      const callId = call.callId ?? call.id;
+      // Admitted before dispatch; an admission that fails never sends.
+      await outcomes.admit({
+        functionCallId: callId,
+        toolName: call.toolName,
+        promptId,
+        params,
+        toolDefinition: prepared.toolDefinition(call.toolName),
+        workerIncarnation: started.boot.runtimeIncarnation,
+      });
+      // Every outcome this call reaches settles through the one guarded
+      // path. A settle that failed after its receipt committed left the
+      // durable proof the call took effect: what proves a call may never
+      // block, and the restore repair settles the checkpoint item from it on
+      // the next open. Only a settle whose receipt never landed is an unknown
+      // outcome, which blocks. The conversion covers the settle alone: a
+      // failure after the commit landed — shaping the result for the model —
+      // is an ordinary error, never this block.
+      const settleCall = async (
+        outcome: ManagedToolResultPayload,
+      ): Promise<void> => {
+        try {
+          // Settled before the model continues, then forgotten by the worker.
+          await outcomes.settle({
+            functionCallId: callId,
+            executionStatus: outcome.executionStatus,
+            payload: outcome,
+          });
+        } catch (error) {
+          if (outcomes.hasCommittedReceipt(callId)) return;
+          const blocked = new ManagedRuntimeOutcomeUnknownError(
+            'The durable settlement of a Runtime tool call failed.',
+            { cause: error },
+          );
+          config.blockManagedSession(blocked);
+          await worker.close().catch(() => undefined);
+          throw blocked;
+        }
+      };
+      // Cancelled between the admission and the dispatch: the worker never
+      // hears the call, so its outcome is known — cancelled — and settles
+      // the same way, without contacting the worker. The payload carries the
+      // cancellation so the durable outcome keeps the evidence the live
+      // result reports.
+      if (signal.aborted) {
+        const payload: ManagedToolResultPayload = {
+          executionStatus: 'cancelled',
+          responseParts: [],
+          error: {
+            message: managedToolFailureMessage({
+              executionStatus: 'cancelled',
+            }),
+          },
+        };
+        await settleCall(payload);
+        return toToolResult(payload);
+      }
+      const reference = worker.referenceFor(callId, params);
+      let payload: ManagedToolResultPayload;
+      try {
+        payload = await worker.executeIn(
+          started,
+          call.toolName,
+          params,
+          signal,
+          reference,
+        );
+      } catch (error) {
+        if (error instanceof ManagedRuntimeOutcomeUnknownError) {
+          // The checkpoint item stays in progress: that is the durable form
+          // of the block, which every later open of the log re-applies.
+          config.blockManagedSession(error);
+          await worker.close().catch(() => undefined);
+        }
+        throw error;
+      }
+      await settleCall(payload);
+      // Fire-and-forget: the outcome is committed, and nothing in the turn
+      // may wait on the worker hearing the receipt — a wedged boot or
+      // worker must never hold a settled result back.
+      void worker.acknowledge(reference);
+      const result = toToolResult(payload);
+      // As Legacy, a read shows no copy of the file it returns.
+      return call.toolName === ToolNames.READ_FILE && !result.error
+        ? { ...result, returnDisplay: '' }
+        : result;
+    },
+  });
+  return {
+    toolNames: prepared.toolNames,
+    prepare: async (request, signal) => {
+      const preparation = await prepared.prepare(request, signal);
+      // The worker runs foreground Shell only, in the session's directory:
+      // refuse before asking what it would refuse. The prepared parameters
+      // are the validated ones.
+      if (request.toolName === ToolNames.SHELL) {
+        const directory = preparation.params['directory'];
+        const refusal =
+          preparation.params['is_background'] === true
+            ? 'A Managed session runs shell commands in the foreground only.'
+            : typeof directory === 'string' &&
+                directory !== '' &&
+                !isWithin(sessionDirectory, directory)
+              ? `A Managed session runs shell commands only in ${sessionDirectory}.`
+              : undefined;
+        if (refusal) {
+          await prepared.release(request.id, signal);
+          throw new Error(refusal);
+        }
+      }
+      return preparation;
+    },
+    permission: (id, signal) => prepared.permission(id, signal),
+    confirmation: (id, signal) => prepared.confirmation(id, signal),
+    confirm: (id, outcome, payload, signal) =>
+      prepared.confirm(id, outcome, payload, signal),
+    execute: (id, signal, updateOutput) =>
+      prepared.execute(id, signal, updateOutput),
+    modificationContent: (toolName, params, signal) =>
+      prepared.modificationContent(toolName, params, signal),
+    release: (id, signal) => prepared.release(id, signal),
+    invalidateReadCache: () => Promise.resolve(),
+    dispose: async () => {
+      try {
+        await prepared.dispose();
+      } finally {
+        await worker.close();
+      }
+    },
+  };
+}

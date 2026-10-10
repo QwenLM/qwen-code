@@ -490,6 +490,51 @@ Optional:
 | `targetAudience`       | string                                        | The OAuth Client ID allowlisted on the IAP-protected application you are trying to access. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                         |
 | `targetServiceAccount` | string                                        | The email address of the Google Cloud Service Account to impersonate. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                                              |
 
+### MCP App resource limits
+
+MCP Apps can return bundled HTML larger than the default 1 MiB or take longer
+than the default 10 seconds to load. Configure only the server that needs more
+headroom in `settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "amplitude": {
+      "httpUrl": "https://mcp.amplitude.com/mcp",
+      "appResourceMaxBytes": 4194304,
+      "appResourceTimeoutMs": 120000
+    }
+  }
+}
+```
+
+Amplitude still requires OAuth authentication. These settings do not enable
+additional App bridge capabilities or guarantee that every App is compatible.
+
+- `appResourceMaxBytes`: maximum decoded HTML size in UTF-8 bytes. Defaults to
+  1,048,576 (1 MiB); clamped to 1–4,194,304 bytes (4 MiB).
+- `appResourceTimeoutMs`: resource-read deadline, independent of tool execution
+  when explicitly set; clamped to 100–120,000 ms. Without an override, the
+  deadline remains the smaller of the general `timeout` and 10,000 ms.
+- Finite values are rounded down and clamped. Nonnumeric or nonfinite values
+  fall back to defaults. Cancellation remains effective at any configured limit.
+
+A limit failure preserves the successful tool result and displays a warning
+with the applicable configuration key. Larger HTML stays outside model context,
+while increasing retained transcript and replay size. The size check happens
+**after** the SDK reads the response; it does not cap network transfer or peak
+memory. These two limit settings do not change the sandbox or CSP.
+
+App HTML is mounted only in a daemon-backed WebShell session and in replay of
+a recorded transcript. Terminal and headless sessions render the fallback text
+instead, so there these keys change only the warning text, the fetch cost and
+latency, and the retained transcript size.
+
+Set these keys in the same source that declares the server. Configuration
+sources replace whole server objects by precedence rather than merging fields,
+so a same-named entry added in another file shadows the original server
+instead of adjusting its limits.
+
 <a id="qwen-mcp-cli"></a>
 
 ### Manage MCP servers with `qwen mcp`

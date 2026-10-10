@@ -10,8 +10,8 @@
  *                        wrapper creates its configured in-process runtime.
  *
  * The test proves the wrapper against the versioned revision protocol:
- * full → (no_change | diff) with a caller-owned base. Every request goes
- * through the wrapper's named typed methods.
+ * full → (no_change | diff) with an automatically managed base. Every request
+ * goes through the wrapper's named typed methods.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -67,34 +67,25 @@ test(
       assert.equal(await computer.supportsObservationRevision(), true);
 
       const first = await computer.observeWindow({ pid, windowId });
-      assert.equal(first.revisionSupported, true);
       assert.equal(first.mode, "full");
-      assert.ok(first.revisionId, "first observation must name a revision");
+      assert.equal(first.diagnostics.revisionSupported, true);
       assert.ok(first.text.length > 0);
 
-      const second = await computer.observeWindow({
-        pid,
-        windowId,
-        baseRevisionId: first.revisionId,
-      });
-      assert.equal(second.revisionSupported, true);
+      const second = await computer.observeWindow({ pid, windowId });
+      assert.equal(second.diagnostics.revisionSupported, true);
       assert.ok(
-        ["no_change", "diff", "full"].includes(second.mode),
+        ["no_change", "diff"].includes(second.mode),
         `unexpected mode ${second.mode}`,
       );
-      if (second.mode !== "full") {
-        assert.equal(second.baseRevisionId, first.revisionId);
-        assert.ok(
-          second.selectedBytes < second.fullBytes,
-          "a validated diff/no_change payload must be smaller than the current full tree",
-        );
-      }
+      assert.ok(
+        second.diagnostics.selectedBytes < second.diagnostics.fullBytes,
+        "a validated diff/no_change payload must be smaller than the current full tree",
+      );
 
       const forced = await computer.observeWindow({
         pid,
         windowId,
-        baseRevisionId: second.revisionId ?? first.revisionId,
-        forceFull: true,
+        disableDiff: true,
       });
       assert.equal(forced.mode, "full");
       assert.equal(forced.resyncReason, "requested");

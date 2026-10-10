@@ -32,7 +32,7 @@ Add a channel to `~/.qwen/settings.json`:
     "dws-work": {
       "type": "dws",
       "profile": "profile-name-or-corp-id",
-      "senderPolicy": "pairing",
+      "privatePolicy": "pairing",
       "groupPolicy": "pairing",
       "watchTodos": true,
       "startReaction": "🤔",
@@ -55,7 +55,7 @@ without interactive confirmations:
   "channels": {
     "dws-answers": {
       "type": "dws",
-      "senderPolicy": "pairing",
+      "privatePolicy": "pairing",
       "groupPolicy": "pairing",
       "approvalMode": "yolo",
       "cwd": "/path/to/answer-bot"
@@ -67,13 +67,17 @@ without interactive confirmations:
 YOLO mode auto-approves every tool call. Use it only for a trusted bot account
 and workspace.
 
-`senderPolicy` and `groupPolicy` default to `pairing` for a newly managed DWS channel. Approve a user or group with the code returned by the channel:
+New managed DWS channels default to `privatePolicy: "pairing"` and `groupPolicy: "pairing"`. Approve a user or group with the code returned by the channel:
 
 ```bash
 qwen channel pairing approve dws-work CODE
 ```
 
-`senderPolicy` controls direct-message senders, document-notification authors, native-todo creators, and senders in `open` or `allowlist` groups. `groupPolicy` controls group conversations. An approved pairing group follows the shared channel behavior and authorizes its members; open and allowlist groups must also pass `senderPolicy`.
+`privatePolicy` controls direct messages, document-notification authors, and native-todo creators. Document threads and native todos are personal requests; `groups.senders` never applies to them. `groupPolicy` controls group admission, and `groups["*"].senders` or a per-group override controls which members may start tasks. Group members default to `open`, independently of private access. Shared-session management requires explicit `operators`; see [Shared-Session Operators](./overview.md#shared-session-operators).
+
+For a group-only channel, set `privatePolicy: "disabled"` and enable `groupPolicy`. For a personal-only channel, set `groupPolicy: "disabled"` and enable `privatePolicy`. Disabled private access prevents direct messages, document notifications, and native todos from starting tasks; `watchTodos` separately enables todo polling. Deprecated `senderPolicy` and `dmPolicy` remain private-policy fallbacks only; see [Private Policy](./overview.md#private-policy).
+
+Disabled chat sources are not subscribed to or polled, and their messages cannot start new tasks through late callbacks or persisted replay. Pending work and history cursors are retained: after re-enabling a source, the existing recovery mechanism may process older messages, including messages from the disabled interval. Sender authorization, group pairing, and mention requirements still apply.
 
 `groups` controls mention behavior. A concrete group ID overrides `"*"`. With `requireMention: true`, only an @ message wakes the channel. With `requireMention: false`, ordinary messages are also received after the group and sender policies pass.
 
@@ -85,6 +89,12 @@ When a message quotes another DingTalk message, the quoted text is included as r
 
 `startReaction` is the emoji character or DingTalk reaction name added while an accepted task is running; an omitted or empty value uses the default `🤔`. `endReaction` replaces it after the task completes, fails, or is cancelled; an omitted or empty value disables the end reaction.
 
+### IM Reply Delivery
+
+A completed group @ or direct-message reply is checkpointed before its first send and retried in the background without rerunning the task. The backoff starts at five seconds, doubles, and caps at five minutes. A reply is abandoned after 16 failed delivery attempts. Local deferrals caused by a disconnected channel or an unreadable pairing approval use a separate limit of 32 consecutive checks, so they do not consume the transport-attempt budget. A reply is dropped immediately when its sender, group, or direct-message authorization is definitively revoked. The queue holds up to 100 replies and evicts the oldest entry regardless of its attempt count when full; switching the configured DWS profile clears the queue. These drops are reported on channel stderr, not sent as chat notifications.
+
+Queued IM replies longer than 12,000 code points are truncated, with `[Response truncated for DWS delivery.]` appended to the message the recipient sees. Document-comment and native-todo comment replies do not use this queued retry or truncation path: each turn makes one comment-send call, unknown outcomes are swallowed, and definitive failures propagate to the existing inbound-turn retry policy. The end reaction marks task completion, not reply delivery, so a retried IM reply can arrive after that reaction appears.
+
 ## Document Mentions
 
 There is no document or knowledge-base watch list. To start a document task:
@@ -95,7 +105,7 @@ There is no document or knowledge-base watch list. To start a document task:
 
 The channel extracts the document ID, comment key, and request from that notification. It reads the referenced document for context, adds the configured start reaction while the task runs, and replies to the original document comment. The real-time DWS event stream is used when it contains the card; a five-second incremental history check covers cards omitted by the current event stream.
 
-Comments that do not generate a notification are ignored by design. Duplicate notification messages for the same document comment execute only once. Document tasks follow `senderPolicy` and support `approvalMode` `default`, `plan`, or `yolo`; `default` is used when omitted.
+Comments that do not generate a notification are ignored by design. Duplicate notification messages for the same document comment execute only once. Document tasks follow `privatePolicy` and support `approvalMode` `default`, `plan`, or `yolo`; `default` is used when omitted.
 
 ## Native Todo Changes
 
@@ -103,7 +113,7 @@ Set `watchTodos: true` to poll the selected DWS profile's pending native todos w
 
 The first successful scan establishes a baseline and does not start historical todos. Later scans run a task when a todo is newly assigned, reopened, or its actionable fields change, including its title, priority, deadline, or assignees. The final response is added as a comment on the originating todo. Comment-only metadata and modification timestamps are excluded from change detection so the channel's own response cannot trigger a loop. Completion or removal drops the todo from the pending set; reopening it creates a new trigger.
 
-Native todos follow `senderPolicy` using the todo creator identity. Under `pairing`, the channel adds one pairing-code comment and keeps the todo pending; after the creator is approved locally, a later poll can process the unchanged todo. Polling runs every 30 seconds and remains scoped to the pinned profile's current organization.
+Native todos follow `privatePolicy` using the todo creator identity. Under `pairing`, the channel adds one pairing-code comment and keeps the todo pending; after the creator is approved locally, a later poll can process the unchanged todo. Polling runs every 30 seconds and remains scoped to the pinned profile's current organization.
 
 ## Starting and Verifying
 
@@ -121,6 +131,6 @@ qwen serve --workspace /path/to/your/project --channel dws-work
 
 Do not run both forms at once because they share the channel-service lease.
 
-For local verification, send a direct message from another account, approve pairing if required, and verify the configured start reaction appears while the task runs. If an end reaction is configured, verify that it replaces the start reaction afterward. Then add a document comment with @mention notification enabled. The channel should react to the notification message, read the document, and post the final answer under the original comment. A comment with notification disabled should produce no task.
+For local verification, send a direct message from another account, approve pairing if required, and verify the configured start reaction appears while the task runs. If an end reaction is configured, verify that it replaces the start reaction after the task finishes; reply delivery can complete later as described above. Then add a document comment with @mention notification enabled. The channel should react to the notification message, read the document, and post the final answer under the original comment. A comment with notification disabled should produce no task.
 
 The channel ignores events from sender IDs that DWS identifies as the authenticated account, preventing reply and pairing loops without inferring identity from message text. Starting the IM sources requires that authoritative self-identity: if the authenticated account exposes no openDingTalkId and no earlier session under the same profile recorded one, the channel refuses to connect. A reconnect that temporarily loses the ID keeps filtering on the previously recorded self sender IDs.

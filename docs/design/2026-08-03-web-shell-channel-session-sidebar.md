@@ -1,5 +1,7 @@
 # Web Shell channel sessions in the sidebar
 
+[English](2026-08-03-web-shell-channel-session-sidebar.md) | [简体中文](2026-08-03-web-shell-channel-session-sidebar.zh-CN.md)
+
 ## Motivation
 
 Daemon-managed channels create ordinary workspace sessions with
@@ -12,7 +14,11 @@ stored in the selected workspace.
 
 Add a two-option source switch above the sidebar's project session list:
 
-- **Tasks** lists `sourceType: "default"` and remains the initial selection.
+- **Tasks** requests `sourceType: "default"` and remains the initial selection.
+  The daemon catalog includes default, legacy, and `qwen-live` sessions.
+  Scheduled-task run sessions (`sourceType: 'default'` with a
+  `scheduled_task_run:` sourceId) appear in dedicated sections. Bound controller
+  sessions use `sourceType: 'scheduled_task'` and are excluded from this catalog.
 - **Channels** lists `sourceType: "channel"`.
 
 The switch is shown only when the daemon advertises
@@ -46,8 +52,18 @@ visible text.
 ## Boundaries
 
 - Channel configuration and runtime management are unchanged.
-- Session source metadata and daemon list APIs are unchanged.
-- Session Overview and Split View keep their existing default-session scope.
+- Persisted session source metadata is unchanged. The public daemon `default`
+  filter now also matches `qwen-live`; other source filters stay exact, and an
+  explicit `sourceId` remains an exact restriction within the selected catalog.
+  The internal Conversations filter is unchanged.
+- Session Overview, the Split View picker, and workspace total, running, and
+  attention counts share the expanded default catalog, including `qwen-live`.
+  Scheduled-task eligibility is unchanged. Web Shell hides delete and archive
+  actions for `qwen-live` sidebar rows and excludes them from the deletion picker.
+  Session Overview disables single and batch delete/archive for these tasks.
+  Opening and explicitly releasing these tasks remain available. Source metadata
+  is attribution, not daemon authorization: REST and ACP mutations keep their
+  existing built-in Live call protection and can terminate external Live tasks.
 - The switch is in-memory UI state and resets to Tasks on page reload.
 - Channel type classification reflects the current workspace configuration;
   sessions do not persist a historical platform type.

@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import { Static, useIsScreenReaderEnabled } from 'ink';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { ConfigContext } from '../contexts/ConfigContext.js';
 import { TerminalOutputProvider } from '../contexts/TerminalOutputContext.js';
 import {
   prepareInlineTerminalImage,
@@ -94,6 +95,21 @@ describe('TerminalImage', () => {
     writtenKeys.clear();
     vi.clearAllMocks();
     vi.mocked(useIsScreenReaderEnabled).mockReturnValue(false);
+  });
+
+  it('does not invoke file or inline image helpers in a tool sandbox', () => {
+    const config = {
+      getShellExecutionSandbox: () => ({ network: 'closed' }),
+    } as unknown as Config;
+    const { lastFrame } = render(
+      <ConfigContext.Provider value={config}>
+        <TerminalImage data={IMAGE} config={config} contentWidth={80} />
+        <TerminalImage image={INLINE_IMAGE} contentWidth={80} />
+      </ConfigContext.Provider>,
+    );
+    expect(lastFrame()).toContain('Image preview unavailable in tool sandbox');
+    expect(mockedRenderTerminalImage).not.toHaveBeenCalled();
+    expect(mockedPrepareInlineTerminalImage).not.toHaveBeenCalled();
   });
 
   it('writes trusted Kitty data and renders its placeholder', async () => {

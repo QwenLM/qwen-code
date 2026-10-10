@@ -1,0 +1,223 @@
+{
+  "contractVersion": 1,
+  "sessionKey": {
+    "tenantId": "tenant-a",
+    "workspaceId": "workspace-a",
+    "sessionId": "550e8400-e29b-41d4-a716-446655440000"
+  },
+  "writerId": "harness-a",
+  "commits": [
+    {
+      "workspaceId": "workspace-a",
+      "writerId": "harness-a",
+      "writerGeneration": 1,
+      "expectedJournalRevision": 0,
+      "expectedCommittedSequence": 0,
+      "transactionId": "session.create:550e8400-e29b-41d4-a716-446655440000",
+      "operation": "session.create",
+      "commandId": "session.create:550e8400-e29b-41d4-a716-446655440000",
+      "contentDigest": "182b7ff101a7903808ff62a58af6f5490892bf75c6966f356eb134aab9d5c732",
+      "firstSequence": 0,
+      "lastSequence": 0,
+      "eventCount": 0,
+      "eventsDigest": null,
+      "previousCommitDigest": null,
+      "commitDigest": null,
+      "activationEpoch": 0,
+      "latestCheckpointResourceId": null,
+      "recordCount": 2,
+      "recordBytesBase64": "eyJ1dWlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAzIiwicGFyZW50VXVpZCI6bnVsbCwic2Vzc2lvbklkIjoiNTUwZTg0MDAtZTI5Yi00MWQ0LWE3MTYtNDQ2NjU1NDQwMDAwIiwidGltZXN0YW1wIjoiMjAyNi0wOS0yMVQxNDoxMzoyMC4wMDBaIiwidHlwZSI6InN5c3RlbSIsInN1YnR5cGUiOiJzZXNzaW9uX2V4ZWN1dGlvbl9lbmdpbmUiLCJjd2QiOiIvd29ya3NwYWNlIiwidmVyc2lvbiI6InRlc3QiLCJzeXN0ZW1QYXlsb2FkIjp7InZlcnNpb24iOjEsImVuZ2luZSI6Im1hbmFnZWQifX0KeyJ1dWlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDA0IiwicGFyZW50VXVpZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMyIsInNlc3Npb25JZCI6IjU1MGU4NDAwLWUyOWItNDFkNC1hNzE2LTQ0NjY1NTQ0MDAwMCIsInRpbWVzdGFtcCI6IjIwMjYtMDktMjFUMTQ6MTM6MjAuMDAwWiIsInR5cGUiOiJzeXN0ZW0iLCJzdWJ0eXBlIjoibWFuYWdlZF9zZXNzaW9uX2hlYWRlcl92MSIsImN3ZCI6Ii93b3Jrc3BhY2UiLCJ2ZXJzaW9uIjoidGVzdCIsIm1hbmFnZWRTZXNzaW9uIjp7ImZvcm1hdFZlcnNpb24iOjEsIm1pbmltdW1SZWFkZXIiOiJtYW5hZ2VkLXNlc3Npb24vMSIsInNlc3Npb25LZXkiOnsidGVuYW50SWQiOiJ0ZW5hbnQtYSIsIndvcmtzcGFjZUlkIjoid29ya3NwYWNlLWEiLCJzZXNzaW9uSWQiOiI1NTBlODQwMC1lMjliLTQxZDQtYTcxNi00NDY2NTU0NDAwMDAifSwiZW5naW5lIjoibWFuYWdlZCIsImRlZmluaXRpb25SZWYiOnsicmVzb3VyY2VJZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMSIsImtpbmQiOiJtYW5hZ2VkLXNlc3Npb24tZGVmaW5pdGlvbiIsInNjaGVtYVZlcnNpb24iOjEsImJ5dGVMZW5ndGgiOjIsImRpZ2VzdCI6IjQ0MTM2ZmEzNTViMzY3OGExMTQ2YWQxNmY3ZTg2NDllOTRmYjRmYzIxZmU3N2U4MzEwYzA2MGY2MWNhYWZmOGEifSwicm9vdFNuYXBzaG90UmVmIjp7InJlc291cmNlSWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDIiLCJraW5kIjoibWFuYWdlZC1zZXNzaW9uLXJvb3Qtc25hcHNob3QiLCJzY2hlbWFWZXJzaW9uIjoxLCJieXRlTGVuZ3RoIjoyLCJkaWdlc3QiOiI0NDEzNmZhMzU1YjM2NzhhMTE0NmFkMTZmN2U4NjQ5ZTk0ZmI0ZmMyMWZlNzdlODMxMGMwNjBmNjFjYWFmZjhhIn0sImNyZWF0ZWRCeSI6InRlc3QifX0K",
+      "recordDigest": "182b7ff101a7903808ff62a58af6f5490892bf75c6966f356eb134aab9d5c732",
+      "resources": [
+        {
+          "resourceId": "00000000-0000-4000-8000-000000000001",
+          "kind": "managed-session-definition",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "bytesBase64": "e30="
+        },
+        {
+          "resourceId": "00000000-0000-4000-8000-000000000002",
+          "kind": "managed-session-root-snapshot",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "bytesBase64": "e30="
+        }
+      ]
+    },
+    {
+      "workspaceId": "workspace-a",
+      "writerId": "harness-a",
+      "writerGeneration": 1,
+      "expectedJournalRevision": 1,
+      "expectedCommittedSequence": 0,
+      "transactionId": "00000000-0000-4000-8000-000000000007",
+      "operation": "installActivation",
+      "commandId": "00000000-0000-4000-8000-000000000005:active",
+      "contentDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "firstSequence": 1,
+      "lastSequence": 1,
+      "eventCount": 1,
+      "eventsDigest": "926a32843fc70a2906bbf6cf78fc369ca7ad30327a73ef06bf389e49636b09cf",
+      "previousCommitDigest": null,
+      "commitDigest": "40e1c11f8119fa27bd5d9ecb519576ed11430779923f1be4e6ab02245fd716e3",
+      "activationEpoch": 1,
+      "latestCheckpointResourceId": null,
+      "recordCount": 2,
+      "recordBytesBase64": "eyJ1dWlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDA4IiwicGFyZW50VXVpZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwNCIsInNlc3Npb25JZCI6IjU1MGU4NDAwLWUyOWItNDFkNC1hNzE2LTQ0NjY1NTQ0MDAwMCIsInRpbWVzdGFtcCI6IjIwMjYtMDktMjFUMTQ6MTM6MjAuMDAwWiIsInR5cGUiOiJzeXN0ZW0iLCJzdWJ0eXBlIjoibWFuYWdlZF9zZXNzaW9uX2V2ZW50X3YxIiwiY3dkIjoiL3dvcmtzcGFjZSIsInZlcnNpb24iOiJ0ZXN0IiwibWFuYWdlZFNlc3Npb24iOnsidiI6MSwic2VxdWVuY2UiOjEsImV2ZW50SWQiOiJhY3RpdmF0aW9uOjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwNTphY3RpdmUiLCJzZXNzaW9uS2V5Ijp7InRlbmFudElkIjoidGVuYW50LWEiLCJ3b3Jrc3BhY2VJZCI6IndvcmtzcGFjZS1hIiwic2Vzc2lvbklkIjoiNTUwZTg0MDAtZTI5Yi00MWQ0LWE3MTYtNDQ2NjU1NDQwMDAwIn0sImtpbmQiOiJhY3RpdmF0aW9uLmNoYW5nZWQiLCJvY2N1cnJlZEF0IjoxNzkwMDAwMDAwMDAwLCJwYXlsb2FkIjp7ImFjdGl2YXRpb25JZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwNSIsImVwb2NoIjoxLCJ3b3JrZXJJZCI6Imhhcm5lc3MtYSIsInN1YmplY3QiOnsidHlwZSI6ImFjdGl2YXRpb24iLCJzY29wZUlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDA1IiwiYWN0aXZhdGlvbklkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDA1IiwiZXBvY2giOjF9LCJwaGFzZSI6ImFjdGl2ZSIsImxlYXNlRHVyYXRpb25NcyI6NjAwMDAsImV4cGlyZXNBdCI6MTc5MDAwMDA2MDAwMCwiaW5zdGFsbFJlZiI6eyJyZXNvdXJjZUlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDA2Iiwia2luZCI6Im1hbmFnZWQtYWN0aXZhdGlvbi1pbnN0YWxsIiwic2NoZW1hVmVyc2lvbiI6MSwiYnl0ZUxlbmd0aCI6MTI0LCJkaWdlc3QiOiJkZWExMmFjMGRkODdlNmMzY2U5ZGJlYjFmNzU0Zjg5MWIzMzBjYjk4OWMxMmY4ZGU0NWUyMzY3ZWE2NmE0MzYxIn0sImJvdW5kYXJ5UmVmIjpudWxsfX19CnsidXVpZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwOSIsInBhcmVudFV1aWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDgiLCJzZXNzaW9uSWQiOiI1NTBlODQwMC1lMjliLTQxZDQtYTcxNi00NDY2NTU0NDAwMDAiLCJ0aW1lc3RhbXAiOiIyMDI2LTA5LTIxVDE0OjEzOjIwLjAwMFoiLCJ0eXBlIjoic3lzdGVtIiwic3VidHlwZSI6Im1hbmFnZWRfc2Vzc2lvbl9jb21taXRfdjEiLCJjd2QiOiIvd29ya3NwYWNlIiwidmVyc2lvbiI6InRlc3QiLCJtYW5hZ2VkU2Vzc2lvbiI6eyJ0cmFuc2FjdGlvbklkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDA3IiwiY29tbWFuZElkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDA1OmFjdGl2ZSIsIm9wZXJhdGlvbiI6Imluc3RhbGxBY3RpdmF0aW9uIiwiY29udGVudERpZ2VzdCI6IjQ0MTM2ZmEzNTViMzY3OGExMTQ2YWQxNmY3ZTg2NDllOTRmYjRmYzIxZmU3N2U4MzEwYzA2MGY2MWNhYWZmOGEiLCJmaXJzdFNlcXVlbmNlIjoxLCJsYXN0U2VxdWVuY2UiOjEsImV2ZW50Q291bnQiOjEsImV2ZW50c0RpZ2VzdCI6IjkyNmEzMjg0M2ZjNzBhMjkwNmJiZjZjZjc4ZmMzNjljYTdhZDMwMzI3YTczZWYwNmJmMzg5ZTQ5NjM2YjA5Y2YiLCJwcmV2aW91c0NvbW1pdERpZ2VzdCI6bnVsbH19Cg==",
+      "recordDigest": "5be7bf6ee3e46689570805cd87061a06dfbb4d0f82670515fae3949ec30afb91",
+      "resources": [
+        {
+          "resourceId": "00000000-0000-4000-8000-000000000006",
+          "kind": "managed-activation-install",
+          "schemaVersion": 1,
+          "byteLength": 124,
+          "digest": "dea12ac0dd87e6c3ce9dbeb1f754f891b330cb989c12f8de45e2367ea66a4361",
+          "bytesBase64": "eyJ2ZXJzaW9uIjoxLCJhY3RpdmF0aW9uSWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDUiLCJlcG9jaCI6MSwid29ya2VySWQiOiJoYXJuZXNzLWEiLCJsZWFzZUR1cmF0aW9uTXMiOjYwMDAwfQ=="
+        }
+      ]
+    },
+    {
+      "workspaceId": "workspace-a",
+      "writerId": "harness-a",
+      "writerGeneration": 1,
+      "expectedJournalRevision": 2,
+      "expectedCommittedSequence": 1,
+      "transactionId": "00000000-0000-4000-8000-000000000012",
+      "operation": "commitMonitorRun",
+      "commandId": "monitor-1:1",
+      "contentDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "firstSequence": 2,
+      "lastSequence": 2,
+      "eventCount": 1,
+      "eventsDigest": "31e4457310c1914fc369b16ca629293f005754b0b22df61f5a6b9de7864617ca",
+      "previousCommitDigest": "40e1c11f8119fa27bd5d9ecb519576ed11430779923f1be4e6ab02245fd716e3",
+      "commitDigest": "d968f2dcee8f0ff599914d5d5ad0be076b466b0a64a55b7868faa02d82950cc9",
+      "activationEpoch": 1,
+      "latestCheckpointResourceId": null,
+      "recordCount": 2,
+      "recordBytesBase64": "eyJ1dWlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDEzIiwicGFyZW50VXVpZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwOSIsInNlc3Npb25JZCI6IjU1MGU4NDAwLWUyOWItNDFkNC1hNzE2LTQ0NjY1NTQ0MDAwMCIsInRpbWVzdGFtcCI6IjIwMjYtMDktMjFUMTQ6MTM6MjAuMDAwWiIsInR5cGUiOiJzeXN0ZW0iLCJzdWJ0eXBlIjoibWFuYWdlZF9zZXNzaW9uX2V2ZW50X3YxIiwiY3dkIjoiL3dvcmtzcGFjZSIsInZlcnNpb24iOiJ0ZXN0IiwibWFuYWdlZFNlc3Npb24iOnsidiI6MSwic2VxdWVuY2UiOjIsImV2ZW50SWQiOiJtb25pdG9yX3J1bjoxIiwic2Vzc2lvbktleSI6eyJ0ZW5hbnRJZCI6InRlbmFudC1hIiwid29ya3NwYWNlSWQiOiJ3b3Jrc3BhY2UtYSIsInNlc3Npb25JZCI6IjU1MGU4NDAwLWUyOWItNDFkNC1hNzE2LTQ0NjY1NTQ0MDAwMCJ9LCJraW5kIjoiZG9tYWluLmNvbW1pdHRlZCIsIm9jY3VycmVkQXQiOjE3OTAwMDAwMDAwMDAsInBheWxvYWQiOnsiZG9tYWluIjoibW9uaXRvcl9ydW4iLCJ2ZXJzaW9uIjoxLCJvcGVyYXRpb25JZCI6Im1vbml0b3ItMToxIiwicmVjb3JkUmVmIjp7InJlc291cmNlSWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMTEiLCJraW5kIjoibWFuYWdlZC1tb25pdG9yX3J1biIsInNjaGVtYVZlcnNpb24iOjEsImJ5dGVMZW5ndGgiOjYzNiwiZGlnZXN0IjoiM2Y5MWQyYjc2MzA3NWRmNTJjNWVjOTYxYjFmNDQ0MDgwNWUzNDEzNDQ1YWViZWJjZjI4ZjI3ODUwZjAwMDE3MyJ9fX19CnsidXVpZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAxNCIsInBhcmVudFV1aWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMTMiLCJzZXNzaW9uSWQiOiI1NTBlODQwMC1lMjliLTQxZDQtYTcxNi00NDY2NTU0NDAwMDAiLCJ0aW1lc3RhbXAiOiIyMDI2LTA5LTIxVDE0OjEzOjIwLjAwMFoiLCJ0eXBlIjoic3lzdGVtIiwic3VidHlwZSI6Im1hbmFnZWRfc2Vzc2lvbl9jb21taXRfdjEiLCJjd2QiOiIvd29ya3NwYWNlIiwidmVyc2lvbiI6InRlc3QiLCJtYW5hZ2VkU2Vzc2lvbiI6eyJ0cmFuc2FjdGlvbklkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDEyIiwiY29tbWFuZElkIjoibW9uaXRvci0xOjEiLCJvcGVyYXRpb24iOiJjb21taXRNb25pdG9yUnVuIiwiY29udGVudERpZ2VzdCI6ImVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWUiLCJmaXJzdFNlcXVlbmNlIjoyLCJsYXN0U2VxdWVuY2UiOjIsImV2ZW50Q291bnQiOjEsImV2ZW50c0RpZ2VzdCI6IjMxZTQ0NTczMTBjMTkxNGZjMzY5YjE2Y2E2MjkyOTNmMDA1NzU0YjBiMjJkZjYxZjVhNmI5ZGU3ODY0NjE3Y2EiLCJwcmV2aW91c0NvbW1pdERpZ2VzdCI6IjQwZTFjMTFmODExOWZhMjdiZDVkOWVjYjUxOTU3NmVkMTE0MzA3Nzk5MjNmMWJlNGU2YWIwMjI0NWZkNzE2ZTMifX0K",
+      "recordDigest": "ae501dbb3e49ea2b045dd9f0c84a5d9fc0e2076dfbb3d890ab661fe7de0c2f7b",
+      "resources": [
+        {
+          "resourceId": "00000000-0000-4000-8000-000000000011",
+          "kind": "managed-monitor_run",
+          "schemaVersion": 1,
+          "byteLength": 636,
+          "digest": "3f91d2b763075df52c5ec961b1f4440805e3413445aebebcf28f27850f000173",
+          "bytesBase64": "eyJtb25pdG9ySWQiOiJtb25pdG9yLTEiLCJvd25lclNjb3BlSWQiOiJzY29wZS1tYWluIiwiY29tbWFuZFJlZiI6eyJyZXNvdXJjZUlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDEwIiwia2luZCI6Im1hbmFnZWQtdG9vbC1hcmdzIiwic2NoZW1hVmVyc2lvbiI6MSwiYnl0ZUxlbmd0aCI6MzEsImRpZ2VzdCI6ImI4ODBhZWQ2MDIxYjZiZmNlNDljMWNiODk5ZDEwOWE0OWRiOTg4OTk5YTVkYjkwNWE0ZmEyZGI4OTA4MzgzM2YifSwibWF4RXZlbnRzIjoxMDAsImlkbGVUaW1lb3V0TXMiOjYwMDAwLCJkZWJvdW5jZU1zIjowLCJzdGFydFJlY2VpcHRSZWYiOm51bGwsIm9ic2VydmF0aW9uU2VxdWVuY2UiOjAsImxhc3RPYnNlcnZhdGlvblJlZiI6bnVsbCwibm90aWZpZWRUaHJvdWdoIjowLCJzdG9wUmVhc29uIjpudWxsLCJvdXRwdXRSZWYiOm51bGwsInJ1biI6eyJzdGF0ZSI6ImFkbWl0dGVkIiwicmVhc29uIjpudWxsLCJkZWZpbml0aW9uIjpudWxsLCJleGVjdXRpb25DYWxsSWQiOiJjYWxsLW1vbml0b3ItMSIsImVmZmVjdElkIjpudWxsLCJkaXNwYXRjaElkIjpudWxsLCJkZWxpdmVyeUlkIjpudWxsLCJleGVjdXRpb24iOiJpbnRlbnQiLCJydW50aW1lIjpudWxsLCJkZWxpdmVyeSI6bnVsbH19"
+        },
+        {
+          "resourceId": "00000000-0000-4000-8000-000000000010",
+          "kind": "managed-tool-args",
+          "schemaVersion": 1,
+          "byteLength": 31,
+          "digest": "b880aed6021b6bfce49c1cb899d109a49db988999a5db905a4fa2db89083833f",
+          "bytesBase64": "eyJjb21tYW5kIjoidGFpbCAtZiBidWlsZC5sb2cifQ=="
+        }
+      ]
+    },
+    {
+      "workspaceId": "workspace-a",
+      "writerId": "harness-a",
+      "writerGeneration": 1,
+      "expectedJournalRevision": 3,
+      "expectedCommittedSequence": 2,
+      "transactionId": "00000000-0000-4000-8000-000000000018",
+      "operation": "commitMonitorRun",
+      "commandId": "monitor-1:2",
+      "contentDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "firstSequence": 3,
+      "lastSequence": 5,
+      "eventCount": 3,
+      "eventsDigest": "0765d1bdc9e9f1b53f3140c065d24b4c935dbc44b46b795d57d3ab34468bd4f4",
+      "previousCommitDigest": "d968f2dcee8f0ff599914d5d5ad0be076b466b0a64a55b7868faa02d82950cc9",
+      "commitDigest": "3295737815301aa6b60f4dacac974fc6393f885779a3a3a02b408641a0fd75f5",
+      "activationEpoch": 1,
+      "latestCheckpointResourceId": null,
+      "recordCount": 4,
+      "recordBytesBase64": "eyJ1dWlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDE5IiwicGFyZW50VXVpZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAxNCIsInNlc3Npb25JZCI6IjU1MGU4NDAwLWUyOWItNDFkNC1hNzE2LTQ0NjY1NTQ0MDAwMCIsInRpbWVzdGFtcCI6IjIwMjYtMDktMjFUMTQ6MTM6MjEuMDAwWiIsInR5cGUiOiJzeXN0ZW0iLCJzdWJ0eXBlIjoibWFuYWdlZF9zZXNzaW9uX2V2ZW50X3YxIiwiY3dkIjoiL3dvcmtzcGFjZSIsInZlcnNpb24iOiJ0ZXN0IiwibWFuYWdlZFNlc3Npb24iOnsidiI6MSwic2VxdWVuY2UiOjMsImV2ZW50SWQiOiJtb25pdG9yX3J1bjoyIiwic2Vzc2lvbktleSI6eyJ0ZW5hbnRJZCI6InRlbmFudC1hIiwid29ya3NwYWNlSWQiOiJ3b3Jrc3BhY2UtYSIsInNlc3Npb25JZCI6IjU1MGU4NDAwLWUyOWItNDFkNC1hNzE2LTQ0NjY1NTQ0MDAwMCJ9LCJraW5kIjoiZG9tYWluLmNvbW1pdHRlZCIsIm9jY3VycmVkQXQiOjE3OTAwMDAwMDEwMDAsInBheWxvYWQiOnsiZG9tYWluIjoibW9uaXRvcl9ydW4iLCJ2ZXJzaW9uIjoxLCJvcGVyYXRpb25JZCI6Im1vbml0b3ItMToyIiwicmVjb3JkUmVmIjp7InJlc291cmNlSWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMTciLCJraW5kIjoibWFuYWdlZC1tb25pdG9yX3J1biIsInNjaGVtYVZlcnNpb24iOjEsImJ5dGVMZW5ndGgiOjY5MSwiZGlnZXN0IjoiMjcwN2QzMmY1NjkxNTg1NDkyMTFiMWNjZjRmNWY4NzAxMWY3MGM2ZjAxYmFlZjRlNGQ5NTU0MzViMzhkN2U1ZiJ9fX19CnsidXVpZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAyMCIsInBhcmVudFV1aWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMTkiLCJzZXNzaW9uSWQiOiI1NTBlODQwMC1lMjliLTQxZDQtYTcxNi00NDY2NTU0NDAwMDAiLCJ0aW1lc3RhbXAiOiIyMDI2LTA5LTIxVDE0OjEzOjIxLjAwMFoiLCJ0eXBlIjoic3lzdGVtIiwic3VidHlwZSI6Im1hbmFnZWRfc2Vzc2lvbl9ldmVudF92MSIsImN3ZCI6Ii93b3Jrc3BhY2UiLCJ2ZXJzaW9uIjoidGVzdCIsIm1hbmFnZWRTZXNzaW9uIjp7InYiOjEsInNlcXVlbmNlIjo0LCJldmVudElkIjoibW9uaXRvci0xOm5vdGlmeToxOmFjY2VwdGVkIiwic2Vzc2lvbktleSI6eyJ0ZW5hbnRJZCI6InRlbmFudC1hIiwid29ya3NwYWNlSWQiOiJ3b3Jrc3BhY2UtYSIsInNlc3Npb25JZCI6IjU1MGU4NDAwLWUyOWItNDFkNC1hNzE2LTQ0NjY1NTQ0MDAwMCJ9LCJraW5kIjoiaW5wdXQuYWNjZXB0ZWQiLCJvY2N1cnJlZEF0IjoxNzkwMDAwMDAxMDAwLCJwYXlsb2FkIjp7ImlucHV0SWQiOiJtb25pdG9yLTE6bm90aWZ5OjEiLCJ0dXJuSWQiOiJtb25pdG9yLTE6bm90aWZ5OjEiLCJzb3VyY2UiOiJtb25pdG9yIiwiY29udGVudFJlZiI6eyJyZXNvdXJjZUlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDE1Iiwia2luZCI6Im1hbmFnZWQtaW5wdXQiLCJzY2hlbWFWZXJzaW9uIjoxLCJieXRlTGVuZ3RoIjoyOCwiZGlnZXN0IjoiMzg0OWVjOTAwMGU2NDc4NTc1MTk1M2FkZTM3MGM0N2Q1OTYwYjNkNzc4M2NjODA2MDFhMDllYjRjYmJlNzdmYiJ9LCJkZWFkbGluZSI6bnVsbCwiYWRtaXNzaW9uUmVmIjp7InJlc291cmNlSWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMTYiLCJraW5kIjoibWFuYWdlZC1hZG1pc3Npb24iLCJzY2hlbWFWZXJzaW9uIjoxLCJieXRlTGVuZ3RoIjoyLCJkaWdlc3QiOiI0NDEzNmZhMzU1YjM2NzhhMTE0NmFkMTZmN2U4NjQ5ZTk0ZmI0ZmMyMWZlNzdlODMxMGMwNjBmNjFjYWFmZjhhIn19fX0KeyJ1dWlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDIxIiwicGFyZW50VXVpZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAyMCIsInNlc3Npb25JZCI6IjU1MGU4NDAwLWUyOWItNDFkNC1hNzE2LTQ0NjY1NTQ0MDAwMCIsInRpbWVzdGFtcCI6IjIwMjYtMDktMjFUMTQ6MTM6MjEuMDAwWiIsInR5cGUiOiJzeXN0ZW0iLCJzdWJ0eXBlIjoibWFuYWdlZF9zZXNzaW9uX2V2ZW50X3YxIiwiY3dkIjoiL3dvcmtzcGFjZSIsInZlcnNpb24iOiJ0ZXN0IiwibWFuYWdlZFNlc3Npb24iOnsidiI6MSwic2VxdWVuY2UiOjUsImV2ZW50SWQiOiJtb25pdG9yLTE6bm90aWZ5OjE6d2FrZSIsInNlc3Npb25LZXkiOnsidGVuYW50SWQiOiJ0ZW5hbnQtYSIsIndvcmtzcGFjZUlkIjoid29ya3NwYWNlLWEiLCJzZXNzaW9uSWQiOiI1NTBlODQwMC1lMjliLTQxZDQtYTcxNi00NDY2NTU0NDAwMDAifSwia2luZCI6Indha2UucmVxdWVzdGVkIiwib2NjdXJyZWRBdCI6MTc5MDAwMDAwMTAwMCwicGF5bG9hZCI6eyJ3YWtlSWQiOiJtb25pdG9yLTE6bm90aWZ5OjE6d2FrZSIsInJlYXNvbiI6ImlucHV0Iiwic3ViamVjdCI6eyJ0eXBlIjoidHVybiIsInR1cm5JZCI6Im1vbml0b3ItMTpub3RpZnk6MSJ9LCJzb3VyY2VFdmVudElkIjoibW9uaXRvci0xOm5vdGlmeToxOmFjY2VwdGVkIiwicmVxdWlyZWRTZXF1ZW5jZSI6NH19fQp7InV1aWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMjIiLCJwYXJlbnRVdWlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDIxIiwic2Vzc2lvbklkIjoiNTUwZTg0MDAtZTI5Yi00MWQ0LWE3MTYtNDQ2NjU1NDQwMDAwIiwidGltZXN0YW1wIjoiMjAyNi0wOS0yMVQxNDoxMzoyMS4wMDBaIiwidHlwZSI6InN5c3RlbSIsInN1YnR5cGUiOiJtYW5hZ2VkX3Nlc3Npb25fY29tbWl0X3YxIiwiY3dkIjoiL3dvcmtzcGFjZSIsInZlcnNpb24iOiJ0ZXN0IiwibWFuYWdlZFNlc3Npb24iOnsidHJhbnNhY3Rpb25JZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAxOCIsImNvbW1hbmRJZCI6Im1vbml0b3ItMToyIiwib3BlcmF0aW9uIjoiY29tbWl0TW9uaXRvclJ1biIsImNvbnRlbnREaWdlc3QiOiJlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlIiwiZmlyc3RTZXF1ZW5jZSI6MywibGFzdFNlcXVlbmNlIjo1LCJldmVudENvdW50IjozLCJldmVudHNEaWdlc3QiOiIwNzY1ZDFiZGM5ZTlmMWI1M2YzMTQwYzA2NWQyNGI0YzkzNWRiYzQ0YjQ2Yjc5NWQ1N2QzYWIzNDQ2OGJkNGY0IiwicHJldmlvdXNDb21taXREaWdlc3QiOiJkOTY4ZjJkY2VlOGYwZmY1OTk5MTRkNWQ1YWQwYmUwNzZiNDY2YjBhNjRhNTViNzg2OGZhYTAyZDgyOTUwY2M5In19Cg==",
+      "recordDigest": "fb70888345c7c7bb30dd9b800fae75a2c1042ee4a1d86b8a486d46e8c259c165",
+      "resources": [
+        {
+          "resourceId": "00000000-0000-4000-8000-000000000017",
+          "kind": "managed-monitor_run",
+          "schemaVersion": 1,
+          "byteLength": 691,
+          "digest": "2707d32f569158549211b1ccf4f5f87011f70c6f01baef4e4d955435b38d7e5f",
+          "bytesBase64": "eyJtb25pdG9ySWQiOiJtb25pdG9yLTEiLCJvd25lclNjb3BlSWQiOiJzY29wZS1tYWluIiwiY29tbWFuZFJlZiI6eyJyZXNvdXJjZUlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDEwIiwia2luZCI6Im1hbmFnZWQtdG9vbC1hcmdzIiwic2NoZW1hVmVyc2lvbiI6MSwiYnl0ZUxlbmd0aCI6MzEsImRpZ2VzdCI6ImI4ODBhZWQ2MDIxYjZiZmNlNDljMWNiODk5ZDEwOWE0OWRiOTg4OTk5YTVkYjkwNWE0ZmEyZGI4OTA4MzgzM2YifSwibWF4RXZlbnRzIjoxMDAsImlkbGVUaW1lb3V0TXMiOjYwMDAwLCJkZWJvdW5jZU1zIjowLCJzdGFydFJlY2VpcHRSZWYiOm51bGwsIm9ic2VydmF0aW9uU2VxdWVuY2UiOjAsImxhc3RPYnNlcnZhdGlvblJlZiI6bnVsbCwibm90aWZpZWRUaHJvdWdoIjowLCJzdG9wUmVhc29uIjpudWxsLCJvdXRwdXRSZWYiOm51bGwsInJ1biI6eyJzdGF0ZSI6ImFkbWl0dGVkIiwicmVhc29uIjpudWxsLCJkZWZpbml0aW9uIjpudWxsLCJleGVjdXRpb25DYWxsSWQiOiJjYWxsLW1vbml0b3ItMSIsImVmZmVjdElkIjpudWxsLCJkaXNwYXRjaElkIjpudWxsLCJkZWxpdmVyeUlkIjpudWxsLCJleGVjdXRpb24iOiJkaXNwYXRjaF9zdGFydGVkIiwicnVudGltZSI6eyJydW50aW1lQmluZGluZ0lkIjoiYmluZGluZy0xIiwiZ2VuZXJhdGlvbiI6IjEifSwiZGVsaXZlcnkiOm51bGx9fQ=="
+        },
+        {
+          "resourceId": "00000000-0000-4000-8000-000000000010",
+          "kind": "managed-tool-args",
+          "schemaVersion": 1,
+          "byteLength": 31,
+          "digest": "b880aed6021b6bfce49c1cb899d109a49db988999a5db905a4fa2db89083833f"
+        },
+        {
+          "resourceId": "00000000-0000-4000-8000-000000000015",
+          "kind": "managed-input",
+          "schemaVersion": 1,
+          "byteLength": 28,
+          "digest": "3849ec9000e64785751953ade370c47d5960b3d7783cc80601a09eb4cbbe77fb",
+          "bytesBase64": "eyJ0ZXh0IjoiYnVpbGQubG9nIGNoYW5nZWQifQ=="
+        },
+        {
+          "resourceId": "00000000-0000-4000-8000-000000000016",
+          "kind": "managed-admission",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "bytesBase64": "e30="
+        }
+      ]
+    },
+    {
+      "workspaceId": "workspace-a",
+      "writerId": "harness-a",
+      "writerGeneration": 1,
+      "expectedJournalRevision": 4,
+      "expectedCommittedSequence": 5,
+      "transactionId": "00000000-0000-4000-8000-000000000024",
+      "operation": "releaseActivation",
+      "commandId": "00000000-0000-4000-8000-000000000005:released",
+      "contentDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "firstSequence": 6,
+      "lastSequence": 6,
+      "eventCount": 1,
+      "eventsDigest": "3c028c1eff157a1ee4b9ec48889ab6c6abca4f29fde65c4186acc79fc26d0125",
+      "previousCommitDigest": "3295737815301aa6b60f4dacac974fc6393f885779a3a3a02b408641a0fd75f5",
+      "commitDigest": "2553a20fc7b13a4488275e19003f7b32241c2c14e80621129b27039c27ad0530",
+      "activationEpoch": 1,
+      "latestCheckpointResourceId": null,
+      "recordCount": 2,
+      "recordBytesBase64": "eyJ1dWlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDI1IiwicGFyZW50VXVpZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAyMiIsInNlc3Npb25JZCI6IjU1MGU4NDAwLWUyOWItNDFkNC1hNzE2LTQ0NjY1NTQ0MDAwMCIsInRpbWVzdGFtcCI6IjIwMjYtMDktMjFUMTQ6MTM6MjEuMDAwWiIsInR5cGUiOiJzeXN0ZW0iLCJzdWJ0eXBlIjoibWFuYWdlZF9zZXNzaW9uX2V2ZW50X3YxIiwiY3dkIjoiL3dvcmtzcGFjZSIsInZlcnNpb24iOiJ0ZXN0IiwibWFuYWdlZFNlc3Npb24iOnsidiI6MSwic2VxdWVuY2UiOjYsImV2ZW50SWQiOiJhY3RpdmF0aW9uOjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwNTpyZWxlYXNlZCIsInNlc3Npb25LZXkiOnsidGVuYW50SWQiOiJ0ZW5hbnQtYSIsIndvcmtzcGFjZUlkIjoid29ya3NwYWNlLWEiLCJzZXNzaW9uSWQiOiI1NTBlODQwMC1lMjliLTQxZDQtYTcxNi00NDY2NTU0NDAwMDAifSwia2luZCI6ImFjdGl2YXRpb24uY2hhbmdlZCIsIm9jY3VycmVkQXQiOjE3OTAwMDAwMDEwMDAsInBheWxvYWQiOnsiYWN0aXZhdGlvbklkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDA1IiwiZXBvY2giOjEsIndvcmtlcklkIjoiaGFybmVzcy1hIiwic3ViamVjdCI6eyJ0eXBlIjoiYWN0aXZhdGlvbiIsInNjb3BlSWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDUiLCJhY3RpdmF0aW9uSWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDUiLCJlcG9jaCI6MX0sInBoYXNlIjoicmVsZWFzZWQiLCJsZWFzZUR1cmF0aW9uTXMiOm51bGwsImV4cGlyZXNBdCI6MTc5MDAwMDA2MDAwMCwiaW5zdGFsbFJlZiI6bnVsbCwiYm91bmRhcnlSZWYiOnsicmVzb3VyY2VJZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAyMyIsImtpbmQiOiJtYW5hZ2VkLWFjdGl2YXRpb24tYm91bmRhcnkiLCJzY2hlbWFWZXJzaW9uIjoxLCJieXRlTGVuZ3RoIjoxNTUsImRpZ2VzdCI6IjViNTA4NjQ5NGE0MDMwMWVlMjM2ZTFlNTUyY2I1MjNkZjZmMjYxMzg4NGNhZjEyM2RjNmI0OGZhZDkyMjIzODQifX19fQp7InV1aWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMjYiLCJwYXJlbnRVdWlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDI1Iiwic2Vzc2lvbklkIjoiNTUwZTg0MDAtZTI5Yi00MWQ0LWE3MTYtNDQ2NjU1NDQwMDAwIiwidGltZXN0YW1wIjoiMjAyNi0wOS0yMVQxNDoxMzoyMS4wMDBaIiwidHlwZSI6InN5c3RlbSIsInN1YnR5cGUiOiJtYW5hZ2VkX3Nlc3Npb25fY29tbWl0X3YxIiwiY3dkIjoiL3dvcmtzcGFjZSIsInZlcnNpb24iOiJ0ZXN0IiwibWFuYWdlZFNlc3Npb24iOnsidHJhbnNhY3Rpb25JZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAyNCIsImNvbW1hbmRJZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwNTpyZWxlYXNlZCIsIm9wZXJhdGlvbiI6InJlbGVhc2VBY3RpdmF0aW9uIiwiY29udGVudERpZ2VzdCI6IjQ0MTM2ZmEzNTViMzY3OGExMTQ2YWQxNmY3ZTg2NDllOTRmYjRmYzIxZmU3N2U4MzEwYzA2MGY2MWNhYWZmOGEiLCJmaXJzdFNlcXVlbmNlIjo2LCJsYXN0U2VxdWVuY2UiOjYsImV2ZW50Q291bnQiOjEsImV2ZW50c0RpZ2VzdCI6IjNjMDI4YzFlZmYxNTdhMWVlNGI5ZWM0ODg4OWFiNmM2YWJjYTRmMjlmZGU2NWM0MTg2YWNjNzlmYzI2ZDAxMjUiLCJwcmV2aW91c0NvbW1pdERpZ2VzdCI6IjMyOTU3Mzc4MTUzMDFhYTZiNjBmNGRhY2FjOTc0ZmM2MzkzZjg4NTc3OWEzYTNhMDJiNDA4NjQxYTBmZDc1ZjUifX0K",
+      "recordDigest": "0a5cc243b528b9a8ce8a89a0cce6cbe52b1e80082a7774df5133a25059056ff5",
+      "resources": [
+        {
+          "resourceId": "00000000-0000-4000-8000-000000000023",
+          "kind": "managed-activation-boundary",
+          "schemaVersion": 1,
+          "byteLength": 155,
+          "digest": "5b5086494a40301ee236e1e552cb523df6f2613884caf123dc6b48fad9222384",
+          "bytesBase64": "eyJ2ZXJzaW9uIjoxLCJhY3RpdmF0aW9uSWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDUiLCJlcG9jaCI6MSwiY29tbWl0dGVkU2VxdWVuY2UiOjUsImxhc3RSZWNvcmRVdWlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDIyIn0="
+        }
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "taskId": "task_92bec57ac91374b68980b439b01a871fae5a36c9c2a014036d268ab933862e7a",
+      "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+      "kind": "monitor",
+      "state": "pending",
+      "runtimeState": "provisioning",
+      "definitionRevision": null,
+      "createdAt": 1790000000000,
+      "startedAt": null,
+      "settledAt": null
+    }
+  ]
+}

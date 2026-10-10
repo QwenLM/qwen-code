@@ -467,8 +467,37 @@ export class SessionMessageHandler extends BaseMessageHandler {
       );
     }
 
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    return workspaceFolder?.uri.fsPath || process.cwd();
+    const fsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!fsPath) return process.cwd();
+    try {
+      // `fs/promises` realpath is documented to use the same semantics as
+      // `fs.realpath.native()`: it calls the realpath(3) binding directly, not
+      // the JS component walker that `fs.realpath` uses and that echoes the
+      // caller's casing on case-insensitive volumes (APFS/NTFS). That is the
+      // spelling `canonicalizeWorkspace` in
+      // packages/acp-bridge/src/workspacePaths.ts canonicalizes to, and the one
+      // the transcript bucket is hashed from.
+      return await fsp.realpath(fsPath);
+    } catch (error) {
+      // A workspace folder that stops resolving while the window stays open
+      // (deleted or renamed from a terminal, a removed worktree, an unmounted
+      // volume, a dangling symlink) must not block the export. For a
+      // non-symlinked folder whose spelling already matches the on-disk casing,
+      // the raw spelling IS the canonical one, so the transcript bucket under
+      // `~/.qwen/tmp/<getProjectHash(cwd)>/chats` still matches. The daemon
+      // hashes the *canonicalized* workspace (packages/cli/src/serve/server.ts),
+      // so two spellings do not: a case-variant on a case-insensitive volume
+      // (`getProjectHash` lowercases only on win32) and any alias in a symlinked
+      // folder that has stopped resolving both hash to a bucket the daemon never
+      // wrote. There the export fails the way it did before this branch existed
+      // — `loadSession` misses and `exportSessionToFile` throws "No active
+      // session found to export." before it ever reaches the save dialog.
+      // Only ENOENT falls back; EACCES/EIO/ELOOP keep propagating so transient
+      // I/O failures are not hidden, matching `canonicalizeWorkspace` in
+      // packages/acp-bridge/src/workspacePaths.ts.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      return fsPath;
+    }
   }
 
   private async handleExportCommand(

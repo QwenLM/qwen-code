@@ -16,6 +16,7 @@ import type {
 } from './types.js';
 import { HookType } from './types.js';
 import { getHookMatcherTarget, getToolMatcherTargets } from './hookPlanner.js';
+import { matchesHookPattern } from './hook-matcher.js';
 
 const debugLogger = createDebugLogger('SESSION_HOOKS_MANAGER');
 
@@ -290,70 +291,12 @@ export class SessionHooksManager {
   ): SessionHookEntry[] {
     const hooks = this.getHooksForEvent(sessionId, event);
 
-    return hooks.filter((entry) => {
-      if (isToolMatcherEvent(event)) {
-        return this.matchesToolPattern(entry.matcher, target);
-      }
-      return this.matchesPattern(entry.matcher, target);
-    });
-  }
-
-  private matchesToolPattern(pattern: string, toolName: string): boolean {
-    if (
-      pattern.includes('|') &&
-      !pattern.startsWith('^') &&
-      !pattern.startsWith('(')
-    ) {
-      const alternatives = pattern.split('|').map((s) => s.trim());
-      return alternatives.some((alt) => this.matchesToolPattern(alt, toolName));
-    }
-
-    const targets = getToolMatcherTargets(toolName);
-    if (targets.includes(pattern)) {
-      return true;
-    }
-
-    return this.matchesPattern(pattern, toolName);
-  }
-
-  /**
-   * Check if a target matches a pattern
-   * Supports: exact match, '*' wildcard, '|' for alternatives, regex syntax
-   *
-   * Matching priority:
-   * 1. '*' - matches everything
-   * 2. Pipe-separated alternatives (e.g., 'Write|Edit|Read')
-   * 3. Regex syntax (e.g., '^Bash.*', 'Write|Edit')
-   * 4. Exact match (fallback)
-   */
-  private matchesPattern(pattern: string, target: string): boolean {
-    if (pattern === '*') {
-      return true;
-    }
-
-    // Handle pipe-separated alternatives
-    if (
-      pattern.includes('|') &&
-      !pattern.startsWith('^') &&
-      !pattern.startsWith('(')
-    ) {
-      const alternatives = pattern.split('|').map((s) => s.trim());
-      return alternatives.some((alt) => this.matchesPattern(alt, target));
-    }
-
-    // Try regex match
-    try {
-      const regex = new RegExp(`^${pattern}$`);
-      return regex.test(target);
-    } catch {
-      // Invalid regex, fall back to exact match
-      debugLogger.debug(
-        `Invalid regex pattern "${pattern}", falling back to exact match`,
-      );
-    }
-
-    // Exact match (fallback)
-    return pattern === target;
+    const aliases = isToolMatcherEvent(event)
+      ? getToolMatcherTargets(target)
+      : undefined;
+    return hooks.filter((entry) =>
+      matchesHookPattern(entry.matcher, target, { aliases }),
+    );
   }
 
   /**

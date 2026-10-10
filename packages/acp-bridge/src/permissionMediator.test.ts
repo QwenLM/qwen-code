@@ -489,6 +489,77 @@ describe('MultiClientPermissionMediator — forgetSession', () => {
   });
 });
 
+describe('MultiClientPermissionMediator — cancelForPrompt', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('cancels only the pending requests attributed to the finished turn', async () => {
+    const { mediator, events } = makeMediator();
+    const promiseTurn = mediator.request(
+      makeRecord({
+        requestId: 'req-turn',
+        sessionId: 'sess-1',
+        promptId: 'turn-1',
+      }),
+      5_000,
+    );
+    const promiseUser = mediator.request(
+      makeRecord({
+        requestId: 'req-user',
+        sessionId: 'sess-1',
+        promptId: 'user-1',
+      }),
+      5_000,
+    );
+    const promiseOtherSession = mediator.request(
+      makeRecord({
+        requestId: 'req-other',
+        sessionId: 'sess-2',
+        promptId: 'turn-1',
+      }),
+      5_000,
+    );
+
+    mediator.cancelForPrompt('sess-1', 'turn-1');
+
+    await expect(promiseTurn).resolves.toEqual({
+      kind: 'cancelled',
+      reason: 'agent_cancelled',
+    });
+    // Same session but a live user prompt: untouched.
+    expect(mediator.peekSessionFor('req-user')).toBe('sess-1');
+    // Same turnId on a different session: untouched.
+    expect(mediator.peekSessionFor('req-other')).toBe('sess-2');
+    const resolved = events.filter(
+      (e) => e.event.type === 'permission_resolved',
+    );
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].sessionId).toBe('sess-1');
+    expect(resolved[0].event.promptId).toBe('turn-1');
+
+    mediator.forgetSession('sess-1');
+    mediator.forgetSession('sess-2');
+    await Promise.all([promiseUser, promiseOtherSession]);
+  });
+
+  it('is a no-op when nothing pending matches the prompt', () => {
+    const { mediator, events } = makeMediator();
+    void mediator.request(
+      makeRecord({ requestId: 'req-1', promptId: 'user-1' }),
+      5_000,
+    );
+
+    mediator.cancelForPrompt('sess-1', 'turn-gone');
+    expect(events).toHaveLength(0);
+
+    mediator.forgetSession('sess-1');
+  });
+});
+
 describe('MultiClientPermissionMediator — timeout', () => {
   beforeEach(() => {
     vi.useFakeTimers();

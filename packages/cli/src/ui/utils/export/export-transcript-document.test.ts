@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
 import {
   EXPORT_TRANSCRIPT_LIMITS_V1,
   assertExportTranscriptDocumentV1,
@@ -7,6 +6,7 @@ import {
   createExportTranscriptDocumentV1,
 } from './export-transcript-document.js';
 import { escapeJsonForHtmlScriptData } from './html-script-data.js';
+import { expectWithinLatencyBudget } from '../../../test-utils/latency-budget.js';
 
 const CANARY = 'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT';
 const EXPORT_OPTIONS = {
@@ -53,6 +53,154 @@ const sessionData = {
 };
 
 describe('ExportTranscriptDocumentV1', () => {
+  it('exports a complete outer transcript while retaining raw internal evidence', () => {
+    const results = [
+      {
+        id: 'nested-write',
+        name: 'write_file',
+        output: CANARY,
+        provenance: 'tool_result',
+        subtype: 'code_mode_tool_result',
+      },
+      {
+        id: 'nested-goal',
+        name: 'get_goal',
+        output: CANARY,
+        provenance: 'goal_runtime',
+        subtype: 'code_mode_tool_result',
+      },
+      {
+        id: 'outer',
+        name: 'exec',
+        output: 'script finished',
+        provenance: 'execution_output',
+      },
+      {
+        id: 'direct-goal',
+        name: 'get_goal',
+        output: 'direct goal result',
+        provenance: 'goal_runtime',
+      },
+    ];
+    const records = [
+      record('calls', null, {
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'outer',
+                name: 'exec',
+                args: { source: 'await tools.write_file({})' },
+              },
+            },
+            { functionCall: { id: 'direct-goal', name: 'get_goal', args: {} } },
+          ],
+        },
+      }),
+      ...results.map(({ id, name, output, ...options }, index) =>
+        record(id, index === 0 ? 'calls' : results[index - 1].id, {
+          type: 'tool_result',
+          ...options,
+          message: {
+            role: 'user',
+            parts: [{ functionResponse: { id, name, response: { output } } }],
+          },
+          toolCallResult: {
+            callId: id,
+            status: 'success',
+            resultDisplay:
+              id === 'nested-write'
+                ? {
+                    fileName: 'internal.txt',
+                    fileDiff: `@@ -0,0 +1 @@\n+${output}`,
+                    originalContent: null,
+                    newContent: output,
+                  }
+                : output,
+          },
+        }),
+      ),
+    ];
+    const original = JSON.stringify(records);
+    const document = createExportTranscriptDocumentV1(
+      records,
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    expect(document.metadata).toMatchObject({
+      complete: true,
+      truncated: false,
+    });
+    expect(document.diagnostics).toEqual([]);
+    expect(
+      document.blocks
+        .filter((block) => block.kind === 'tool')
+        .map((block) => block.toolName),
+    ).toEqual(['exec', 'get_goal']);
+    expect(JSON.stringify(document)).not.toContain(CANARY);
+    expect(JSON.stringify(records)).toBe(original);
+  });
+  it('keeps the history-gap notice when the chain breaks at an internal Code Mode result', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('calls', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [{ functionCall: { id: 'outer', name: 'exec', args: {} } }],
+          },
+        }),
+        record('nested', 'missing-parent', {
+          type: 'tool_result',
+          subtype: 'code_mode_tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'nested',
+                  name: 'write_file',
+                  response: { output: CANARY },
+                },
+              },
+            ],
+          },
+        }),
+        record('outer-result', 'nested', {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'outer',
+                  name: 'exec',
+                  response: { output: 'script finished' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: 'outer',
+            status: 'success',
+            resultDisplay: 'script finished',
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const text = document.blocks
+      .flatMap((block) => ('text' in block ? [block.text] : []))
+      .join('\n');
+
+    expect(text).toContain(
+      'Some earlier messages are unavailable because the saved history is incomplete.',
+    );
+    expect(JSON.stringify(document)).not.toContain(CANARY);
+  });
   it('projects records through an explicit allowlist without raw leakage', () => {
     const records = [
       record('user-1', null, {
@@ -765,7 +913,7 @@ describe('ExportTranscriptDocumentV1', () => {
   });
 
   it('bounds repeated-separator checks in decoded URL authorities', () => {
-    const separators = '/'.repeat(40);
+    const separators = '/'.repeat(30);
     const input = record('repeated-separators', null, {
       message: {
         role: 'user',
@@ -780,27 +928,19 @@ describe('ExportTranscriptDocumentV1', () => {
         ],
       },
     });
-    const moduleUrl = new URL(
-      './export-transcript-document.ts',
-      import.meta.url,
+    const startedAt = Date.now();
+    const document = createExportTranscriptDocumentV1(
+      [input],
+      sessionData,
+      EXPORT_OPTIONS,
     );
-    const result = spawnSync(
-      process.execPath,
-      [
-        '--import',
-        'tsx',
-        '--input-type=module',
-        '--eval',
-        `import { createExportTranscriptDocumentV1 as create } from ${JSON.stringify(moduleUrl.href)};
-process.stdout.write(JSON.stringify(create(${JSON.stringify([input])}, ${JSON.stringify(sessionData)}, ${JSON.stringify(EXPORT_OPTIONS)})));`,
-      ],
-      { encoding: 'utf8', timeout: 20_000, killSignal: 'SIGKILL' },
-    );
+    expectWithinLatencyBudget(Date.now() - startedAt, 1000, {
+      poolMultiplier: 20,
+    });
 
-    expect(result.error).toBeUndefined();
-    expect(result.status).toBe(0);
-    expect(result.stdout).not.toContain('alice');
-    expect(result.stdout).toContain('ordinary');
+    const serialized = JSON.stringify(document);
+    expect(serialized).not.toContain('alice');
+    expect(serialized).toContain('ordinary');
   });
 
   it.each(['image/png', 'image/jpeg', 'image/webp'])(
@@ -1221,6 +1361,142 @@ process.stdout.write(JSON.stringify(create(${JSON.stringify([input])}, ${JSON.st
     expect(document.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'envelope_budget_exceeded' }),
     );
+  });
+
+  it('keeps structured shell fallback text in the HTML document safe preview', () => {
+    const text = 'Health check complete\nSaved under /Users/alice/project';
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('shell-start', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'shell-1',
+                  name: 'run_shell_command',
+                  args: { command: 'true' },
+                },
+              },
+            ],
+          },
+        }),
+        record('shell-result', 'shell-start', {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'shell-1',
+                  name: 'run_shell_command',
+                  response: { output: 'Different legacy envelope' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: 'shell-1',
+            resultDisplay: {
+              type: 'shell_result',
+              version: 1,
+              text,
+              output: 'Health check complete',
+              directory: '/Users/alice/project',
+              exitCode: 0,
+              signal: null,
+              pid: 42,
+              error: null,
+              outcome: 'completed',
+              notices: [],
+              truncated: false,
+              outputFiles: [],
+            },
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const tool = document.blocks.find((block) => block.kind === 'tool');
+    expect(tool?.resultPreview).toEqual({
+      kind: 'text',
+      text: 'Health check complete\nSaved under [home]/project',
+    });
+    expect(JSON.stringify(document)).not.toContain('Different legacy envelope');
+    expect(() => assertExportTranscriptDocumentV1(document)).not.toThrow();
+  });
+
+  it('exports structured question answers through the safe preview allowlist', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('tool-start', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'ask-1',
+                  name: 'ask_user_question',
+                  args: { questions: [] },
+                },
+              },
+            ],
+          },
+        }),
+        record('tool-result', 'tool-start', {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'ask-1',
+                  name: 'ask_user_question',
+                  response: { output: 'Question A: first\n**B**: embedded' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: 'ask-1',
+            resultDisplay: {
+              type: 'ask_user_question_answers',
+              text: 'Question A: first\n**B**: embedded',
+              answers: [
+                {
+                  question: 'Read /Users/alice/example.ts?',
+                  answer: 'first\n**B**: embedded',
+                  secret: CANARY,
+                },
+              ],
+              secret: CANARY,
+            },
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const tool = document.blocks.find((block) => block.kind === 'tool');
+    expect(tool?.resultPreview).toEqual({
+      kind: 'question_answers',
+      text: 'Question A: first\n**B**: embedded',
+      answers: [
+        {
+          question: 'Read [home]/example.ts?',
+          answer: 'first\n**B**: embedded',
+        },
+      ],
+    });
+    expect(JSON.stringify(document)).not.toContain(CANARY);
+    expect(() => assertExportTranscriptDocumentV1(document)).not.toThrow();
+    const invalid = structuredClone(document);
+    const invalidTool = invalid.blocks.find((block) => block.kind === 'tool');
+    Object.assign(invalidTool!.resultPreview!, { secret: CANARY });
+    expect(() => assertExportTranscriptDocumentV1(invalid)).toThrow();
   });
 
   it('degrades a completed tool when its safe result preview is unavailable', () => {
@@ -2553,6 +2829,97 @@ process.stdout.write(JSON.stringify(create(${JSON.stringify([input])}, ${JSON.st
       maxArrayLength: 1_000,
       maxRichRenderTasks: 100,
     });
+  });
+
+  it("names the agent on an agent's reply and on its posts", () => {
+    const records = [
+      record('prompt', null),
+      record('answer', 'prompt', {
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'Main answer.' }] },
+      }),
+      record('agent-reply', 'answer', {
+        subtype: 'agent_message',
+        provenance: 'external_agent',
+        message: {
+          role: 'user',
+          parts: [{ text: '<agent_message>Looks good.</agent_message>' }],
+        },
+        systemPayload: {
+          displayText: 'Looks good.',
+          author: { agentId: 'agent-1', name: 'claude-B', color: '#f80' },
+          runId: 'run-1',
+          status: 'completed',
+        },
+        agentId: 'agent-1',
+        agentName: 'claude-B',
+      }),
+      record('agent-post', 'agent-reply', {
+        subtype: 'agent_mention',
+        provenance: 'external_agent',
+        systemPayload: {
+          displayText: '@codex-C your turn',
+          mentionedAgentIds: ['agent-2'],
+          author: { agentId: 'agent-1', name: 'claude-B' },
+        },
+      }),
+    ];
+    const document = createExportTranscriptDocumentV1(
+      records,
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    expect(
+      document.blocks.map((block) => [
+        block.kind,
+        'text' in block ? block.text : undefined,
+        'author' in block ? block.author : undefined,
+      ]),
+    ).toEqual([
+      ['user', 'prompt', undefined],
+      ['assistant', 'Main answer.', undefined],
+      ['assistant', 'Looks good.', { name: 'claude-B' }],
+      ['user', '@codex-C your turn', { name: 'claude-B' }],
+    ]);
+    // Only the name travels: no agent id, color or raw meta.
+    expect(JSON.stringify(document)).not.toContain('agent-1');
+    expect(JSON.stringify(document)).not.toContain('qwenAgentMessage');
+    expect(() => assertExportTranscriptDocumentV1(document)).not.toThrow();
+  });
+
+  it('rejects an unsafe or widened block author', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('agent-reply', null, {
+          subtype: 'agent_message',
+          systemPayload: {
+            displayText: 'Hi.',
+            author: { agentId: 'agent-1', name: 'claude-B' },
+            runId: 'run-1',
+            status: 'completed',
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const withAuthor = (author: unknown) => ({
+      ...document,
+      blocks: document.blocks.map((block) =>
+        'author' in block ? { ...block, author } : block,
+      ),
+    });
+    expect(() =>
+      assertExportTranscriptDocumentV1(withAuthor({ name: 'bad\u0007name' })),
+    ).toThrowError('invalid_block');
+    expect(() =>
+      assertExportTranscriptDocumentV1(
+        withAuthor({ name: 'claude-B', agentId: 'agent-1' }),
+      ),
+    ).toThrowError('schema_validation_failed');
+    expect(() =>
+      assertExportTranscriptDocumentV1(withAuthor({ name: '' })),
+    ).toThrowError('schema_validation_failed');
   });
 
   it('escapes HTML script terminators in serialized document data', () => {

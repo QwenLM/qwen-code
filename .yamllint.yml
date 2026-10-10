@@ -83,6 +83,7 @@ rules:
     check-keys: true
 
 ignore:
+  - 'pnpm-lock.yaml'
   - 'thirdparty/'
   - 'third_party/'
   - 'vendor/'

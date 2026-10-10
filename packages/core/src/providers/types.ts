@@ -5,7 +5,13 @@
  */
 
 import type { AuthType, InputModalities } from '../core/contentGenerator.js';
-import type { ModelConfig, ModelProvidersConfig } from '../models/types.js';
+import type {
+  ModelWireApi,
+  ModelCapabilities,
+  ModelConfig,
+  ModelProvidersConfig,
+  ProviderProtocolConfig,
+} from '../models/types.js';
 
 // Re-export for convenience
 export type ProviderModelConfig = ModelConfig;
@@ -18,6 +24,7 @@ export type ProviderId = string;
 
 export interface ModelSpec {
   id: string;
+  capabilities?: ModelCapabilities;
   contextWindowSize?: number;
   enableThinking?: boolean;
   thinkingMandatory?: boolean;
@@ -115,6 +122,18 @@ export interface ProviderConfig {
   mergeModelsByIdentity?: boolean;
 
   /**
+   * Built-in `web_search` backend this provider can serve with the same
+   * credentials as the main model, letting the tool register without any
+   * `tools.webSearch` configuration.
+   *
+   * For a preset that pins its base URL, absence vetoes automatic activation.
+   * Custom and unmatched endpoints carry no preset-level knowledge and still
+   * pass through the automatic DashScope host check. Explicit configuration
+   * requires a search model; an env-declared backend also requires that model.
+   */
+  webSearch?: { backend: 'dashscope' };
+
+  /**
    * UI grouping hint — used by AuthDialog to organize providers into sections.
    * Providers with the same `uiGroup` appear together under a shared heading.
    */
@@ -134,12 +153,16 @@ export interface ProviderConfig {
 export interface ProviderSetupInputs {
   /** Override protocol (only for custom provider). Defaults to config.protocol. */
   protocol?: AuthType;
+  wireApi?: ModelWireApi;
   baseUrl: string;
   apiKey: string;
   modelIds: string[];
   /** Pre-built model configs (e.g. OpenRouter fetches models from API). Overrides modelIds. */
   prebuiltModels?: ProviderModelConfig[];
   advancedConfig?: {
+    /** Replace all advanced form controls; omitted fields otherwise stay unchanged. */
+    replaceExisting?: boolean;
+    purpose?: 'image' | 'voice';
     enableThinking?: boolean;
     multimodal?: InputModalities;
     contextWindowSize?: number;
@@ -161,8 +184,14 @@ export interface ProviderModelProvidersPatch {
 /**
  * Arbitrary key-value metadata to persist alongside a provider install.
  * Each top-level key becomes a settings path prefix (e.g. `codingPlan.version`).
+ * A field value of `undefined` deletes the persisted key — settings adapters
+ * treat `undefined` as unset — used to retire metadata a previous install
+ * recorded when the current install's shape cannot be version-tracked.
  */
-export type ProviderInstallState = Record<string, Record<string, string>>;
+export type ProviderInstallState = Record<
+  string,
+  Record<string, string | undefined>
+>;
 
 export interface ProviderInstallPlan {
   providerId: ProviderId;
@@ -205,6 +234,12 @@ export interface ProviderSettingsAdapter {
   setValue(key: string, value: unknown): void;
   /** Get the current model providers config. */
   getModelProviders(): ModelProvidersConfig;
+  /** Scope-owned entries and routing; omitted by unscoped adapters. */
+  getModelProvidersForWrite?(): {
+    modelProviders: ModelProvidersConfig;
+    providerProtocol?: ProviderProtocolConfig;
+    shadowedProviders: string[];
+  };
   /**
    * Flush changes to disk. NOTE: this may be a no-op for adapters whose
    * `setValue` already persists eagerly (see the warning on `setValue`).

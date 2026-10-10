@@ -10,7 +10,6 @@ import {
   handleSlashCommand,
 } from './nonInteractiveCliCommands.js';
 import {
-  __resetActiveGoalStoreForTests,
   createGoalRuntime,
   type ChatRecord,
   type Config,
@@ -26,6 +25,7 @@ import {
 } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
+import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
 
 const recordAutoSkillUsageMock = vi.hoisted(() => vi.fn());
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
@@ -81,7 +81,6 @@ describe('handleSlashCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     uiTelemetryService.reset();
-    __resetActiveGoalStoreForTests();
     const goalRuntime = createGoalRuntime({ journal: createJournal() });
     // getCommandsForMode applies real mode filtering on top of getCommands()
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
@@ -135,7 +134,6 @@ describe('handleSlashCommand', () => {
 
   afterEach(() => {
     uiTelemetryService.reset();
-    __resetActiveGoalStoreForTests();
   });
 
   it('should return no_command for non-slash input', async () => {
@@ -160,6 +158,107 @@ describe('handleSlashCommand', () => {
     );
 
     expect(result.type).toBe('no_command');
+  });
+
+  it('blocks local SSH workspace commands before execution and does not load custom commands', async () => {
+    mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
+    const action = vi.fn();
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'init',
+        kind: CommandKind.BUILT_IN,
+        supportedModes: ['acp', 'non_interactive'],
+        action,
+      },
+      {
+        name: 'model',
+        kind: CommandKind.FILE,
+        supportedModes: ['acp', 'non_interactive'],
+        action,
+      },
+    ]);
+    for (const command of ['/init', '/model']) {
+      expect(
+        (
+          await handleSlashCommand(
+            command,
+            abortController,
+            mockConfig,
+            mockSettings,
+          )
+        ).type,
+      ).toBe('unsupported');
+    }
+    expect(action).not.toHaveBeenCalled();
+    for (const [loaders] of mockCommandServiceCreate.mock.calls) {
+      expect(loaders).toEqual([expect.any(BuiltinCommandLoader)]);
+    }
+  });
+
+  it.each(['/var is filling up', '/tmp is full', '/custom'])(
+    'sends an unknown SSH slash prefix to the model as text: %s',
+    async (query) => {
+      mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
+      mockGetCommands.mockReturnValue([]);
+      expect(
+        await handleSlashCommand(
+          query,
+          abortController,
+          mockConfig,
+          mockSettings,
+        ),
+      ).toEqual({ type: 'no_command' });
+    },
+  );
+
+  it('shows only SSH session commands and prevents model setting persistence', async () => {
+    mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
+    const action = vi.fn().mockResolvedValue({
+      type: 'message',
+      messageType: 'info',
+      content: 'model changed',
+    });
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'model',
+        kind: CommandKind.BUILT_IN,
+        supportedModes: ['acp', 'non_interactive'],
+        action,
+      },
+      {
+        name: 'clear',
+        kind: CommandKind.BUILT_IN,
+        supportedModes: ['acp', 'non_interactive'],
+        action: vi.fn(),
+      },
+    ]);
+    expect(
+      (
+        await getAvailableCommands(mockConfig, abortController.signal, 'acp')
+      ).map((command) => command.name),
+    ).toEqual(['model']);
+    expect(
+      (
+        await handleSlashCommand(
+          '/model selected',
+          abortController,
+          mockConfig,
+          mockSettings,
+        )
+      ).type,
+    ).toBe('message');
+    expect(action).toHaveBeenCalledWith(
+      expect.objectContaining({
+        executionPolicy: expect.objectContaining({
+          allowWorkspaceSettingsWrite: false,
+          persistModelSelection: false,
+        }),
+      }),
+      'selected',
+    );
+    expect(mockCommandServiceCreate.mock.calls[0]?.[0]).toEqual([
+      expect.any(BuiltinCommandLoader),
+    ]);
   });
 
   it('should return unsupported for built-in commands without non-interactive supportedModes', async () => {
@@ -209,6 +308,45 @@ describe('handleSlashCommand', () => {
         'The command "/help" is not supported in this mode.',
       );
     }
+  });
+
+  it('forwards artifact descriptors from a message command result', async () => {
+    const artifacts = [
+      {
+        kind: 'file',
+        storage: 'workspace',
+        title: 'export.md',
+        workspacePath: 'export.md',
+        sizeBytes: 42,
+      },
+    ];
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'export',
+        description: 'Export',
+        kind: CommandKind.BUILT_IN,
+        supportedModes: ['acp'],
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'info',
+          content: 'Exported.',
+          artifacts,
+        }),
+      },
+    ]);
+    vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(true);
+    const result = await handleSlashCommand(
+      '/export md',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+      content: 'Exported.',
+      artifacts,
+    });
   });
 
   it('should execute local commands with non_interactive supportedModes', async () => {
@@ -1093,6 +1231,41 @@ describe('handleSlashCommand', () => {
       expect(result.type).toBe('unsupported');
       if (result.type === 'unsupported') {
         expect(result.reason).toContain('disabled');
+      }
+    });
+
+    it('names the legacy bare entry as the blocker of a prefixed skill command', async () => {
+      // The gate (`CommandService.create`) drops this command under either
+      // spelling. This surface only reports why, so it has to agree with the
+      // gate on which names count: matching the registry name alone would send
+      // `/demo:pdf` to the model as unknown text when the config in fact
+      // removed it.
+      mockGetCommands.mockReturnValue([
+        {
+          name: 'demo:pdf',
+          description: 'Run the pdf skill',
+          kind: CommandKind.SKILL,
+          skillDetail: { name: 'demo:pdf', authoredName: 'pdf' },
+          supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'PDF prompt' }],
+          }),
+        },
+      ]);
+      vi.mocked(mockConfig.getDisabledSlashCommands).mockReturnValue(['pdf']);
+
+      const result = await handleSlashCommand(
+        '/demo:pdf',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('unsupported');
+      if (result.type === 'unsupported') {
+        expect(result.reason).toContain('disabled');
+        expect(result.originalType).toBe('filtered_command');
       }
     });
 

@@ -9,8 +9,9 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { OpenAILogger } from '@qwen-code/qwen-code-core';
+import { OpenAILogger, Storage } from '@qwen-code/qwen-code-core';
 import {
+  cleanupOldDebugLogs,
   cleanupOldFileHistoryBackups,
   cleanupOldOpenAILogs,
   cleanupOldSubagentTranscripts,
@@ -22,6 +23,17 @@ vi.mock('node:fs/promises', { spy: true });
 const MS_PER_HOUR = 60 * 60 * 1000;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const FILE_HISTORY_DIR = 'file-history';
+const DEBUG_DIR = 'debug';
+const UUID_A = '11111111-1111-4111-8111-111111111111';
+const UUID_B = '22222222-2222-4222-8222-222222222222';
+const UUID_C = '33333333-3333-4333-8333-333333333333';
+const AGENT_SESSION_ID = `${UUID_C}-agent-Explore-g2tss0`;
+const VALID_DEBUG_SESSION_IDS = new Set([
+  UUID_A,
+  UUID_B,
+  UUID_C,
+  AGENT_SESSION_ID,
+]);
 
 // Use utimesSync (not vi.useFakeTimers) for mtime fixtures — fake timers
 // don't affect fs mtime. Day-scale windows avoid Windows FAT 2s resolution
@@ -486,6 +498,176 @@ describe('cleanupOldOpenAILogs', () => {
         ).rejects.toMatchObject({ code: 'EACCES' });
       } finally {
         fs.chmodSync(logDir, 0o700);
+      }
+    },
+  );
+});
+
+describe('cleanupOldDebugLogs', () => {
+  let qwenHome: string;
+  let debugRoot: string;
+  let cutoff: Date;
+
+  beforeEach(() => {
+    qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-debug-cleanup-'));
+    debugRoot = path.join(qwenHome, DEBUG_DIR);
+    vi.stubEnv('QWEN_HOME', qwenHome);
+    // cleanupOldDebugLogs resolves its root via Storage.getGlobalDebugDir(),
+    // which prefers QWEN_RUNTIME_DIR — pin it so an ambient value can never
+    // redirect the sweep at the real debug dir.
+    vi.stubEnv('QWEN_RUNTIME_DIR', qwenHome);
+    cutoff = new Date(Date.now() - 30 * MS_PER_DAY);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    fs.rmSync(qwenHome, { recursive: true, force: true });
+  });
+
+  function mkDebugLog(name: string, mtime: Date): string {
+    fs.mkdirSync(debugRoot, { recursive: true });
+    const p = path.join(debugRoot, name);
+    fs.writeFileSync(p, 'log');
+    fs.utimesSync(p, mtime, mtime);
+    return p;
+  }
+
+  // Valid-session fixtures go through core's writer-side path builder so the
+  // suite goes red if the sweeper's suffix/stem contract drifts from core's.
+  function mkSessionLog(sessionId: string, mtime: Date): string {
+    const p = Storage.getDebugLogPath(sessionId);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, 'log');
+    fs.utimesSync(p, mtime, mtime);
+    return p;
+  }
+
+  function cleanupDebugLogs(
+    opts: Omit<Parameters<typeof cleanupOldDebugLogs>[0], 'isValidSessionId'>,
+  ) {
+    return cleanupOldDebugLogs({
+      ...opts,
+      isValidSessionId: (sessionId) => VALID_DEBUG_SESSION_IDS.has(sessionId),
+    });
+  }
+
+  it('returns zero result when the debug dir does not exist', async () => {
+    const r = await cleanupDebugLogs({ cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 0, errors: 0 });
+  });
+
+  it('removes session logs older than the cutoff, keeping recent ones', async () => {
+    const old = mkSessionLog(UUID_A, new Date(Date.now() - 60 * MS_PER_DAY));
+    const agent = mkSessionLog(
+      AGENT_SESSION_ID,
+      new Date(Date.now() - 60 * MS_PER_DAY),
+    );
+    const fresh = mkSessionLog(UUID_B, new Date(Date.now() - 1 * MS_PER_DAY));
+
+    const r = await cleanupDebugLogs({ cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 2, errors: 0 });
+    expect(fs.existsSync(old)).toBe(false);
+    expect(fs.existsSync(agent)).toBe(false);
+    expect(fs.existsSync(fresh)).toBe(true);
+    // The debug dir itself is never removed.
+    expect(fs.existsSync(debugRoot)).toBe(true);
+  });
+
+  it('preserves session ids listed in excludeSessionIds even if old', async () => {
+    const current = mkSessionLog(
+      UUID_A,
+      new Date(Date.now() - 60 * MS_PER_DAY),
+    );
+    const other = mkSessionLog(UUID_B, new Date(Date.now() - 60 * MS_PER_DAY));
+
+    const r = await cleanupDebugLogs({
+      cutoffDate: cutoff,
+      excludeSessionIds: new Set([UUID_A]),
+    });
+    expect(r).toEqual({ removed: 1, errors: 0 });
+    expect(fs.existsSync(current)).toBe(true);
+    expect(fs.existsSync(other)).toBe(false);
+  });
+
+  // 25 > SWEEP_CONCURRENCY (20): a batch-loop stride regression that only
+  // visits the first batch would silently under-delete and still pass every
+  // smaller fixture.
+  it('sweeps stale logs spanning multiple concurrency batches', async () => {
+    const old = new Date(Date.now() - 60 * MS_PER_DAY);
+    const ids = new Set<string>();
+    for (let i = 0; i < 25; i++) {
+      const id = `${i.toString(16).padStart(8, '0')}-0000-4000-8000-000000000000`;
+      ids.add(id);
+      mkSessionLog(id, old);
+    }
+
+    const r = await cleanupOldDebugLogs({
+      cutoffDate: cutoff,
+      isValidSessionId: (sessionId) => ids.has(sessionId),
+    });
+    expect(r).toEqual({ removed: 25, errors: 0 });
+    // The debug root itself must survive even when the sweep empties it —
+    // debugLogger memoizes its ensure-dir step per path and would silently
+    // drop the rest of a session's debug output after an rmdir.
+    expect(fs.existsSync(debugRoot)).toBe(true);
+    expect(fs.readdirSync(debugRoot)).toEqual([]);
+  });
+
+  it('leaves the latest symlink and the daemon subdir untouched', async () => {
+    const old = mkSessionLog(UUID_A, new Date(Date.now() - 60 * MS_PER_DAY));
+
+    // `latest` symlink → an old target: it must not be swept even though its
+    // target is aged, because it is a symlink, not a `<uuid>.txt` file.
+    const latest = path.join(debugRoot, 'latest');
+    fs.symlinkSync(path.basename(old), latest);
+
+    // `daemon/` subdir with an old file inside — size-rotated separately.
+    const daemonDir = path.join(debugRoot, 'daemon');
+    fs.mkdirSync(daemonDir);
+    const daemonLog = path.join(daemonDir, 'serve-1.log');
+    fs.writeFileSync(daemonLog, 'x');
+    const old2 = new Date(Date.now() - 60 * MS_PER_DAY);
+    fs.utimesSync(daemonLog, old2, old2);
+
+    const r = await cleanupDebugLogs({ cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 1, errors: 0 });
+    expect(fs.existsSync(old)).toBe(false);
+    expect(fs.lstatSync(latest).isSymbolicLink()).toBe(true);
+    expect(fs.existsSync(daemonLog)).toBe(true);
+  });
+
+  it('ignores invalid-session-id .txt files even when old', async () => {
+    const stray = mkDebugLog(
+      'notes.txt',
+      new Date(Date.now() - 60 * MS_PER_DAY),
+    );
+    const alsoStray = mkDebugLog(
+      'latest.txt',
+      new Date(Date.now() - 60 * MS_PER_DAY),
+    );
+
+    const r = await cleanupDebugLogs({ cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 0, errors: 0 });
+    expect(fs.existsSync(stray)).toBe(true);
+    expect(fs.existsSync(alsoStray)).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'counts errors and continues when a file cannot be unlinked',
+    async () => {
+      const good = mkSessionLog(UUID_A, new Date(Date.now() - 60 * MS_PER_DAY));
+      mkSessionLog(UUID_B, new Date(Date.now() - 60 * MS_PER_DAY));
+      mkSessionLog(UUID_C, new Date(Date.now() - 60 * MS_PER_DAY));
+
+      // Drop the write bit on the dir so unlink of any child fails (EACCES)
+      // while readdir/stat still work.
+      fs.chmodSync(debugRoot, 0o500);
+      try {
+        const r = await cleanupDebugLogs({ cutoffDate: cutoff });
+        expect(r).toEqual({ removed: 0, errors: 3 });
+        expect(fs.existsSync(good)).toBe(true);
+      } finally {
+        fs.chmodSync(debugRoot, 0o700);
       }
     },
   );

@@ -43,7 +43,13 @@ vi.mock('./lib/git.js', () => ({
   gitOpt: mocks.gitOpt,
 }));
 
-vi.mock('./lib/paths.js', () => ({
+// PARTIAL, not a replacement: only `worktreePath` is being steered, and a
+// total mock silently deletes every other export — which broke this suite the
+// moment the handler's import graph reached `REVIEW_TMP_DIR` through the
+// worktree gate. `importOriginal` keeps the module's real surface behind the
+// one value the fixtures choose.
+vi.mock('./lib/paths.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./lib/paths.js')>()),
   worktreePath: (n: string | number) => `/repo/.qwen/tmp/review-pr-${n}`,
 }));
 

@@ -8,6 +8,15 @@ import { describe, expect, it } from 'vitest';
 import { applySedSubstitution, parseSedEditCommand } from './sedEditParser.js';
 
 describe('sedEditParser', () => {
+  // Parses `command`, asserting the simulation accepts it.
+  const parseOk = (command: string) => {
+    const sedInfo = parseSedEditCommand(command);
+    expect(sedInfo).not.toBeNull();
+    return sedInfo!;
+  };
+  const applySed = (command: string, input: string) =>
+    applySedSubstitution(input, parseOk(command));
+
   it('parses a simple in-place substitution', () => {
     expect(parseSedEditCommand("sed -i 's/foo/bar/g' src/a.ts")).toEqual({
       filePath: 'src/a.ts',
@@ -59,36 +68,30 @@ describe('sedEditParser', () => {
   });
 
   it('parses safe combined in-place and extended regex flags', () => {
-    expect(parseSedEditCommand("sed -Ei 's/foo|bar/baz/g' src/a.ts")).toEqual({
+    const expected = {
       filePath: 'src/a.ts',
       pattern: 'foo|bar',
       replacement: 'baz',
       flags: 'g',
       extendedRegex: true,
-    });
-    expect(parseSedEditCommand("sed -ri 's/foo|bar/baz/g' src/a.ts")).toEqual({
-      filePath: 'src/a.ts',
-      pattern: 'foo|bar',
-      replacement: 'baz',
-      flags: 'g',
-      extendedRegex: true,
-    });
-    expect(parseSedEditCommand("sed -Eri 's/foo|bar/baz/g' src/a.ts")).toEqual({
-      filePath: 'src/a.ts',
-      pattern: 'foo|bar',
-      replacement: 'baz',
-      flags: 'g',
-      extendedRegex: true,
-    });
+    };
+    expect(parseSedEditCommand("sed -Ei 's/foo|bar/baz/g' src/a.ts")).toEqual(
+      expected,
+    );
+    expect(parseSedEditCommand("sed -ri 's/foo|bar/baz/g' src/a.ts")).toEqual(
+      expected,
+    );
+    expect(parseSedEditCommand("sed -Eri 's/foo|bar/baz/g' src/a.ts")).toEqual(
+      expected,
+    );
     expect(
       parseSedEditCommand("sed -iE 's/foo|bar/baz/g' src/a.ts"),
     ).toBeNull();
   });
 
-  // Everything after -i is the backup suffix, so -Eir is `-E` plus in-place
-  // with an `r` suffix: real sed writes src/a.tsr next to the edit. The
-  // simulation makes no backup, so these have to fall through to real sed --
-  // the same reason `-i.bak` is rejected below.
+  // Everything after -i is the backup suffix: -Eir is `-E` plus in-place with
+  // an `r` suffix, so real sed writes src/a.tsr. The simulation makes no
+  // backup, so these fall through to real sed (as `-i.bak` does below).
   it('rejects combined flags where in-place is not last', () => {
     expect(
       parseSedEditCommand("sed -Eir 's/foo|bar/baz/g' src/a.ts"),
@@ -100,31 +103,22 @@ describe('sedEditParser', () => {
   });
 
   it('parses expression flag forms', () => {
-    expect(parseSedEditCommand("sed -i -e 's/foo/bar/' file.txt")).toEqual({
+    const expected = {
       filePath: 'file.txt',
       pattern: 'foo',
       replacement: 'bar',
       flags: '',
       extendedRegex: false,
-    });
+    };
+    expect(parseSedEditCommand("sed -i -e 's/foo/bar/' file.txt")).toEqual(
+      expected,
+    );
     expect(
       parseSedEditCommand("sed -i --expression 's/foo/bar/' file.txt"),
-    ).toEqual({
-      filePath: 'file.txt',
-      pattern: 'foo',
-      replacement: 'bar',
-      flags: '',
-      extendedRegex: false,
-    });
+    ).toEqual(expected);
     expect(
       parseSedEditCommand("sed -i --expression='s/foo/bar/' file.txt"),
-    ).toEqual({
-      filePath: 'file.txt',
-      pattern: 'foo',
-      replacement: 'bar',
-      flags: '',
-      extendedRegex: false,
-    });
+    ).toEqual(expected);
     expect(parseSedEditCommand('sed -i -e')).toBeNull();
   });
 
@@ -151,92 +145,68 @@ describe('sedEditParser', () => {
   });
 
   it('applies supported sed substitutions', () => {
-    const sedInfo = parseSedEditCommand("sed -i 's/a\\+/X/g' file.txt");
-
-    expect(sedInfo).not.toBeNull();
-    expect(applySedSubstitution('aa aaa b', sedInfo!)).toBe('X X b');
+    expect(applySed("sed -i 's/a\\+/X/g' file.txt", 'aa aaa b')).toBe('X X b');
   });
 
   it('supports replacement ampersands', () => {
-    const sedInfo = parseSedEditCommand("sed -i 's/foo/[&]/g' file.txt");
-
-    expect(sedInfo).not.toBeNull();
-    expect(applySedSubstitution('foo foo', sedInfo!)).toBe('[foo] [foo]');
+    expect(applySed("sed -i 's/foo/[&]/g' file.txt", 'foo foo')).toBe(
+      '[foo] [foo]',
+    );
   });
 
   it('supports escaped replacement ampersands', () => {
-    const sedInfo = parseSedEditCommand("sed -i 's/foo/\\&/g' file.txt");
-
-    expect(sedInfo).not.toBeNull();
-    expect(applySedSubstitution('foo foo', sedInfo!)).toBe('& &');
+    expect(applySed("sed -i 's/foo/\\&/g' file.txt", 'foo foo')).toBe('& &');
   });
 
   it('supports escaped replacement delimiters', () => {
-    const slashSedInfo = parseSedEditCommand("sed -i 's/foo/\\//g' file.txt");
-
-    expect(slashSedInfo).not.toBeNull();
-    expect(applySedSubstitution('foo foo', slashSedInfo!)).toBe('/ /');
+    expect(applySed("sed -i 's/foo/\\//g' file.txt", 'foo foo')).toBe('/ /');
   });
 
   it('supports literal backslashes in replacements', () => {
-    const sedInfo = parseSedEditCommand("sed -i 's/foo/\\\\bar/g' file.txt");
-
-    expect(sedInfo).not.toBeNull();
-    expect(applySedSubstitution('foo foo', sedInfo!)).toBe('\\bar \\bar');
+    expect(applySed("sed -i 's/foo/\\\\bar/g' file.txt", 'foo foo')).toBe(
+      '\\bar \\bar',
+    );
   });
 
   it('keeps literal backslashes before replacement ampersands', () => {
-    const sedInfo = parseSedEditCommand("sed -i 's/foo/\\\\&/g' file.txt");
-
-    expect(sedInfo).not.toBeNull();
-    expect(applySedSubstitution('foo foo', sedInfo!)).toBe('\\foo \\foo');
+    expect(applySed("sed -i 's/foo/\\\\&/g' file.txt", 'foo foo')).toBe(
+      '\\foo \\foo',
+    );
   });
 
   it('keeps unescaped BRE braces literal', () => {
-    const sedInfo = parseSedEditCommand("sed -i 's/a{2}/X/g' file.txt");
-
-    expect(sedInfo).not.toBeNull();
-    expect(applySedSubstitution('aa a{2} aaa', sedInfo!)).toBe('aa X aaa');
+    expect(applySed("sed -i 's/a{2}/X/g' file.txt", 'aa a{2} aaa')).toBe(
+      'aa X aaa',
+    );
   });
 
   it('converts escaped BRE braces to intervals', () => {
-    const sedInfo = parseSedEditCommand("sed -i 's/a\\{2\\}/X/g' file.txt");
-
-    expect(sedInfo).not.toBeNull();
-    expect(applySedSubstitution('aa a{2} aaa', sedInfo!)).toBe('X a{2} Xa');
+    expect(applySed("sed -i 's/a\\{2\\}/X/g' file.txt", 'aa a{2} aaa')).toBe(
+      'X a{2} Xa',
+    );
   });
 
   it('keeps BRE operators literal inside bracket expressions', () => {
-    const sedInfo = parseSedEditCommand("sed -i 's/[\\+]/X/g' file.txt");
-
-    expect(sedInfo).not.toBeNull();
-    expect(applySedSubstitution('a + \\ b', sedInfo!)).toBe('a X X b');
+    expect(applySed("sed -i 's/[\\+]/X/g' file.txt", 'a + \\ b')).toBe(
+      'a X X b',
+    );
   });
 
   it('keeps non-position BRE anchors literal', () => {
-    const caretSedInfo = parseSedEditCommand("sed -i 's/a^/X/g' file.txt");
-    const dollarSedInfo = parseSedEditCommand("sed -i 's/a$-/X/g' file.txt");
-
-    expect(caretSedInfo).not.toBeNull();
-    expect(dollarSedInfo).not.toBeNull();
-    expect(applySedSubstitution('a^ a', caretSedInfo!)).toBe('X a');
-    expect(applySedSubstitution('a$- a', dollarSedInfo!)).toBe('X a');
+    expect(applySed("sed -i 's/a^/X/g' file.txt", 'a^ a')).toBe('X a');
+    expect(applySed("sed -i 's/a$-/X/g' file.txt", 'a$- a')).toBe('X a');
   });
 
   it('applies non-global substitutions once per line', () => {
-    const sedInfo = parseSedEditCommand("sed -i 's/foo/bar/' file.txt");
-
-    expect(sedInfo).not.toBeNull();
-    expect(applySedSubstitution('foo foo\nfoo foo', sedInfo!)).toBe(
+    expect(applySed("sed -i 's/foo/bar/' file.txt", 'foo foo\nfoo foo')).toBe(
       'bar foo\nbar foo',
     );
   });
 
   it('supports numeric occurrences and capture replacements', () => {
-    const sedInfo = parseSedEditCommand("sed -E -i 's/(foo)/[\\1]/2' file.txt");
-
-    expect(sedInfo).not.toBeNull();
-    expect(applySedSubstitution('foo foo foo', sedInfo!)).toBe('foo [foo] foo');
+    expect(
+      applySed("sed -E -i 's/(foo)/[\\1]/2' file.txt", 'foo foo foo'),
+    ).toBe('foo [foo] foo');
   });
 
   it('rejects replacement backrefs without matching capture groups', () => {
@@ -276,81 +246,54 @@ describe('sedEditParser', () => {
   });
 
   it('preserves carriage returns in sed pattern space', () => {
-    const anchoredSedInfo = parseSedEditCommand(
-      "sed -i 's/foo$/bar/' file.txt",
+    expect(applySed("sed -i 's/foo$/bar/' file.txt", 'foo\r\n')).toBe(
+      'foo\r\n',
     );
-    const crSedInfo = parseSedEditCommand("sed -i 's/\\r$//g' file.txt");
-
-    expect(anchoredSedInfo).not.toBeNull();
-    expect(crSedInfo).not.toBeNull();
-    expect(applySedSubstitution('foo\r\n', anchoredSedInfo!)).toBe('foo\r\n');
-    expect(applySedSubstitution('foo\r\n', crSedInfo!)).toBe('foo\n');
+    expect(applySed("sed -i 's/\\r$//g' file.txt", 'foo\r\n')).toBe('foo\n');
   });
 
   it('applies substitutions to empty lines', () => {
-    const sedInfo = parseSedEditCommand("sed -i 's/^$/X/g' file.txt");
-
-    expect(sedInfo).not.toBeNull();
-    expect(applySedSubstitution('line1\n\nline3', sedInfo!)).toBe(
+    expect(applySed("sed -i 's/^$/X/g' file.txt", 'line1\n\nline3')).toBe(
       'line1\nX\nline3',
     );
   });
 
   it('does not process a phantom line after a trailing newline', () => {
-    const sedInfo = parseSedEditCommand("sed -i 's/$/!/g' file.txt");
-
-    expect(sedInfo).not.toBeNull();
-    expect(applySedSubstitution('', sedInfo!)).toBe('');
-    expect(applySedSubstitution('hello\n', sedInfo!)).toBe('hello!\n');
-    expect(applySedSubstitution('\n', sedInfo!)).toBe('!\n');
+    const sedInfo = parseOk("sed -i 's/$/!/g' file.txt");
+    expect(applySedSubstitution('', sedInfo)).toBe('');
+    expect(applySedSubstitution('hello\n', sedInfo)).toBe('hello!\n');
+    expect(applySedSubstitution('\n', sedInfo)).toBe('!\n');
   });
 
   it('supports multi-digit numeric occurrences', () => {
-    const sedInfo = parseSedEditCommand("sed -i 's/x/y/10' file.txt");
-
-    expect(sedInfo).not.toBeNull();
-    expect(applySedSubstitution('x x x x x x x x x x x', sedInfo!)).toBe(
-      'x x x x x x x x x y x',
-    );
+    expect(
+      applySed("sed -i 's/x/y/10' file.txt", 'x x x x x x x x x x x'),
+    ).toBe('x x x x x x x x x y x');
   });
 
   it('supports global substitutions from a numeric occurrence', () => {
-    const sedInfo = parseSedEditCommand("sed -i 's/foo/bar/2g' file.txt");
-
-    expect(sedInfo).not.toBeNull();
-    expect(applySedSubstitution('foo foo foo foo', sedInfo!)).toBe(
+    expect(applySed("sed -i 's/foo/bar/2g' file.txt", 'foo foo foo foo')).toBe(
       'foo bar bar bar',
     );
   });
 
   it('suppresses trailing zero-width global matches like sed', () => {
-    const starSedInfo = parseSedEditCommand("sed -i 's/a*/X/g' file.txt");
-    const lineSedInfo = parseSedEditCommand("sed -i 's/.*/X/g' file.txt");
-
-    expect(starSedInfo).not.toBeNull();
-    expect(lineSedInfo).not.toBeNull();
-    expect(applySedSubstitution('aaa', starSedInfo!)).toBe('X');
-    expect(applySedSubstitution('aaa', lineSedInfo!)).toBe('X');
+    expect(applySed("sed -i 's/a*/X/g' file.txt", 'aaa')).toBe('X');
+    expect(applySed("sed -i 's/.*/X/g' file.txt", 'aaa')).toBe('X');
   });
 
   it('suppresses zero-width global matches after non-empty matches like sed', () => {
-    const spacesSedInfo = parseSedEditCommand("sed -i 's/ */_/g' file.txt");
-    const digitsSedInfo = parseSedEditCommand("sed -i 's/[0-9]*/N/g' file.txt");
-    const starSedInfo = parseSedEditCommand("sed -i 's/a*/X/g' file.txt");
-
-    expect(spacesSedInfo).not.toBeNull();
-    expect(digitsSedInfo).not.toBeNull();
-    expect(starSedInfo).not.toBeNull();
-    expect(applySedSubstitution('a  b c', spacesSedInfo!)).toBe('_a_b_c_');
-    expect(applySedSubstitution('x12y3z', digitsSedInfo!)).toBe('NxNyNzN');
-    expect(applySedSubstitution('aabaaa', starSedInfo!)).toBe('XbX');
+    expect(applySed("sed -i 's/ */_/g' file.txt", 'a  b c')).toBe('_a_b_c_');
+    expect(applySed("sed -i 's/[0-9]*/N/g' file.txt", 'x12y3z')).toBe(
+      'NxNyNzN',
+    );
+    expect(applySed("sed -i 's/a*/X/g' file.txt", 'aabaaa')).toBe('XbX');
   });
 
   it('applies trailing zero-width matches after prior zero-width matches', () => {
-    const sedInfo = parseSedEditCommand("sed -i 's/a*/foo/g' file.txt");
-
-    expect(sedInfo).not.toBeNull();
-    expect(applySedSubstitution('bbb', sedInfo!)).toBe('foobfoobfoobfoo');
+    expect(applySed("sed -i 's/a*/foo/g' file.txt", 'bbb')).toBe(
+      'foobfoobfoobfoo',
+    );
   });
 
   it('throws when direct sed simulation cannot compile the pattern', () => {
@@ -365,11 +308,10 @@ describe('sedEditParser', () => {
     ).toThrow(/sed pattern simulation failed/);
   });
 
-  // In POSIX BRE/ERE a `]` right after `[` or `[^` is a literal member of the
-  // bracket expression. JavaScript reads `[]` as an empty class and `[^]` as
-  // "any character", so simulating these rewrites the file differently from
-  // the command the user ran. Returning null hands the command back to the
-  // real sed. Behaviour of the real sed below was measured, not assumed.
+  // In POSIX BRE/ERE a `]` right after `[` or `[^` is a literal member; JS
+  // reads `[]` as an empty class and `[^]` as "any character", so simulating
+  // would rewrite the file differently. Null hands the command back to real
+  // sed. Real-sed behaviour below was measured, not assumed.
   it('declines a bracket expression whose first member is a literal ]', () => {
     // On `a]b`, sed writes `XXb`; the simulation matched nothing at all.
     expect(parseSedEditCommand("sed -i 's/[]a]/X/g' f.txt")).toBeNull();
@@ -386,19 +328,11 @@ describe('sedEditParser', () => {
   });
 
   it('still simulates ordinary bracket expressions', () => {
-    // The guard against over-correcting: declining every pattern would also
-    // satisfy the two tests above. A `]` that is not the first member, and an
-    // escaped `[`, both still translate exactly and must keep their fast path.
-    const plain = parseSedEditCommand("sed -i 's/[abc]/X/g' f.txt");
-    expect(plain).not.toBeNull();
-    expect(applySedSubstitution('a]b', plain!)).toBe('X]X');
-
-    const negated = parseSedEditCommand("sed -i 's/[^abc]/X/g' f.txt");
-    expect(negated).not.toBeNull();
-    expect(applySedSubstitution('a]b', negated!)).toBe('aXb');
-
-    const escaped = parseSedEditCommand("sed -i 's/a\\[b/X/g' f.txt");
-    expect(escaped).not.toBeNull();
-    expect(applySedSubstitution('a[b]c', escaped!)).toBe('X]c');
+    // Guards over-correcting (declining everything would pass the tests
+    // above): a non-first `]` and an escaped `[` translate exactly and must
+    // keep their fast path.
+    expect(applySed("sed -i 's/[abc]/X/g' f.txt", 'a]b')).toBe('X]X');
+    expect(applySed("sed -i 's/[^abc]/X/g' f.txt", 'a]b')).toBe('aXb');
+    expect(applySed("sed -i 's/a\\[b/X/g' f.txt", 'a[b]c')).toBe('X]c');
   });
 });

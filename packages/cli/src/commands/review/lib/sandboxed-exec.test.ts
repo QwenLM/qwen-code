@@ -579,10 +579,7 @@ describe('containerCommand', () => {
   });
 
   it("reads rootlessness out of either runtime's info document", () => {
-    // The negative case is a LIVE rootful docker's actual `info` output
-    // (docker 29.5.2), not a hand-written stub: the marker search only holds
-    // if the word genuinely does not occur in a rootful document, and a stub
-    // written by the same hand that wrote the matcher cannot show that.
+    // Captured from a rootful Docker 29.5.2 runtime.
     expect(
       hasRootlessMarker(
         '{"SecurityOptions":["name=apparmor","name=seccomp,profile=builtin","name=cgroupns"],"ServerVersion":"29.5.2","OperatingSystem":"Ubuntu 24.04.4 LTS"}',
@@ -594,8 +591,7 @@ describe('containerCommand', () => {
         '{"SecurityOptions":["name=seccomp,profile=builtin","name=rootless","name=cgroupns"]}',
       ),
     ).toBe(true);
-    // ...podman as a field under Host.Security, which is why this searches the
-    // document rather than one runtime's schema path.
+    // ...podman as a field under Host.Security.
     expect(
       hasRootlessMarker(
         '{"host":{"security":{"rootless":true,"seccompEnabled":true}}}',
@@ -609,6 +605,14 @@ describe('containerCommand', () => {
     expect(hasRootlessMarker('{"Host":{"Security":{"Rootless":true}}}')).toBe(
       true,
     );
+  });
+
+  it.each([
+    '{"Labels":["name=rootless"],"SecurityInfo":{"Rootless":false}}',
+    '{"Plugins":{"Rootless":true}}',
+    '{"Registries":{"rootless":true}}',
+  ])('does not accept rootless markers outside security fields: %s', (info) => {
+    expect(hasRootlessMarker(info)).toBe(false);
   });
 
   it('mounts the review temp dir, not the tree the command runs in', () => {
@@ -904,6 +908,25 @@ describe('mountRootFor', () => {
       // and a build with the colon check deleted passed it.
       expect(existsSync(tree)).toBe(true);
       expect(mountRootFor(tree)).toBe(null);
+    },
+  );
+
+  itWhereRootsCanMount(
+    'answers for the review temp dir ITSELF, not only for its children',
+    () => {
+      // The marker ends in a separator, so a path ending AT `.qwen/tmp`
+      // matched no temp dir at all: `untrustedRepositoryFrom` short-circuited
+      // on its first line, the launch-directory question went unpolicied for a
+      // process standing there, and `lib/git` memoized that negative as
+      // trusted for the rest of the process.
+      const root = tmp();
+      const tmpDir = join(root, '.qwen', 'tmp');
+      mkdirSync(tmpDir, { recursive: true });
+      expect(mountRootFor(tmpDir)).toBe(realpathSync(tmpDir));
+      // ...and a child of it answers the same root, as before.
+      const tree = join(tmpDir, 'review-pr-1');
+      mkdirSync(tree, { recursive: true });
+      expect(mountRootFor(tree)).toBe(realpathSync(tmpDir));
     },
   );
 

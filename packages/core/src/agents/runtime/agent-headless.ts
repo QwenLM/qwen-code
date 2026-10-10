@@ -29,6 +29,7 @@ import type {
 } from './agent-events.js';
 import { AgentEventType } from './agent-events.js';
 import type { AgentStatsSummary } from './agent-statistics.js';
+import type { SubagentExecutor } from './subagent-executor.js';
 import type {
   PromptConfig,
   ModelConfig,
@@ -88,42 +89,28 @@ export class ContextState {
 /**
  * Replaces `${...}` placeholders in a template string with values from a context.
  *
- * This function identifies all placeholders in the format `${key}`, validates that
- * each key exists in the provided `ContextState`, and then performs the substitution.
+ * Only placeholders whose key exists in the provided `ContextState` are
+ * substituted; every other `${identifier}` is left in the string verbatim.
+ * Templates here are arbitrary markdown, so a subagent definition body that
+ * documents a shell or JS template literal (for example `${baseUrl}` inside a
+ * code fence) carries sequences that are text, not context keys.
  *
  * @param template The template string containing placeholders.
  * @param context The `ContextState` object providing placeholder values.
- * @returns The populated string with all placeholders replaced.
- * @throws {Error} if any placeholder key is not found in the context.
+ * @returns The string with every known placeholder replaced and every unknown
+ *     one preserved as literal text.
  */
 export function templateString(
   template: string,
   context: ContextState,
 ): string {
   const placeholderRegex = /\$\{([a-zA-Z_]\w*)\}/g;
-
-  // First, find all unique keys required by the template.
-  const requiredKeys = new Set(
-    Array.from(template.matchAll(placeholderRegex), (match) => match[1]),
-  );
-
-  // Check if all required keys exist in the context.
   const contextKeys = new Set(context.get_keys());
-  const missingKeys = Array.from(requiredKeys).filter(
-    (key) => !contextKeys.has(key),
-  );
 
-  if (missingKeys.length > 0) {
-    throw new Error(
-      `Missing context values for the following keys: ${missingKeys.join(
-        ', ',
-      )}`,
-    );
-  }
-
-  // Perform the replacement using a replacer function.
-  return template.replace(placeholderRegex, (_match, key) =>
-    String(context.get(key)),
+  // Substitute the keys the context actually provides and pass the rest
+  // through unchanged.
+  return template.replace(placeholderRegex, (match, key) =>
+    contextKeys.has(key) ? String(context.get(key)) : match,
   );
 }
 
@@ -135,7 +122,7 @@ export function templateString(
  * Each execute() call runs one task through AgentCore's reasoning loop. Calls
  * must be sequential; later calls reuse the same chat and prepared tools.
  */
-export class AgentHeadless {
+export class AgentHeadless implements SubagentExecutor {
   private readonly core: AgentCore;
   private finalText: string = '';
   private terminateMode: AgentTerminateMode = AgentTerminateMode.ERROR;
@@ -184,6 +171,14 @@ export class AgentHeadless {
     taskName?: string,
     subagentId?: string,
   ): Promise<AgentHeadless> {
+    if (
+      runtimeContext.getAgentExecutionBackend?.() === 'container' &&
+      !runtimeContext.getExecutionEnvironment?.()
+    ) {
+      throw new Error(
+        'Container execution is required, but this agent has no execution environment. Start a supported regular subagent.',
+      );
+    }
     const core = new AgentCore(
       name,
       runtimeContext,
@@ -216,7 +211,10 @@ export class AgentHeadless {
   async execute(
     context: ContextState,
     externalSignal?: AbortSignal,
-    options: { resetStats?: boolean } = {},
+    options: {
+      resetStats?: boolean;
+      enforceTimeLimitDuringRetryWait?: boolean;
+    } = {},
   ): Promise<void> {
     if (this.executing) {
       throw new Error(
@@ -237,7 +235,14 @@ export class AgentHeadless {
     }
 
     try {
-      await this.executeTurn(context, externalSignal, !resetStats);
+      await this.core.runInHookFrame(() =>
+        this.executeTurn(
+          context,
+          externalSignal,
+          !resetStats,
+          options.enforceTimeLimitDuringRetryWait,
+        ),
+      );
     } finally {
       this.executing = false;
     }
@@ -258,16 +263,15 @@ export class AgentHeadless {
     context: ContextState,
     externalSignal?: AbortSignal,
     preserveStats = false,
+    enforceTimeLimitDuringRetryWait?: boolean,
   ): Promise<void> {
     const initialMessagesOverride = context.get('initial_messages_override') as
       | Content[]
       | undefined;
     const isContinuation = this.hasStartedReasoning;
-    const externalInputsOverride = isContinuation
-      ? (context.get('external_inputs_override') as
-          | AgentExternalInput[]
-          | undefined)
-      : undefined;
+    const externalInputsOverride = context.get('external_inputs_override') as
+      | AgentExternalInput[]
+      | undefined;
     // Record the initial user turn in the observable message log before
     // anything that can throw — createChat / prepareTools failures still
     // get a transcript showing the task that was asked, which is what
@@ -276,8 +280,8 @@ export class AgentHeadless {
     const initialTaskText = String(
       (context.get('task_prompt') as string) ?? 'Get Started!',
     );
-    if (isContinuation) {
-      const transcriptInputs = externalInputsOverride ?? [initialTaskText];
+    if (externalInputsOverride) {
+      const transcriptInputs = externalInputsOverride;
       for (const input of transcriptInputs) {
         this.core.eventEmitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
           subagentId: this.core.subagentId,
@@ -286,6 +290,13 @@ export class AgentHeadless {
           timestamp: Date.now(),
         });
       }
+    } else if (isContinuation) {
+      this.core.eventEmitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
+        subagentId: this.core.subagentId,
+        kind: 'message',
+        text: initialTaskText,
+        timestamp: Date.now(),
+      });
     } else if (
       !initialMessagesOverride ||
       initialMessagesOverride.length === 0
@@ -386,6 +397,7 @@ export class AgentHeadless {
             getExternalMessages: this.externalMessageProvider,
             waitForExternalMessages: this.externalMessageWaiter,
             shouldWaitForExternalMessages: this.externalMessageWaitPredicate,
+            enforceTimeLimitDuringRetryWait,
           },
         );
 

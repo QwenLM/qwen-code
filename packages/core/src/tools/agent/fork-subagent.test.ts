@@ -8,6 +8,7 @@ import type { Content } from '@google/genai';
 import { describe, expect, it } from 'vitest';
 import { ToolNames } from '../tool-names.js';
 import {
+  buildForkExecutionAllowlist,
   buildForkedMessages,
   FORK_PLACEHOLDER_RESULT,
   normalizeForkTurns,
@@ -15,6 +16,41 @@ import {
   selectForkHistory,
   validateForkToolList,
 } from './fork-subagent.js';
+import {
+  content,
+  fnCall,
+  fnResponse,
+  modelText,
+  userText,
+} from '../../test-utils/model-fixtures.js';
+
+describe('buildForkExecutionAllowlist', () => {
+  const advertisedTools = [
+    ToolNames.READ_FILE,
+    ToolNames.TOOL_SEARCH,
+    ToolNames.TOOL_CALL,
+  ];
+
+  it('preserves an explicit empty deny-all list', () => {
+    expect(
+      buildForkExecutionAllowlist([], [ToolNames.READ_FILE], advertisedTools),
+    ).toEqual([]);
+  });
+
+  it('keeps both bridge tools for a non-empty explicit request', () => {
+    expect(
+      buildForkExecutionAllowlist(
+        [ToolNames.READ_FILE],
+        [ToolNames.READ_FILE],
+        advertisedTools,
+      ),
+    ).toEqual([
+      ToolNames.READ_FILE,
+      ToolNames.TOOL_SEARCH,
+      ToolNames.TOOL_CALL,
+    ]);
+  });
+});
 
 describe('resolveForkExecutionAllowedTools', () => {
   const parentTools = [
@@ -73,50 +109,21 @@ describe('validateForkToolList', () => {
 });
 
 describe('selectForkHistory', () => {
-  const startup: Content = {
-    role: 'user',
-    parts: [{ text: '<system-reminder>\nstartup\n</system-reminder>' }],
-  };
-  const firstUser: Content = {
-    role: 'user',
-    parts: [{ text: 'first question' }],
-  };
-  const firstModel: Content = {
-    role: 'model',
-    parts: [{ text: 'first answer' }],
-  };
-  const toolCall: Content = {
-    role: 'model',
-    parts: [
-      {
-        functionCall: {
-          id: 'call-1',
-          name: 'read_file',
-          args: { path: 'a.ts' },
-        },
-      },
-    ],
-  };
-  const toolResult: Content = {
-    role: 'user',
-    parts: [
-      {
-        functionResponse: {
-          id: 'call-1',
-          name: 'read_file',
-          response: { output: 'file contents' },
-        },
-      },
-    ],
-  };
-  const secondUser: Content = {
-    role: 'user',
-    parts: [{ text: 'second question' }],
-  };
-  const secondModel: Content = {
-    role: 'model',
-    parts: [{ text: 'second answer' }],
-  };
+  const startup: Content = userText(
+    '<system-reminder>\nstartup\n</system-reminder>',
+  );
+  const firstUser: Content = userText('first question');
+  const firstModel: Content = modelText('first answer');
+  const toolCall: Content = content(
+    'model',
+    fnCall('read_file', { path: 'a.ts' }, 'call-1'),
+  );
+  const toolResult: Content = content(
+    'user',
+    fnResponse('read_file', { output: 'file contents' }, 'call-1'),
+  );
+  const secondUser: Content = userText('second question');
+  const secondModel: Content = modelText('second answer');
 
   it('defaults to all and normalizes explicit values', () => {
     expect(normalizeForkTurns(undefined)).toBe('all');
@@ -161,14 +168,12 @@ describe('selectForkHistory', () => {
   });
 
   it('does not count or inherit a compacted-history prefix for a numeric window', () => {
-    const compactedSummary: Content = {
-      role: 'user',
-      parts: [{ text: 'Resume the prior task from this summary.' }],
-    };
-    const compactedAck: Content = {
-      role: 'model',
-      parts: [{ text: 'Got it. Thanks for the additional context!' }],
-    };
+    const compactedSummary: Content = userText(
+      'Resume the prior task from this summary.',
+    );
+    const compactedAck: Content = modelText(
+      'Got it. Thanks for the additional context!',
+    );
 
     expect(
       selectForkHistory(
@@ -179,10 +184,9 @@ describe('selectForkHistory', () => {
   });
 
   it('does not count pure reminders as user turns', () => {
-    const reminder: Content = {
-      role: 'user',
-      parts: [{ text: '<system-reminder>\nchanged tools\n</system-reminder>' }],
-    };
+    const reminder: Content = userText(
+      '<system-reminder>\nchanged tools\n</system-reminder>',
+    );
 
     expect(
       selectForkHistory(
@@ -194,10 +198,7 @@ describe('selectForkHistory', () => {
 
   it('does not count empty user content as a real turn', () => {
     const emptyUser: Content = { role: 'user', parts: [] };
-    const emptyAck: Content = {
-      role: 'model',
-      parts: [{ text: 'ignored empty input' }],
-    };
+    const emptyAck: Content = modelText('ignored empty input');
 
     expect(
       selectForkHistory(
@@ -208,13 +209,9 @@ describe('selectForkHistory', () => {
   });
 
   it('does not count a tool response mixed with a pure reminder', () => {
-    const mixedToolResponse: Content = {
-      role: 'user',
-      parts: [
-        ...toolResult.parts!,
-        { text: '<system-reminder>\nchanged tools\n</system-reminder>' },
-      ],
-    };
+    const mixedToolResponse: Content = content('user', ...toolResult.parts!, {
+      text: '<system-reminder>\nchanged tools\n</system-reminder>',
+    });
 
     expect(
       selectForkHistory(
@@ -228,19 +225,14 @@ describe('selectForkHistory', () => {
     const nestedImage = {
       inlineData: { mimeType: 'image/png', data: 'c2hvdA==' },
     };
-    const toolResultWithImage: Content = {
-      role: 'user',
-      parts: [
-        {
-          functionResponse: {
-            id: 'call-1',
-            name: 'read_file',
-            response: { output: 'captured' },
-            parts: [nestedImage],
-          },
-        },
-      ],
-    };
+    const toolResultWithImage: Content = content('user', {
+      functionResponse: {
+        id: 'call-1',
+        name: 'read_file',
+        response: { output: 'captured' },
+        parts: [nestedImage],
+      },
+    });
 
     const inherited = selectForkHistory(
       [startup, firstUser, toolCall, toolResultWithImage, firstModel],
@@ -258,34 +250,28 @@ describe('buildForkedMessages', () => {
   // A model launching several forks in one response: the last model message
   // carries one functionCall per sibling fork, each with its own directive in
   // `args.prompt`.
-  const launch: Content = {
-    role: 'model',
-    parts: [
-      { text: 'Launching two forks.' },
+  const launch: Content = content(
+    'model',
+    { text: 'Launching two forks.' },
+    fnCall(
+      'agent',
       {
-        functionCall: {
-          id: 'call-a',
-          name: 'agent',
-          args: {
-            subagent_type: 'fork',
-            prompt: 'ALPHA_DIRECTIVE',
-            description: 'task a',
-          },
-        },
+        subagent_type: 'fork',
+        prompt: 'ALPHA_DIRECTIVE',
+        description: 'task a',
       },
+      'call-a',
+    ),
+    fnCall(
+      'agent',
       {
-        functionCall: {
-          id: 'call-b',
-          name: 'agent',
-          args: {
-            subagent_type: 'fork',
-            prompt: 'BETA_DIRECTIVE',
-            description: 'task b',
-          },
-        },
+        subagent_type: 'fork',
+        prompt: 'BETA_DIRECTIVE',
+        description: 'task b',
       },
-    ],
-  };
+      'call-b',
+    ),
+  );
 
   it('does not leak sibling fork directives into the forked history', () => {
     const messages = buildForkedMessages('ALPHA_DIRECTIVE', launch);

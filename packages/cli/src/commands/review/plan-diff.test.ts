@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 const settingsMock = vi.hoisted(() => vi.fn(() => ({ merged: {} })));
 vi.mock('../../config/settings.js', async (importOriginal) => {
@@ -11,13 +12,28 @@ vi.mock('../../config/settings.js', async (importOriginal) => {
     await importOriginal<typeof import('../../config/settings.js')>();
   return { ...actual, loadSettings: settingsMock };
 });
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { planDiffCommand } from './plan-diff.js';
 import { chunksCoverDiff } from './lib/diff-plan.js';
 import { makeDiff, seedParseArgs } from './lib/test-utils.js';
-import { DEADLINE_ENV } from './lib/deadline.js';
+import {
+  COMPOSE_FLOOR_ENV,
+  DEADLINE_ENV,
+  DEFAULT_DEADLINE_SECONDS,
+  RESERVE_ENV,
+} from './lib/deadline.js';
 
 let dir: string;
 let cwd: string;
@@ -43,6 +59,38 @@ afterEach(() => {
   if (dir) rmSync(dir, { recursive: true, force: true });
 });
 
+describe('plan-diff — the scratch directory guard', () => {
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked .qwen/tmp before writing the plan',
+    () => {
+      // A standalone plan-diff is a round's first writer into `.qwen/tmp`;
+      // the shared entry guard runs here too, so a workspace-planted link
+      // refuses the command with nothing landed through it.
+      const victim = realpathSync(mkdtempSync(join(tmpdir(), 'victim-')));
+      try {
+        writeFileSync(join(dir, 'diff.txt'), makeDiff('src/a.ts', 3));
+        mkdirSync(join(dir, '.qwen'), { recursive: true });
+        symlinkSync(victim, join(dir, '.qwen', 'tmp'));
+        // The handler reports refusals as a non-zero exit code, not a throw.
+        run(join(dir, 'diff.txt'), join('.qwen', 'tmp', 'plan.json'));
+        expect(process.exitCode).toBe(1);
+        expect(readdirSync(victim)).toEqual([]);
+
+        // …and an `--out` that stays outside the scratch directory is not
+        // this command's business: it writes nothing there, so a redirect
+        // it never touches must not refuse the round.
+        process.exitCode = undefined;
+        run(join(dir, 'diff.txt'), join(dir, 'elsewhere', 'plan.json'));
+        expect(process.exitCode).toBeUndefined();
+        expect(existsSync(join(dir, 'elsewhere', 'plan.json'))).toBe(true);
+        expect(readdirSync(victim)).toEqual([]);
+      } finally {
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
 describe('plan-diff — the round cap the handler actually records', () => {
   // The capture handlers are where the two machine facts enter a plan, and
   // until now nothing exercised that wiring: the budget unit tests pass the
@@ -51,7 +99,7 @@ describe('plan-diff — the round cap the handler actually records', () => {
   // real env and reads the number out of the file it wrote.
   const hugeDiff = () => makeDiff('src/huge.ts', 9000);
 
-  it('records the huge tier only when the environment has a deadline', () => {
+  it('records the huge tier only under an explicit clock — here the environment’s', () => {
     const diffPath = join(dir, 'huge.diff');
     writeFileSync(diffPath, hugeDiff());
     const before = process.env[DEADLINE_ENV];
@@ -62,6 +110,10 @@ describe('plan-diff — the round cap the handler actually records', () => {
       const a = JSON.parse(readFileSync(noClock, 'utf8'));
       expect(a.srcDiffLines).toBeGreaterThanOrEqual(3000);
       expect(a.budget.reverseAuditRounds).toBe(5);
+      // The default wall rides along, and is why the tier still reads 5: a
+      // default is not an explicit clock.
+      expect(a.deadlineSeconds).toBe(DEFAULT_DEADLINE_SECONDS.huge);
+      expect(a.deadlineSource).toBe('default');
 
       process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
       const withClock = join(dir, 'with-clock.json');
@@ -73,6 +125,74 @@ describe('plan-diff — the round cap the handler actually records', () => {
       if (before === undefined) delete process.env[DEADLINE_ENV];
       else process.env[DEADLINE_ENV] = before;
     }
+  });
+
+  const runWith = (out: string, deadline: string | undefined) =>
+    (planDiffCommand.handler as (a: unknown) => void)({
+      diff_path: join(dir, 'huge.diff'),
+      out,
+      maxChunkLines: 400,
+      deadline,
+    });
+
+  it('records an explicit --deadline as a flag wall, which flips the huge tier like an env clock', () => {
+    writeFileSync(join(dir, 'huge.diff'), hugeDiff());
+    // The shell-priced leg reads the reserve / compose-floor overrides from
+    // the ambient environment — this repository's own review job exports a
+    // reserve — so isolate them beside the epoch.
+    const before = process.env[DEADLINE_ENV];
+    const beforeReserve = process.env[RESERVE_ENV];
+    const beforeFloor = process.env[COMPOSE_FLOOR_ENV];
+    try {
+      delete process.env[DEADLINE_ENV];
+      delete process.env[RESERVE_ENV];
+      delete process.env[COMPOSE_FLOOR_ENV];
+      const out = join(dir, 'flag.json');
+      runWith(out, '120');
+      const a = JSON.parse(readFileSync(out, 'utf8'));
+      expect(a.deadlineSeconds).toBe(7200);
+      expect(a.deadlineSource).toBe('flag');
+      expect(a.budget.reverseAuditRounds).toBe(3);
+
+      const none = join(dir, 'none.json');
+      runWith(none, 'none');
+      const b = JSON.parse(readFileSync(none, 'utf8'));
+      expect(b).not.toHaveProperty('deadlineSeconds');
+      expect(b).not.toHaveProperty('deadlineSource');
+      expect(b.budget.reverseAuditRounds).toBe(5);
+    } finally {
+      if (before === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = before;
+      if (beforeReserve === undefined) delete process.env[RESERVE_ENV];
+      else process.env[RESERVE_ENV] = beforeReserve;
+      if (beforeFloor === undefined) delete process.env[COMPOSE_FLOOR_ENV];
+      else process.env[COMPOSE_FLOOR_ENV] = beforeFloor;
+    }
+  });
+
+  it('a small diff records the small default', () => {
+    const diffPath = join(dir, 'small.diff');
+    writeFileSync(diffPath, makeDiff('src/small.ts', 40));
+    const out = join(dir, 'small.json');
+    run(diffPath, out);
+    const a = JSON.parse(readFileSync(out, 'utf8'));
+    expect(a.deadlineSeconds).toBe(DEFAULT_DEADLINE_SECONDS.small);
+    expect(a.deadlineSource).toBe('default');
+  });
+
+  it('a malformed --deadline is a usage error: exit 2, nothing written, and it is ruled BEFORE the diff is read', () => {
+    // No diff file at all: a handler that validated the flag only at the
+    // plan write would die on the missing diff first (an ordinary error,
+    // exit 1). The usage ruling must come first, so exit 2 pins the order.
+    const out = join(dir, 'bad.json');
+    (planDiffCommand.handler as (a: unknown) => void)({
+      diff_path: join(dir, 'missing.diff'),
+      out,
+      maxChunkLines: 400,
+      deadline: 'soon',
+    });
+    expect(process.exitCode).toBe(2);
+    expect(existsSync(out)).toBe(false);
   });
 
   it('records the operator ceiling the settings actually carry', () => {
@@ -147,6 +267,24 @@ describe('plan-diff', () => {
     expect(plan.srcDiffLines).toBe(plan.diffLines);
     expect(plan.files[0].path).toBe('src/a.ts');
     expect(plan.files[0].kind).toBe('source');
+  });
+
+  it('records the identity of the diff it planned over', () => {
+    // The coverage reader re-hashes the file at `diffPathAbsolute` and
+    // compares it to this, so it must digest the text this command read —
+    // any other string at the call site type-checks and reads as drift on
+    // every run.
+    const diffPath = join(dir, 'local.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, makeDiff('src/a.ts', 1200));
+    run(diffPath, out);
+
+    const plan = JSON.parse(readFileSync(out, 'utf8'));
+    expect(plan.selection.sourceArtifactSha256).toBe(
+      createHash('sha256')
+        .update(readFileSync(diffPath, 'utf8'), 'utf8')
+        .digest('hex'),
+    );
   });
 
   it('carries the PR identity when told to — the roster requires Agent 0 from it', () => {

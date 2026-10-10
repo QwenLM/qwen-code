@@ -7,7 +7,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { runInNewContext } from 'node:vm';
+import { describe, expect, it, vi } from 'vitest';
 import { parseSkillContent } from '../../skill-load.js';
 
 function loadComputerUseSkill() {
@@ -15,54 +16,128 @@ function loadComputerUseSkill() {
     path.dirname(fileURLToPath(import.meta.url)),
     'SKILL.md',
   );
-  const content = fs.readFileSync(skillPath, 'utf8');
-  const config = parseSkillContent(content, skillPath);
+  const config = parseSkillContent(
+    fs.readFileSync(skillPath, 'utf-8'),
+    skillPath,
+  );
   return { config, body: config.body };
 }
 
 describe('bundled computer-use skill', () => {
-  it('uses the public typed SDK contract and requires fresh verification', () => {
-    const { body } = loadComputerUseSkill();
+  it.each([true, false])(
+    'runs the forwarding example with desktop relay available=%s',
+    async (desktopAvailable) => {
+      const { body } = loadComputerUseSkill();
+      const example = body.match(/```js\n([\s\S]*?)\n```/)?.[1];
+      expect(example).toBeDefined();
+      const screenshot = {
+        type: 'image',
+        data: 'screenshot',
+        mimeType: 'image/png',
+      };
+      const result = {
+        content: [{ type: 'text', text: 'macos' }, screenshot],
+      };
+      const desktop = vi.fn().mockResolvedValue(result);
+      const regular = vi.fn().mockResolvedValue(result);
+      const text = vi.fn();
+      const image = vi.fn();
+      // Mirror the code-mode host (host.ts): a Proxy that throws on an
+      // unknown key, so an unbound desktop tool must be probed with `in`.
+      const toolTarget = Object.assign(Object.create(null), {
+        mcp__node_repl__node_repl: regular,
+        ...(desktopAvailable
+          ? { mcp__desktop_node_repl__node_repl: desktop }
+          : {}),
+      }) as Record<string, unknown>;
+      const tools = new Proxy(toolTarget, {
+        get(target, property) {
+          if (typeof property === 'string' && !(property in target)) {
+            throw new Error(
+              `Unknown or unavailable code mode tool: ${property}`,
+            );
+          }
+          return Reflect.get(target, property) as unknown;
+        },
+      });
+      await runInNewContext(`(async () => {${example}})()`, {
+        tools,
+        ALL_TOOLS: desktopAvailable
+          ? [{ name: 'mcp__desktop_node_repl__node_repl' }]
+          : [],
+        code: 'return platform',
+        text,
+        image,
+      });
+      expect(desktopAvailable ? desktop : regular).toHaveBeenCalledWith({
+        code: 'return platform',
+      });
+      expect(desktopAvailable ? regular : desktop).not.toHaveBeenCalled();
+      expect(text).toHaveBeenCalledWith('macos');
+      expect(image).toHaveBeenCalledWith(screenshot);
+    },
+  );
 
-    expect(body).toContain("import('@qwen-code/cua-sdk/computer-use')");
-    expect(body).toContain('ComputerUse.create()');
-    expect(body).toContain('computer.actAndVerify');
-    expect(body).toContain('computer.verifyState');
-    expect(body).toContain('stableSamples: 2');
-    expect(body).toContain('globalThis.lastCuaOutcome');
-    expect(body).toContain('JSON.stringify(lastCuaOutcome)');
-    expect(body).toContain('error?.details');
-    expect(
-      body.match(/signal: ?nodeRepl\.signal/g)?.length,
-    ).toBeGreaterThanOrEqual(5);
-    expect(body).toContain('delivery evidence, not task completion');
-    expect(body).toContain('`unknown` and `stable:false` are not success');
-    expect(body).toContain('`effect`');
-    expect(body).toContain('`operation`');
-    expect(body).toContain('Do not use generic `callTool`');
-  });
-
-  it('keeps one revision cursor per surface and forceFull recovery one-shot', () => {
-    const { body } = loadComputerUseSkill();
-
-    expect(body).toContain('`${target.pid}:${target.windowId}`');
-    expect(body).toContain('baseRevisionId: cuaRevisions.get(key)');
-    expect(body).toContain('same surface');
-    expect(body.match(/forceFull/g)).toHaveLength(1);
-    expect(body).toContain('one observation with `forceFull: true`');
-    expect(body).toContain('Do not make full observations the default');
-  });
-
-  it('stays minimal, generic, and separate from Node REPL runtime guidance', () => {
+  it('loads a self-contained App workflow for every connected platform', () => {
     const { config, body } = loadComputerUseSkill();
-
     expect(config.name).toBe('computer-use');
-    expect(body.length).toBeLessThanOrEqual(6000);
+    expect(config.allowedTools).toBeUndefined();
+    expect(body).toContain('`desktop-node-repl` MCP server');
+    expect(body).toContain('mcp__desktop_node_repl__node_repl');
+    expect(body).toContain('skip the installation commands below');
+    expect(body).toContain('ComputerUse.create()');
+    expect(body).toContain('await computer.getPlatform()');
+    expect(body).toContain('computer.getApp(');
+    expect(body).toContain('app.getState(');
+    expect(body).toContain('app.click(37)');
     expect(body).not.toMatch(
-      /RecreationBench|benchmark|evaluator|score|bcrypt|ovonote|failure count/i,
+      /references\/|computer\.observeWindow\(|computer\.listWindows\(|elementToken|windowId/,
+    );
+  });
+
+  it('preserves batching, incremental observation and safe refresh guidance', () => {
+    const { body } = loadComputerUseSkill();
+    expect(body).toMatch(/After performing one or more UI actions/);
+    expect(body).toMatch(/Batch actions whose target remains the same/);
+    expect(body).toContain('Prefer this default diff output');
+    expect(body).toContain('disableDiff: true');
+    expect(body).toMatch(/window or session changes/);
+    expect(body).toContain('maxTextChars?: number');
+    expect(body).toContain('12,000 characters');
+    expect(body).toContain('Only currently captured actionable IDs');
+    expect(body).toMatch(
+      /Partial, unconfirmed or cancelled actions must not be blindly repeated/,
     );
     expect(body).not.toMatch(
-      /top-level (?:const|let|var)|lexical binding|cannot be redeclared|dynamic import/i,
+      /RecreationBench|benchmark|evaluator|score|failure count/i,
     );
+  });
+
+  it('requests screenshots separately and keeps the persistent REPL lifecycle', () => {
+    const { body } = loadComputerUseSkill();
+    const screenshotSection = body.split('## Reading screenshots')[1];
+    expect(screenshotSection).toContain('includeScreenshot: true');
+    expect(screenshotSection).not.toContain('disableDiff');
+    expect(screenshotSection).toContain('image.dataBase64');
+    expect(screenshotSection).toContain('nodeRepl.write(state.text)');
+    expect(body).toContain('await computer.close()');
+    expect(body).toContain(
+      'Reset the Node REPL only when no other persistent state is needed.',
+    );
+  });
+
+  it('documents the macOS text methods and their uncertainty boundaries', () => {
+    const { body } = loadComputerUseSkill();
+    expect(body).toContain('app.selectText(37,');
+    expect(body).toContain("await app.paste('ready')");
+    expect(body).toContain("format?: 'text' | 'md' | 'html'");
+    expect(body).toContain(
+      "selection?: 'text' | 'cursor_before' | 'cursor_after'",
+    );
+    expect(body).toContain('immediately adjacent');
+    expect(body).toContain('Missing or');
+    expect(body).toContain('ambiguous matches fail');
+    expect(body).toContain('Observe state before');
+    expect(body).toContain('newer external clipboard change');
   });
 });

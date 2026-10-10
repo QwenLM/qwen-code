@@ -18,7 +18,7 @@
  * When disabled, no notification is sent.
  */
 
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { TerminalNotification } from '../ui/hooks/useTerminalNotification.js';
 import { detectTerminal, generateKittyId } from '../utils/osc.js';
 

@@ -14,10 +14,16 @@
  * same numbers/sections as the original. Tab/shift+tab switch, Esc closes.
  */
 
-import { useEffect, useLayoutEffect, useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { useRenderer, useKeyboard } from '@opentui/react';
-import type { Config } from '@qwen-code/qwen-code-core';
-import { uiTelemetryService } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { uiTelemetryService } from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
 import { computeSessionStats } from '../utils/computeStats.js';
 import { formatDuration } from '../utils/formatters.js';
 import {
@@ -28,6 +34,7 @@ import {
 import { fmtTokens, getSeriesColors } from '../components/stats-helpers.js';
 import { ICON } from '../constants.js';
 import { toOriginalKey } from './key-map.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { C } from './theme.js';
 
 /** Close the dialog on a raw Escape, like the other dialog hosts. */
@@ -101,9 +108,19 @@ export function OpenTuiStatsDialog(props: {
   onClose: () => void;
   /** Embedded hosts pass false while their own focus zone owns the keys. */
   isFocused?: boolean;
+  /** The popup region's row budget; the stats body does not window, so it is ignored. */
+  availableTerminalHeight?: number;
 }) {
   const { config, onClose, isFocused = true } = props;
-  const [tab, setTab] = useState<StatsTabName>('session');
+  const [tab, setTabState] = useState<StatsTabName>('session');
+  // A held Tab hands the whole burst to the handler from the last render, so
+  // the cycle must read where the previous key of the burst landed.
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
+  const setTab = (next: StatsTabName) => {
+    tabRef.current = next;
+    setTabState(next);
+  };
   // Re-render on every telemetry update so stats stay live while the dialog
   // is open (ink re-renders via SessionStatsProvider's update event).
   const [, forceUpdate] = useState(0);
@@ -120,7 +137,7 @@ export function OpenTuiStatsDialog(props: {
     const original = toOriginalKey(key);
     if (original.name === 'tab') {
       const order = TABS.map((t) => t.name);
-      const idx = order.indexOf(tab);
+      const idx = order.indexOf(tabRef.current);
       setTab(
         order[(idx + (original.shift ? -1 : 1) + order.length) % order.length],
       );
@@ -176,7 +193,13 @@ export function OpenTuiStatsDialog(props: {
       paddingRight={2}
       paddingTop={1}
       paddingBottom={1}
-      marginTop={1}
+      // A shrinkable frame lets a short region squeeze its text rows to zero
+      // and paint them over each other; staying natural height keeps the rows
+      // contiguous for the region's clip to cut at the tail, as ink does for
+      // /stats. The clip cuts child text but not the frame's own border
+      // strokes, so a frame taller than the region still paints its border
+      // past it, and a body with an explicit height windows itself from the
+      // region budget instead of relying on the clip (Decision 71).
       flexShrink={0}
     >
       {/* Tab bar */}
@@ -380,6 +403,13 @@ export function OpenTuiStatsDialog(props: {
   );
 }
 
+/** The port's own body cap; ink windows its list at
+ * Math.min(15, Math.max(1, residual)) (SkillsManagerDialog). */
+const SKILLS_BODY_ROWS = 12;
+
+/** The skills frame's rows outside the scrollbox: border 2, padding 2, title 1, body margin 1. */
+const SKILLS_FRAME_CHROME_ROWS = 6;
+
 interface SkillRow {
   name: string;
   description: string;
@@ -388,11 +418,25 @@ interface SkillRow {
 export function OpenTuiSkillsDialog(props: {
   config: Config | null | undefined;
   onClose: () => void;
+  /** The popup region's row budget; the scrollbox windows its height from it. */
+  availableTerminalHeight?: number;
 }) {
   const { config, onClose } = props;
   const [rows, setRows] = useState<SkillRow[]>([]);
   const [loading, setLoading] = useState(true);
   useEscToClose(onClose, true);
+  // The frame is unshrinkable and the region's clip cannot cut the border,
+  // so the body's explicit height windows itself from what the region leaves
+  // after the frame's chrome: border and padding 4, the title row 1, the
+  // body's margin row 1. Without a budget the body keeps its twelve rows.
+  const regionHeight = clampDialogHeight(props.availableTerminalHeight);
+  const bodyRows =
+    regionHeight === undefined
+      ? SKILLS_BODY_ROWS
+      : Math.max(
+          0,
+          Math.min(SKILLS_BODY_ROWS, regionHeight - SKILLS_FRAME_CHROME_ROWS),
+        );
   useEffect(() => {
     let alive = true;
     const mgr = config?.getSkillManager?.();
@@ -428,7 +472,13 @@ export function OpenTuiSkillsDialog(props: {
       paddingRight={2}
       paddingTop={1}
       paddingBottom={1}
-      marginTop={1}
+      // A shrinkable frame lets a short region squeeze its text rows to zero
+      // and paint them over each other; staying natural height keeps the rows
+      // contiguous for the region's clip to cut at the tail, as ink does for
+      // /stats. The clip cuts child text but not the frame's own border
+      // strokes, so a frame taller than the region still paints its border
+      // past it, and a body with an explicit height windows itself from the
+      // region budget instead of relying on the clip (Decision 71).
       flexShrink={0}
     >
       <box flexDirection="row" justifyContent="space-between">
@@ -437,7 +487,7 @@ export function OpenTuiSkillsDialog(props: {
         </text>
         <text fg={C.dim}>{'esc to close'}</text>
       </box>
-      <scrollbox height={12} marginTop={1} stickyScroll={false}>
+      <scrollbox height={bodyRows} marginTop={1} stickyScroll={false}>
         {loading ? (
           <text fg={C.dim}>{'loading skills…'}</text>
         ) : rows.length === 0 ? (

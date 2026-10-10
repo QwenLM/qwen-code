@@ -133,6 +133,36 @@ beforeEach(() => {
   debugWarnCalls.length = 0;
 });
 
+const errorStatus = (message: string) => ({
+  code: SpanStatusCode.ERROR,
+  message,
+});
+
+// Asserts the single recorded span carries exactly `statuses` and has ended.
+function expectOnlySpan(statuses: SpanRecord['statuses']) {
+  expect(spans).toHaveLength(1);
+  expect(spans[0].statuses).toEqual(statuses);
+  expect(spans[0].ended).toBe(true);
+}
+
+// Runs withSpan on a callback that throws `message`; asserts the rejection.
+async function expectSpanRejects(
+  name: string,
+  message: string,
+  options?: { autoOkOnSuccess?: boolean },
+) {
+  await expect(
+    withSpan(
+      name,
+      {},
+      async () => {
+        throw new Error(message);
+      },
+      options,
+    ),
+  ).rejects.toThrow(message);
+}
+
 describe('withSpan', () => {
   it('rate-limits repeated telemetry operation warnings and reports suppressed count', async () => {
     mockState.throwOnSetStatus = true;
@@ -164,87 +194,50 @@ describe('withSpan', () => {
     const result = await withSpan('test.op', { key: 'value' }, async () => 42);
 
     expect(result).toBe(42);
-    expect(spans).toHaveLength(1);
+    expectOnlySpan([{ code: SpanStatusCode.OK }]);
     expect(spans[0].name).toBe('test.op');
-    expect(spans[0].statuses).toEqual([{ code: SpanStatusCode.OK }]);
-    expect(spans[0].ended).toBe(true);
   });
 
   it('preserves ERROR status set by callback (does not overwrite with OK)', async () => {
+    // The callback returns normally; only its ERROR status may be present.
     await withSpan('test.handled-error', {}, async (span) => {
-      span.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: 'hook denied',
-      });
-      // Return normally without throwing
+      span.setStatus(errorStatus('hook denied'));
     });
 
-    expect(spans).toHaveLength(1);
-    // Only the ERROR status set by the callback should be present
-    expect(spans[0].statuses).toEqual([
-      { code: SpanStatusCode.ERROR, message: 'hook denied' },
-    ]);
-    expect(spans[0].ended).toBe(true);
+    expectOnlySpan([errorStatus('hook denied')]);
   });
 
   it('tracks explicit status without mutating non-writable spans', async () => {
     mockState.nonWritableSetStatus = true;
 
     await withSpan('test.non-writable-status', {}, async (span) => {
-      span.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: 'custom error',
-      });
+      span.setStatus(errorStatus('custom error'));
     });
 
-    expect(spans).toHaveLength(1);
-    expect(spans[0].statuses).toEqual([
-      { code: SpanStatusCode.ERROR, message: 'custom error' },
-    ]);
-    expect(spans[0].ended).toBe(true);
+    expectOnlySpan([errorStatus('custom error')]);
   });
 
   it('sets ERROR status when callback throws and no status was set', async () => {
-    const error = new Error('something failed');
-    await expect(
-      withSpan('test.throw', {}, async () => {
-        throw error;
-      }),
-    ).rejects.toThrow('something failed');
+    await expectSpanRejects('test.throw', 'something failed');
 
-    expect(spans).toHaveLength(1);
-    expect(spans[0].statuses).toEqual([
-      { code: SpanStatusCode.ERROR, message: 'Operation failed' },
-    ]);
+    expectOnlySpan([errorStatus('Operation failed')]);
     expect(JSON.stringify(spans[0].statuses)).not.toContain('something failed');
-    expect(spans[0].ended).toBe(true);
   });
 
   it('does not overwrite ERROR when callback throws after setting status', async () => {
     await expect(
       withSpan('test.throw-after-status', {}, async (span) => {
-        span.setStatus({
-          code: SpanStatusCode.ERROR,
-          message: 'custom error',
-        });
+        span.setStatus(errorStatus('custom error'));
         throw new Error('exception');
       }),
     ).rejects.toThrow('exception');
 
-    expect(spans).toHaveLength(1);
     // Only the callback's status should be present
-    expect(spans[0].statuses).toEqual([
-      { code: SpanStatusCode.ERROR, message: 'custom error' },
-    ]);
-    expect(spans[0].ended).toBe(true);
+    expectOnlySpan([errorStatus('custom error')]);
   });
 
   it('ends the span even when callback throws', async () => {
-    await expect(
-      withSpan('test.ensure-end', {}, async () => {
-        throw new Error('boom');
-      }),
-    ).rejects.toThrow('boom');
+    await expectSpanRejects('test.ensure-end', 'boom');
 
     expect(spans[0].ended).toBe(true);
   });
@@ -263,11 +256,7 @@ describe('withSpan', () => {
   it('does not let ERROR status failures mask the original error', async () => {
     mockState.throwOnSetStatus = true;
 
-    await expect(
-      withSpan('test.error-status-fail', {}, async () => {
-        throw new Error('original failure');
-      }),
-    ).rejects.toThrow('original failure');
+    await expectSpanRejects('test.error-status-fail', 'original failure');
 
     expect(spans[0].statuses).toEqual([]);
     expect(spans[0].ended).toBe(true);
@@ -276,15 +265,9 @@ describe('withSpan', () => {
   it('does not let span end failures mask the original error', async () => {
     mockState.throwOnEnd = true;
 
-    await expect(
-      withSpan('test.end-fail', {}, async () => {
-        throw new Error('original failure');
-      }),
-    ).rejects.toThrow('original failure');
+    await expectSpanRejects('test.end-fail', 'original failure');
 
-    expect(spans[0].statuses).toEqual([
-      { code: SpanStatusCode.ERROR, message: 'Operation failed' },
-    ]);
+    expect(spans[0].statuses).toEqual([errorStatus('Operation failed')]);
     expect(spans[0].ended).toBe(false);
   });
 
@@ -304,27 +287,16 @@ describe('withSpan', () => {
         autoOkOnSuccess: false,
       });
 
-      expect(spans).toHaveLength(1);
-      expect(spans[0].statuses).toEqual([]);
-      expect(spans[0].ended).toBe(true);
+      expectOnlySpan([]);
     });
 
     it('still sets ERROR when callback throws and autoOkOnSuccess is false', async () => {
-      await expect(
-        withSpan(
-          'test.throw-no-auto',
-          {},
-          async () => {
-            throw new Error('fail');
-          },
-          { autoOkOnSuccess: false },
-        ),
-      ).rejects.toThrow('fail');
+      await expectSpanRejects('test.throw-no-auto', 'fail', {
+        autoOkOnSuccess: false,
+      });
 
       expect(spans).toHaveLength(1);
-      expect(spans[0].statuses).toEqual([
-        { code: SpanStatusCode.ERROR, message: 'Operation failed' },
-      ]);
+      expect(spans[0].statuses).toEqual([errorStatus('Operation failed')]);
     });
 
     it('preserves caller-set ERROR with autoOkOnSuccess false', async () => {
@@ -332,18 +304,13 @@ describe('withSpan', () => {
         'test.error-no-auto',
         {},
         async (span) => {
-          span.setStatus({
-            code: SpanStatusCode.ERROR,
-            message: 'hook denied',
-          });
+          span.setStatus(errorStatus('hook denied'));
         },
         { autoOkOnSuccess: false },
       );
 
       expect(spans).toHaveLength(1);
-      expect(spans[0].statuses).toEqual([
-        { code: SpanStatusCode.ERROR, message: 'hook denied' },
-      ]);
+      expect(spans[0].statuses).toEqual([errorStatus('hook denied')]);
     });
 
     it('allows caller to set OK explicitly with autoOkOnSuccess false', async () => {
@@ -381,108 +348,70 @@ describe('startSpanWithContext', () => {
 });
 
 describe('createSessionRootContext', () => {
-  it('derives a deterministic traceId from session ID (spanId is random)', () => {
-    const ctx = createSessionRootContext('session-123') as unknown as {
+  // The mocked trace.setSpan/wrapSpanContext return the span context itself.
+  const rootContext = (sessionId: string) =>
+    createSessionRootContext(sessionId) as unknown as {
       traceId: string;
       spanId: string;
       traceFlags: number;
       isRemote: boolean;
     };
-    expect(ctx.traceId).toBe(deriveTraceId('session-123'));
+
+  it('derives a deterministic traceId from session ID (spanId is random)', () => {
+    expect(rootContext('session-123').traceId).toBe(
+      deriveTraceId('session-123'),
+    );
   });
 
-  it('uses TraceFlags.SAMPLED by default (no OTEL_TRACES_SAMPLER)', () => {
+  it.each([
+    [
+      'uses TraceFlags.SAMPLED by default (no OTEL_TRACES_SAMPLER)',
+      undefined,
+      'session-123',
+      TraceFlags.SAMPLED,
+    ],
+    [
+      'uses TraceFlags.NONE when a custom sampler is configured',
+      'traceidratio',
+      'session-456',
+      TraceFlags.NONE,
+    ],
+    [
+      'uses TraceFlags.SAMPLED when OTEL_TRACES_SAMPLER=always_on',
+      'always_on',
+      'session-ao',
+      TraceFlags.SAMPLED,
+    ],
+    [
+      'uses TraceFlags.NONE when OTEL_TRACES_SAMPLER=always_off',
+      'always_off',
+      'session-aoff',
+      TraceFlags.NONE,
+    ],
+    [
+      'uses TraceFlags.SAMPLED when OTEL_TRACES_SAMPLER=parentbased_always_on',
+      'parentbased_always_on',
+      'session-789',
+      TraceFlags.SAMPLED,
+    ],
+    [
+      'uses TraceFlags.NONE when OTEL_TRACES_SAMPLER=parentbased_always_off',
+      'parentbased_always_off',
+      'session-off',
+      TraceFlags.NONE,
+    ],
+    [
+      'uses TraceFlags.SAMPLED for parentbased_traceidratio (parent flag gates children)',
+      'parentbased_traceidratio',
+      'session-pb-ratio',
+      TraceFlags.SAMPLED,
+    ],
+  ])('%s', (_title, sampler, sessionId, expected) => {
     const original = process.env['OTEL_TRACES_SAMPLER'];
-    delete process.env['OTEL_TRACES_SAMPLER'];
+    if (sampler === undefined) delete process.env['OTEL_TRACES_SAMPLER'];
+    else process.env['OTEL_TRACES_SAMPLER'] = sampler;
     try {
-      const ctx = createSessionRootContext('session-123') as unknown as {
-        traceFlags: number;
-      };
-      expect(ctx.traceFlags).toBe(TraceFlags.SAMPLED);
-    } finally {
-      if (original !== undefined) process.env['OTEL_TRACES_SAMPLER'] = original;
-      else delete process.env['OTEL_TRACES_SAMPLER'];
-    }
-  });
-
-  it('uses TraceFlags.NONE when a custom sampler is configured', () => {
-    const original = process.env['OTEL_TRACES_SAMPLER'];
-    process.env['OTEL_TRACES_SAMPLER'] = 'traceidratio';
-    try {
-      const ctx = createSessionRootContext('session-456') as unknown as {
-        traceFlags: number;
-      };
-      expect(ctx.traceFlags).toBe(TraceFlags.NONE);
-    } finally {
-      if (original !== undefined) process.env['OTEL_TRACES_SAMPLER'] = original;
-      else delete process.env['OTEL_TRACES_SAMPLER'];
-    }
-  });
-
-  it('uses TraceFlags.SAMPLED when OTEL_TRACES_SAMPLER=always_on', () => {
-    const original = process.env['OTEL_TRACES_SAMPLER'];
-    process.env['OTEL_TRACES_SAMPLER'] = 'always_on';
-    try {
-      const ctx = createSessionRootContext('session-ao') as unknown as {
-        traceFlags: number;
-      };
-      expect(ctx.traceFlags).toBe(TraceFlags.SAMPLED);
-    } finally {
-      if (original !== undefined) process.env['OTEL_TRACES_SAMPLER'] = original;
-      else delete process.env['OTEL_TRACES_SAMPLER'];
-    }
-  });
-
-  it('uses TraceFlags.NONE when OTEL_TRACES_SAMPLER=always_off', () => {
-    const original = process.env['OTEL_TRACES_SAMPLER'];
-    process.env['OTEL_TRACES_SAMPLER'] = 'always_off';
-    try {
-      const ctx = createSessionRootContext('session-aoff') as unknown as {
-        traceFlags: number;
-      };
-      expect(ctx.traceFlags).toBe(TraceFlags.NONE);
-    } finally {
-      if (original !== undefined) process.env['OTEL_TRACES_SAMPLER'] = original;
-      else delete process.env['OTEL_TRACES_SAMPLER'];
-    }
-  });
-
-  it('uses TraceFlags.SAMPLED when OTEL_TRACES_SAMPLER=parentbased_always_on', () => {
-    const original = process.env['OTEL_TRACES_SAMPLER'];
-    process.env['OTEL_TRACES_SAMPLER'] = 'parentbased_always_on';
-    try {
-      const ctx = createSessionRootContext('session-789') as unknown as {
-        traceFlags: number;
-      };
-      expect(ctx.traceFlags).toBe(TraceFlags.SAMPLED);
-    } finally {
-      if (original !== undefined) process.env['OTEL_TRACES_SAMPLER'] = original;
-      else delete process.env['OTEL_TRACES_SAMPLER'];
-    }
-  });
-
-  it('uses TraceFlags.NONE when OTEL_TRACES_SAMPLER=parentbased_always_off', () => {
-    const original = process.env['OTEL_TRACES_SAMPLER'];
-    process.env['OTEL_TRACES_SAMPLER'] = 'parentbased_always_off';
-    try {
-      const ctx = createSessionRootContext('session-off') as unknown as {
-        traceFlags: number;
-      };
-      expect(ctx.traceFlags).toBe(TraceFlags.NONE);
-    } finally {
-      if (original !== undefined) process.env['OTEL_TRACES_SAMPLER'] = original;
-      else delete process.env['OTEL_TRACES_SAMPLER'];
-    }
-  });
-
-  it('uses TraceFlags.SAMPLED for parentbased_traceidratio (parent flag gates children)', () => {
-    const original = process.env['OTEL_TRACES_SAMPLER'];
-    process.env['OTEL_TRACES_SAMPLER'] = 'parentbased_traceidratio';
-    try {
-      const ctx = createSessionRootContext('session-pb-ratio') as unknown as {
-        traceFlags: number;
-      };
-      expect(ctx.traceFlags).toBe(TraceFlags.SAMPLED);
+      expect(rootContext(sessionId).traceFlags).toBe(expected);
     } finally {
       if (original !== undefined) process.env['OTEL_TRACES_SAMPLER'] = original;
       else delete process.env['OTEL_TRACES_SAMPLER'];
@@ -490,30 +419,19 @@ describe('createSessionRootContext', () => {
   });
 
   it('generates a valid 16-char hex spanId', () => {
-    const ctx = createSessionRootContext('session-123') as unknown as {
-      spanId: string;
-    };
-    expect(ctx.spanId).toMatch(/^[0-9a-f]{16}$/);
+    expect(rootContext('session-123').spanId).toMatch(/^[0-9a-f]{16}$/);
   });
 
   it('produces same traceId for same session ID', () => {
-    const ctx1 = createSessionRootContext('session-abc') as unknown as {
-      traceId: string;
-    };
-    const ctx2 = createSessionRootContext('session-abc') as unknown as {
-      traceId: string;
-    };
-    expect(ctx1.traceId).toBe(ctx2.traceId);
+    expect(rootContext('session-abc').traceId).toBe(
+      rootContext('session-abc').traceId,
+    );
   });
 
   it('produces different traceId for different session IDs', () => {
-    const ctx1 = createSessionRootContext('session-abc') as unknown as {
-      traceId: string;
-    };
-    const ctx2 = createSessionRootContext('session-xyz') as unknown as {
-      traceId: string;
-    };
-    expect(ctx1.traceId).not.toBe(ctx2.traceId);
+    expect(rootContext('session-abc').traceId).not.toBe(
+      rootContext('session-xyz').traceId,
+    );
   });
 });
 

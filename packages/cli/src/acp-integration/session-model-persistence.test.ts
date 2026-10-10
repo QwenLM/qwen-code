@@ -99,6 +99,75 @@ describe('session-model-persistence', () => {
     });
   });
 
+  it('records and restores the effective Responses API despite a same-id Chat route', async () => {
+    const recordSessionModel = vi.fn().mockResolvedValue(true);
+    const baseUrl = 'https://example.test/v1';
+    const config = {
+      getModel: () => 'gpt-model',
+      getAuthType: () => AuthType.USE_OPENAI_RESPONSES,
+      getCurrentModelRegistryBaseUrl: () => baseUrl,
+      getChatRecordingService: () => ({ recordSessionModel }),
+    } as unknown as Config;
+    await recordDaemonSessionModelFromConfig(config);
+    expect(recordSessionModel).toHaveBeenCalledWith({
+      modelId: 'gpt-model',
+      authType: AuthType.USE_OPENAI_RESPONSES,
+      baseUrl,
+    });
+
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const restoreConfig = {
+      getModel: () => 'gpt-model',
+      getAuthType: () => AuthType.USE_OPENAI,
+      getCurrentModelRegistryBaseUrl: () => baseUrl,
+      getResolvedModelConfig: resolvedWhen(baseUrl),
+      switchModel,
+    } as unknown as Config;
+    await applyRestoredSessionModel(
+      restoreConfig,
+      recordingProjection({
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [null],
+        sessionModel: recordSessionModel.mock.calls[0][0],
+      }),
+    );
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI_RESPONSES,
+      'gpt-model',
+      { baseUrl },
+    );
+  });
+
+  it('does not retry a removed recorded Responses route as Chat', async () => {
+    const switchModel = vi
+      .fn()
+      .mockRejectedValue(new Error('Model route unavailable'));
+    const config = {
+      getModel: () => 'gpt-model',
+      getAuthType: () => AuthType.USE_OPENAI,
+      getResolvedModelConfig: () => undefined,
+      switchModel,
+    } as unknown as Config;
+    await applyRestoredSessionModel(
+      config,
+      recordingProjection({
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [null],
+        sessionModel: {
+          modelId: 'gpt-model',
+          authType: AuthType.USE_OPENAI_RESPONSES,
+          baseUrl: 'https://example.test/v1',
+        },
+      }),
+    );
+    expect(switchModel).toHaveBeenCalledOnce();
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI_RESPONSES,
+      'gpt-model',
+      undefined,
+    );
+  });
+
   it('omits baseUrl for an implicit registry route', async () => {
     const recordSessionModel = vi.fn().mockResolvedValue(true);
     const config = {

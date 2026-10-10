@@ -170,6 +170,263 @@ describe('workspace memory routes', () => {
         (f) => f.path,
       );
       expect(paths).toEqual(expect.arrayContaining([wsFile, globalFile]));
+      for (const file of res.body.files as Array<Record<string, unknown>>) {
+        expect(file).not.toHaveProperty('content');
+      }
+    });
+
+    it('returns the global file text with content=true', async () => {
+      await fs.mkdir(globalDir, { recursive: true });
+      const globalFile = path.join(globalDir, 'QWEN.md');
+      await fs.writeFile(globalFile, 'global memory\n', 'utf8');
+
+      const bridge = buildBridgeStub();
+      const app = buildApp({ bridge, boundWorkspace: workspace });
+      const res = await request(app).get('/workspace/memory?content=true');
+
+      expect(res.status).toBe(200);
+      expect(res.body.files).toEqual([
+        {
+          kind: 'memory_file',
+          path: globalFile,
+          scope: 'global',
+          bytes: Buffer.byteLength('global memory\n'),
+          content: 'global memory\n',
+        },
+      ]);
+    });
+
+    it('marks content truncated past the 1 MB cap', async () => {
+      const wsFile = path.join(workspace, 'QWEN.md');
+      await fs.writeFile(wsFile, 'x'.repeat(1024 * 1024 + 5), 'utf8');
+
+      const bridge = buildBridgeStub();
+      const app = buildApp({ bridge, boundWorkspace: workspace });
+      const res = await request(app).get('/workspace/memory?content=true');
+
+      expect(res.status).toBe(200);
+      const [file] = res.body.files as Array<{
+        content: string;
+        truncated?: boolean;
+      }>;
+      expect(file.truncated).toBe(true);
+      expect(file.content).toHaveLength(1024 * 1024);
+    });
+
+    it.each(['workspace', 'global'] as const)(
+      'refuses content outside the %s root while retaining metadata',
+      async (scope) => {
+        const root = scope === 'workspace' ? workspace : globalDir;
+        await fs.mkdir(root, { recursive: true });
+        const outside = path.join(tmp, 'outside.md');
+        await fs.writeFile(outside, 'outside memory\n');
+        const memoryFile = path.join(root, 'QWEN.md');
+        await fs.symlink(outside, memoryFile);
+
+        const app = buildApp({
+          bridge: buildBridgeStub(),
+          boundWorkspace: workspace,
+        });
+        const res = await request(app).get('/workspace/memory?content=true');
+
+        expect(res.status).toBe(200);
+        expect(res.body.files).toEqual([
+          { kind: 'memory_file', path: memoryFile, scope, bytes: 15 },
+        ]);
+        expect(res.body.errors).toEqual([
+          expect.objectContaining({
+            kind: 'memory_file',
+            status: 'error',
+            error: expect.any(String),
+            hint: memoryFile,
+          }),
+        ]);
+      },
+    );
+
+    it.each(['workspace', 'global'] as const)(
+      'reads a symlink whose target stays within the %s root',
+      async (scope) => {
+        const root = scope === 'workspace' ? workspace : globalDir;
+        await fs.mkdir(root, { recursive: true });
+        const target = path.join(root, 'notes.md');
+        await fs.writeFile(target, 'linked memory\n');
+        const memoryFile = path.join(root, 'QWEN.md');
+        await fs.symlink(target, memoryFile);
+
+        const app = buildApp({
+          bridge: buildBridgeStub(),
+          boundWorkspace: workspace,
+        });
+        const res = await request(app).get('/workspace/memory?content=true');
+
+        expect(res.status).toBe(200);
+        expect(res.body.files).toEqual([
+          {
+            kind: 'memory_file',
+            path: memoryFile,
+            scope,
+            bytes: 14,
+            content: 'linked memory\n',
+          },
+        ]);
+        expect(res.body.errors).toBeUndefined();
+      },
+    );
+
+    it('bounds large-file reads and completes short descriptor reads', async () => {
+      const cap = 1024 * 1024;
+      const wsFile = path.join(workspace, 'QWEN.md');
+      await fs.writeFile(wsFile, 'x'.repeat(8 * cap));
+      const handle = await fs.open(wsFile, 'r');
+      const read = handle.read.bind(handle);
+      const readSpy = vi
+        .spyOn(handle, 'read')
+        .mockImplementation((async (
+          buffer: Buffer,
+          offset: number,
+          length: number,
+          position: number,
+        ) =>
+          read(
+            buffer,
+            offset,
+            Math.min(length, 64 * 1024),
+            position,
+          )) as typeof handle.read);
+      const openSpy = vi.spyOn(fs, 'open').mockResolvedValue(handle);
+      const readFileSpy = vi.spyOn(fs, 'readFile');
+      try {
+        const app = buildApp({
+          bridge: buildBridgeStub(),
+          boundWorkspace: workspace,
+        });
+        const res = await request(app).get('/workspace/memory?content=true');
+
+        expect(res.status).toBe(200);
+        expect(res.body.files[0]).toMatchObject({
+          bytes: 8 * cap,
+          content: 'x'.repeat(cap),
+          truncated: true,
+        });
+        expect(readFileSpy).not.toHaveBeenCalled();
+        expect(readSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ byteLength: cap + 1 }),
+          0,
+          cap + 1,
+          0,
+        );
+        expect(readSpy.mock.calls.length).toBeGreaterThan(1);
+      } finally {
+        readFileSpy.mockRestore();
+        openSpy.mockRestore();
+        readSpy.mockRestore();
+        await handle.close();
+      }
+    });
+
+    it('returns a complete UTF-8 prefix when the cap splits a character', async () => {
+      const prefix = 'x'.repeat(1024 * 1024 - 1);
+      const wsFile = path.join(workspace, 'QWEN.md');
+      await fs.writeFile(wsFile, `${prefix}中\n`);
+      const app = buildApp({
+        bridge: buildBridgeStub(),
+        boundWorkspace: workspace,
+      });
+      const res = await request(app).get('/workspace/memory?content=true');
+
+      expect(res.status).toBe(200);
+      expect(res.body.files[0]).toMatchObject({
+        content: prefix,
+        truncated: true,
+      });
+    });
+
+    it('omits content for a memory file that is not valid UTF-8', async () => {
+      await fs.mkdir(globalDir, { recursive: true });
+      const globalFile = path.join(globalDir, 'QWEN.md');
+      // What PowerShell `>` redirection writes. Serving it as lossy text
+      // would still look complete to the panel, whose `mode=replace` save
+      // then rewrites the real bytes with no backup.
+      await fs.writeFile(
+        globalFile,
+        Buffer.concat([
+          Buffer.from([0xff, 0xfe]),
+          Buffer.from('# Memory 中文\n', 'utf16le'),
+        ]),
+      );
+
+      const bridge = buildBridgeStub();
+      const app = buildApp({ bridge, boundWorkspace: workspace });
+      const res = await request(app).get('/workspace/memory?content=true');
+
+      expect(res.status).toBe(200);
+      const [file] = res.body.files as Array<Record<string, unknown>>;
+      expect(file['path']).toBe(globalFile);
+      expect(file).not.toHaveProperty('content');
+    });
+
+    it('flags a torn read (size changed between stat and open) as truncated', async () => {
+      // Memory writes are truncate-then-write; a read landing inside that
+      // window captures a prefix. The entry must not report that prefix
+      // as the file's full text.
+      const wsFile = path.join(workspace, 'QWEN.md');
+      await fs.writeFile(wsFile, 'x'.repeat(100), 'utf8');
+      const resolved = await fs.realpath(wsFile);
+      const realOpen = fs.open;
+      const openSpy = vi.spyOn(fs, 'open').mockImplementation((async (
+        target: Parameters<typeof fs.open>[0],
+        ...rest: unknown[]
+      ) => {
+        if (String(target) === resolved) await fs.truncate(wsFile, 40);
+        return Reflect.apply(realOpen, fs, [target, ...rest]);
+      }) as typeof fs.open);
+      try {
+        const bridge = buildBridgeStub();
+        const app = buildApp({ bridge, boundWorkspace: workspace });
+        const res = await request(app).get('/workspace/memory?content=true');
+
+        expect(res.status).toBe(200);
+        const [file] = res.body.files as Array<{
+          content?: string;
+          truncated?: boolean;
+        }>;
+        expect(file.truncated).toBe(true);
+        expect(file.content).toBeUndefined();
+      } finally {
+        openSpy.mockRestore();
+      }
+    });
+
+    it('does not certify a same-size rewrite during the read as complete', async () => {
+      const wsFile = path.join(workspace, 'QWEN.md');
+      await fs.writeFile(wsFile, 'x'.repeat(100));
+      const handle = await fs.open(wsFile, 'r');
+      const read = handle.read.bind(handle);
+      const readSpy = vi.spyOn(handle, 'read').mockImplementation((async (
+        ...args: unknown[]
+      ) => {
+        const result = await Reflect.apply(read, handle, args);
+        await fs.writeFile(wsFile, 'y'.repeat(100));
+        await fs.utimes(wsFile, new Date(), new Date(Date.now() + 2000));
+        return result;
+      }) as typeof handle.read);
+      const openSpy = vi.spyOn(fs, 'open').mockResolvedValue(handle);
+      try {
+        const app = buildApp({
+          bridge: buildBridgeStub(),
+          boundWorkspace: workspace,
+        });
+        const res = await request(app).get('/workspace/memory?content=true');
+
+        expect(res.status).toBe(200);
+        expect(res.body.files[0]).toMatchObject({ truncated: true });
+        expect(res.body.files[0]).not.toHaveProperty('content');
+      } finally {
+        openSpy.mockRestore();
+        readSpy.mockRestore();
+        await handle.close();
+      }
     });
   });
 

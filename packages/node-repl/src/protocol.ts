@@ -85,6 +85,7 @@ export interface ImageMessage {
   execId: string | null;
   data: string;
   mimeType: string;
+  metadata?: string;
 }
 
 export interface ExecResultMessage {
@@ -97,6 +98,8 @@ export interface ExecResultMessage {
   errorName?: string;
   errorMessage?: string;
   errorStack?: string;
+  errorCode?: string;
+  errorDetails?: string;
 }
 
 export interface AddModuleRootResultMessage {

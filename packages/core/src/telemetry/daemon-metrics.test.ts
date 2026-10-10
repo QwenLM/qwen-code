@@ -72,16 +72,7 @@ vi.mock('@opentelemetry/api', () => ({
 }));
 
 describe('Daemon Metrics', () => {
-  let initializeDaemonMetrics: typeof import('./daemon-metrics.js').initializeDaemonMetrics;
-  let registerDaemonGaugeCallbacks: typeof import('./daemon-metrics.js').registerDaemonGaugeCallbacks;
-  let recordDaemonHttpRequest: typeof import('./daemon-metrics.js').recordDaemonHttpRequest;
-  let recordDaemonSessionLifecycle: typeof import('./daemon-metrics.js').recordDaemonSessionLifecycle;
-  let recordDaemonChannelLifecycle: typeof import('./daemon-metrics.js').recordDaemonChannelLifecycle;
-  let recordDaemonPromptQueueWait: typeof import('./daemon-metrics.js').recordDaemonPromptQueueWait;
-  let recordDaemonPromptDuration: typeof import('./daemon-metrics.js').recordDaemonPromptDuration;
-  let recordDaemonBridgeError: typeof import('./daemon-metrics.js').recordDaemonBridgeError;
-  let recordDaemonCancel: typeof import('./daemon-metrics.js').recordDaemonCancel;
-  let recordDaemonPipeMessage: typeof import('./daemon-metrics.js').recordDaemonPipeMessage;
+  let dm: typeof import('./daemon-metrics.js');
 
   beforeEach(async () => {
     vi.resetModules();
@@ -91,22 +82,28 @@ describe('Daemon Metrics', () => {
     mockCreateCounterFn.mockReturnValue(mockCounterInstance);
     mockCreateHistogramFn.mockReturnValue(mockHistogramInstance);
 
-    const mod = await import('./daemon-metrics.js');
-    initializeDaemonMetrics = mod.initializeDaemonMetrics;
-    registerDaemonGaugeCallbacks = mod.registerDaemonGaugeCallbacks;
-    recordDaemonHttpRequest = mod.recordDaemonHttpRequest;
-    recordDaemonSessionLifecycle = mod.recordDaemonSessionLifecycle;
-    recordDaemonChannelLifecycle = mod.recordDaemonChannelLifecycle;
-    recordDaemonPromptQueueWait = mod.recordDaemonPromptQueueWait;
-    recordDaemonPromptDuration = mod.recordDaemonPromptDuration;
-    recordDaemonBridgeError = mod.recordDaemonBridgeError;
-    recordDaemonCancel = mod.recordDaemonCancel;
-    recordDaemonPipeMessage = mod.recordDaemonPipeMessage;
+    dm = await import('./daemon-metrics.js');
   });
+
+  /** Initializes the instruments, then forgets any add/record calls so far. */
+  function initialize() {
+    dm.initializeDaemonMetrics();
+    mockCounterAddFn.mockClear();
+    mockHistogramRecordFn.mockClear();
+  }
+
+  /** Feeds every registered gauge callback one shared result. */
+  function runGaugeCallbacks() {
+    const mockResult = { observe: vi.fn() };
+    for (const cb of gaugeCallbacks) {
+      cb(mockResult as unknown as ObservableResult);
+    }
+    return mockResult;
+  }
 
   describe('initializeDaemonMetrics', () => {
     it('creates counters and histograms', () => {
-      initializeDaemonMetrics();
+      dm.initializeDaemonMetrics();
 
       expect(mockCreateCounterFn).toHaveBeenCalledWith(
         'qwen-code.daemon.http.request.count',
@@ -116,14 +113,6 @@ describe('Daemon Metrics', () => {
         'qwen-code.daemon.http.request.duration',
         expect.objectContaining({ unit: 'ms' }),
       );
-      expect(mockCreateCounterFn).toHaveBeenCalledWith(
-        'qwen-code.daemon.session.lifecycle',
-        expect.any(Object),
-      );
-      expect(mockCreateCounterFn).toHaveBeenCalledWith(
-        'qwen-code.daemon.channel.lifecycle',
-        expect.any(Object),
-      );
       expect(mockCreateHistogramFn).toHaveBeenCalledWith(
         'qwen-code.daemon.prompt.queue_wait',
         expect.objectContaining({ unit: 'ms' }),
@@ -132,34 +121,37 @@ describe('Daemon Metrics', () => {
         'qwen-code.daemon.prompt.duration',
         expect.objectContaining({ unit: 'ms' }),
       );
-      expect(mockCreateCounterFn).toHaveBeenCalledWith(
-        'qwen-code.daemon.bridge.error.count',
-        expect.any(Object),
-      );
-      expect(mockCreateCounterFn).toHaveBeenCalledWith(
-        'qwen-code.daemon.cancel.count',
-        expect.any(Object),
-      );
       expect(mockCreateHistogramFn).toHaveBeenCalledWith(
         'qwen-code.daemon.pipe.message_bytes',
         expect.objectContaining({ unit: 'By' }),
       );
+      for (const name of [
+        'qwen-code.daemon.session.lifecycle',
+        'qwen-code.daemon.channel.lifecycle',
+        'qwen-code.daemon.bridge.error.count',
+        'qwen-code.daemon.cancel.count',
+      ]) {
+        expect(mockCreateCounterFn).toHaveBeenCalledWith(
+          name,
+          expect.any(Object),
+        );
+      }
     });
 
     it('does not re-initialize on second call', () => {
-      initializeDaemonMetrics();
+      dm.initializeDaemonMetrics();
       const callCount = mockCreateCounterFn.mock.calls.length;
-      initializeDaemonMetrics();
+      dm.initializeDaemonMetrics();
       expect(mockCreateCounterFn.mock.calls.length).toBe(callCount);
     });
   });
 
   describe('recording functions before initialization', () => {
     it('are no-ops before init', () => {
-      recordDaemonHttpRequest(100, 'POST /session/:id/prompt', 200);
-      recordDaemonSessionLifecycle('spawn');
-      recordDaemonCancel();
-      recordDaemonPipeMessage('inbound', 1024);
+      dm.recordDaemonHttpRequest(100, 'POST /session/:id/prompt', 200);
+      dm.recordDaemonSessionLifecycle('spawn');
+      dm.recordDaemonCancel();
+      dm.recordDaemonPipeMessage('inbound', 1024);
       expect(mockCounterAddFn).not.toHaveBeenCalled();
       expect(mockHistogramRecordFn).not.toHaveBeenCalled();
     });
@@ -167,8 +159,8 @@ describe('Daemon Metrics', () => {
 
   describe('recordDaemonHttpRequest', () => {
     it('records counter with status_class and histogram with route', () => {
-      initializeDaemonMetrics();
-      recordDaemonHttpRequest(42, 'POST /session/:id/prompt', 201);
+      initialize();
+      dm.recordDaemonHttpRequest(42, 'POST /session/:id/prompt', 201);
 
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
         route: 'POST /session/:id/prompt',
@@ -181,8 +173,13 @@ describe('Daemon Metrics', () => {
     });
 
     it('adds the deferred runtime path to the duration histogram', () => {
-      initializeDaemonMetrics();
-      recordDaemonHttpRequest(42, 'POST /session', 201, 'started_on_request');
+      initialize();
+      dm.recordDaemonHttpRequest(
+        42,
+        'POST /session',
+        201,
+        'started_on_request',
+      );
 
       expect(mockHistogramRecordFn).toHaveBeenCalledWith(42, {
         route: 'POST /session',
@@ -191,17 +188,16 @@ describe('Daemon Metrics', () => {
     });
 
     it('computes status_class correctly for 4xx and 5xx', () => {
-      initializeDaemonMetrics();
-      mockCounterAddFn.mockClear();
+      initialize();
 
-      recordDaemonHttpRequest(10, 'DELETE /session/:id', 404);
+      dm.recordDaemonHttpRequest(10, 'DELETE /session/:id', 404);
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
         route: 'DELETE /session/:id',
         status_class: '4xx',
       });
 
       mockCounterAddFn.mockClear();
-      recordDaemonHttpRequest(5, 'POST /session', 500);
+      dm.recordDaemonHttpRequest(5, 'POST /session', 500);
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
         route: 'POST /session',
         status_class: '5xx',
@@ -211,18 +207,16 @@ describe('Daemon Metrics', () => {
 
   describe('recordDaemonSessionLifecycle', () => {
     it('records with action attribute', () => {
-      initializeDaemonMetrics();
-      mockCounterAddFn.mockClear();
-      recordDaemonSessionLifecycle('spawn');
+      initialize();
+      dm.recordDaemonSessionLifecycle('spawn');
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, { action: 'spawn' });
     });
   });
 
   describe('recordDaemonChannelLifecycle', () => {
     it('records with action and expected attributes', () => {
-      initializeDaemonMetrics();
-      mockCounterAddFn.mockClear();
-      recordDaemonChannelLifecycle('exit', false);
+      initialize();
+      dm.recordDaemonChannelLifecycle('exit', false);
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
         action: 'exit',
         expected: false,
@@ -230,38 +224,38 @@ describe('Daemon Metrics', () => {
     });
 
     it('omits expected when undefined', () => {
-      initializeDaemonMetrics();
-      mockCounterAddFn.mockClear();
-      recordDaemonChannelLifecycle('spawn');
+      initialize();
+      dm.recordDaemonChannelLifecycle('spawn');
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, { action: 'spawn' });
     });
   });
 
   describe('recordDaemonPromptQueueWait', () => {
     it('records histogram value', () => {
-      initializeDaemonMetrics();
-      mockHistogramRecordFn.mockClear();
-      recordDaemonPromptQueueWait(150);
+      initialize();
+      dm.recordDaemonPromptQueueWait(150);
       expect(mockHistogramRecordFn).toHaveBeenCalledWith(150);
     });
   });
 
   describe('recordDaemonPromptDuration', () => {
     it('records histogram value', () => {
-      initializeDaemonMetrics();
-      mockHistogramRecordFn.mockClear();
-      recordDaemonPromptDuration(5000);
+      initialize();
+      dm.recordDaemonPromptDuration(5000);
       expect(mockHistogramRecordFn).toHaveBeenCalledWith(5000);
     });
   });
 
   describe('recordDaemonBridgeError', () => {
+    const recordErrorNamed = (name: string, message: string) => {
+      const err = new Error(message);
+      err.name = name;
+      dm.recordDaemonBridgeError(err);
+    };
+
     it('normalizes known error types', () => {
-      initializeDaemonMetrics();
-      mockCounterAddFn.mockClear();
-      const err = new Error('not found');
-      err.name = 'SessionNotFoundError';
-      recordDaemonBridgeError(err);
+      initialize();
+      recordErrorNamed('SessionNotFoundError', 'not found');
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
         error_type: 'SessionNotFoundError',
       });
@@ -273,30 +267,23 @@ describe('Daemon Metrics', () => {
         // These are the restore-timeout 504 and cleanup-quarantine 503 classes.
         // Dropping either from the known set silently collapses them into
         // `unknown`, which is exactly the signal the restore work adds them for.
-        initializeDaemonMetrics();
-        mockCounterAddFn.mockClear();
-        const err = new Error('restore lifecycle');
-        err.name = name;
-        recordDaemonBridgeError(err);
+        initialize();
+        recordErrorNamed(name, 'restore lifecycle');
         expect(mockCounterAddFn).toHaveBeenCalledWith(1, { error_type: name });
       },
     );
 
     it('normalizes unknown error types to "unknown"', () => {
-      initializeDaemonMetrics();
-      mockCounterAddFn.mockClear();
-      const err = new Error('something');
-      err.name = 'RandomCustomError';
-      recordDaemonBridgeError(err);
+      initialize();
+      recordErrorNamed('RandomCustomError', 'something');
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
         error_type: 'unknown',
       });
     });
 
     it('handles non-Error throws', () => {
-      initializeDaemonMetrics();
-      mockCounterAddFn.mockClear();
-      recordDaemonBridgeError('string error');
+      initialize();
+      dm.recordDaemonBridgeError('string error');
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
         error_type: 'unknown',
       });
@@ -305,18 +292,16 @@ describe('Daemon Metrics', () => {
 
   describe('recordDaemonCancel', () => {
     it('increments counter', () => {
-      initializeDaemonMetrics();
-      mockCounterAddFn.mockClear();
-      recordDaemonCancel();
+      initialize();
+      dm.recordDaemonCancel();
       expect(mockCounterAddFn).toHaveBeenCalledWith(1);
     });
   });
 
   describe('recordDaemonPipeMessage', () => {
     it('records pipe message bytes with direction', () => {
-      initializeDaemonMetrics();
-      mockHistogramRecordFn.mockClear();
-      recordDaemonPipeMessage('outbound', 2048);
+      initialize();
+      dm.recordDaemonPipeMessage('outbound', 2048);
       expect(mockHistogramRecordFn).toHaveBeenCalledWith(2048, {
         direction: 'outbound',
       });
@@ -325,7 +310,7 @@ describe('Daemon Metrics', () => {
 
   describe('registerDaemonGaugeCallbacks', () => {
     it('creates 3 observable gauges', () => {
-      registerDaemonGaugeCallbacks({
+      dm.registerDaemonGaugeCallbacks({
         sessionCount: () => 5,
         sseCount: () => 3,
         heapUsed: () => 100_000_000,
@@ -351,12 +336,9 @@ describe('Daemon Metrics', () => {
       const sseCount = vi.fn().mockReturnValue(2);
       const heapUsed = vi.fn().mockReturnValue(50_000_000);
 
-      registerDaemonGaugeCallbacks({ sessionCount, sseCount, heapUsed });
+      dm.registerDaemonGaugeCallbacks({ sessionCount, sseCount, heapUsed });
 
-      const mockResult = { observe: vi.fn() };
-      for (const cb of gaugeCallbacks) {
-        cb(mockResult as unknown as ObservableResult);
-      }
+      const mockResult = runGaugeCallbacks();
 
       expect(sessionCount).toHaveBeenCalled();
       expect(sseCount).toHaveBeenCalled();
@@ -367,13 +349,13 @@ describe('Daemon Metrics', () => {
     });
 
     it('does not re-register on second call', () => {
-      registerDaemonGaugeCallbacks({
+      dm.registerDaemonGaugeCallbacks({
         sessionCount: () => 1,
         sseCount: () => 0,
         heapUsed: () => 0,
       });
       const callCount = mockCreateObservableGaugeFn.mock.calls.length;
-      registerDaemonGaugeCallbacks({
+      dm.registerDaemonGaugeCallbacks({
         sessionCount: () => 2,
         sseCount: () => 0,
         heapUsed: () => 0,
@@ -382,7 +364,7 @@ describe('Daemon Metrics', () => {
     });
 
     it('gauge callbacks swallow exceptions', () => {
-      registerDaemonGaugeCallbacks({
+      dm.registerDaemonGaugeCallbacks({
         sessionCount: () => {
           throw new Error('boom');
         },
@@ -390,12 +372,7 @@ describe('Daemon Metrics', () => {
         heapUsed: () => 0,
       });
 
-      const mockResult = { observe: vi.fn() };
-      expect(() => {
-        for (const cb of gaugeCallbacks) {
-          cb(mockResult as unknown as ObservableResult);
-        }
-      }).not.toThrow();
+      expect(runGaugeCallbacks).not.toThrow();
     });
   });
 });

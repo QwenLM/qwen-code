@@ -5,25 +5,15 @@
  */
 import { mkdirSync } from 'node:fs';
 import { chromium } from '@playwright/test';
-import {
-  createWebShellDaemonScenario,
-  installMockDaemon,
-} from './utils/mockDaemon';
+import { installMockDaemon } from './utils/mockDaemon';
+import { createGitWorkspaceScenario } from './utils/gitScenario';
 
 const BASE_URL = process.env.PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:5174';
 const OUT_DIR = 'client/e2e/test-results';
 mkdirSync(OUT_DIR, { recursive: true });
-const WORKSPACE_CWD = '/tmp/qwen-web-shell-e2e';
 
 async function main() {
-  const scenario = createWebShellDaemonScenario({
-    capabilities: {
-      workspaces: [
-        { id: 'primary', cwd: WORKSPACE_CWD, primary: true, trusted: true },
-      ],
-    },
-    gitStatus: { v: 2, workspaceCwd: WORKSPACE_CWD, branch: 'main' },
-  });
+  const scenario = createGitWorkspaceScenario();
 
   const browser = await chromium.launch();
   try {

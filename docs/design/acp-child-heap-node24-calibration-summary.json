@@ -1,0 +1,396 @@
+{
+  "version": 1,
+  "status": "decision-input",
+  "generatedAt": "2026-09-19T15:16:14.949469+00:00",
+  "source": {
+    "commit": "df864bea6a930d31faf8b35fc5e57bac98a25e20",
+    "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+    "trackingIssue": "https://github.com/QwenLM/qwen-code/issues/8182"
+  },
+  "environment": {
+    "host": {
+      "kind": "Original authorized Linux 4-vCPU calibration host",
+      "physicalMemoryBytes": 7618281472,
+      "arch": "x64",
+      "kernel": "7.0.0-29-generic"
+    },
+    "node": {
+      "version": "v24.21.0",
+      "v8Version": "13.6.233.17-node.53",
+      "executableSha256": "7fde7b8afa198da66257f42ee2001d874c7355631e6d1579a5fb5ef1f246df4c",
+      "archiveSha256": "fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6",
+      "shasumsFileSha256": "f410428039e2c922a14058df067a4482691c9304a5c01a75847f9f3f2d3307f6"
+    },
+    "provider": {
+      "model": "qwen3.8-flash",
+      "baseUrlSha256": "6f941ca230f6988b523fb7c2c4ec0dd200613170f28b05176857eaa587b045bc"
+    }
+  },
+  "comparison": {
+    "baselineOldSpaceMiB": 3632,
+    "candidateOldSpaceMiB": 544,
+    "matrix": {
+      "runs": 8,
+      "turns": 184,
+      "tools": 360,
+      "plannedRuns": 8,
+      "plannedTurns": 184,
+      "plannedTools": 360,
+      "longPairs": 2,
+      "longPairOrders": ["AB", "BA"],
+      "longRoundsPerRun": 36,
+      "longStagesPerRun": 3,
+      "distinctSourcePagesPerRun": 72,
+      "fixtureTotalPages": 74,
+      "sourcePagesPerStage": 24,
+      "longMinimumPacedSpanMs": 1080000,
+      "mcpPairs": 1,
+      "concurrentPairs": 1,
+      "A": "3632 MiB baseline",
+      "B": "544 MiB experiment"
+    }
+  },
+  "evidenceSets": [
+    {
+      "protocol": "node24-long-heap-v4",
+      "batchId": "node24-long-v4-20260914T135205Z",
+      "acceptedRuns": 2,
+      "acceptedPhase": "pilot-complete",
+      "fullBatchState": "failed",
+      "retryOf": null,
+      "hashes": {
+        "node": "7fde7b8afa198da66257f42ee2001d874c7355631e6d1579a5fb5ef1f246df4c",
+        "collector": "e9c11d8c5fe71aba2d9a7eef2a3f85aa40c41eb83a53b60161ffe7a2c08b55d5",
+        "bundleManifest": "f6ed0482eabcf0c328531c98b77a6838b65ecb61037787593e16825d34c0bb13",
+        "driver": "f760be6eb8584176e9fcb7a8da1dcdbbfb1c7721de8b2f83e09d4d74eac154ea",
+        "downloadManifest": "7c4ff2452903a1b183c61462d5109a9e46dabca2166476ccedbea87eb52eac64"
+      },
+      "independentChecks": 5819,
+      "finalHostState": "failed",
+      "providerSchemaCapture": null
+    },
+    {
+      "protocol": "node24-long-heap-v4b",
+      "batchId": "node24-long-v4b-20260914T142103Z",
+      "acceptedRuns": 3,
+      "acceptedPhase": "failed",
+      "fullBatchState": "failed",
+      "retryOf": null,
+      "hashes": {
+        "node": "7fde7b8afa198da66257f42ee2001d874c7355631e6d1579a5fb5ef1f246df4c",
+        "collector": "148d2c42937ed70e39430d2647adb67698a9b89c27f9433d1bfdeae12da90f7a",
+        "bundleManifest": "f6ed0482eabcf0c328531c98b77a6838b65ecb61037787593e16825d34c0bb13",
+        "driver": "8a73afc2d76c80918217be6b1ebc176b92d0a5da671bb4bc12150ea0bc4250e4",
+        "downloadManifest": "bea1e88f2c2d5f41c0f8926147ee4220d55fc0d297161a202731ddd176a1adb7"
+      },
+      "independentChecks": 316595,
+      "finalHostState": "failed",
+      "providerSchemaCapture": null
+    },
+    {
+      "protocol": "node24-long-heap-v4b",
+      "batchId": "node24-long-v4c-20260914T155644Z",
+      "acceptedRuns": 1,
+      "acceptedPhase": "pilot-complete",
+      "fullBatchState": "failed",
+      "retryOf": {
+        "batchId": "node24-long-v4b-20260914T142103Z",
+        "failedOrdinal": 4,
+        "reason": "model-serving internal error at turn22; restart the entire baseline run once with unchanged collector/workload"
+      },
+      "hashes": {
+        "node": "7fde7b8afa198da66257f42ee2001d874c7355631e6d1579a5fb5ef1f246df4c",
+        "collector": "148d2c42937ed70e39430d2647adb67698a9b89c27f9433d1bfdeae12da90f7a",
+        "bundleManifest": "f6ed0482eabcf0c328531c98b77a6838b65ecb61037787593e16825d34c0bb13",
+        "driver": "8f5d3fb3dacf4278639980b88c0acfe5822dcf379bcd75794f0dab736633a09f",
+        "downloadManifest": "c5c7b692e0255fdfd46c120f7ea665a17fe13e485a4f04ceeafddf19a71cb69c"
+      },
+      "independentChecks": 99252,
+      "finalHostState": "failed",
+      "providerSchemaCapture": null
+    },
+    {
+      "protocol": "node24-concurrent-heap-v5",
+      "batchId": "node24-concurrent-v5-20260919T150128Z",
+      "acceptedRuns": 2,
+      "acceptedPhase": "complete",
+      "fullBatchState": "complete",
+      "retryOf": {
+        "batchId": "node24-long-v4c-20260914T155644Z",
+        "failedOrdinal": 2,
+        "reason": "one of four sessions called unregistered tool_search; the prior batch did not capture provider request tool schemas"
+      },
+      "hashes": {
+        "node": "7fde7b8afa198da66257f42ee2001d874c7355631e6d1579a5fb5ef1f246df4c",
+        "collector": "0dc95bf775f59e1a09970b2b40cb965047d027dc68a3ccff93a11b46f07a61ef",
+        "bundleManifest": "f6ed0482eabcf0c328531c98b77a6838b65ecb61037787593e16825d34c0bb13",
+        "driver": "e3632d780dc99e522181bd168c89e7f94616a8d614a63eefd5d1b219c4f1c7e8",
+        "downloadManifest": "81a8d29589fa4fc2e53a106818ed7e186c013370fc0fa8a6904c8da7aee51949"
+      },
+      "independentChecks": 6318,
+      "finalHostState": "complete",
+      "providerSchemaCapture": {
+        "retainedFields": [
+          "request timestamp",
+          "model",
+          "body byte count",
+          "top-level keys",
+          "tool name",
+          "parameter schema byte count",
+          "parameter schema SHA-256"
+        ],
+        "excludedFields": [
+          "authorization headers",
+          "message bodies",
+          "tool schema bodies",
+          "response bodies"
+        ],
+        "candidate": {
+          "requestCount": 36,
+          "requestsWithReadFile": 24,
+          "requestsWithToolSearch": 0,
+          "parseErrors": 0
+        },
+        "baseline": {
+          "requestCount": 36,
+          "requestsWithReadFile": 24,
+          "requestsWithToolSearch": 0,
+          "parseErrors": 0
+        }
+      }
+    }
+  ],
+  "acceptedRuns": [
+    {
+      "ordinal": 1,
+      "sourceProtocol": "node24-long-heap-v4",
+      "sourceBatchId": "node24-long-v4-20260914T135205Z",
+      "sourceOrdinal": 1,
+      "profile": "mcp",
+      "arm": "baseline",
+      "pair": 1,
+      "actualOldSpaceMiB": 3632,
+      "completedTurns": 8,
+      "completedTools": 24,
+      "childGenerations": 1,
+      "oldGenerationPeakMiB": 105.99609375,
+      "observedOldSpaceHeadroomMiB": 3526.00390625,
+      "liveSetLifetimeUpperBoundMiB": 94.50936126708984,
+      "windowMajorGcCount": 5,
+      "windowMajorGcMs": 39.08648902177811,
+      "peakTreeRssMiB": 814.5859375,
+      "longPacedSpanMs": null,
+      "finalContextTokens": [176491],
+      "modelApiErrors": 0,
+      "modelApiRetries": 0,
+      "cleanupPassed": true
+    },
+    {
+      "ordinal": 2,
+      "sourceProtocol": "node24-long-heap-v4",
+      "sourceBatchId": "node24-long-v4-20260914T135205Z",
+      "sourceOrdinal": 2,
+      "profile": "mcp",
+      "arm": "544",
+      "pair": 1,
+      "actualOldSpaceMiB": 544,
+      "completedTurns": 8,
+      "completedTools": 24,
+      "childGenerations": 1,
+      "oldGenerationPeakMiB": 106.203125,
+      "observedOldSpaceHeadroomMiB": 437.796875,
+      "liveSetLifetimeUpperBoundMiB": 100.30631256103516,
+      "windowMajorGcCount": 7,
+      "windowMajorGcMs": 37.05794405937195,
+      "peakTreeRssMiB": 716.05078125,
+      "longPacedSpanMs": null,
+      "finalContextTokens": [176613],
+      "modelApiErrors": 0,
+      "modelApiRetries": 0,
+      "cleanupPassed": true
+    },
+    {
+      "ordinal": 3,
+      "sourceProtocol": "node24-long-heap-v4b",
+      "sourceBatchId": "node24-long-v4b-20260914T142103Z",
+      "sourceOrdinal": 1,
+      "profile": "long",
+      "arm": "baseline",
+      "pair": 1,
+      "actualOldSpaceMiB": 3632,
+      "completedTurns": 36,
+      "completedTools": 72,
+      "childGenerations": 1,
+      "oldGenerationPeakMiB": 109.3125,
+      "observedOldSpaceHeadroomMiB": 3522.6875,
+      "liveSetLifetimeUpperBoundMiB": 94.61529541015625,
+      "windowMajorGcCount": 29,
+      "windowMajorGcMs": 105.16898906230927,
+      "peakTreeRssMiB": 522.90625,
+      "longPacedSpanMs": 1353960,
+      "finalContextTokens": [302374],
+      "modelApiErrors": 0,
+      "modelApiRetries": 0,
+      "cleanupPassed": true
+    },
+    {
+      "ordinal": 4,
+      "sourceProtocol": "node24-long-heap-v4b",
+      "sourceBatchId": "node24-long-v4b-20260914T142103Z",
+      "sourceOrdinal": 2,
+      "profile": "long",
+      "arm": "544",
+      "pair": 1,
+      "actualOldSpaceMiB": 544,
+      "completedTurns": 36,
+      "completedTools": 72,
+      "childGenerations": 1,
+      "oldGenerationPeakMiB": 109.96875,
+      "observedOldSpaceHeadroomMiB": 434.03125,
+      "liveSetLifetimeUpperBoundMiB": 98.35897064208984,
+      "windowMajorGcCount": 37,
+      "windowMajorGcMs": 131.36485785245895,
+      "peakTreeRssMiB": 547.03125,
+      "longPacedSpanMs": 1324117,
+      "finalContextTokens": [302437],
+      "modelApiErrors": 0,
+      "modelApiRetries": 0,
+      "cleanupPassed": true
+    },
+    {
+      "ordinal": 5,
+      "sourceProtocol": "node24-long-heap-v4b",
+      "sourceBatchId": "node24-long-v4b-20260914T142103Z",
+      "sourceOrdinal": 3,
+      "profile": "long",
+      "arm": "544",
+      "pair": 2,
+      "actualOldSpaceMiB": 544,
+      "completedTurns": 36,
+      "completedTools": 72,
+      "childGenerations": 1,
+      "oldGenerationPeakMiB": 108.87109375,
+      "observedOldSpaceHeadroomMiB": 435.12890625,
+      "liveSetLifetimeUpperBoundMiB": 98.7105712890625,
+      "windowMajorGcCount": 40,
+      "windowMajorGcMs": 138.52514719963074,
+      "peakTreeRssMiB": 535.98046875,
+      "longPacedSpanMs": 1376350,
+      "finalContextTokens": [311090],
+      "modelApiErrors": 0,
+      "modelApiRetries": 0,
+      "cleanupPassed": true
+    },
+    {
+      "ordinal": 6,
+      "sourceProtocol": "node24-long-heap-v4b",
+      "sourceBatchId": "node24-long-v4c-20260914T155644Z",
+      "sourceOrdinal": 1,
+      "profile": "long",
+      "arm": "baseline",
+      "pair": 2,
+      "actualOldSpaceMiB": 3632,
+      "completedTurns": 36,
+      "completedTools": 72,
+      "childGenerations": 1,
+      "oldGenerationPeakMiB": 109.1953125,
+      "observedOldSpaceHeadroomMiB": 3522.8046875,
+      "liveSetLifetimeUpperBoundMiB": 94.6025619506836,
+      "windowMajorGcCount": 29,
+      "windowMajorGcMs": 134.31471014022827,
+      "peakTreeRssMiB": 562.0078125,
+      "longPacedSpanMs": 1280292,
+      "finalContextTokens": [300217],
+      "modelApiErrors": 0,
+      "modelApiRetries": 0,
+      "cleanupPassed": true
+    },
+    {
+      "ordinal": 7,
+      "sourceProtocol": "node24-concurrent-heap-v5",
+      "sourceBatchId": "node24-concurrent-v5-20260919T150128Z",
+      "sourceOrdinal": 1,
+      "profile": "concurrent",
+      "arm": "544",
+      "pair": 1,
+      "actualOldSpaceMiB": 544,
+      "completedTurns": 12,
+      "completedTools": 12,
+      "childGenerations": 4,
+      "oldGenerationPeakMiB": 93.71484375,
+      "observedOldSpaceHeadroomMiB": 450.28515625,
+      "liveSetLifetimeUpperBoundMiB": 86.05628967285156,
+      "windowMajorGcCount": 12,
+      "windowMajorGcMs": 73.3228018283844,
+      "peakTreeRssMiB": 1285.69921875,
+      "longPacedSpanMs": null,
+      "finalContextTokens": [28636, 28980, 28834, 30129],
+      "modelApiErrors": 0,
+      "modelApiRetries": 0,
+      "cleanupPassed": true
+    },
+    {
+      "ordinal": 8,
+      "sourceProtocol": "node24-concurrent-heap-v5",
+      "sourceBatchId": "node24-concurrent-v5-20260919T150128Z",
+      "sourceOrdinal": 2,
+      "profile": "concurrent",
+      "arm": "baseline",
+      "pair": 1,
+      "actualOldSpaceMiB": 3632,
+      "completedTurns": 12,
+      "completedTools": 12,
+      "childGenerations": 4,
+      "oldGenerationPeakMiB": 93.23046875,
+      "observedOldSpaceHeadroomMiB": 3538.76953125,
+      "liveSetLifetimeUpperBoundMiB": 87.57843017578125,
+      "windowMajorGcCount": 10,
+      "windowMajorGcMs": 113.4300628900528,
+      "peakTreeRssMiB": 1359.64453125,
+      "longPacedSpanMs": null,
+      "finalContextTokens": [28808, 28554, 29474, 29163],
+      "modelApiErrors": 0,
+      "modelApiRetries": 0,
+      "cleanupPassed": true
+    }
+  ],
+  "excludedAttempts": [
+    "Startup-only preflights and provider readiness calls are not workload turns.",
+    "The original v4 run3 failed at turn 13 with zero tool calls after 12 successful turns/24 calls. Its answer was not archived, so the model reason is unknown. Failed-run audit passed 633 checks; this run and the five unstarted v4 jobs are excluded. v4b uses a new distinct-page protocol, not a completed original v4 matrix.",
+    "The second baseline in v4b failed at turn 22 with a model-serving internal error after 21 completed turns. Its partial workload is excluded; its complete baseline is retried once in a separate v4c batch using the identical v4b collector/protocol. Two concurrent jobs were unstarted in v4b and scheduled in v4c, but no Node 24 concurrent pair completed. The second BA pair therefore spans batches with a preserved failed attempt between arms.",
+    "The v4c concurrent/544 first wave failed: one session made two failed unregistered tool_search calls instead of its required read; the other three sessions each completed one exact read. All four end_turn events do not satisfy the workload contract. The baseline concurrent job was not started. All four workspace registry snapshots listed only read_file as enabled. The model claimed read_file was unavailable, but actual provider request schemas were not captured, so the cause remains unknown. This partial attempt stays excluded. The later v5 pair retries the workload with request-schema summaries and does not retroactively make v4c valid.",
+    "Earlier v1/v2/v2b/v3/v3b/v3c matrices retain separate provenance, including their failed attempts; none are pooled into these Node 24 accepted runs."
+  ],
+  "audit": {
+    "pilotPreserved": true,
+    "failedAttemptAuditSha256": [
+      "7b59db6dd92184c98576cd3cea43585f988700269b4a0b1c12370b9048661f7e",
+      "21919271ef02060cf51ecffa50ac70759588c429630c3b1c86860ae4f8b088f1",
+      "09f0c6c0dd7cb4023514395c5eb771d3bf2de5183a42b0f8373dc0d1894b6df9"
+    ],
+    "v5PilotReportSha256": "071fc222532eff5e477ad644b3ea38e3b78a6eb9e01b3a7e9aa6b2543e373908",
+    "v5PilotPreserved": true
+  },
+  "limitations": [
+    "Node 24-only within-runtime baseline/candidate comparisons. Earlier Node 22 protocols differ and are not matched cross-major performance controls.",
+    "Each long run keeps one session and one child generation through three stages covering 72 distinct source pages. At least 18 minutes include prompt execution, diagnostics and explicit pacing waits; this is not continuous CPU work or multi-hour leak evidence.",
+    "Old-generation and total heap peaks are child lifetime observational high-water marks including startup. Live-set lifetime peak is a post-major-GC upper bound, not current retained memory or a leak slope.",
+    "Stage and complete-workload GC deltas are computed within each PID/startticks generation. A stage without major GC has no live-set coverage; only the complete final workload requires positive major-GC coverage.",
+    "Tree RSS is a maximum sampled sum of daemon and observed descendants, including ACP and local MCP processes. Shared pages may be counted repeatedly; it is neither unique physical memory nor a continuous peak.",
+    "Per-turn context reports and event counts do not prove all delivered history remains resident or exhaustively observe compaction. Exact tool text is verified, but answer semantics are not graded.",
+    "MCP payloads are local repetitive synthetic text; registry/schema/server-log evidence does not establish capture of actual initial provider request schemas.",
+    "Resource tap and status/context diagnostics add overhead, which is included and not independently benchmarked. No forced GC or additional ACP resource polling is used. RPC IDs are matched internally but not serialized.",
+    "Capture ceilings remain 256 MiB samples, 32 MiB tool events and 16 MiB tap; instrumentation ceiling failures would be classified separately from product heap failures.",
+    "The second BA long pair spans batches with one preserved provider-error attempt between its arms; the retry is not hidden or pooled with partial turns. The Node 24 concurrent pair is a later fresh protocol that preserves the failed v4c attempt and captures only provider tool-schema summaries. These bounded pairs are not maximum deployment capacity, universal 544 MiB safety, or a statistically established latency/GC regression threshold.",
+    "The v5 experiment-only loopback proxy retained request metadata plus tool names and parameter-schema hashes. It did not retain authorization headers, message bodies, schema bodies or response bodies. Each arm had 36 provider requests; all 24 tool-bearing requests included read_file, none included tool_search, and no request failed to parse."
+  ],
+  "decision": {
+    "productionEnforcementEnabled": false,
+    "changeProductionPartition": false,
+    "interpretation": "The Node 24 long, MCP and four-child concurrent screens retain 544 MiB as a scope-specific candidate. They do not establish production admission readiness, a performance threshold, multi-hour stability or other host partitions."
+  },
+  "remaining": [
+    "Broader real-world profiles, materially larger contexts, multi-hour stability and other host partitions remain open.",
+    "Define acceptable GC and latency thresholds plus staged rollout and rollback criteria before production heap enforcement."
+  ]
+}

@@ -11,6 +11,7 @@ type ModelDialogPersistScope = 'workspace' | 'user';
 interface UseModelCommandReturn {
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;
+  isAdvisorModelMode: boolean;
   isVoiceModelMode: boolean;
   isVisionModelMode: boolean;
   isCompactionModelMode: boolean;
@@ -18,6 +19,7 @@ interface UseModelCommandReturn {
   modelDialogPersistScope: ModelDialogPersistScope | undefined;
   openModelDialog: (options?: {
     fastModelMode?: boolean;
+    advisorModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
     compactionModelMode?: boolean;
@@ -30,6 +32,7 @@ interface UseModelCommandReturn {
 export const useModelCommand = (): UseModelCommandReturn => {
   const [isModelDialogOpen, setIsModelDialogOpen] = useState(false);
   const [isFastModelMode, setIsFastModelMode] = useState(false);
+  const [isAdvisorModelMode, setIsAdvisorModelMode] = useState(false);
   const [isVoiceModelMode, setIsVoiceModelMode] = useState(false);
   const [isVisionModelMode, setIsVisionModelMode] = useState(false);
   const [isCompactionModelMode, setIsCompactionModelMode] = useState(false);
@@ -41,12 +44,14 @@ export const useModelCommand = (): UseModelCommandReturn => {
   const openModelDialog = useCallback(
     (options?: {
       fastModelMode?: boolean;
+      advisorModelMode?: boolean;
       voiceModelMode?: boolean;
       visionModelMode?: boolean;
       compactionModelMode?: boolean;
       imageModelMode?: boolean;
       persistScope?: ModelDialogPersistScope;
     }) => {
+      const advisorModelMode = options?.advisorModelMode ?? false;
       const voiceModelMode = options?.voiceModelMode ?? false;
       const visionModelMode = options?.visionModelMode ?? false;
       const compactionModelMode = options?.compactionModelMode ?? false;
@@ -56,19 +61,35 @@ export const useModelCommand = (): UseModelCommandReturn => {
         voiceModelMode ||
           visionModelMode ||
           compactionModelMode ||
-          imageModelMode
+          imageModelMode ||
+          advisorModelMode
           ? false
           : (options?.fastModelMode ?? false),
       );
+      setIsAdvisorModelMode(
+        voiceModelMode ||
+          visionModelMode ||
+          compactionModelMode ||
+          imageModelMode
+          ? false
+          : advisorModelMode,
+      );
       setIsVoiceModelMode(
-        visionModelMode || compactionModelMode || imageModelMode
+        advisorModelMode ||
+          visionModelMode ||
+          compactionModelMode ||
+          imageModelMode
           ? false
           : voiceModelMode,
       );
       setIsVisionModelMode(
-        compactionModelMode || imageModelMode ? false : visionModelMode,
+        advisorModelMode || compactionModelMode || imageModelMode
+          ? false
+          : visionModelMode,
       );
-      setIsCompactionModelMode(imageModelMode ? false : compactionModelMode);
+      setIsCompactionModelMode(
+        advisorModelMode || imageModelMode ? false : compactionModelMode,
+      );
       setIsImageModelMode(imageModelMode);
       setModelDialogPersistScope(options?.persistScope);
       setIsModelDialogOpen(true);
@@ -79,6 +100,7 @@ export const useModelCommand = (): UseModelCommandReturn => {
   const closeModelDialog = useCallback(() => {
     setIsModelDialogOpen(false);
     setIsFastModelMode(false);
+    setIsAdvisorModelMode(false);
     setIsVoiceModelMode(false);
     setIsVisionModelMode(false);
     setIsCompactionModelMode(false);
@@ -89,6 +111,7 @@ export const useModelCommand = (): UseModelCommandReturn => {
   return {
     isModelDialogOpen,
     isFastModelMode,
+    isAdvisorModelMode,
     isVoiceModelMode,
     isVisionModelMode,
     isCompactionModelMode,

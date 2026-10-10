@@ -10,13 +10,51 @@
  * SIGINT/SIGTERM.
  */
 
-import { realpathSync, statSync } from 'node:fs';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { loadConfig } from './config.js';
 import { runInit } from './init.js';
 import { LiveDaemon } from './daemon.js';
 import { LiveLogger } from './logger.js';
+import { parseLiveCliArgs, type LiveCliArgs } from './cli-args.js';
+import {
+  displayLiveMessage,
+  isLiveLanguage,
+  liveText,
+  type LiveLanguage,
+} from './i18n/messages.js';
+
+function preferredLanguage(): LiveLanguage {
+  try {
+    const configuredDirectory =
+      process.env['QWEN_LIVE_DATA_DIR']?.trim() ||
+      join(homedir(), '.qwen-live');
+    const directory =
+      configuredDirectory === '~'
+        ? homedir()
+        : /^~[/\\]/u.test(configuredDirectory)
+          ? join(homedir(), configuredDirectory.slice(2))
+          : configuredDirectory;
+    const config: unknown = JSON.parse(
+      readFileSync(join(directory, 'config.json'), 'utf8').replace(
+        /^\uFEFF/u,
+        '',
+      ),
+    );
+    if (
+      config &&
+      typeof config === 'object' &&
+      'language' in config &&
+      isLiveLanguage(config.language)
+    )
+      return config.language;
+  } catch {
+    /* Help remains available when config is missing or invalid. */
+  }
+  return 'en';
+}
 
 export { loadConfig, type BackendConfig, type LiveConfig } from './config.js';
 export { LiveDaemon } from './daemon.js';
@@ -28,8 +66,11 @@ export type {
   BackendHandle,
 } from './adaptor/types.js';
 
-async function main(): Promise<void> {
-  const logger = new LiveLogger();
+async function main(debug: boolean): Promise<void> {
+  const logger = new LiveLogger(debug ? 'debug' : undefined);
+  if (logger.debugEnabled) {
+    logger.debug(liveText(preferredLanguage(), 'cli.debugNotice'));
+  }
   // A stray rejection in a background chain (event pump, auto-approval)
   // must be diagnosable, not process-fatal.
   process.on('unhandledRejection', (reason) => {
@@ -43,9 +84,14 @@ async function main(): Promise<void> {
   });
   let daemon: LiveDaemon;
   try {
-    daemon = new LiveDaemon(loadConfig());
+    daemon = new LiveDaemon(loadConfig(), { logger });
   } catch (error) {
-    logger.error(error instanceof Error ? error.message : String(error));
+    logger.error(
+      displayLiveMessage(
+        preferredLanguage(),
+        error instanceof Error ? error.message : String(error),
+      ),
+    );
     process.exitCode = 1;
     return;
   }
@@ -56,7 +102,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     logger.info(`received ${signal}, shutting down`);
     daemon
-      .stop()
+      .stopForProcessExit()
       .catch((error: unknown) => {
         logger.error(
           `shutdown failed: ${
@@ -78,10 +124,32 @@ async function main(): Promise<void> {
   try {
     await daemon.start();
   } catch (error) {
-    logger.error(error instanceof Error ? error.message : String(error));
+    logger.error(
+      displayLiveMessage(
+        preferredLanguage(),
+        error instanceof Error ? error.message : String(error),
+      ),
+    );
     await daemon.stop().catch(() => undefined);
     process.exitCode = 1;
   }
+}
+
+function runCli(args: LiveCliArgs): void {
+  if (args.command === 'help') {
+    process.stdout.write(`${liveText(preferredLanguage(), 'cli.usage')}\n`);
+    return;
+  }
+  if (args.command === 'init') {
+    void runInit().catch((error: unknown) => {
+      process.stderr.write(
+        `${displayLiveMessage(preferredLanguage(), error instanceof Error ? error.message : String(error))}\n`,
+      );
+      process.exitCode = 1;
+    });
+    return;
+  }
+  void main(args.debug);
 }
 
 // Only run as a daemon when invoked as the bin, not when imported. npm
@@ -110,11 +178,12 @@ if (process.argv[1] !== undefined) {
   }
 }
 if (invokedDirectly) {
-  // Subcommand dispatch: `qwen-live init` runs the setup wizard,
-  // everything else starts the daemon.
-  if (process.argv[2] === 'init') {
-    void runInit();
-  } else {
-    void main();
+  try {
+    runCli(parseLiveCliArgs(process.argv.slice(2)));
+  } catch (error) {
+    process.stderr.write(
+      `${displayLiveMessage(preferredLanguage(), error instanceof Error ? error.message : String(error))}\n${liveText(preferredLanguage(), 'cli.usage')}\n`,
+    );
+    process.exitCode = 1;
   }
 }

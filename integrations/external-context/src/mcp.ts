@@ -20,6 +20,7 @@ import {
 } from './provider-profile.js';
 import type {
   ExternalContextConfigV1,
+  ExternalContextConfig,
   ExternalContextProvider,
   ExternalMemoryWriter,
   RememberResult,
@@ -125,8 +126,8 @@ export function createExternalContextMcpServer(
   return server;
 }
 
-export async function runMcp(): Promise<void> {
-  const config = await loadConfig();
+export async function runMcp(config?: ExternalContextConfig): Promise<void> {
+  config ??= await loadConfig();
   if (config.version !== 1) {
     throw new ConfigurationError(
       'External context MCP server requires a version 1 configuration.',

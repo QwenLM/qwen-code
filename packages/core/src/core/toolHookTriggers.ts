@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { HookExecutionOwner } from '../hooks/hook-execution-context.js';
+
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { MessageBusType } from '../confirmation-bus/types.js';
 import type {
@@ -26,6 +28,8 @@ import type { Part, PartListUnion } from '@google/genai';
 
 const debugLogger = createDebugLogger('TOOL_HOOKS');
 const POST_TOOL_BATCH_HOOK_TIMEOUT_MS = 15_000;
+const INVALID_UPDATED_INPUT_REASON =
+  'PreToolUse hook returned an invalid updatedInput: expected a JSON object that replaces the tool input.';
 
 /**
  * Generate a unique tool_use_id for tracking tool executions
@@ -46,6 +50,11 @@ export interface PreToolUseHookResult {
   blockType?: 'denied' | 'ask' | 'stop';
   /** Additional context to add */
   additionalContext?: string;
+  /**
+   * A hook's validated `updatedInput`, which replaces the whole tool input.
+   * Present only on a proceeding or `ask` result.
+   */
+  updatedInput?: Record<string, unknown>;
   /**
    * Set when the hook helper caught and absorbed a transport / dispatch
    * error. The tool execution still proceeds (existing non-blocking
@@ -119,6 +128,7 @@ export async function firePreToolUseHook(
   permissionMode: string,
   signal?: AbortSignal,
   tool_call_id?: string,
+  owner?: HookExecutionOwner,
 ): Promise<PreToolUseHookResult> {
   if (!messageBus) {
     return { shouldProceed: true };
@@ -131,6 +141,7 @@ export async function firePreToolUseHook(
     >(
       {
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner,
         eventName: 'PreToolUse',
         input: {
           permission_mode: permissionMode,
@@ -172,6 +183,8 @@ export async function firePreToolUseHook(
       'PreToolUse',
       response.output,
     ) as PreToolUseHookOutput;
+    // Read once so every decision branch carries the same sanitized value.
+    const additionalContext = preToolOutput.getAdditionalContext();
 
     // Check if execution was denied
     if (preToolOutput.isDenied()) {
@@ -181,7 +194,29 @@ export async function firePreToolUseHook(
           preToolOutput.getPermissionDecisionReason() ||
           preToolOutput.getEffectiveReason(),
         blockType: 'denied',
+        additionalContext,
       };
+    }
+
+    const stopResult = (): PreToolUseHookResult => ({
+      shouldProceed: false,
+      blockReason: preToolOutput.getEffectiveReason(),
+      blockType: 'stop',
+      additionalContext,
+    });
+
+    // An explicit but unusable replacement must not fall back to the
+    // original input; a stop still stops.
+    const updatedInput = preToolOutput.getUpdatedInput();
+    if (updatedInput === null) {
+      return preToolOutput.shouldStopExecution()
+        ? stopResult()
+        : {
+            shouldProceed: false,
+            blockReason: INVALID_UPDATED_INPUT_REASON,
+            blockType: 'denied',
+            additionalContext,
+          };
     }
 
     // Check if user confirmation is required
@@ -192,24 +227,20 @@ export async function firePreToolUseHook(
           preToolOutput.getPermissionDecisionReason() ||
           'User confirmation required',
         blockType: 'ask',
+        additionalContext,
+        ...(updatedInput && { updatedInput }),
       };
     }
 
     // Check if execution should stop
     if (preToolOutput.shouldStopExecution()) {
-      return {
-        shouldProceed: false,
-        blockReason: preToolOutput.getEffectiveReason(),
-        blockType: 'stop',
-      };
+      return stopResult();
     }
-
-    // Get additional context
-    const additionalContext = preToolOutput.getAdditionalContext();
 
     return {
       shouldProceed: true,
       additionalContext,
+      ...(updatedInput && { updatedInput }),
     };
   } catch (error) {
     // Hook errors should not block tool execution
@@ -240,6 +271,8 @@ export async function firePostToolUseHook(
   permissionMode: string,
   signal?: AbortSignal,
   tool_call_id?: string,
+  durationMs?: number,
+  owner?: HookExecutionOwner,
 ): Promise<PostToolUseHookResult> {
   if (!messageBus) {
     return { shouldStop: false };
@@ -252,6 +285,7 @@ export async function firePostToolUseHook(
     >(
       {
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner,
         eventName: 'PostToolUse',
         input: {
           permission_mode: permissionMode,
@@ -260,6 +294,7 @@ export async function firePostToolUseHook(
           tool_response: toolResponse,
           tool_use_id: toolUseId,
           ...(tool_call_id && { tool_call_id }),
+          ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
         },
         signal,
       },
@@ -335,6 +370,8 @@ export async function firePostToolUseFailureHook(
   permissionMode?: string,
   signal?: AbortSignal,
   tool_call_id?: string,
+  durationMs?: number,
+  owner?: HookExecutionOwner,
 ): Promise<PostToolUseFailureHookResult> {
   if (!messageBus) {
     return {};
@@ -347,6 +384,7 @@ export async function firePostToolUseFailureHook(
     >(
       {
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner,
         eventName: 'PostToolUseFailure',
         input: {
           permission_mode: permissionMode,
@@ -356,6 +394,7 @@ export async function firePostToolUseFailureHook(
           tool_input: toolInput,
           error: errorMessage,
           is_interrupt: isInterrupt,
+          ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
         },
         signal,
       },
@@ -410,6 +449,7 @@ export async function firePostToolBatchHook(
   toolCalls: PostToolBatchToolCall[],
   permissionMode = 'default',
   signal?: AbortSignal,
+  owner?: HookExecutionOwner,
 ): Promise<PostToolBatchHookResult> {
   if (!messageBus) {
     return { shouldStop: false };
@@ -422,6 +462,7 @@ export async function firePostToolBatchHook(
     >(
       {
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner,
         eventName: 'PostToolBatch',
         input: {
           permission_mode: permissionMode,
@@ -479,6 +520,7 @@ export async function fireNotificationHook(
   notificationType: NotificationType,
   title?: string,
   signal?: AbortSignal,
+  owner?: HookExecutionOwner,
 ): Promise<NotificationHookResult> {
   if (!messageBus) {
     return {};
@@ -491,6 +533,7 @@ export async function fireNotificationHook(
     >(
       {
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner,
         eventName: 'Notification',
         input: {
           message,
@@ -557,6 +600,7 @@ export async function firePermissionRequestHook(
   permissionMode: string,
   permissionSuggestions?: PermissionSuggestion[],
   signal?: AbortSignal,
+  owner?: HookExecutionOwner,
 ): Promise<PermissionRequestHookResult> {
   if (!messageBus) {
     return { hasDecision: false };
@@ -569,6 +613,7 @@ export async function firePermissionRequestHook(
     >(
       {
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner,
         eventName: 'PermissionRequest',
         input: {
           tool_name: toolName,
@@ -596,10 +641,21 @@ export async function firePermissionRequestHook(
     }
 
     if (decision.behavior === 'allow') {
+      // An explicit but unusable replacement must not let the current
+      // input run instead.
+      const updatedInput = permissionOutput.getUpdatedToolInput();
+      if (updatedInput === null) {
+        return {
+          hasDecision: true,
+          shouldAllow: false,
+          denyMessage:
+            'PermissionRequest hook returned an invalid updatedInput: expected a JSON object that replaces the tool input.',
+        };
+      }
       return {
         hasDecision: true,
         shouldAllow: true,
-        updatedInput: decision.updatedInput,
+        ...(updatedInput && { updatedInput }),
       };
     }
 
@@ -634,6 +690,27 @@ export function appendAdditionalContext(
 
   if (typeof content === 'string') {
     return content + '\n\n' + additionalContext;
+  }
+
+  const single =
+    Array.isArray(content) && content.length === 1 ? content[0] : content;
+  if (
+    typeof single === 'object' &&
+    !Array.isArray(single) &&
+    single.functionResponse
+  ) {
+    const response = single.functionResponse;
+    const updated: Part = {
+      ...single,
+      functionResponse: {
+        ...response,
+        response: {
+          ...response.response,
+          output: `${response.response?.['output'] ?? ''}\n\n${additionalContext}`,
+        },
+      },
+    };
+    return Array.isArray(content) ? [updated] : updated;
   }
 
   // For PartListUnion content, append as an additional text part

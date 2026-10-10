@@ -25,12 +25,13 @@
 // roster that gets shrunk.
 
 import type { RepositoryContextRoleId, RoleId } from './agent-briefs.js';
+import { DOCS_NAV_PROFILE } from './docs-nav-profile.js';
 import { repositoryContextOf } from './repository-context.js';
 import { pathTool } from '../script-lint.js';
 // The topology gate lives in `budget.ts` — it is a size ruling, and the round
 // cap needs the same one. Re-exported here because this file was its home and
 // the roster is where a reader looks for "which fan-out was owed".
-export { isTerritoryFanOut } from './budget.js';
+export { isTerritoryFanOut, isFixAuditRound } from './budget.js';
 import { isTerritoryFanOut } from './budget.js';
 
 /**
@@ -52,6 +53,7 @@ export type ReviewMode =
 
 /** The plan, as far as the roster needs it. */
 export interface RosterPlan {
+  reviewProfile?: unknown;
   ownerRepo?: unknown;
   chunks?: Array<{ id?: unknown }>;
   files?: Array<{
@@ -76,7 +78,8 @@ export interface RosterPlan {
   /**
    * The review's effort, as the capturing command recorded it (`--effort`).
    * `'medium'` is the balanced tier and drops the adversarial personas
-   * (6a/6b/6c) and the language-pitfall and wrapper/proxy specialists (1d/1e);
+   * (6a/6b/6c), the counter-frame audit (6d) and the language-pitfall and
+   * wrapper/proxy specialists (1d/1e);
    * anything else — including absent — keeps the full roster. It lives in the plan, not in
    * a caller argument, on purpose: the roster this file computes must not be
    * shrinkable by whoever calls `requiredAgents`, or the shrink is what gets
@@ -85,6 +88,12 @@ export interface RosterPlan {
    */
   effort?: unknown;
   repositoryContext?: unknown;
+  /**
+   * The capture command's incremental ruling. The roster reads it through
+   * `isTerritoryFanOut` — a critical-posture round keeps the territory
+   * shape and the full agent set whatever the narrowed delta's size says.
+   */
+  incremental?: unknown;
 }
 
 /** One agent this review must launch. */
@@ -172,6 +181,87 @@ export function hasExecutableScript(plan: RosterPlan): boolean {
   });
 }
 
+/**
+ * Does the diff touch a file whose CONTENT a future agent follows as
+ * instructions — a skill, an agent brief, a prompt template? Path-detected,
+ * like `hasExecutableScript`: names this ecosystem reserves for instruction
+ * prose, because only the plan's file paths are in hand here. The predicate is
+ * deliberately generous — `prompt-record.ts` (code about prompts) trips it too
+ * — because the false-positive cost is one agent returning a documented empty
+ * scope, while a prompt file nobody executed is how #9655's guidance shipped
+ * a misattribution four review rounds read as sound. A repository whose
+ * prompt files match none of these shapes requires `prose-exec` back through
+ * a manifest rule instead.
+ */
+export function isPromptPath(path: string): boolean {
+  const base = path.split('/').pop() ?? '';
+  if (base === 'SKILL.md') return true;
+  // Root guidance files agents follow as standing instructions, by each
+  // ecosystem's reserved name — they carry operational recipes, and an
+  // AGENTS.md-only diff whose new instructions get readings but no execution
+  // is the motivating incident's shape verbatim.
+  if (/^(AGENTS|CLAUDE|QWEN|GEMINI)\.md$/.test(base)) return true;
+  if (base === 'copilot-instructions.md') return true;
+  // Agent and slash-command definitions, and prompts/ directories.
+  if (/(^|\/)\.(claude|qwen)\/(agents|commands)\//.test(path)) return true;
+  if (/(^|\/)prompts\//.test(path)) return true;
+  // The pipeline's own review rules: load-rules reads them FIRST and bakes
+  // them into every brief — instruction prose it provably follows, matching
+  // none of the reserved shapes above.
+  if (/(^|\/)\.qwen\/review-rules\.md$/.test(path)) return true;
+  // Test code ABOUT prompts pins them; it is not itself followed as one.
+  // Guard the token fallback only: a file in a reserved directory is
+  // followed as instructions under ANY name (FileCommandLoader globs
+  // **/*.md with no test filter), so a `.test.` basename must not hide it.
+  if (/\.(test|spec)\./.test(base)) return false;
+  // Skill bundles, by the loader's own marker — the `skills/` segment above
+  // a SKILL.md — rather than by one more filename: everything prose in a
+  // bundle is read AND followed (SKILL.md says so of `references/posting.md`
+  // and `references/persistence.md` verbatim), and a hand-listed set has no
+  // last corner (this file grew `.qwen/review-rules.md` for exactly that
+  // reason). After the test guard on purpose: a bundle's unit tests pin its
+  // prose, they are not followed as it, and the reserved-directory override
+  // above is licensed only by FileCommandLoader's untested glob.
+  if (/(^|\/)skills\//.test(path)) return /\.(md|ya?ml|txt)$/i.test(base);
+  const stem = base.replace(/\.[^.]+$/, '');
+  return stem
+    .split(/[-_.]/)
+    .some((token) => /^(prompts?|briefs?)$/.test(token));
+}
+
+/**
+ * Any changed file `isPromptPath` recognises — the prose-execution trigger.
+ *
+ * No `files[]` at all is not "no prompt files" — it is "we do not know" (a
+ * plan an older CLI wrote — the version skew this file already fails safe on
+ * twice), and the safe answer is the one `hasDeletions` gives: run the audit.
+ * An agent with nothing to execute costs one documented empty-scope return; a
+ * changed instruction file nobody executed is the motivating incident.
+ */
+export function hasPromptFiles(plan: RosterPlan): boolean {
+  const files = Array.isArray(plan.files) ? plan.files : [];
+  if (files.length === 0) return true;
+  return files.some((f) => typeof f?.path === 'string' && isPromptPath(f.path));
+}
+
+/**
+ * Is the counter-frame audit (6d) owed? Its two mandatory extractions — the
+ * author's nominated frame and the motivating incident — both live in the PR
+ * description, so a review with no PR identity has no frame to counter and no
+ * incident to replay: requiring 6d there manufactures a fourth undirected
+ * persona, the exact degradation the role exists to counter. Same identity
+ * condition as Agent 0 (the brief builder welds the context pointer from the
+ * same two fields), the personas' effort tier (medium skips it), and — unlike
+ * the personas — both topologies: the frame spans territories.
+ */
+function countersFrame(plan: RosterPlan): boolean {
+  return (
+    plan.effort !== 'medium' &&
+    isPositivePrNumber(plan.prNumber) &&
+    typeof plan.ownerRepo === 'string'
+  );
+}
+
 /** Source files rewritten heavily enough that the diff is the wrong frame. */
 function heavyFiles(plan: RosterPlan): string[] {
   const files = Array.isArray(plan.files) ? plan.files : [];
@@ -189,6 +279,9 @@ function heavyFiles(plan: RosterPlan): string[] {
  * dimension nobody reviewed, and must not certify the diff.
  */
 export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
+  if (plan.reviewProfile === DOCS_NAV_PROFILE) {
+    return [{ key: 'docs-nav', role: 'docs-nav' }];
+  }
   const mode = reviewMode(plan);
   const out: RequiredAgent[] = [];
   const add = (role: RoleId, file?: string) =>
@@ -210,6 +303,18 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   // issue-fidelity pass regardless of whether it has a worktree. Both halves of
   // the identity, because the brief builder needs both — requiring an agent
   // nobody could build would wedge the run.
+  // …and on a fix-audit round too (#10104). The posture's first draft
+  // dropped Agent 0 here on the claim that the one Critical-grade fidelity
+  // regression — a fix commit removing behaviour the issue required — is
+  // the removed-behavior audit's territory (1b), which the round keeps. A
+  // probe through the real pipeline disproved the claim in its canonical
+  // shape: the published scope is assembled from `base..head`, and
+  // behaviour the PR itself added is absent at the merge base and — once a
+  // fix commit removes it — absent at head, so the removal appears on
+  // NEITHER side: `removedLines` stays 0, `hasDeletions` drops 1b, and no
+  // chunk territory displays it. Issue fidelity re-checks head against the
+  // issue whatever the diff displays, so it is the one auditor that can
+  // still see the class, and the round keeps it.
   if (isPositivePrNumber(plan.prNumber) && typeof plan.ownerRepo === 'string') {
     add('0');
   }
@@ -230,6 +335,12 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
       }
     }
     add('test-matrix');
+    // The counter-frame audit is a whole-diff question: the author's frame
+    // spans territories, so no chunk agent can escape it from inside one —
+    // and a chunked PR with a strong narrative is the MOST frame-capturable
+    // shape there is. Gated by countersFrame like its 3A twin: the personas'
+    // effort tier plus the PR identity the frame lives in.
+    if (countersFrame(plan)) add('6d');
   } else {
     // Step 3A: every dimension, each walking the whole diff.
     add('1a');
@@ -253,6 +364,11 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
       add('6a');
       add('6b');
       add('6c');
+      // The counter-frame audit joins the personas: like them it is a
+      // depth pass over the whole diff, and its whole premise — attention
+      // the author's narrative cannot steer — is the kind of coverage a
+      // balanced review deliberately trades away (issue #9707, proposal 4).
+      if (countersFrame(plan)) add('6d');
       // The two checks promoted out of Agent 1a's line-by-line brief (#9788):
       // a checklist pattern-match and a structural routing expectation are
       // different attention modes from the walk, and folded into it they were
@@ -266,6 +382,14 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   // Both topologies. 1b owns the deleted side; 1c owns the cross-file walk and
   // needs a tree to grep.
   if (hasDeletions(plan)) add('1b');
+  // Instruction prose is executed, not read: a diff touching a file a future
+  // agent follows as instructions owes the prose-execution audit — in both
+  // topologies (a chunked PR touching SKILL.md still owes it) and at every
+  // effort, because on a prompt-file diff it is the highest-yield agent there
+  // is (issue #9707, proposal 3: #9655's two prose defects each fall out of a
+  // single execution and fell out of none of twenty-five readings). It runs
+  // the repository's own tooling, so like 1c and 7 it needs a tree.
+  if (mode !== 'diff-only' && hasPromptFiles(plan)) add('prose-exec');
   if (mode !== 'diff-only') {
     add('1c');
     add('7');
@@ -293,14 +417,13 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   //
   // Skipping them was tempting and wrong. The premise was that an interaction
   // file's full-range slice is code the previous round already cleared — true
-  // only while the MERGE BASE holds still between rounds, and nothing
-  // enforces that. The anchor gate validates `--since` against head history;
-  // neither the round cache nor the posted ledger carries a base identity, so
-  // a BACKWARD base move — the author retargets the PR to an older base, an
-  // ordinary GitHub operation — is accepted. `newBase..anchor` then carries
-  // hunks no round has read, they arrive inside a heavy interaction file's
-  // full-range slice, and these three agents are the only ones that would
-  // have walked them. A clean verdict re-anchors past them for good.
+  // only while the MERGE BASE holds still between rounds. The anchor gate
+  // validates `--since` against head history and rules nothing about the
+  // base, so a BACKWARD base move — the author retargets the PR to an older
+  // base, an ordinary GitHub operation — is accepted. `newBase..anchor` then
+  // carries hunks no round has read, they arrive inside a heavy interaction
+  // file's full-range slice, and these three agents are the only ones that
+  // would have walked them. A clean verdict re-anchors past them for good.
   //
   // So the skip is off until the anchor can prove base continuity. It costs
   // three agents on a rare shape — heavy, unchanged since the anchor, and
@@ -333,7 +456,7 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
  * adversarial personas, re-add whole-diff walkers to a chunked 3B fan-out, or
  * demand a tree-grepping tracer from a review that has no tree.
  */
-function contextRoleRunsInThisReview(
+export function contextRoleRunsInThisReview(
   role: RepositoryContextRoleId,
   plan: RosterPlan,
   mode: ReviewMode,
@@ -344,9 +467,21 @@ function contextRoleRunsInThisReview(
     case '6b':
     case '6c':
       return !fanOut && plan.effort !== 'medium';
+    case '6d':
+      // Whole-diff in both topologies — the frame spans territories — but a
+      // manifest cannot conjure a frame: no PR identity, no counter-frame.
+      return countersFrame(plan);
     case 'test-matrix':
       return fanOut;
     case '1c':
+      return mode !== 'diff-only';
+    case 'prose-exec':
+      // Both topologies, every effort, prompt files or not — whether it has
+      // work is the diff's business (hasPromptFiles), not the policy's: a
+      // manifest may require it back where the path detector misses, which
+      // is the escape hatch `isPromptPath`'s doc comment promises. The one
+      // policy line is capability: never without a tree to run the
+      // repository's tooling in (the same line 1c and 7 draw).
       return mode !== 'diff-only';
     case '1b':
       // Both topologies run the removed-behavior audit; whether it has work is

@@ -13,6 +13,7 @@
 // genuinely UNCHANGED and resumable, never whether a field was forged.
 
 import { describe, it, expect } from 'vitest';
+import { DOCS_NAV_PROFILE } from './docs-nav-profile.js';
 import { assessResume, type ResumeProbes } from './resume.js';
 import { RESUME_MAX } from './run-ledger.js';
 
@@ -24,6 +25,7 @@ const prev = () => ({
   fetchedSha: SHA,
   diffSha256: DIFF_SHA,
   effort: undefined as unknown,
+  reviewModelId: 'model-a@1a2b3c4d' as unknown,
 });
 
 const probes = (over: Partial<ResumeProbes> = {}): ResumeProbes => ({
@@ -34,6 +36,7 @@ const probes = (over: Partial<ResumeProbes> = {}): ResumeProbes => ({
   liveHeadSha: SHA,
   resumeCount: 0,
   requestedEffort: null,
+  runningModelId: 'model-a@1a2b3c4d',
   ...over,
 });
 
@@ -69,6 +72,26 @@ describe('assessResume — the empty-string shapes, named by the FIRST break', (
 });
 
 describe('assessResume', () => {
+  it('starts fresh rather than resuming a focused automatic review as high', () => {
+    expect(
+      assessResume({ ...prev(), reviewProfile: DOCS_NAV_PROFILE }, probes()),
+    ).toEqual({
+      ok: false,
+      reason: 'profile-not-resumable',
+    });
+  });
+
+  it('reports a moved head as head-moved even on a focused-profile report', () => {
+    // A focused run starts fresh by design, but a head that MOVED is the
+    // restart case the run-ledger charges — masking it as
+    // profile-not-resumable would bypass the restart accounting.
+    expect(
+      assessResume(
+        { ...prev(), reviewProfile: DOCS_NAV_PROFILE },
+        probes({ liveHeadSha: 'e'.repeat(64) }),
+      ),
+    ).toEqual({ ok: false, reason: 'head-moved' });
+  });
   it('resumes when every probe matches the previous report', () => {
     expect(assessResume(prev(), probes())).toEqual({ ok: true });
   });
@@ -103,6 +126,53 @@ describe('assessResume', () => {
         probes({ requestedEffort: 'high' }),
       ),
     ).toEqual({ ok: false, reason: 'effort-mismatch' });
+  });
+
+  it('refuses with model-mismatch when another identity would inherit the round (R26-1)', () => {
+    // The continuation republishes the interrupted attempt's report and cache
+    // candidate verbatim, stamped with THAT attempt's identity; resumed under
+    // another one, Step 8 promotes an anchor naming a model that never
+    // finished the review. A provider change alone changes the digest.
+    expect(
+      assessResume(prev(), probes({ runningModelId: 'model-b@1a2b3c4d' })),
+    ).toEqual({ ok: false, reason: 'model-mismatch' });
+    expect(
+      assessResume(prev(), probes({ runningModelId: 'model-a@9f8e7d6c' })),
+    ).toEqual({ ok: false, reason: 'model-mismatch' });
+    // An identity on one side only is a mismatch too.
+    for (const recorded of [undefined, '', 7]) {
+      expect(
+        assessResume({ ...prev(), reviewModelId: recorded }, probes()),
+      ).toEqual({ ok: false, reason: 'model-mismatch' });
+    }
+    expect(assessResume(prev(), probes({ runningModelId: '' }))).toEqual({
+      ok: false,
+      reason: 'model-mismatch',
+    });
+    expect(assessResume(prev(), probes())).toEqual({ ok: true });
+  });
+
+  it('resumes when NEITHER side has an identity — nothing was certified to inherit', () => {
+    // `fetch-pr` records no `reviewModelId` and withholds the candidate under
+    // an empty identity, so the continuation republishes no certificate;
+    // refusing would only disable `--resume` on such a runtime.
+    expect(
+      assessResume(
+        { ...prev(), reviewModelId: undefined },
+        probes({ runningModelId: '' }),
+      ),
+    ).toEqual({ ok: true });
+  });
+
+  it('charges a moved head as head-moved even when the model changed too', () => {
+    // `fetch-pr` records a restart only for `head-moved`; a model-mismatch
+    // ruled first would lose that accounting.
+    expect(
+      assessResume(
+        prev(),
+        probes({ runningModelId: 'model-b@1a2b3c4d', liveHeadSha: 'moved' }),
+      ),
+    ).toEqual({ ok: false, reason: 'head-moved' });
   });
 
   it('resumes when the explicit effort matches the recorded one', () => {

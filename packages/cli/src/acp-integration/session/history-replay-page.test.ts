@@ -23,6 +23,7 @@ import {
 import {
   collectHistoryReplayUpdates,
   createReplayCumulativeUsage,
+  degradeReplayEnvelopeAppHtml,
   replayTranscriptRecordPage,
 } from './history-replay-page.js';
 
@@ -165,6 +166,48 @@ function largeToolResultRecord(
       callId: 'call-1',
       responseParts: [],
       resultDisplay,
+    },
+  };
+}
+
+function appToolResultRecord(
+  uuid: string,
+  callId: string,
+  html: string,
+  fallbackText: string,
+): ChatRecord {
+  return {
+    uuid,
+    parentUuid: null,
+    sessionId: SESSION_ID,
+    timestamp: TIMESTAMP,
+    type: 'tool_result',
+    cwd: '/workspace',
+    version: '1.0.0',
+    message: {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id: callId,
+            name: 'amplitude__chart',
+            response: { result: fallbackText },
+          },
+        },
+      ],
+    },
+    toolCallResult: {
+      callId,
+      responseParts: [],
+      resultDisplay: {
+        type: 'mcp_app',
+        serverName: 'amplitude',
+        resourceUri: 'ui://amplitude/chart',
+        html,
+        toolResult: {},
+        toolArguments: {},
+        fallbackText,
+      },
     },
   };
 }
@@ -478,6 +521,183 @@ describe('history replay page', () => {
     });
   });
 
+  it('blanks the oldest replayed App html until a limited page fits', async () => {
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [
+        appToolResultRecord(
+          'app-record-1',
+          'call-app-1',
+          'x'.repeat(3000),
+          'first chart',
+        ),
+        appToolResultRecord(
+          'app-record-2',
+          'call-app-2',
+          'y'.repeat(3000),
+          'second chart',
+        ),
+        appToolResultRecord(
+          'app-record-3',
+          'call-app-3',
+          'z'.repeat(3000),
+          'third chart',
+        ),
+      ],
+      cumulativeUsage: createReplayCumulativeUsage(),
+      limits: { maxBytes: 8000, maxUpdates: 100 },
+    });
+
+    const appOutputs = result.updates
+      .filter((update) => update.sessionUpdate === 'tool_call_update')
+      .map(
+        (update) =>
+          (update as { rawOutput: { html: string; fallbackText: string } })
+            .rawOutput,
+      );
+    expect(appOutputs).toHaveLength(3);
+    expect(appOutputs[0]).toMatchObject({
+      html: '',
+      fallbackText: 'first chart',
+    });
+    expect(appOutputs[1]).toMatchObject({
+      html: 'y'.repeat(3000),
+      fallbackText: 'second chart',
+    });
+    expect(appOutputs[2]).toMatchObject({
+      html: 'z'.repeat(3000),
+      fallbackText: 'third chart',
+    });
+  });
+
+  it('admits a single over-budget App update degraded rather than failing the page', async () => {
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [
+        appToolResultRecord(
+          'app-record-1',
+          'call-app-1',
+          'x'.repeat(3000),
+          'only chart',
+        ),
+      ],
+      cumulativeUsage: createReplayCumulativeUsage(),
+      limits: { maxBytes: 2000, maxUpdates: 100 },
+    });
+
+    const update = result.updates.find(
+      (candidate) => candidate.sessionUpdate === 'tool_call_update',
+    );
+    expect(update).toMatchObject({
+      rawOutput: { html: '', fallbackText: 'only chart' },
+    });
+  });
+
+  it('keeps an HTML-only App visible when a limited replay page degrades it', async () => {
+    const record = appToolResultRecord(
+      'app-record-1',
+      'call-app-1',
+      'x'.repeat(3000),
+      '',
+    );
+    const original = JSON.stringify(record);
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [record],
+      cumulativeUsage: createReplayCumulativeUsage(),
+      limits: { maxBytes: 2000, maxUpdates: 100 },
+    });
+
+    expect(result.updates).toContainEqual(
+      expect.objectContaining({
+        rawOutput: expect.objectContaining({
+          html: '',
+          fallbackText:
+            'MCP App HTML omitted because the restored page exceeds its size limit.',
+        }),
+      }),
+    );
+    expect(jsonBytes(result.updates)).toBeLessThanOrEqual(2000);
+    expect(JSON.stringify(record)).toBe(original);
+  });
+
+  it('keeps an HTML-only App visible when the envelope wrapper exceeds the budget', () => {
+    const rawOutput = {
+      type: 'mcp_app',
+      html: 'x'.repeat(3000),
+      fallbackText: '',
+    };
+    const update = {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-app-1',
+      status: 'completed',
+      rawOutput,
+    } as unknown as SessionUpdate;
+    const envelope = { v: 1, updates: [update] };
+
+    degradeReplayEnvelopeAppHtml(envelope, jsonBytes(envelope) - 1);
+
+    expect(envelope.updates[0]).toMatchObject({
+      rawOutput: {
+        html: '',
+        fallbackText:
+          'MCP App HTML omitted because the restored page exceeds its size limit.',
+      },
+    });
+    expect(jsonBytes(envelope)).toBeLessThanOrEqual(1000);
+    expect(rawOutput).toEqual({
+      type: 'mcp_app',
+      html: 'x'.repeat(3000),
+      fallbackText: '',
+    });
+  });
+
+  it('degrades envelope App html oldest-first until the envelope serializes under the cap', () => {
+    const appUpdate = (callId: string, html: string, fallbackText: string) =>
+      ({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: callId,
+        status: 'completed',
+        rawOutput: { type: 'mcp_app', html, fallbackText },
+      }) as unknown as SessionUpdate;
+    const envelope = {
+      v: 1,
+      updates: [
+        appUpdate('call-app-1', 'x'.repeat(3000), 'first chart'),
+        appUpdate('call-app-2', 'y'.repeat(3000), 'second chart'),
+      ],
+    };
+
+    degradeReplayEnvelopeAppHtml(envelope, 4000);
+
+    const [first, second] = envelope.updates as unknown as Array<{
+      rawOutput: { html: string; fallbackText: string };
+    }>;
+    expect(first!.rawOutput).toMatchObject({
+      html: '',
+      fallbackText: 'first chart',
+    });
+    expect(second!.rawOutput).toMatchObject({
+      html: 'y'.repeat(3000),
+      fallbackText: 'second chart',
+    });
+    expect(jsonBytes(envelope)).toBeLessThanOrEqual(4000);
+  });
+
+  it('leaves a within-budget envelope untouched', () => {
+    const update = {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-app-1',
+      status: 'completed',
+      rawOutput: { type: 'mcp_app', html: '<b>ok</b>', fallbackText: 'chart' },
+    } as unknown as SessionUpdate;
+    const envelope = { v: 1, updates: [update] };
+
+    degradeReplayEnvelopeAppHtml(envelope, 4000);
+
+    expect(envelope.updates[0]).toBe(update);
+  });
+
   it('filters malformed replay state before encoding the next cursor', async () => {
     const logger = { warn: vi.fn() };
     const encodeCursor = vi.fn(() => 'next-cursor');
@@ -575,6 +795,7 @@ describe('history replay page', () => {
       pendingToolCalls: [],
       finalizeDangling: true,
       gaps: [],
+      includeTiming: true,
     });
     expect(encodeCursor).toHaveBeenCalledWith(cursorState());
   });
@@ -606,6 +827,7 @@ describe('history replay page', () => {
       pendingToolCalls: [],
       finalizeDangling: true,
       gaps: [],
+      includeTiming: true,
       goalState: GOAL_STATE,
       goalCause: 'verifier_reject',
     });
@@ -640,6 +862,7 @@ describe('history replay page', () => {
       pendingToolCalls: [],
       finalizeDangling: true,
       gaps: [],
+      includeTiming: true,
     });
   });
 
@@ -672,6 +895,7 @@ describe('history replay page', () => {
       pendingToolCalls: [],
       finalizeDangling: true,
       gaps: [],
+      includeTiming: true,
       goalState: GOAL_STATE,
     });
   });
@@ -925,5 +1149,182 @@ describe('history replay page', () => {
         encodeCursor: vi.fn(),
       }),
     ).rejects.toThrow('Unsupported transcript replay state version');
+  });
+
+  describe('timing frames', () => {
+    function telemetryRecord(
+      uuid: string,
+      uiEvent: Record<string, unknown>,
+    ): ChatRecord {
+      return {
+        uuid,
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: TIMESTAMP,
+        type: 'system',
+        subtype: 'ui_telemetry',
+        cwd: '/workspace',
+        version: '1.0.0',
+        systemPayload: { uiEvent },
+      } as unknown as ChatRecord;
+    }
+
+    function requestTelemetry(uuid = 'telemetry-request'): ChatRecord {
+      return telemetryRecord(uuid, {
+        'event.name': 'qwen-code.api_response',
+        'event.timestamp': TIMESTAMP,
+        response_id: 'chatcmpl-abc',
+        model: 'qwen3.8-max',
+        duration_ms: 6544,
+        ttft_ms: 2344,
+        prompt_id: `${SESSION_ID}########0`,
+      });
+    }
+
+    function toolTelemetry(uuid = 'telemetry-tool'): ChatRecord {
+      return telemetryRecord(uuid, {
+        'event.name': 'qwen-code.tool_call',
+        'event.timestamp': TIMESTAMP,
+        call_id: 'call-1',
+        function_name: 'read_file',
+        duration_ms: 16,
+        status: 'success',
+        response_id: 'chatcmpl-abc',
+      });
+    }
+
+    function timingsOf(updates: SessionUpdate[]) {
+      return updates
+        .map(
+          (update) =>
+            (update as { _meta?: { timing?: Record<string, unknown> } })._meta
+              ?.timing,
+        )
+        .filter(Boolean);
+    }
+
+    it('retains resolved wrapper names when a cursor remaps colliding timing ids', async () => {
+      const result = await replayTranscriptRecordPage({
+        sessionId: SESSION_ID,
+        page: recordPage({
+          records: [toolTelemetry()],
+          replay: {
+            v: 1,
+            pendingToolCalls: [
+              {
+                callId: 'call-1:2',
+                rawCallId: 'call-1',
+                toolName: 'tool_call',
+                resolvedToolName: 'read_file',
+                sourceRecordId: 'tool-call-record',
+              },
+            ],
+            cumulativeUsage: createReplayCumulativeUsage(),
+          },
+        }),
+        finalizeDangling: false,
+        encodeCursor: vi.fn(),
+      });
+      expect(timingsOf(result.updates)).toEqual([
+        expect.objectContaining({
+          callId: 'call-1:2',
+          toolName: 'read_file',
+          durationMs: 16,
+        }),
+      ]);
+    });
+
+    it('surfaces request and tool timing on a forward page', async () => {
+      const result = await replayTranscriptRecordPage({
+        sessionId: SESSION_ID,
+        page: recordPage({
+          records: [
+            userRecord(),
+            requestTelemetry(),
+            toolCallRecord(),
+            toolTelemetry(),
+            toolResultRecord(),
+          ],
+        }),
+        encodeCursor: vi.fn(),
+      });
+
+      expect(result.replayError).toBeUndefined();
+      expect(timingsOf(result.updates)).toEqual([
+        {
+          kind: 'request',
+          status: 'ok',
+          durationMs: 6544,
+          ttftMs: 2344,
+          startedAt: Date.parse(TIMESTAMP) - 6544,
+          responseId: 'chatcmpl-abc',
+          promptId: `${SESSION_ID}########0`,
+          model: 'qwen3.8-max',
+        },
+        {
+          kind: 'tool',
+          durationMs: 16,
+          callId: 'call-1',
+          toolName: 'read_file',
+          toolStatus: 'success',
+          responseId: 'chatcmpl-abc',
+        },
+      ]);
+    });
+
+    it('surfaces timing on a backward page whose head is the assistant record', async () => {
+      // The split a backward page actually makes: the api_response record
+      // stays behind on the older page, so the newer page must still carry
+      // its own frames and the older page must not lose its one.
+      const newer = await replayTranscriptRecordPage({
+        sessionId: SESSION_ID,
+        page: recordPage({
+          direction: 'backward',
+          records: [toolCallRecord(), toolTelemetry(), toolResultRecord()],
+        }),
+        encodeCursor: vi.fn(),
+      });
+      const older = await replayTranscriptRecordPage({
+        sessionId: SESSION_ID,
+        page: recordPage({
+          direction: 'backward',
+          records: [userRecord(), requestTelemetry()],
+        }),
+        encodeCursor: vi.fn(),
+      });
+
+      expect(timingsOf(newer.updates)).toMatchObject([{ kind: 'tool' }]);
+      expect(timingsOf(older.updates)).toMatchObject([{ kind: 'request' }]);
+    });
+
+    it('leaves the rest of the page projection untouched', async () => {
+      const withTelemetry = await replayTranscriptRecordPage({
+        sessionId: SESSION_ID,
+        page: recordPage({
+          records: [
+            userRecord(),
+            requestTelemetry(),
+            toolCallRecord(),
+            toolTelemetry(),
+            toolResultRecord(),
+          ],
+        }),
+        encodeCursor: vi.fn(),
+      });
+      const withoutTelemetry = await replayTranscriptRecordPage({
+        sessionId: SESSION_ID,
+        page: recordPage({
+          records: [userRecord(), toolCallRecord(), toolResultRecord()],
+        }),
+        encodeCursor: vi.fn(),
+      });
+
+      const withoutTimingFrames = withTelemetry.updates.filter(
+        (update) =>
+          (update as { _meta?: { timing?: unknown } })._meta?.timing ===
+          undefined,
+      );
+      expect(withoutTimingFrames).toEqual(withoutTelemetry.updates);
+    });
   });
 });

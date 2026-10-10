@@ -11,6 +11,7 @@ import {
   MAX_RETAINED_TERMINAL_AGENTS,
   readAgentMetaAsync,
   sanitizeFilenameComponent,
+  snapshotArgsUnavailable,
   type AgentTask,
   type Config,
   type MonitorTask,
@@ -195,6 +196,12 @@ function serializeWorkflowTask(
     id: entry.runId,
     ...optionalField('toolUseId', entry.toolUseId),
     ...optionalField('workflowName', entry.workflowName),
+    ...optionalField('sourceRef', entry.sourceRef && { ...entry.sourceRef }),
+    ...optionalField(
+      'workflowCalls',
+      entry.workflowCalls?.map((call) => ({ ...call })),
+    ),
+    ...optionalField('workflowCallsTruncated', entry.workflowCallsTruncated),
     ...optionalField('sourceRunId', entry.sourceRunId),
     ...optionalField('startMode', entry.startMode),
     label:
@@ -217,6 +224,11 @@ function serializeWorkflowTask(
     })),
     agentsDispatched: entry.agentsDispatched,
     agentsCompleted: entry.agentsCompleted,
+    agentsRespawned: entry.agentsRespawned ?? 0,
+    ...optionalField(
+      'sizeWarning',
+      entry.sizeWarning ? { ...entry.sizeWarning } : undefined,
+    ),
     tokensSpent: entry.tokensSpent,
     tokenBudgetTotal: entry.tokenBudgetTotal,
     recentLogs: [...entry.recentLogs],
@@ -240,8 +252,29 @@ function serializeWorkflowSnapshot(
     kind: 'workflow',
     id: snapshot.runId,
     isHistorical: true,
+    ...optionalField('argsOmitted', snapshot.argsOmitted),
+    // The daemon's own answer, so a client never offers a retry or rerun it
+    // would refuse. `args` itself stays off the wire: it can be 256 KiB, and
+    // it is the caller's data.
+    ...optionalField(
+      'argsUnavailable',
+      // `true as const`: the field is `true | undefined`, and a plain `true`
+      // in this position widens to `boolean`.
+      snapshotArgsUnavailable(snapshot) === undefined
+        ? undefined
+        : (true as const),
+    ),
     ...optionalField('toolUseId', snapshot.toolUseId),
     ...optionalField('workflowName', snapshot.workflowName),
+    ...optionalField(
+      'sourceRef',
+      snapshot.sourceRef && { ...snapshot.sourceRef },
+    ),
+    ...optionalField(
+      'workflowCalls',
+      snapshot.workflowCalls?.map((call) => ({ ...call })),
+    ),
+    ...optionalField('workflowCallsTruncated', snapshot.workflowCallsTruncated),
     ...optionalField('sourceRunId', snapshot.sourceRunId),
     ...optionalField('startMode', snapshot.startMode),
     label:
@@ -264,6 +297,11 @@ function serializeWorkflowSnapshot(
     })),
     agentsDispatched: snapshot.agentsDispatched,
     agentsCompleted: snapshot.agentsCompleted,
+    agentsRespawned: snapshot.agentsRespawned ?? 0,
+    ...optionalField(
+      'sizeWarning',
+      snapshot.sizeWarning ? { ...snapshot.sizeWarning } : undefined,
+    ),
     tokensSpent: snapshot.tokensSpent,
     tokenBudgetTotal: snapshot.tokenBudgetTotal,
     recentLogs: [...snapshot.recentLogs],

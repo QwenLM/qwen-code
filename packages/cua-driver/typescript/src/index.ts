@@ -4,7 +4,28 @@
  * Agents should configure `qwen-cua-driver mcp` through their runtime's existing
  * MCP client instead of importing a language MCP facade.
  */
-import { CuaDriver, SdkClientKind } from "./native/cua_driver_sdk.js"
+import { CuaDriver, CuaDriverSession, SdkClientKind } from "./native/cua_driver_sdk.js"
+import { withMainRunLoop } from "./native/node-runtime.js"
+
+for (const prototype of [CuaDriver.prototype, CuaDriverSession.prototype]) {
+  const paste = prototype.paste
+  prototype.paste = async function (input, options) {
+    options?.signal.throwIfAborted()
+    // A dispatched paste must finish clipboard cleanup before cancellation
+    // can stop the host's AppKit pump or free its native future.
+    const result = await withMainRunLoop(() => paste.call(this, input))
+    options?.signal.throwIfAborted()
+    return result
+  }
+  const callTool = prototype.callTool
+  prototype.callTool = async function (name, argumentsJson, options) {
+    if (name !== "paste") return callTool.call(this, name, argumentsJson, options)
+    options?.signal.throwIfAborted()
+    const result = await withMainRunLoop(() => callTool.call(this, name, argumentsJson))
+    options?.signal.throwIfAborted()
+    return result
+  }
+}
 
 // The same native library backs Python and TypeScript. The package root tags
 // both the canonical same-process constructor and the temporary daemon

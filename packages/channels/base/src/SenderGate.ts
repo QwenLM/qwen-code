@@ -1,4 +1,4 @@
-import type { SenderPolicy } from './types.js';
+import type { PrivatePolicy } from './types.js';
 import type {
   CreatePairingRequestResult,
   PairingStore,
@@ -11,12 +11,12 @@ export interface SenderCheckResult {
 }
 
 export class SenderGate {
-  private policy: SenderPolicy;
+  private policy: PrivatePolicy;
   private allowedUsers: Set<string>;
   private pairingStore: PairingStore | null;
 
   constructor(
-    policy: SenderPolicy,
+    policy: PrivatePolicy,
     allowedUsers: string[] = [],
     pairingStore?: PairingStore,
   ) {
@@ -31,6 +31,8 @@ export class SenderGate {
 
   isAllowed(senderId: string): boolean {
     switch (this.policy) {
+      case 'disabled':
+        return false;
       case 'open':
         return true;
       case 'allowlist':
@@ -47,6 +49,8 @@ export class SenderGate {
 
   check(senderId: string, senderName?: string): SenderCheckResult {
     switch (this.policy) {
+      case 'disabled':
+        return { allowed: false };
       case 'open':
         return { allowed: true };
       case 'allowlist':

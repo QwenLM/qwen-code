@@ -4,11 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  afterEach,
+  vi,
+  beforeEach,
+  type MockInstance,
+} from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
 import * as cache from './crawlCache.js';
+import type { CrawlOptions } from './crawler.js';
 import {
   crawl,
   __setCommandRunnerForTests,
@@ -42,10 +51,8 @@ async function runExecFile(
   });
 }
 
-async function initGitRepo(dir: string): Promise<void> {
-  await runExecFile('git', ['init'], dir);
-  await runExecFile('git', ['add', '.'], dir);
-  await runExecFile(
+const gitCommit = (dir: string, message: string) =>
+  runExecFile(
     'git',
     [
       '-c',
@@ -55,11 +62,97 @@ async function initGitRepo(dir: string): Promise<void> {
       'commit',
       '--no-gpg-sign',
       '-m',
-      'init',
+      message,
     ],
     dir,
   );
+
+async function initGitRepo(dir: string): Promise<void> {
+  await runExecFile('git', ['init'], dir);
+  await runExecFile('git', ['add', '.'], dir);
+  await gitCommit(dir, 'init');
 }
+
+/** loadIgnoreRules for `projectRoot`, every source off unless enabled. */
+const rules = (
+  projectRoot: string,
+  useGitignore = false,
+  useQwenignore = false,
+  ignoreDirs: string[] = [],
+) => loadIgnoreRules({ projectRoot, useGitignore, useQwenignore, ignoreDirs });
+
+/** crawl() options for `dir` (also the cwd) with caching off. */
+const opts = (
+  dir: string,
+  ignore: Ignore,
+  extra: Partial<CrawlOptions> = {},
+): CrawlOptions => ({
+  crawlDirectory: dir,
+  cwd: dir,
+  ignore,
+  cache: false,
+  cacheTtl: 0,
+  ...extra,
+});
+
+const fail = () => ({ success: false, lines: [] as string[] });
+
+/** A command runner under which git and rg both fail (the fdir fallback). */
+const failAllCommands = () => __setCommandRunnerForTests(async () => fail());
+
+/**
+ * A fake git repo at `root`: rev-parse reports it, ls-files --others and
+ * --deleted list nothing, and ls-files --cached lists `cached` (null: that
+ * command fails). rg lists `rg` when given, and everything else fails.
+ * `calls` records the args of every command run.
+ */
+function fakeGitRepo(
+  root: string,
+  cached: string[] | null,
+  { rg, calls }: { rg?: string[]; calls?: string[][] } = {},
+) {
+  __setCommandRunnerForTests(async (command, args) => {
+    calls?.push(args);
+    if (command === 'git') {
+      if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
+        return { success: true, lines: [root] };
+      }
+      if (args.includes('ls-files') && args.includes('--others')) {
+        return { success: true, lines: [] };
+      }
+      if (args.includes('ls-files') && args.includes('--deleted')) {
+        return { success: true, lines: [] };
+      }
+      if (args.includes('ls-files') && args.includes('--cached')) {
+        return cached ? { success: true, lines: [...cached] } : fail();
+      }
+    }
+    if (command === 'rg' && rg) {
+      return { success: true, lines: [...rg] };
+    }
+    return fail();
+  });
+}
+
+/** git fails; rg answers `respond(args)` and its args are recorded. */
+function fakeRipgrepOnly(respond: (args: string[]) => string[]) {
+  const rgArgsSeen: string[][] = [];
+  __setCommandRunnerForTests(async (command, args) => {
+    if (command !== 'rg') return fail();
+    rgArgsSeen.push(args);
+    return { success: true, lines: respond(args) };
+  });
+  return rgArgsSeen;
+}
+
+/** The crawler's "falling back to …" warnings, in order. */
+const degradations = (warnSpy: MockInstance) =>
+  warnSpy.mock.calls
+    .map((c) => c[0])
+    .filter(
+      (m): m is string =>
+        typeof m === 'string' && m.startsWith('[crawler] falling back to'),
+    );
 
 describe('crawler', () => {
   let tmpDir: string;
@@ -72,6 +165,10 @@ describe('crawler', () => {
     vi.restoreAllMocks();
   });
 
+  /** Crawls tmpDir with caching off. */
+  const crawlTmp = (ignore: Ignore, extra?: Partial<CrawlOptions>) =>
+    crawl(opts(tmpDir, ignore, extra));
+
   it('should use .qwenignore rules', async () => {
     tmpDir = await createTmpDir({
       '.qwenignore': 'dist/',
@@ -79,20 +176,7 @@ describe('crawler', () => {
       src: ['not-ignored.js'],
     });
 
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: false,
-      useQwenignore: true,
-      ignoreDirs: [],
-    });
-
-    const results = await crawl({
-      crawlDirectory: tmpDir,
-      cwd: tmpDir,
-      ignore,
-      cache: false,
-      cacheTtl: 0,
-    });
+    const results = await crawlTmp(rules(tmpDir, false, true));
 
     expect(results).toEqual(
       expect.arrayContaining([
@@ -113,20 +197,7 @@ describe('crawler', () => {
       src: ['not-ignored.js'],
     });
 
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: true,
-      useQwenignore: true,
-      ignoreDirs: [],
-    });
-
-    const results = await crawl({
-      crawlDirectory: tmpDir,
-      cwd: tmpDir,
-      ignore,
-      cache: false,
-      cacheTtl: 0,
-    });
+    const results = await crawlTmp(rules(tmpDir, true, true));
 
     expect(results).toEqual(
       expect.arrayContaining([
@@ -145,20 +216,7 @@ describe('crawler', () => {
       src: ['main.js'],
     });
 
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: false,
-      useQwenignore: false,
-      ignoreDirs: ['logs'],
-    });
-
-    const results = await crawl({
-      crawlDirectory: tmpDir,
-      cwd: tmpDir,
-      ignore,
-      cache: false,
-      cacheTtl: 0,
-    });
+    const results = await crawlTmp(rules(tmpDir, false, false, ['logs']));
 
     expect(results).toEqual(
       expect.arrayContaining(['.', 'src/', 'src/main.js']),
@@ -177,20 +235,7 @@ describe('crawler', () => {
       src: ['main.js'],
     });
 
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: true,
-      useQwenignore: false,
-      ignoreDirs: [],
-    });
-
-    const results = await crawl({
-      crawlDirectory: tmpDir,
-      cwd: tmpDir,
-      ignore,
-      cache: false,
-      cacheTtl: 0,
-    });
+    const results = await crawlTmp(rules(tmpDir, true));
 
     expect(results).toEqual(
       expect.arrayContaining([
@@ -212,20 +257,7 @@ describe('crawler', () => {
       'Foo.mk': '',
     });
 
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: true,
-      useQwenignore: false,
-      ignoreDirs: [],
-    });
-
-    const results = await crawl({
-      crawlDirectory: tmpDir,
-      cwd: tmpDir,
-      ignore,
-      cache: false,
-      cacheTtl: 0,
-    });
+    const results = await crawlTmp(rules(tmpDir, true));
 
     expect(results).toEqual(
       expect.arrayContaining(['.', '.gitignore', 'Foo.mk']),
@@ -252,20 +284,7 @@ describe('crawler', () => {
       },
     });
 
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: true,
-      useQwenignore: false,
-      ignoreDirs: [],
-    });
-
-    const results = await crawl({
-      crawlDirectory: tmpDir,
-      cwd: tmpDir,
-      ignore,
-      cache: false,
-      cacheTtl: 0,
-    });
+    const results = await crawlTmp(rules(tmpDir, true));
 
     expect(results).toEqual(
       expect.arrayContaining([
@@ -286,20 +305,7 @@ describe('crawler', () => {
       src: ['main.js'],
     });
 
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: true,
-      useQwenignore: false,
-      ignoreDirs: [],
-    });
-
-    const results = await crawl({
-      crawlDirectory: tmpDir,
-      cwd: tmpDir,
-      ignore,
-      cache: false,
-      cacheTtl: 0,
-    });
+    const results = await crawlTmp(rules(tmpDir, true));
 
     expect(results).toEqual(
       expect.arrayContaining([
@@ -318,20 +324,7 @@ describe('crawler', () => {
       src: ['file1.js'],
     });
 
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: true,
-      useQwenignore: true,
-      ignoreDirs: [],
-    });
-
-    const results = await crawl({
-      crawlDirectory: tmpDir,
-      cwd: tmpDir,
-      ignore,
-      cache: false,
-      cacheTtl: 0,
-    });
+    const results = await crawlTmp(rules(tmpDir, true, true));
     expect(results).toEqual(
       expect.arrayContaining(['.', 'src/', 'src/file1.js']),
     );
@@ -343,20 +336,7 @@ describe('crawler', () => {
       src: ['main.js'],
     });
 
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: true,
-      useQwenignore: false,
-      ignoreDirs: [],
-    });
-
-    const results = await crawl({
-      crawlDirectory: tmpDir,
-      cwd: tmpDir,
-      ignore,
-      cache: false,
-      cacheTtl: 0,
-    });
+    const results = await crawlTmp(rules(tmpDir, true));
 
     expect(results).toEqual(
       expect.arrayContaining(['.', 'src/', '.gitignore', 'src/main.js']),
@@ -369,20 +349,7 @@ describe('crawler', () => {
       src: ['main.js'],
     });
 
-    const ignore = loadIgnoreRules({
-      projectRoot: tmpDir,
-      useGitignore: false,
-      useQwenignore: false,
-      ignoreDirs: [],
-    });
-
-    const results = await crawl({
-      crawlDirectory: tmpDir,
-      cwd: tmpDir,
-      ignore,
-      cache: false,
-      cacheTtl: 0,
-    });
+    const results = await crawlTmp(rules(tmpDir));
 
     expect(results).toEqual(
       expect.arrayContaining(['.', 'src/', 'src/main.js']),
@@ -401,19 +368,10 @@ describe('crawler', () => {
 
     it('should hit the cache for subsequent crawls', async () => {
       tmpDir = await createTmpDir({ 'file1.js': '' });
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-      const options = {
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
+      const options = opts(tmpDir, rules(tmpDir), {
         cache: true,
         cacheTtl: 10,
-      };
+      });
 
       const crawlSpy = vi.spyOn(cache, 'read');
 
@@ -422,8 +380,8 @@ describe('crawler', () => {
 
       await crawl(options);
       expect(crawlSpy).toHaveBeenCalledTimes(2);
-      // fdir should not have been called a second time.
-      // We can't spy on it directly, but we can check the cache was hit.
+      // fdir should not have been called a second time. We can't spy on it
+      // directly, but we can check the cache was hit.
       const canonicalDir = path
         .resolve(options.crawlDirectory)
         .split(path.sep)
@@ -442,24 +400,13 @@ describe('crawler', () => {
         'a.txt': '',
         'b.txt': '',
       });
-      const getIgnore = () =>
-        loadIgnoreRules({
-          projectRoot: tmpDir,
-          useGitignore: true,
-          useQwenignore: false,
-          ignoreDirs: [],
-        });
-      const getOptions = (ignore: Ignore) => ({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: true,
-        cacheTtl: 10000,
-      });
+      const crawlCached = () =>
+        crawl(
+          opts(tmpDir, rules(tmpDir, true), { cache: true, cacheTtl: 10000 }),
+        );
 
       // Initial crawl to populate the cache
-      const ignore1 = getIgnore();
-      const results1 = await crawl(getOptions(ignore1));
+      const results1 = await crawlCached();
       expect(results1).toEqual(
         expect.arrayContaining(['.', '.gitignore', 'b.txt']),
       );
@@ -468,8 +415,7 @@ describe('crawler', () => {
       await fs.writeFile(path.join(tmpDir, '.gitignore'), 'b.txt');
 
       // Second crawl should miss the cache and trigger a recrawl
-      const ignore2 = getIgnore();
-      const results2 = await crawl(getOptions(ignore2));
+      const results2 = await crawlCached();
       expect(results2).toEqual(
         expect.arrayContaining(['.', '.gitignore', 'a.txt']),
       );
@@ -477,19 +423,10 @@ describe('crawler', () => {
 
     it('should miss the cache after TTL expires', async () => {
       tmpDir = await createTmpDir({ 'file1.js': '' });
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-      const options = {
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
+      const options = opts(tmpDir, rules(tmpDir), {
         cache: true,
         cacheTtl: 10, // 10 seconds
-      };
+      });
 
       const readSpy = vi.spyOn(cache, 'read');
       const writeSpy = vi.spyOn(cache, 'write');
@@ -508,20 +445,9 @@ describe('crawler', () => {
 
     it('should miss the cache when maxDepth changes', async () => {
       tmpDir = await createTmpDir({ 'file1.js': '' });
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-      const getOptions = (maxDepth?: number) => ({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: true,
-        cacheTtl: 10000,
-        maxDepth,
-      });
+      const ignore = rules(tmpDir);
+      const getOptions = (maxDepth?: number) =>
+        opts(tmpDir, ignore, { cache: true, cacheTtl: 10000, maxDepth });
 
       const readSpy = vi.spyOn(cache, 'read');
       const writeSpy = vi.spyOn(cache, 'write');
@@ -547,19 +473,10 @@ describe('crawler', () => {
       await initGitRepo(tmpDir);
 
       cache.clear();
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-      const options = {
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
+      const options = opts(tmpDir, rules(tmpDir), {
         cache: true,
         cacheTtl: 3600,
-      };
+      });
 
       const writeSpy = vi.spyOn(cache, 'write');
 
@@ -576,19 +493,10 @@ describe('crawler', () => {
       tmpDir = await createTmpDir({ 'only.js': '' });
 
       cache.clear();
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-      const options = {
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
+      const options = opts(tmpDir, rules(tmpDir), {
         cache: true,
         cacheTtl: 3600,
-      };
+      });
 
       const writeSpy = vi.spyOn(cache, 'write');
 
@@ -617,22 +525,8 @@ describe('crawler', () => {
       });
     });
 
-    const getCrawlResults = (maxDepth?: number) => {
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-      return crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-        maxDepth,
-      });
-    };
+    const getCrawlResults = (maxDepth?: number) =>
+      crawlTmp(rules(tmpDir), { maxDepth });
 
     it('should only crawl top-level files when maxDepth is 0', async () => {
       const results = await getCrawlResults(0);
@@ -689,19 +583,8 @@ describe('crawler', () => {
       await initGitRepo(tmpDir);
       tmpDir = await fs.realpath(tmpDir);
 
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
+      const results = await crawlTmp(rules(tmpDir), {
         crawlDirectory: path.join(tmpDir, 'level1'),
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
         maxDepth: 0,
       });
 
@@ -727,29 +610,9 @@ describe('crawler', () => {
         sub: ['d.txt', 'e.txt'],
       });
 
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const allResults = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      });
-
-      const limitedResults = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-        maxFiles: 3,
-      });
+      const ignore = rules(tmpDir);
+      const allResults = await crawlTmp(ignore);
+      const limitedResults = await crawlTmp(ignore, { maxFiles: 3 });
 
       expect(allResults.length).toBeGreaterThan(3);
       expect(limitedResults.length).toBe(3);
@@ -765,25 +628,11 @@ describe('crawler', () => {
         'noise3.log': '',
       });
 
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: true,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
       // Valid entries: '.', '.gitignore', 'a.txt', 'b.txt' = 4
       // Ignored entries: 'noise1.log', 'noise2.log', 'noise3.log'
       // With maxFiles=4, all valid entries should fit because
       // .log files are filtered out before the cap is applied.
-      const results = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-        maxFiles: 4,
-      });
+      const results = await crawlTmp(rules(tmpDir, true), { maxFiles: 4 });
 
       expect(results).toEqual(
         expect.arrayContaining(['.', '.gitignore', 'a.txt', 'b.txt']),
@@ -799,21 +648,7 @@ describe('crawler', () => {
         'b.txt': '',
       });
 
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-        maxFiles: 1000,
-      });
+      const results = await crawlTmp(rules(tmpDir), { maxFiles: 1000 });
 
       expect(results.length).toBeLessThanOrEqual(1000);
       expect(results).toEqual(expect.arrayContaining(['.', 'a.txt', 'b.txt']));
@@ -828,20 +663,7 @@ describe('crawler', () => {
       });
       await initGitRepo(tmpDir);
 
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      });
+      const results = await crawlTmp(rules(tmpDir));
 
       expect(results).toEqual(
         expect.arrayContaining(['.', 'src/', 'file1.js', 'src/file2.js']),
@@ -856,20 +678,7 @@ describe('crawler', () => {
       });
       await initGitRepo(tmpDir);
 
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      });
+      const results = await crawlTmp(rules(tmpDir));
 
       expect(results).toEqual(
         expect.arrayContaining(['café.txt', '文档.md', 'plain/nested.txt']),
@@ -900,35 +709,9 @@ describe('crawler', () => {
         ],
         parentRepo,
       );
-      await runExecFile(
-        'git',
-        [
-          '-c',
-          'user.name=Qwen Test',
-          '-c',
-          'user.email=qwen-test@example.com',
-          'commit',
-          '--no-gpg-sign',
-          '-m',
-          'add submodule',
-        ],
-        parentRepo,
-      );
+      await gitCommit(parentRepo, 'add submodule');
 
-      const ignore = loadIgnoreRules({
-        projectRoot: parentRepo,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
-        crawlDirectory: parentRepo,
-        cwd: parentRepo,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      });
+      const results = await crawl(opts(parentRepo, rules(parentRepo)));
 
       expect(results).toContain('vendor/lib/inner.txt');
     }, 15_000);
@@ -937,43 +720,12 @@ describe('crawler', () => {
       tmpDir = await createTmpDir({});
       await fs.mkdir(path.join(tmpDir, 'vendor', 'lib'), { recursive: true });
       await fs.writeFile(path.join(tmpDir, 'vendor', 'lib', 'alive.txt'), '');
+      fakeGitRepo(tmpDir, [
+        'H vendor/lib/alive.txt',
+        'H vendor/lib/deleted.txt',
+      ]);
 
-      __setCommandRunnerForTests(async (command, args) => {
-        if (command !== 'git') {
-          return { success: false, lines: [] };
-        }
-        if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
-          return { success: true, lines: [tmpDir] };
-        }
-        if (args.includes('ls-files') && args.includes('--others')) {
-          return { success: true, lines: [] };
-        }
-        if (args.includes('ls-files') && args.includes('--deleted')) {
-          return { success: true, lines: [] };
-        }
-        if (args.includes('ls-files') && args.includes('--cached')) {
-          return {
-            success: true,
-            lines: ['H vendor/lib/alive.txt', 'H vendor/lib/deleted.txt'],
-          };
-        }
-        return { success: false, lines: [] };
-      });
-
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      });
+      const results = await crawlTmp(rules(tmpDir));
 
       expect(results).toContain('vendor/lib/alive.txt');
       expect(results).not.toContain('vendor/lib/deleted.txt');
@@ -982,40 +734,9 @@ describe('crawler', () => {
     it('should skip cached gitlink directories from uninitialized submodules', async () => {
       tmpDir = await createTmpDir({});
       await fs.mkdir(path.join(tmpDir, 'vendor', 'lib'), { recursive: true });
+      fakeGitRepo(tmpDir, ['H vendor/lib']);
 
-      __setCommandRunnerForTests(async (command, args) => {
-        if (command !== 'git') {
-          return { success: false, lines: [] };
-        }
-        if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
-          return { success: true, lines: [tmpDir] };
-        }
-        if (args.includes('ls-files') && args.includes('--others')) {
-          return { success: true, lines: [] };
-        }
-        if (args.includes('ls-files') && args.includes('--deleted')) {
-          return { success: true, lines: [] };
-        }
-        if (args.includes('ls-files') && args.includes('--cached')) {
-          return { success: true, lines: ['H vendor/lib'] };
-        }
-        return { success: false, lines: [] };
-      });
-
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      });
+      const results = await crawlTmp(rules(tmpDir));
 
       expect(results).not.toContain('vendor/lib');
       expect(results).not.toContain('vendor/lib/');
@@ -1028,19 +749,8 @@ describe('crawler', () => {
       await initGitRepo(tmpDir);
       tmpDir = await fs.realpath(tmpDir);
 
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
+      const results = await crawlTmp(rules(tmpDir), {
         crawlDirectory: path.join(tmpDir, 'src'),
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
       });
 
       expect(results).toContain('src/file2.js');
@@ -1055,20 +765,7 @@ describe('crawler', () => {
       await initGitRepo(tmpDir);
       await fs.unlink(path.join(tmpDir, 'deleted.txt'));
 
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      });
+      const results = await crawlTmp(rules(tmpDir));
 
       expect(results).toContain('alive.txt');
       expect(results).not.toContain('deleted.txt');
@@ -1076,40 +773,9 @@ describe('crawler', () => {
 
     it('should ignore sparse-checkout skip-worktree tracked entries', async () => {
       tmpDir = await createTmpDir({ 'keep.txt': '', 'skip.txt': '' });
+      fakeGitRepo(tmpDir, ['S skip.txt', 'H keep.txt']);
 
-      __setCommandRunnerForTests(async (command, args) => {
-        if (command !== 'git') {
-          return { success: false, lines: [] };
-        }
-        if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
-          return { success: true, lines: [tmpDir] };
-        }
-        if (args.includes('ls-files') && args.includes('--others')) {
-          return { success: true, lines: [] };
-        }
-        if (args.includes('ls-files') && args.includes('--deleted')) {
-          return { success: true, lines: [] };
-        }
-        if (args.includes('ls-files') && args.includes('--cached')) {
-          return { success: true, lines: ['S skip.txt', 'H keep.txt'] };
-        }
-        return { success: false, lines: [] };
-      });
-
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      });
+      const results = await crawlTmp(rules(tmpDir));
 
       expect(results).toContain('keep.txt');
       expect(results).not.toContain('skip.txt');
@@ -1120,43 +786,9 @@ describe('crawler', () => {
         ' leading.txt': '',
         'trailing.txt ': '',
       });
+      fakeGitRepo(tmpDir, ['H  leading.txt', 'H trailing.txt ']);
 
-      __setCommandRunnerForTests(async (command, args) => {
-        if (command !== 'git') {
-          return { success: false, lines: [] };
-        }
-        if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
-          return { success: true, lines: [tmpDir] };
-        }
-        if (args.includes('ls-files') && args.includes('--others')) {
-          return { success: true, lines: [] };
-        }
-        if (args.includes('ls-files') && args.includes('--deleted')) {
-          return { success: true, lines: [] };
-        }
-        if (args.includes('ls-files') && args.includes('--cached')) {
-          return {
-            success: true,
-            lines: ['H  leading.txt', 'H trailing.txt '],
-          };
-        }
-        return { success: false, lines: [] };
-      });
-
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      });
+      const results = await crawlTmp(rules(tmpDir));
 
       expect(results).toContain(' leading.txt');
       expect(results).toContain('trailing.txt ');
@@ -1164,43 +796,18 @@ describe('crawler', () => {
 
     it('should fall back to fdir when not in a git repo and ripgrep unavailable', async () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-      __setCommandRunnerForTests(async (command) => {
-        if (command === 'git' || command === 'rg') {
-          return { success: false, lines: [] };
-        }
-        return { success: false, lines: [] };
-      });
-
+      failAllCommands();
       tmpDir = await createTmpDir({
         'index.js': '',
         lib: ['util.js'],
       });
 
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      });
+      const results = await crawlTmp(rules(tmpDir));
 
       expect(results).toEqual(
         expect.arrayContaining(['.', 'lib/', 'index.js', 'lib/util.js']),
       );
-      const degradationWarns = warnSpy.mock.calls.filter(
-        (c) =>
-          typeof c[0] === 'string' &&
-          (c[0] as string).startsWith('[crawler] falling back to'),
-      );
-      expect(degradationWarns.map((c) => c[0])).toEqual([
+      expect(degradations(warnSpy)).toEqual([
         '[crawler] falling back to fdir (ripgrep unavailable)',
       ]);
       warnSpy.mockRestore();
@@ -1215,21 +822,7 @@ describe('crawler', () => {
       });
       await initGitRepo(tmpDir);
 
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-        maxDepth: 0,
-      });
+      const results = await crawlTmp(rules(tmpDir), { maxDepth: 0 });
 
       expect(results).toEqual(
         expect.arrayContaining(['.', 'root/', 'nested/']),
@@ -1247,36 +840,14 @@ describe('crawler', () => {
       });
       await initGitRepo(tmpDir);
 
-      const withoutGitignore = loadIgnoreRules({
-        projectRoot: tmpDir,
+      const withoutGitignoreResults = await crawlTmp(rules(tmpDir), {
         useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-      const withoutGitignoreResults = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore: withoutGitignore,
-        useGitignore: false,
-        cache: false,
-        cacheTtl: 0,
       });
       expect(withoutGitignoreResults).toContain('keep.log');
       expect(withoutGitignoreResults).toContain('keep.txt');
 
-      const withGitignore = loadIgnoreRules({
-        projectRoot: tmpDir,
+      const withGitignoreResults = await crawlTmp(rules(tmpDir, true), {
         useGitignore: true,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-      const withGitignoreResults = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore: withGitignore,
-        useGitignore: true,
-        cache: false,
-        cacheTtl: 0,
       });
       expect(withGitignoreResults).not.toContain('keep.log');
       expect(withGitignoreResults).toContain('keep.txt');
@@ -1288,20 +859,8 @@ describe('crawler', () => {
       });
       await initGitRepo(tmpDir);
 
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
+      const results = await crawlTmp(rules(tmpDir), {
         useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        useGitignore: false,
-        cache: false,
-        cacheTtl: 0,
         maxFiles: 1,
       });
 
@@ -1309,45 +868,16 @@ describe('crawler', () => {
     });
 
     it('should include gitignored files in non-git rg fallback when useGitignore is false', async () => {
-      const rgArgsSeen: string[][] = [];
-
-      __setCommandRunnerForTests(async (command, args) => {
-        if (command === 'git') {
-          return { success: false, lines: [] };
-        }
-
-        if (command === 'rg') {
-          rgArgsSeen.push(args);
-          if (args.includes('--no-ignore')) {
-            return { success: true, lines: ['keep.log', 'keep.txt'] };
-          }
-          return { success: true, lines: ['keep.txt'] };
-        }
-
-        return { success: false, lines: [] };
-      });
-
+      const rgArgsSeen = fakeRipgrepOnly((args) =>
+        args.includes('--no-ignore') ? ['keep.log', 'keep.txt'] : ['keep.txt'],
+      );
       tmpDir = await createTmpDir({
         '.gitignore': '*.log',
         'keep.log': '',
         'keep.txt': '',
       });
 
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        useGitignore: false,
-        cache: false,
-        cacheTtl: 0,
-      });
+      const results = await crawlTmp(rules(tmpDir), { useGitignore: false });
 
       expect(results).toContain('keep.log');
       expect(results).toContain('keep.txt');
@@ -1356,42 +886,14 @@ describe('crawler', () => {
     });
 
     it('should omit --no-ignore on ripgrep when useGitignore is true (default)', async () => {
-      const rgArgsSeen: string[][] = [];
-
-      __setCommandRunnerForTests(async (command, args) => {
-        if (command === 'git') {
-          return { success: false, lines: [] };
-        }
-
-        if (command === 'rg') {
-          rgArgsSeen.push(args);
-          return { success: true, lines: ['keep.txt'] };
-        }
-
-        return { success: false, lines: [] };
-      });
-
+      const rgArgsSeen = fakeRipgrepOnly(() => ['keep.txt']);
       tmpDir = await createTmpDir({
         '.gitignore': '*.log',
         'keep.log': '',
         'keep.txt': '',
       });
 
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: true,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-        useGitignore: true,
-      });
+      await crawlTmp(rules(tmpDir, true), { useGitignore: true });
 
       expect(rgArgsSeen).toHaveLength(1);
       expect(rgArgsSeen[0]).not.toContain('--no-ignore');
@@ -1399,42 +901,9 @@ describe('crawler', () => {
 
     it('should not run git ls-files --cached on second crawl when throttled and working tree unchanged', async () => {
       tmpDir = await createTmpDir({ 'tracked.js': '' });
-
       const gitCalls: string[][] = [];
-
-      __setCommandRunnerForTests(async (command, args) => {
-        gitCalls.push(args);
-        if (command !== 'git') {
-          return { success: false, lines: [] };
-        }
-        if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
-          return { success: true, lines: [tmpDir] };
-        }
-        if (args.includes('ls-files') && args.includes('--others')) {
-          return { success: true, lines: [] };
-        }
-        if (args.includes('ls-files') && args.includes('--deleted')) {
-          return { success: true, lines: [] };
-        }
-        if (args.includes('ls-files') && args.includes('--cached')) {
-          return { success: true, lines: ['tracked.js'] };
-        }
-        return { success: false, lines: [] };
-      });
-
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-      const options = {
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      };
+      fakeGitRepo(tmpDir, ['tracked.js'], { calls: gitCalls });
+      const options = opts(tmpDir, rules(tmpDir));
 
       await crawl(options);
       const callsAfterFirst = gitCalls.length;
@@ -1457,51 +926,12 @@ describe('crawler', () => {
     it('should fall back to ripgrep when git ls-files --cached fails inside a git repo', async () => {
       tmpDir = await createTmpDir({ 'via-rg.js': '' });
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fakeGitRepo(tmpDir, null, { rg: ['via-rg.js'] });
 
-      __setCommandRunnerForTests(async (command, args) => {
-        if (command === 'git') {
-          if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
-            return { success: true, lines: [tmpDir] };
-          }
-          if (args.includes('ls-files') && args.includes('--others')) {
-            return { success: true, lines: [] };
-          }
-          if (args.includes('ls-files') && args.includes('--deleted')) {
-            return { success: true, lines: [] };
-          }
-          if (args.includes('ls-files') && args.includes('--cached')) {
-            return { success: false, lines: [] };
-          }
-        }
-        if (command === 'rg') {
-          return { success: true, lines: ['via-rg.js'] };
-        }
-        return { success: false, lines: [] };
-      });
-
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      });
+      const results = await crawlTmp(rules(tmpDir));
 
       expect(results).toContain('via-rg.js');
-      const degradationCalls = warnSpy.mock.calls
-        .map((c) => c[0])
-        .filter(
-          (m): m is string =>
-            typeof m === 'string' && m.startsWith('[crawler] falling back to'),
-        );
-      expect(degradationCalls).toContain(
+      expect(degradations(warnSpy)).toContain(
         '[crawler] falling back to ripgrep (git ls-files unavailable)',
       );
       warnSpy.mockRestore();
@@ -1510,51 +940,12 @@ describe('crawler', () => {
     it('should warn on git→rg→fdir degradation when git listing then rg fail', async () => {
       tmpDir = await createTmpDir({ 'only-fdir.js': '' });
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fakeGitRepo(tmpDir, null);
 
-      __setCommandRunnerForTests(async (command, args) => {
-        if (command === 'git') {
-          if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
-            return { success: true, lines: [tmpDir] };
-          }
-          if (args.includes('ls-files') && args.includes('--others')) {
-            return { success: true, lines: [] };
-          }
-          if (args.includes('ls-files') && args.includes('--deleted')) {
-            return { success: true, lines: [] };
-          }
-          if (args.includes('ls-files') && args.includes('--cached')) {
-            return { success: false, lines: [] };
-          }
-        }
-        if (command === 'rg') {
-          return { success: false, lines: [] };
-        }
-        return { success: false, lines: [] };
-      });
-
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-
-      const results = await crawl({
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      });
+      const results = await crawlTmp(rules(tmpDir));
 
       expect(results).toContain('only-fdir.js');
-      const degradationCalls = warnSpy.mock.calls
-        .map((c) => c[0])
-        .filter(
-          (m): m is string =>
-            typeof m === 'string' && m.startsWith('[crawler] falling back to'),
-        );
-      expect(degradationCalls).toEqual([
+      expect(degradations(warnSpy)).toEqual([
         '[crawler] falling back to ripgrep (git ls-files unavailable)',
         '[crawler] falling back to fdir (ripgrep unavailable)',
       ]);
@@ -1569,19 +960,7 @@ describe('crawler', () => {
 
     it('should not re-crawl within throttle window', async () => {
       tmpDir = await createTmpDir({ 'file1.js': '' });
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-      const options = {
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      };
+      const options = opts(tmpDir, rules(tmpDir));
 
       const results1 = await crawl(options);
       expect(results1).toContain('file1.js');
@@ -1595,20 +974,7 @@ describe('crawler', () => {
         'tracked.js': '',
       });
       await initGitRepo(tmpDir);
-
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-      const options = {
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      };
+      const options = opts(tmpDir, rules(tmpDir));
 
       const first = await crawl(options);
       expect(first).toContain('tracked.js');
@@ -1622,27 +988,9 @@ describe('crawler', () => {
     });
 
     it('should throttle re-crawl on non-git fallback paths until the window expires', async () => {
-      __setCommandRunnerForTests(async (command) => {
-        if (command === 'git' || command === 'rg') {
-          return { success: false, lines: [] };
-        }
-        return { success: false, lines: [] };
-      });
-
+      failAllCommands();
       tmpDir = await createTmpDir({ 'file1.js': '' });
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-      const options = {
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      };
+      const options = opts(tmpDir, rules(tmpDir));
 
       vi.useFakeTimers();
       try {
@@ -1666,32 +1014,13 @@ describe('crawler', () => {
     });
 
     it('should preserve maxFiles cap on throttled non-git fallback reads', async () => {
-      __setCommandRunnerForTests(async (command) => {
-        if (command === 'git' || command === 'rg') {
-          return { success: false, lines: [] };
-        }
-        return { success: false, lines: [] };
-      });
-
+      failAllCommands();
       tmpDir = await createTmpDir({
         'file1.js': '',
         'file2.js': '',
         'file3.js': '',
       });
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-      const options = {
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-        maxFiles: 1,
-      };
+      const options = opts(tmpDir, rules(tmpDir), { maxFiles: 1 });
 
       const first = await crawl(options);
       expect(first).toHaveLength(2);
@@ -1713,19 +1042,7 @@ describe('crawler', () => {
     it('should re-crawl when git index mtime changes', async () => {
       tmpDir = await createTmpDir({ 'file1.js': '' });
       await initGitRepo(tmpDir);
-      const ignore = loadIgnoreRules({
-        projectRoot: tmpDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-      const options = {
-        crawlDirectory: tmpDir,
-        cwd: tmpDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      };
+      const options = opts(tmpDir, rules(tmpDir));
 
       const results1 = await crawl(options);
       expect(results1.length).toBeGreaterThan(0);
@@ -1787,19 +1104,7 @@ describe('crawler', () => {
         },
       );
 
-      const ignore = loadIgnoreRules({
-        projectRoot: worktreeDir,
-        useGitignore: false,
-        useQwenignore: false,
-        ignoreDirs: [],
-      });
-      const options = {
-        crawlDirectory: worktreeDir,
-        cwd: worktreeDir,
-        ignore,
-        cache: false,
-        cacheTtl: 0,
-      };
+      const options = opts(worktreeDir, rules(worktreeDir));
 
       const first = await crawl(options);
       expect(first).toEqual(expect.arrayContaining(['.', 'tracked.txt']));

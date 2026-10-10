@@ -5,10 +5,18 @@ import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { dp } from './dialogStyles';
 import styles from './ModelDialog.module.css';
 
-export type ModelDialogMode = 'main' | 'fast' | 'voice' | 'vision';
+export type ModelDialogMode =
+  | 'main'
+  | 'fast'
+  | 'voice'
+  | 'vision'
+  | 'advisor'
+  | 'image';
 
 interface ModelDialogProps {
   mode?: ModelDialogMode;
+  loading?: boolean;
+  error?: Error;
   onSelect: (modelId: string) => void;
   models?: ModelDialogModel[];
   currentModelId?: string;
@@ -75,14 +83,6 @@ function getModelKey(model: ModelDialogModel): string {
   ].join('\0');
 }
 
-function getModelSelectId(
-  model: ModelDialogModel,
-  isFastMode: boolean,
-): string {
-  if (!isFastMode) return model.id;
-  return model.baseModelId ?? model.id.replace(/\([^()]+\)$/, '');
-}
-
 function DetailRow({ label, value }: { label: string; value: string }) {
   return (
     <div className={styles.detailRow}>
@@ -94,6 +94,8 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 
 export function ModelDialog({
   mode = 'main',
+  loading = false,
+  error,
   onSelect,
   models,
   currentModelId,
@@ -112,9 +114,13 @@ export function ModelDialog({
   const isVoiceMode = mode === 'voice';
   const isVisionMode = mode === 'vision';
   const currentIdx = availableModels.findIndex((m) => m.id === currentModel);
-  const [activeIndex, setActiveIndex] = useState(
-    currentIdx >= 0 ? currentIdx : 0,
-  );
+  const initialIndex =
+    currentIdx >= 0
+      ? currentIdx
+      : (isFastMode || mode === 'advisor' || mode === 'image') && currentModel
+        ? -1
+        : 0;
+  const [activeIndex, setActiveIndex] = useState(initialIndex);
   // Follow the current model until the user first navigates: models arrive
   // asynchronously, and the current model itself can change while the dialog
   // is open (e.g. another client sharing the session switches models) — the
@@ -123,8 +129,8 @@ export function ModelDialog({
   const userNavigatedRef = useRef(false);
   useEffect(() => {
     if (userNavigatedRef.current || availableModels.length === 0) return;
-    setActiveIndex(currentIdx >= 0 ? currentIdx : 0);
-  }, [availableModels.length, currentIdx]);
+    setActiveIndex(initialIndex);
+  }, [availableModels.length, initialIndex]);
 
   const moveHighlight = (index: number) => {
     userNavigatedRef.current = true;
@@ -139,11 +145,11 @@ export function ModelDialog({
     }
   }, [availableModels.length, activeIndex]);
 
-  const selectedModel = availableModels[activeIndex] ?? availableModels[0];
+  const selectedModel = availableModels[activeIndex];
 
   const confirm = (index: number) => {
     const model = availableModels[index];
-    if (model) onSelect(getModelSelectId(model, isFastMode));
+    if (model && !loading && !error) onSelect(model.id);
   };
 
   const { keyboardMode } = useListboxKeyboard({
@@ -168,7 +174,9 @@ export function ModelDialog({
         role="listbox"
         tabIndex={0}
         aria-activedescendant={
-          availableModels.length > 0 ? `model-opt-${activeIndex}` : undefined
+          activeIndex >= 0 && availableModels.length > 0
+            ? `model-opt-${activeIndex}`
+            : undefined
         }
         aria-label={
           isFastMode
@@ -177,12 +185,19 @@ export function ModelDialog({
               ? t('model.setVoice')
               : isVisionMode
                 ? t('model.setVision')
-                : t('model.select')
+                : mode === 'advisor'
+                  ? t('model.setAdvisor')
+                  : mode === 'image'
+                    ? t('model.setImage')
+                    : t('model.select')
         }
         data-web-shell-model-dialog
       >
         {availableModels.length === 0 ? (
-          <div className={styles.empty}>{t('model.none')}</div>
+          <div className={styles.empty} role={error ? 'alert' : 'status'}>
+            {error?.message ??
+              t(loading ? 'settings.models.loading' : 'model.none')}
+          </div>
         ) : null}
         {availableModels.map((model, index) => {
           const selected = index === activeIndex;

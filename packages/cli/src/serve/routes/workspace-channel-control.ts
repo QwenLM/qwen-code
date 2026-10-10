@@ -219,6 +219,10 @@ function sendChannelControlError(
     res.status(403).json({ error: message, code });
     return true;
   }
+  if (code === 'channel_control_workspace_limit_reached') {
+    res.status(409).json({ error: message, code });
+    return true;
+  }
   if (code === 'channel_service_conflict') {
     const conflict = error as { owner?: unknown; pid?: unknown };
     res.status(409).json({

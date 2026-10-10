@@ -64,7 +64,7 @@ Add the channel to `~/.qwen/settings.json`:
       "type": "feishu",
       "clientId": "<your-app-id>",
       "clientSecret": "<your-app-secret>",
-      "senderPolicy": "open",
+      "privatePolicy": "open",
       "sessionScope": "user",
       "cwd": "/path/to/your/project",
       "groupPolicy": "open",
@@ -156,6 +156,11 @@ You can send photos and documents to the bot:
 
 - **Images:** Analyzed using multimodal vision capabilities
 - **Files:** Downloaded and saved locally for the agent to read
+
+On systems with POSIX permissions, downloaded files and their temporary folders
+are accessible only to the account running Qwen Code. If a downloaded file
+cannot be saved locally, the message still reaches the agent with an indication
+that the media is unavailable. Any quoted message is preserved.
 
 ### Concurrent Messages
 

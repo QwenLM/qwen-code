@@ -14,4 +14,4 @@ export type {
   TranscriptProjectionDiagnostic,
   TranscriptProjectionInputErrorCode,
 } from './ui/chat-record-transcript.js';
-export type { DaemonTranscriptBlock } from './ui/types.js';
+export type { DaemonResourceLink, DaemonTranscriptBlock } from './ui/types.js';

@@ -9,11 +9,12 @@ import {
   checkCommandPermissions,
   escapeShellArg,
   getShellConfiguration,
-  ShellExecutionService,
   isSignalTermination,
   flatMapTextParts,
   checkArgumentSafety,
 } from '@qwen-code/qwen-code-core';
+
+import { executeRuntimeShell } from '@qwen-code/qwen-code-core/sandbox/runtime-shell.js';
 
 import type { CommandContext } from '../../ui/commands/types.js';
 import type { IPromptProcessor, PromptPipelineContent } from './types.js';
@@ -190,7 +191,8 @@ export class ShellProcessor implements IPromptProcessor {
           defaultFg: activeTheme.colors.Foreground,
           defaultBg: activeTheme.colors.Background,
         };
-        const { result } = await ShellExecutionService.execute(
+        const { result } = await executeRuntimeShell(
+          config,
           injection.resolvedCommand,
           config.getTargetDir(),
           () => {},

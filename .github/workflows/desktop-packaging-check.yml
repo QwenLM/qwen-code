@@ -1,0 +1,53 @@
+name: 'Desktop Packaging Check'
+
+run-name: "Desktop packaging check (${{ inputs.qwen_code_ref || 'main' }})"
+
+# The desktop app bundles a Qwen Code runtime built from this repository's
+# `dist/`, so a change anywhere in the CLI can break desktop packaging. Until
+# this workflow existed, nothing exercised that path outside a manual release
+# dispatch: desktop release 0.2.3-preview.0 was the first run to see that a new
+# CLI dependency had shipped a native library the AppImage bundler chokes on,
+# two weeks after it landed. This runs the same jobs as a dry run so the
+# breakage surfaces on the day it lands instead of on release day.
+#
+# A dry run leaves the signing steps out (they are gated on `dry_run == false`),
+# so this does not cover macOS notarization or Windows Authenticode.
+on:
+  schedule:
+    - cron: '0 16 * * *'
+  workflow_dispatch:
+    inputs:
+      qwen_code_ref:
+        description: 'Qwen Code branch, tag, or commit to bundle.'
+        required: true
+        default: 'main'
+        type: 'string'
+
+# A caller must grant every permission the called workflow's jobs declare, or
+# the run fails to start — the check happens when the file is loaded, before
+# any `if` is evaluated, so the publish job being unreachable in a dry run
+# does not exempt its `contents: write`. Nothing here writes: `dry_run` is
+# hardcoded true below, which skips both the publish and the mirror job.
+permissions:
+  actions: 'read'
+  contents: 'write'
+
+concurrency:
+  group: 'desktop-packaging-check'
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: 'Package'
+    if: "github.repository == 'QwenLM/qwen-code'"
+    # No `secrets: inherit`: every step that needs a signing secret is gated on
+    # `dry_run == false`, so this run never has to hold one.
+    uses: './.github/workflows/desktop-release.yml'
+    with:
+      version: '0.0.0-packaging-check'
+      qwen_code_ref: "${{ inputs.qwen_code_ref || 'main' }}"
+      electron_bridge: false
+      dry_run: true
+      draft: true
+      prerelease: true
+      clobber: false

@@ -391,6 +391,9 @@ describe('getSandboxPassthroughEnvArgs', () => {
   it('passes update relaunch state into container sandboxes', () => {
     expect(
       getSandboxPassthroughEnvArgs({
+        QWEN_CODE_MODELS_DEV: 'off',
+        QWEN_CODE_MODELS_DEV_REFRESH: 'off',
+        QWEN_CODE_MODELS_DEV_URL: 'https://mirror.example/api.json',
         QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
         QWEN_CODE_CUSTOM_SANDBOX_IMAGE: 'example.com/qwen:1.0.0',
         QWEN_CODE_HOST_UPDATE_RELAUNCH: 'false',
@@ -398,6 +401,12 @@ describe('getSandboxPassthroughEnvArgs', () => {
         QWEN_CODE_DESKTOP: '1',
       }),
     ).toEqual([
+      '--env',
+      'QWEN_CODE_MODELS_DEV=off',
+      '--env',
+      'QWEN_CODE_MODELS_DEV_REFRESH=off',
+      '--env',
+      'QWEN_CODE_MODELS_DEV_URL=https://mirror.example/api.json',
       '--env',
       'QWEN_CODE_SKIP_UPDATE_CHECK_ONCE=true',
       '--env',

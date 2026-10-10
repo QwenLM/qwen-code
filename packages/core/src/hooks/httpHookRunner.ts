@@ -10,6 +10,9 @@ import { UrlValidator } from './urlValidator.js';
 import { combineAbortSignals } from '../utils/abortController.js';
 import { isBlockedAddress, isMetadataAddress } from './ssrfGuard.js';
 import { lookup as dnsLookup } from 'dns';
+import { HookAbortError, HookTimeoutError } from './hook-errors.js';
+import { DEFAULT_HTTP_HOOK_TIMEOUT_SECONDS } from './hook-timeout.js';
+import { isBlockingHookOutput } from './types.js';
 import type {
   HttpHookConfig,
   HookInput,
@@ -21,19 +24,9 @@ import type {
 const debugLogger = createDebugLogger('HTTP_HOOK_RUNNER');
 
 /**
- * Default timeout for HTTP hook execution
- */
-const DEFAULT_HTTP_TIMEOUT = 10 * 60 * 1000;
-
-/**
  * Maximum output length (10,000 characters as per Qwen Code spec)
  */
 const MAX_OUTPUT_LENGTH = 10000;
-
-/**
- * Callback for displaying status messages during hook execution
- */
-export type StatusMessageCallback = (message: string) => void;
 
 /**
  * Resolve a hostname and validate that all resolved IPs are not in blocked
@@ -106,7 +99,6 @@ export class HttpHookRunner {
   private urlValidator: UrlValidator;
   private readonly allowPrivateNetworkHosts: boolean;
   private readonly executedOnceHooks: Set<string> = new Set();
-  private statusMessageCallback?: StatusMessageCallback;
 
   constructor(
     allowedUrls?: string[],
@@ -114,13 +106,6 @@ export class HttpHookRunner {
   ) {
     this.allowPrivateNetworkHosts = allowPrivateNetworkHosts;
     this.urlValidator = new UrlValidator(allowedUrls, allowPrivateNetworkHosts);
-  }
-
-  /**
-   * Set callback for displaying status messages
-   */
-  setStatusMessageCallback(callback: StatusMessageCallback): void {
-    this.statusMessageCallback = callback;
   }
 
   /**
@@ -135,6 +120,37 @@ export class HttpHookRunner {
     eventName: HookEventName,
     input: HookInput,
     signal?: AbortSignal,
+    trackRequest = false,
+    requestSignal?: AbortSignal,
+  ): Promise<HookExecutionResult> {
+    let requestState: NonNullable<HookExecutionResult['httpRequestState']> =
+      'not_started';
+    const result = await this.executeRequest(
+      hookConfig,
+      eventName,
+      input,
+      signal,
+      trackRequest
+        ? (state) => {
+            requestState = state;
+          }
+        : undefined,
+      requestSignal,
+    );
+    return trackRequest
+      ? { ...result, httpRequestState: requestState }
+      : result;
+  }
+
+  private async executeRequest(
+    hookConfig: HttpHookConfig,
+    eventName: HookEventName,
+    input: HookInput,
+    signal?: AbortSignal,
+    onRequestState?: (
+      state: NonNullable<HookExecutionResult['httpRequestState']>,
+    ) => void,
+    requestSignal?: AbortSignal,
   ): Promise<HookExecutionResult> {
     const startTime = Date.now();
     const hookId = hookConfig.name || hookConfig.url;
@@ -145,6 +161,7 @@ export class HttpHookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'cancelled',
         error: new Error(`HTTP hook execution cancelled (aborted): ${hookId}`),
         duration: 0,
       };
@@ -161,16 +178,12 @@ export class HttpHookRunner {
           hookConfig,
           eventName,
           success: true,
+          outcome: 'success',
           duration: 0,
           output: { continue: true },
         };
       }
       this.executedOnceHooks.add(onceKey);
-    }
-
-    // Display status message if configured
-    if (hookConfig.statusMessage && this.statusMessageCallback) {
-      this.statusMessageCallback(hookConfig.statusMessage);
     }
 
     try {
@@ -187,6 +200,7 @@ export class HttpHookRunner {
           hookConfig,
           eventName,
           success: false,
+          outcome: 'non_blocking_error',
           error: new Error(`URL validation failed: ${validation.reason}`),
           duration: Date.now() - startTime,
         };
@@ -204,6 +218,7 @@ export class HttpHookRunner {
           hookConfig,
           eventName,
           success: false,
+          outcome: 'non_blocking_error',
           error: new Error(hostValidation.error),
           duration: Date.now() - startTime,
         };
@@ -223,18 +238,21 @@ export class HttpHookRunner {
         hook_event_name: eventName,
       });
 
-      // Set up combined abort signal (external signal + timeout)
+      // Managed requests keep their response channel until timeout or shutdown.
       const timeout = hookConfig.timeout
         ? hookConfig.timeout * 1000
-        : DEFAULT_HTTP_TIMEOUT;
+        : DEFAULT_HTTP_HOOK_TIMEOUT_SECONDS * 1000;
       const { signal: combinedSignal, cleanup } = combineAbortSignals(
-        [signal],
+        [requestSignal ?? signal],
         { timeoutMs: timeout },
       );
 
       try {
         debugLogger.debug(`Executing HTTP hook: ${hookId} -> ${url}`);
 
+        signal?.throwIfAborted();
+        combinedSignal.throwIfAborted();
+        onRequestState?.('outcome_unknown');
         const response = await fetch(url, {
           method: 'POST',
           headers: {
@@ -249,58 +267,72 @@ export class HttpHookRunner {
           // non-2xx branch below (non-blocking error).
           redirect: 'manual',
         });
-
-        cleanup();
-
-        const duration = Date.now() - startTime;
-
         // Per Qwen Code spec: Non-2xx status is a non-blocking error
         // Execution continues, but we log a warning
         if (!response.ok) {
+          onRequestState?.('response_received');
           debugLogger.warn(
             `HTTP hook ${hookId} returned non-2xx status ${response.status} (non-blocking)`,
           );
-          // Return success: true with continue: true for non-blocking error
+          // `success` stays true so the aggregate treats this as non-blocking;
+          // `outcome` and `error` report what actually happened.
           return {
             hookConfig,
             eventName,
             success: true,
+            outcome: 'non_blocking_error',
+            error: new Error(`HTTP hook returned ${response.status}`),
             output: { continue: true },
-            duration,
+            duration: Date.now() - startTime,
           };
         }
 
         // Parse response
-        const output = await this.parseResponse(response, eventName);
+        const output = await this.parseResponse(
+          response,
+          eventName,
+          onRequestState && (() => onRequestState('response_received')),
+        );
+        const duration = Date.now() - startTime;
 
         debugLogger.debug(
           `HTTP hook ${hookId} completed successfully in ${duration}ms`,
         );
 
+        // `success` stays true even for a deny: callers only read the output
+        // of a successful hook, so false here would let the call through.
         return {
           hookConfig,
           eventName,
           success: true,
+          outcome: isBlockingHookOutput(eventName, output)
+            ? 'blocking'
+            : 'success',
           output,
           duration,
         };
       } catch (fetchError) {
-        cleanup();
-
         const duration = Date.now() - startTime;
 
         if (
           fetchError instanceof Error &&
           (fetchError.name === 'AbortError' || combinedSignal.aborted)
         ) {
-          // Timeout or abort is a non-blocking error per Qwen Code spec
+          // Timeout or abort is a non-blocking error per Qwen Code spec.
+          const cancelled =
+            (requestSignal ?? signal)?.aborted === true ||
+            (signal?.aborted === true && !combinedSignal.aborted);
           debugLogger.warn(
-            `HTTP hook ${hookId} timed out or was aborted after ${timeout}ms (non-blocking)`,
+            `HTTP hook ${hookId} ${cancelled ? 'was aborted' : `timed out after ${timeout}ms`} (non-blocking)`,
           );
           return {
             hookConfig,
             eventName,
             success: true,
+            outcome: cancelled ? 'cancelled' : 'timeout',
+            error: cancelled
+              ? new HookAbortError('HTTP hook execution aborted')
+              : new HookTimeoutError(`HTTP hook timed out after ${timeout}ms`),
             output: { continue: true },
             duration,
           };
@@ -314,9 +346,16 @@ export class HttpHookRunner {
           hookConfig,
           eventName,
           success: true,
+          outcome: 'non_blocking_error',
+          error:
+            fetchError instanceof Error
+              ? fetchError
+              : new Error(String(fetchError)),
           output: { continue: true },
           duration,
         };
+      } finally {
+        cleanup();
       }
     } catch (error) {
       const duration = Date.now() - startTime;
@@ -329,6 +368,7 @@ export class HttpHookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         error: error instanceof Error ? error : new Error(errorMessage),
         duration,
       };
@@ -341,13 +381,19 @@ export class HttpHookRunner {
   private async parseResponse(
     response: Response,
     eventName: HookEventName,
+    onBodyReceived?: () => void,
   ): Promise<HookOutput> {
     const contentType = response.headers.get('content-type') || '';
+    // Managed receipts require the body, not just headers. Keep transport
+    // failures outside the native malformed-JSON fallback.
+    const body = onBodyReceived ? await response.text() : undefined;
+    onBodyReceived?.();
 
     // Try to parse as JSON
     if (contentType.includes('application/json')) {
       try {
-        const json = await response.json();
+        const json =
+          body === undefined ? await response.json() : JSON.parse(body);
         return this.normalizeOutput(json, eventName);
       } catch {
         debugLogger.warn('Failed to parse JSON response, using empty output');
@@ -356,7 +402,7 @@ export class HttpHookRunner {
     }
 
     // For plain text responses, add as context (truncated if needed)
-    const text = await response.text();
+    const text = body ?? (await response.text());
     if (text.trim()) {
       return {
         continue: true,

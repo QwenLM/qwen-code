@@ -1,0 +1,38 @@
+{
+  "name": "@qwen-code/channel-email",
+  "private": true,
+  "version": "0.25.0",
+  "description": "IMAP and SMTP Email channel for Qwen Code",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run",
+    "test:ci": "vitest run"
+  },
+  "dependencies": {
+    "@qwen-code/channel-base": "0.25.0",
+    "imapflow": "^1.7.8",
+    "mailparser": "^3.9.28",
+    "nodemailer": "^10.0.10",
+    "proper-lockfile": "^4.1.2",
+    "html-to-text": "^10.0.1"
+  },
+  "devDependencies": {
+    "@types/mailparser": "^3.4.6",
+    "@types/nodemailer": "^8.0.2",
+    "@types/proper-lockfile": "^4.1.4",
+    "typescript": "^5.0.0",
+    "@types/html-to-text": "^9.0.4"
+  }
+}

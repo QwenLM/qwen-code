@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseUnifiedDiff } from './unifiedDiff';
+import { buildUnifiedDiff, parseUnifiedDiff } from './unifiedDiff';
 
 describe('parseUnifiedDiff', () => {
   it('tracks hunks without confusing file-like content for headers', () => {
@@ -47,6 +47,48 @@ describe('parseUnifiedDiff', () => {
       { type: 'header', oldLine: undefined, newLine: undefined },
       { type: 'add', oldLine: undefined, newLine: 20 },
     ]);
+  });
+
+  it('does not add phantom lines for empty content', () => {
+    expect(buildUnifiedDiff('', 'new')).toBe('+new');
+    expect(buildUnifiedDiff('old', '')).toBe('-old');
+  });
+
+  it('falls back to a coarse remove/add strip when the LCS table would allocate too much memory', () => {
+    // 600 lines per side ⇒ n*m = 360_000, which exceeds MAX_DIFF_PRODUCT, so
+    // the LCS is skipped and the output is a plain concatenation of `-old…`
+    // then `+new…`. Total line and char budgets are the caller's concern
+    // (approval cards gate on those).
+    //
+    // The two sides must share lines. A fully disjoint pair has an empty LCS,
+    // so the backtrack emits every removal followed by every addition — the
+    // exact string the coarse branch concatenates — and the test would still
+    // pass with MAX_DIFF_PRODUCT disabled. Every tenth line differing gives
+    // the LCS path 540 context rows to emit, which the coarse path cannot.
+    const oldText = Array.from({ length: 600 }, (_, i) => `L${i}`).join('\n');
+    const newText = Array.from({ length: 600 }, (_, i) =>
+      i % 10 === 0 ? `X${i}` : `L${i}`,
+    ).join('\n');
+    const rows = buildUnifiedDiff(oldText, newText).split('\n');
+    expect(rows).toHaveLength(1_200);
+    expect(rows.filter((row) => row.startsWith(' '))).toHaveLength(0);
+    expect(rows.filter((row) => row.startsWith('-'))).toHaveLength(600);
+    expect(rows.filter((row) => row.startsWith('+'))).toHaveLength(600);
+    expect(rows[0]).toBe('-L0');
+    expect(rows[600]).toBe('+X0');
+    expect(rows[1_199]).toBe('+L599');
+  });
+
+  it('does not count a trailing newline as an extra line', () => {
+    // Real file bodies end with '\n', and `permissionUtils` sends new files as
+    // `oldText: ''`. Splitting without dropping the trailing empty segment
+    // counted it as a second addition: a one-line new file rendered `+2/-0`
+    // with a phantom blank row instead of `+1/-0`.
+    expect(buildUnifiedDiff('', 'created line\n')).toBe('+created line');
+    expect(buildUnifiedDiff('removed line\n', '')).toBe('-removed line');
+    expect(buildUnifiedDiff('a\n', 'a\nb\n')).toBe(' a\n+b');
+    // A blank line that is real content still counts.
+    expect(buildUnifiedDiff('a\n\n', 'a\n')).toBe(' a\n-');
   });
 
   it('keeps supporting headerless generated diffs', () => {

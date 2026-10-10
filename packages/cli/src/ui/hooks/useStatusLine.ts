@@ -8,6 +8,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { exec, type ChildProcess } from 'child_process';
 import wrapAnsi from 'wrap-ansi';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { getReasoningForDisplay } from '../../acp-integration/model-configuration.js';
 import { SettingScope } from '../../config/settings.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
@@ -258,7 +259,9 @@ export function useStatusLine(
       ? statusLineConfigOverride
       : settingsStatusLineConfig;
   const statusLineCommand =
-    statusLineConfig?.type === 'command' ? statusLineConfig.command : undefined;
+    !config.getShellExecutionSandbox?.() && statusLineConfig?.type === 'command'
+      ? statusLineConfig.command
+      : undefined;
   const statusLinePreset =
     statusLineConfig?.type === 'preset' ? statusLineConfig : undefined;
   const statusLineSettingsVersion = uiState.statusLineSettingsVersion ?? 0;
@@ -314,7 +317,9 @@ export function useStatusLine(
   // Reasoning effort lives on the content-generator config, not uiState, so it
   // isn't a natural render trigger. Track it as a string key so the status line
   // recomputes immediately when `/effort` changes it mid-session.
-  const reasoningConfig = config.getContentGeneratorConfig()?.reasoning;
+  const generationConfig = config.getContentGeneratorConfig();
+  const reasoningConfig =
+    generationConfig && getReasoningForDisplay(config, generationConfig);
   const reasoningEffortKey =
     reasoningConfig === false ? 'off' : (reasoningConfig?.effort ?? '');
   const prevStateRef = useRef<{
@@ -377,7 +382,11 @@ export function useStatusLine(
       currentDir: string,
       branch: string | undefined,
     ) => {
-      if (!preset.items.includes('pull-request-number') || !branch) {
+      if (
+        configRef.current.getShellExecutionSandbox?.() ||
+        !preset.items.includes('pull-request-number') ||
+        !branch
+      ) {
         clearPullRequestLookup();
         return;
       }
@@ -461,7 +470,9 @@ export function useStatusLine(
         sessionId: stats.sessionId,
         version: cfg.getCliVersion(),
         modelDisplayName,
-        reasoning: contentGeneratorConfig?.reasoning,
+        reasoning:
+          contentGeneratorConfig &&
+          getReasoningForDisplay(cfg, contentGeneratorConfig),
         currentDir,
         branch: ui.branchName,
         pullRequestNumber: pullRequestNumberRef.current,

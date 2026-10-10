@@ -48,7 +48,7 @@
 //! The LRU is **per runtime and pid**, not global. Two snapshots in different
 //! lanes never collide even when their numeric counters match.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -71,7 +71,7 @@ pub const STALE_TOKEN_ERROR: &str =
     "element_token is stale; call get_window_state again to refresh";
 
 /// One valid snapshot retained in the per-pid LRU.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct SnapshotEntry {
     /// Monotonic, process-global id assigned by [`mint_snapshot_id`].
     snapshot_id: u32,
@@ -79,10 +79,9 @@ struct SnapshotEntry {
     /// this so tools can verify the caller's `window_id` arg matches —
     /// a token-only call doesn't have to pass window_id at all.
     window_id: u32,
-    /// Maximum element_index that was assigned in this snapshot. The
-    /// resolver rejects out-of-range tokens up-front instead of waiting
-    /// for the per-platform cache to NPE.
-    max_element_index: usize,
+    element_count: usize,
+    /// Linux window captures retain application-wide indices, including gaps.
+    element_indices: Option<HashSet<usize>>,
 }
 
 /// Process-global token registry. Thread-safe; tools resolve from any
@@ -115,6 +114,26 @@ impl TokenRegistry {
     /// in its lane, the oldest is evicted and any token that referenced
     /// it becomes stale — that's the contract.
     pub fn register_snapshot(&self, pid: i32, window_id: u32, element_count: usize) -> u32 {
+        self.register(pid, window_id, element_count, None)
+    }
+
+    pub fn register_snapshot_indices(
+        &self,
+        pid: i32,
+        window_id: u32,
+        indices: impl IntoIterator<Item = usize>,
+    ) -> u32 {
+        let indices: HashSet<usize> = indices.into_iter().collect();
+        self.register(pid, window_id, indices.len(), Some(indices))
+    }
+
+    fn register(
+        &self,
+        pid: i32,
+        window_id: u32,
+        element_count: usize,
+        element_indices: Option<HashSet<usize>>,
+    ) -> u32 {
         // Keep the full 32-bit counter. Truncating to 16 bits repeats an id
         // every 65,536 process-global snapshots. A long-lived daemon can then
         // mint an id that still exists in another runtime/pid lane, allowing a
@@ -131,7 +150,8 @@ impl TokenRegistry {
         lane.push(SnapshotEntry {
             snapshot_id: id,
             window_id,
-            max_element_index: element_count.saturating_sub(1),
+            element_count,
+            element_indices,
         });
         // Evict oldest. The loop guards against pre-existing over-cap
         // state from a previous version of the binary; in steady state
@@ -179,10 +199,14 @@ impl TokenRegistry {
                 STALE_TOKEN_ERROR.to_owned()
             }
         })?;
-        if idx > entry.max_element_index {
+        if !entry
+            .element_indices
+            .as_ref()
+            .map_or(idx < entry.element_count, |indices| indices.contains(&idx))
+        {
             return Err(format!(
                 "element_token element_index {idx} out of range (snapshot had {} elements)",
-                entry.max_element_index + 1
+                entry.element_count
             ));
         }
         Ok((entry.window_id, idx))
@@ -484,6 +508,41 @@ pub fn resolve_element_args(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sparse_indices_are_membership_checked_and_window_scoped() {
+        let registry = super::TokenRegistry::new();
+        let first = registry.register_snapshot_indices(42, 7, [130, 132, 637]);
+        for idx in [130, 132, 637] {
+            assert_eq!(
+                registry.resolve(42, &super::format_token(first, idx)),
+                Ok((7, idx))
+            );
+        }
+        for gap in [0, 1, 131, 638] {
+            assert!(registry
+                .resolve(42, &super::format_token(first, gap))
+                .is_err());
+        }
+        let sibling = registry.register_snapshot_indices(42, 8, [1, 2, 3]);
+        assert_eq!(
+            registry.resolve(42, &super::format_token(first, 637)),
+            Ok((7, 637))
+        );
+        registry.register_snapshot_indices(42, 7, [130]);
+        assert_eq!(
+            registry.resolve(42, &super::format_token(first, 637)),
+            Err(super::STALE_TOKEN_ERROR.to_owned())
+        );
+        assert_eq!(
+            registry.resolve(42, &super::format_token(sibling, 3)),
+            Ok((8, 3))
+        );
+        let empty = registry.register_snapshot(42, 9, 0);
+        assert!(registry
+            .resolve(42, &super::format_token(empty, 0))
+            .is_err());
+    }
+
     use super::*;
 
     fn fresh_registry() -> TokenRegistry {

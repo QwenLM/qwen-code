@@ -59,6 +59,10 @@ const lockObservation = vi.hoisted(() => ({
   simulateCompromise: false,
 }));
 
+// Pristine copies; afterEach restores both objects from these.
+const FS_FAILURE_DEFAULTS = { ...fsFailure };
+const LOCK_OBSERVATION_DEFAULTS = { ...lockObservation };
+
 vi.mock('proper-lockfile', async (importOriginal) => {
   const actual = await importOriginal<typeof import('proper-lockfile')>();
   return {
@@ -151,7 +155,6 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     },
   };
 });
-
 describe('channel memory', () => {
   const originalQwenHome = process.env['QWEN_HOME'];
   let qwenHome: string;
@@ -167,17 +170,8 @@ describe('channel memory', () => {
   });
 
   afterEach(() => {
-    fsFailure.tempSync = false;
-    fsFailure.tempBytesAtSync = 0;
-    fsFailure.rename = false;
-    fsFailure.legacyUnlinkPath = undefined;
-    fsFailure.readErrorPath = undefined;
-    fsFailure.readRace = undefined;
-    fsFailure.legacyAppendAfterRename = undefined;
-    lockObservation.path = undefined;
-    lockObservation.attempted = undefined;
-    lockObservation.options = undefined;
-    lockObservation.simulateCompromise = false;
+    Object.assign(fsFailure, FS_FAILURE_DEFAULTS);
+    Object.assign(lockObservation, LOCK_OBSERVATION_DEFAULTS);
     vi.restoreAllMocks();
     if (originalQwenHome === undefined) {
       delete process.env['QWEN_HOME'];
@@ -187,19 +181,45 @@ describe('channel memory', () => {
     fs.rmSync(qwenHome, { recursive: true, force: true });
   });
 
-  function writeLegacy(text: string): string {
+  const jsonPath = () => getChannelMemoryFilePath(target);
+  const revision = () => getChannelMemoryRevision(target);
+  const list = () => listChannelMemoryEntries(target);
+  const read = () => readChannelMemory(target);
+  const add = (texts: readonly string[], createdBy?: string) =>
+    addChannelMemoryEntries(target, texts, createdBy);
+  const addEntries = async (...texts: string[]) => (await add(texts)).added;
+  const update = (mutation: Parameters<typeof updateChannelMemoryEntry>[1]) =>
+    updateChannelMemoryEntry(target, mutation);
+  const remove = (mutation: Parameters<typeof removeChannelMemoryEntries>[1]) =>
+    removeChannelMemoryEntries(target, mutation);
+  const unchanged = () => ({ changed: false, filePath: jsonPath() });
+  const ENTRY_CHANGED = 'Channel memory entry changed';
+  // Compare-and-swap requests guarded by the entry's expected current text.
+  const casUpdate = (id: string, expectedText = 'Use staging') =>
+    update({ id, text: 'Use production', expectedText });
+  const casRemove = (id: string, expectedText = 'Use staging') =>
+    remove({ ids: [id], expectedTextById: { [id]: expectedText } });
+  const readDoc = () =>
+    parseChannelMemoryDocument(fs.readFileSync(jsonPath(), 'utf8'));
+  const expectListed = (...texts: string[]) =>
+    expect(list()).resolves.toMatchObject(texts.map((text) => ({ text })));
+
+  function writeLegacy(text: string | Uint8Array): string {
     const legacyPath = getLegacyChannelMemoryFilePath(target);
     fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
     fs.writeFileSync(legacyPath, text);
     return legacyPath;
   }
 
-  function writeJson(raw: string): string {
-    const filePath = getChannelMemoryFilePath(target);
+  function writeJson(raw: string | Uint8Array): string {
+    const filePath = jsonPath();
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, raw);
     return filePath;
   }
+
+  const writeEntries = (...entries: Array<{ id: string; text: string }>) =>
+    writeJson(serializeChannelMemoryDocument({ version: 1, entries }));
 
   function deferred(): { promise: Promise<void>; resolve: () => void } {
     let resolve = () => {};
@@ -224,7 +244,7 @@ describe('channel memory', () => {
   }
 
   it('uses JSON for canonical storage and Markdown for legacy storage', () => {
-    const filePath = getChannelMemoryFilePath(target);
+    const filePath = jsonPath();
     const legacyPath = getLegacyChannelMemoryFilePath(target);
 
     expect(filePath.startsWith(qwenHome + path.sep)).toBe(true);
@@ -289,8 +309,8 @@ describe('channel memory', () => {
   });
 
   it('returns a stable opaque revision when channel memory is missing', async () => {
-    const first = await getChannelMemoryRevision(target);
-    const second = await getChannelMemoryRevision(target);
+    const first = await revision();
+    const second = await revision();
 
     expect(second).toBe(first);
     expect(first).not.toContain(qwenHome);
@@ -299,55 +319,41 @@ describe('channel memory', () => {
   });
 
   it('changes revision when canonical channel memory changes', async () => {
-    const missing = await getChannelMemoryRevision(target);
-    writeJson(
-      serializeChannelMemoryDocument({
-        version: 1,
-        entries: [{ id: 'm-111111111111', text: 'Use staging' }],
-      }),
-    );
-    const created = await getChannelMemoryRevision(target);
-    writeJson(
-      serializeChannelMemoryDocument({
-        version: 1,
-        entries: [{ id: 'm-111111111111', text: 'Use production instead' }],
-      }),
-    );
-    const replaced = await getChannelMemoryRevision(target);
+    const missing = await revision();
+    writeEntries({ id: 'm-111111111111', text: 'Use staging' });
+    const created = await revision();
+    writeEntries({ id: 'm-111111111111', text: 'Use production instead' });
+    const replaced = await revision();
 
     expect(created).not.toBe(missing);
     expect(replaced).not.toBe(created);
   });
 
   it('changes revision after an external atomic replacement', async () => {
-    const raw = serializeChannelMemoryDocument({
-      version: 1,
-      entries: [{ id: 'm-111111111111', text: 'Use staging' }],
+    const filePath = writeEntries({
+      id: 'm-111111111111',
+      text: 'Use staging',
     });
-    const filePath = writeJson(raw);
-    const before = await getChannelMemoryRevision(target);
+    const before = await revision();
     const replacementPath = path.join(path.dirname(filePath), '.external.tmp');
-    fs.writeFileSync(replacementPath, raw);
+    fs.writeFileSync(replacementPath, fs.readFileSync(filePath));
     fs.renameSync(replacementPath, filePath);
 
-    expect(await getChannelMemoryRevision(target)).not.toBe(before);
+    expect(await revision()).not.toBe(before);
   });
 
   it('changes revision after each successful structured mutation', async () => {
-    const revisions = [await getChannelMemoryRevision(target)];
-    const added = await addChannelMemoryEntries(target, ['Use staging']);
-    revisions.push(await getChannelMemoryRevision(target));
-    await updateChannelMemoryEntry(target, {
-      id: added.added[0]!.id,
-      text: 'Use production',
-    });
-    revisions.push(await getChannelMemoryRevision(target));
-    await removeChannelMemoryEntries(target, { ids: [added.added[0]!.id] });
-    revisions.push(await getChannelMemoryRevision(target));
-    await addChannelMemoryEntries(target, ['Run tests']);
-    revisions.push(await getChannelMemoryRevision(target));
+    const revisions = [await revision()];
+    const [entry] = await addEntries('Use staging');
+    revisions.push(await revision());
+    await update({ id: entry.id, text: 'Use production' });
+    revisions.push(await revision());
+    await remove({ ids: [entry.id] });
+    revisions.push(await revision());
+    await add(['Run tests']);
+    revisions.push(await revision());
     await clearChannelMemory(target);
-    revisions.push(await getChannelMemoryRevision(target));
+    revisions.push(await revision());
 
     for (let index = 1; index < revisions.length; index += 1) {
       expect(revisions[index]).not.toBe(revisions[index - 1]);
@@ -355,13 +361,13 @@ describe('channel memory', () => {
   });
 
   it('changes revision when legacy channel memory changes', async () => {
-    const missing = await getChannelMemoryRevision(target);
+    const missing = await revision();
     const legacyPath = writeLegacy('Use staging\n');
-    const created = await getChannelMemoryRevision(target);
+    const created = await revision();
     fs.writeFileSync(legacyPath, 'Use production instead\n');
-    const replaced = await getChannelMemoryRevision(target);
+    const replaced = await revision();
     fs.unlinkSync(legacyPath);
-    const removed = await getChannelMemoryRevision(target);
+    const removed = await revision();
 
     expect(created).not.toBe(missing);
     expect(replaced).not.toBe(created);
@@ -369,25 +375,18 @@ describe('channel memory', () => {
   });
 
   it('renders JSON entries through the compatibility read API', async () => {
-    writeJson(
-      serializeChannelMemoryDocument({
-        version: 1,
-        entries: [
-          { id: 'm-111111111111', text: 'Use staging' },
-          { id: 'm-222222222222', text: 'Run tests' },
-        ],
-      }),
+    writeEntries(
+      { id: 'm-111111111111', text: 'Use staging' },
+      { id: 'm-222222222222', text: 'Run tests' },
     );
 
-    await expect(readChannelMemory(target)).resolves.toBe(
-      'Use staging\nRun tests\n',
-    );
+    await expect(read()).resolves.toBe('Use staging\nRun tests\n');
   });
 
   it('lists deterministic legacy entries without creating JSON', async () => {
     writeLegacy('Use staging\nUse staging\n Run tests \n');
 
-    const entries = await listChannelMemoryEntries(target);
+    const entries = await list();
 
     expect(entries.map((entry) => entry.text)).toEqual([
       'Use staging',
@@ -397,26 +396,19 @@ describe('channel memory', () => {
       'm-5c1888e97dc2',
       'm-477e65662a6b',
     ]);
-    expect(fs.existsSync(getChannelMemoryFilePath(target))).toBe(false);
+    expect(fs.existsSync(jsonPath())).toBe(false);
   });
 
   it('migrates legacy content on add and cleans up the legacy file after commit', async () => {
     const legacyPath = writeLegacy('Use staging\n');
 
-    const result = await addChannelMemoryEntries(
-      target,
-      ['Run tests'],
-      'alice',
-    );
+    const result = await add(['Run tests'], 'alice');
 
     expect(result.added).toHaveLength(1);
     expect(result.added[0].createdBy).toBe('alice');
-    expect(fs.existsSync(getChannelMemoryFilePath(target))).toBe(true);
+    expect(fs.existsSync(jsonPath())).toBe(true);
     expect(fs.existsSync(legacyPath)).toBe(false);
-    await expect(listChannelMemoryEntries(target)).resolves.toMatchObject([
-      { text: 'Use staging' },
-      { text: 'Run tests' },
-    ]);
+    await expectListed('Use staging', 'Run tests');
   });
 
   it('waits for an old worker lock and migrates its final append', async () => {
@@ -429,7 +421,7 @@ describe('channel memory', () => {
     lockObservation.path = legacyPath;
     lockObservation.attempted = legacyLockAttempted.resolve;
 
-    const migration = addChannelMemoryEntries(target, ['Run tests']);
+    const migration = add(['Run tests']);
     try {
       const first = await Promise.race([
         legacyLockAttempted.promise.then(() => 'legacy-lock'),
@@ -442,7 +434,7 @@ describe('channel memory', () => {
       releaseOldWorker = async () => {};
 
       await expect(migration).resolves.toMatchObject({ changed: true });
-      await expect(readChannelMemory(target)).resolves.toBe(
+      await expect(read()).resolves.toBe(
         'Use staging\nOld worker append\nRun tests\n',
       );
       expect(fs.existsSync(legacyPath)).toBe(false);
@@ -452,19 +444,17 @@ describe('channel memory', () => {
   });
 
   it('completes mutations when the channel memory lock is compromised', async () => {
-    writeJson(serializeChannelMemoryDocument({ version: 1, entries: [] }));
+    writeEntries();
     lockObservation.path = path.join(
-      path.dirname(getChannelMemoryFilePath(target)),
+      path.dirname(jsonPath()),
       '.channel-memory.lock',
     );
     lockObservation.simulateCompromise = true;
 
-    await expect(
-      addChannelMemoryEntries(target, ['Run tests']),
-    ).resolves.toMatchObject({ changed: true });
+    await expect(add(['Run tests'])).resolves.toMatchObject({ changed: true });
 
     expect(lockObservation.options?.onCompromised).toBeTypeOf('function');
-    await expect(readChannelMemory(target)).resolves.toBe('Run tests\n');
+    await expect(read()).resolves.toBe('Run tests\n');
   });
 
   it('does not delete legacy bytes changed after canonical commit', async () => {
@@ -474,31 +464,20 @@ describe('channel memory', () => {
       text: 'Late append\n',
     };
 
-    await expect(
-      addChannelMemoryEntries(target, ['Run tests']),
-    ).resolves.toMatchObject({ changed: true });
+    await expect(add(['Run tests'])).resolves.toMatchObject({ changed: true });
 
     expect(fs.readFileSync(legacyPath, 'utf8')).toBe(
       'Use staging\nLate append\n',
     );
-    expect(fs.existsSync(getChannelMemoryFilePath(target))).toBe(true);
+    expect(fs.existsSync(jsonPath())).toBe(true);
   });
 
   it('skips normalized duplicate additions and returns their existing IDs', async () => {
-    const first = await addChannelMemoryEntries(
-      target,
-      ['Use staging'],
-      'alice',
-    );
-    const duplicate = await addChannelMemoryEntries(
-      target,
-      [' use   STAGING '],
-      'alice',
-    );
+    const first = await add(['Use staging'], 'alice');
+    const duplicate = await add([' use   STAGING '], 'alice');
 
     expect(duplicate).toEqual({
-      changed: false,
-      filePath: getChannelMemoryFilePath(target),
+      ...unchanged(),
       added: [],
       duplicateIds: [first.added[0].id],
     });
@@ -507,24 +486,19 @@ describe('channel memory', () => {
   it('rejects credential-bearing batches before creating canonical storage', async () => {
     const credentialText = `ghp_${'a'.repeat(36)}`;
 
-    await expectCredentialRejection(() =>
-      addChannelMemoryEntries(target, ['Use staging', credentialText]),
-    );
+    await expectCredentialRejection(() => add(['Use staging', credentialText]));
 
-    expect(fs.existsSync(getChannelMemoryFilePath(target))).toBe(false);
+    expect(fs.existsSync(jsonPath())).toBe(false);
   });
 
   it('rejects credential-bearing batches without changing canonical storage', async () => {
-    await addChannelMemoryEntries(target, ['Use staging']);
-    const filePath = getChannelMemoryFilePath(target);
-    const before = fs.readFileSync(filePath);
+    await add(['Use staging']);
+    const before = fs.readFileSync(jsonPath());
     const credentialText = `ghp_${'b'.repeat(36)}`;
 
-    await expectCredentialRejection(() =>
-      addChannelMemoryEntries(target, ['Run tests', credentialText]),
-    );
+    await expectCredentialRejection(() => add(['Run tests', credentialText]));
 
-    expect(fs.readFileSync(filePath)).toEqual(before);
+    expect(fs.readFileSync(jsonPath())).toEqual(before);
   });
 
   it('persists the scanned add snapshot when an input getter changes', async () => {
@@ -540,48 +514,35 @@ describe('channel memory', () => {
       },
     });
 
-    await addChannelMemoryEntries(target, texts);
+    await add(texts);
 
-    await expect(listChannelMemoryEntries(target)).resolves.toMatchObject([
-      { text: 'Use staging' },
-      { text: 'Run tests' },
-    ]);
+    await expectListed('Use staging', 'Run tests');
     expect(secondTextReads).toBe(1);
   });
 
   it('keeps append as a compatibility wrapper', async () => {
     await expect(appendChannelMemory(target, 'Use staging')).resolves.toEqual({
       changed: true,
-      filePath: getChannelMemoryFilePath(target),
+      filePath: jsonPath(),
     });
     await expect(appendChannelMemory(target, ' use STAGING ')).resolves.toEqual(
-      {
-        changed: false,
-        filePath: getChannelMemoryFilePath(target),
-      },
+      unchanged(),
     );
-    await expect(readChannelMemory(target)).resolves.toBe('Use staging\n');
+    await expect(read()).resolves.toBe('Use staging\n');
   });
 
   it('does not create memory for whitespace-only appends', async () => {
-    await expect(appendChannelMemory(target, ' \n\t ')).resolves.toEqual({
-      changed: false,
-      filePath: getChannelMemoryFilePath(target),
-    });
-    await expect(readChannelMemory(target)).resolves.toBe('');
+    await expect(appendChannelMemory(target, ' \n\t ')).resolves.toEqual(
+      unchanged(),
+    );
+    await expect(read()).resolves.toBe('');
   });
 
   it('updates only text and updatedAt while preserving identity metadata', async () => {
-    const [entry] = (
-      await addChannelMemoryEntries(target, ['Use staging'], 'alice')
-    ).added;
+    const [entry] = (await add(['Use staging'], 'alice')).added;
     await new Promise((resolve) => setTimeout(resolve, 1));
 
-    const result = await updateChannelMemoryEntry(target, {
-      id: entry.id,
-      text: 'Use production',
-      expectedText: 'Use staging',
-    });
+    const result = await casUpdate(entry.id);
 
     expect(result.changed).toBe(true);
     expect(result.entry).toMatchObject({
@@ -594,23 +555,20 @@ describe('channel memory', () => {
   });
 
   it('rejects credential-bearing replacements without changing the entry', async () => {
-    const [entry] = (await addChannelMemoryEntries(target, ['Use staging']))
-      .added;
-    const filePath = getChannelMemoryFilePath(target);
-    const before = fs.readFileSync(filePath);
+    const [entry] = await addEntries('Use staging');
+    const before = fs.readFileSync(jsonPath());
     const credentialText = `ghp_${'c'.repeat(36)}`;
 
     await expectCredentialRejection(() =>
-      updateChannelMemoryEntry(target, { id: entry.id, text: credentialText }),
+      update({ id: entry.id, text: credentialText }),
     );
 
-    expect(fs.readFileSync(filePath)).toEqual(before);
-    await expect(listChannelMemoryEntries(target)).resolves.toEqual([entry]);
+    expect(fs.readFileSync(jsonPath())).toEqual(before);
+    await expect(list()).resolves.toEqual([entry]);
   });
 
   it('persists one scanned update snapshot when mutation getters change', async () => {
-    const [entry] = (await addChannelMemoryEntries(target, ['Use staging']))
-      .added;
+    const [entry] = await addEntries('Use staging');
     const credentialText = `ghp_${'f'.repeat(36)}`;
     const reads = { id: 0, text: 0, expectedText: 0 };
     const mutation = {
@@ -628,9 +586,9 @@ describe('channel memory', () => {
       },
     };
 
-    await updateChannelMemoryEntry(target, mutation);
+    await update(mutation);
 
-    await expect(listChannelMemoryEntries(target)).resolves.toMatchObject([
+    await expect(list()).resolves.toMatchObject([
       { id: entry.id, text: 'Use production' },
     ]);
     expect(reads).toEqual({ id: 1, text: 1, expectedText: 1 });
@@ -639,33 +597,29 @@ describe('channel memory', () => {
   it('allows manually seeded credential entries to be removed and cleared', async () => {
     const credentialText = `ghp_${'d'.repeat(36)}`;
     const entry = { id: 'm-111111111111', text: credentialText };
-    writeJson(serializeChannelMemoryDocument({ version: 1, entries: [entry] }));
+    writeEntries(entry);
 
-    await expect(
-      removeChannelMemoryEntries(target, { ids: [entry.id] }),
-    ).resolves.toMatchObject({ changed: true, removed: [entry] });
-    await expect(listChannelMemoryEntries(target)).resolves.toEqual([]);
+    await expect(remove({ ids: [entry.id] })).resolves.toMatchObject({
+      changed: true,
+      removed: [entry],
+    });
+    await expect(list()).resolves.toEqual([]);
 
-    writeJson(serializeChannelMemoryDocument({ version: 1, entries: [entry] }));
+    writeEntries(entry);
     await expect(clearChannelMemory(target)).resolves.toMatchObject({
       changed: true,
     });
-    await expect(listChannelMemoryEntries(target)).resolves.toEqual([]);
+    await expect(list()).resolves.toEqual([]);
   });
 
   it('rejects updates that duplicate another entry after normalization', async () => {
-    const [first, second] = (
-      await addChannelMemoryEntries(target, ['Use staging', 'Run tests'])
-    ).added;
+    const [first, second] = await addEntries('Use staging', 'Run tests');
 
     await expect(
-      updateChannelMemoryEntry(target, {
-        id: second.id,
-        text: ' use   STAGING ',
-      }),
+      update({ id: second.id, text: ' use   STAGING ' }),
     ).rejects.toThrow('Channel memory entry already exists');
 
-    await expect(listChannelMemoryEntries(target)).resolves.toMatchObject([
+    await expect(list()).resolves.toMatchObject([
       { id: first.id, text: 'Use staging' },
       { id: second.id, text: 'Run tests' },
     ]);
@@ -673,170 +627,123 @@ describe('channel memory', () => {
 
   it('returns no change for missing update IDs', async () => {
     await expect(
-      updateChannelMemoryEntry(target, {
-        id: 'm-111111111111',
-        text: 'Use prod',
-      }),
-    ).resolves.toEqual({
-      changed: false,
-      filePath: getChannelMemoryFilePath(target),
-    });
+      update({ id: 'm-111111111111', text: 'Use prod' }),
+    ).resolves.toEqual(unchanged());
   });
 
   it('rejects update CAS when the entry was deleted', async () => {
-    const [entry] = (await addChannelMemoryEntries(target, ['Use staging']))
-      .added;
-    await removeChannelMemoryEntries(target, { ids: [entry.id] });
+    const [entry] = await addEntries('Use staging');
+    await remove({ ids: [entry.id] });
 
-    await expect(
-      updateChannelMemoryEntry(target, {
-        id: entry.id,
-        text: 'Use production',
-        expectedText: 'Use staging',
-      }),
-    ).rejects.toThrow('Channel memory entry changed');
+    await expect(casUpdate(entry.id)).rejects.toThrow(ENTRY_CHANGED);
   });
 
   it('rejects remove CAS when any expected entry was deleted', async () => {
-    const [first, second] = (
-      await addChannelMemoryEntries(target, ['Use staging', 'Run tests'])
-    ).added;
-    await removeChannelMemoryEntries(target, { ids: [first.id] });
+    const [first, second] = await addEntries('Use staging', 'Run tests');
+    await remove({ ids: [first.id] });
 
     await expect(
-      removeChannelMemoryEntries(target, {
+      remove({
         ids: [first.id, second.id],
         expectedTextById: {
           [first.id]: first.text,
           [second.id]: second.text,
         },
       }),
-    ).rejects.toThrow('Channel memory entry changed');
-    await expect(listChannelMemoryEntries(target)).resolves.toEqual([second]);
+    ).rejects.toThrow(ENTRY_CHANGED);
+    await expect(list()).resolves.toEqual([second]);
   });
 
   it('rejects stale update and remove compare-and-swap requests', async () => {
-    const [entry] = (await addChannelMemoryEntries(target, ['Use staging']))
-      .added;
+    const [entry] = await addEntries('Use staging');
 
-    await expect(
-      updateChannelMemoryEntry(target, {
-        id: entry.id,
-        text: 'Use production',
-        expectedText: 'stale text',
-      }),
-    ).rejects.toThrow('Channel memory entry changed');
-    await expect(
-      removeChannelMemoryEntries(target, {
-        ids: [entry.id],
-        expectedTextById: { [entry.id]: 'stale text' },
-      }),
-    ).rejects.toThrow('Channel memory entry changed');
+    await expect(casUpdate(entry.id, 'stale text')).rejects.toThrow(
+      ENTRY_CHANGED,
+    );
+    await expect(casRemove(entry.id, 'stale text')).rejects.toThrow(
+      ENTRY_CHANGED,
+    );
   });
 
   it('removes requested IDs once and ignores missing IDs', async () => {
-    const [entry] = (await addChannelMemoryEntries(target, ['Use staging']))
-      .added;
+    const [entry] = await addEntries('Use staging');
 
-    const result = await removeChannelMemoryEntries(target, {
+    const result = await remove({
       ids: [entry.id, entry.id, 'm-111111111111'],
     });
 
     expect(result.removed).toEqual([entry]);
     expect(result.changed).toBe(true);
-    await expect(
-      removeChannelMemoryEntries(target, { ids: ['m-111111111111'] }),
-    ).resolves.toEqual({
-      changed: false,
-      filePath: getChannelMemoryFilePath(target),
+    await expect(remove({ ids: ['m-111111111111'] })).resolves.toEqual({
+      ...unchanged(),
       removed: [],
     });
   });
 
   it('clears entries while preserving migration metadata', async () => {
     const legacyPath = writeLegacy('Use staging\n');
-    await addChannelMemoryEntries(target, ['Run tests']);
-    const before = parseChannelMemoryDocument(
-      fs.readFileSync(getChannelMemoryFilePath(target), 'utf8'),
-    );
+    await add(['Run tests']);
+    const before = readDoc();
 
     await expect(clearChannelMemory(target)).resolves.toEqual({
       changed: true,
-      filePath: getChannelMemoryFilePath(target),
+      filePath: jsonPath(),
     });
     expect(fs.existsSync(legacyPath)).toBe(false);
-    expect(
-      parseChannelMemoryDocument(
-        fs.readFileSync(getChannelMemoryFilePath(target), 'utf8'),
-      ),
-    ).toEqual({ version: 1, migration: before.migration, entries: [] });
+    expect(readDoc()).toEqual({
+      version: 1,
+      migration: before.migration,
+      entries: [],
+    });
   });
 
   it('reports no change when clearing sources with no entries', async () => {
-    await expect(clearChannelMemory(target)).resolves.toEqual({
-      changed: false,
-      filePath: getChannelMemoryFilePath(target),
-    });
+    await expect(clearChannelMemory(target)).resolves.toEqual(unchanged());
     writeLegacy('\n\n');
-    await expect(clearChannelMemory(target)).resolves.toEqual({
-      changed: false,
-      filePath: getChannelMemoryFilePath(target),
-    });
+    await expect(clearChannelMemory(target)).resolves.toEqual(unchanged());
   });
 
   it('rejects additions beyond request, entry, and text limits', async () => {
     await expect(
-      addChannelMemoryEntries(
-        target,
-        Array.from({ length: 11 }, () => 'entry'),
-      ),
+      add(Array.from({ length: 11 }, () => 'entry')),
     ).rejects.toThrow();
-    await expect(
-      addChannelMemoryEntries(target, ['a'.repeat(2_001)]),
-    ).rejects.toThrow('Invalid channel memory entry');
+    await expect(add(['a'.repeat(2_001)])).rejects.toThrow(
+      'Invalid channel memory entry',
+    );
 
     for (let index = 0; index < 50; index++) {
-      await addChannelMemoryEntries(
-        target,
+      await add(
         Array.from(
           { length: 10 },
           (_, offset) => `entry ${index * 10 + offset}`,
         ),
       );
     }
-    await expect(addChannelMemoryEntries(target, ['too many'])).rejects.toThrow(
+    await expect(add(['too many'])).rejects.toThrow(
       'Channel memory exceeds maximum number of entries',
     );
   });
 
   it('rejects oversized serialized JSON without creating canonical storage', async () => {
     await expect(
-      addChannelMemoryEntries(
-        target,
-        ['entry'],
-        'x'.repeat(MAX_CHANNEL_MEMORY_BYTES),
-      ),
+      add(['entry'], 'x'.repeat(MAX_CHANNEL_MEMORY_BYTES)),
     ).rejects.toThrow('Channel memory exceeds maximum size');
-    expect(fs.existsSync(getChannelMemoryFilePath(target))).toBe(false);
+    expect(fs.existsSync(jsonPath())).toBe(false);
   });
 
   it('fails closed for malformed JSON and unsupported JSON versions', async () => {
     writeLegacy('Use staging\n');
     writeJson('{');
-    await expect(listChannelMemoryEntries(target)).rejects.toThrow(
+    await expect(list()).rejects.toThrow('Invalid channel memory document');
+    await expect(add(['Run tests'])).rejects.toThrow(
       'Invalid channel memory document',
     );
-    await expect(
-      addChannelMemoryEntries(target, ['Run tests']),
-    ).rejects.toThrow('Invalid channel memory document');
     expect(
       fs.readFileSync(getLegacyChannelMemoryFilePath(target), 'utf8'),
     ).toBe('Use staging\n');
 
     writeJson('{"version":2,"entries":[]}');
-    await expect(listChannelMemoryEntries(target)).rejects.toThrow(
-      'Unsupported channel memory version',
-    );
+    await expect(list()).rejects.toThrow('Unsupported channel memory version');
   });
 
   it('rejects unknown JSON keys without modifying either source', async () => {
@@ -853,17 +760,14 @@ describe('channel memory', () => {
       }),
     );
     const canonicalBefore = fs.readFileSync(filePath);
+    const outcome = (promise: Promise<unknown>) =>
+      promise.then(
+        () => 'fulfilled',
+        () => 'rejected',
+      );
 
-    const readResult = await readChannelMemory(target).then(
-      () => 'fulfilled',
-      () => 'rejected',
-    );
-    const mutationResult = await addChannelMemoryEntries(target, [
-      'Run tests',
-    ]).then(
-      () => 'fulfilled',
-      () => 'rejected',
-    );
+    const readResult = await outcome(read());
+    const mutationResult = await outcome(add(['Run tests']));
 
     expect(readResult).toBe('rejected');
     expect(mutationResult).toBe('rejected');
@@ -877,9 +781,7 @@ describe('channel memory', () => {
     const migrationHash = createHash('sha256')
       .update(legacyBefore)
       .digest('hex');
-    const filePath = getChannelMemoryFilePath(target);
-    fs.writeFileSync(
-      filePath,
+    const filePath = writeJson(
       Buffer.concat([
         Buffer.from(
           `{"version":1,"migration":{"legacySha256":"${migrationHash}"},"entries":[{"id":"m-111111111111","text":"`,
@@ -890,28 +792,22 @@ describe('channel memory', () => {
     );
     const canonicalBefore = fs.readFileSync(filePath);
 
-    await expect(readChannelMemory(target)).rejects.toThrow();
-    await expect(
-      addChannelMemoryEntries(target, ['Run tests']),
-    ).rejects.toThrow();
+    await expect(read()).rejects.toThrow();
+    await expect(add(['Run tests'])).rejects.toThrow();
 
     expect(fs.readFileSync(filePath)).toEqual(canonicalBefore);
     expect(fs.readFileSync(legacyPath)).toEqual(legacyBefore);
   });
 
   it('rejects invalid UTF-8 legacy bytes without migrating or modifying them', async () => {
-    const legacyPath = getLegacyChannelMemoryFilePath(target);
-    fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
-    fs.writeFileSync(legacyPath, Buffer.from([0xff]));
+    const legacyPath = writeLegacy(Buffer.from([0xff]));
     const legacyBefore = fs.readFileSync(legacyPath);
 
-    await expect(readChannelMemory(target)).rejects.toThrow();
-    await expect(
-      addChannelMemoryEntries(target, ['Run tests']),
-    ).rejects.toThrow();
+    await expect(read()).rejects.toThrow();
+    await expect(add(['Run tests'])).rejects.toThrow();
 
     expect(fs.readFileSync(legacyPath)).toEqual(legacyBefore);
-    expect(fs.existsSync(getChannelMemoryFilePath(target))).toBe(false);
+    expect(fs.existsSync(jsonPath())).toBe(false);
   });
 
   it('rejects non-missing read errors without modifying either source', async () => {
@@ -924,14 +820,12 @@ describe('channel memory', () => {
     const legacyBefore = fs.readFileSync(legacyPath);
     fsFailure.readErrorPath = filePath;
 
-    await expect(listChannelMemoryEntries(target)).rejects.toMatchObject({
-      code: 'EIO',
-      message: 'read failed',
-    });
-    await expect(readChannelMemory(target)).rejects.toMatchObject({
-      code: 'EIO',
-      message: 'read failed',
-    });
+    for (const load of [list, read]) {
+      await expect(load()).rejects.toMatchObject({
+        code: 'EIO',
+        message: 'read failed',
+      });
+    }
     expect(fs.readFileSync(filePath)).toEqual(canonicalBefore);
     expect(fs.readFileSync(legacyPath)).toEqual(legacyBefore);
   });
@@ -941,21 +835,18 @@ describe('channel memory', () => {
     const legacy = fs.readFileSync(legacyPath);
     writeJson(serializeChannelMemoryDocument(parseLegacyChannelMemory(legacy)));
 
-    await expect(listChannelMemoryEntries(target)).resolves.toMatchObject([
-      { text: 'Use staging' },
-    ]);
+    await expectListed('Use staging');
     expect(fs.existsSync(legacyPath)).toBe(true);
-    await addChannelMemoryEntries(target, ['Run tests']);
+    await add(['Run tests']);
     expect(fs.existsSync(legacyPath)).toBe(false);
   });
 
   it('re-reads canonical JSON across the first-migration rename race', async () => {
     const legacyPath = writeLegacy('Use staging\n');
-    const filePath = getChannelMemoryFilePath(target);
     const jsonRead = deferred();
     const releaseLegacyRead = deferred();
     fsFailure.readRace = {
-      jsonPath: filePath,
+      jsonPath: jsonPath(),
       legacyPath,
       jsonRead: jsonRead.resolve,
       waitToReadLegacy: () => releaseLegacyRead.promise,
@@ -963,9 +854,9 @@ describe('channel memory', () => {
       legacyIntercepted: false,
     };
 
-    const entriesPromise = listChannelMemoryEntries(target);
+    const entriesPromise = list();
     await jsonRead.promise;
-    await addChannelMemoryEntries(target, ['Run tests']);
+    await add(['Run tests']);
     releaseLegacyRead.resolve();
 
     await expect(entriesPromise).resolves.toMatchObject([
@@ -986,14 +877,12 @@ describe('channel memory', () => {
         },
       }),
     );
-    await expect(listChannelMemoryEntries(target)).rejects.toThrow(
+    await expect(list()).rejects.toThrow('Channel memory migration conflict');
+
+    writeEntries();
+    await expect(add(['Run tests'])).rejects.toThrow(
       'Channel memory migration conflict',
     );
-
-    writeJson(serializeChannelMemoryDocument({ version: 1, entries: [] }));
-    await expect(
-      addChannelMemoryEntries(target, ['Run tests']),
-    ).rejects.toThrow('Channel memory migration conflict');
   });
 
   it('cleans a written temp file and recovers lock and queue after sync failure', async () => {
@@ -1001,66 +890,50 @@ describe('channel memory', () => {
     const directory = path.dirname(legacyPath);
     fsFailure.tempSync = true;
 
-    await expect(
-      addChannelMemoryEntries(target, ['Run tests']),
-    ).rejects.toThrow('temp sync failed');
+    await expect(add(['Run tests'])).rejects.toThrow('temp sync failed');
     expect(fsFailure.tempBytesAtSync).toBeGreaterThan(0);
     expect(
       fs.readdirSync(directory).filter((name) => name.endsWith('.tmp')),
     ).toEqual([]);
-    expect(fs.existsSync(getChannelMemoryFilePath(target))).toBe(false);
+    expect(fs.existsSync(jsonPath())).toBe(false);
     expect(fs.readFileSync(legacyPath, 'utf8')).toBe('Use staging\n');
 
     fsFailure.tempSync = false;
-    await expect(
-      addChannelMemoryEntries(target, ['after failure']),
-    ).resolves.toMatchObject({
+    await expect(add(['after failure'])).resolves.toMatchObject({
       changed: true,
     });
-    await expect(readChannelMemory(target)).resolves.toBe(
-      'Use staging\nafter failure\n',
-    );
+    await expect(read()).resolves.toBe('Use staging\nafter failure\n');
   });
 
   it('preserves the previous JSON when atomic rename fails', async () => {
-    await addChannelMemoryEntries(target, ['Use staging']);
-    const filePath = getChannelMemoryFilePath(target);
-    const previous = fs.readFileSync(filePath, 'utf8');
+    await add(['Use staging']);
+    const previous = fs.readFileSync(jsonPath(), 'utf8');
     fsFailure.rename = true;
 
-    await expect(
-      addChannelMemoryEntries(target, ['Run tests']),
-    ).rejects.toThrow('rename failed');
-    expect(fs.readFileSync(filePath, 'utf8')).toBe(previous);
+    await expect(add(['Run tests'])).rejects.toThrow('rename failed');
+    expect(fs.readFileSync(jsonPath(), 'utf8')).toBe(previous);
   });
 
   it('reports a committed migration when legacy cleanup fails and retries later', async () => {
     const legacyPath = writeLegacy('Use staging\n');
     fsFailure.legacyUnlinkPath = legacyPath;
 
-    await expect(
-      addChannelMemoryEntries(target, ['Run tests']),
-    ).resolves.toMatchObject({
+    await expect(add(['Run tests'])).resolves.toMatchObject({
       changed: true,
       added: [{ text: 'Run tests' }],
     });
     expect(fs.existsSync(legacyPath)).toBe(true);
-    await expect(readChannelMemory(target)).resolves.toBe(
-      'Use staging\nRun tests\n',
-    );
+    await expect(read()).resolves.toBe('Use staging\nRun tests\n');
 
     fsFailure.legacyUnlinkPath = undefined;
-    await addChannelMemoryEntries(target, ['Review diff']);
+    await add(['Review diff']);
     expect(fs.existsSync(legacyPath)).toBe(false);
   });
 
   it('serializes concurrent additions without losing entries', async () => {
-    const additions = await Promise.all(
-      Array.from({ length: 20 }, (_, index) =>
-        addChannelMemoryEntries(target, [`entry ${index}`]),
-      ),
-    );
-    const entries = await listChannelMemoryEntries(target);
+    const texts = Array.from({ length: 20 }, (_, index) => `entry ${index}`);
+    const additions = await Promise.all(texts.map((text) => add([text])));
+    const entries = await list();
 
     expect(entries).toHaveLength(20);
     expect(new Set(entries.map((entry) => entry.id)).size).toBe(20);
@@ -1068,29 +941,15 @@ describe('channel memory', () => {
       new Set(
         additions.flatMap((result) => result.added.map((entry) => entry.text)),
       ),
-    ).toEqual(
-      new Set(Array.from({ length: 20 }, (_, index) => `entry ${index}`)),
-    );
-    expect(() =>
-      parseChannelMemoryDocument(
-        fs.readFileSync(getChannelMemoryFilePath(target), 'utf8'),
-      ),
-    ).not.toThrow();
+    ).toEqual(new Set(texts));
+    expect(readDoc).not.toThrow();
   });
 
   it('allows only one stale compare-and-swap operation to win', async () => {
-    const [entry] = (await addChannelMemoryEntries(target, ['Use staging']))
-      .added;
+    const [entry] = await addEntries('Use staging');
     const results = await Promise.allSettled([
-      updateChannelMemoryEntry(target, {
-        id: entry.id,
-        text: 'Use production',
-        expectedText: 'Use staging',
-      }),
-      removeChannelMemoryEntries(target, {
-        ids: [entry.id],
-        expectedTextById: { [entry.id]: 'Use staging' },
-      }),
+      casUpdate(entry.id),
+      casRemove(entry.id),
     ]);
 
     expect(
@@ -1102,52 +961,32 @@ describe('channel memory', () => {
   });
 
   it('rejects an update CAS when a racing remove is queued first', async () => {
-    const [entry] = (await addChannelMemoryEntries(target, ['Use staging']))
-      .added;
+    const [entry] = await addEntries('Use staging');
     const results = await Promise.allSettled([
-      removeChannelMemoryEntries(target, {
-        ids: [entry.id],
-        expectedTextById: { [entry.id]: 'Use staging' },
-      }),
-      updateChannelMemoryEntry(target, {
-        id: entry.id,
-        text: 'Use production',
-        expectedText: 'Use staging',
-      }),
+      casRemove(entry.id),
+      casUpdate(entry.id),
     ]);
 
     expect(results[0].status).toBe('fulfilled');
     expect(results[1]).toMatchObject({
       status: 'rejected',
-      reason: new Error('Channel memory entry changed'),
+      reason: new Error(ENTRY_CHANGED),
     });
   });
 
   it('serializes clear racing additions and first migration racing another add', async () => {
     writeLegacy('Use staging\n');
-    await Promise.all([
-      addChannelMemoryEntries(target, ['Run tests']),
-      addChannelMemoryEntries(target, ['Review diff']),
-    ]);
-    await expect(readChannelMemory(target)).resolves.toBe(
-      'Use staging\nRun tests\nReview diff\n',
-    );
+    await Promise.all([add(['Run tests']), add(['Review diff'])]);
+    await expect(read()).resolves.toBe('Use staging\nRun tests\nReview diff\n');
+    const texts = Array.from({ length: 10 }, (_, index) => `entry ${index}`);
     await Promise.all([
       clearChannelMemory(target),
-      ...Array.from({ length: 10 }, (_, index) =>
-        addChannelMemoryEntries(target, [`entry ${index}`]),
-      ),
+      ...texts.map((text) => add([text])),
     ]);
 
-    const entries = await listChannelMemoryEntries(target);
-    expect(entries.map((entry) => entry.text)).toEqual(
-      Array.from({ length: 10 }, (_, index) => `entry ${index}`),
-    );
+    const entries = await list();
+    expect(entries.map((entry) => entry.text)).toEqual(texts);
     expect(new Set(entries.map((entry) => entry.id)).size).toBe(entries.length);
-    expect(() =>
-      parseChannelMemoryDocument(
-        fs.readFileSync(getChannelMemoryFilePath(target), 'utf8'),
-      ),
-    ).not.toThrow();
+    expect(readDoc).not.toThrow();
   });
 });

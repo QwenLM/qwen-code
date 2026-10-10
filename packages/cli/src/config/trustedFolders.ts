@@ -16,7 +16,6 @@ import {
   Storage,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
-import stripJsonComments from 'strip-json-comments';
 import { parseJsoncObject, updateJsoncContent } from '../utils/jsonc-editor.js';
 import {
   arePathsEquivalent,
@@ -125,10 +124,24 @@ export class LoadedTrustedFolders {
     );
   }
 
-  setValue(path: string, trustLevel: TrustLevel): void {
+  setValue(
+    path: string,
+    trustLevel: TrustLevel,
+    preserveExistingTrust = false,
+  ): void {
     const committedConfig = writeTrustedFolders(
       this.user.path,
-      (diskConfig) => ({ ...diskConfig, [path]: trustLevel }),
+      (diskConfig) => {
+        const existing = diskConfig[path];
+        if (
+          preserveExistingTrust &&
+          (existing === TrustLevel.TRUST_FOLDER ||
+            existing === TrustLevel.TRUST_PARENT)
+        ) {
+          return diskConfig;
+        }
+        return { ...diskConfig, [path]: trustLevel };
+      },
     );
     this.user.config = committedConfig;
     notifyTrustedFoldersChanged();
@@ -159,24 +172,15 @@ export function loadTrustedFolders(): LoadedTrustedFolders {
   try {
     if (fs.existsSync(userPath)) {
       const content = fs.readFileSync(userPath, 'utf-8');
-      const parsed: unknown = JSON.parse(stripJsonComments(content));
-
-      if (
-        typeof parsed !== 'object' ||
-        parsed === null ||
-        Array.isArray(parsed)
-      ) {
-        errors.push({
-          message: 'Trusted folders file is not a valid JSON object.',
-          path: userPath,
-        });
-      } else {
-        userConfig = parsed as Record<string, TrustLevel>;
-      }
+      userConfig = parseJsoncObject(content) as Record<string, TrustLevel>;
     }
   } catch (error: unknown) {
     errors.push({
-      message: getErrorMessage(error),
+      message:
+        error instanceof Error &&
+        error.message === 'JSONC document root is not a JSON object.'
+          ? 'Trusted folders file is not a valid JSON object.'
+          : getErrorMessage(error),
       path: userPath,
     });
   }

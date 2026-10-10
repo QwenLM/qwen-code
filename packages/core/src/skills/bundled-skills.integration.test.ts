@@ -8,6 +8,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { MAX_SKILL_LISTING_CHARS } from '../core/environmentContext.js';
+import {
+  renderAvailableSkillsBlock,
+  type AvailableSkillEntry,
+} from '../tools/skill-utils.js';
 import { parseSkillContent } from './skill-load.js';
 
 // Bundled skills are loaded from disk at runtime by SkillManager. A typo in
@@ -44,6 +49,37 @@ describe('bundled SKILL.md files', () => {
     if (cfg.allowedTools !== undefined) {
       expect(Array.isArray(cfg.allowedTools)).toBe(true);
     }
+  });
+
+  // Every model-invocable bundled skill's `description` and `when_to_use` are
+  // rendered into the session-start <available_skills> listing and charged on
+  // every request. The listing is simplified once it passes
+  // MAX_SKILL_LISTING_CHARS, but that trim keeps bundled entries verbatim, so
+  // whatever the bundled entries take is taken from the room left for the
+  // user's project, user and extension skills and model-invocable commands
+  // (#12472). At 6,549 characters for 15 entries, that room is about 1,450.
+  // A failure here means compress a bundled frontmatter, or raise this number
+  // as a decision about how much of the listing bundled skills may take.
+  const BUNDLED_LISTING_BUDGET = 6_800;
+
+  it(`renders the model-invocable bundled listing within ${BUNDLED_LISTING_BUDGET} characters`, () => {
+    const entries: AvailableSkillEntry[] = skillNames
+      .map((name) => {
+        const file = path.join(bundledDir, name, 'SKILL.md');
+        return parseSkillContent(fs.readFileSync(file, 'utf8'), file);
+      })
+      .filter((cfg) => !cfg.disableModelInvocation)
+      .map((cfg) => ({
+        name: cfg.name,
+        description: cfg.description,
+        whenToUse: cfg.whenToUse,
+        level: 'bundled' as const,
+      }));
+
+    expect(renderAvailableSkillsBlock(entries).length).toBeLessThanOrEqual(
+      BUNDLED_LISTING_BUDGET,
+    );
+    expect(BUNDLED_LISTING_BUDGET).toBeLessThan(MAX_SKILL_LISTING_CHARS);
   });
 
   it('ships dataviz validator and references with the bundled skill', () => {

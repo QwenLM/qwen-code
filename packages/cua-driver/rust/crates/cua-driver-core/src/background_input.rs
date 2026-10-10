@@ -42,6 +42,9 @@ pub enum ElementAncestry {
     /// The live element ascends to an AX window whose CGWindowID is the
     /// requested one.
     ProvenDescendant,
+    /// A menu descendant of the owning app's fresh AXMenuBar, with the
+    /// requested window confirmed as that app's focused window.
+    ProvenAppMenu,
     /// The live element ascends to a different window of the same process.
     OutsideTargetWindow,
     /// Ancestry could not be resolved (dead element, SPI failure). An address
@@ -68,10 +71,12 @@ pub struct BackgroundTargetFacts {
     /// `target_minimized`.
     pub app_hidden: Option<bool>,
     /// Same-pid top-level windows, other than the target, that could receive
-    /// process-scoped keyboard input (enumerated from WindowServer so an
-    /// off-Space sibling that AX cannot see still counts; proven-minimized
-    /// siblings are excluded because they cannot be the key window).
+    /// process-scoped keyboard input, mapped from both WindowServer and fresh
+    /// AXWindows. Proven-minimized siblings are excluded.
     pub competing_keyboard_destinations: usize,
+    /// Fresh AXFocusedWindow and focused first-responder ancestry both name
+    /// this exact target, with AXFocused confirmed on the responder.
+    pub keyboard_focus_matches_target: bool,
     /// Ancestry proof for an explicitly addressed element, when one exists.
     pub element: ElementAncestry,
 }
@@ -173,13 +178,12 @@ fn refuse(
 /// - a stale or foreign CGWindowID refuses every mutation;
 /// - a target absent from fresh `AXWindows` (off-Space or AX-unresolved) is
 ///   observation-only;
-/// - an addressed element must prove ancestry to the requested window for
-///   every route, including semantic AX;
+/// - addressed elements must prove window ancestry; semantic menu actions may
+///   instead prove ancestry to the owning app's current menu bar;
 /// - semantic AX actions remain available for minimized/hidden targets;
 /// - the routed pointer requires a visible (possibly occluded) target; and
-/// - process-scoped keyboard additionally requires that the target is the
-///   only eligible same-pid keyboard destination, because the transport
-///   addresses a process, not a window.
+/// - process-scoped keyboard requires either a single eligible destination or
+///   fresh focused-window and first-responder proof for the exact target.
 pub fn decide_background_input(
     target: ExactWindowTarget,
     facts: &BackgroundTargetFacts,
@@ -213,7 +217,10 @@ pub fn decide_background_input(
 
     match facts.element {
         ElementAncestry::NotAddressed | ElementAncestry::ProvenDescendant => {}
-        ElementAncestry::OutsideTargetWindow | ElementAncestry::Unproven => {
+        ElementAncestry::ProvenAppMenu if action == BackgroundAction::AxSemantic => {}
+        ElementAncestry::OutsideTargetWindow
+        | ElementAncestry::Unproven
+        | ElementAncestry::ProvenAppMenu => {
             return refuse(
                 refusal_codes::ELEMENT_OUTSIDE_TARGET_WINDOW,
                 format!(
@@ -286,7 +293,7 @@ pub fn decide_background_input(
                 );
             }
             debug_assert!(action.is_pid_keyboard());
-            if facts.competing_keyboard_destinations > 0 {
+            if facts.competing_keyboard_destinations > 0 && !facts.keyboard_focus_matches_target {
                 return refuse(
                     refusal_codes::SAME_PID_KEYBOARD_AMBIGUITY,
                     format!(
@@ -367,6 +374,55 @@ pub fn background_input_capability_report(
 mod tests {
     use super::*;
 
+    #[test]
+    fn app_menu_identity_only_allows_semantic_actions_on_a_live_owned_window() {
+        let target = ExactWindowTarget {
+            pid: 42,
+            window_id: 7,
+        };
+        let mut facts = matched_facts();
+        facts.element = ElementAncestry::ProvenAppMenu;
+        assert!(decide_background_input(target, &facts, BackgroundAction::AxSemantic).is_execute());
+        for action in [
+            BackgroundAction::WindowPointer,
+            BackgroundAction::InsertText,
+            BackgroundAction::GenericKey,
+        ] {
+            assert!(!decide_background_input(target, &facts, action).is_execute());
+        }
+        facts.window_server = WindowServerOwnership::ForeignPid { owner_pid: 99 };
+        assert!(
+            !decide_background_input(target, &facts, BackgroundAction::AxSemantic).is_execute()
+        );
+        facts.window_server = WindowServerOwnership::SamePid;
+        facts.ax_window_present = false;
+        assert!(
+            !decide_background_input(target, &facts, BackgroundAction::AxSemantic).is_execute()
+        );
+    }
+
+    #[test]
+    fn competing_windows_require_current_target_focus_without_relaxing_ownership() {
+        let target = ExactWindowTarget {
+            pid: 42,
+            window_id: 7,
+        };
+        let mut facts = matched_facts();
+        facts.competing_keyboard_destinations = 2;
+        for action in [BackgroundAction::InsertText, BackgroundAction::GenericKey] {
+            assert!(!decide_background_input(target, &facts, action).is_execute());
+            facts.keyboard_focus_matches_target = true;
+            assert!(decide_background_input(target, &facts, action).is_execute());
+            facts.target_minimized = None;
+            assert!(!decide_background_input(target, &facts, action).is_execute());
+            facts.target_minimized = Some(false);
+            facts.window_server = WindowServerOwnership::ForeignPid { owner_pid: 99 };
+            assert!(!decide_background_input(target, &facts, action).is_execute());
+            facts.window_server = WindowServerOwnership::SamePid;
+            facts.keyboard_focus_matches_target = false;
+        }
+    }
+
     const TARGET: ExactWindowTarget = ExactWindowTarget {
         pid: 42,
         window_id: 700,
@@ -379,6 +435,7 @@ mod tests {
             target_minimized: Some(false),
             app_hidden: Some(false),
             competing_keyboard_destinations: 0,
+            keyboard_focus_matches_target: false,
             element: ElementAncestry::NotAddressed,
         }
     }
@@ -606,6 +663,7 @@ mod tests {
             target_minimized: Some(true),
             app_hidden: Some(true),
             competing_keyboard_destinations: 3,
+            keyboard_focus_matches_target: false,
             element: ElementAncestry::OutsideTargetWindow,
         };
         assert_eq!(

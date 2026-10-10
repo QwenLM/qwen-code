@@ -16,6 +16,7 @@ import {
   MAX_ARCHIVE_PATH_BYTES,
   assertDirectorySymlinksAreSafe,
   assertTarArchiveLinksAreSafe,
+  type TarArchiveSafetyOptions,
 } from './archive-safety.js';
 
 // Passthrough wrapper around `fs.createReadStream` that tests can hook to
@@ -53,10 +54,9 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 // Builds a ustar header for a zero-content regular file. `tar.t` parses
-// headers via `onReadEntry` without requiring entry content, so these
-// crafted headers are enough to exercise the entry-count and expanded-size
-// limits without writing gigabytes of data or hundreds of thousands of
-// files to disk.
+// headers via `onReadEntry` without needing content, so crafted headers
+// exercise the entry-count and expanded-size limits without writing gigabytes
+// of data or hundreds of thousands of files to disk.
 function createTarFileHeader(
   name: string,
   size: number,
@@ -100,20 +100,42 @@ describe('assertTarArchiveLinksAreSafe', () => {
   });
 
   afterEach(async () => {
+    streamProbe.onReadStream = undefined;
     await fs.rm(root, { recursive: true, force: true });
   });
+
+  /** Writes crafted `headers` to an archive under `root` and scans it. */
+  const scanCrafted = async (
+    headers: Buffer[],
+    options?: TarArchiveSafetyOptions,
+  ) => {
+    const archive = path.join(root, 'crafted.tar');
+    await writeCraftedTar(archive, headers);
+    return assertTarArchiveLinksAreSafe(archive, undefined, options);
+  };
+
+  /** Packs `entries` (relative to `cwd`) into an archive under `root`. */
+  const pack = async (entries: string[], cwd = root) => {
+    const archive = path.join(root, 'packed.tar');
+    await tar.c({ cwd, file: archive }, entries);
+    return archive;
+  };
+
+  /** Packs 101 dangling symlinks, one past the unsupported-link cap. */
+  const symlinkLinks = async () => {
+    const links = Array.from({ length: 101 }, (_, index) => `link-${index}`);
+    await Promise.all(
+      links.map(async (link) => {
+        await fs.symlink('missing-target', path.join(root, link));
+      }),
+    );
+    return links;
+  };
 
   it.runIf(process.platform !== 'win32')(
     'rejects a large link set without throwing outside the promise',
     async () => {
-      const links = Array.from({ length: 101 }, (_, index) => `link-${index}`);
-      await Promise.all(
-        links.map(async (link) => {
-          await fs.symlink('missing-target', path.join(root, link));
-        }),
-      );
-      const archive = path.join(root, 'links.tar');
-      await tar.c({ cwd: root, file: archive }, links);
+      const archive = await pack(await symlinkLinks());
 
       await expect(assertTarArchiveLinksAreSafe(archive)).rejects.toThrow(
         'more than 100 unsupported link entries',
@@ -124,18 +146,12 @@ describe('assertTarArchiveLinksAreSafe', () => {
   it.runIf(process.platform !== 'win32')(
     'stops reading the archive as soon as validation fails',
     async () => {
-      const links = Array.from({ length: 101 }, (_, index) => `link-${index}`);
-      await Promise.all(
-        links.map(async (link) => {
-          await fs.symlink('missing-target', path.join(root, link));
-        }),
-      );
+      const links = await symlinkLinks();
       // A large trailing entry that a scan-to-end implementation would still
       // consume after the link limit trips; an early abort never reaches it.
       const tailBytes = 20 * 1024 * 1024;
       await fs.writeFile(path.join(root, 'tail.bin'), randomBytes(tailBytes));
-      const archive = path.join(root, 'abort-links.tar');
-      await tar.c({ cwd: root, file: archive }, [...links, 'tail.bin']);
+      const archive = await pack([...links, 'tail.bin']);
 
       let bytesRead = 0;
       streamProbe.onReadStream = (filePath, options, original) => {
@@ -146,13 +162,9 @@ describe('assertTarArchiveLinksAreSafe', () => {
         return stream;
       };
 
-      try {
-        await expect(assertTarArchiveLinksAreSafe(archive)).rejects.toThrow(
-          'more than 100 unsupported link entries',
-        );
-      } finally {
-        streamProbe.onReadStream = undefined;
-      }
+      await expect(assertTarArchiveLinksAreSafe(archive)).rejects.toThrow(
+        'more than 100 unsupported link entries',
+      );
 
       // Without the early abort the scan would read the whole ~20 MB tail.
       expect(bytesRead).toBeLessThan(tailBytes / 2);
@@ -174,126 +186,86 @@ describe('assertTarArchiveLinksAreSafe', () => {
       return stream;
     };
 
-    try {
-      await expect(
-        assertTarArchiveLinksAreSafe(
-          path.join(root, 'missing.tar'),
-          controller.signal,
-        ),
-      ).rejects.toBe(abortReason);
-    } finally {
-      streamProbe.onReadStream = undefined;
-    }
+    await expect(
+      assertTarArchiveLinksAreSafe(
+        path.join(root, 'missing.tar'),
+        controller.signal,
+      ),
+    ).rejects.toBe(abortReason);
 
     expect(createReadStreamCalls).toBe(0);
   });
 
   const resourceLimits = { enforceResourceLimits: true };
+  const fileHeaders = (count: number) =>
+    new Array<Buffer>(count).fill(createTarFileHeader('file', 0));
 
   it('accepts an archive with exactly the entry-count limit', async () => {
-    const archive = path.join(root, 'exact-entries.tar');
-    const header = createTarFileHeader('file', 0);
-    await writeCraftedTar(
-      archive,
-      Array.from({ length: MAX_ARCHIVE_ENTRIES }, () => header),
-    );
-
     await expect(
-      assertTarArchiveLinksAreSafe(archive, undefined, resourceLimits),
+      scanCrafted(fileHeaders(MAX_ARCHIVE_ENTRIES), resourceLimits),
     ).resolves.toBeUndefined();
   });
 
   it('rejects an archive just over the entry-count limit', async () => {
-    const archive = path.join(root, 'too-many-entries.tar');
-    const header = createTarFileHeader('file', 0);
-    await writeCraftedTar(
-      archive,
-      Array.from({ length: MAX_ARCHIVE_ENTRIES + 1 }, () => header),
-    );
-
     await expect(
-      assertTarArchiveLinksAreSafe(archive, undefined, resourceLimits),
+      scanCrafted(fileHeaders(MAX_ARCHIVE_ENTRIES + 1), resourceLimits),
     ).rejects.toThrow(
       `Tar archive contains more than ${MAX_ARCHIVE_ENTRIES} entries.`,
     );
   });
 
   it('bounds retained archive path metadata', async () => {
-    const archive = path.join(root, 'too-many-path-bytes.tar');
     const suffix = 'x'.repeat(90);
     const pathLength = 97;
-    await writeCraftedTar(
-      archive,
-      Array.from(
-        { length: Math.ceil(MAX_ARCHIVE_PATH_BYTES / pathLength) + 1 },
-        (_, index) =>
-          createTarFileHeader(
-            `${index.toString().padStart(6, '0')}-${suffix}`,
-            0,
-          ),
-      ),
+    const headers = Array.from(
+      { length: Math.ceil(MAX_ARCHIVE_PATH_BYTES / pathLength) + 1 },
+      (_, index) =>
+        createTarFileHeader(
+          `${index.toString().padStart(6, '0')}-${suffix}`,
+          0,
+        ),
     );
 
     await expect(
-      assertTarArchiveLinksAreSafe(archive, undefined, {
-        allowContainedSymlinks: true,
-      }),
+      scanCrafted(headers, { allowContainedSymlinks: true }),
     ).rejects.toThrow(
       `Tar archive path metadata exceeds ${MAX_ARCHIVE_PATH_BYTES} bytes.`,
     );
   });
 
   it('skips resource limits for trusted archives by default', async () => {
-    const archive = path.join(root, 'huge-but-trusted.tar');
-    await fs.writeFile(
-      archive,
-      Buffer.concat([
-        createTarFileHeader('big.bin', MAX_ARCHIVE_EXPANDED_BYTES + 1),
-        TAR_TRAILER,
-      ]),
-    );
-
     await expect(
-      assertTarArchiveLinksAreSafe(archive),
+      scanCrafted([
+        createTarFileHeader('big.bin', MAX_ARCHIVE_EXPANDED_BYTES + 1),
+      ]),
     ).resolves.toBeUndefined();
   });
 
-  // The parser skips `size` content bytes after each header, so every entry
-  // except the last must carry its (padded) content; the final entry declares
-  // a huge size without backing bytes, which `tar.t` tolerates as a trailing
-  // truncation. The first entry's real content makes the two-entry sum an
-  // actual accumulation check.
-  async function writeByteLimitTar(
-    archive: string,
-    secondEntrySize: number,
-  ): Promise<void> {
+  // The parser skips `size` content bytes after each header, so every entry but
+  // the last must carry its (padded) content; the last declares a huge size
+  // with no backing bytes, which `tar.t` tolerates as trailing truncation. The
+  // first entry's real content makes the two-entry sum a real accumulation.
+  const scanByteLimitTar = (secondEntrySize: number) => {
     const firstContent = Buffer.alloc(512);
-    await fs.writeFile(
-      archive,
-      Buffer.concat([
+    return scanCrafted(
+      [
         createTarFileHeader('first.bin', firstContent.length),
         firstContent,
         createTarFileHeader('second.bin', secondEntrySize),
-        TAR_TRAILER,
-      ]),
+      ],
+      resourceLimits,
     );
-  }
+  };
 
   it('accepts an archive whose declared sizes sum exactly to the byte limit', async () => {
-    const archive = path.join(root, 'exact-bytes.tar');
-    await writeByteLimitTar(archive, MAX_ARCHIVE_EXPANDED_BYTES - 512);
-
     await expect(
-      assertTarArchiveLinksAreSafe(archive, undefined, resourceLimits),
+      scanByteLimitTar(MAX_ARCHIVE_EXPANDED_BYTES - 512),
     ).resolves.toBeUndefined();
   });
 
   it('rejects an archive whose declared sizes sum just over the byte limit', async () => {
-    const archive = path.join(root, 'too-many-bytes.tar');
-    await writeByteLimitTar(archive, MAX_ARCHIVE_EXPANDED_BYTES - 512 + 1);
-
     await expect(
-      assertTarArchiveLinksAreSafe(archive, undefined, resourceLimits),
+      scanByteLimitTar(MAX_ARCHIVE_EXPANDED_BYTES - 512 + 1),
     ).rejects.toThrow(
       `Tar archive expands beyond ${MAX_ARCHIVE_EXPANDED_BYTES} bytes.`,
     );
@@ -308,14 +280,32 @@ describe('assertTarArchiveLinksAreSafe', () => {
     const allowLinks = { allowContainedSymlinks: true } as const;
     const symlinkHeader = (name: string, linkPath: string) =>
       createTarFileHeader(name, 0, '2', linkPath);
+    const expectCraftedRejected = (
+      headers: Buffer[],
+      message = 'unsupported link entry',
+    ) => expect(scanCrafted(headers, allowLinks)).rejects.toThrow(message);
+    /** Packs the #9724 repro: a root `AGENTS.md -> CLAUDE.md` symlink. */
+    const packAgentsLink = async () => {
+      await fs.writeFile(path.join(root, 'CLAUDE.md'), '# guide\n');
+      await fs.symlink('CLAUDE.md', path.join(root, 'AGENTS.md'));
+      return pack(['CLAUDE.md', 'AGENTS.md']);
+    };
+    /** Packs a lone root symlink `<name> -> <target>`; the scan must refuse. */
+    const expectPackedSymlinkRejected = async (
+      target: string,
+      name: string,
+    ) => {
+      await fs.symlink(target, path.join(root, name));
+      const archive = await pack([name]);
+      await expect(
+        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+      ).rejects.toThrow('unsupported link entry');
+    };
 
     it.runIf(process.platform !== 'win32')(
       'accepts a root-level symlink to a sibling file',
       async () => {
-        await fs.writeFile(path.join(root, 'CLAUDE.md'), '# guide\n');
-        await fs.symlink('CLAUDE.md', path.join(root, 'AGENTS.md'));
-        const archive = path.join(root, 'superpowers.tar');
-        await tar.c({ cwd: root, file: archive }, ['CLAUDE.md', 'AGENTS.md']);
+        const archive = await packAgentsLink();
 
         await expect(
           assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
@@ -323,27 +313,21 @@ describe('assertTarArchiveLinksAreSafe', () => {
       },
     );
 
-    it('rejects a dot-relative duplicate of an already-seen entry path', async () => {
-      const archive = path.join(root, 'duplicate-entry.tar');
-      await writeCraftedTar(archive, [
-        createTarFileHeader('foo', 0),
-        createTarFileHeader('./foo', 0),
-      ]);
-
-      await expect(
-        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-      ).rejects.toThrow('duplicate entry path');
-    });
+    it('rejects a dot-relative duplicate of an already-seen entry path', () =>
+      expectCraftedRejected(
+        [createTarFileHeader('foo', 0), createTarFileHeader('./foo', 0)],
+        'duplicate entry path',
+      ));
 
     it('accepts a symlink declared before its target', async () => {
-      const archive = path.join(root, 'target-after-link.tar');
-      await writeCraftedTar(archive, [
-        symlinkHeader('AGENTS.md', 'CLAUDE.md'),
-        createTarFileHeader('CLAUDE.md', 0),
-      ]);
-
       await expect(
-        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+        scanCrafted(
+          [
+            symlinkHeader('AGENTS.md', 'CLAUDE.md'),
+            createTarFileHeader('CLAUDE.md', 0),
+          ],
+          allowLinks,
+        ),
       ).resolves.toBeUndefined();
     });
 
@@ -353,8 +337,7 @@ describe('assertTarArchiveLinksAreSafe', () => {
         await fs.mkdir(path.join(root, 'docs'));
         await fs.writeFile(path.join(root, 'real.md'), 'x\n');
         await fs.symlink('../real.md', path.join(root, 'docs', 'link.md'));
-        const archive = path.join(root, 'nested.tar');
-        await tar.c({ cwd: root, file: archive }, ['real.md', 'docs']);
+        const archive = await pack(['real.md', 'docs']);
 
         await expect(
           assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
@@ -364,223 +347,140 @@ describe('assertTarArchiveLinksAreSafe', () => {
 
     it.runIf(process.platform !== 'win32')(
       'rejects a symlink whose target escapes the archive root',
-      async () => {
-        await fs.symlink('../../etc/hosts', path.join(root, 'escape'));
-        const archive = path.join(root, 'escape.tar');
-        await tar.c({ cwd: root, file: archive }, ['escape']);
-
-        await expect(
-          assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-        ).rejects.toThrow('unsupported link entry');
-      },
+      () => expectPackedSymlinkRejected('../../etc/hosts', 'escape'),
     );
 
-    it('rejects a symlink whose normalized target is exactly the archive parent', async () => {
-      const archive = path.join(root, 'parent.tar');
-      await writeCraftedTar(archive, [symlinkHeader('escape', '..')]);
+    it('rejects a symlink whose normalized target is exactly the archive parent', () =>
+      expectCraftedRejected([symlinkHeader('escape', '..')]));
 
-      await expect(
-        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-      ).rejects.toThrow('unsupported link entry');
-    });
-
-    it('rejects a backslash-separated traversal target', async () => {
-      const archive = path.join(root, 'backslash.tar');
-      await writeCraftedTar(archive, [
-        symlinkHeader('escape', '..\\..\\outside'),
-      ]);
-
-      await expect(
-        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-      ).rejects.toThrow('unsupported link entry');
-    });
+    it('rejects a backslash-separated traversal target', () =>
+      expectCraftedRejected([symlinkHeader('escape', '..\\..\\outside')]));
 
     it.runIf(process.platform !== 'win32')(
       'rejects an ambiguous literal-backslash target',
-      async () => {
-        const archive = path.join(root, 'literal-backslash.tar');
-        await writeCraftedTar(archive, [
+      () =>
+        expectCraftedRejected([
           createTarFileHeader('dir/file', 0),
           createTarFileHeader('dir\\file', 0),
           symlinkHeader('alias', 'dir\\file'),
-        ]);
-
-        await expect(
-          assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-        ).rejects.toThrow('unsupported link entry');
-      },
+        ]),
     );
 
-    it('rejects a UNC target without requiring Windows symlink support', async () => {
-      const archive = path.join(root, 'unc-target.tar');
-      await writeCraftedTar(archive, [
+    it('rejects a UNC target without requiring Windows symlink support', () =>
+      expectCraftedRejected([
         symlinkHeader('escape', '\\\\server\\share\\file'),
-      ]);
+      ]));
 
-      await expect(
-        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-      ).rejects.toThrow('unsupported link entry');
-    });
-
-    it('rejects a symlink with an absolute entry path', async () => {
-      const archive = path.join(root, 'absolute-entry.tar');
-      await writeCraftedTar(archive, [
+    it('rejects a symlink with an absolute entry path', () =>
+      expectCraftedRejected([
         symlinkHeader('/absolute-link', 'target'),
         createTarFileHeader('target', 0),
-      ]);
+      ]));
 
-      await expect(
-        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-      ).rejects.toThrow('unsupported link entry');
-    });
-
-    it('rejects a symlink with a Windows-absolute entry path', async () => {
-      // Distinct from the target-side check exercised by "rejects a
-      // symlink with a Windows-absolute target": this crafts the drive
-      // letter into the *entry* path so only `WINDOWS_ABSOLUTE_PATH.test(
-      // entryPath)` can reject it (the target, 'target', is unremarkable).
-      const archive = path.join(root, 'windows-entry-path.tar');
-      await writeCraftedTar(archive, [
+    // Unlike "rejects a symlink with a Windows-absolute target", the drive
+    // letter is in the *entry* path, so only
+    // `WINDOWS_ABSOLUTE_PATH.test(entryPath)` can reject it (the target,
+    // 'target', is unremarkable).
+    it('rejects a symlink with a Windows-absolute entry path', () =>
+      expectCraftedRejected([
         symlinkHeader('C:\\pwn', 'target'),
         createTarFileHeader('target', 0),
-      ]);
+      ]));
 
-      await expect(
-        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-      ).rejects.toThrow('unsupported link entry');
-    });
-
-    it('rejects a symlink whose entry path normalizes to the archive root', async () => {
-      const archive = path.join(root, 'root-entry.tar');
-      await writeCraftedTar(archive, [
+    it('rejects a symlink whose entry path normalizes to the archive root', () =>
+      expectCraftedRejected([
         symlinkHeader('nested/..', 'target'),
         createTarFileHeader('target', 0),
-      ]);
+      ]));
 
-      await expect(
-        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-      ).rejects.toThrow('unsupported link entry');
-    });
+    // dirname('link') + 'link' normalizes back to 'link'. Unlike the
+    // ancestor-entry sibling, this does NOT discriminate its clause
+    // (`normalizedEntry === resolved`): onReadEntry records the link in
+    // `archiveEntries` (as SymbolicLink) before the check, so the post-loop
+    // "target must be a distinct regular-file entry" scan rejects it anyway.
+    // A plain regression test; deleting the self-reference clause passes it.
+    it('rejects a symlink whose target resolves to its own entry path', () =>
+      expectCraftedRejected([symlinkHeader('link', 'link')]));
 
-    it('rejects a symlink whose target resolves to its own entry path', async () => {
-      // dirname('link') + 'link' normalizes back to 'link' itself. This
-      // does NOT discriminate the `normalizedEntry === resolved`
-      // self-reference clause the way the sibling ancestor-entry test
-      // discriminates its own clause: onReadEntry always records the
-      // symlink itself in `archiveEntries` (typed SymbolicLink) before
-      // this check runs, so even with the clause removed, the post-loop
-      // "target must be a distinct regular-file entry" scan independently
-      // rejects a link that names itself. Kept as a plain regression test;
-      // deleting the self-reference clause does not fail it.
-      const archive = path.join(root, 'self-reference.tar');
-      await writeCraftedTar(archive, [symlinkHeader('link', 'link')]);
-
-      await expect(
-        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-      ).rejects.toThrow('unsupported link entry');
-    });
-
-    it('rejects a symlink whose target resolves to an ancestor entry', async () => {
-      // dirname('a/b/link') + '..' normalizes to 'a', an ancestor of the
-      // entry itself (not '.' or '..'), so this is rejected by the
-      // `normalizedEntry.startsWith(`${resolved}/`)` ancestor clause
-      // specifically (unlike `symlinkHeader('sub/loop', '..')`, whose
-      // resolved target is exactly '.' and never reaches this clause).
-      const archive = path.join(root, 'ancestor-entry.tar');
-      await writeCraftedTar(archive, [
+    // dirname('a/b/link') + '..' normalizes to 'a', an ancestor of the entry
+    // (not '.' or '..'), so only the ancestor clause
+    // `normalizedEntry.startsWith(`${resolved}/`)` rejects it (unlike
+    // `symlinkHeader('sub/loop', '..')`, whose target resolves to exactly '.'
+    // and never reaches that clause).
+    it('rejects a symlink whose target resolves to an ancestor entry', () =>
+      expectCraftedRejected([
         createTarFileHeader('a', 0),
         symlinkHeader('a/b/link', '..'),
-      ]);
+      ]));
 
-      await expect(
-        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-      ).rejects.toThrow('unsupported link entry');
-    });
+    it('rejects link chains and dangling or directory targets', () =>
+      expectCraftedRejected(
+        [
+          createTarFileHeader('target', 0),
+          symlinkHeader('first', 'target'),
+          symlinkHeader('second', 'first'),
+          symlinkHeader('dangling', 'missing'),
+          createTarFileHeader('directory/', 0, '5'),
+          symlinkHeader('directory-link', 'directory'),
+          symlinkHeader('path-link', 'target'),
+          createTarFileHeader('path-link/child', 0),
+        ],
+        '4 unsupported link entries',
+      ));
 
-    it('rejects link chains and dangling or directory targets', async () => {
-      const archive = path.join(root, 'indirect-targets.tar');
-      await writeCraftedTar(archive, [
-        createTarFileHeader('target', 0),
-        symlinkHeader('first', 'target'),
-        symlinkHeader('second', 'first'),
-        symlinkHeader('dangling', 'missing'),
-        createTarFileHeader('directory/', 0, '5'),
-        symlinkHeader('directory-link', 'directory'),
-        symlinkHeader('path-link', 'target'),
-        createTarFileHeader('path-link/child', 0),
-      ]);
-
-      await expect(
-        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-      ).rejects.toThrow('4 unsupported link entries');
-    });
-
-    it('rejects descendants of a trailing-separator symlink entry', async () => {
-      const archive = path.join(root, 'trailing-separator-link.tar');
-      await writeCraftedTar(archive, [
+    it('rejects descendants of a trailing-separator symlink entry', () =>
+      expectCraftedRejected([
         createTarFileHeader('target', 0),
         symlinkHeader('alias/', 'target'),
         createTarFileHeader('alias/child', 0),
-      ]);
-
-      await expect(
-        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-      ).rejects.toThrow('unsupported link entry');
-    });
+      ]));
 
     it.runIf(process.platform !== 'win32')(
       'rejects unsafe symlinks in a restructured extracted tree',
       async () => {
-        const directoryCase = path.join(root, 'directory-case');
-        await fs.mkdir(path.join(directoryCase, 'target'), { recursive: true });
+        const expectTreeRejected = (dir: string) =>
+          expect(assertDirectorySymlinksAreSafe(dir)).rejects.toThrow(
+            'unsupported link entry',
+          );
+        /** `<root>/<name>`, optionally holding a regular file `target`. */
+        const caseDir = async (name: string, withTarget = false) => {
+          const dir = path.join(root, name);
+          await fs.mkdir(dir);
+          if (withTarget)
+            await fs.writeFile(path.join(dir, 'target'), 'content');
+          return dir;
+        };
+
+        const directoryCase = await caseDir('directory-case');
+        await fs.mkdir(path.join(directoryCase, 'target'));
         await fs.symlink('target', path.join(directoryCase, 'link'));
-        await expect(
-          assertDirectorySymlinksAreSafe(directoryCase),
-        ).rejects.toThrow('unsupported link entry');
+        await expectTreeRejected(directoryCase);
 
-        const danglingCase = path.join(root, 'dangling-case');
-        await fs.mkdir(danglingCase);
+        const danglingCase = await caseDir('dangling-case');
         await fs.symlink('missing', path.join(danglingCase, 'link'));
-        await expect(
-          assertDirectorySymlinksAreSafe(danglingCase),
-        ).rejects.toThrow('unsupported link entry');
+        await expectTreeRejected(danglingCase);
 
-        const cycleCase = path.join(root, 'cycle-case');
-        await fs.mkdir(cycleCase);
+        const cycleCase = await caseDir('cycle-case');
         await fs.symlink('b', path.join(cycleCase, 'a'));
         await fs.symlink('a', path.join(cycleCase, 'b'));
-        await expect(assertDirectorySymlinksAreSafe(cycleCase)).rejects.toThrow(
-          'unsupported link entry',
-        );
+        await expectTreeRejected(cycleCase);
 
-        const chainCase = path.join(root, 'chain-case');
-        await fs.mkdir(chainCase);
-        await fs.writeFile(path.join(chainCase, 'target'), 'content');
+        const chainCase = await caseDir('chain-case', true);
         await fs.symlink('target', path.join(chainCase, 'middle'));
         await fs.symlink('middle', path.join(chainCase, 'link'));
-        await expect(assertDirectorySymlinksAreSafe(chainCase)).rejects.toThrow(
-          'unsupported link entry',
-        );
+        await expectTreeRejected(chainCase);
 
-        const absoluteCase = path.join(root, 'absolute-case');
-        await fs.mkdir(absoluteCase);
+        const absoluteCase = await caseDir('absolute-case', true);
         const absoluteTarget = path.join(absoluteCase, 'target');
-        await fs.writeFile(absoluteTarget, 'content');
         await fs.symlink(absoluteTarget, path.join(absoluteCase, 'link'));
-        await expect(
-          assertDirectorySymlinksAreSafe(absoluteCase),
-        ).rejects.toThrow('unsupported link entry');
+        await expectTreeRejected(absoluteCase);
 
-        const noncanonicalCase = path.join(root, 'noncanonical-case');
-        await fs.mkdir(noncanonicalCase);
-        await fs.writeFile(path.join(noncanonicalCase, 'target'), 'content');
+        const noncanonicalCase = await caseDir('noncanonical-case', true);
         await fs.symlink(
           'missing/../target',
           path.join(noncanonicalCase, 'link'),
         );
-        await expect(
-          assertDirectorySymlinksAreSafe(noncanonicalCase),
-        ).rejects.toThrow('unsupported link entry');
+        await expectTreeRejected(noncanonicalCase);
       },
     );
 
@@ -632,12 +532,7 @@ describe('assertTarArchiveLinksAreSafe', () => {
         await fs.writeFile(path.join(source, 'target'), 'large');
         await fs.writeFile(path.join(source, 'dir', 'target'), '');
         await fs.symlink('target', path.join(source, 'dir\\copy'));
-        const archive = path.join(root, 'backslash-entry-size.tar');
-        await tar.c({ cwd: source, file: archive }, [
-          'target',
-          'dir',
-          'dir\\copy',
-        ]);
+        const archive = await pack(['target', 'dir', 'dir\\copy'], source);
 
         await expect(
           assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
@@ -676,79 +571,47 @@ describe('assertTarArchiveLinksAreSafe', () => {
       expect(lstatSpy).toHaveBeenCalledWith(file);
     });
 
-    it('counts accepted symlinks toward the link-entry limit', async () => {
-      const archive = path.join(root, 'accepted-link-limit.tar');
-      await writeCraftedTar(archive, [
-        ...Array.from({ length: 101 }, (_, index) =>
-          symlinkHeader(`link-${index}`, 'target'),
-        ),
-        createTarFileHeader('target', 0),
-      ]);
-
-      await expect(
-        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-      ).rejects.toThrow('more than 100 link entries');
-    });
+    it('counts accepted symlinks toward the link-entry limit', () =>
+      expectCraftedRejected(
+        [
+          ...Array.from({ length: 101 }, (_, index) =>
+            symlinkHeader(`link-${index}`, 'target'),
+          ),
+          createTarFileHeader('target', 0),
+        ],
+        'more than 100 link entries',
+      ));
 
     it.runIf(process.platform !== 'win32')(
       'rejects a symlink with an absolute target',
-      async () => {
-        await fs.symlink('/etc/passwd', path.join(root, 'absolute'));
-        const archive = path.join(root, 'absolute.tar');
-        await tar.c({ cwd: root, file: archive }, ['absolute']);
-
-        await expect(
-          assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-        ).rejects.toThrow('unsupported link entry');
-      },
+      () => expectPackedSymlinkRejected('/etc/passwd', 'absolute'),
     );
 
     it.runIf(process.platform !== 'win32')(
       'rejects a symlink with a Windows-absolute target',
-      async () => {
-        await fs.symlink('C:\\Windows\\system32', path.join(root, 'drive'));
-        const archive = path.join(root, 'drive.tar');
-        await tar.c({ cwd: root, file: archive }, ['drive']);
-
-        await expect(
-          assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-        ).rejects.toThrow('unsupported link entry');
-      },
+      () => expectPackedSymlinkRejected('C:\\Windows\\system32', 'drive'),
     );
 
-    // Crafted rather than packed with `tar.c`, and deliberately so: a hard
-    // link is the one fixture that drives tar's PENDINGLINKS path, where
-    // [JOBDONE] re-processes the pending job and re-enters [PROCESS]. Under
-    // CPU contention that second pass can reach the finalization branch after
-    // the pack already ended, and minipass throws `Error: write after end`
-    // from a stream nothing awaits. It escapes as an uncaught exception, and
-    // `dangerouslyIgnoreUnhandledErrors` is false on Linux, so the whole
-    // suite exits non-zero with every test still green — a release failure
-    // whose log contains no FAIL line (release run 33576013293: 211 files,
-    // 9480 tests passed, exit 1). Locally it reproduced 3 times in 28 runs
-    // with the cores saturated. The bytes below are exactly what tar writes
-    // for a hard link (typeflag '1', linkname pointing at the original), so
-    // the scanner is still being handed a real-world archive shape; it just
-    // is not produced by a pack this test would have to outlive.
-    it('rejects a hard link even when it points inside the archive root', async () => {
-      const archive = path.join(root, 'hard.tar');
-      await writeCraftedTar(archive, [
+    // Crafted, not packed with `tar.c`, on purpose: a hard link is the one
+    // fixture that drives tar's PENDINGLINKS path ([JOBDONE] re-processes the
+    // pending job and re-enters [PROCESS]). Under CPU contention that second
+    // pass can finalize after the pack ended, and minipass throws an unawaited
+    // `Error: write after end`. With `dangerouslyIgnoreUnhandledErrors` false
+    // on Linux, that uncaught exception exits the suite non-zero with every
+    // test green and no FAIL line (release run 33576013293: 211 files, 9480
+    // tests passed, exit 1; locally 3 in 28 runs with cores saturated). These
+    // are exactly the bytes tar writes for a hard link (typeflag '1', linkname
+    // -> original): a real-world shape without a pack the test must outlive.
+    it('rejects a hard link even when it points inside the archive root', () =>
+      expectCraftedRejected([
         createTarFileHeader('original.txt', 0),
         createTarFileHeader('hard.txt', 0, '1', 'original.txt'),
-      ]);
-
-      await expect(
-        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
-      ).rejects.toThrow('unsupported link entry');
-    });
+      ]));
 
     it.runIf(process.platform !== 'win32')(
       'still rejects a contained symlink when the option is off',
       async () => {
-        await fs.writeFile(path.join(root, 'CLAUDE.md'), '# guide\n');
-        await fs.symlink('CLAUDE.md', path.join(root, 'AGENTS.md'));
-        const archive = path.join(root, 'default.tar');
-        await tar.c({ cwd: root, file: archive }, ['CLAUDE.md', 'AGENTS.md']);
+        const archive = await packAgentsLink();
 
         await expect(assertTarArchiveLinksAreSafe(archive)).rejects.toThrow(
           'unsupported link entry',

@@ -102,13 +102,18 @@ jobs:
             echo '::error::Packaged app declares an Input Monitoring usage description.'
             exit 1
           fi
-          for unused_permission in NSBluetoothAlwaysUsageDescription NSBluetoothPeripheralUsageDescription NSCameraUsageDescription; do
+          for unused_permission in NSBluetoothAlwaysUsageDescription NSBluetoothPeripheralUsageDescription; do
             if /usr/libexec/PlistBuddy -c "Print :$unused_permission" "$info_plist" >/dev/null 2>&1; then
               echo "::error::Packaged app declares unused permission $unused_permission."
               exit 1
             fi
           done
           /usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$info_plist" >/dev/null
+          camera_usage="$(/usr/libexec/PlistBuddy -c 'Print :NSCameraUsageDescription' "$info_plist")"
+          if [ -z "${camera_usage//[[:space:]]/}" ]; then
+            echo '::error::Packaged app must describe its camera use.'
+            exit 1
+          fi
 
           assert_live_host_entitlements() {
             local entitlements_file="$1"
@@ -121,6 +126,7 @@ jobs:
                   "com.apple.security.cs.allow-jit",
                   "com.apple.security.cs.allow-unsigned-executable-memory",
                   "com.apple.security.device.audio-input",
+                  "com.apple.security.device.camera",
                 ];
                 const actual = Object.keys(value).sort();
                 if (

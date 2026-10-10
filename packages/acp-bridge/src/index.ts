@@ -16,6 +16,7 @@ export * from './sessionArtifacts.js';
 export * from './sessionAttachments.js';
 export * from './bridgeTypes.js';
 export * from './session-source.js';
+export * from './session-startup-config.js';
 export * from './bridgeOptions.js';
 export * from './prompt-ledger.js';
 export * from './session-restore-timeout.js';
@@ -27,3 +28,5 @@ export * from './bridgeClient.js';
 export * from './bridge.js';
 export * from './bridgeFileSystem.js';
 export * from './generation-stream.js';
+
+export { summarizeReplay } from './replay-summary.js';

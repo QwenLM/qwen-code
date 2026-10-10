@@ -158,6 +158,44 @@ describe('configCommand', () => {
         content: expect.stringContaining('true'),
       });
     });
+
+    it.each(['ui.accessibility.screenReader', 'security.auth.useExternal'])(
+      'enables an unset default-off setting: %s',
+      async (key) => {
+        const { ctx, setValuesMock } = createMockContext({});
+        const result = await configCommand.action!(ctx, key);
+
+        expect(result).toEqual({
+          type: 'message',
+          messageType: 'info',
+          content: expect.stringContaining('true'),
+        });
+        expect(setValuesMock).toHaveBeenCalledWith([
+          { scope: 'User', key, value: true },
+        ]);
+      },
+    );
+
+    it('turns an unset tri-state web search setting off', async () => {
+      const { ctx, setValuesMock } = createMockContext({});
+      const result = await configCommand.action!(
+        ctx,
+        'tools.webSearch.enabled',
+      );
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('false'),
+      });
+      expect(setValuesMock).toHaveBeenCalledWith([
+        {
+          scope: 'User',
+          key: 'tools.webSearch.enabled',
+          value: false,
+        },
+      ]);
+    });
   });
 
   describe('invalid boolean value', () => {
@@ -433,6 +471,20 @@ describe('configCommand', () => {
         messageType: 'info',
         content: expect.stringContaining('requires a restart'),
       });
+    });
+
+    it('shows restart warning for Goal cadence settings', async () => {
+      const { ctx, setValuesMock } = createMockContext({});
+      const result = await configCommand.action!(ctx, 'model.goalMaxTurns=20');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('requires a restart'),
+      });
+      expect(setValuesMock).toHaveBeenCalledWith([
+        { scope: 'User', key: 'model.goalMaxTurns', value: 20 },
+      ]);
     });
   });
 

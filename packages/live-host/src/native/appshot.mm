@@ -2,11 +2,13 @@
 
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
+#import <ColorSync/ColorSyncDevice.h>
 #import <ImageIO/ImageIO.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -19,6 +21,7 @@ constexpr size_t kMaxAccessibilityNodes = 1200;
 constexpr size_t kMaxAccessibilityDepth = 12;
 constexpr size_t kMaxChildrenPerNode = 200;
 constexpr size_t kMaxAttributeBytes = 500;
+constexpr size_t kMaxDisplayPngBytes = 8 * 1024 * 1024;
 
 struct WindowTarget {
   CGWindowID window_id;
@@ -44,6 +47,21 @@ struct AsyncCaptureWork {
   std::string error;
 };
 
+struct DisplayTarget {
+  CGDirectDisplayID display_id;
+  std::string uuid;
+  CGRect bounds;
+};
+
+struct AsyncDisplayCaptureWork {
+  napi_deferred deferred;
+  napi_async_work work = nullptr;
+  std::string selection;
+  std::string display_id;
+  std::vector<uint8_t> screenshot;
+  std::string error;
+};
+
 std::string ToUtf8(CFStringRef value) {
   if (value == nullptr) return {};
   const CFIndex length = CFStringGetLength(value);
@@ -56,6 +74,52 @@ std::string ToUtf8(CFStringRef value) {
     return {};
   }
   return std::string(buffer.data());
+}
+
+std::string DisplayUuid(CGDirectDisplayID display_id) {
+  CFUUIDRef uuid = CGDisplayCreateUUIDFromDisplayID(display_id);
+  if (uuid == nullptr) return {};
+  CFStringRef text = CFUUIDCreateString(kCFAllocatorDefault, uuid);
+  std::string result = ToUtf8(text);
+  if (text != nullptr) CFRelease(text);
+  CFRelease(uuid);
+  std::transform(result.begin(), result.end(), result.begin(),
+                 [](unsigned char character) {
+                   return std::tolower(character);
+                 });
+  return result;
+}
+
+std::vector<CGDirectDisplayID> ActiveDisplayIds() {
+  uint32_t count = 0;
+  if (CGGetActiveDisplayList(0, nullptr, &count) != kCGErrorSuccess) return {};
+  if (count == 0) return {};
+  std::vector<CGDirectDisplayID> displays(count);
+  if (CGGetActiveDisplayList(count, displays.data(), &count) != kCGErrorSuccess)
+    return {};
+  displays.resize(count);
+  return displays;
+}
+
+std::optional<DisplayTarget> ResolveDisplay(std::string selection) {
+  std::transform(selection.begin(), selection.end(), selection.begin(),
+                 [](unsigned char character) {
+                   return std::tolower(character);
+                 });
+  std::optional<DisplayTarget> selected;
+  for (CGDirectDisplayID display_id : ActiveDisplayIds()) {
+    const std::string uuid = DisplayUuid(display_id);
+    if (!uuid.empty() &&
+        ((selection == "primary" && display_id == CGMainDisplayID()) ||
+         selection == uuid)) {
+      if (selected.has_value()) return std::nullopt;
+      const CGRect bounds = CGDisplayBounds(display_id);
+      if (bounds.size.width <= 0 || bounds.size.height <= 0)
+        return std::nullopt;
+      selected = DisplayTarget{display_id, uuid, bounds};
+    }
+  }
+  return selected;
 }
 
 std::string NormalizeText(std::string value, size_t maximum) {
@@ -392,15 +456,7 @@ CGImageRef CaptureWithScreenCaptureKit(const WindowTarget& target) {
   return nullptr;
 }
 
-std::vector<uint8_t> CapturePng(const WindowTarget& target) {
-  CGImageRef image = nullptr;
-  if (@available(macOS 14.0, *)) {
-    image = CaptureWithScreenCaptureKit(target);
-  } else {
-    image = CGWindowListCreateImage(
-        CGRectNull, kCGWindowListOptionIncludingWindow, target.window_id,
-        kCGWindowImageBoundsIgnoreFraming | kCGWindowImageBestResolution);
-  }
+std::vector<uint8_t> EncodePng(CGImageRef image) {
   if (image == nullptr) return {};
   CFMutableDataRef data = CFDataCreateMutable(kCFAllocatorDefault, 0);
   CGImageDestinationRef destination = CGImageDestinationCreateWithData(
@@ -423,6 +479,152 @@ std::vector<uint8_t> CapturePng(const WindowTarget& target) {
   CFRelease(destination);
   CFRelease(data);
   CGImageRelease(image);
+  return bytes;
+}
+
+std::vector<uint8_t> CapturePng(const WindowTarget& target) {
+  CGImageRef image = nullptr;
+  if (@available(macOS 14.0, *)) {
+    image = CaptureWithScreenCaptureKit(target);
+  } else {
+    image = CGWindowListCreateImage(
+        CGRectNull, kCGWindowListOptionIncludingWindow, target.window_id,
+        kCGWindowImageBoundsIgnoreFraming | kCGWindowImageBestResolution);
+  }
+  return EncodePng(image);
+}
+
+CGSize DisplayImageSize(CGFloat width, CGFloat height) {
+  const CGFloat scale = std::min({1.0, 1920.0 / width, 1080.0 / height});
+  return CGSizeMake(std::max<CGFloat>(1, std::floor(width * scale)),
+                    std::max<CGFloat>(1, std::floor(height * scale)));
+}
+
+CGImageRef CaptureDisplayWithScreenCaptureKit(const DisplayTarget& target) {
+  if (@available(macOS 14.0, *)) {
+    dispatch_semaphore_t content_semaphore = dispatch_semaphore_create(0);
+    __block SCShareableContent* shareable_content = nil;
+    [SCShareableContent
+        getShareableContentExcludingDesktopWindows:NO
+                               onScreenWindowsOnly:YES
+                                  completionHandler:^(SCShareableContent* content,
+                                                      NSError*) {
+                                    shareable_content = content;
+                                    dispatch_semaphore_signal(content_semaphore);
+                                  }];
+    if (dispatch_semaphore_wait(
+            content_semaphore,
+            dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) != 0 ||
+        shareable_content == nil) {
+      return nullptr;
+    }
+
+    SCDisplay* selected_display = nil;
+    for (SCDisplay* display in shareable_content.displays) {
+      if (display.displayID == target.display_id) {
+        selected_display = display;
+        break;
+      }
+    }
+    if (selected_display == nil || DisplayUuid(target.display_id) != target.uuid)
+      return nullptr;
+    NSMutableArray<SCRunningApplication*>* excluded = [NSMutableArray array];
+    for (SCRunningApplication* application in shareable_content.applications) {
+      if (application.processID == getpid()) [excluded addObject:application];
+    }
+    if (excluded.count == 0) return nullptr;
+    SCContentFilter* filter =
+        [[SCContentFilter alloc] initWithDisplay:selected_display
+                          excludingApplications:excluded
+                               exceptingWindows:@[]];
+    if (@available(macOS 14.2, *)) filter.includeMenuBar = YES;
+    SCStreamConfiguration* configuration = [[SCStreamConfiguration alloc] init];
+    const CGFloat pixel_scale = std::max<CGFloat>(1, filter.pointPixelScale);
+    const CGSize size = DisplayImageSize(selected_display.width * pixel_scale,
+                                        selected_display.height * pixel_scale);
+    configuration.width = static_cast<size_t>(size.width);
+    configuration.height = static_cast<size_t>(size.height);
+    configuration.preservesAspectRatio = YES;
+    configuration.showsCursor = NO;
+    configuration.capturesAudio = NO;
+
+    dispatch_semaphore_t capture_semaphore = dispatch_semaphore_create(0);
+    NSLock* capture_lock = [[NSLock alloc] init];
+    __block BOOL accepting_capture = YES;
+    __block CGImageRef captured_image = nullptr;
+    [SCScreenshotManager
+        captureImageWithFilter:filter
+                 configuration:configuration
+              completionHandler:^(CGImageRef image, NSError*) {
+                [capture_lock lock];
+                if (accepting_capture && image != nullptr)
+                  captured_image = CGImageRetain(image);
+                [capture_lock unlock];
+                dispatch_semaphore_signal(capture_semaphore);
+              }];
+    if (dispatch_semaphore_wait(
+            capture_semaphore,
+            dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0) {
+      [capture_lock lock];
+      accepting_capture = NO;
+      if (captured_image != nullptr) CGImageRelease(captured_image);
+      captured_image = nullptr;
+      [capture_lock unlock];
+      return nullptr;
+    }
+    return captured_image;
+  }
+  return nullptr;
+}
+
+std::vector<uint8_t> CaptureDisplayPng(const DisplayTarget& target) {
+  if (DisplayUuid(target.display_id) != target.uuid) return {};
+  CGImageRef image = nullptr;
+  if (@available(macOS 14.0, *)) {
+    image = CaptureDisplayWithScreenCaptureKit(target);
+  } else {
+    CFArrayRef info = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+    if (info == nullptr) return {};
+    NSArray* windows = CFBridgingRelease(info);
+    CFMutableArrayRef ids =
+        CFArrayCreateMutable(kCFAllocatorDefault, 0, nullptr);
+    if (ids == nullptr) return {};
+    for (NSDictionary* window in windows) {
+      NSNumber* pid = window[(__bridge NSString*)kCGWindowOwnerPID];
+      NSNumber* window_id = window[(__bridge NSString*)kCGWindowNumber];
+      if (pid.intValue != getpid() && window_id.unsignedIntValue != 0)
+        CFArrayAppendValue(ids, reinterpret_cast<const void*>(
+            static_cast<uintptr_t>(window_id.unsignedIntValue)));
+    }
+    image = CGWindowListCreateImageFromArray(
+        target.bounds, ids, kCGWindowImageBestResolution);
+    CFRelease(ids);
+  }
+  if (image == nullptr) return {};
+  const CGSize size =
+      DisplayImageSize(CGImageGetWidth(image), CGImageGetHeight(image));
+  if (size.width != CGImageGetWidth(image) ||
+      size.height != CGImageGetHeight(image)) {
+    CGColorSpaceRef colors = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(
+        nullptr, static_cast<size_t>(size.width),
+        static_cast<size_t>(size.height), 8, static_cast<size_t>(size.width) * 4,
+        colors, kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(colors);
+    if (context == nullptr) {
+      CGImageRelease(image);
+      return {};
+    }
+    CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
+    CGContextDrawImage(context, CGRectMake(0, 0, size.width, size.height),
+                       image);
+    CGImageRelease(image);
+    image = CGBitmapContextCreateImage(context);
+    CGContextRelease(context);
+  }
+  auto bytes = EncodePng(image);
+  if (bytes.size() > kMaxDisplayPngBytes) return {};
   return bytes;
 }
 
@@ -461,6 +663,125 @@ napi_value RequestAccessibility(napi_env env, napi_callback_info) {
 
 napi_value RequestScreenRecording(napi_env env, napi_callback_info) {
   return Boolean(env, CGRequestScreenCaptureAccess());
+}
+
+napi_value ListDisplays(napi_env env, napi_callback_info) {
+  @autoreleasepool {
+    napi_value result = nullptr;
+    napi_create_array(env, &result);
+    uint32_t index = 0;
+    for (CGDirectDisplayID display_id : ActiveDisplayIds()) {
+      const std::string uuid = DisplayUuid(display_id);
+      if (uuid.empty()) continue;
+      std::string name = uuid;
+      for (NSScreen* screen in NSScreen.screens) {
+        NSNumber* screen_id = screen.deviceDescription[@"NSScreenNumber"];
+        if (screen_id.unsignedIntValue == display_id) {
+          const std::string localized =
+              NSStringValue(screen.localizedName, 256);
+          if (!localized.empty()) name = localized;
+          break;
+        }
+      }
+      napi_value entry = nullptr;
+      napi_create_object(env, &entry);
+      Set(env, entry, "id", String(env, uuid));
+      Set(env, entry, "name", String(env, name));
+      napi_value width = nullptr;
+      napi_value height = nullptr;
+      napi_create_double(env, CGDisplayPixelsWide(display_id), &width);
+      napi_create_double(env, CGDisplayPixelsHigh(display_id), &height);
+      Set(env, entry, "width", width);
+      Set(env, entry, "height", height);
+      Set(env, entry, "primary", Boolean(env, display_id == CGMainDisplayID()));
+      napi_set_element(env, result, index++, entry);
+    }
+    return result;
+  }
+}
+
+void ExecuteDisplayCapture(napi_env, void* data) {
+  AsyncDisplayCaptureWork* work = static_cast<AsyncDisplayCaptureWork*>(data);
+  @autoreleasepool {
+    if (!CGPreflightScreenCaptureAccess()) {
+      work->error = "DISPLAY_PERMISSION";
+      return;
+    }
+    const auto target = ResolveDisplay(work->selection);
+    if (!target.has_value()) {
+      work->error = "DISPLAY_UNAVAILABLE";
+      return;
+    }
+    work->screenshot = CaptureDisplayPng(*target);
+    const auto current = ResolveDisplay(work->selection);
+    if (!current.has_value() || current->uuid != target->uuid ||
+        current->display_id != target->display_id ||
+        !CGRectEqualToRect(current->bounds, target->bounds)) {
+      work->screenshot.clear();
+      work->error = "DISPLAY_UNAVAILABLE";
+    } else if (work->screenshot.empty()) {
+      work->error = "DISPLAY_CAPTURE_FAILED";
+    } else {
+      work->display_id = target->uuid;
+    }
+  }
+}
+
+void CompleteDisplayCapture(napi_env env, napi_status status, void* data) {
+  AsyncDisplayCaptureWork* work = static_cast<AsyncDisplayCaptureWork*>(data);
+  if (status != napi_ok && work->error.empty())
+    work->error = "DISPLAY_CAPTURE_FAILED";
+  if (!work->error.empty()) {
+    napi_value error = nullptr;
+    napi_create_error(env, String(env, work->error), String(env, work->error),
+                      &error);
+    napi_reject_deferred(env, work->deferred, error);
+  } else {
+    napi_value result = nullptr;
+    napi_create_object(env, &result);
+    Set(env, result, "displayId", String(env, work->display_id));
+    napi_value screenshot = nullptr;
+    napi_create_buffer_copy(env, work->screenshot.size(), work->screenshot.data(),
+                            nullptr, &screenshot);
+    Set(env, result, "screenshot", screenshot);
+    napi_resolve_deferred(env, work->deferred, result);
+  }
+  napi_delete_async_work(env, work->work);
+  delete work;
+}
+
+napi_value CaptureDisplay(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argument = nullptr;
+  napi_get_cb_info(env, info, &argc, &argument, nullptr, nullptr);
+  char selection[37] = {};
+  size_t length = 0;
+  if (argc != 1 ||
+      napi_get_value_string_utf8(env, argument, nullptr, 0, &length) != napi_ok ||
+      (length != 36 && length != 7) ||
+      napi_get_value_string_utf8(env, argument, selection, sizeof(selection),
+                                 &length) != napi_ok) {
+    napi_throw_error(env, "DISPLAY_UNAVAILABLE", "DISPLAY_UNAVAILABLE");
+    return nullptr;
+  }
+  AsyncDisplayCaptureWork* work = new AsyncDisplayCaptureWork{};
+  work->selection = std::string(selection, length);
+  napi_value promise = nullptr;
+  if (napi_create_promise(env, &work->deferred, &promise) != napi_ok) {
+    delete work;
+    napi_throw_error(env, "DISPLAY_CAPTURE_FAILED", "DISPLAY_CAPTURE_FAILED");
+    return nullptr;
+  }
+  if (napi_create_async_work(env, nullptr, String(env, "QwenLiveDisplayCapture"),
+                             ExecuteDisplayCapture, CompleteDisplayCapture,
+                             work, &work->work) != napi_ok ||
+      napi_queue_async_work(env, work->work) != napi_ok) {
+    if (work->work != nullptr) napi_delete_async_work(env, work->work);
+    delete work;
+    napi_throw_error(env, "DISPLAY_CAPTURE_FAILED", "DISPLAY_CAPTURE_FAILED");
+    return nullptr;
+  }
+  return promise;
 }
 
 void ExecuteCapture(napi_env, void* data) {
@@ -563,6 +884,10 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"requestScreenRecording", nullptr, RequestScreenRecording, nullptr,
        nullptr, nullptr, napi_default, nullptr},
       {"captureAppshot", nullptr, CaptureAppshot, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"listDisplays", nullptr, ListDisplays, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"captureDisplay", nullptr, CaptureDisplay, nullptr, nullptr, nullptr,
        napi_default, nullptr},
   };
   napi_define_properties(env, exports,

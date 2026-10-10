@@ -15,6 +15,7 @@ import {
   describeGoalCard,
   describeLegacyGoalCard,
   foldLiveEvent,
+  type LiveAssistantItem,
   type LiveHistoryItem,
   type LiveToolItem,
 } from './live-session-model.js';
@@ -114,6 +115,96 @@ describe('foldLiveEvent done (turn end)', () => {
   it('marks pending approvals rejected', () => {
     const items = foldLiveEvent([waitingTool()], { type: 'done' });
     expect(items[0]).toMatchObject({ done: true, confirm: 'rejected' });
+  });
+});
+
+describe('foldLiveEvent confirm-resolved (outcome parity, R1-18)', () => {
+  it('records a rejected resolution and clears the pending marker', () => {
+    const items = foldLiveEvent([waitingTool()], {
+      type: 'confirm-resolved',
+      id: 'tool1',
+      outcome: 'rejected',
+    });
+    expect(items[0]).toMatchObject({ confirm: 'rejected', done: false });
+  });
+
+  it('records an approved resolution and clears the pending marker', () => {
+    const items = foldLiveEvent([waitingTool()], {
+      type: 'confirm-resolved',
+      id: 'tool1',
+      outcome: 'approved',
+    });
+    expect(items[0]).toMatchObject({ confirm: 'approved', done: false });
+  });
+
+  it('leaves an already-resolved card untouched', () => {
+    const items = foldLiveEvent([{ ...waitingTool(), confirm: 'approved' }], {
+      type: 'confirm-resolved',
+      id: 'tool1',
+      outcome: 'rejected',
+    });
+    expect(items[0]).toMatchObject({ confirm: 'approved' });
+  });
+});
+
+describe('foldLiveEvent tool-queued (approved but not started)', () => {
+  it('records the queued status and clears it again', () => {
+    const queued = foldLiveEvent([{ ...waitingTool(), confirm: 'approved' }], {
+      type: 'tool-queued',
+      id: 'tool1',
+      queued: true,
+    });
+    expect(queued[0]).toMatchObject({ confirm: 'approved', queued: true });
+    const running = foldLiveEvent(queued, {
+      type: 'tool-queued',
+      id: 'tool1',
+      queued: false,
+    });
+    expect(running[0]).toMatchObject({ queued: false });
+  });
+
+  it('ignores a status for a call with no card', () => {
+    const items = foldLiveEvent([assistant('hi')], {
+      type: 'tool-queued',
+      id: 'tool1',
+      queued: true,
+    });
+    expect(items).toHaveLength(1);
+  });
+});
+
+describe('foldLiveEvent task card (subagent roster parity)', () => {
+  const started = foldLiveEvent([assistant('hi')], {
+    type: 'task-start',
+    id: 's1',
+    name: 'researcher',
+    description: 'bench frames',
+  });
+
+  it('opens a card and appends progress lines', () => {
+    const items = foldLiveEvent(started, {
+      type: 'task-progress',
+      id: 's1',
+      line: '↳ grep',
+    });
+    expect(items[1]).toMatchObject({
+      kind: 'task',
+      name: 'researcher',
+      progress: ['↳ grep'],
+    });
+  });
+
+  it('drops the card once the subagent settles', () => {
+    const items = foldLiveEvent(started, { type: 'task-end', id: 's1' });
+    expect(items).toEqual([{ ...assistant('hi'), streaming: false }]);
+  });
+
+  it('ignores task-end for a card that is not there', () => {
+    const items = foldLiveEvent([assistant('hi')], {
+      type: 'task-end',
+      id: 'ghost',
+    });
+    expect(items).toHaveLength(1);
   });
 });
 
@@ -300,6 +391,48 @@ describe('foldLiveEvent tool-result ansi', () => {
       totalBytes: 4096,
     });
   });
+
+  it('drops the grid when a later chunk carries plain text', () => {
+    // A shell run that streams ANSI and then trips binary detection replaces
+    // the grid with a plain string, and ToolCardBody prefers the grid
+    // unconditionally — a stale one would hide the notice for good, including
+    // in the settled card.
+    const grid = [
+      [
+        {
+          text: 'partial',
+          bold: false,
+          italic: false,
+          underline: false,
+          dim: false,
+          inverse: false,
+          fg: '',
+          bg: '',
+        },
+      ],
+    ];
+    let items = foldLiveEvent([], {
+      type: 'tool-start',
+      id: 'tool1',
+      tool: 'run_shell_command',
+      title: 'run_shell_command',
+    });
+    items = foldLiveEvent(items, {
+      type: 'tool-result',
+      id: 'tool1',
+      display: '',
+      ansi: { grid },
+    });
+    items = foldLiveEvent(items, {
+      type: 'tool-output',
+      id: 'tool1',
+      output: '[Binary output detected. Halting stream...]',
+    });
+    const tool = items[0];
+    if (tool.kind !== 'tool') throw new Error('expected tool item');
+    expect(tool.ansi).toBeUndefined();
+    expect(tool.output).toBe('[Binary output detected. Halting stream...]');
+  });
 });
 
 describe('foldLiveEvent compaction', () => {
@@ -474,30 +607,120 @@ describe('foldLiveEvent status rows (ink StatusMessage parity)', () => {
       message: 'run the tests',
     });
   });
+
+  it('pushes the U-33 user shell row after settling a streaming assistant', () => {
+    const items = foldLiveEvent([assistant('thinking')], {
+      type: 'user-shell',
+      text: 'ls',
+    });
+    expect(items).toMatchObject([
+      { kind: 'assistant', streaming: false },
+      { kind: 'user-shell', text: 'ls' },
+    ]);
+  });
+
+  it('pushes the U-34 command cards structurally, settling the stream first', () => {
+    const agent = {
+      label: 'left',
+      status: 'completed',
+      durationMs: 1200,
+      totalTokens: 10,
+      inputTokens: 4,
+      outputTokens: 6,
+      toolCalls: 2,
+      successfulToolCalls: 2,
+      failedToolCalls: 0,
+      rounds: 1,
+    } as never;
+    const recap = foldLiveEvent([assistant('thinking')], {
+      type: 'away-recap',
+      text: 'did X',
+    });
+    expect(recap).toMatchObject([
+      { kind: 'assistant', streaming: false },
+      { kind: 'away-recap', text: 'did X' },
+    ]);
+
+    const advisor = foldLiveEvent([assistant('thinking')], {
+      type: 'advisor',
+      text: 'Looks good',
+      model: 'qwen3-max',
+    });
+    expect(advisor).toMatchObject([
+      { kind: 'assistant', streaming: false },
+      { kind: 'advisor', text: 'Looks good', model: 'qwen3-max' },
+    ]);
+
+    const arenaAgent = foldLiveEvent([assistant('thinking')], {
+      type: 'arena-agent',
+      agent,
+    });
+    expect(arenaAgent).toMatchObject([
+      { kind: 'assistant', streaming: false },
+      { kind: 'arena-agent', agent },
+    ]);
+
+    const arenaSession = foldLiveEvent([assistant('thinking')], {
+      type: 'arena-session',
+      sessionStatus: 'completed',
+      task: 'do it',
+      totalDurationMs: 2000,
+      agents: [agent],
+    });
+    expect(arenaSession).toMatchObject([
+      { kind: 'assistant', streaming: false },
+      {
+        kind: 'arena-session',
+        sessionStatus: 'completed',
+        task: 'do it',
+        totalDurationMs: 2000,
+        agents: [agent],
+      },
+    ]);
+  });
 });
 
 describe('foldLiveEvent tool-output', () => {
-  it('appends live output to the running tool card', () => {
-    let items = foldLiveEvent([], {
+  const started = () =>
+    foldLiveEvent([], {
       type: 'tool-start',
       id: 'tool1',
       tool: 'run_shell_command',
       title: 'run_shell_command',
     });
-    items = foldLiveEvent(items, {
+
+  it('replaces the running card output with each snapshot', () => {
+    let items = foldLiveEvent(started(), {
       type: 'tool-output',
       id: 'tool1',
-      delta: 'line1\n',
+      output: 'line1\n',
     });
     items = foldLiveEvent(items, {
       type: 'tool-output',
       id: 'tool1',
-      delta: 'line2\n',
+      output: 'line1\nline2\n',
     });
     expect(items[0]).toMatchObject({
       kind: 'tool',
       done: false,
       output: 'line1\nline2\n',
+    });
+  });
+
+  it('holds one copy when the result repeats the streamed output', () => {
+    let items = foldLiveEvent(started(), {
+      type: 'tool-output',
+      id: 'tool1',
+      output: 'ACCEPT_TOOL_RAN\n',
+    });
+    items = foldLiveEvent(items, {
+      type: 'tool-result',
+      id: 'tool1',
+      display: 'ACCEPT_TOOL_RAN\n',
+    });
+    expect(items[0]).toMatchObject({
+      kind: 'tool',
+      output: 'ACCEPT_TOOL_RAN\n',
     });
   });
 });
@@ -656,6 +879,85 @@ describe('describeGoalCard (ink GoalStateCard)', () => {
     ).toMatchObject({ subtitle: '2 turns · 1m 1s' });
   });
 
+  it.each([
+    [3, 20, 723_000, 1_800_000, '3/20 turns · 12m 3s/30m'],
+    [1, 20, 0, undefined, '1/20 turns'],
+    [1, 1, 0, undefined, '1/1 turn'],
+    [3, undefined, 723_000, undefined, '3 turns · 12m 3s'],
+  ])(
+    'shows turn and active-time budgets (%s/%s)',
+    (turnCount, turnBudget, activeTimeMs, activeTimeBudgetMs, expected) => {
+      expect(
+        describeGoalCard(
+          snap({
+            objective: 'o',
+            status: 'paused',
+            turnCount,
+            turnBudget,
+            activeTimeMs,
+            activeTimeBudgetMs,
+          }),
+        ),
+      ).toMatchObject({ subtitle: expected });
+    },
+  );
+
+  it('hides unused turn and active-time budgets', () => {
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          turnCount: 0,
+          turnBudget: 20,
+          activeTimeMs: 0,
+          activeTimeBudgetMs: 1_800_000,
+        }),
+      ),
+    ).toMatchObject({ subtitle: null });
+  });
+
+  it('carries spend in the subtitle, matching the ink card', () => {
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          turnCount: 2,
+          activeTimeMs: 61000,
+          tokensUsed: 1234,
+          tokenBudget: 30_000_000,
+        }),
+      ),
+    ).toMatchObject({ subtitle: '2 turns · 1m 1s · 1.2k/30.0m tokens' });
+  });
+
+  it('carries spend alone when the Goal has no budget', () => {
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          turnCount: 1,
+          tokensUsed: 900,
+        }),
+      ),
+    ).toMatchObject({ subtitle: '1 turn · 900 tokens' });
+  });
+
+  it('says nothing about spend before a turn has billed', () => {
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          turnCount: 2,
+          tokenBudget: 30_000_000,
+        }),
+      ),
+    ).toMatchObject({ subtitle: '2 turns' });
+  });
+
   it('shows the reason only off-active or verifying', () => {
     expect(
       describeGoalCard(
@@ -735,5 +1037,46 @@ describe('describeLegacyGoalCard (ink kind form)', () => {
         lastReason: 'nope',
       }),
     ).toMatchObject({ lastCheck: undefined });
+  });
+});
+
+describe('foldLiveEvent assistant timestamps (#76)', () => {
+  const stampOf = (items: readonly LiveHistoryItem[]): number | undefined =>
+    (items[0] as LiveAssistantItem).timestamp;
+
+  it('opens the block at the replayed record time', () => {
+    const items = foldLiveEvent([], {
+      type: 'text',
+      delta: 'hi',
+      timestamp: 1_700_000_000_000,
+    });
+    expect(items[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'hi',
+      timestamp: 1_700_000_000_000,
+    });
+  });
+
+  it('keeps the opening stamp as later deltas append to the same block', () => {
+    let items = foldLiveEvent([], {
+      type: 'text',
+      delta: 'a',
+      timestamp: 1_700_000_000_000,
+    });
+    items = foldLiveEvent(items, {
+      type: 'text',
+      delta: 'b',
+      timestamp: 1_800_000_000_000,
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ text: 'ab' });
+    expect(stampOf(items)).toBe(1_700_000_000_000);
+  });
+
+  it('falls back to the fold time for a live delta', () => {
+    const before = Date.now();
+    const items = foldLiveEvent([], { type: 'text', delta: 'live' });
+    expect(stampOf(items)).toBeGreaterThanOrEqual(before);
+    expect(stampOf(items)).toBeLessThanOrEqual(Date.now());
   });
 });

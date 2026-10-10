@@ -19,6 +19,7 @@ describe('getLocalCommands', () => {
     expect(
       getLocalCommands(en).every((c) => c.source === 'builtin-command'),
     ).toBe(true);
+    expect(byName.get('plan')?.subcommands).toEqual(['on', 'off', 'exit']);
     expect(byName.get('fork')?.argumentHint).toBe('<directive>');
     expect(byName.get('btw')?.argumentHint).toBe('<your question>');
     expect(

@@ -7,12 +7,10 @@
 import type React from 'react';
 import { useCallback, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
-import {
-  type ArenaManager,
-  isSuccessStatus,
-  type Config,
-  type ArenaAgentResult,
-} from '@qwen-code/qwen-code-core';
+import type { ArenaManager } from '@qwen-code/qwen-code-core/agents/arena/ArenaManager.js';
+import type { ArenaAgentResult } from '@qwen-code/qwen-code-core/agents/arena/types.js';
+import { isSuccessStatus } from '@qwen-code/qwen-code-core/agents/runtime/agent-types.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { MessageType, type HistoryItemWithoutId } from '../../types.js';

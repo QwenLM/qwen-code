@@ -46,72 +46,58 @@ const mockExecFile = vi.mocked(execFile);
 const mockReaddir = vi.mocked(readdir);
 const mockReadFile = vi.mocked(readFile);
 
-/**
- * Helper: make mockExecFile resolve with given stdout/stderr/code.
- */
-function mockExecResult(result: {
-  stdout: string;
-  stderr: string;
-  code: number;
-}) {
+type ExecCallback = (err: Error | null, stdout: string, stderr: string) => void;
+
+const errorWith = (message: string, fields: Record<string, unknown>) =>
+  Object.assign(new Error(message), fields);
+
+/** Queues one execFile outcome: its callback receives (err, stdout, stderr). */
+function queueExec(err: Error | null, stdout = '', stderr = '') {
   mockExecFile.mockImplementationOnce(
     (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
-      const callback = cb as (
-        err: Error | null,
-        stdout: string,
-        stderr: string,
-      ) => void;
-      if (result.code !== 0) {
-        const err = new Error('command failed') as Error & { code: number };
-        err.code = result.code;
-        callback(err, result.stdout, result.stderr);
-      } else {
-        callback(null, result.stdout, result.stderr);
-      }
+      (cb as ExecCallback)(err, stdout, stderr);
       return {} as ReturnType<typeof execFile>;
     },
   );
 }
 
-/**
- * Helper: make mockExecFile reject (e.g., ENOENT).
- */
-function mockExecError() {
-  mockExecFile.mockImplementationOnce(
-    (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
-      const callback = cb as (
-        err: Error | null,
-        stdout: string,
-        stderr: string,
-      ) => void;
-      const err = new Error('ENOENT') as Error & { code: string };
-      err.code = 'ENOENT';
-      callback(err, '', '');
-      return {} as ReturnType<typeof execFile>;
-    },
-  );
+/** A non-zero `code` fails the call with that numeric exit code. */
+function mockExecResult({ stdout = '', stderr = '', code = 0 } = {}) {
+  const err = code !== 0 ? errorWith('command failed', { code }) : null;
+  queueExec(err, stdout, stderr);
 }
 
+/** The command is missing (ENOENT). */
+const mockExecError = () => queueExec(errorWith('ENOENT', { code: 'ENOENT' }));
+
 /**
- * Helper: simulate Node's maxBuffer overrun — child is killed, partial
- * stdout is delivered, error.code is 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'.
+ * Node's maxBuffer overrun: the child is killed, partial stdout is
+ * delivered, error.code is 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'.
  */
-function mockMaxBufferExceeded(partialStdout: string) {
-  mockExecFile.mockImplementationOnce(
-    (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
-      const callback = cb as (
-        err: Error | null,
-        stdout: string,
-        stderr: string,
-      ) => void;
-      const err = new Error('stdout maxBuffer length exceeded') as Error & {
-        code: string;
-      };
-      err.code = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
-      callback(err, partialStdout, '');
-      return {} as ReturnType<typeof execFile>;
-    },
-  );
+const maxBufferError = (message: string) =>
+  errorWith(message, { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' });
+const mockMaxBufferExceeded = (partialStdout: string) =>
+  queueExec(maxBufferError('stdout maxBuffer length exceeded'), partialStdout);
+
+const mockPdftotextAvailable = () =>
+  mockExecResult({ stderr: 'pdftotext version 24.02.0' });
+
+const execArgs = (call: number) =>
+  mockExecFile.mock.calls[call]![1] as string[];
+
+/** Asserts a failed result whose error matches `text`. */
+function expectError(
+  result: { success: true } | { success: false; error: string },
+  text: string | RegExp,
+) {
+  expect(result.success).toBe(false);
+  if (!result.success) expect(result.error).toMatch(text);
+}
+
+/** Asserts a successful extraction and returns its text. */
+function expectText(result: Awaited<ReturnType<typeof extractPDFText>>) {
+  expect(result.success).toBe(true);
+  return result.success ? result.text : '';
 }
 
 describe('pdf utilities', () => {
@@ -151,7 +137,7 @@ describe('pdf utilities', () => {
     });
 
     it('estimates dense non-ASCII PDF text conservatively', () => {
-      expect(estimatePDFTextOutputTokens('\u4e00'.repeat(45_000))).toBe(49_517);
+      expect(estimatePDFTextOutputTokens('一'.repeat(45_000))).toBe(49_517);
     });
 
     it('builds exact page-range guidance for pdfinfo-backed and heuristic counts', () => {
@@ -207,61 +193,28 @@ describe('pdf utilities', () => {
   });
 
   describe('parsePDFPageRange', () => {
-    it('should parse a single page', () => {
-      expect(parsePDFPageRange('5')).toEqual({ firstPage: 5, lastPage: 5 });
+    it.each([
+      ['should parse a single page', '5', 5, 5],
+      ['should parse a page range', '1-10', 1, 10],
+      ['should parse an open-ended range', '3-', 3, Infinity],
+      ['should handle whitespace', '  5  ', 5, 5],
+    ])('%s', (_title, input, firstPage, lastPage) => {
+      expect(parsePDFPageRange(input)).toEqual({ firstPage, lastPage });
     });
 
-    it('should parse a page range', () => {
-      expect(parsePDFPageRange('1-10')).toEqual({
-        firstPage: 1,
-        lastPage: 10,
-      });
-    });
-
-    it('should parse an open-ended range', () => {
-      expect(parsePDFPageRange('3-')).toEqual({
-        firstPage: 3,
-        lastPage: Infinity,
-      });
-    });
-
-    it('should handle whitespace', () => {
-      expect(parsePDFPageRange('  5  ')).toEqual({
-        firstPage: 5,
-        lastPage: 5,
-      });
-    });
-
-    it('should return null for empty string', () => {
-      expect(parsePDFPageRange('')).toBeNull();
-      expect(parsePDFPageRange('  ')).toBeNull();
-    });
-
-    it('should return null for zero page', () => {
-      expect(parsePDFPageRange('0')).toBeNull();
-    });
-
-    it('should return null for negative page', () => {
-      expect(parsePDFPageRange('-1')).toBeNull();
-    });
-
-    it('should return null for inverted range', () => {
-      expect(parsePDFPageRange('10-5')).toBeNull();
-    });
-
-    it('should return null for non-numeric input', () => {
-      expect(parsePDFPageRange('abc')).toBeNull();
-      expect(parsePDFPageRange('1-abc')).toBeNull();
-    });
-
-    it('should reject malformed tokens that parseInt would silently truncate', () => {
-      // Whole-string validation — parseInt() would accept each of these.
-      expect(parsePDFPageRange('5abc')).toBeNull();
-      expect(parsePDFPageRange('1-2-3')).toBeNull();
-      expect(parsePDFPageRange('1-2x')).toBeNull();
-      expect(parsePDFPageRange('1x-2')).toBeNull();
-      expect(parsePDFPageRange('1.5')).toBeNull();
-      expect(parsePDFPageRange('+5')).toBeNull();
+    it.each([
+      ['should return null for empty string', ['', '  ']],
+      ['should return null for zero page', ['0']],
+      ['should return null for negative page', ['-1']],
+      ['should return null for inverted range', ['10-5']],
+      ['should return null for non-numeric input', ['abc', '1-abc']],
+      // Whole-string validation: parseInt() would accept each of these.
+      [
+        'should reject malformed tokens that parseInt would silently truncate',
+        ['5abc', '1-2-3', '1-2x', '1x-2', '1.5', '+5'],
+      ],
+    ])('%s', (_title, inputs) => {
+      for (const input of inputs) expect(parsePDFPageRange(input)).toBeNull();
     });
 
     it('should tolerate whitespace around the range hyphen', () => {
@@ -296,11 +249,7 @@ describe('pdf utilities', () => {
 
   describe('isPdftotextAvailable', () => {
     it('should return true when pdftotext is available', async () => {
-      mockExecResult({
-        stdout: '',
-        stderr: 'pdftotext version 24.02.0',
-        code: 0,
-      });
+      mockPdftotextAvailable();
       expect(await isPdftotextAvailable()).toBe(true);
     });
 
@@ -308,7 +257,7 @@ describe('pdf utilities', () => {
       // Exit code is the reliable signal. Earlier implementation relied on
       // stderr having bytes, which flaked to false when stderr was
       // suppressed by a container / CI wrapper.
-      mockExecResult({ stdout: '', stderr: '', code: 0 });
+      mockExecResult();
       expect(await isPdftotextAvailable()).toBe(true);
     });
 
@@ -318,11 +267,7 @@ describe('pdf utilities', () => {
     });
 
     it('should cache the result', async () => {
-      mockExecResult({
-        stdout: '',
-        stderr: 'pdftotext version 24.02.0',
-        code: 0,
-      });
+      mockPdftotextAvailable();
       await isPdftotextAvailable();
       await isPdftotextAvailable();
       expect(mockExecFile).toHaveBeenCalledTimes(1);
@@ -334,11 +279,7 @@ describe('pdf utilities', () => {
       // would have spawned its own pdftotext -v probe.
       mockExecFile.mockImplementation(
         (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
-          const callback = cb as (
-            err: Error | null,
-            stdout: string,
-            stderr: string,
-          ) => void;
+          const callback = cb as ExecCallback;
           setTimeout(() => callback(null, '', 'pdftotext version 24.02.0'), 10);
           return {} as ReturnType<typeof execFile>;
         },
@@ -362,17 +303,11 @@ describe('pdf utilities', () => {
       // `resetPdftotextCache()`, the second call must reach the subprocess
       // again and observe the new (now-installed) state.
       mockExecError();
-      const first = await isPdftotextAvailable();
-      expect(first).toBe(false);
+      expect(await isPdftotextAvailable()).toBe(false);
 
       resetPdftotextCache();
-      mockExecResult({
-        stdout: '',
-        stderr: 'pdftotext version 24.02.0',
-        code: 0,
-      });
-      const second = await isPdftotextAvailable();
-      expect(second).toBe(true);
+      mockPdftotextAvailable();
+      expect(await isPdftotextAvailable()).toBe(true);
       expect(mockExecFile).toHaveBeenCalledTimes(2);
     });
   });
@@ -382,18 +317,12 @@ describe('pdf utilities', () => {
       mockExecResult({
         stdout:
           'Title:          Test\nPages:          42\nPage size:      612 x 792 pts',
-        stderr: '',
-        code: 0,
       });
       expect(await getPDFPageCount('/test.pdf')).toBe(42);
     });
 
     it('should return null when pdfinfo fails', async () => {
-      mockExecResult({
-        stdout: '',
-        stderr: 'error',
-        code: 1,
-      });
+      mockExecResult({ stderr: 'error', code: 1 });
       expect(await getPDFPageCount('/test.pdf')).toBeNull();
     });
 
@@ -403,44 +332,25 @@ describe('pdf utilities', () => {
     });
   });
 
+  // Each extraction first queues the pdftotext availability probe, then the
+  // extraction call itself (execFile call 1).
   describe('extractPDFText', () => {
     it('should extract text from a PDF', async () => {
-      // First call: isPdftotextAvailable check
-      mockExecResult({
-        stdout: '',
-        stderr: 'pdftotext version 24.02.0',
-        code: 0,
-      });
-      // Second call: actual extraction
-      mockExecResult({
-        stdout: 'Hello World\nThis is a PDF.',
-        stderr: '',
-        code: 0,
-      });
+      mockPdftotextAvailable();
+      mockExecResult({ stdout: 'Hello World\nThis is a PDF.' });
 
-      const result = await extractPDFText('/test.pdf');
-      expect(result).toEqual({
+      expect(await extractPDFText('/test.pdf')).toEqual({
         success: true,
         text: 'Hello World\nThis is a PDF.',
       });
     });
 
     it('should pass page range options to pdftotext', async () => {
-      mockExecResult({
-        stdout: '',
-        stderr: 'pdftotext version 24.02.0',
-        code: 0,
-      });
-      mockExecResult({
-        stdout: 'Page 2 content',
-        stderr: '',
-        code: 0,
-      });
+      mockPdftotextAvailable();
+      mockExecResult({ stdout: 'Page 2 content' });
 
       await extractPDFText('/test.pdf', { firstPage: 2, lastPage: 5 });
-      // Second call to execFile should have the page range args
-      const secondCall = mockExecFile.mock.calls[1]!;
-      const args = secondCall[1] as string[];
+      const args = execArgs(1);
       expect(args).toContain('-f');
       expect(args).toContain('2');
       expect(args).toContain('-l');
@@ -451,36 +361,23 @@ describe('pdf utilities', () => {
       // Without `--`, a filename like `-opw=X.pdf` is treated by poppler
       // as the `-opw` (owner password) option, since execFile passes each
       // element as a separate argv entry but poppler itself parses argv.
-      mockExecResult({
-        stdout: '',
-        stderr: 'pdftotext version 24.02.0',
-        code: 0,
-      });
-      mockExecResult({ stdout: 'dummy content', stderr: '', code: 0 });
+      mockPdftotextAvailable();
+      mockExecResult({ stdout: 'dummy content' });
 
       await extractPDFText('/tmp/-opw=X.pdf');
-      const extractionArgs = mockExecFile.mock.calls[1]![1] as string[];
-      const dashDashIndex = extractionArgs.indexOf('--');
-      const fileIndex = extractionArgs.indexOf('/tmp/-opw=X.pdf');
+      const args = execArgs(1);
+      const dashDashIndex = args.indexOf('--');
+      const fileIndex = args.indexOf('/tmp/-opw=X.pdf');
       expect(dashDashIndex).toBeGreaterThanOrEqual(0);
       expect(fileIndex).toBeGreaterThan(dashDashIndex);
     });
 
     it('should not pass lastPage for Infinity', async () => {
-      mockExecResult({
-        stdout: '',
-        stderr: 'pdftotext version 24.02.0',
-        code: 0,
-      });
-      mockExecResult({
-        stdout: 'Page content',
-        stderr: '',
-        code: 0,
-      });
+      mockPdftotextAvailable();
+      mockExecResult({ stdout: 'Page content' });
 
       await extractPDFText('/test.pdf', { firstPage: 3, lastPage: Infinity });
-      const secondCall = mockExecFile.mock.calls[1]!;
-      const args = secondCall[1] as string[];
+      const args = execArgs(1);
       expect(args).toContain('-f');
       expect(args).toContain('3');
       expect(args).not.toContain('-l');
@@ -488,113 +385,57 @@ describe('pdf utilities', () => {
 
     it('should return error when pdftotext is not installed', async () => {
       mockExecError();
-      const result = await extractPDFText('/test.pdf');
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error).toContain('pdftotext is not installed');
-      }
+      expectError(
+        await extractPDFText('/test.pdf'),
+        'pdftotext is not installed',
+      );
     });
 
     it('should detect password-protected PDFs', async () => {
-      mockExecResult({
-        stdout: '',
-        stderr: 'pdftotext version 24.02.0',
-        code: 0,
-      });
-      mockExecResult({
-        stdout: '',
-        stderr: 'Incorrect password',
-        code: 1,
-      });
-
-      const result = await extractPDFText('/test.pdf');
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error).toContain('password-protected');
-      }
+      mockPdftotextAvailable();
+      mockExecResult({ stderr: 'Incorrect password', code: 1 });
+      expectError(await extractPDFText('/test.pdf'), 'password-protected');
     });
 
     it('should detect corrupted PDFs', async () => {
-      mockExecResult({
-        stdout: '',
-        stderr: 'pdftotext version 24.02.0',
-        code: 0,
-      });
-      mockExecResult({
-        stdout: '',
-        stderr: 'PDF file is damaged',
-        code: 1,
-      });
-
-      const result = await extractPDFText('/test.pdf');
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error).toContain('corrupted or invalid');
-      }
+      mockPdftotextAvailable();
+      mockExecResult({ stderr: 'PDF file is damaged', code: 1 });
+      expectError(await extractPDFText('/test.pdf'), 'corrupted or invalid');
     });
 
     it('should truncate very large text output', async () => {
-      mockExecResult({
-        stdout: '',
-        stderr: 'pdftotext version 24.02.0',
-        code: 0,
-      });
-      const largeText = 'x'.repeat(200000);
-      mockExecResult({
-        stdout: largeText,
-        stderr: '',
-        code: 0,
-      });
+      mockPdftotextAvailable();
+      mockExecResult({ stdout: 'x'.repeat(200000) });
 
-      const result = await extractPDFText('/test.pdf');
-      expect(result.success).toBe(true);
-      if (result.success) {
-        expect(result.text.length).toBeLessThan(110000);
-        expect(result.text).toContain('text truncated at 100000 characters');
-        expect(result.text).toContain("'pages' parameter");
-      }
+      const text = expectText(await extractPDFText('/test.pdf'));
+      expect(text.length).toBeLessThan(110000);
+      expect(text).toContain('text truncated at 100000 characters');
+      expect(text).toContain("'pages' parameter");
     });
 
     it('should treat maxBuffer overrun as truncation, not a generic failure', async () => {
-      // Availability check
-      mockExecResult({
-        stdout: '',
-        stderr: 'pdftotext version 24.02.0',
-        code: 0,
-      });
-      // Simulate a text-dense PDF whose output exceeded the execFile
-      // maxBuffer. Node kills the child and delivers partial stdout plus
-      // err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'. We should recover
-      // the partial output and return success with the truncation note,
-      // not fail with "pdftotext failed:" or "pdftotext execution failed:".
-      const partial = 'y'.repeat(200000);
-      mockMaxBufferExceeded(partial);
+      // A text-dense PDF whose output exceeded the execFile maxBuffer: we
+      // should recover the partial output and return success with the
+      // truncation note, not fail with "pdftotext failed:" or "pdftotext
+      // execution failed:".
+      mockPdftotextAvailable();
+      mockMaxBufferExceeded('y'.repeat(200000));
 
-      const result = await extractPDFText('/test.pdf');
-      expect(result.success).toBe(true);
-      if (result.success) {
-        expect(result.text.length).toBeLessThan(110000);
-        expect(result.text).toContain('text truncated');
-        expect(result.text).toContain("'pages' parameter");
-      }
+      const text = expectText(await extractPDFText('/test.pdf'));
+      expect(text.length).toBeLessThan(110000);
+      expect(text).toContain('text truncated');
+      expect(text).toContain("'pages' parameter");
     });
 
     it('should recover maxBuffer overrun when UTF-8 bytes exceed the threshold', async () => {
-      mockExecResult({
-        stdout: '',
-        stderr: 'pdftotext version 24.02.0',
-        code: 0,
-      });
-      mockMaxBufferExceeded('\u4e00'.repeat(70_000));
+      mockPdftotextAvailable();
+      mockMaxBufferExceeded('一'.repeat(70_000));
 
-      const result = await extractPDFText('/test.pdf');
-      expect(result.success).toBe(true);
-      if (result.success) {
-        expect(result.text).toContain('text truncated');
-        expect(result.text).toContain('PDF text buffer limit');
-        expect(result.text).not.toContain('100000 characters');
-        expect(result.text).toContain("'pages' parameter");
-      }
+      const text = expectText(await extractPDFText('/test.pdf'));
+      expect(text).toContain('text truncated');
+      expect(text).toContain('PDF text buffer limit');
+      expect(text).not.toContain('100000 characters');
+      expect(text).toContain("'pages' parameter");
     });
 
     it('should NOT treat maxBuffer overrun as success when stdout is tiny', async () => {
@@ -603,118 +444,39 @@ describe('pdf utilities', () => {
       // pretending we got a valid extraction would feed garbage to the
       // model. Re-run the password/corrupt detectors on the stderr we
       // did capture, then fall back to a generic failure.
-      mockExecResult({
-        stdout: '',
-        stderr: 'pdftotext version 24.02.0',
-        code: 0,
-      });
-      mockExecFile.mockImplementationOnce(
-        (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
-          const callback = cb as (
-            err: Error | null,
-            stdout: string,
-            stderr: string,
-          ) => void;
-          const err = new Error('maxBuffer') as Error & { code: string };
-          err.code = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
-          // Tiny stdout, password-related stderr spam.
-          callback(err, 'x', 'Incorrect password '.repeat(20000));
-          return {} as ReturnType<typeof execFile>;
-        },
+      mockPdftotextAvailable();
+      // Tiny stdout, password-related stderr spam.
+      queueExec(
+        maxBufferError('maxBuffer'),
+        'x',
+        'Incorrect password '.repeat(20000),
       );
-
-      const result = await extractPDFText('/test.pdf');
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error).toContain('password-protected');
-      }
+      expectError(await extractPDFText('/test.pdf'), 'password-protected');
     });
 
-    it('should surface a dedicated error on timeout', async () => {
-      mockExecResult({
-        stdout: '',
-        stderr: 'pdftotext version 24.02.0',
-        code: 0,
-      });
-      mockExecFile.mockImplementationOnce(
-        (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
-          const callback = cb as (
-            err: Error | null,
-            stdout: string,
-            stderr: string,
-          ) => void;
-          // Node's execFile timeout: SIGTERM + killed=true, no numeric code.
-          const err = new Error('Command failed: pdftotext') as Error & {
-            code?: string;
-            killed?: boolean;
-            signal?: string;
-          };
-          err.killed = true;
-          err.signal = 'SIGTERM';
-          callback(err, '', '');
-          return {} as ReturnType<typeof execFile>;
-        },
-      );
+    // Node's execFile timeout: killed=true, no numeric code. The signal is
+    // SIGTERM on POSIX; on Windows Node terminates via TerminateProcess and
+    // `signal` is typically null. Both must classify as a timeout, not as a
+    // generic execution failure.
+    const timeoutError = (signal: string | null) =>
+      errorWith('Command failed: pdftotext', { killed: true, signal });
 
-      const result = await extractPDFText('/test.pdf');
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error).toMatch(/timed out/i);
-      }
+    it('should surface a dedicated error on timeout', async () => {
+      mockPdftotextAvailable();
+      queueExec(timeoutError('SIGTERM'));
+      expectError(await extractPDFText('/test.pdf'), /timed out/i);
     });
 
     it('should surface a dedicated error on Windows-style timeout (signal=null)', async () => {
-      // On Windows Node terminates via TerminateProcess and `signal` is
-      // typically null rather than 'SIGTERM'. Should still be classified
-      // as a timeout, not as a generic execution failure.
-      mockExecResult({
-        stdout: '',
-        stderr: 'pdftotext version 24.02.0',
-        code: 0,
-      });
-      mockExecFile.mockImplementationOnce(
-        (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
-          const callback = cb as (
-            err: Error | null,
-            stdout: string,
-            stderr: string,
-          ) => void;
-          const err = new Error('Command failed: pdftotext') as Error & {
-            code?: string;
-            killed?: boolean;
-            signal?: string | null;
-          };
-          err.killed = true;
-          err.signal = null;
-          callback(err, '', '');
-          return {} as ReturnType<typeof execFile>;
-        },
-      );
-
-      const result = await extractPDFText('/test.pdf');
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error).toMatch(/timed out/i);
-      }
+      mockPdftotextAvailable();
+      queueExec(timeoutError(null));
+      expectError(await extractPDFText('/test.pdf'), /timed out/i);
     });
 
     it('should report empty output', async () => {
-      mockExecResult({
-        stdout: '',
-        stderr: 'pdftotext version 24.02.0',
-        code: 0,
-      });
-      mockExecResult({
-        stdout: '   ',
-        stderr: '',
-        code: 0,
-      });
-
-      const result = await extractPDFText('/test.pdf');
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error).toContain('no text output');
-      }
+      mockPdftotextAvailable();
+      mockExecResult({ stdout: '   ' });
+      expectError(await extractPDFText('/test.pdf'), 'no text output');
     });
   });
 
@@ -722,18 +484,17 @@ describe('pdf utilities', () => {
     // Queue the `pdftoppm -v` availability probe as successful. It runs once
     // per render call because resetPdftoppmCache clears the cache each test.
     const mockAvailable = () =>
-      mockExecResult({
-        stdout: '',
-        stderr: 'pdftoppm version 24.02.0',
-        code: 0,
-      });
-    const asEntries = (names: string[]) => names as never;
+      mockExecResult({ stderr: 'pdftoppm version 24.02.0' });
+    // Probe and render succeed; the temp dir then lists `files`.
+    const mockRendered = (files: string[]) => {
+      mockAvailable();
+      mockExecResult();
+      mockReaddir.mockResolvedValue(files as never);
+    };
 
     it('renders pages to base64 JPEG images, numerically sorted', async () => {
-      mockAvailable();
-      mockExecResult({ stdout: '', stderr: '', code: 0 });
       // Returned out of order to prove numeric (not lexical) sorting.
-      mockReaddir.mockResolvedValue(asEntries(['page-2.jpg', 'page-1.jpg']));
+      mockRendered(['page-2.jpg', 'page-1.jpg']);
       mockReadFile
         .mockResolvedValueOnce(Buffer.from('page-one-bytes'))
         .mockResolvedValueOnce(Buffer.from('page-two-bytes'));
@@ -762,22 +523,18 @@ describe('pdf utilities', () => {
     });
 
     it('forwards an explicit page range to pdftoppm', async () => {
-      mockAvailable();
-      mockExecResult({ stdout: '', stderr: '', code: 0 });
-      mockReaddir.mockResolvedValue(asEntries(['page-3.jpg']));
+      mockRendered(['page-3.jpg']);
       mockReadFile.mockResolvedValue(Buffer.from('x'));
 
       await renderPDFPagesToImages('/test.pdf', { firstPage: 3, lastPage: 5 });
 
-      const args = mockExecFile.mock.calls[1]![1] as string[];
+      const args = execArgs(1);
       expect(args[args.indexOf('-f') + 1]).toBe('3');
       expect(args[args.indexOf('-l') + 1]).toBe('5');
     });
 
     it('omits -l for an open-ended (Infinity) last page', async () => {
-      mockAvailable();
-      mockExecResult({ stdout: '', stderr: '', code: 0 });
-      mockReaddir.mockResolvedValue(asEntries(['page-1.jpg']));
+      mockRendered(['page-1.jpg']);
       mockReadFile.mockResolvedValue(Buffer.from('x'));
 
       await renderPDFPagesToImages('/test.pdf', {
@@ -785,9 +542,8 @@ describe('pdf utilities', () => {
         lastPage: Infinity,
       });
 
-      const args = mockExecFile.mock.calls[1]![1] as string[];
-      expect(args).toContain('-f');
-      expect(args).not.toContain('-l');
+      expect(execArgs(1)).toContain('-f');
+      expect(execArgs(1)).not.toContain('-l');
     });
 
     it('returns an install hint when pdftoppm is unavailable', async () => {
@@ -804,46 +560,28 @@ describe('pdf utilities', () => {
     it('maps password-protected PDFs to a clear error', async () => {
       mockAvailable();
       mockExecResult({
-        stdout: '',
         stderr: 'Command Line Error: Incorrect password',
         code: 1,
       });
-      const result = await renderPDFPagesToImages('/test.pdf');
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error).toContain('password-protected');
-      }
+      expectError(
+        await renderPDFPagesToImages('/test.pdf'),
+        'password-protected',
+      );
     });
 
     it('maps corrupt PDFs to a clear error', async () => {
       mockAvailable();
-      mockExecResult({
-        stdout: '',
-        stderr: 'Syntax Error: Document is damaged',
-        code: 1,
-      });
-      const result = await renderPDFPagesToImages('/test.pdf');
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error).toContain('corrupted');
-      }
+      mockExecResult({ stderr: 'Syntax Error: Document is damaged', code: 1 });
+      expectError(await renderPDFPagesToImages('/test.pdf'), 'corrupted');
     });
 
     it('errors when pdftoppm produces no images', async () => {
-      mockAvailable();
-      mockExecResult({ stdout: '', stderr: '', code: 0 });
-      mockReaddir.mockResolvedValue(asEntries([]));
-      const result = await renderPDFPagesToImages('/test.pdf');
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error).toContain('no image output');
-      }
+      mockRendered([]);
+      expectError(await renderPDFPagesToImages('/test.pdf'), 'no image output');
     });
 
     it('caps total payload size and flags truncation instead of dropping silently', async () => {
-      mockAvailable();
-      mockExecResult({ stdout: '', stderr: '', code: 0 });
-      mockReaddir.mockResolvedValue(asEntries(['page-1.jpg', 'page-2.jpg']));
+      mockRendered(['page-1.jpg', 'page-2.jpg']);
       // The first page alone (~27MB base64) already exceeds the 25MB cap, so
       // the second page is dropped and the result is flagged.
       mockReadFile

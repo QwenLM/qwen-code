@@ -119,4 +119,75 @@ describe('useDaemonProviders', () => {
     // The advance triggers a single reload — not zero, not one-per-render.
     expect(loadProviders).toHaveBeenCalledTimes(2);
   });
+
+  it('loads once per opening, ignores hidden events, and refreshes visible data', async () => {
+    loadProviders.mockResolvedValue({ providers: [], current: undefined });
+    let result: ReturnType<typeof useDaemonProviders> | undefined;
+    function TestComponent({ open }: { open: boolean }) {
+      result = useDaemonProviders({ autoLoad: open, enabled: open });
+      return null;
+    }
+    const render = async (open: boolean) => {
+      await act(async () => root.render(<TestComponent open={open} />));
+    };
+
+    await render(false);
+    expect(loadProviders).not.toHaveBeenCalled();
+    await render(true);
+    expect(loadProviders).toHaveBeenCalledTimes(1);
+
+    await render(false);
+    signals.current.settingsVersion += 1;
+    await render(false);
+    await act(async () => {
+      await result?.reload();
+    });
+    expect(loadProviders).toHaveBeenCalledTimes(1);
+
+    signals.current.settingsVersion += 1;
+    await render(true);
+    expect(loadProviders).toHaveBeenCalledTimes(2);
+
+    const status = {
+      providers: [{ authType: 'openai', models: [{ modelId: 'new-model' }] }],
+      current: undefined,
+    };
+    loadProviders.mockResolvedValue(status);
+    signals.current.settingsVersion += 1;
+    await render(true);
+    expect(loadProviders).toHaveBeenCalledTimes(3);
+    expect(result?.providers).toEqual(status.providers);
+
+    loadProviders.mockResolvedValue({ providers: [], current: undefined });
+    await act(async () => {
+      await result?.reload();
+    });
+    expect(loadProviders).toHaveBeenCalledTimes(4);
+    expect(result?.providers).toEqual([]);
+  });
+
+  it('preserves manual loading and catches up once when reenabled', async () => {
+    loadProviders.mockResolvedValue({ providers: [], current: undefined });
+    let result: ReturnType<typeof useDaemonProviders> | undefined;
+    function TestComponent({ enabled }: { enabled: boolean }) {
+      result = useDaemonProviders({ autoLoad: false, enabled });
+      return null;
+    }
+    const render = async (enabled: boolean) => {
+      await act(async () => root.render(<TestComponent enabled={enabled} />));
+    };
+
+    await render(true);
+    expect(loadProviders).not.toHaveBeenCalled();
+    await act(async () => {
+      await result?.reload();
+    });
+    expect(loadProviders).toHaveBeenCalledTimes(1);
+    await render(false);
+    signals.current.settingsVersion += 1;
+    await render(false);
+    expect(loadProviders).toHaveBeenCalledTimes(1);
+    await render(true);
+    expect(loadProviders).toHaveBeenCalledTimes(2);
+  });
 });

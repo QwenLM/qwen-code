@@ -20,6 +20,7 @@ const CLI_BUILD_PACKAGE_PATHS = [
   'packages/channels/weixin',
   'packages/channels/dingtalk',
   'packages/channels/dws',
+  'packages/channels/email',
   'packages/channels/wecom',
   'packages/channels/feishu',
   'packages/channels/qqbot',

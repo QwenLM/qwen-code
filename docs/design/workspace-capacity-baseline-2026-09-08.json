@@ -1,0 +1,1863 @@
+{
+  "date": "2026-09-08",
+  "environment": {
+    "platform": "macOS 26.6.2 arm64",
+    "cpu": "Apple M4 Pro",
+    "logicalCpus": 12,
+    "physicalMemoryGiB": 48,
+    "node": "v22.22.3",
+    "npm": "10.9.8"
+  },
+  "artifact": {
+    "head": "1a73f5bff6201473f237c5106367e944ba2d092b",
+    "changedFile": ".qwen/experiments/11386/cap256/dist/chunks/chunk-RJYXLKEL.js",
+    "before": "var MAX_REGISTERED_WORKSPACES = MAX_DAEMON_WORKSPACES;",
+    "after": "var MAX_REGISTERED_WORKSPACES = 256;",
+    "originalSha256": "0298fc2d87007bb73ed663b3a10a698092362afa7f222f5fa0c046c7a4c9a229",
+    "modifiedSha256": "3318c999515cacc7a004a1557cd3e6a8fa7db415d754444c46c0265660cace11"
+  },
+  "units": {
+    "MiB": 1048576,
+    "cpuPercent": "100 percent is one logical CPU core"
+  },
+  "runs": [
+    {
+      "label": "boundary-n1-r1",
+      "count": 1,
+      "diagnostic": true,
+      "listenerMs": 606.351,
+      "readyMs": 1065.279,
+      "modelRequests": 0,
+      "workspaceState": {
+        "count": 1,
+        "trusted": 1
+      },
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": [],
+        "knownChildrenBeforeStop": [],
+        "remainingProcesses": []
+      },
+      "error": null,
+      "rawSha256": "3f91489e4a889bfd48d46c22d1d56d76d51b2a7c4cc4c98f37ce9231391e0a61",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 2,
+          "sampleWindowMs": 1002,
+          "daemonRssMiB": 220.555,
+          "daemonRssRangeMiB": [220.516, 220.594],
+          "daemonHeapMiB": 98.539,
+          "daemonPostGcHeapMiB": 88.345,
+          "daemonCpuOneCorePercent": 0.5344,
+          "daemonFdCount": 21,
+          "daemonNodeResources": {
+            "Timeout": 14,
+            "FSEVENTWRAP": 1
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        },
+        {
+          "phase": "registered-256",
+          "sampleCount": 2,
+          "sampleWindowMs": 1002,
+          "daemonRssMiB": 246.125,
+          "daemonRssRangeMiB": [246.125, 246.125],
+          "daemonHeapMiB": 124.047,
+          "daemonPostGcHeapMiB": 111.46,
+          "daemonCpuOneCorePercent": 0.6167,
+          "daemonFdCount": 21,
+          "daemonNodeResources": {
+            "Timeout": 523,
+            "FSEVENTWRAP": 256
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 256,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        },
+        {
+          "phase": "removed-255",
+          "sampleCount": 2,
+          "sampleWindowMs": 1002,
+          "daemonRssMiB": 235.75,
+          "daemonRssRangeMiB": [235.75, 235.75],
+          "daemonHeapMiB": 91.212,
+          "daemonPostGcHeapMiB": 89.929,
+          "daemonCpuOneCorePercent": 0.4561,
+          "daemonFdCount": 21,
+          "daemonNodeResources": {
+            "Timeout": 14,
+            "FSEVENTWRAP": 1
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ],
+      "registrationMs": 1244.66925,
+      "boundaryRejection": "POST /workspaces: 409 {\"error\":\"Workspace registration limit reached\",\"code\":\"workspace_limit_reached\"}"
+    },
+    {
+      "label": "churn-n1-r1",
+      "count": 1,
+      "diagnostic": true,
+      "listenerMs": 582.681,
+      "readyMs": 1033.64,
+      "modelRequests": 0,
+      "workspaceState": {
+        "count": 1,
+        "trusted": 1
+      },
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": [],
+        "knownChildrenBeforeStop": [],
+        "remainingProcesses": []
+      },
+      "error": null,
+      "rawSha256": "c5141d6849703d54ebddf4ad3ca56935054095b0043214abd9ce8e05baf2c317",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 2,
+          "sampleWindowMs": 1002,
+          "daemonRssMiB": 219.828,
+          "daemonRssRangeMiB": [219.797, 219.859],
+          "daemonHeapMiB": 96.898,
+          "daemonPostGcHeapMiB": 88.254,
+          "daemonCpuOneCorePercent": 0.716,
+          "daemonFdCount": 21,
+          "daemonNodeResources": {
+            "Timeout": 14,
+            "FSEVENTWRAP": 1
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        },
+        {
+          "phase": "churn-1",
+          "sampleCount": 2,
+          "sampleWindowMs": 1001,
+          "daemonRssMiB": 196.625,
+          "daemonRssRangeMiB": [196.625, 196.625],
+          "daemonHeapMiB": 94.923,
+          "daemonPostGcHeapMiB": 90.11,
+          "daemonCpuOneCorePercent": 0.5717,
+          "daemonFdCount": 21,
+          "daemonNodeResources": {
+            "Timeout": 14,
+            "FSEVENTWRAP": 1
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": [],
+          "cycleDurationMs": 214.107
+        },
+        {
+          "phase": "churn-2",
+          "sampleCount": 2,
+          "sampleWindowMs": 1002,
+          "daemonRssMiB": 196.156,
+          "daemonRssRangeMiB": [196.016, 196.297],
+          "daemonHeapMiB": 94.506,
+          "daemonPostGcHeapMiB": 90.139,
+          "daemonCpuOneCorePercent": 0.8072,
+          "daemonFdCount": 21,
+          "daemonNodeResources": {
+            "Timeout": 14,
+            "FSEVENTWRAP": 1
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": [],
+          "cycleDurationMs": 135.982
+        },
+        {
+          "phase": "churn-3",
+          "sampleCount": 2,
+          "sampleWindowMs": 1001,
+          "daemonRssMiB": 196.109,
+          "daemonRssRangeMiB": [196.109, 196.109],
+          "daemonHeapMiB": 95.595,
+          "daemonPostGcHeapMiB": 90.415,
+          "daemonCpuOneCorePercent": 0.3649,
+          "daemonFdCount": 21,
+          "daemonNodeResources": {
+            "Timeout": 14,
+            "FSEVENTWRAP": 1
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": [],
+          "cycleDurationMs": 127.162
+        },
+        {
+          "phase": "churn-4",
+          "sampleCount": 2,
+          "sampleWindowMs": 1001,
+          "daemonRssMiB": 196.484,
+          "daemonRssRangeMiB": [196.484, 196.484],
+          "daemonHeapMiB": 95.664,
+          "daemonPostGcHeapMiB": 90.31,
+          "daemonCpuOneCorePercent": 0.4248,
+          "daemonFdCount": 21,
+          "daemonNodeResources": {
+            "Timeout": 14,
+            "FSEVENTWRAP": 1
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": [],
+          "cycleDurationMs": 139.37
+        },
+        {
+          "phase": "churn-5",
+          "sampleCount": 2,
+          "sampleWindowMs": 1002,
+          "daemonRssMiB": 196.734,
+          "daemonRssRangeMiB": [196.734, 196.734],
+          "daemonHeapMiB": 95.565,
+          "daemonPostGcHeapMiB": 90.409,
+          "daemonCpuOneCorePercent": 0.3963,
+          "daemonFdCount": 21,
+          "daemonNodeResources": {
+            "Timeout": 13,
+            "FSEVENTWRAP": 1
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": [],
+          "cycleDurationMs": 150.214
+        }
+      ]
+    },
+    {
+      "label": "control-n1-r1",
+      "count": 1,
+      "diagnostic": false,
+      "listenerMs": 617.453,
+      "readyMs": 1420.677,
+      "modelRequests": 0,
+      "workspaceState": {
+        "count": 1,
+        "trusted": 1
+      },
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": [],
+        "knownChildrenBeforeStop": [],
+        "remainingProcesses": []
+      },
+      "error": null,
+      "rawSha256": "676948f28299ce70c4bb2158af658fc1b23678ea6dadddfb5326160faf39fb4b",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 5,
+          "sampleWindowMs": 20008,
+          "daemonRssMiB": 181.375,
+          "daemonRssRangeMiB": [180.156, 185.672],
+          "daemonHeapMiB": 88.772,
+          "daemonPostGcHeapMiB": 88.192,
+          "daemonCpuOneCorePercent": 0.7807,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "control-n25-r1",
+      "count": 25,
+      "diagnostic": false,
+      "listenerMs": 619.255,
+      "readyMs": 974.09,
+      "modelRequests": 0,
+      "workspaceState": {
+        "count": 25,
+        "trusted": 25
+      },
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": [],
+        "knownChildrenBeforeStop": [],
+        "remainingProcesses": []
+      },
+      "error": null,
+      "rawSha256": "04da9f43224a4cf1ec874f34c3b0f830af6b3b4ab0f768a67cbffdaaad62912c",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 5,
+          "sampleWindowMs": 20009,
+          "daemonRssMiB": 189.484,
+          "daemonRssRangeMiB": [187.719, 193.875],
+          "daemonHeapMiB": 99.081,
+          "daemonPostGcHeapMiB": 98.186,
+          "daemonCpuOneCorePercent": 0.6416,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 25,
+          "acpMounts": 25,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": 800,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "diagnostic-n1-r1",
+      "count": 1,
+      "diagnostic": true,
+      "listenerMs": 577.935,
+      "readyMs": 1043.83,
+      "modelRequests": 0,
+      "workspaceState": {
+        "count": 1,
+        "trusted": 1
+      },
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": [],
+        "knownChildrenBeforeStop": [],
+        "remainingProcesses": []
+      },
+      "error": null,
+      "rawSha256": "971f0628cd9e5933c0a93e2d8f972b8d000fedb25959bcc05bbf647c5912dd12",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 2,
+          "sampleWindowMs": 1003,
+          "daemonRssMiB": 220.055,
+          "daemonRssRangeMiB": [220.031, 220.078],
+          "daemonHeapMiB": 96.77,
+          "daemonPostGcHeapMiB": 88.234,
+          "daemonCpuOneCorePercent": 0.8955,
+          "daemonFdCount": 21,
+          "daemonNodeResources": {
+            "Timeout": 14,
+            "FSEVENTWRAP": 1
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "diagnostic-n25-r1",
+      "count": 25,
+      "diagnostic": true,
+      "listenerMs": 629.303,
+      "readyMs": 950.3,
+      "modelRequests": 0,
+      "workspaceState": {
+        "count": 25,
+        "trusted": 25
+      },
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": [],
+        "knownChildrenBeforeStop": [],
+        "remainingProcesses": []
+      },
+      "error": null,
+      "rawSha256": "330778950f6fda378813c660d52739595e76f51fb3d139d19548d06ee12dfc18",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 2,
+          "sampleWindowMs": 1002,
+          "daemonRssMiB": 230.711,
+          "daemonRssRangeMiB": [230.688, 230.734],
+          "daemonHeapMiB": 107.853,
+          "daemonPostGcHeapMiB": 98.3,
+          "daemonCpuOneCorePercent": 1.0174,
+          "daemonFdCount": 21,
+          "daemonNodeResources": {
+            "Timeout": 85,
+            "FSEVENTWRAP": 25
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 25,
+          "acpMounts": 25,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": 800,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "diagnostic-n256-r1",
+      "count": 256,
+      "diagnostic": true,
+      "listenerMs": 801.111,
+      "readyMs": 1384.566,
+      "modelRequests": 0,
+      "workspaceState": {
+        "count": 256,
+        "trusted": 256
+      },
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": [],
+        "knownChildrenBeforeStop": [],
+        "remainingProcesses": []
+      },
+      "error": null,
+      "rawSha256": "173db3e53b3602c0a18bf50dafdfb3bdfec3a871538fd123b202aad02d229a92",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 2,
+          "sampleWindowMs": 1002,
+          "daemonRssMiB": 264.234,
+          "daemonRssRangeMiB": [264.203, 264.266],
+          "daemonHeapMiB": 123.782,
+          "daemonPostGcHeapMiB": 118.999,
+          "daemonCpuOneCorePercent": 0.828,
+          "daemonFdCount": 21,
+          "daemonNodeResources": {
+            "Timeout": 779,
+            "FSEVENTWRAP": 256
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 256,
+          "acpMounts": 256,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": 8192,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "git-churn-n1-r1",
+      "count": 1,
+      "diagnostic": true,
+      "listenerMs": 628.122,
+      "readyMs": 1192.497,
+      "modelRequests": 0,
+      "workspaceState": {
+        "count": 1,
+        "trusted": 1
+      },
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": [],
+        "knownChildrenBeforeStop": [],
+        "remainingProcesses": []
+      },
+      "error": null,
+      "rawSha256": "64a5f3cc053fea853a44c17e2eedbebc349802fb0e7ad2122a74cb7e05ad7ab4",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 2,
+          "sampleWindowMs": 1003,
+          "daemonRssMiB": 221.211,
+          "daemonRssRangeMiB": [221.172, 221.25],
+          "daemonHeapMiB": 97.339,
+          "daemonPostGcHeapMiB": 88.454,
+          "daemonCpuOneCorePercent": 0.5298,
+          "daemonFdCount": 22,
+          "daemonNodeResources": {
+            "Timeout": 13,
+            "FSEVENTWRAP": 2
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        },
+        {
+          "phase": "churn-1",
+          "sampleCount": 2,
+          "sampleWindowMs": 1001,
+          "daemonRssMiB": 199.078,
+          "daemonRssRangeMiB": [199.078, 199.078],
+          "daemonHeapMiB": 93.132,
+          "daemonPostGcHeapMiB": 90.221,
+          "daemonCpuOneCorePercent": 0.6742,
+          "daemonFdCount": 22,
+          "daemonNodeResources": {
+            "Timeout": 14,
+            "FSEVENTWRAP": 2
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": [],
+          "cycleDurationMs": 1309.024
+        },
+        {
+          "phase": "churn-2",
+          "sampleCount": 2,
+          "sampleWindowMs": 1002,
+          "daemonRssMiB": 198.406,
+          "daemonRssRangeMiB": [198.406, 198.406],
+          "daemonHeapMiB": 94.59,
+          "daemonPostGcHeapMiB": 90.377,
+          "daemonCpuOneCorePercent": 0.7239,
+          "daemonFdCount": 22,
+          "daemonNodeResources": {
+            "Timeout": 13,
+            "FSEVENTWRAP": 2
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": [],
+          "cycleDurationMs": 1150.986
+        },
+        {
+          "phase": "churn-3",
+          "sampleCount": 2,
+          "sampleWindowMs": 1003,
+          "daemonRssMiB": 198.453,
+          "daemonRssRangeMiB": [198.453, 198.453],
+          "daemonHeapMiB": 95.81,
+          "daemonPostGcHeapMiB": 90.526,
+          "daemonCpuOneCorePercent": 0.5702,
+          "daemonFdCount": 22,
+          "daemonNodeResources": {
+            "Timeout": 14,
+            "FSEVENTWRAP": 2
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": [],
+          "cycleDurationMs": 1157.977
+        },
+        {
+          "phase": "churn-4",
+          "sampleCount": 2,
+          "sampleWindowMs": 1002,
+          "daemonRssMiB": 199.125,
+          "daemonRssRangeMiB": [199.125, 199.125],
+          "daemonHeapMiB": 95.856,
+          "daemonPostGcHeapMiB": 90.772,
+          "daemonCpuOneCorePercent": 0.657,
+          "daemonFdCount": 22,
+          "daemonNodeResources": {
+            "Timeout": 14,
+            "FSEVENTWRAP": 2
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": [],
+          "cycleDurationMs": 1300.422
+        },
+        {
+          "phase": "churn-5",
+          "sampleCount": 2,
+          "sampleWindowMs": 1002,
+          "daemonRssMiB": 196.422,
+          "daemonRssRangeMiB": [196.422, 196.422],
+          "daemonHeapMiB": 96.077,
+          "daemonPostGcHeapMiB": 90.719,
+          "daemonCpuOneCorePercent": 0.4144,
+          "daemonFdCount": 22,
+          "daemonNodeResources": {
+            "Timeout": 13,
+            "FSEVENTWRAP": 2
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": [],
+          "cycleDurationMs": 1291.161
+        }
+      ]
+    },
+    {
+      "label": "git-diagnostic-n1-r1",
+      "count": 1,
+      "diagnostic": true,
+      "listenerMs": 578.636,
+      "readyMs": 1043.369,
+      "modelRequests": 0,
+      "workspaceState": {
+        "count": 1,
+        "trusted": 1
+      },
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": [],
+        "knownChildrenBeforeStop": [],
+        "remainingProcesses": []
+      },
+      "error": null,
+      "rawSha256": "aaa963211ae45e974a7d238877621f002763ecbfff8666aa32d38516694fec11",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 2,
+          "sampleWindowMs": 1003,
+          "daemonRssMiB": 219.383,
+          "daemonRssRangeMiB": [219.359, 219.406],
+          "daemonHeapMiB": 97.151,
+          "daemonPostGcHeapMiB": 88.391,
+          "daemonCpuOneCorePercent": 0.6244,
+          "daemonFdCount": 22,
+          "daemonNodeResources": {
+            "Timeout": 14,
+            "FSEVENTWRAP": 2
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "git-diagnostic-n25-r1",
+      "count": 25,
+      "diagnostic": true,
+      "listenerMs": 627.389,
+      "readyMs": 1000.535,
+      "modelRequests": 0,
+      "workspaceState": {
+        "count": 25,
+        "trusted": 25
+      },
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": [],
+        "knownChildrenBeforeStop": [],
+        "remainingProcesses": []
+      },
+      "error": null,
+      "rawSha256": "9d50634b55a46df1bda877fd3949da28772a4ee8bbc390098ccd58e53c507360",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 2,
+          "sampleWindowMs": 1003,
+          "daemonRssMiB": 230.523,
+          "daemonRssRangeMiB": [230.5, 230.547],
+          "daemonHeapMiB": 113.308,
+          "daemonPostGcHeapMiB": 98.911,
+          "daemonCpuOneCorePercent": 1.1059,
+          "daemonFdCount": 46,
+          "daemonNodeResources": {
+            "Timeout": 86,
+            "FSEVENTWRAP": 50
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 25,
+          "acpMounts": 25,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": 800,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "git-diagnostic-n256-r1",
+      "count": 256,
+      "diagnostic": true,
+      "listenerMs": 886.668,
+      "readyMs": 2026.286,
+      "modelRequests": 0,
+      "workspaceState": {
+        "count": 256,
+        "trusted": 256
+      },
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": [],
+        "knownChildrenBeforeStop": [],
+        "remainingProcesses": []
+      },
+      "error": null,
+      "rawSha256": "581ff3446a2dfd563baadcf95dc9ced10d82365df8708cfbd790eef823fc0a01",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 2,
+          "sampleWindowMs": 1002,
+          "daemonRssMiB": 183.219,
+          "daemonRssRangeMiB": [183.188, 183.25],
+          "daemonHeapMiB": 122.592,
+          "daemonPostGcHeapMiB": 120.658,
+          "daemonCpuOneCorePercent": 0.6589,
+          "daemonFdCount": 277,
+          "daemonNodeResources": {
+            "Timeout": 778,
+            "FSEVENTWRAP": 512
+          },
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 256,
+          "acpMounts": 256,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": 8192,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "idle-n1-r1",
+      "count": 1,
+      "diagnostic": false,
+      "listenerMs": 552.41,
+      "readyMs": 1016.541,
+      "modelRequests": 0,
+      "workspaceState": {
+        "count": 1,
+        "trusted": 1
+      },
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": [],
+        "knownChildrenBeforeStop": [],
+        "remainingProcesses": []
+      },
+      "error": null,
+      "rawSha256": "84e631fad3fb3c931be7d5e25f61b1dbfffc3ccd217e9bd410c182f5577c7ee3",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 17,
+          "sampleWindowMs": 80040,
+          "daemonRssMiB": 175.078,
+          "daemonRssRangeMiB": [174.375, 176.219],
+          "daemonHeapMiB": 89.248,
+          "daemonPostGcHeapMiB": 88.443,
+          "daemonCpuOneCorePercent": 0.6746,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "idle-n25-r1",
+      "count": 25,
+      "diagnostic": false,
+      "listenerMs": 633.163,
+      "readyMs": 1003.904,
+      "modelRequests": 0,
+      "workspaceState": {
+        "count": 25,
+        "trusted": 25
+      },
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": [],
+        "knownChildrenBeforeStop": [],
+        "remainingProcesses": []
+      },
+      "error": null,
+      "rawSha256": "6d5740d43c0d31924ca9a3f702b7f134cb70a8d9a0a30b92507cf460b91253ad",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 17,
+          "sampleWindowMs": 80029,
+          "daemonRssMiB": 193.844,
+          "daemonRssRangeMiB": [188.25, 194.344],
+          "daemonHeapMiB": 99.371,
+          "daemonPostGcHeapMiB": 98.559,
+          "daemonCpuOneCorePercent": 0.8694,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 25,
+          "acpMounts": 25,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": 800,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "idle-n256-r1",
+      "count": 256,
+      "diagnostic": false,
+      "listenerMs": 838.931,
+      "readyMs": 1359.356,
+      "modelRequests": 0,
+      "workspaceState": {
+        "count": 256,
+        "trusted": 256
+      },
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": [],
+        "knownChildrenBeforeStop": [],
+        "remainingProcesses": []
+      },
+      "error": null,
+      "rawSha256": "45411c4615e303bed165518a19b2a8d9de29631157bbccf588d84f1c6ee46359",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 17,
+          "sampleWindowMs": 80038,
+          "daemonRssMiB": 217.531,
+          "daemonRssRangeMiB": [212.484, 218.484],
+          "daemonHeapMiB": 119.998,
+          "daemonPostGcHeapMiB": 119.118,
+          "daemonCpuOneCorePercent": 1.1162,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 256,
+          "acpMounts": 256,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": 8192,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "matrix-n1-r1",
+      "count": 1,
+      "diagnostic": false,
+      "listenerMs": 645.207,
+      "readyMs": 1158.682,
+      "modelRequests": 0,
+      "workspaceState": null,
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": []
+      },
+      "error": null,
+      "rawSha256": "81046dd7954e8a269d3d306ba399cc387952beb67e91c7bdad327b0c6abf117d",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 5,
+          "sampleWindowMs": 20004,
+          "daemonRssMiB": 181.656,
+          "daemonRssRangeMiB": [176.641, 209.641],
+          "daemonHeapMiB": 89.211,
+          "daemonPostGcHeapMiB": 88.263,
+          "daemonCpuOneCorePercent": 0.9651,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "matrix-n1-r2",
+      "count": 1,
+      "diagnostic": false,
+      "listenerMs": 566.404,
+      "readyMs": 999.933,
+      "modelRequests": 0,
+      "workspaceState": null,
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": []
+      },
+      "error": null,
+      "rawSha256": "95253a5a5e9e0a0834bcdba835c6e5d7aa14633f97943ed9d1da5c50cca41107",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 5,
+          "sampleWindowMs": 20010,
+          "daemonRssMiB": 178.281,
+          "daemonRssRangeMiB": [177.062, 178.859],
+          "daemonHeapMiB": 89.209,
+          "daemonPostGcHeapMiB": 88.286,
+          "daemonCpuOneCorePercent": 0.8535,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "matrix-n1-r3",
+      "count": 1,
+      "diagnostic": false,
+      "listenerMs": 609.416,
+      "readyMs": 1115.387,
+      "modelRequests": 0,
+      "workspaceState": null,
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": []
+      },
+      "error": null,
+      "rawSha256": "e33edd91d1e4b3134b964a86ed83927da6153c324470f3bff2a5831c283e4ad5",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 5,
+          "sampleWindowMs": 20007,
+          "daemonRssMiB": 178.719,
+          "daemonRssRangeMiB": [112.0, 179.297],
+          "daemonHeapMiB": 89.192,
+          "daemonPostGcHeapMiB": 88.28,
+          "daemonCpuOneCorePercent": 0.4555,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "matrix-n25-r1",
+      "count": 25,
+      "diagnostic": false,
+      "listenerMs": 745.133,
+      "readyMs": 1143.84,
+      "modelRequests": 0,
+      "workspaceState": null,
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": []
+      },
+      "error": null,
+      "rawSha256": "9f4fee3304af730e6847cfaf6ad91829f94b2f7b9ee37d20b334039a097eb457",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 5,
+          "sampleWindowMs": 20008,
+          "daemonRssMiB": 188.891,
+          "daemonRssRangeMiB": [187.734, 193.156],
+          "daemonHeapMiB": 99.107,
+          "daemonPostGcHeapMiB": 98.293,
+          "daemonCpuOneCorePercent": 0.6248,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 25,
+          "acpMounts": 25,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": 800,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "matrix-n25-r2",
+      "count": 25,
+      "diagnostic": false,
+      "listenerMs": 389.535,
+      "readyMs": 753.705,
+      "modelRequests": 0,
+      "workspaceState": null,
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": []
+      },
+      "error": null,
+      "rawSha256": "cd7434426fe168336bde37c9c1dc1aa34915fb6ac4ac4d25a5aa95d3c9a6c655",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 5,
+          "sampleWindowMs": 20007,
+          "daemonRssMiB": 189.188,
+          "daemonRssRangeMiB": [188.031, 193.469],
+          "daemonHeapMiB": 99.069,
+          "daemonPostGcHeapMiB": 98.285,
+          "daemonCpuOneCorePercent": 0.468,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 25,
+          "acpMounts": 25,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": 800,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "matrix-n25-r3",
+      "count": 25,
+      "diagnostic": false,
+      "listenerMs": 661.564,
+      "readyMs": 1053.925,
+      "modelRequests": 0,
+      "workspaceState": null,
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": []
+      },
+      "error": null,
+      "rawSha256": "0ff665006d038f4e2ef937c14659eb5e0561142798979ee5d4fc457421bb28a9",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 5,
+          "sampleWindowMs": 20004,
+          "daemonRssMiB": 188.531,
+          "daemonRssRangeMiB": [187.375, 192.891],
+          "daemonHeapMiB": 99.092,
+          "daemonPostGcHeapMiB": 98.285,
+          "daemonCpuOneCorePercent": 0.4636,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 25,
+          "acpMounts": 25,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": 800,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "matrix-n256-r1",
+      "count": 256,
+      "diagnostic": false,
+      "listenerMs": 839.478,
+      "readyMs": 1431.467,
+      "modelRequests": 0,
+      "workspaceState": null,
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": []
+      },
+      "error": null,
+      "rawSha256": "0f95f00cacfaa98ba24f68b6d8133604eb0a829b10a8a2593fde05b17d510c3e",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 5,
+          "sampleWindowMs": 20006,
+          "daemonRssMiB": 214.984,
+          "daemonRssRangeMiB": [213.609, 218.953],
+          "daemonHeapMiB": 120.507,
+          "daemonPostGcHeapMiB": 119.744,
+          "daemonCpuOneCorePercent": 0.8602,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 256,
+          "acpMounts": 256,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": 8192,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "matrix-n256-r2",
+      "count": 256,
+      "diagnostic": false,
+      "listenerMs": 818.656,
+      "readyMs": 1348.989,
+      "modelRequests": 0,
+      "workspaceState": null,
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": []
+      },
+      "error": null,
+      "rawSha256": "94cebcec6030570edfb0ac8df049786ad74910c204a75a1a74aa710d69c44e5b",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 5,
+          "sampleWindowMs": 20008,
+          "daemonRssMiB": 214.062,
+          "daemonRssRangeMiB": [212.703, 218.062],
+          "daemonHeapMiB": 119.673,
+          "daemonPostGcHeapMiB": 118.922,
+          "daemonCpuOneCorePercent": 0.9027,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 256,
+          "acpMounts": 256,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": 8192,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "matrix-n256-r3",
+      "count": 256,
+      "diagnostic": false,
+      "listenerMs": 838.059,
+      "readyMs": 1379.683,
+      "modelRequests": 0,
+      "workspaceState": null,
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": []
+      },
+      "error": null,
+      "rawSha256": "fa9fb061604adc0c13492a03ad180a51b2f76e1cc3d9252ad1c97d3cfdac7691",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 5,
+          "sampleWindowMs": 20007,
+          "daemonRssMiB": 213.312,
+          "daemonRssRangeMiB": [211.984, 217.328],
+          "daemonHeapMiB": 119.647,
+          "daemonPostGcHeapMiB": 118.908,
+          "daemonCpuOneCorePercent": 0.5131,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 256,
+          "acpMounts": 256,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": 8192,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ]
+    },
+    {
+      "label": "smoke-n1-r1",
+      "count": 1,
+      "diagnostic": false,
+      "listenerMs": 639.143,
+      "readyMs": 1464.319,
+      "modelRequests": 0,
+      "workspaceState": null,
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": []
+      },
+      "error": null,
+      "rawSha256": "fa9e2764102d7685106e817fb4fbd530b80300830ef024c9c0fd704ca063bef3",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 5,
+          "sampleWindowMs": 4005,
+          "daemonRssMiB": 211.031,
+          "daemonRssRangeMiB": [209.938, 211.062],
+          "daemonHeapMiB": 92.799,
+          "daemonPostGcHeapMiB": 88.147,
+          "daemonCpuOneCorePercent": 0.5899,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        },
+        {
+          "phase": "one-child",
+          "sampleCount": 5,
+          "sampleWindowMs": 4007,
+          "daemonRssMiB": 179.469,
+          "daemonRssRangeMiB": [179.219, 179.703],
+          "daemonHeapMiB": 90.01,
+          "daemonPostGcHeapMiB": 88.466,
+          "daemonCpuOneCorePercent": 0.4057,
+          "daemonFdCount": 24,
+          "daemonNodeResources": null,
+          "children": 1,
+          "childRssMiB": 222.812,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 1,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ],
+      "ensureMs": 1214.5436660000005
+    },
+    {
+      "label": "warm-n1-r1",
+      "count": 1,
+      "diagnostic": false,
+      "listenerMs": 602.85,
+      "readyMs": 1048.347,
+      "modelRequests": 0,
+      "workspaceState": {
+        "count": 1,
+        "trusted": 1
+      },
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": [],
+        "knownChildrenBeforeStop": [10854],
+        "remainingProcesses": []
+      },
+      "error": null,
+      "rawSha256": "23e69b9e2951963993d05746dae09c5bb8ec61eb11fac660769b0e8b617e5051",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 5,
+          "sampleWindowMs": 20007,
+          "daemonRssMiB": 183.094,
+          "daemonRssRangeMiB": [178.062, 211.422],
+          "daemonHeapMiB": 89.302,
+          "daemonPostGcHeapMiB": 88.277,
+          "daemonCpuOneCorePercent": 1.028,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        },
+        {
+          "phase": "one-child",
+          "sampleCount": 5,
+          "sampleWindowMs": 20013,
+          "daemonRssMiB": 184.375,
+          "daemonRssRangeMiB": [178.844, 184.688],
+          "daemonHeapMiB": 90.016,
+          "daemonPostGcHeapMiB": 88.861,
+          "daemonCpuOneCorePercent": 0.9041,
+          "daemonFdCount": 24,
+          "daemonNodeResources": null,
+          "children": 1,
+          "childRssMiB": 193.484,
+          "registeredWorkspaces": 1,
+          "acpMounts": 1,
+          "activeSessions": 0,
+          "activeAcpChildren": 1,
+          "maxTotalSessions": null,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ],
+      "ensureMs": 1168.5588329999991
+    },
+    {
+      "label": "warm-n25-r1",
+      "count": 25,
+      "diagnostic": false,
+      "listenerMs": 628.245,
+      "readyMs": 996.148,
+      "modelRequests": 0,
+      "workspaceState": {
+        "count": 25,
+        "trusted": 25
+      },
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": [],
+        "knownChildrenBeforeStop": [11395],
+        "remainingProcesses": []
+      },
+      "error": null,
+      "rawSha256": "b66d16e48e88cbf5fa68b2b4259f243958476600ca88a809e873de623d5532cc",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 5,
+          "sampleWindowMs": 20014,
+          "daemonRssMiB": 188.891,
+          "daemonRssRangeMiB": [187.641, 193.141],
+          "daemonHeapMiB": 99.102,
+          "daemonPostGcHeapMiB": 98.322,
+          "daemonCpuOneCorePercent": 0.8279,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 25,
+          "acpMounts": 25,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": 800,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        },
+        {
+          "phase": "one-child",
+          "sampleCount": 5,
+          "sampleWindowMs": 20012,
+          "daemonRssMiB": 194.344,
+          "daemonRssRangeMiB": [194.141, 194.531],
+          "daemonHeapMiB": 100.006,
+          "daemonPostGcHeapMiB": 98.878,
+          "daemonCpuOneCorePercent": 0.5892,
+          "daemonFdCount": 24,
+          "daemonNodeResources": null,
+          "children": 1,
+          "childRssMiB": 190.922,
+          "registeredWorkspaces": 25,
+          "acpMounts": 25,
+          "activeSessions": 0,
+          "activeAcpChildren": 1,
+          "maxTotalSessions": 800,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ],
+      "ensureMs": 1185.9690830000036
+    },
+    {
+      "label": "warm-n256-r1",
+      "count": 256,
+      "diagnostic": false,
+      "listenerMs": 813.571,
+      "readyMs": 1405.008,
+      "modelRequests": 0,
+      "workspaceState": {
+        "count": 256,
+        "trusted": 256
+      },
+      "cleanup": {
+        "exitCode": 0,
+        "signalCode": null,
+        "portClosed": true,
+        "remainingChildren": [],
+        "knownChildrenBeforeStop": [13004],
+        "remainingProcesses": []
+      },
+      "error": null,
+      "rawSha256": "2c1ab4b88f9bcc40c8a30a79e11a8d6c15893a574504ed799a3bb899e2838698",
+      "phases": [
+        {
+          "phase": "cold",
+          "sampleCount": 5,
+          "sampleWindowMs": 20012,
+          "daemonRssMiB": 213.094,
+          "daemonRssRangeMiB": [212.016, 217.172],
+          "daemonHeapMiB": 119.964,
+          "daemonPostGcHeapMiB": 118.924,
+          "daemonCpuOneCorePercent": 1.1108,
+          "daemonFdCount": 21,
+          "daemonNodeResources": null,
+          "children": 0,
+          "childRssMiB": 0.0,
+          "registeredWorkspaces": 256,
+          "acpMounts": 256,
+          "activeSessions": 0,
+          "activeAcpChildren": 0,
+          "maxTotalSessions": 8192,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        },
+        {
+          "phase": "one-child",
+          "sampleCount": 5,
+          "sampleWindowMs": 20010,
+          "daemonRssMiB": 212.812,
+          "daemonRssRangeMiB": [212.656, 213.047],
+          "daemonHeapMiB": 120.874,
+          "daemonPostGcHeapMiB": 119.781,
+          "daemonCpuOneCorePercent": 1.1752,
+          "daemonFdCount": 24,
+          "daemonNodeResources": null,
+          "children": 1,
+          "childRssMiB": 192.234,
+          "registeredWorkspaces": 256,
+          "acpMounts": 256,
+          "activeSessions": 0,
+          "activeAcpChildren": 1,
+          "maxTotalSessions": 8192,
+          "childHeapModel": {
+            "mode": "observe",
+            "maxConcurrentChildren": 25,
+            "perChildCeilingMb": 942,
+            "refusals": 0
+          },
+          "status": "ok",
+          "issues": []
+        }
+      ],
+      "ensureMs": 1128.3277080000262
+    }
+  ]
+}

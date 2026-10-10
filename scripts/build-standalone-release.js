@@ -14,6 +14,7 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
+import { parse as parseYaml } from 'yaml';
 import {
   TARGET_CLIPBOARD_PACKAGE,
   standaloneArchiveName,
@@ -63,6 +64,12 @@ const RELEASE_TARGETS = [
 const DEFAULT_RUNTIME = 'node';
 const DEFAULT_BUN_VERSION = '1.3.14';
 const BUN_RELEASE_BASE_URL = 'https://github.com/oven-sh/bun/releases/download';
+// The runtime downloads are the publish job's least reliable leg: one
+// transient download failure aborted the v0.23.4 publish while the
+// unchanged re-run passed. Bound each attempt and retry before failing.
+const MAX_DOWNLOAD_ATTEMPTS = 3;
+const INITIAL_DOWNLOAD_BACKOFF_MS = 5_000;
+const DOWNLOAD_TIMEOUT_MS = 120_000;
 
 // Temporary OpenTUI preview: the bundled OpenTUI backend resolves its native
 // render library at runtime via `import('@opentui/core-<platform>-<arch>')`,
@@ -71,8 +78,7 @@ const BUN_RELEASE_BASE_URL = 'https://github.com/oven-sh/bun/releases/download';
 // packaging cross-builds all targets from a single host. Linux is glibc-only
 // on purpose: RELEASE_TARGETS bundles glibc-linked Bun binaries that cannot
 // start on musl hosts, so the -musl render packages would be dead weight
-// claiming support the archive cannot deliver. Declared before the
-// top-level `main()` call below (ESM const TDZ).
+// claiming support the archive cannot deliver.
 const OPENTUI_PLATFORM_PACKAGES = [
   '@opentui/core-darwin-arm64',
   '@opentui/core-darwin-x64',
@@ -81,15 +87,6 @@ const OPENTUI_PLATFORM_PACKAGES = [
   '@opentui/core-win32-arm64',
   '@opentui/core-win32-x64',
 ];
-
-if (isMainModule()) {
-  try {
-    await main();
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  }
-}
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -132,16 +129,16 @@ async function main() {
     // checksum list (Node.js SHASUMS256.txt vs Bun's), so fetch one per flavor.
     const checksums = {};
     for (const flavor of flavors) {
-      const checksumsPath = path.join(runtimeDir, `${flavor}-SHASUMS256.txt`);
-      await downloadFile(
-        `${flavor === 'bun' ? bunDistUrl : nodeDistUrl}/SHASUMS256.txt`,
-        checksumsPath,
-      );
-      checksums[flavor] = parseChecksums(
-        fs.readFileSync(checksumsPath, 'utf8'),
-      );
+      checksums[flavor] = await downloadRuntimeChecksums({
+        runtime: flavor,
+        distUrl: flavor === 'bun' ? bunDistUrl : nodeDistUrl,
+        checksumsPath: path.join(runtimeDir, `${flavor}-SHASUMS256.txt`),
+        expectedArchives: RELEASE_TARGETS.map((target) =>
+          runtimeArchiveName({ ...target, runtime: flavor, nodeVersion }),
+        ),
+      });
     }
-    const nativeModulesDir = stageClipboardPackages(runtimeDir);
+    const nativeModulesDir = stageNativeModules(runtimeDir);
     // Only the bun runtime consumes the staged OpenTUI packages; the classic
     // Node packaging must not install them (nor fail on a missing lockfile
     // entry) at all.
@@ -178,6 +175,22 @@ function isMainModule() {
   return process.argv[1] && path.resolve(process.argv[1]) === __filename;
 }
 
+function runtimeArchiveName({
+  runtime,
+  nodeVersion,
+  nodeTarget,
+  nodeArchiveExtension,
+  bunAsset,
+}) {
+  return runtime === 'bun'
+    ? `${bunAsset}.zip`
+    : `node-v${nodeVersion}-${nodeTarget}.${nodeArchiveExtension}`;
+}
+
+function runtimeLabel(runtime) {
+  return runtime === 'bun' ? 'Bun' : 'Node.js';
+}
+
 async function packageTarget({
   qwenTarget,
   nodeTarget,
@@ -194,24 +207,23 @@ async function packageTarget({
   nativeModulesDir,
   opentuiModulesDir,
 }) {
-  let archiveName;
-  let archiveUrlBase;
-  if (runtime === 'bun') {
-    archiveName = `${bunAsset}.zip`;
-    archiveUrlBase = bunDistUrl;
-  } else {
-    archiveName = `node-v${nodeVersion}-${nodeTarget}.${nodeArchiveExtension}`;
-    archiveUrlBase = nodeDistUrl;
-  }
+  const archiveName = runtimeArchiveName({
+    runtime,
+    nodeVersion,
+    nodeTarget,
+    nodeArchiveExtension,
+    bunAsset,
+  });
+  const archiveUrlBase = runtime === 'bun' ? bunDistUrl : nodeDistUrl;
   const archivePath = path.join(runtimeDir, archiveName);
 
-  await downloadFile(`${archiveUrlBase}/${archiveName}`, archivePath);
-  await verifyNodeArchive(
+  await downloadRuntimeArchive({
+    archiveUrl: `${archiveUrlBase}/${archiveName}`,
     archivePath,
     archiveName,
     checksums,
-    runtime === 'bun' ? 'Bun' : 'Node.js',
-  );
+    label: runtimeLabel(runtime),
+  });
 
   const args = [
     'scripts/create-standalone-package.js',
@@ -239,10 +251,23 @@ async function packageTarget({
   });
 }
 
-function readClipboardPackageSpecs() {
-  const packageLock = JSON.parse(
-    fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf8'),
+// The release installs from pnpm-lock.yaml, so that is where every target's
+// native package version comes from. Only the build host's own platform
+// package is installed, so the installed tree cannot answer for the others.
+let pnpmLockedKeys;
+function readPnpmLockedVersion(packageName) {
+  pnpmLockedKeys ??= Object.keys(
+    parseYaml(fs.readFileSync(path.join(rootDir, 'pnpm-lock.yaml'), 'utf8'))
+      ?.packages ?? {},
   );
+  const versions = pnpmLockedKeys
+    .filter((key) => key.startsWith(`${packageName}@`))
+    .map((key) => key.slice(packageName.length + 1));
+  // Two locked versions would leave the staged one ambiguous; fail instead.
+  return versions.length === 1 ? versions[0] : undefined;
+}
+
+function readClipboardPackageSpecs() {
   const cliPackage = JSON.parse(
     fs.readFileSync(
       path.join(rootDir, 'packages', 'cli', 'package.json'),
@@ -255,8 +280,7 @@ function readClipboardPackageSpecs() {
   ];
 
   return packageNames.map((packageName) => {
-    const version =
-      packageLock.packages?.[`node_modules/${packageName}`]?.version;
+    const version = readPnpmLockedVersion(packageName);
     const declaredVersion = cliPackage.optionalDependencies?.[packageName];
     if (!version || ![version, `^${version}`].includes(declaredVersion)) {
       fail(`Clipboard package version is not locked for ${packageName}`);
@@ -265,10 +289,34 @@ function readClipboardPackageSpecs() {
   });
 }
 
-function stageClipboardPackages(runtimeDir) {
+// node-pty pins live in the root package.json optionalDependencies (mirrored
+// in packages/core). The wrapper plus every pinned platform package must be
+// staged because release packaging cross-builds all targets from a single
+// host — the host's own node_modules only ever carries one platform's
+// prebuild, and getPty() resolves the platform package from node_modules at
+// runtime (#11872). Deriving the list from the root manifest keeps it in sync
+// when a platform pin is added (e.g. linux-arm64).
+function readNodePtyPackageSpecs() {
+  const rootPackage = JSON.parse(
+    fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'),
+  );
+  const packageNames = Object.keys(
+    rootPackage.optionalDependencies ?? {},
+  ).filter((packageName) => packageName.startsWith('@lydell/node-pty'));
+
+  return packageNames.map((packageName) => {
+    const version = readPnpmLockedVersion(packageName);
+    if (!version) {
+      fail(`node-pty package version is not locked for ${packageName}`);
+    }
+    return `${packageName}@${version}`;
+  });
+}
+
+function stageNativeModules(runtimeDir) {
   const installDir = path.join(runtimeDir, 'clipboard-modules');
   fs.mkdirSync(installDir, { recursive: true });
-  console.log('Staging standalone clipboard native packages');
+  console.log('Staging standalone native packages (clipboard, node-pty)');
   const npmExecPath = process.env.npm_execpath;
   if (!npmExecPath) {
     fail('npm_execpath is unavailable; run package:standalone:release via npm');
@@ -287,6 +335,7 @@ function stageClipboardPackages(runtimeDir) {
       '--no-audit',
       '--no-fund',
       ...readClipboardPackageSpecs(),
+      ...readNodePtyPackageSpecs(),
     ],
     {
       cwd: rootDir,
@@ -300,13 +349,8 @@ function stageClipboardPackages(runtimeDir) {
 // render library at runtime via `import('@opentui/core-<platform>-<arch>')`,
 // so each standalone archive must ship the matching platform package(s).
 function readOpenTuiPackageSpecs() {
-  const packageLock = JSON.parse(
-    fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf8'),
-  );
-
   return OPENTUI_PLATFORM_PACKAGES.map((packageName) => {
-    const version =
-      packageLock.packages?.[`node_modules/${packageName}`]?.version;
+    const version = readPnpmLockedVersion(packageName);
     if (!version) {
       fail(`OpenTUI platform package version is not locked for ${packageName}`);
     }
@@ -345,9 +389,11 @@ function stageOpenTuiPackages(runtimeDir) {
   return path.join(installDir, 'node_modules');
 }
 
-async function downloadFile(url, destination) {
+async function downloadFile(url, destination, { fetchImpl = fetch } = {}) {
   console.log(`Downloading ${url}`);
-  const response = await fetch(url);
+  const response = await fetchImpl(url, {
+    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+  });
   if (!response.ok) {
     fail(
       `Failed to download ${url}: ${response.status} ${response.statusText}`,
@@ -362,6 +408,93 @@ async function downloadFile(url, destination) {
   );
 }
 
+// verify runs after each attempt: an integrity failure means the bytes on
+// disk are bad, so the retry re-downloads instead of reusing them.
+async function downloadWithRetry(
+  url,
+  destination,
+  {
+    verify,
+    fetchImpl = fetch,
+    sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  } = {},
+) {
+  for (let attempt = 1; attempt <= MAX_DOWNLOAD_ATTEMPTS; attempt += 1) {
+    try {
+      await downloadFile(url, destination, { fetchImpl });
+      await verify?.();
+      return;
+    } catch (error) {
+      if (attempt >= MAX_DOWNLOAD_ATTEMPTS) {
+        throw error;
+      }
+      const delayMs = INITIAL_DOWNLOAD_BACKOFF_MS * 2 ** (attempt - 1);
+      const message = error instanceof Error ? error.message : String(error);
+      // A real undici network failure reads only "fetch failed"; the
+      // discriminating detail (ECONNRESET, ENOTFOUND, ...) is on the cause.
+      const cause =
+        error instanceof Error && error.cause instanceof Error
+          ? error.cause.message
+          : undefined;
+      console.warn(
+        `Download attempt ${attempt}/${MAX_DOWNLOAD_ATTEMPTS} failed for ${url}: ${message}${
+          cause ? ` (cause: ${cause})` : ''
+        }, retrying in ${delayMs / 1000}s...`,
+      );
+      await sleepImpl(delayMs);
+    }
+  }
+}
+
+// The archive leg's download-and-verify wiring, lifted out of packageTarget so
+// tests pin it behaviourally (a rejected download must be re-fetched) instead
+// of matching its source spelling.
+async function downloadRuntimeArchive({
+  archiveUrl,
+  archivePath,
+  archiveName,
+  checksums,
+  label,
+  fetchImpl,
+  sleepImpl,
+}) {
+  await downloadWithRetry(archiveUrl, archivePath, {
+    verify: () => verifyNodeArchive(archivePath, archiveName, checksums, label),
+    fetchImpl,
+    sleepImpl,
+  });
+}
+
+// The checksum list is the one download the archive legs cannot re-fetch, so
+// verify it inside the retry: a corrupt or truncated list is downloaded again
+// instead of poisoning every archive check that shares the parsed map.
+async function downloadRuntimeChecksums({
+  runtime,
+  distUrl,
+  checksumsPath,
+  expectedArchives,
+  fetchImpl,
+  sleepImpl,
+}) {
+  let checksums;
+  await downloadWithRetry(`${distUrl}/SHASUMS256.txt`, checksumsPath, {
+    verify: () => {
+      checksums = parseChecksums(fs.readFileSync(checksumsPath, 'utf8'));
+      const missing = expectedArchives.filter(
+        (archiveName) => !checksums.has(archiveName),
+      );
+      if (missing.length > 0) {
+        fail(
+          `${runtimeLabel(runtime)} SHASUMS256.txt does not list ${missing.join(', ')}`,
+        );
+      }
+    },
+    fetchImpl,
+    sleepImpl,
+  });
+  return checksums;
+}
+
 function parseChecksums(content) {
   const checksums = new Map();
   for (const line of content.split(/\r?\n/)) {
@@ -374,10 +507,10 @@ function parseChecksums(content) {
 }
 
 async function verifyNodeArchive(archivePath, archiveName, checksums, label) {
-  const runtimeLabel = label || 'Node.js';
+  const displayLabel = label || 'Node.js';
   const expected = checksums.get(archiveName);
   if (!expected) {
-    fail(`${runtimeLabel} SHASUMS256.txt does not list ${archiveName}`);
+    fail(`${displayLabel} SHASUMS256.txt does not list ${archiveName}`);
   }
 
   const actual = await sha256File(archivePath);
@@ -385,7 +518,7 @@ async function verifyNodeArchive(archivePath, archiveName, checksums, label) {
     fail(`Checksum verification failed for ${archiveName}`);
   }
 
-  console.log(`Verified ${runtimeLabel} runtime checksum for ${archiveName}`);
+  console.log(`Verified ${displayLabel} runtime checksum for ${archiveName}`);
 }
 
 async function sha256File(filePath) {
@@ -525,7 +658,21 @@ function fail(message) {
 
 export {
   assertStandaloneOutput,
+  downloadRuntimeArchive,
+  downloadRuntimeChecksums,
+  downloadWithRetry,
   parseChecksums,
   readClipboardPackageSpecs,
+  readNodePtyPackageSpecs,
   RELEASE_TARGETS,
+  runtimeArchiveName,
 };
+
+if (isMainModule()) {
+  try {
+    await main();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  }
+}

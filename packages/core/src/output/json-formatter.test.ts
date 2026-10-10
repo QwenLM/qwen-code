@@ -10,54 +10,46 @@ import { JsonFormatter } from './json-formatter.js';
 import type { JsonError } from './types.js';
 
 describe('JsonFormatter', () => {
+  const format = (...args: Parameters<JsonFormatter['format']>) =>
+    JSON.parse(new JsonFormatter().format(...args));
+
+  /** Returns formatError's raw text and its parsed form. */
+  function formatError(error: Error, code?: string | number) {
+    const formatted = new JsonFormatter().formatError(error, code);
+    return { formatted, parsed: JSON.parse(formatted) };
+  }
+
   it('should format the response as JSON', () => {
-    const formatter = new JsonFormatter();
     const response = 'This is a test response.';
-    const formatted = formatter.format(response);
-    const expected = {
-      response,
-    };
-    expect(JSON.parse(formatted)).toEqual(expected);
+    expect(format(response)).toEqual({ response });
   });
 
   it('should strip ANSI escape sequences from response text', () => {
-    const formatter = new JsonFormatter();
-    const responseWithAnsi =
-      '\x1B[31mRed text\x1B[0m and \x1B[32mGreen text\x1B[0m';
-    const formatted = formatter.format(responseWithAnsi);
-    const parsed = JSON.parse(formatted);
-    expect(parsed.response).toBe('Red text and Green text');
+    const withAnsi = '\x1B[31mRed text\x1B[0m and \x1B[32mGreen text\x1B[0m';
+    expect(format(withAnsi).response).toBe('Red text and Green text');
   });
 
   it('should strip control characters from response text', () => {
-    const formatter = new JsonFormatter();
-    const responseWithControlChars =
-      'Text with\x07 bell\x08 and\x0B vertical tab';
-    const formatted = formatter.format(responseWithControlChars);
-    const parsed = JSON.parse(formatted);
+    const withControlChars = 'Text with\x07 bell\x08 and\x0B vertical tab';
     // Only ANSI codes are stripped, other control chars are preserved
-    expect(parsed.response).toBe('Text with\x07 bell\x08 and\x0B vertical tab');
+    expect(format(withControlChars).response).toBe(
+      'Text with\x07 bell\x08 and\x0B vertical tab',
+    );
   });
 
   it('should preserve newlines and tabs in response text', () => {
-    const formatter = new JsonFormatter();
-    const responseWithWhitespace = 'Line 1\nLine 2\r\nLine 3\twith tab';
-    const formatted = formatter.format(responseWithWhitespace);
-    const parsed = JSON.parse(formatted);
-    expect(parsed.response).toBe('Line 1\nLine 2\r\nLine 3\twith tab');
+    const withWhitespace = 'Line 1\nLine 2\r\nLine 3\twith tab';
+    expect(format(withWhitespace).response).toBe(
+      'Line 1\nLine 2\r\nLine 3\twith tab',
+    );
   });
 
   it('should format the response as JSON with stats', () => {
-    const formatter = new JsonFormatter();
     const response = 'This is a test response.';
     const stats: SessionMetrics = {
       models: {
         'gemini-2.5-pro': {
-          api: {
-            totalRequests: 2,
-            totalErrors: 0,
-            totalLatencyMs: 5672,
-          },
+          api: { totalRequests: 2, totalErrors: 0, totalLatencyMs: 5672 },
           tokens: {
             prompt: 24401,
             candidates: 215,
@@ -68,11 +60,7 @@ describe('JsonFormatter', () => {
           bySource: {},
         },
         'gemini-2.5-flash': {
-          api: {
-            totalRequests: 2,
-            totalErrors: 0,
-            totalLatencyMs: 5914,
-          },
+          api: { totalRequests: 2, totalErrors: 0, totalLatencyMs: 5914 },
           tokens: {
             prompt: 20803,
             candidates: 716,
@@ -88,82 +76,45 @@ describe('JsonFormatter', () => {
         totalSuccess: 1,
         totalFail: 0,
         totalDurationMs: 4582,
-        totalDecisions: {
-          accept: 0,
-          reject: 0,
-          modify: 0,
-          auto_accept: 1,
-        },
+        totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 1 },
         byName: {
           google_web_search: {
             count: 1,
             success: 1,
             fail: 0,
             durationMs: 4582,
-            decisions: {
-              accept: 0,
-              reject: 0,
-              modify: 0,
-              auto_accept: 1,
-            },
+            decisions: { accept: 0, reject: 0, modify: 0, auto_accept: 1 },
           },
         },
       },
-      files: {
-        totalLinesAdded: 0,
-        totalLinesRemoved: 0,
-      },
+      files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
     };
-    const formatted = formatter.format(response, stats);
-    const expected = {
-      response,
-      stats,
-    };
-    expect(JSON.parse(formatted)).toEqual(expected);
+    expect(format(response, stats)).toEqual({ response, stats });
   });
 
   it('should format error as JSON', () => {
-    const formatter = new JsonFormatter();
     const error: JsonError = {
       type: 'ValidationError',
       message: 'Invalid input provided',
       code: 400,
     };
-    const formatted = formatter.format(undefined, undefined, error);
-    const expected = {
-      error,
-    };
-    expect(JSON.parse(formatted)).toEqual(expected);
+    expect(format(undefined, undefined, error)).toEqual({ error });
   });
 
   it('should format response with error as JSON', () => {
-    const formatter = new JsonFormatter();
     const response = 'Partial response';
     const error: JsonError = {
       type: 'TimeoutError',
       message: 'Request timed out',
       code: 'TIMEOUT',
     };
-    const formatted = formatter.format(response, undefined, error);
-    const expected = {
-      response,
-      error,
-    };
-    expect(JSON.parse(formatted)).toEqual(expected);
+    expect(format(response, undefined, error)).toEqual({ response, error });
   });
 
   it('should format error using formatError method', () => {
-    const formatter = new JsonFormatter();
-    const error = new Error('Something went wrong');
-    const formatted = formatter.formatError(error, 500);
-    const parsed = JSON.parse(formatted);
-
+    const { parsed } = formatError(new Error('Something went wrong'), 500);
     expect(parsed).toEqual({
-      error: {
-        type: 'Error',
-        message: 'Something went wrong',
-        code: 500,
-      },
+      error: { type: 'Error', message: 'Something went wrong', code: 500 },
     });
   });
 
@@ -175,21 +126,13 @@ describe('JsonFormatter', () => {
       }
     }
 
-    const formatter = new JsonFormatter();
-    const error = new CustomError('Custom error occurred');
-    const formatted = formatter.formatError(error);
-    const parsed = JSON.parse(formatted);
-
+    const { parsed } = formatError(new CustomError('Custom error occurred'));
     expect(parsed).toEqual({
-      error: {
-        type: 'CustomError',
-        message: 'Custom error occurred',
-      },
+      error: { type: 'CustomError', message: 'Custom error occurred' },
     });
   });
 
   it('should format complete JSON output with response, stats, and error', () => {
-    const formatter = new JsonFormatter();
     const response = 'Partial response before error';
     const stats: SessionMetrics = {
       models: {},
@@ -198,42 +141,22 @@ describe('JsonFormatter', () => {
         totalSuccess: 0,
         totalFail: 1,
         totalDurationMs: 0,
-        totalDecisions: {
-          accept: 0,
-          reject: 0,
-          modify: 0,
-          auto_accept: 0,
-        },
+        totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
         byName: {},
       },
-      files: {
-        totalLinesAdded: 0,
-        totalLinesRemoved: 0,
-      },
+      files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
     };
     const error: JsonError = {
       type: 'ApiError',
       message: 'Rate limit exceeded',
       code: 429,
     };
-
-    const formatted = formatter.format(response, stats, error);
-    const expected = {
-      response,
-      stats,
-      error,
-    };
-    expect(JSON.parse(formatted)).toEqual(expected);
+    expect(format(response, stats, error)).toEqual({ response, stats, error });
   });
 
   it('should handle error messages containing JSON content', () => {
-    const formatter = new JsonFormatter();
-    const errorWithJson = new Error(
-      'API returned: {"error": "Invalid request", "code": 400}',
-    );
-    const formatted = formatter.formatError(errorWithJson, 'API_ERROR');
-    const parsed = JSON.parse(formatted);
-
+    const message = 'API returned: {"error": "Invalid request", "code": 400}';
+    const { formatted, parsed } = formatError(new Error(message), 'API_ERROR');
     expect(parsed).toEqual({
       error: {
         type: 'Error',
@@ -241,59 +164,43 @@ describe('JsonFormatter', () => {
         code: 'API_ERROR',
       },
     });
-
     // Verify the entire output is valid JSON
     expect(() => JSON.parse(formatted)).not.toThrow();
   });
 
   it('should handle error messages with quotes and special characters', () => {
-    const formatter = new JsonFormatter();
-    const errorWithQuotes = new Error('Error: "quoted text" and \\backslash');
-    const formatted = formatter.formatError(errorWithQuotes);
-    const parsed = JSON.parse(formatted);
-
+    const { formatted, parsed } = formatError(
+      new Error('Error: "quoted text" and \\backslash'),
+    );
     expect(parsed).toEqual({
-      error: {
-        type: 'Error',
-        message: 'Error: "quoted text" and \\backslash',
-      },
+      error: { type: 'Error', message: 'Error: "quoted text" and \\backslash' },
     });
-
     // Verify the entire output is valid JSON
     expect(() => JSON.parse(formatted)).not.toThrow();
   });
 
   it('should handle error messages with control characters', () => {
-    const formatter = new JsonFormatter();
-    const errorWithControlChars = new Error('Error with\n newline and\t tab');
-    const formatted = formatter.formatError(errorWithControlChars);
-    const parsed = JSON.parse(formatted);
-
+    const { formatted, parsed } = formatError(
+      new Error('Error with\n newline and\t tab'),
+    );
     // Should preserve newlines and tabs as they are common whitespace characters
     expect(parsed.error.message).toBe('Error with\n newline and\t tab');
-
     // Verify the entire output is valid JSON
     expect(() => JSON.parse(formatted)).not.toThrow();
   });
 
   it('should strip ANSI escape sequences from error messages', () => {
-    const formatter = new JsonFormatter();
-    const errorWithAnsi = new Error('\x1B[31mRed error\x1B[0m message');
-    const formatted = formatter.formatError(errorWithAnsi);
-    const parsed = JSON.parse(formatted);
-
+    const { formatted, parsed } = formatError(
+      new Error('\x1B[31mRed error\x1B[0m message'),
+    );
     expect(parsed.error.message).toBe('Red error message');
     expect(() => JSON.parse(formatted)).not.toThrow();
   });
 
   it('should strip unsafe control characters from error messages', () => {
-    const formatter = new JsonFormatter();
-    const errorWithControlChars = new Error(
-      'Error\x07 with\x08 control\x0B chars',
+    const { formatted, parsed } = formatError(
+      new Error('Error\x07 with\x08 control\x0B chars'),
     );
-    const formatted = formatter.formatError(errorWithControlChars);
-    const parsed = JSON.parse(formatted);
-
     // Only ANSI codes are stripped, other control chars are preserved
     expect(parsed.error.message).toBe('Error\x07 with\x08 control\x0B chars');
     expect(() => JSON.parse(formatted)).not.toThrow();

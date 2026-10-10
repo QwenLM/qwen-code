@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  DAEMON_INPUT_ANNOTATIONS_META_KEY,
+  parseBackgroundNotificationTurn,
+} from './bridgeTypes.js';
 import type {
   SessionUpdate,
   ToolCallContent,
@@ -13,21 +17,38 @@ import type {
 // Use the Node-free transcriptRecords subpath so the browser replay bundle
 // does not pull in the full core package barrel.
 import {
+  isInternalCodeModeToolResult,
   projectUserTranscriptForDisplay,
   stripGeneratedAttachmentTokens,
   type TranscriptProjectionDiagnostic,
   type TranscriptRecordInput,
   type TranscriptReplayGapInput,
 } from '@qwen-code/qwen-code-core/transcriptRecords';
+// Telemetry event names, matched against the `ui_telemetry` records this
+// module projects. Its own Node-free subpath: `constants.ts` imports nothing,
+// and core's `utils/` layer may not re-export a value from outside itself.
 import {
+  EVENT_API_ERROR,
+  EVENT_API_RESPONSE,
+  EVENT_TOOL_CALL,
+} from '@qwen-code/qwen-code-core/telemetryConstants';
+import {
+  GOAL_PAUSE_REASON_COMMAND,
   isGoalCheckpointBookkeepingRecord,
   parseGoalSnapshotV2,
   parseGoalStateCause,
   parseGoalStateRecordPayloadV2,
-  projectGoalStateToLegacy,
+  projectGoalCard,
   type GoalSnapshotV2,
   type GoalStateCause,
 } from '@qwen-code/qwen-code-core/goalWire';
+// Type-only (erased): this module ships in the browser replay bundle.
+import type {
+  QwenAgentMessageMeta,
+  SessionAgentAuthor,
+  SessionAgentStep,
+  SessionAgentTerminalStatus,
+} from '@qwen-code/qwen-code-core';
 
 export const MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
@@ -51,6 +72,7 @@ export interface TranscriptReplayUsageState {
 export interface PendingTranscriptToolCall {
   readonly callId: string;
   readonly toolName: string;
+  readonly resolvedToolName?: string;
   readonly sourceRecordId: string;
   readonly sourceTimestamp?: string;
   /**
@@ -59,6 +81,14 @@ export interface PendingTranscriptToolCall {
    * against both.
    */
   readonly rawCallId?: string;
+  /**
+   * Set once a timing frame has claimed this call, so a second telemetry
+   * record naming the same recorded id resolves to the next allocation
+   * instead of re-claiming this one. Persisted with the rest of the pending
+   * entry because a page can split between a call and its telemetry.
+   */
+  readonly timingMatched?: true;
+  readonly toolLifecycleExecutionId?: string;
 }
 
 export interface TranscriptReplayStateV1 {
@@ -92,6 +122,14 @@ export interface TranscriptReplayMachineOptions {
   readonly presentation?: TranscriptReplayPresentationAdapter;
   readonly onDiagnostic?: (diagnostic: TranscriptProjectionDiagnostic) => void;
   readonly skipFinalizeCallIds?: ReadonlySet<string>;
+  /**
+   * Emit a timing frame for every `ui_telemetry` record (see
+   * {@link createTranscriptTimingUpdate}). Off by default: these frames add
+   * one update per recorded request and per recorded tool call, and the bulk
+   * `session/load` replay is capped at a fixed number of updates. Paged
+   * replay, which is bounded by records and bytes per page, turns it on.
+   */
+  readonly includeTiming?: boolean;
 }
 
 export interface TranscriptReplayMachine {
@@ -106,6 +144,12 @@ interface UpdateMetaOptions {
   readonly planToolCallId?: string;
   readonly todoPlanId?: string;
   readonly resultPreviewText?: string;
+  /**
+   * Explicit `qwenTranscript.segmentId`. Set only where live and replay must
+   * agree on a segment id the record alone determines (session agent
+   * records); the replay machine then keeps it instead of deriving one.
+   */
+  readonly segmentId?: string;
   readonly extra?: Readonly<Record<string, unknown>>;
 }
 
@@ -169,8 +213,8 @@ const TRANSCRIPT_GOAL_STATUS_KINDS = new Set([
   // A paused goal is not running, and dropping the card here is not neutral:
   // the replay stream is what feeds the goal renderer, so the older `set` card
   // stays newest and every surface keeps claiming autonomous work is under way.
-  // Kept in step with `GOAL_STATUS_KINDS`, which the daemon-side reader
-  // (`parseGoalStatusItem`) validates the same on-disk cards against.
+  // Kept in step with `GOAL_CARD_KINDS` in core's `goal-legacy-cards.ts`,
+  // which the daemon-side readers validate the same on-disk cards against.
   'paused',
   'checking',
 ]);
@@ -234,6 +278,7 @@ function buildUpdateMeta(
     ...(options.resultPreviewText
       ? { resultPreviewText: options.resultPreviewText }
       : {}),
+    ...(options.segmentId ? { segmentId: options.segmentId } : {}),
   };
   const meta: Record<string, unknown> = {
     ...(options.extra ?? {}),
@@ -257,6 +302,182 @@ export function createTranscriptMessageUpdate(
     content: { type: 'text', text: options.text },
     ...(meta ? { _meta: meta } : {}),
   } as SessionUpdate;
+}
+
+const AGENT_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
+  'completed',
+  'failed',
+  'cancelled',
+  'offline',
+] satisfies SessionAgentTerminalStatus[]);
+
+function parseAgentAuthor(value: unknown): SessionAgentAuthor | undefined {
+  if (
+    !isObjectRecord(value) ||
+    typeof value['agentId'] !== 'string' ||
+    typeof value['name'] !== 'string'
+  ) {
+    return undefined;
+  }
+  const program = value['program'];
+  return {
+    agentId: value['agentId'],
+    name: value['name'],
+    ...(typeof value['color'] === 'string' ? { color: value['color'] } : {}),
+    ...(program === 'qwen' || program === 'claude' || program === 'codex'
+      ? { program }
+      : {}),
+    ...(typeof value['runtimeId'] === 'string'
+      ? { runtimeId: value['runtimeId'] }
+      : {}),
+    ...(typeof value['squadName'] === 'string' && value['squadName']
+      ? { squadName: value['squadName'] }
+      : {}),
+    ...(typeof value['memberSquadName'] === 'string' && value['memberSquadName']
+      ? { memberSquadName: value['memberSquadName'] }
+      : {}),
+  };
+}
+
+function parseAgentSteps(value: unknown): SessionAgentStep[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const steps = value.flatMap((step): SessionAgentStep[] =>
+    isObjectRecord(step) &&
+    typeof step['id'] === 'string' &&
+    typeof step['title'] === 'string' &&
+    (step['status'] === 'running' ||
+      step['status'] === 'completed' ||
+      step['status'] === 'failed')
+      ? [{ id: step['id'], title: step['title'], status: step['status'] }]
+      : [],
+  );
+  return steps.length > 0 ? steps : undefined;
+}
+
+export interface AgentRecordTranscriptUpdateInput {
+  /** uuid of the `agent_message` / `agent_mention` record. */
+  readonly recordId: string;
+  readonly subtype: 'agent_message' | 'agent_mention';
+  /** The record's `systemPayload`; validated here. */
+  readonly payload: unknown;
+  readonly timestamp?: string | number;
+}
+
+/**
+ * The one session update a session multi-agent record projects to. Shared by
+ * replay (`projectUserRecord`) and the ACP child's live emission when it
+ * writes the record, so both carry the same role, text, `_meta.qwenAgentMessage`
+ * and `qwenTranscript.{segmentId, sourceRecordIds}` and reconcile.
+ *
+ * - `agent_message`: an assistant chunk authored by the agent, segment
+ *   `agent:<runId>`.
+ * - `agent_mention`: a user chunk, segment `mention:<recordId>`.
+ *
+ * Returns `undefined` for a payload without display text.
+ */
+export function createAgentRecordTranscriptUpdate(
+  input: AgentRecordTranscriptUpdateInput,
+): SessionUpdate | undefined {
+  const payload = isObjectRecord(input.payload) ? input.payload : undefined;
+  if (!payload || typeof payload['displayText'] !== 'string') return undefined;
+  const displayText = payload['displayText'];
+  const author = parseAgentAuthor(payload['author']);
+  if (input.subtype === 'agent_message') {
+    const runId =
+      typeof payload['runId'] === 'string' && payload['runId'].length > 0
+        ? payload['runId']
+        : undefined;
+    const status =
+      typeof payload['status'] === 'string' &&
+      AGENT_TERMINAL_STATUSES.has(payload['status'])
+        ? (payload['status'] as SessionAgentTerminalStatus)
+        : undefined;
+    const error =
+      typeof payload['error'] === 'string' && payload['error'].length > 0
+        ? payload['error']
+        : undefined;
+    const steps = parseAgentSteps(payload['steps']);
+    const totalTokens =
+      typeof payload['totalTokens'] === 'number' &&
+      Number.isFinite(payload['totalTokens'])
+        ? payload['totalTokens']
+        : undefined;
+    // A failed run can end with no reply text; show why instead of nothing.
+    // TODO(multi-agent): UI copy for an empty failed reply is a placeholder.
+    const squadOutcome =
+      payload['squadOutcome'] === 'no_action' ? 'no_action' : undefined;
+    // An empty chunk is dropped by the client's normalizer, so a squad
+    // leader's silent "no action" turn carries a short placeholder; the UI
+    // renders it from `squadOutcome`, not from this text.
+    const text =
+      displayText.length > 0
+        ? displayText
+        : status && status !== 'completed'
+          ? (error ?? `Agent run ${status}.`)
+          : squadOutcome
+            ? 'No action needed.'
+            : '';
+    if (text.length === 0) return undefined;
+    const agentMeta: QwenAgentMessageMeta = {
+      kind: 'agent_message',
+      ...(author ? { author } : {}),
+      ...(runId ? { runId } : {}),
+      ...(status ? { status } : {}),
+      ...(error ? { error } : {}),
+      ...(steps ? { steps } : {}),
+      ...(totalTokens !== undefined ? { totalTokens } : {}),
+      ...(squadOutcome ? { squadOutcome } : {}),
+    };
+    return createTranscriptMessageUpdate({
+      role: 'assistant',
+      text,
+      timestamp: input.timestamp,
+      sourceRecordIds: [input.recordId],
+      // TODO(multi-agent): a record without runId falls back to its uuid.
+      segmentId: runId ? `agent:${runId}` : `agent-record:${input.recordId}`,
+      extra: {
+        source: 'agent_message',
+        qwenAgentMessage: agentMeta,
+        qwenDiscreteMessage: true,
+      },
+    });
+  }
+  if (displayText.length === 0) return undefined;
+  const mentionedAgentIds = Array.isArray(payload['mentionedAgentIds'])
+    ? payload['mentionedAgentIds'].filter(
+        (id): id is string => typeof id === 'string',
+      )
+    : [];
+  const mentionedSquadIds = Array.isArray(payload['mentionedSquadIds'])
+    ? payload['mentionedSquadIds'].filter(
+        (id): id is string => typeof id === 'string',
+      )
+    : [];
+  const mentionError =
+    typeof payload['error'] === 'string' && payload['error'].length > 0
+      ? payload['error']
+      : undefined;
+  const mentionMeta: QwenAgentMessageMeta = {
+    kind: 'agent_mention',
+    mentionedAgentIds,
+    ...(mentionedSquadIds.length > 0 ? { mentionedSquadIds } : {}),
+    ...(mentionError ? { error: mentionError } : {}),
+    ...(author ? { author } : {}),
+  };
+  return createTranscriptMessageUpdate({
+    role: 'user',
+    text: displayText,
+    timestamp: input.timestamp,
+    sourceRecordIds: [input.recordId],
+    // The contract comment says `mention:<recordKey>`; the record uuid is
+    // what both live and replay know, so it is the key here.
+    segmentId: `mention:${input.recordId}`,
+    extra: {
+      source: 'agent_mention',
+      qwenAgentMessage: mentionMeta,
+      qwenDiscreteMessage: true,
+    },
+  });
 }
 
 export function createTranscriptImageUpdate(
@@ -324,6 +545,422 @@ export function createTranscriptUsageUpdate(
     content: { type: 'text', text: options.text ?? '' },
     _meta: meta,
   } as SessionUpdate;
+}
+
+/**
+ * Recorded timing for one model request or one tool call, read back from the
+ * `ui_telemetry` records the telemetry loggers persist alongside the
+ * conversation.
+ *
+ * Every field but `kind` and `durationMs` is optional and is only ever set
+ * from a recorded value: a trajectory that shows a fabricated duration is
+ * worse than one that shows none.
+ */
+export interface TranscriptTimingMeta {
+  readonly executionId?: string;
+  readonly kind: 'request' | 'tool';
+  /**
+   * Epoch ms. A request is logged when its stream ends, so its start time is
+   * a real subtraction from a real end time. A tool call carries one only when
+   * its record does (`started_at_ms`): tool calls can be logged in one loop
+   * after their whole batch settles, so the record's timestamp is the batch's
+   * end and subtracting a tool's own duration from it would misplace it.
+   */
+  readonly startedAt?: number;
+  readonly durationMs: number;
+  /** `kind === 'request'`: dispatch to first user-visible content. */
+  readonly ttftMs?: number;
+  /** `kind === 'request'`: 'error' comes from an `api_error` record. */
+  readonly status?: 'ok' | 'error';
+  readonly responseId?: string;
+  readonly promptId?: string;
+  readonly model?: string;
+  /** `kind === 'tool'`: pairs the frame with its `tool_call` update. */
+  readonly callId?: string;
+  readonly toolName?: string;
+  readonly toolStatus?: 'success' | 'error' | 'cancelled';
+  /** Set when a subagent issued the request or tool call. */
+  readonly subagentId?: string;
+}
+
+/**
+ * Build a timing frame: an empty-text assistant chunk carrying `_meta.timing`.
+ *
+ * The carrier matches the usage frame's shape on purpose. An empty-text chunk
+ * opens no message segment, and clients that do not know the key normalize it
+ * to nothing, so the frame is inert for every existing reader.
+ *
+ * It deliberately carries no `_meta.usage`: a present `usage.durationMs` is
+ * what tells the daemon host a frame came from a live model round rather than
+ * replay, and reusing it here would double-count into the metrics ring.
+ */
+export function createTranscriptTimingUpdate(
+  timing: TranscriptTimingMeta,
+  options: UpdateMetaOptions = {},
+): SessionUpdate {
+  const meta = buildUpdateMeta({
+    ...options,
+    extra: { timing, ...(options.extra ?? {}) },
+  });
+  return {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '' },
+    _meta: meta,
+  } as SessionUpdate;
+}
+
+export type TranscriptToolLifecycle = {
+  readonly v: 1;
+  readonly kind: 'tool';
+  readonly executionId: string;
+  readonly sessionId: string;
+  readonly callId: string;
+  readonly toolName: string;
+  readonly subagentId?: string;
+} & (
+  | {
+      readonly phase: 'started';
+      readonly executionStatus: 'running';
+      readonly startedAt: number;
+    }
+  | {
+      readonly phase: 'ended';
+      readonly executionStatus: 'not_started';
+      readonly endedAt: number;
+      readonly outcome: 'success' | 'error' | 'cancelled';
+    }
+  | {
+      readonly phase: 'ended';
+      readonly executionStatus: 'success' | 'error' | 'cancelled';
+      readonly startedAt: number;
+      readonly endedAt: number;
+      readonly executionDurationMs: number;
+      readonly outcome: 'success' | 'error' | 'cancelled';
+    }
+);
+
+export function parseToolLifecycle(
+  value: unknown,
+): TranscriptToolLifecycle | undefined {
+  if (!isObjectRecord(value) || value['v'] !== 1 || value['kind'] !== 'tool')
+    return undefined;
+  const strings: Record<string, string> = {};
+  for (const key of ['executionId', 'sessionId', 'callId', 'toolName']) {
+    const entry = value[key];
+    if (typeof entry !== 'string' || !entry.trim()) return undefined;
+    strings[key] = entry;
+  }
+  const subagentId = value['subagentId'];
+  if (
+    subagentId !== undefined &&
+    (typeof subagentId !== 'string' || !subagentId.trim())
+  )
+    return undefined;
+  const shared = {
+    v: 1 as const,
+    kind: 'tool' as const,
+    executionId: strings['executionId']!,
+    sessionId: strings['sessionId']!,
+    callId: strings['callId']!,
+    toolName: strings['toolName']!,
+    ...(typeof subagentId === 'string' ? { subagentId } : {}),
+  };
+  const startedAt = finiteNumber(value['startedAt']);
+  if (value['phase'] === 'started') {
+    if (
+      value['executionStatus'] !== 'running' ||
+      startedAt === undefined ||
+      startedAt < 0 ||
+      value['endedAt'] !== undefined ||
+      value['outcome'] !== undefined ||
+      value['executionDurationMs'] !== undefined
+    )
+      return undefined;
+    return {
+      ...shared,
+      phase: 'started',
+      executionStatus: 'running',
+      startedAt,
+    };
+  }
+  if (value['phase'] !== 'ended') return undefined;
+  const endedAt = finiteNumber(value['endedAt']);
+  const outcome = value['outcome'];
+  if (
+    endedAt === undefined ||
+    endedAt < 0 ||
+    (outcome !== 'success' && outcome !== 'error' && outcome !== 'cancelled')
+  )
+    return undefined;
+  const executionStatus = value['executionStatus'];
+  if (executionStatus === 'not_started') {
+    if (
+      value['startedAt'] !== undefined ||
+      value['executionDurationMs'] !== undefined
+    )
+      return undefined;
+    return { ...shared, phase: 'ended', executionStatus, endedAt, outcome };
+  }
+  const executionDurationMs = finiteNumber(value['executionDurationMs']);
+  if (
+    (executionStatus !== 'success' &&
+      executionStatus !== 'error' &&
+      executionStatus !== 'cancelled') ||
+    startedAt === undefined ||
+    startedAt < 0 ||
+    endedAt < startedAt ||
+    executionDurationMs === undefined ||
+    executionDurationMs < 0
+  )
+    return undefined;
+  return {
+    ...shared,
+    phase: 'ended',
+    executionStatus,
+    startedAt,
+    endedAt,
+    executionDurationMs,
+    outcome,
+  };
+}
+
+export function createTranscriptToolLifecycleUpdate(
+  toolLifecycle: TranscriptToolLifecycle,
+  options: UpdateMetaOptions = {},
+): SessionUpdate {
+  return {
+    sessionUpdate: 'tool_call_update',
+    toolCallId: toolLifecycle.callId,
+    _meta: buildUpdateMeta({
+      ...options,
+      extra: { ...(options.extra ?? {}), toolLifecycle },
+    }),
+  } as SessionUpdate;
+}
+
+export type TranscriptExecutionLifecycle = {
+  readonly v: 1;
+  readonly kind: 'request';
+  readonly executionId: string;
+  readonly sessionId: string;
+  readonly promptId: string;
+  readonly model: string;
+  readonly startedAt: number;
+  readonly subagentId?: string;
+} & (
+  | { readonly phase: 'started' }
+  | {
+      readonly phase: 'ended';
+      readonly endedAt: number;
+      readonly durationMs: number;
+      readonly outcome: 'success' | 'error' | 'cancelled' | 'interrupted';
+      readonly reason?: 'consumer_closed';
+    }
+);
+
+export function parseExecutionLifecycle(
+  value: unknown,
+): TranscriptExecutionLifecycle | undefined {
+  if (
+    !isObjectRecord(value) ||
+    value['v'] !== 1 ||
+    value['kind'] !== 'request'
+  ) {
+    return undefined;
+  }
+  const strings: Record<string, string> = {};
+  for (const key of ['executionId', 'sessionId', 'promptId', 'model']) {
+    const entry = value[key];
+    if (typeof entry !== 'string' || !entry.trim()) return undefined;
+    strings[key] = entry;
+  }
+  const startedAt = finiteNumber(value['startedAt']);
+  if (startedAt === undefined || startedAt < 0) return undefined;
+  const subagentId = value['subagentId'];
+  if (
+    subagentId !== undefined &&
+    (typeof subagentId !== 'string' || !subagentId.trim())
+  ) {
+    return undefined;
+  }
+  const shared = {
+    v: 1 as const,
+    kind: 'request' as const,
+    executionId: strings['executionId']!,
+    sessionId: strings['sessionId']!,
+    promptId: strings['promptId']!,
+    model: strings['model']!,
+    startedAt,
+    ...(typeof subagentId === 'string' ? { subagentId } : {}),
+  };
+  if (value['phase'] === 'started') return { ...shared, phase: 'started' };
+  if (value['phase'] !== 'ended') return undefined;
+  const endedAt = finiteNumber(value['endedAt']);
+  const durationMs = finiteNumber(value['durationMs']);
+  const outcome = value['outcome'];
+  if (
+    endedAt === undefined ||
+    endedAt < startedAt ||
+    durationMs === undefined ||
+    durationMs < 0 ||
+    (outcome !== 'success' &&
+      outcome !== 'error' &&
+      outcome !== 'cancelled' &&
+      outcome !== 'interrupted')
+  ) {
+    return undefined;
+  }
+  if (
+    value['reason'] !== undefined &&
+    (value['reason'] !== 'consumer_closed' || outcome !== 'interrupted')
+  )
+    return undefined;
+  return {
+    ...shared,
+    phase: 'ended',
+    endedAt,
+    durationMs,
+    outcome,
+    ...(value['reason'] === 'consumer_closed'
+      ? { reason: 'consumer_closed' as const }
+      : {}),
+  };
+}
+
+export function createTranscriptExecutionLifecycleUpdate(
+  executionLifecycle: TranscriptExecutionLifecycle,
+  options: UpdateMetaOptions = {},
+): SessionUpdate {
+  return {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '' },
+    _meta: buildUpdateMeta({
+      ...options,
+      extra: { ...(options.extra ?? {}), executionLifecycle },
+    }),
+  } as SessionUpdate;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * A subagent round's prompt id is `<sessionId>#<agentId>#<round>`; the main
+ * session's is `<sessionId>########<n>`, which splits into nine parts rather
+ * than three. Kept in step with `extractSubagentSuffix` in core's
+ * `openaiLogger.ts`, the canonical reader of this shape.
+ */
+function isSubagentPromptId(promptId: string | undefined): boolean {
+  if (promptId === undefined) return false;
+  const parts = promptId.split('#');
+  if (parts.length !== 3) return false;
+  const [, agentId, round] = parts;
+  return Boolean(agentId) && /^\d+$/.test(round ?? '');
+}
+
+function parseToolTimingStatus(
+  value: unknown,
+): TranscriptTimingMeta['toolStatus'] {
+  return value === 'success' || value === 'error' || value === 'cancelled'
+    ? value
+    : undefined;
+}
+
+/**
+ * Project a `ui_telemetry` record's payload into a timing frame's metadata,
+ * or `undefined` when the record carries no usable timing.
+ *
+ * Response text, tool arguments and token counts are deliberately left behind:
+ * the first two are large and already in the conversation, and token counts
+ * already ride on the usage frame.
+ */
+function parseTelemetryTiming(
+  payload: unknown,
+): TranscriptTimingMeta | undefined {
+  const uiEvent = isObjectRecord(payload)
+    ? isObjectRecord(payload['uiEvent'])
+      ? payload['uiEvent']
+      : undefined
+    : undefined;
+  if (!uiEvent) return undefined;
+  const eventName = uiEvent['event.name'];
+  if (
+    eventName !== EVENT_API_RESPONSE &&
+    eventName !== EVENT_API_ERROR &&
+    eventName !== EVENT_TOOL_CALL
+  ) {
+    return undefined;
+  }
+  const durationMs = finiteNumber(uiEvent['duration_ms']);
+  if (durationMs === undefined || durationMs < 0) return undefined;
+
+  const shared = {
+    durationMs,
+    ...(nonEmptyString(uiEvent['response_id']) !== undefined
+      ? { responseId: nonEmptyString(uiEvent['response_id']) }
+      : {}),
+    ...(nonEmptyString(uiEvent['prompt_id']) !== undefined
+      ? { promptId: nonEmptyString(uiEvent['prompt_id']) }
+      : {}),
+    ...(nonEmptyString(uiEvent['subagent_id']) !== undefined
+      ? { subagentId: nonEmptyString(uiEvent['subagent_id']) }
+      : {}),
+  };
+
+  if (eventName === EVENT_TOOL_CALL) {
+    // Without a call id the frame cannot be paired with anything.
+    const callId = nonEmptyString(uiEvent['call_id']);
+    if (callId === undefined) return undefined;
+    const toolName = nonEmptyString(uiEvent['function_name']);
+    const toolStatus = parseToolTimingStatus(uiEvent['status']);
+    // Earlier panel development builds recorded the same value as started_at.
+    const startedAt = finiteNumber(
+      uiEvent['started_at_ms'] ?? uiEvent['started_at'],
+    );
+    // Legacy non-success records use zero for missing timing. A recorded start
+    // distinguishes a measured zero duration from that placeholder.
+    if (
+      durationMs === 0 &&
+      toolStatus !== 'success' &&
+      (startedAt === undefined || startedAt < 0)
+    )
+      return undefined;
+    return {
+      kind: 'tool',
+      ...shared,
+      ...(startedAt !== undefined && startedAt >= 0 ? { startedAt } : {}),
+      callId,
+      ...(toolName !== undefined ? { toolName } : {}),
+      ...(toolStatus !== undefined ? { toolStatus } : {}),
+    };
+  }
+
+  const ttftMs = finiteNumber(uiEvent['ttft_ms']);
+  const model = nonEmptyString(uiEvent['model']);
+  // A request is logged the moment its stream ends, so its `event.timestamp`
+  // really is this span's end and the start time follows from the duration.
+  // Tool calls are logged in a batch loop after the whole batch settles, so
+  // the same subtraction would misplace a tool; theirs is read from the
+  // record above — see `startedAt` on the type.
+  const endMs = toTranscriptEpochMs(
+    typeof uiEvent['event.timestamp'] === 'string'
+      ? uiEvent['event.timestamp']
+      : undefined,
+  );
+  return {
+    kind: 'request',
+    ...shared,
+    ...(nonEmptyString(uiEvent['execution_id']) !== undefined
+      ? { executionId: nonEmptyString(uiEvent['execution_id']) }
+      : {}),
+    ...(endMs !== undefined ? { startedAt: endMs - durationMs } : {}),
+    status: eventName === EVENT_API_RESPONSE ? 'ok' : 'error',
+    ...(ttftMs !== undefined && ttftMs >= 0 && ttftMs <= durationMs
+      ? { ttftMs }
+      : {}),
+    ...(model !== undefined ? { model } : {}),
+  };
 }
 
 export function createTranscriptToolCallStartUpdate(
@@ -518,7 +1155,14 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     let ordinal = 0;
     let activeSegmentLane: string | undefined;
     let activeSegmentId: string | undefined;
+    const backgroundTurn = parseBackgroundNotificationTurn(
+      record.subtype === 'background_task_completed'
+        ? undefined
+        : (record as unknown as Record<string, unknown>)['backgroundTurn'],
+    );
     const emit = (update: SessionUpdate): TranscriptReplayEmission => {
+      if (backgroundTurn)
+        update = { ...update, _meta: { ...update._meta, backgroundTurn } };
       const emissionOrdinal = ordinal++;
       const lane = transcriptSegmentLane(update);
       if (lane && (lane !== activeSegmentLane || !activeSegmentId)) {
@@ -528,8 +1172,10 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         activeSegmentLane = undefined;
         activeSegmentId = undefined;
       }
+      // An update that already names its segment (session agent records)
+      // keeps it, so the live emission and this replay reconcile.
       const projectedUpdate =
-        lane && activeSegmentId
+        lane && activeSegmentId && !hasExplicitTranscriptSegmentId(update)
           ? withTranscriptSegmentId(update, activeSegmentId)
           : update;
       if (isTranscriptDiscreteMessage(update)) {
@@ -576,7 +1222,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         yield* this.projectAssistantRecord(record, emit, meta);
         break;
       case 'tool_result':
-        yield* this.projectToolResult(record, emit, meta);
+        if (!isInternalCodeModeToolResult(record)) {
+          yield* this.projectToolResult(record, emit, meta);
+        }
         break;
       case 'system':
         yield* this.projectSystemRecord(record, emit, meta);
@@ -646,17 +1294,57 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     const payload = isObjectRecord(record.systemPayload)
       ? record.systemPayload
       : undefined;
+    // Records written before element validation (or by a hostile writer) can
+    // hold non-object entries; skip them individually so valid tags on the
+    // same record still restore, matching the live echo the client rendered.
+    const savedInputAnnotations: unknown =
+      payload?.[DAEMON_INPUT_ANNOTATIONS_META_KEY];
+    const savedInputAnnotationList: unknown[] = Array.isArray(
+      savedInputAnnotations,
+    )
+      ? savedInputAnnotations
+      : [];
+    const replayedInputAnnotations =
+      savedInputAnnotationList.filter(isObjectRecord);
+    const userMeta: UpdateMetaOptions = {
+      ...meta,
+      extra: {
+        ...meta.extra,
+        ...(typeof record.daemonPromptId === 'string' &&
+        record.daemonPromptId.trim().length > 0
+          ? { promptId: record.daemonPromptId }
+          : {}),
+        ...(replayedInputAnnotations.length > 0
+          ? { [DAEMON_INPUT_ANNOTATIONS_META_KEY]: replayedInputAnnotations }
+          : {}),
+      },
+    };
+    if (
+      record.subtype === 'agent_message' ||
+      record.subtype === 'agent_mention'
+    ) {
+      // `message` holds the model envelope; project the authored display
+      // text through the helper the live emission uses.
+      const update = createAgentRecordTranscriptUpdate({
+        recordId: record.uuid,
+        subtype: record.subtype,
+        payload: record.systemPayload,
+        timestamp: record.timestamp,
+      });
+      if (update) yield emit(update);
+      return;
+    }
     const replayMeta: UpdateMetaOptions =
       record.subtype === 'mid_turn_user_message'
         ? {
-            ...meta,
+            ...userMeta,
             extra: {
-              ...meta.extra,
+              ...userMeta.extra,
               source: 'mid_turn_message_injected',
               qwenDiscreteMessage: true,
             },
           }
-        : meta;
+        : userMeta;
     if (
       record.subtype === 'goal_runtime' ||
       record.subtype === 'notification' ||
@@ -697,7 +1385,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
                 }
               : record.subtype === 'cron'
                 ? { extra: { source: 'cron' } }
-                : {}),
+                : record.subtype === 'goal_runtime'
+                  ? { extra: { source: 'goal_runtime' } }
+                  : {}),
           }),
         );
         yield* this.projectUserAttachmentReferences(payload, emit, replayMeta);
@@ -741,11 +1431,28 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
     const references = payload?.['attachmentReferences'];
-    if (!Array.isArray(references)) return;
-    for (const reference of references) {
+    for (const reference of Array.isArray(references) ? references : []) {
       if (!isObjectRecord(reference)) continue;
       const update = createTranscriptAttachmentReferenceUpdate(reference, meta);
       if (update) yield emit(update);
+    }
+    const resourceLinks = payload?.['resourceLinks'];
+    for (const link of Array.isArray(resourceLinks) ? resourceLinks : []) {
+      if (
+        !isObjectRecord(link) ||
+        link['type'] !== 'resource_link' ||
+        typeof link['uri'] !== 'string' ||
+        link['uri'].length === 0 ||
+        typeof link['name'] !== 'string'
+      ) {
+        continue;
+      }
+      const updateMeta = buildUpdateMeta(meta);
+      yield emit({
+        sessionUpdate: 'user_message_chunk',
+        content: structuredClone(link),
+        ...(updateMeta ? { _meta: updateMeta } : {}),
+      } as SessionUpdate);
     }
   }
 
@@ -874,6 +1581,11 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           this.pendingToolCalls.set(callId, {
             callId,
             toolName,
+            ...(toolName === 'tool_call' &&
+            typeof args['name'] === 'string' &&
+            args['name'].trim()
+              ? { resolvedToolName: args['name'].trim() }
+              : {}),
             sourceRecordId: record.uuid,
             ...(record.timestamp ? { sourceTimestamp: record.timestamp } : {}),
             ...(explicitId !== undefined && explicitId !== callId
@@ -965,7 +1677,12 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       const usage = usageFromTaskExecution(resultDisplay);
       if (Object.keys(usage).length > 0) {
         this.addUsage(usage);
-        yield emit(createTranscriptUsageUpdate(usage, meta));
+        yield emit(
+          createTranscriptUsageUpdate(usage, {
+            ...meta,
+            extra: { ...meta.extra, parentToolCallId: callId },
+          }),
+        );
       }
     }
   }
@@ -975,6 +1692,159 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
+    if (record.subtype === 'ui_telemetry') {
+      // Emitted in place, at the telemetry record's own position, rather than
+      // attached to the assistant record it describes. A backward page may
+      // start exactly at that assistant record, which would strand its
+      // `api_response` record on the older page, and backward pages replay
+      // with no carried state. Stateless frames survive any page split; the
+      // client pairs them across its own contiguous event window.
+      if (!this.options.includeTiming) return;
+      const payload = record.systemPayload;
+      const uiEvent = isObjectRecord(payload) ? payload['uiEvent'] : undefined;
+      if (
+        isObjectRecord(uiEvent) &&
+        uiEvent['event.name'] === 'request_lifecycle'
+      ) {
+        const lifecycle = parseExecutionLifecycle(uiEvent);
+        if (lifecycle)
+          yield emit(createTranscriptExecutionLifecycleUpdate(lifecycle, meta));
+        return;
+      }
+      if (
+        isObjectRecord(uiEvent) &&
+        uiEvent['event.name'] === 'tool_lifecycle'
+      ) {
+        const lifecycle = parseToolLifecycle(uiEvent);
+        if (lifecycle) {
+          let callId = lifecycle.callId;
+          if (!lifecycle.subagentId) {
+            const candidates = [...this.pendingToolCalls.values()].filter(
+              (pending) =>
+                (pending.rawCallId ?? pending.callId) === lifecycle.callId &&
+                (pending.toolName === lifecycle.toolName ||
+                  pending.resolvedToolName === lifecycle.toolName),
+            );
+            const pending =
+              candidates.find(
+                (item) =>
+                  item.toolLifecycleExecutionId === lifecycle.executionId,
+              ) ??
+              candidates.find(
+                (item) => item.toolLifecycleExecutionId === undefined,
+              );
+            if (pending) {
+              callId = pending.callId;
+              this.pendingToolCalls.set(callId, {
+                ...pending,
+                toolLifecycleExecutionId: lifecycle.executionId,
+              });
+            }
+          }
+          yield emit({
+            ...createTranscriptToolLifecycleUpdate(lifecycle, meta),
+            toolCallId: callId,
+          } as SessionUpdate);
+        }
+        return;
+      }
+      const timing = parseTelemetryTiming(record.systemPayload);
+      if (!timing) return;
+      yield emit(
+        createTranscriptTimingUpdate(this.resolveTimingCallId(timing), meta),
+      );
+      return;
+    }
+    if (record.subtype === 'turn_result') {
+      const payload = isObjectRecord(record.systemPayload)
+        ? record.systemPayload
+        : undefined;
+      const cancelledAt = finiteNumber(payload?.['cancelledAt']);
+      const startedAt = finiteNumber(payload?.['startedAt']);
+      const promptId = payload?.['promptId'];
+      if (
+        payload?.['state'] !== 'cancelled' ||
+        cancelledAt === undefined ||
+        typeof promptId !== 'string' ||
+        !promptId ||
+        (payload['startedAt'] !== undefined && startedAt === undefined)
+      )
+        return;
+      const elapsedMs = Math.max(0, cancelledAt - (startedAt ?? cancelledAt));
+      if (!Number.isFinite(elapsedMs)) return;
+      yield emit(
+        createTranscriptMessageUpdate({
+          role: 'assistant',
+          text: '',
+          ...meta,
+          extra: {
+            qwenDiscreteMessage: true,
+            promptCancelled: { promptId, cancelledAt, elapsedMs },
+          },
+        }),
+      );
+      return;
+    }
+    if (record.subtype === 'background_task_completed') {
+      const payload = isObjectRecord(record.systemPayload)
+        ? record.systemPayload
+        : undefined;
+      if (!payload || typeof payload['displayText'] !== 'string') return;
+      yield emit(
+        createTranscriptMessageUpdate({
+          role: 'assistant',
+          text: payload['displayText'],
+          ...meta,
+          extra: {
+            source: 'background_task_completed',
+            qwenDiscreteMessage: true,
+            ...(isObjectRecord(payload['backgroundTask'])
+              ? { backgroundTask: payload['backgroundTask'] }
+              : {}),
+          },
+        }),
+      );
+      return;
+    }
+    if (record.subtype === 'agent_session_ready') {
+      const payload = isObjectRecord(record.systemPayload)
+        ? record.systemPayload
+        : undefined;
+      if (
+        typeof payload?.['callId'] !== 'string' ||
+        payload['callId'].length === 0 ||
+        typeof payload['subagentSessionReady'] !== 'boolean'
+      ) {
+        this.report(
+          'malformed_agent_session_ready',
+          'Skipped a malformed subagent session readiness record.',
+          record.uuid,
+          'systemPayload',
+        );
+        return;
+      }
+      const callId = payload['callId'];
+      if (!this.pendingToolCalls.has(callId)) {
+        this.report(
+          'orphan_agent_session_ready',
+          'Skipped subagent readiness without a matching pending tool call.',
+          record.uuid,
+          'systemPayload.callId',
+        );
+        return;
+      }
+      yield emit({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: callId,
+        _meta: buildUpdateMeta({
+          ...meta,
+          extra: {
+            subagentSessionReady: payload['subagentSessionReady'],
+          },
+        }),
+      });
+      return;
+    }
     if (record.subtype === 'goal_state') {
       const payload = parseGoalStateRecordPayloadV2(record.systemPayload);
       if (!payload) {
@@ -992,10 +1862,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         previous: this.goalState,
         next: payload.snapshot,
       });
-      const projection = projectGoalStateToLegacy(
-        payload,
-        this.goalState?.goal ?? null,
-      );
+      const goalStatus = projectGoalCard(payload, this.goalState?.goal ?? null);
       const goalControlCommand = projectGoalControlCommand(
         payload.cause,
         payload.snapshot,
@@ -1016,7 +1883,6 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           }),
         );
       }
-      const { type: _type, ...goalStatus } = projection.goalStatus;
       yield emit(
         createTranscriptMessageUpdate({
           role: 'assistant',
@@ -1025,9 +1891,6 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           extra: {
             goalState: payload.snapshot,
             goalStatus,
-            ...(projection.goalTerminal
-              ? { goalTerminal: projection.goalTerminal }
-              : {}),
             'qwen.session.recordId': record.uuid,
           },
         }),
@@ -1065,12 +1928,29 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         continue;
       }
       if (!isObjectRecord(item) || typeof item['text'] !== 'string') continue;
+      const contextCompression = isObjectRecord(item['contextCompression'])
+        ? item['contextCompression']
+        : undefined;
+      const contextCompressionNotice = isObjectRecord(
+        item['contextCompressionNotice'],
+      )
+        ? item['contextCompressionNotice']
+        : undefined;
       yield emit(
         createTranscriptMessageUpdate({
           role: 'assistant',
           text: item['text'].replace(/\n/g, '  \n'),
           ...meta,
-          extra: { source: 'slash_command' },
+          extra: {
+            source: 'slash_command',
+            ...(contextCompression ? { contextCompression } : {}),
+            // Replayed on its own key, exactly as it was recorded: the folded
+            // block keeps both, so the note survives beside the result.
+            ...(contextCompressionNotice ? { contextCompressionNotice } : {}),
+            ...(Array.isArray(item['sessionArtifacts'])
+              ? { sessionArtifacts: item['sessionArtifacts'] }
+              : {}),
+          },
         }),
       );
     }
@@ -1113,6 +1993,52 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     const id = `${candidate}:${occurrence}`;
     this.usedToolCallIds.add(id);
     return id;
+  }
+
+  /**
+   * Re-point a tool timing frame at the call id the tool_call update actually
+   * went out with. `allocateToolCallId` rewrites ids that collide within a
+   * replay, keeping the recorded one as `rawCallId`; telemetry records the raw
+   * one. The owning pending entry is still open here, because a tool's
+   * telemetry record is written after its assistant record and before its
+   * result. A subagent's tool never has a pending entry in this machine, so
+   * its id passes through untouched.
+   *
+   * When one recorded id was allocated more than once, the candidates are
+   * consumed in allocation order — the map preserves insertion order — so the
+   * first telemetry record naming it takes the first allocation rather than
+   * every record collapsing onto the rewritten one.
+   *
+   * Two guards keep a subagent's tool from claiming a main-session call.
+   * `logToolCall` attaches no subagent identity, so a subagent's tool
+   * telemetry is indistinguishable by id alone — only its prompt id says it
+   * came from a subagent, and this machine holds no pending entry for a
+   * subagent's own calls. A provider that reuses `call_0` on every response
+   * would otherwise let the first tool inside an Agent call claim the Agent
+   * call itself, permanently, via `timingMatched`. The tool name has to agree
+   * for the same reason.
+   */
+  private resolveTimingCallId(
+    timing: TranscriptTimingMeta,
+  ): TranscriptTimingMeta {
+    if (timing.kind !== 'tool' || timing.callId === undefined) return timing;
+    if (isSubagentPromptId(timing.promptId)) return timing;
+    for (const pending of this.pendingToolCalls.values()) {
+      const recordedId = pending.rawCallId ?? pending.callId;
+      if (recordedId !== timing.callId || pending.timingMatched) continue;
+      if (
+        timing.toolName !== undefined &&
+        pending.toolName !== timing.toolName &&
+        pending.resolvedToolName !== timing.toolName
+      )
+        continue;
+      this.pendingToolCalls.set(pending.callId, {
+        ...pending,
+        timingMatched: true,
+      });
+      return { ...timing, callId: pending.callId };
+    }
+    return timing;
   }
 
   private resolveToolMetadata(
@@ -1217,6 +2143,16 @@ function withTranscriptSegmentId(
   } as unknown as SessionUpdate;
 }
 
+function hasExplicitTranscriptSegmentId(update: SessionUpdate): boolean {
+  const meta = (update as unknown as Record<string, unknown>)['_meta'];
+  const transcript = isObjectRecord(meta) ? meta['qwenTranscript'] : undefined;
+  return (
+    isObjectRecord(transcript) &&
+    typeof transcript['segmentId'] === 'string' &&
+    transcript['segmentId'].length > 0
+  );
+}
+
 function transcriptSegmentLane(update: SessionUpdate): string | undefined {
   const record = update as unknown as Record<string, unknown>;
   const kind = record['sessionUpdate'];
@@ -1282,6 +2218,17 @@ function projectGoalControlCommand(
         ? `/goal edit ${snapshot.goal.objective}`
         : undefined;
     case 'pause':
+      // Only a pause the user typed replays as the user typing it. The
+      // runtime writes `pause` records of its own -- the no-progress bound
+      // stops an idle Goal with no one at the keyboard -- and attributing
+      // those to the user would assert the opposite of what happened. The
+      // paused card that follows carries `lastReason` either way. A record
+      // written before pauses carried reasons keeps the historical
+      // projection.
+      return snapshot.goal?.lastReason === undefined ||
+        snapshot.goal.lastReason === GOAL_PAUSE_REASON_COMMAND
+        ? `/goal ${cause}`
+        : undefined;
     case 'resume':
     case 'clear':
       return `/goal ${cause}`;
@@ -1395,9 +2342,24 @@ function parseInitialState(
         {
           callId: pending['callId'],
           toolName: pending['toolName'],
+          ...(typeof pending['resolvedToolName'] === 'string'
+            ? { resolvedToolName: pending['resolvedToolName'] }
+            : {}),
           sourceRecordId: pending['sourceRecordId'],
           ...(typeof pending['sourceTimestamp'] === 'string'
             ? { sourceTimestamp: pending['sourceTimestamp'] }
+            : {}),
+          // Dropping these would make a timing frame that arrives on a later
+          // page resolve against the recorded id instead of the allocated one.
+          ...(typeof pending['rawCallId'] === 'string'
+            ? { rawCallId: pending['rawCallId'] }
+            : {}),
+          ...(typeof pending['toolLifecycleExecutionId'] === 'string' &&
+          pending['toolLifecycleExecutionId'].length > 0
+            ? { toolLifecycleExecutionId: pending['toolLifecycleExecutionId'] }
+            : {}),
+          ...(pending['timingMatched'] === true
+            ? { timingMatched: true as const }
             : {}),
         },
       ];
@@ -1562,9 +2524,11 @@ function extractDiffContent(resultDisplay: unknown): ToolCallContent | null {
   return {
     type: 'diff',
     path:
-      typeof resultDisplay['fileName'] === 'string'
-        ? resultDisplay['fileName']
-        : '',
+      typeof resultDisplay['filePath'] === 'string'
+        ? resultDisplay['filePath']
+        : typeof resultDisplay['fileName'] === 'string'
+          ? resultDisplay['fileName']
+          : '',
     oldText:
       typeof resultDisplay['originalContent'] === 'string'
         ? resultDisplay['originalContent']

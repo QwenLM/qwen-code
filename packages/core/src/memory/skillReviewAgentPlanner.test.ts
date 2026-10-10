@@ -18,7 +18,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
-import type { PermissionManager } from '../permissions/permission-manager.js';
 import {
   AUTO_SKILL_DIR_PREFIX,
   buildTaskPrompt,
@@ -36,23 +35,20 @@ vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
 }));
 
-function makeMinimalConfig(projectRoot: string): Config {
-  return {
-    getProjectRoot: () => projectRoot,
-    getPermissionManager: () => undefined,
-  } as unknown as Config;
-}
+const { EDIT, READ_FILE, WEB_FETCH, WRITE_FILE } = ToolNames;
 
 /**
  * Build the scoped Config and return its non-null PermissionManager.
- * `createSkillScopedAgentConfig` always installs one, but Config's
- * declared `getPermissionManager(): PermissionManager | null` forces
- * tests to launder the null at the call site — this helper does it
- * once with an assertion that fires loudly if the contract ever breaks.
+ * Config declares `getPermissionManager(): PermissionManager | null`, so this
+ * launders the null once, with an assertion that fires loudly if
+ * `createSkillScopedAgentConfig` ever stops installing one.
  */
-function scopedPm(projectRoot: string) {
+function scopedPm(projectRoot: string, basePm?: unknown) {
   const scoped = createSkillScopedAgentConfig(
-    makeMinimalConfig(projectRoot),
+    {
+      getProjectRoot: () => projectRoot,
+      getPermissionManager: () => basePm,
+    } as unknown as Config,
     projectRoot,
   );
   const pm = scoped.getPermissionManager();
@@ -64,16 +60,40 @@ function scopedPm(projectRoot: string) {
   return pm;
 }
 
+const skillsPath = (projectRoot: string, ...segs: string[]) =>
+  path.join(projectRoot, '.qwen', 'skills', ...segs);
+
 async function writeSkillFile(
   projectRoot: string,
   skillName: string,
   content: string,
 ): Promise<string> {
-  const dir = path.join(projectRoot, '.qwen', 'skills', skillName);
+  const dir = skillsPath(projectRoot, skillName);
   await fs.mkdir(dir, { recursive: true });
   const filePath = path.join(dir, 'SKILL.md');
   await fs.writeFile(filePath, content, 'utf-8');
   return filePath;
+}
+
+async function archiveSkillDir(projectRoot: string, directoryName: string) {
+  await fs.mkdir(
+    path.join(projectRoot, '.qwen', 'archived-skills', directoryName),
+    { recursive: true },
+  );
+}
+
+/** A fresh temp project root per test; returns getters for both dirs. */
+function useTempProject(prefix: string) {
+  const dirs = { tempDir: '', projectRoot: '' };
+  beforeEach(async () => {
+    dirs.tempDir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+    dirs.projectRoot = path.join(dirs.tempDir, 'project');
+    await fs.mkdir(dirs.projectRoot, { recursive: true });
+  });
+  afterEach(async () => {
+    await fs.rm(dirs.tempDir, { recursive: true, force: true });
+  });
+  return dirs;
 }
 
 const AUTO_SKILL = `---
@@ -93,130 +113,73 @@ human body
 `;
 
 describe('skillReviewAgentPlanner — write_file collision deny (#4437)', () => {
-  let tempDir: string;
-  let projectRoot: string;
+  const dirs = useTempProject('skill-review-v2-');
+  const decide = (toolName: string, filePath: string) =>
+    scopedPm(dirs.projectRoot).evaluate({ toolName, filePath });
 
-  beforeEach(async () => {
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-review-v2-'));
-    projectRoot = path.join(tempDir, 'project');
-    await fs.mkdir(projectRoot, { recursive: true });
-  });
-
-  afterEach(async () => {
-    await fs.rm(tempDir, { recursive: true, force: true });
-  });
-
-  it("denies write_file to an existing AUTO-skill path (the #4437 bug — was 'allow')", async () => {
-    const filePath = await writeSkillFile(projectRoot, 'my-skill', AUTO_SKILL);
-    const pm = scopedPm(projectRoot);
-
-    const decision = await pm.evaluate({
-      toolName: ToolNames.WRITE_FILE,
-      filePath,
-    });
-    expect(decision).toBe('deny');
-  });
-
-  it('denies write_file to an existing USER-skill path (already worked — kept as regression guard)', async () => {
-    const filePath = await writeSkillFile(projectRoot, 'my-skill', USER_SKILL);
-    const pm = scopedPm(projectRoot);
-
-    const decision = await pm.evaluate({
-      toolName: ToolNames.WRITE_FILE,
-      filePath,
-    });
-    expect(decision).toBe('deny');
+  it.each([
+    [
+      "denies write_file to an existing AUTO-skill path (the #4437 bug — was 'allow')",
+      AUTO_SKILL,
+      WRITE_FILE,
+      'deny',
+    ],
+    [
+      'denies write_file to an existing USER-skill path (already worked — kept as regression guard)',
+      USER_SKILL,
+      WRITE_FILE,
+      'deny',
+    ],
+    [
+      'still allows edit on an existing auto-skill (update path preserved)',
+      AUTO_SKILL,
+      EDIT,
+      'allow',
+    ],
+    [
+      'still denies edit on a user skill (update path safety preserved)',
+      USER_SKILL,
+      EDIT,
+      'deny',
+    ],
+  ])('%s', async (_title, content, toolName, expected) => {
+    const filePath = await writeSkillFile(
+      dirs.projectRoot,
+      'my-skill',
+      content,
+    );
+    expect(await decide(toolName, filePath)).toBe(expected);
   });
 
   it('allows write_file to a fresh path that does not yet exist', async () => {
-    const fresh = path.join(
-      projectRoot,
-      '.qwen',
-      'skills',
-      'brand-new',
+    const fresh = skillsPath(dirs.projectRoot, 'brand-new', 'SKILL.md');
+    expect(await decide(WRITE_FILE, fresh)).toBe('allow');
+  });
+
+  it.each([
+    [
+      'denies write_file when the directory name is already archived',
+      WRITE_FILE,
+    ],
+    ['denies edit creation when the directory name is already archived', EDIT],
+  ])('%s', async (_title, toolName) => {
+    await archiveSkillDir(dirs.projectRoot, 'auto-skill-retired');
+    const target = skillsPath(
+      dirs.projectRoot,
+      'auto-skill-retired',
       'SKILL.md',
     );
-    const pm = scopedPm(projectRoot);
-
-    const decision = await pm.evaluate({
-      toolName: ToolNames.WRITE_FILE,
-      filePath: fresh,
-    });
-    expect(decision).toBe('allow');
-  });
-
-  it('denies write_file when the directory name is already archived', async () => {
-    const directoryName = 'auto-skill-retired';
-    await fs.mkdir(
-      path.join(projectRoot, '.qwen', 'archived-skills', directoryName),
-      { recursive: true },
-    );
-    const target = path.join(
-      projectRoot,
-      '.qwen',
-      'skills',
-      directoryName,
-      'SKILL.md',
-    );
-
-    expect(
-      await scopedPm(projectRoot).evaluate({
-        toolName: ToolNames.WRITE_FILE,
-        filePath: target,
-      }),
-    ).toBe('deny');
-  });
-
-  it('denies edit creation when the directory name is already archived', async () => {
-    const directoryName = 'auto-skill-retired';
-    await fs.mkdir(
-      path.join(projectRoot, '.qwen', 'archived-skills', directoryName),
-      { recursive: true },
-    );
-    const target = path.join(
-      projectRoot,
-      '.qwen',
-      'skills',
-      directoryName,
-      'SKILL.md',
-    );
-
-    expect(
-      await scopedPm(projectRoot).evaluate({
-        toolName: ToolNames.EDIT,
-        filePath: target,
-      }),
-    ).toBe('deny');
-  });
-
-  it('still allows edit on an existing auto-skill (update path preserved)', async () => {
-    const filePath = await writeSkillFile(projectRoot, 'my-skill', AUTO_SKILL);
-    const pm = scopedPm(projectRoot);
-
-    const decision = await pm.evaluate({
-      toolName: ToolNames.EDIT,
-      filePath,
-    });
-    expect(decision).toBe('allow');
-  });
-
-  it('still denies edit on a user skill (update path safety preserved)', async () => {
-    const filePath = await writeSkillFile(projectRoot, 'my-skill', USER_SKILL);
-    const pm = scopedPm(projectRoot);
-
-    const decision = await pm.evaluate({
-      toolName: ToolNames.EDIT,
-      filePath,
-    });
-    expect(decision).toBe('deny');
+    expect(await decide(toolName, target)).toBe('deny');
   });
 
   it('write_file deny rule message points the agent at a fresh name', async () => {
-    const filePath = await writeSkillFile(projectRoot, 'my-skill', AUTO_SKILL);
-    const pm = scopedPm(projectRoot);
-
-    const rule = pm.findMatchingDenyRule({
-      toolName: ToolNames.WRITE_FILE,
+    const filePath = await writeSkillFile(
+      dirs.projectRoot,
+      'my-skill',
+      AUTO_SKILL,
+    );
+    const rule = scopedPm(dirs.projectRoot).findMatchingDenyRule({
+      toolName: WRITE_FILE,
       filePath,
     });
     expect(rule).toMatch(/<name>-2/);
@@ -224,160 +187,100 @@ describe('skillReviewAgentPlanner — write_file collision deny (#4437)', () => 
   });
 
   it('denies write_file to a path outside the project skills root', async () => {
-    // Security-boundary regression guard for the `isProjectSkillPath`
-    // false branch — without it the agent could escape to anywhere
-    // reachable from CWD.
-    const escape = path.join(projectRoot, 'NOT-SKILLS', 'evil.md');
-    const pm = scopedPm(projectRoot);
-    expect(
-      await pm.evaluate({
-        toolName: ToolNames.WRITE_FILE,
-        filePath: escape,
-      }),
-    ).toBe('deny');
+    // Security-boundary regression guard for the `isProjectSkillPath` false
+    // branch — without it the agent could escape to anywhere reachable from
+    // CWD.
+    const escape = path.join(dirs.projectRoot, 'NOT-SKILLS', 'evil.md');
+    expect(await decide(WRITE_FILE, escape)).toBe('deny');
   });
 
   it('denies write_file to a non-SKILL.md path inside the skills root', async () => {
-    // Auxiliary files (NOTES.md, attachments) must not land in the
-    // skills dir — SkillManager would ignore them but they'd still
-    // pollute the layout. Tightening the basename invariant is the
-    // hard guard for that.
-    const aux = path.join(
-      projectRoot,
-      '.qwen',
-      'skills',
-      'my-skill',
-      'NOTES.md',
-    );
+    // Auxiliary files (NOTES.md, attachments) must not land in the skills dir:
+    // SkillManager would ignore them but they'd pollute the layout. The
+    // basename invariant is the hard guard for that.
+    const aux = skillsPath(dirs.projectRoot, 'my-skill', 'NOTES.md');
     await fs.mkdir(path.dirname(aux), { recursive: true });
-    const pm = scopedPm(projectRoot);
-    expect(
-      await pm.evaluate({
-        toolName: ToolNames.WRITE_FILE,
-        filePath: aux,
-      }),
-    ).toBe('deny');
+    expect(await decide(WRITE_FILE, aux)).toBe('deny');
   });
 
   it('denies write_file when the target traverses a symlink outside the skills root', async () => {
     // Symlink-escape regression guard for the `assertRealProjectSkillPath`
-    // catch. A skill dir that's actually a symlink to /tmp would let the
-    // agent write outside the project; the realpath check stops it.
-    const outside = path.join(tempDir, 'outside');
+    // catch: a skill dir symlinked to /tmp would let the agent write outside
+    // the project; the realpath check stops it.
+    const outside = path.join(dirs.tempDir, 'outside');
     await fs.mkdir(outside, { recursive: true });
-    const skillsRoot = path.join(projectRoot, '.qwen', 'skills');
+    const skillsRoot = skillsPath(dirs.projectRoot);
     await fs.mkdir(skillsRoot, { recursive: true });
     await fs.symlink(outside, path.join(skillsRoot, 'escape'));
     const target = path.join(skillsRoot, 'escape', 'SKILL.md');
-    const pm = scopedPm(projectRoot);
-    expect(
-      await pm.evaluate({
-        toolName: ToolNames.WRITE_FILE,
-        filePath: target,
-      }),
-    ).toBe('deny');
+    expect(await decide(WRITE_FILE, target)).toBe('deny');
   });
 
   it('denies write_file when the target path is a directory, not a file', async () => {
-    // `fs.stat` on a directory SUCCEEDS (returning stats with
-    // `isDirectory: true`); it does not throw EISDIR. So this exercise
-    // path A in evaluateScopedDecision — `try { await fs.stat(); return
-    // 'deny'; }` — i.e. "target exists" rather than the non-ENOENT
-    // catch. WriteFileTool would later fail with EISDIR on the actual
-    // write, but the permission layer catches it earlier here.
-    const dirAsFile = path.join(
-      projectRoot,
-      '.qwen',
-      'skills',
+    // `fs.stat` on a directory SUCCEEDS (`isDirectory: true`), it does not
+    // throw EISDIR, so this exercises path A in evaluateScopedDecision
+    // (`try { await fs.stat(); return 'deny'; }`, "target exists") rather
+    // than the non-ENOENT catch. WriteFileTool would later fail with EISDIR;
+    // the permission layer catches it earlier.
+    const dirAsFile = skillsPath(
+      dirs.projectRoot,
       'is-a-directory',
       'SKILL.md',
     );
     await fs.mkdir(dirAsFile, { recursive: true });
-    const pm = scopedPm(projectRoot);
-    expect(
-      await pm.evaluate({
-        toolName: ToolNames.WRITE_FILE,
-        filePath: dirAsFile,
-      }),
-    ).toBe('deny');
+    expect(await decide(WRITE_FILE, dirAsFile)).toBe('deny');
   });
 
-  // Note on coverage of the `fs.stat` catch branch in
-  // evaluateScopedDecision:
-  // The branch is defense-in-depth — anything that would make `fs.stat`
-  // throw a non-ENOENT error (EACCES, ELOOP, ENAMETOOLONG, EIO) also
-  // throws from `assertRealProjectSkillPath`'s `realpath`/`lstat` one
-  // step earlier, which is exercised by the symlink-traversal test
-  // above. Spying on `fs.stat` from ESM tests is blocked
-  // (https://vitest.dev/guide/browser/#limitations), and chmod-based
-  // reproductions of EACCES are non-portable to Windows CI. The deny
-  // contract is straightforward enough that the structural duplication
-  // here is acceptable.
+  // The `fs.stat` catch branch in evaluateScopedDecision is defense-in-depth:
+  // any non-ENOENT stat error (EACCES, ELOOP, ENAMETOOLONG, EIO) also throws
+  // one step earlier from `assertRealProjectSkillPath`'s `realpath`/`lstat`,
+  // which the symlink-traversal test covers. Spying on `fs.stat` from ESM is
+  // blocked (https://vitest.dev/guide/browser/#limitations) and chmod-based
+  // EACCES repros don't port to Windows CI, so the branch stays untested here.
 });
 
 describe('listExistingSkillDirNames', () => {
-  let tempDir: string;
-  let projectRoot: string;
-
-  beforeEach(async () => {
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-list-'));
-    projectRoot = path.join(tempDir, 'project');
-    await fs.mkdir(projectRoot, { recursive: true });
-  });
-
-  afterEach(async () => {
-    await fs.rm(tempDir, { recursive: true, force: true });
-  });
+  const dirs = useTempProject('skill-list-');
 
   it('returns sorted directory names that contain a SKILL.md', async () => {
-    await writeSkillFile(projectRoot, 'zebra', AUTO_SKILL);
-    await writeSkillFile(projectRoot, 'apple', AUTO_SKILL);
-    expect(await listExistingSkillDirNames(projectRoot)).toEqual([
+    await writeSkillFile(dirs.projectRoot, 'zebra', AUTO_SKILL);
+    await writeSkillFile(dirs.projectRoot, 'apple', AUTO_SKILL);
+    expect(await listExistingSkillDirNames(dirs.projectRoot)).toEqual([
       'apple',
       'zebra',
     ]);
   });
 
   it('does not treat archive-only directory names as live skills', async () => {
-    const archived = path.join(
-      projectRoot,
-      '.qwen',
-      'archived-skills',
-      'auto-skill-retired',
-    );
-    await fs.mkdir(archived, { recursive: true });
-    await writeSkillFile(projectRoot, 'auto-skill-live', AUTO_SKILL);
-
-    expect(await listExistingSkillDirNames(projectRoot)).toEqual([
+    await archiveSkillDir(dirs.projectRoot, 'auto-skill-retired');
+    await writeSkillFile(dirs.projectRoot, 'auto-skill-live', AUTO_SKILL);
+    expect(await listExistingSkillDirNames(dirs.projectRoot)).toEqual([
       'auto-skill-live',
     ]);
   });
 
   it('skips directories without SKILL.md so half-built dirs do not reserve names', async () => {
-    await writeSkillFile(projectRoot, 'real', AUTO_SKILL);
-    await fs.mkdir(path.join(projectRoot, '.qwen', 'skills', 'empty'), {
-      recursive: true,
-    });
-    expect(await listExistingSkillDirNames(projectRoot)).toEqual(['real']);
+    await writeSkillFile(dirs.projectRoot, 'real', AUTO_SKILL);
+    await fs.mkdir(skillsPath(dirs.projectRoot, 'empty'), { recursive: true });
+    expect(await listExistingSkillDirNames(dirs.projectRoot)).toEqual(['real']);
   });
 
   it('returns [] when the skills directory does not exist', async () => {
-    expect(await listExistingSkillDirNames(projectRoot)).toEqual([]);
+    expect(await listExistingSkillDirNames(dirs.projectRoot)).toEqual([]);
   });
 
   it('includes skills whose directory is a symlink (matches skill-load.ts convention)', async () => {
-    // Build a real skill outside the skills root, then symlink it in.
-    // `skill-load.ts:31-34` and `skill-manager.ts:994-997` both treat
-    // `isDirectory() || isSymbolicLink()` as a skill candidate; the
-    // enumeration here mirrors that.
-    const external = path.join(tempDir, 'external-skills', 'linked');
+    // A real skill outside the skills root, symlinked in. `skill-load.ts:31-34`
+    // and `skill-manager.ts:994-997` both treat `isDirectory() ||
+    // isSymbolicLink()` as a skill candidate; the enumeration mirrors that.
+    const external = path.join(dirs.tempDir, 'external-skills', 'linked');
     await fs.mkdir(external, { recursive: true });
     await fs.writeFile(path.join(external, 'SKILL.md'), AUTO_SKILL, 'utf-8');
-    const skillsRoot = path.join(projectRoot, '.qwen', 'skills');
+    const skillsRoot = skillsPath(dirs.projectRoot);
     await fs.mkdir(skillsRoot, { recursive: true });
     await fs.symlink(external, path.join(skillsRoot, 'linked'));
-    await writeSkillFile(projectRoot, 'regular', AUTO_SKILL);
-    expect(await listExistingSkillDirNames(projectRoot)).toEqual([
+    await writeSkillFile(dirs.projectRoot, 'regular', AUTO_SKILL);
+    expect(await listExistingSkillDirNames(dirs.projectRoot)).toEqual([
       'linked',
       'regular',
     ]);
@@ -385,23 +288,12 @@ describe('listExistingSkillDirNames', () => {
 });
 
 describe('buildTaskPrompt', () => {
-  let tempDir: string;
-  let projectRoot: string;
-
-  beforeEach(async () => {
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-prompt-'));
-    projectRoot = path.join(tempDir, 'project');
-    await fs.mkdir(projectRoot, { recursive: true });
-  });
-
-  afterEach(async () => {
-    await fs.rm(tempDir, { recursive: true, force: true });
-  });
+  const dirs = useTempProject('skill-prompt-');
 
   it('lists existing skill names so the agent picks a non-colliding name', async () => {
-    await writeSkillFile(projectRoot, 'alpha', AUTO_SKILL);
-    await writeSkillFile(projectRoot, 'beta', AUTO_SKILL);
-    const prompt = await buildTaskPrompt(projectRoot);
+    await writeSkillFile(dirs.projectRoot, 'alpha', AUTO_SKILL);
+    await writeSkillFile(dirs.projectRoot, 'beta', AUTO_SKILL);
+    const prompt = await buildTaskPrompt(dirs.projectRoot);
     expect(prompt).toContain('alpha');
     expect(prompt).toContain('beta');
     expect(prompt).toMatch(/Active skill directory names/i);
@@ -414,13 +306,10 @@ describe('buildTaskPrompt', () => {
   });
 
   it('lists archived directory names as reserved', async () => {
-    const directoryName = 'auto-skill-retired';
-    await fs.mkdir(
-      path.join(projectRoot, '.qwen', 'archived-skills', directoryName),
-      { recursive: true },
+    await archiveSkillDir(dirs.projectRoot, 'auto-skill-retired');
+    expect(await buildTaskPrompt(dirs.projectRoot)).toContain(
+      'auto-skill-retired',
     );
-
-    expect(await buildTaskPrompt(projectRoot)).toContain(directoryName);
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -428,37 +317,31 @@ describe('buildTaskPrompt', () => {
     async () => {
       // Mirrors the curator's charset guard: a crafted archived directory name
       // with ANSI/control bytes must not reach the task prompt verbatim.
-      const directoryName = 'auto-skill-evil\u001b[31m';
-      await fs.mkdir(
-        path.join(projectRoot, '.qwen', 'archived-skills', directoryName),
-        { recursive: true },
-      );
-
-      const prompt = await buildTaskPrompt(projectRoot);
+      await archiveSkillDir(dirs.projectRoot, 'auto-skill-evil\u001b[31m');
+      const prompt = await buildTaskPrompt(dirs.projectRoot);
       expect(prompt).not.toContain('\u001b[31m');
     },
   );
 
   it('falls back to a placeholder line when no skills exist yet', async () => {
-    const prompt = await buildTaskPrompt(projectRoot);
+    const prompt = await buildTaskPrompt(dirs.projectRoot);
     expect(prompt).toMatch(/no skills exist yet/i);
   });
 
   it('displays the project skills root derived from the same projectRoot used for enumeration', async () => {
     // Regression guard for the param collapse — the displayed root and
     // the enumerated names always come from the same source.
-    await writeSkillFile(projectRoot, 'real', AUTO_SKILL);
-    const prompt = await buildTaskPrompt(projectRoot);
-    expect(prompt).toContain(path.join(projectRoot, '.qwen', 'skills'));
+    await writeSkillFile(dirs.projectRoot, 'real', AUTO_SKILL);
+    const prompt = await buildTaskPrompt(dirs.projectRoot);
+    expect(prompt).toContain(skillsPath(dirs.projectRoot));
     expect(prompt).toContain('real');
   });
 
   it('instructs the agent to use the auto-skill- directory prefix (#4837)', async () => {
-    // The `.gitignore` re-ignores `.qwen/skills/auto-skill-*/`, so new
-    // auto-generated skills must land under an `auto-skill-`-prefixed
-    // directory to stay out of version control. The prompt is the soft
-    // guard that steers the agent there.
-    const prompt = await buildTaskPrompt(projectRoot);
+    // `.gitignore` re-ignores `.qwen/skills/auto-skill-*/`, so new auto skills
+    // must land under an `auto-skill-`-prefixed dir to stay out of version
+    // control. The prompt is the soft guard that steers the agent there.
+    const prompt = await buildTaskPrompt(dirs.projectRoot);
     expect(prompt).toContain(AUTO_SKILL_DIR_PREFIX);
     expect(prompt).toContain(`.qwen/skills/${AUTO_SKILL_DIR_PREFIX}<name>/`);
     expect(prompt).toMatch(/mandatory/i);
@@ -480,200 +363,143 @@ describe('SKILL_REVIEW_SYSTEM_PROMPT', () => {
 });
 
 describe('runSkillReviewByAgent limit wiring', () => {
-  let tempDir: string;
-  let projectRoot: string;
+  const dirs = useTempProject('skill-timeout-');
 
-  function makeConfig(
-    options: {
-      timeoutMinutes?: number;
-      maxTurns?: number;
-    } = {},
-  ): Config {
-    return {
-      getProjectRoot: () => projectRoot,
-      getPermissionManager: () => undefined,
-      getMemoryAgentTimeoutMinutes: vi
-        .fn()
-        .mockReturnValue(options.timeoutMinutes),
-      getMemoryAgentMaxTurns: vi.fn().mockReturnValue(options.maxTurns),
-    } as unknown as Config;
-  }
-
-  beforeEach(async () => {
+  beforeEach(() => {
     vi.mocked(runForkedAgent).mockReset();
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       finalText: '',
       filesTouched: [],
     });
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-timeout-'));
-    projectRoot = path.join(tempDir, 'project');
-    await fs.mkdir(projectRoot, { recursive: true });
   });
 
-  afterEach(async () => {
-    await fs.rm(tempDir, { recursive: true, force: true });
-  });
-
-  it('uses the configured memory agent timeout when no timeoutMs param is passed', async () => {
-    await runSkillReviewByAgent({
-      config: makeConfig({ timeoutMinutes: 30 }),
-      projectRoot,
+  /** Runs a review whose config reports the given memory-agent limits. */
+  function review(
+    limits: { timeoutMinutes?: number; maxTurns?: number } = {},
+    params: { maxTurns?: number; timeoutMs?: number } = {},
+  ) {
+    const config = {
+      getProjectRoot: () => dirs.projectRoot,
+      getPermissionManager: () => undefined,
+      getMemoryAgentTimeoutMinutes: vi
+        .fn()
+        .mockReturnValue(limits.timeoutMinutes),
+      getMemoryAgentMaxTurns: vi.fn().mockReturnValue(limits.maxTurns),
+    } as unknown as Config;
+    return runSkillReviewByAgent({
+      config,
+      projectRoot: dirs.projectRoot,
       history: [],
+      ...params,
     });
+  }
 
-    expect(runForkedAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ maxTimeMinutes: 30 }),
-    );
-  });
-
-  it('uses the configured memory agent turn limit when maxTurns is omitted', async () => {
-    await runSkillReviewByAgent({
-      config: makeConfig({ maxTurns: 25 }),
-      projectRoot,
-      history: [],
-    });
-
-    expect(runForkedAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ maxTurns: 25 }),
-    );
-  });
-
-  it('passes the zero turn-limit sentinel through to the forked agent', async () => {
-    await runSkillReviewByAgent({
-      config: makeConfig({ maxTurns: 0 }),
-      projectRoot,
-      history: [],
-    });
-
-    expect(runForkedAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ maxTurns: 0 }),
-    );
-  });
-
-  it('lets an explicit maxTurns param override the configured value', async () => {
-    await runSkillReviewByAgent({
-      config: makeConfig({ maxTurns: 25 }),
-      projectRoot,
-      history: [],
-      maxTurns: 3,
-    });
-
-    expect(runForkedAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ maxTurns: 3 }),
-    );
-  });
-
-  it('lets an explicit timeoutMs param override the configured value', async () => {
-    await runSkillReviewByAgent({
-      config: makeConfig({ timeoutMinutes: 30 }),
-      projectRoot,
-      history: [],
-      timeoutMs: 60_000,
-    });
-
-    expect(runForkedAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ maxTimeMinutes: 1 }),
-    );
-  });
-
-  it('falls back to the built-in default when neither is set', async () => {
-    await runSkillReviewByAgent({
-      config: makeConfig(),
-      projectRoot,
-      history: [],
-    });
-
-    expect(runForkedAgent).toHaveBeenCalledWith(
-      expect.objectContaining({
+  it.each([
+    [
+      'uses the configured memory agent timeout when no timeoutMs param is passed',
+      { timeoutMinutes: 30 },
+      {},
+      { maxTimeMinutes: 30 },
+    ],
+    [
+      'uses the configured memory agent turn limit when maxTurns is omitted',
+      { maxTurns: 25 },
+      {},
+      { maxTurns: 25 },
+    ],
+    [
+      'passes the zero turn-limit sentinel through to the forked agent',
+      { maxTurns: 0 },
+      {},
+      { maxTurns: 0 },
+    ],
+    [
+      'lets an explicit maxTurns param override the configured value',
+      { maxTurns: 25 },
+      { maxTurns: 3 },
+      { maxTurns: 3 },
+    ],
+    [
+      'lets an explicit timeoutMs param override the configured value',
+      { timeoutMinutes: 30 },
+      { timeoutMs: 60_000 },
+      { maxTimeMinutes: 1 },
+    ],
+    [
+      'falls back to the built-in default when neither is set',
+      {},
+      {},
+      {
         maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
         maxTimeMinutes: DEFAULT_AUTO_SKILL_TIMEOUT_MS / 60_000,
-      }),
+      },
+    ],
+  ])('%s', async (_title, limits, params, expected) => {
+    await review(limits, params);
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining(expected),
     );
   });
 
   it('passes only always-registered tools to the forked agent', async () => {
     // list_directory is disabled by default, so it must not be requested for
     // this turn-budgeted background agent — the prompt steers to read_file.
-    await runSkillReviewByAgent({
-      config: makeConfig(),
-      projectRoot,
-      history: [],
-    });
-
+    await review();
     const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
-    expect(call?.tools).toEqual([
-      ToolNames.READ_FILE,
-      ToolNames.WRITE_FILE,
-      ToolNames.EDIT,
-    ]);
+    expect(call?.tools).toEqual([READ_FILE, WRITE_FILE, EDIT]);
   });
 });
 
 describe('skill-scoped shim registration-gate delegation (#10075)', () => {
-  function scopedPmWithBase(basePm: unknown): PermissionManager {
-    const scoped = createSkillScopedAgentConfig(
-      {
-        getProjectRoot: () => '/project',
-        getPermissionManager: () => basePm,
-      } as unknown as Config,
-      '/project',
-    );
-    const pm = scoped.getPermissionManager();
-    if (!pm) {
-      throw new Error(
-        'createSkillScopedAgentConfig must install a PermissionManager',
-      );
-    }
-    return pm;
-  }
+  const pmOver = (basePm: unknown) => scopedPm('/project', basePm);
 
   it('isToolDisabledByCoreToolsAllowList delegates when present, defaults to false otherwise', () => {
     const gate = vi.fn().mockReturnValue(true);
-    const withGate: Pick<
-      PermissionManager,
-      'isToolDisabledByCoreToolsAllowList'
-    > = {
-      isToolDisabledByCoreToolsAllowList: gate,
-    };
-    const delegated = scopedPmWithBase(withGate);
-    expect(delegated.isToolDisabledByCoreToolsAllowList(ToolNames.EDIT)).toBe(
-      true,
-    );
-    expect(gate).toHaveBeenCalledWith(ToolNames.EDIT);
+    const delegated = pmOver({ isToolDisabledByCoreToolsAllowList: gate });
+    expect(delegated.isToolDisabledByCoreToolsAllowList(EDIT)).toBe(true);
+    expect(gate).toHaveBeenCalledWith(EDIT);
 
-    const noBase = scopedPmWithBase(undefined);
-    expect(noBase.isToolDisabledByCoreToolsAllowList(ToolNames.EDIT)).toBe(
+    expect(pmOver(undefined).isToolDisabledByCoreToolsAllowList(EDIT)).toBe(
       false,
     );
 
     // A base PM without the method (older shape) must not throw — the
     // scheduler's own `typeof` guard relies on this returning false.
-    const legacyBase: Pick<PermissionManager, 'isToolEnabled'> = {
-      isToolEnabled: vi.fn().mockResolvedValue(true),
-    };
-    const legacy = scopedPmWithBase(legacyBase);
-    expect(legacy.isToolDisabledByCoreToolsAllowList(ToolNames.EDIT)).toBe(
-      false,
-    );
+    const legacy = pmOver({ isToolEnabled: vi.fn().mockResolvedValue(true) });
+    expect(legacy.isToolDisabledByCoreToolsAllowList(EDIT)).toBe(false);
   });
 
   it('getToolRegistrationStatus delegates when present, defaults to registered', async () => {
     // Use a non-scoped tool: read_file/ls/edit/write_file short-circuit as
     // scoped tools before the base delegation.
     const status = vi.fn().mockResolvedValue('disabled');
-    const withStatus: Pick<PermissionManager, 'getToolRegistrationStatus'> = {
-      getToolRegistrationStatus: status,
-    };
-    const delegated = scopedPmWithBase(withStatus);
-    await expect(
-      delegated.getToolRegistrationStatus(ToolNames.WEB_FETCH),
-    ).resolves.toBe('disabled');
-    expect(status).toHaveBeenCalledWith(ToolNames.WEB_FETCH);
+    const delegated = pmOver({ getToolRegistrationStatus: status });
+    await expect(delegated.getToolRegistrationStatus(WEB_FETCH)).resolves.toBe(
+      'disabled',
+    );
+    expect(status).toHaveBeenCalledWith(WEB_FETCH, undefined, undefined);
 
-    const noBase = scopedPmWithBase(undefined);
     await expect(
-      noBase.getToolRegistrationStatus(ToolNames.WEB_FETCH),
+      pmOver(undefined).getToolRegistrationStatus(WEB_FETCH),
     ).resolves.toBe('registered');
+  });
+
+  it('isToolEnabled forwards the alias and identity channels to the base PM', async () => {
+    const isToolEnabled = vi.fn().mockResolvedValue(false);
+    const delegated = pmOver({ isToolEnabled });
+    const identity = { serverName: 'foo:bar', serverToolName: 'a.b' };
+    await expect(
+      delegated.isToolEnabled(
+        'mcp__foo_bar__a_b_1aofxjh',
+        ['mcp__foo:bar__a.b'],
+        identity,
+      ),
+    ).resolves.toBe(false);
+    expect(isToolEnabled).toHaveBeenCalledWith(
+      'mcp__foo_bar__a_b_1aofxjh',
+      ['mcp__foo:bar__a.b'],
+      identity,
+    );
   });
 });

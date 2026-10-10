@@ -35,17 +35,21 @@ export function sessionMatchesGitQuery(
 /**
  * The sidebar's session-source scope: the "channel" tab lists only
  * channel-source sessions, the "default" tab lists unattributed (legacy)
- * and default-source ones, and no filter lists everything.
+ * and default/Qwen Live tasks, every other source lists exact matches, and
+ * no filter lists everything.
  */
 export function sessionMatchesSource(
   session: DaemonSessionSummary,
   source: string | undefined,
 ): boolean {
-  if (source === 'channel') return session.sourceType === 'channel';
   if (source === 'default') {
-    return session.sourceType === undefined || session.sourceType === 'default';
+    return (
+      session.sourceType === undefined ||
+      session.sourceType === 'default' ||
+      session.sourceType === 'qwen-live'
+    );
   }
-  return true;
+  return source === undefined || session.sourceType === source;
 }
 
 /**

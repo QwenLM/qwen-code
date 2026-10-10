@@ -1,0 +1,37 @@
+# Managed Tool Publication Ownership (O2a)
+
+[English](2026-09-27-managed-tool-publication-ownership.md) | [简体中文](2026-09-27-managed-tool-publication-ownership.zh-CN.md)
+
+## Status and scope
+
+Implementation foundation of the unified [O2 delivery](2026-09-27-managed-tool-result-hosted-delivery.md), based on main `848cf5e6c`. O2a supplies a closed publication binding/request/grant contract, shared TypeScript/Java fixtures, a forward SQL migration, and an internal transactional reservation repository. Production HTTP publication routes, OSS data transfer, Session receipt admission and worker dispatch remain later work in the same Draft PR. The repository is explicitly constructed with deployment capacity limits and the existing SQL Session/Broker authorities; no default-enabled bean or worker capability is added. O2b preserves this grant's closed `OPEN/FENCED/NOT_STARTED` authorization state and stores producer progress separately as `producerPhase`.
+
+## Identity and authority
+
+The immutable binding records full Session key, model call ID, original execution ID, Runtime binding/reference/generation, capture identity, exact argument resource and payload digest, original writer/activation, intent sequence and checkpoint reference. `manifest.callId` repeats Runtime `reference.callId`; `modelCallId` pairs model history separately. O1a documentation is clarified accordingly, while existing local equal-ID and segment fixtures remain unchanged.
+
+The exact dispatch payload digest and canonical input digest are different. Runtime `reference.argsDigest` uses the canonical input SHA-256 with its original `sha256:` prefix. Java verifies the exact UTF-8 payload digest and stored argument/checkpoint relations; TypeScript additionally recomputes canonical input with `managedToolDigest`. A normal HTTP 409, absent Runtime status or expired writer is not evidence of a not-started execution.
+
+Owner requests authenticate against the existing writer token and lock the Session head. A blocked Session may fence/close reservations but cannot reserve/renew. Reserve and renew also verify the latest committed active activation, original intent (including its committing writer generation), original immutable checkpoint and current `await_runtime` checkpoint, resource digests and the saved Broker execution/binding. When other tools advance the checkpoint, renew retains the original binding and separately verifies that the latest checkpoint still has this execution in progress. The SQL head's activation epoch alone is insufficient because release can keep the same epoch. Admission reads bounded journal transactions in reverse to locate the latest activation; it holds at most one existing bounded transaction in memory. A later ingestion implementation may add a verified projection if profiling requires it.
+
+The owner generates an independent 256-bit random publication token before reserve, following the existing writer-secret pattern. Only its SHA-256 is stored; responses contain grant metadata, not secrets. Lost responses retry the same binding, allocation and token. Rotation is not implicit. The parent design is synchronized with this choice. No encrypted token storage is required.
+
+## Operations and capacity
+
+The internal operations are `reserve`, `renew`, `fence` and `close_not_started`. Requests are closed JSON with a 64 KiB bound. Reserve includes an immutable binding and capture allocation; producer-terminal (2,686,976 bytes: terminal + manifest + two final pages) and admission (2,097,152 bytes) allowances are fixed separately so quota exhaustion cannot consume them. Other operations name the original publication and current owner. Grants contain publication ID, binding digest, state and expiry, never authorization secrets.
+
+A first reserve requires the original Broker execution to be `PREPARED` with dispatch generation zero; only an existing reservation may be replayed/renewed during execution. O2d must require the committed reservation before claiming dispatch, so this precondition is not a replacement for its dispatch interlock. Reserve is idempotent only for the identical binding, capacity and token. Publication ID, original execution and capture IDs cannot be rebound within the Session. Renew retains original identity and caps grant expiry at writer and activation expiry. Fence is irreversible and retains reservation; it does not certify process stop. Close requires the authoritative original Broker record to be `SETTLED/not_started`, or `SETTLED/cancelled` with dispatch generation zero. It revokes the grant and releases the unused reservation exactly once. A new owner may fence/close a predecessor's reservation after authenticating its own writer; it cannot renew or re-reserve that predecessor's identity.
+
+Capacity is bounded per execution, Session, tenant and tenant-wide active capture count. Deployment instances must use the same capacity policy. Earlier pages count toward capture capacity; final pages have the separate producer allowance. All limits are explicit positive safe integers. Transactions lock tenant capacity, Session head and publication in a fixed order. Duplicate reserve consumes no extra quota; failure rolls back its charge. O2a performs no uploads, so close can release the entire untouched allocation. Before O2b adds upload operations it must account for used/in-flight/quarantined bytes and preserve the separate admission allowance; no O2a close path may be reused blindly once bytes exist.
+
+## Validation
+
+Use failing shared-fixture tests before implementation, then run real parsers in both languages. Test ID/UTF-8/NFC/decimal-generation boundaries, unknown fields, changed scope/digests, distinct model/Runtime IDs, and grant secret exclusion. SQL tests cover restart/replay, writer and same-epoch activation release, missing or changed committed evidence, Broker identity conflicts, concurrent quota claims, rollback, fence/revoke and authoritative no-start closure. The internal repository tests use real JDBC transactions and state exactly whether the database is H2 or MySQL. Existing global CLI `0.24.6` has no O2 entry; ordinary model dialogue is not this slice's E2E evidence.
+
+Run focused core/Java tests, core/CLI regressions for O1a/O1c gates, repository build/typecheck/bundle and full-diff self-review. No remote-object or different-host result is claimed by this slice. Contract semantic changes still require maintainer review when submitted.
+
+### Local implementation evidence (2026-09-27)
+
+Repository build, typecheck and bundle passed. Core regression selection passed 608 tests and the CLI gate selection passed 23. After the final dispatch guard change, the publication suite passed 42 TypeScript tests and 15 Java tests; the earlier Session Store/Flyway regression selection passed another five Java tests. Targeted ESLint and Java Checkstyle passed. Java dependencies were rebuilt from this worktree into an isolated Maven cache after detecting a conflicting same-version artifact in the shared cache.
+
+The SQL evidence is H2 2.3 with actual Flyway V1–V14 and JDBC transactions. Its journal/checkpoint fixtures exercise the fields this repository consumes; they do not assemble a complete TypeScript authority/model loop. Repository reconstruction proves catalog replay, not process-crash or different-host recovery. MySQL, OSS, HTTP publication routes and Hosted dispatch remain unverified by this slice.

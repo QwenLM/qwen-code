@@ -53,7 +53,7 @@ const {
         availableSkills: [],
         savedWorkflows: [] as Array<{
           name: string;
-          source: 'project' | 'user';
+          source: 'project' | 'user' | 'extension';
         }>,
       },
     },
@@ -323,6 +323,7 @@ describe('WorkflowRunsPage', () => {
     connectionMock.supportedCommands.savedWorkflows = [
       { name: 'deep-review', source: 'project' },
       { name: 'release-check', source: 'user' },
+      { name: 'gcp:audit', source: 'extension' },
     ];
     const container = await renderPage({
       v: 1,
@@ -343,6 +344,14 @@ describe('WorkflowRunsPage', () => {
     expect(container.textContent).toContain('Available in this project');
     expect(container.textContent).toContain('/release-check');
     expect(container.textContent).toContain('Available across projects');
+    expect(container.textContent).toContain('/gcp:audit');
+    expect(container.textContent).toContain(
+      'Provided by an installed extension',
+    );
+    const extensionEntry = container.querySelector('[data-scope="extension"]');
+    expect(
+      extensionEntry?.querySelector('[data-slot="badge"]')?.textContent,
+    ).toBe('Extension');
 
     const runButton = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Run deep-review"]',

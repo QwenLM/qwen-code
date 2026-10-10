@@ -15,6 +15,21 @@ import { OAuthUtils } from './oauth-utils.js';
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
+/** A successful fetch response whose JSON body is `body`. */
+const okJson = (body: unknown) => ({
+  ok: true,
+  json: () => Promise.resolve(body),
+});
+
+const PRM_URL = 'https://example.com/.well-known/oauth-protected-resource';
+
+const authServerMetadata: OAuthAuthorizationServerMetadata = {
+  issuer: 'https://auth.example.com',
+  authorization_endpoint: 'https://auth.example.com/authorize',
+  token_endpoint: 'https://auth.example.com/token',
+  scopes_supported: ['read', 'write'],
+};
+
 describe('OAuthUtils', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -28,49 +43,31 @@ describe('OAuthUtils', () => {
   });
 
   describe('buildWellKnownUrls', () => {
-    it('should build standard root-based URLs by default', () => {
-      const urls = OAuthUtils.buildWellKnownUrls('https://example.com/mcp');
-      expect(urls.protectedResource).toBe(
-        'https://example.com/.well-known/oauth-protected-resource',
-      );
-      expect(urls.authorizationServer).toBe(
-        'https://example.com/.well-known/oauth-authorization-server',
-      );
-    });
-
-    it('should build path-based URLs when includePathSuffix is true', () => {
-      const urls = OAuthUtils.buildWellKnownUrls(
+    it.each([
+      [
+        'should build standard root-based URLs by default',
+        'https://example.com/mcp',
+        undefined,
+        '',
+      ],
+      [
+        'should build path-based URLs when includePathSuffix is true',
         'https://example.com/mcp',
         true,
-      );
-      expect(urls.protectedResource).toBe(
-        'https://example.com/.well-known/oauth-protected-resource/mcp',
-      );
-      expect(urls.authorizationServer).toBe(
-        'https://example.com/.well-known/oauth-authorization-server/mcp',
-      );
-    });
-
-    it('should handle root path correctly', () => {
-      const urls = OAuthUtils.buildWellKnownUrls('https://example.com', true);
-      expect(urls.protectedResource).toBe(
-        'https://example.com/.well-known/oauth-protected-resource',
-      );
-      expect(urls.authorizationServer).toBe(
-        'https://example.com/.well-known/oauth-authorization-server',
-      );
-    });
-
-    it('should handle trailing slash in path', () => {
-      const urls = OAuthUtils.buildWellKnownUrls(
+        '/mcp',
+      ],
+      ['should handle root path correctly', 'https://example.com', true, ''],
+      [
+        'should handle trailing slash in path',
         'https://example.com/mcp/',
         true,
-      );
-      expect(urls.protectedResource).toBe(
-        'https://example.com/.well-known/oauth-protected-resource/mcp',
-      );
+        '/mcp',
+      ],
+    ])('%s', (_title, url, includePathSuffix, suffix) => {
+      const urls = OAuthUtils.buildWellKnownUrls(url, includePathSuffix);
+      expect(urls.protectedResource).toBe(`${PRM_URL}${suffix}`);
       expect(urls.authorizationServer).toBe(
-        'https://example.com/.well-known/oauth-authorization-server/mcp',
+        `https://example.com/.well-known/oauth-authorization-server${suffix}`,
       );
     });
   });
@@ -83,89 +80,46 @@ describe('OAuthUtils', () => {
     };
 
     it('should fetch protected resource metadata successfully', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve(mockResourceMetadata),
-      });
-
-      const result = await OAuthUtils.fetchProtectedResourceMetadata(
-        'https://example.com/.well-known/oauth-protected-resource',
-      );
-
+      mockFetch.mockResolvedValueOnce(okJson(mockResourceMetadata));
+      const result = await OAuthUtils.fetchProtectedResourceMetadata(PRM_URL);
       expect(result).toEqual(mockResourceMetadata);
     });
 
     it('should return null when fetch fails', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-      });
-
-      const result = await OAuthUtils.fetchProtectedResourceMetadata(
-        'https://example.com/.well-known/oauth-protected-resource',
-      );
-
+      mockFetch.mockResolvedValueOnce({ ok: false });
+      const result = await OAuthUtils.fetchProtectedResourceMetadata(PRM_URL);
       expect(result).toBeNull();
     });
   });
 
   describe('fetchAuthorizationServerMetadata', () => {
-    const mockAuthServerMetadata: OAuthAuthorizationServerMetadata = {
-      issuer: 'https://auth.example.com',
-      authorization_endpoint: 'https://auth.example.com/authorize',
-      token_endpoint: 'https://auth.example.com/token',
-      scopes_supported: ['read', 'write'],
-    };
-
-    it('should fetch authorization server metadata successfully', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve(mockAuthServerMetadata),
-      });
-
-      const result = await OAuthUtils.fetchAuthorizationServerMetadata(
+    const fetchMetadata = () =>
+      OAuthUtils.fetchAuthorizationServerMetadata(
         'https://auth.example.com/.well-known/oauth-authorization-server',
       );
 
-      expect(result).toEqual(mockAuthServerMetadata);
+    it('should fetch authorization server metadata successfully', async () => {
+      mockFetch.mockResolvedValueOnce(okJson(authServerMetadata));
+      expect(await fetchMetadata()).toEqual(authServerMetadata);
     });
 
     it('should return null when fetch fails', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-      });
-
-      const result = await OAuthUtils.fetchAuthorizationServerMetadata(
-        'https://auth.example.com/.well-known/oauth-authorization-server',
-      );
-
-      expect(result).toBeNull();
+      mockFetch.mockResolvedValueOnce({ ok: false });
+      expect(await fetchMetadata()).toBeNull();
     });
   });
 
   describe('discoverAuthorizationServerMetadata', () => {
-    const mockAuthServerMetadata: OAuthAuthorizationServerMetadata = {
-      issuer: 'https://auth.example.com',
-      authorization_endpoint: 'https://auth.example.com/authorize',
-      token_endpoint: 'https://auth.example.com/token',
-      scopes_supported: ['read', 'write'],
-    };
-
     it('should handle URLs without path components correctly', async () => {
       mockFetch
-        .mockResolvedValueOnce({
-          ok: false,
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve(mockAuthServerMetadata),
-        });
+        .mockResolvedValueOnce({ ok: false })
+        .mockResolvedValueOnce(okJson(authServerMetadata));
 
       const result = await OAuthUtils.discoverAuthorizationServerMetadata(
         'https://auth.example.com/',
       );
 
-      expect(result).toEqual(mockAuthServerMetadata);
-
+      expect(result).toEqual(authServerMetadata);
       expect(mockFetch).nthCalledWith(
         1,
         'https://auth.example.com/.well-known/oauth-authorization-server',
@@ -178,23 +132,15 @@ describe('OAuthUtils', () => {
 
     it('should handle URLs with path components correctly', async () => {
       mockFetch
-        .mockResolvedValueOnce({
-          ok: false,
-        })
-        .mockResolvedValueOnce({
-          ok: false,
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve(mockAuthServerMetadata),
-        });
+        .mockResolvedValueOnce({ ok: false })
+        .mockResolvedValueOnce({ ok: false })
+        .mockResolvedValueOnce(okJson(authServerMetadata));
 
       const result = await OAuthUtils.discoverAuthorizationServerMetadata(
         'https://auth.example.com/mcp',
       );
 
-      expect(result).toEqual(mockAuthServerMetadata);
-
+      expect(result).toEqual(authServerMetadata);
       expect(mockFetch).nthCalledWith(
         1,
         'https://auth.example.com/.well-known/oauth-authorization-server/mcp',
@@ -212,16 +158,7 @@ describe('OAuthUtils', () => {
 
   describe('metadataToOAuthConfig', () => {
     it('should convert metadata to OAuth config', () => {
-      const metadata: OAuthAuthorizationServerMetadata = {
-        issuer: 'https://auth.example.com',
-        authorization_endpoint: 'https://auth.example.com/authorize',
-        token_endpoint: 'https://auth.example.com/token',
-        scopes_supported: ['read', 'write'],
-      };
-
-      const config = OAuthUtils.metadataToOAuthConfig(metadata);
-
-      expect(config).toEqual({
+      expect(OAuthUtils.metadataToOAuthConfig(authServerMetadata)).toEqual({
         authorizationUrl: 'https://auth.example.com/authorize',
         tokenUrl: 'https://auth.example.com/token',
         scopes: ['read', 'write'],
@@ -229,95 +166,61 @@ describe('OAuthUtils', () => {
     });
 
     it('should handle empty scopes', () => {
-      const metadata: OAuthAuthorizationServerMetadata = {
-        issuer: 'https://auth.example.com',
-        authorization_endpoint: 'https://auth.example.com/authorize',
-        token_endpoint: 'https://auth.example.com/token',
-      };
-
-      const config = OAuthUtils.metadataToOAuthConfig(metadata);
-
+      const { scopes_supported: _, ...withoutScopes } = authServerMetadata;
+      const config = OAuthUtils.metadataToOAuthConfig(withoutScopes);
       expect(config.scopes).toEqual([]);
     });
   });
 
   describe('parseWWWAuthenticateHeader', () => {
+    const parse = (header: string) =>
+      OAuthUtils.parseWWWAuthenticateHeader(header);
+
     it('should parse resource metadata URI from WWW-Authenticate header', () => {
-      const header =
-        'Bearer realm="example", resource_metadata="https://example.com/.well-known/oauth-protected-resource"';
-      const result = OAuthUtils.parseWWWAuthenticateHeader(header);
-      expect(result).toBe(
-        'https://example.com/.well-known/oauth-protected-resource',
-      );
+      expect(
+        parse(`Bearer realm="example", resource_metadata="${PRM_URL}"`),
+      ).toBe(PRM_URL);
     });
 
     it('should parse resource metadata URI with optional whitespace around equals', () => {
-      const header =
-        'Bearer realm="example", resource_metadata = "https://example.com/.well-known/oauth-protected-resource"';
-      const result = OAuthUtils.parseWWWAuthenticateHeader(header);
-      expect(result).toBe(
-        'https://example.com/.well-known/oauth-protected-resource',
-      );
+      expect(
+        parse(`Bearer realm="example", resource_metadata = "${PRM_URL}"`),
+      ).toBe(PRM_URL);
     });
 
     it('should parse single-quoted resource metadata URI', () => {
-      const header =
-        'Bearer realm="example", resource_metadata=\'https://example.com/.well-known/oauth-protected-resource\'';
-      const result = OAuthUtils.parseWWWAuthenticateHeader(header);
-      expect(result).toBe(
-        'https://example.com/.well-known/oauth-protected-resource',
-      );
+      expect(
+        parse(`Bearer realm="example", resource_metadata='${PRM_URL}'`),
+      ).toBe(PRM_URL);
     });
 
     it('should preserve apostrophes inside double-quoted resource metadata URI', () => {
-      const header =
-        'Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource?name=o\'hara"';
-      const result = OAuthUtils.parseWWWAuthenticateHeader(header);
-      expect(result).toBe(
-        "https://example.com/.well-known/oauth-protected-resource?name=o'hara",
+      expect(parse(`Bearer resource_metadata="${PRM_URL}?name=o'hara"`)).toBe(
+        `${PRM_URL}?name=o'hara`,
       );
     });
 
     it('should ignore apostrophes in other auth params', () => {
-      const header =
-        'Bearer ext=can\'t, resource_metadata="https://example.com/.well-known/oauth-protected-resource"';
-      const result = OAuthUtils.parseWWWAuthenticateHeader(header);
-      expect(result).toBe(
-        'https://example.com/.well-known/oauth-protected-resource',
+      expect(parse(`Bearer ext=can't, resource_metadata="${PRM_URL}"`)).toBe(
+        PRM_URL,
       );
     });
 
     it('should return null when no resource metadata URI is found', () => {
-      const header = 'Bearer realm="example"';
-      const result = OAuthUtils.parseWWWAuthenticateHeader(header);
-      expect(result).toBeNull();
+      expect(parse('Bearer realm="example"')).toBeNull();
     });
 
     it('should not parse malformed resource metadata values', () => {
-      expect(
-        OAuthUtils.parseWWWAuthenticateHeader(
-          'Bearer resource_metadata=https://example.com/.well-known/oauth-protected-resource',
-        ),
-      ).toBeNull();
-      expect(
-        OAuthUtils.parseWWWAuthenticateHeader('Bearer resource_metadata=""'),
-      ).toBeNull();
-      expect(
-        OAuthUtils.parseWWWAuthenticateHeader(
-          'Bearer resource_metadata=\'https://example.com/.well-known/oauth-protected-resource"',
-        ),
-      ).toBeNull();
+      expect(parse(`Bearer resource_metadata=${PRM_URL}`)).toBeNull();
+      expect(parse('Bearer resource_metadata=""')).toBeNull();
+      expect(parse(`Bearer resource_metadata='${PRM_URL}"`)).toBeNull();
     });
 
     it('should only parse standalone resource metadata params', () => {
+      expect(parse(`Bearer not_resource_metadata="${PRM_URL}"`)).toBeNull();
       expect(
-        OAuthUtils.parseWWWAuthenticateHeader(
-          'Bearer not_resource_metadata="https://example.com/.well-known/oauth-protected-resource"',
-        ),
-      ).toBeNull();
-      expect(
-        OAuthUtils.parseWWWAuthenticateHeader(
-          'Bearer error_description="missing, resource_metadata=\'https://example.com/.well-known/oauth-protected-resource\'"',
+        parse(
+          `Bearer error_description="missing, resource_metadata='${PRM_URL}'"`,
         ),
       ).toBeNull();
     });
@@ -358,89 +261,81 @@ describe('OAuthUtils', () => {
   });
 
   describe('buildResourceParameter', () => {
+    const resourceFor = (url: string) => OAuthUtils.buildResourceParameter(url);
+
     it('should return canonical URI with full path', () => {
-      const result = OAuthUtils.buildResourceParameter(
+      expect(resourceFor('https://example.com/oauth/token')).toBe(
         'https://example.com/oauth/token',
       );
-      expect(result).toBe('https://example.com/oauth/token');
     });
 
     it('should handle URLs with ports', () => {
-      const result = OAuthUtils.buildResourceParameter(
+      expect(resourceFor('https://example.com:8080/oauth/token')).toBe(
         'https://example.com:8080/oauth/token',
       );
-      expect(result).toBe('https://example.com:8080/oauth/token');
     });
 
     it('should strip query and fragment per RFC 8707', () => {
-      const result = OAuthUtils.buildResourceParameter(
-        'https://example.com/mcp?foo=bar#frag',
+      expect(resourceFor('https://example.com/mcp?foo=bar#frag')).toBe(
+        'https://example.com/mcp',
       );
-      expect(result).toBe('https://example.com/mcp');
     });
 
     it('should remove trailing slash from paths', () => {
-      expect(
-        OAuthUtils.buildResourceParameter('https://example.com/mcp/'),
-      ).toBe('https://example.com/mcp');
+      expect(resourceFor('https://example.com/mcp/')).toBe(
+        'https://example.com/mcp',
+      );
     });
 
     it('should handle root URL consistently', () => {
-      // Both "https://example.com" and "https://example.com/" should
-      // produce the same canonical form without trailing slash
-      expect(OAuthUtils.buildResourceParameter('https://example.com')).toBe(
-        'https://example.com',
-      );
-      expect(OAuthUtils.buildResourceParameter('https://example.com/')).toBe(
-        'https://example.com',
-      );
+      // With or without the trailing slash, the root has one canonical
+      // form, without it.
+      expect(resourceFor('https://example.com')).toBe('https://example.com');
+      expect(resourceFor('https://example.com/')).toBe('https://example.com');
     });
 
     // Regression test for https://github.com/QwenLM/qwen-code/issues/1749
-    // Per MCP spec, resource should be the canonical URI including the path,
-    // so multi-tenant servers can distinguish between different MCP servers.
+    // Per MCP spec, resource is the canonical URI including the path, so
+    // multi-tenant servers can tell different MCP servers apart: it must
+    // include the full path, not just the host.
     it('should preserve full path for multi-tenant MCP servers (issue #1749)', () => {
-      const result = OAuthUtils.buildResourceParameter(
+      expect(resourceFor('https://mcp.alibaba-inc.com/yuque/mcp')).toBe(
         'https://mcp.alibaba-inc.com/yuque/mcp',
       );
-      // Must include the full path, not just the host
-      expect(result).toBe('https://mcp.alibaba-inc.com/yuque/mcp');
     });
   });
 
   describe('discoverOAuthConfig', () => {
-    it('should use scopes from protected resource metadata when available', async () => {
-      // This test verifies the fix for the issue where scopes from
-      // protected resource metadata were not being used
-      const mockResourceMetadata: OAuthProtectedResourceMetadata = {
-        resource: 'https://www.modelscope.cn/mcp-server',
-        authorization_servers: ['https://www.modelscope.cn'],
-        scopes_supported: [
-          'openid',
-          'profile',
-          'list-operational-mcp',
-          'manage-mcp-deployment',
-        ],
-      };
-
-      const mockAuthServerMetadata: OAuthAuthorizationServerMetadata = {
-        issuer: 'https://www.modelscope.cn',
-        authorization_endpoint: 'https://www.modelscope.cn/oauth/authorize',
-        token_endpoint: 'https://www.modelscope.cn/oauth/token',
-        // Note: scopes_supported is NOT present in auth server metadata
-      };
-
+    /** Serves resource metadata, then auth server metadata. */
+    const serveMetadata = (
+      resource: OAuthProtectedResourceMetadata,
+      authServer: OAuthAuthorizationServerMetadata,
+    ) =>
       mockFetch
-        // First call: fetch protected resource metadata
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve(mockResourceMetadata),
-        })
-        // Second call: fetch authorization server metadata
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve(mockAuthServerMetadata),
-        });
+        .mockResolvedValueOnce(okJson(resource))
+        .mockResolvedValueOnce(okJson(authServer));
+
+    it('should use scopes from protected resource metadata when available', async () => {
+      // Guards the fix for scopes from protected resource metadata not
+      // being used.
+      serveMetadata(
+        {
+          resource: 'https://www.modelscope.cn/mcp-server',
+          authorization_servers: ['https://www.modelscope.cn'],
+          scopes_supported: [
+            'openid',
+            'profile',
+            'list-operational-mcp',
+            'manage-mcp-deployment',
+          ],
+        },
+        {
+          issuer: 'https://www.modelscope.cn',
+          authorization_endpoint: 'https://www.modelscope.cn/oauth/authorize',
+          token_endpoint: 'https://www.modelscope.cn/oauth/token',
+          // Note: scopes_supported is NOT present in auth server metadata
+        },
+      );
 
       const result = await OAuthUtils.discoverOAuthConfig(
         'https://www.modelscope.cn/mcp-server',
@@ -456,35 +351,21 @@ describe('OAuthUtils', () => {
     });
 
     it('should prefer protected resource scopes over auth server scopes', async () => {
-      const mockResourceMetadata: OAuthProtectedResourceMetadata = {
-        resource: 'https://example.com/mcp',
-        authorization_servers: ['https://auth.example.com'],
-        scopes_supported: ['mcp-read', 'mcp-write'],
-      };
-
-      const mockAuthServerMetadata: OAuthAuthorizationServerMetadata = {
-        issuer: 'https://auth.example.com',
-        authorization_endpoint: 'https://auth.example.com/authorize',
-        token_endpoint: 'https://auth.example.com/token',
-        scopes_supported: ['read', 'write', 'admin'], // Different scopes
-      };
-
-      mockFetch
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve(mockResourceMetadata),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve(mockAuthServerMetadata),
-        });
+      serveMetadata(
+        {
+          resource: 'https://example.com/mcp',
+          authorization_servers: ['https://auth.example.com'],
+          scopes_supported: ['mcp-read', 'mcp-write'],
+        },
+        { ...authServerMetadata, scopes_supported: ['read', 'write', 'admin'] },
+      );
 
       const result = await OAuthUtils.discoverOAuthConfig(
         'https://example.com/mcp',
       );
 
       expect(result).not.toBeNull();
-      // Should use protected resource scopes, not auth server scopes
+      // Protected resource scopes win over the auth server's.
       expect(result!.scopes).toEqual(['mcp-read', 'mcp-write']);
     });
   });

@@ -15,6 +15,7 @@ import { Header, AuthDisplayType } from './Header.js';
 import { Tips } from './Tips.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
+import { useUIState } from '../contexts/UIStateContext.js';
 import { resolveCustomBanner } from '../utils/customBanner.js';
 
 interface AppHeaderProps {
@@ -51,7 +52,8 @@ export const AppHeader = ({ version }: AppHeaderProps) => {
   const config = useConfig();
   const contentGeneratorConfig = config.getContentGeneratorConfig();
   const authType = contentGeneratorConfig?.authType;
-  const model = config.getModelDisplayName();
+  const { currentModel } = useUIState();
+  const model = config.getModelsConfig().getModelDisplayName(currentModel);
   const targetDir = config.getTargetDir();
   const showBanner =
     !config.getScreenReader() && !settings.merged.ui?.hideBanner;

@@ -5,7 +5,73 @@
  */
 
 import type { Application, Request } from 'express';
+import { TLSSocket } from 'node:tls';
+import { bearerAuth } from '../auth.js';
+import { isPreAuthWebShellRequest } from '../web-shell-preauth.js';
+import { listenerIdentityOf } from '../local-control/listener-identity.js';
 import { formatHostForAuthority, isLoopbackBind } from '../loopback-binds.js';
+import { ACCESS_LOG_REJECT_LOCAL } from './access-log.js';
+import type { ListenerScopedCredentials } from '../local-control/credentials.js';
+
+export function installRemoteSelfOriginMiddleware(
+  app: Application,
+  bind: string,
+  token: string | undefined | ListenerScopedCredentials,
+): void {
+  if (isLoopbackBind(bind) || !token) return;
+  const authenticate = bearerAuth(token);
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    if (!origin || !host || listenerIdentityOf(req).kind !== 'primary') {
+      next();
+      return;
+    }
+    const scheme =
+      req.socket instanceof TLSSocket && req.socket.encrypted
+        ? 'https'
+        : 'http';
+    // Browsers serialize Origin with a lowercase host and omit the
+    // scheme-default port, while an intermediary may case-preserve Host or
+    // keep an explicit default port. Normalize Host the same way before
+    // comparing; never forwarded headers.
+    let authority = host.toLowerCase();
+    if (scheme === 'http' && authority.endsWith(':80'))
+      authority = authority.slice(0, -3);
+    else if (scheme === 'https' && authority.endsWith(':443'))
+      authority = authority.slice(0, -4);
+    if (origin !== `${scheme}://${authority}`) {
+      next();
+      return;
+    }
+    try {
+      if (new URL(origin).origin !== origin) {
+        next();
+        return;
+      }
+    } catch {
+      next();
+      return;
+    }
+    // Charge a same-origin credential reject to the pre-auth budget, not
+    // the operator one: the marker is set provisionally and cleared when
+    // the bearer actually verifies.
+    (res.locals ??= {})[ACCESS_LOG_REJECT_LOCAL] = true;
+    const allow = () => {
+      delete res.locals[ACCESS_LOG_REJECT_LOCAL];
+      delete req.headers.origin;
+      next();
+    };
+    // Public shell assets cannot attach Authorization. Pairing exchange has
+    // its own single-use credential check before the ordinary bearer gate.
+    if (
+      isPreAuthWebShellRequest(req) ||
+      (req.method === 'POST' && req.path === '/web-shell/pairing/exchange')
+    )
+      allow();
+    else authenticate(req, res, allow);
+  });
+}
 
 /**
  * Allow same-origin requests from the Web Shell. Browsers send an `Origin`

@@ -16,16 +16,20 @@ import {
 } from 'vitest';
 import { act } from 'react';
 import { renderHook } from '@testing-library/react';
-import { resolveBranchName, watchRepoBranch } from '@qwen-code/qwen-code-core';
+import {
+  resolveBranchName,
+  watchRepoBranch,
+} from '@qwen-code/qwen-code-core/utils/gitDirect.js';
 import {
   useGitBranchName,
   BRANCH_POLL_INTERVAL_MS,
+  primeGitBranchName,
 } from './useGitBranchName.js';
 
 // The hook is a thin wrapper over core's gitDirect helpers; the direct-read
 // logic itself is covered by core's gitDirect.test.ts. Here we mock those two
 // functions and exercise the hook's wiring and lifecycle.
-vi.mock('@qwen-code/qwen-code-core', () => ({
+vi.mock('@qwen-code/qwen-code-core/utils/gitDirect.js', () => ({
   resolveBranchName: vi.fn(),
   watchRepoBranch: vi.fn(),
 }));
@@ -52,6 +56,15 @@ describe('useGitBranchName', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.useRealTimers();
+  });
+
+  it('starts from a primed branch name before any effect runs', async () => {
+    mockResolve.mockResolvedValue('primed');
+    await primeGitBranchName('/primed/project');
+
+    const { result } = renderHook(() => useGitBranchName('/primed/project'));
+
+    expect(result.current).toBe('primed');
   });
 
   it('reads the branch name on mount', async () => {

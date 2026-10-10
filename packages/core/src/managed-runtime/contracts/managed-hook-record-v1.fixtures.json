@@ -1,0 +1,643 @@
+{
+  "contract": "managed-hook-record/1",
+  "templates": {
+    "hook_registration": {
+      "registrationId": "registration-1",
+      "catalogId": "catalog-1",
+      "catalogRevision": 1,
+      "catalogRef": {
+        "resourceId": "hook-data",
+        "kind": "hook-data",
+        "schemaVersion": 1,
+        "byteLength": 2,
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "run": {
+        "state": "admitted",
+        "reason": null,
+        "definition": {
+          "definitionId": "catalog-1",
+          "definitionRevision": 1,
+          "definitionDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "executionCallId": null,
+        "effectId": "registration-1",
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": null,
+        "runtime": null,
+        "delivery": null
+      }
+    },
+    "hook_execution": {
+      "hookExecutionId": "execution-1",
+      "runtimeSessionId": "hook:session-1",
+      "occurrenceId": "occurrence-1",
+      "registrationId": "registration-1",
+      "eventName": "BeforeTool",
+      "ordinal": 0,
+      "hookId": "hook-1",
+      "planRef": {
+        "resourceId": "hook-data",
+        "kind": "hook-data",
+        "schemaVersion": 1,
+        "byteLength": 2,
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "inputRef": {
+        "resourceId": "hook-data",
+        "kind": "hook-data",
+        "schemaVersion": 1,
+        "byteLength": 2,
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "resultRef": null,
+      "onceKey": "once-1",
+      "cancelRequested": false,
+      "run": {
+        "state": "admitted",
+        "reason": null,
+        "definition": {
+          "definitionId": "catalog-1",
+          "definitionRevision": 1,
+          "definitionDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "executionCallId": null,
+        "effectId": "execution-1",
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": "intent",
+        "runtime": null,
+        "delivery": null
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "registration-start",
+      "domain": "hook_registration",
+      "patch": {},
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "registration-local-revision",
+      "domain": "hook_registration",
+      "patch": {
+        "run": {
+          "state": "running"
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "registration-settled",
+      "domain": "hook_registration",
+      "patch": {
+        "run": {
+          "state": "settled"
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "registration-no-execution",
+      "domain": "hook_registration",
+      "patch": {
+        "run": {
+          "execution": "intent"
+        }
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "registration-wrong-pin",
+      "domain": "hook_registration",
+      "patch": {
+        "catalogRevision": 2
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "registration-no-unknown-keys",
+      "domain": "hook_registration",
+      "patch": {
+        "extra": false
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "registration-positive-revision",
+      "domain": "hook_registration",
+      "patch": {
+        "catalogRevision": 0
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "registration-effect-identity",
+      "domain": "hook_registration",
+      "patch": {
+        "run": {
+          "effectId": "other"
+        }
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "registration-no-unpinned",
+      "domain": "hook_registration",
+      "patch": {
+        "run": {
+          "definition": null
+        }
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "execution-start",
+      "domain": "hook_execution",
+      "patch": {},
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "execution-local-handler",
+      "domain": "hook_execution",
+      "patch": {
+        "run": {
+          "state": "running",
+          "execution": "dispatch_started"
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "execution-unknown",
+      "domain": "hook_execution",
+      "patch": {
+        "run": {
+          "state": "recovery_blocked",
+          "execution": "outcome_unknown",
+          "reason": "outcome_unknown"
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "execution-settled-local-handler",
+      "domain": "hook_execution",
+      "patch": {
+        "run": {
+          "state": "settled",
+          "execution": "settled"
+        },
+        "resultRef": {
+          "resourceId": "hook-data",
+          "kind": "hook-data",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "execution-settled-runtime",
+      "domain": "hook_execution",
+      "patch": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "runtime-1",
+            "generation": "1"
+          }
+        },
+        "resultRef": {
+          "resourceId": "hook-data",
+          "kind": "hook-data",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "execution-no-missing-result",
+      "domain": "hook_execution",
+      "patch": {
+        "run": {
+          "state": "settled",
+          "execution": "settled"
+        }
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "execution-no-premature-result",
+      "domain": "hook_execution",
+      "patch": {
+        "resultRef": {
+          "resourceId": "hook-data",
+          "kind": "hook-data",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "execution-no-null-execution",
+      "domain": "hook_execution",
+      "patch": {
+        "run": {
+          "execution": null
+        }
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "execution-no-negative-ordinal",
+      "domain": "hook_execution",
+      "patch": {
+        "ordinal": -1
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "execution-no-invalid-once",
+      "domain": "hook_execution",
+      "patch": {
+        "onceKey": ""
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "execution-no-invalid-runtime-session",
+      "domain": "hook_execution",
+      "patch": {
+        "runtimeSessionId": ""
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "execution-no-cancel-start",
+      "domain": "hook_execution",
+      "patch": {
+        "cancelRequested": true
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "execution-no-delivery",
+      "domain": "hook_execution",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "planned"
+          }
+        }
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "execution-no-call-id",
+      "domain": "hook_execution",
+      "patch": {
+        "run": {
+          "executionCallId": "call-1",
+          "effectId": null
+        }
+      },
+      "valid": false,
+      "start": false
+    }
+  ],
+  "successors": [
+    {
+      "id": "registration-runs",
+      "domain": "hook_registration",
+      "before": {},
+      "after": {
+        "run": {
+          "state": "running"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "registration-settles",
+      "domain": "hook_registration",
+      "before": {
+        "run": {
+          "state": "running"
+        }
+      },
+      "after": {
+        "run": {
+          "state": "settled"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "registration-cannot-skip",
+      "domain": "hook_registration",
+      "before": {},
+      "after": {
+        "run": {
+          "state": "settled"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "registration-fixed-pin",
+      "domain": "hook_registration",
+      "before": {},
+      "after": {
+        "catalogRevision": 2,
+        "run": {
+          "definition": {
+            "definitionRevision": 2
+          }
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "registration-fixed-catalog",
+      "domain": "hook_registration",
+      "before": {},
+      "after": {
+        "catalogRef": {
+          "resourceId": "other"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "execution-dispatch",
+      "domain": "hook_execution",
+      "before": {},
+      "after": {
+        "run": {
+          "state": "running",
+          "execution": "dispatch_started"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "execution-cancel",
+      "domain": "hook_execution",
+      "before": {},
+      "after": {
+        "cancelRequested": true
+      },
+      "valid": true
+    },
+    {
+      "id": "execution-no-uncancel",
+      "domain": "hook_execution",
+      "before": {
+        "cancelRequested": true
+      },
+      "after": {},
+      "valid": false
+    },
+    {
+      "id": "execution-no-replay",
+      "domain": "hook_execution",
+      "before": {
+        "run": {
+          "state": "recovery_blocked",
+          "execution": "outcome_unknown",
+          "reason": "outcome_unknown"
+        }
+      },
+      "after": {},
+      "valid": false
+    },
+    {
+      "id": "execution-late-result",
+      "domain": "hook_execution",
+      "before": {
+        "run": {
+          "state": "recovery_blocked",
+          "execution": "outcome_unknown",
+          "reason": "outcome_unknown"
+        }
+      },
+      "after": {
+        "run": {
+          "state": "settled",
+          "execution": "settled"
+        },
+        "resultRef": {
+          "resourceId": "hook-data",
+          "kind": "hook-data",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "execution-result-immutable",
+      "domain": "hook_execution",
+      "before": {
+        "run": {
+          "state": "settled",
+          "execution": "settled"
+        },
+        "resultRef": {
+          "resourceId": "hook-data",
+          "kind": "hook-data",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "after": {
+        "run": {
+          "state": "settled",
+          "execution": "settled"
+        },
+        "resultRef": {
+          "resourceId": "other",
+          "kind": "hook-data",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "execution-terminal-cancel-immutable",
+      "domain": "hook_execution",
+      "before": {
+        "run": {
+          "state": "settled",
+          "execution": "settled"
+        },
+        "resultRef": {
+          "resourceId": "hook-data",
+          "kind": "hook-data",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "after": {
+        "run": {
+          "state": "settled",
+          "execution": "settled"
+        },
+        "resultRef": {
+          "resourceId": "hook-data",
+          "kind": "hook-data",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "cancelRequested": true
+      },
+      "valid": false
+    },
+    {
+      "id": "execution-fixed-hookId",
+      "domain": "hook_execution",
+      "before": {},
+      "after": {
+        "hookId": "other"
+      },
+      "valid": false
+    },
+    {
+      "id": "execution-fixed-runtimeSessionId",
+      "domain": "hook_execution",
+      "before": {},
+      "after": {
+        "runtimeSessionId": "other"
+      },
+      "valid": false
+    },
+    {
+      "id": "execution-fixed-occurrenceId",
+      "domain": "hook_execution",
+      "before": {},
+      "after": {
+        "occurrenceId": "other"
+      },
+      "valid": false
+    },
+    {
+      "id": "execution-fixed-registrationId",
+      "domain": "hook_execution",
+      "before": {},
+      "after": {
+        "registrationId": "other"
+      },
+      "valid": false
+    },
+    {
+      "id": "execution-fixed-eventName",
+      "domain": "hook_execution",
+      "before": {},
+      "after": {
+        "eventName": "AfterTool"
+      },
+      "valid": false
+    },
+    {
+      "id": "execution-fixed-ordinal",
+      "domain": "hook_execution",
+      "before": {},
+      "after": {
+        "ordinal": 1
+      },
+      "valid": false
+    },
+    {
+      "id": "execution-fixed-onceKey",
+      "domain": "hook_execution",
+      "before": {},
+      "after": {
+        "onceKey": null
+      },
+      "valid": false
+    },
+    {
+      "id": "execution-fixed-planRef",
+      "domain": "hook_execution",
+      "before": {},
+      "after": {
+        "planRef": {
+          "resourceId": "other",
+          "kind": "hook-data",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "execution-fixed-inputRef",
+      "domain": "hook_execution",
+      "before": {},
+      "after": {
+        "inputRef": {
+          "resourceId": "other",
+          "kind": "hook-data",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "registration-terminal-not-reordered",
+      "domain": "hook_registration",
+      "before": {
+        "run": {
+          "state": "settled"
+        }
+      },
+      "after": {
+        "run": {
+          "state": "settled"
+        }
+      },
+      "valid": false
+    }
+  ]
+}

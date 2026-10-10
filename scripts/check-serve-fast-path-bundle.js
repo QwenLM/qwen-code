@@ -90,6 +90,10 @@ const FORBIDDEN_SOURCE_INPUTS = [
     suffixes: [
       'packages/acp-bridge/src/bridge.ts',
       'packages/acp-bridge/dist/bridge.js',
+      'packages/acp-bridge/src/session-control-plane.ts',
+      'packages/acp-bridge/dist/session-control-plane.js',
+      'packages/acp-bridge/src/channel-harness.ts',
+      'packages/acp-bridge/dist/channel-harness.js',
     ],
   },
   {

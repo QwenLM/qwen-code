@@ -71,6 +71,7 @@ type ArtifactRetention = 'ephemeral' | 'restorable';
 - 用户在交互式前端手动注册的 Client POST artifact：默认 `restorable`，恢复后仍出现在 artifact list 中。
 - 后台/自动化 client POST：如果只是临时 UI 状态，应显式请求 `retention: "ephemeral"`；SDK 应提供明确的 ephemeral helper。
 - `published` artifact：默认 `restorable`；当前只恢复 published locator，不托管内容。
+- **已落地偏离（2026-09-21）**：非快照的 `published + file://` 不再按默认 `restorable` 入 journal。写入时强制 `ephemeral`；恢复时安静丢弃 Artifact 工具留下的同类历史记录。完整说明见 [local-published-file-retention.zh-CN.md](./local-published-file-retention.zh-CN.md) / [local-published-file-retention.md](./local-published-file-retention.md)。
 
 如果 chat recording 被禁用，metadata persistence 默认禁用，capability 不声明。
 

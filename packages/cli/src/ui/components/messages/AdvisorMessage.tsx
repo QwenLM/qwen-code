@@ -17,15 +17,23 @@ export interface AdvisorDisplayProps {
   model: string;
   /** Width of the parent container. Falls back to terminal width. */
   containerWidth?: number;
+  /** Height budget while rendered in the live tool-call region. */
+  availableTerminalHeight?: number;
+  /** Whether the message is still part of the live tool-call region. */
+  isPending?: boolean;
 }
 
 // border(1)*2 + paddingX(1)*2 = 4
 const ADVISOR_SELF_CHROME = 4;
+// border(1)*2 + header(1) + body margin(1) = 4
+const ADVISOR_VERTICAL_CHROME = 4;
 
 const AdvisorMessageInternal: React.FC<AdvisorDisplayProps> = ({
   text,
   model,
   containerWidth,
+  availableTerminalHeight,
+  isPending = false,
 }) => {
   const { columns: terminalWidth } = useTerminalSize();
   const baseWidth = containerWidth ?? terminalWidth;
@@ -49,6 +57,12 @@ const AdvisorMessageInternal: React.FC<AdvisorDisplayProps> = ({
         <MarkdownDisplay
           text={text}
           isPending={false}
+          enforceHeightBudget={isPending}
+          availableTerminalHeight={
+            availableTerminalHeight === undefined
+              ? undefined
+              : Math.max(1, availableTerminalHeight - ADVISOR_VERTICAL_CHROME)
+          }
           contentWidth={contentWidth}
         />
       </Box>

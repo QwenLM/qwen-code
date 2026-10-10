@@ -584,6 +584,7 @@ export class ChatCompressionService {
             .slice(0, MAX_HOOK_INSTRUCTIONS_CHARS);
         }
       } catch (err) {
+        if (hookSystem.isManaged()) throw err;
         config.getDebugLogger().warn(`PreCompact hook failed: ${err}`);
       }
     }
@@ -667,12 +668,23 @@ export class ChatCompressionService {
     // model — warning about the main model being "too small" is confusing
     // when no compaction model was explicitly configured.
     if (effectiveCompactionModel !== config.getModel()) {
-      const resolved = resolveModelId(effectiveCompactionModel);
+      // getCompactionModel() may carry the picker's endpoint pin as
+      // `authType:id\0<declaredBaseUrl>` (#12760); measure the window of the
+      // entry the request is actually routed to, not the first same-id row.
+      // The suffix is the *declared* baseUrl, so compare `registryBaseUrl`,
+      // not the effective `baseUrl` the registry fills with a default.
+      const [compactionSelector, compactionEndpoint] =
+        effectiveCompactionModel.split('\0');
+      const resolved = resolveModelId(compactionSelector);
       if (resolved) {
         const models = resolved.authType
           ? config.getAllConfiguredModels([resolved.authType])
           : config.getAllConfiguredModels();
-        const entry = models.find((m) => m.id === resolved.modelId);
+        const sameId = models.filter((m) => m.id === resolved.modelId);
+        const entry =
+          (compactionEndpoint
+            ? sameId.find((m) => m.registryBaseUrl === compactionEndpoint)
+            : undefined) ?? sameId[0];
         const window = entry?.contextWindowSize;
         // Include the system prompt and the output reserve: providers check
         // prompt + max_tokens <= window, so all three terms count.
@@ -1330,6 +1342,7 @@ export class ChatCompressionService {
             signal,
           );
       } catch (err) {
+        if (config.getHookSystem()?.isManaged()) throw err;
         config.getDebugLogger().warn(`PostCompact hook failed: ${err}`);
       }
 

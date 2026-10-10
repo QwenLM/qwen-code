@@ -12,7 +12,9 @@ import {
   type SlashCommandActionReturn,
   CommandKind,
 } from './types.js';
+import type { Content } from '@google/genai';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { t } from '../../i18n/index.js';
 
 async function restoreAction(
@@ -22,6 +24,14 @@ async function restoreAction(
   const { services, ui } = context;
   const { config } = services;
   const { addItem, loadHistory } = ui;
+
+  if (config?.getShellExecutionSandbox?.()) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: 'File restore is unavailable in tool sandbox.',
+    };
+  }
 
   const checkpointDir = config?.storage.getProjectTempCheckpointsDir();
 
@@ -149,6 +159,17 @@ async function restoreAction(
     }
 
     if (toolCallData.clientHistory) {
+      // A checkpoint is JSON, so the Symbol-keyed prompt identity of each
+      // model-facing entry cannot survive the round trip. Re-mark from the
+      // parallel array the writer persisted; without it a restored turn is
+      // identified in the UI but unresolvable in the API history, and
+      // conversation rewind fails closed across the whole restored range.
+      const promptIds: unknown[] = Array.isArray(toolCallData.promptIds)
+        ? toolCallData.promptIds
+        : [];
+      toolCallData.clientHistory.forEach((content: Content, index: number) => {
+        markApiHistoryPrompt(content, promptIds[index]);
+      });
       await config?.getLlmClient()?.setHistory(toolCallData.clientHistory);
     }
 

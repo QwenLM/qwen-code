@@ -14,6 +14,7 @@ import {
   rewriteGitHubBlobUrl,
   sideQueryTimeoutMs,
 } from './web-fetch.js';
+import type { WebFetchToolParams } from './web-fetch.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolConfirmationOutcome } from './tools.js';
@@ -60,6 +61,40 @@ function okResponse(
   };
 }
 
+const pdfBytes = Buffer.concat([
+  Buffer.from('%PDF-1.4\n'),
+  Buffer.from([0xe2, 0xe3, 0xcf, 0xd3, 0x00, 0x01, 0x02]),
+]);
+const PDF = { contentType: 'application/pdf', body: pdfBytes };
+
+type Overrides = Partial<FetchPolicyResponse>;
+
+/** Every fetch resolves `okResponse(overrides)`; returns the spy. */
+const stubFetch = (overrides: Overrides = {}) =>
+  vi
+    .spyOn(fetchUtils, 'fetchWithPolicy')
+    .mockResolvedValue(okResponse(overrides));
+
+/** stubFetch plus a side query answering `{ text: 'Summary' }`. */
+function stubSummary(overrides: Overrides = {}) {
+  const fetchSpy = stubFetch(overrides);
+  mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+  return fetchSpy;
+}
+
+/** The first fetch fails with a FetchError, the http fallback resolves. */
+function stubHttpFallback(message: string, code: string, finalUrl: string) {
+  const fetchSpy = vi
+    .spyOn(fetchUtils, 'fetchWithPolicy')
+    .mockRejectedValueOnce(new fetchUtils.FetchError(message, code))
+    .mockResolvedValueOnce(okResponse({ finalUrl }));
+  mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+  return fetchSpy;
+}
+
+const PROCESSED = { text: 'Processed' };
+const PROCESSED_USAGE_UNSET = { text: 'Processed', usage: undefined };
+
 describe('WebFetchTool', () => {
   let mockConfig: Config;
   let toolResultsDir: string;
@@ -94,6 +129,37 @@ describe('WebFetchTool', () => {
     fs.rmSync(toolResultsDir, { recursive: true, force: true });
   });
 
+  /** Builds and runs one call through a fresh tool. */
+  const run = (
+    url: string,
+    prompt = 'summarize',
+    opts: {
+      signal?: AbortSignal;
+      config?: Config;
+      format?: WebFetchToolParams['format'];
+    } = {},
+  ) =>
+    new WebFetchTool(opts.config ?? mockConfig)
+      .build({ url, prompt, ...(opts.format && { format: opts.format }) })
+      .execute(opts.signal ?? new AbortController().signal);
+
+  /** Runs one fetch; `sent` is the text the side query (answering `reply`) received. */
+  async function runCapturing(
+    overrides: Overrides,
+    reply: object,
+    url: string,
+    prompt?: string,
+  ) {
+    stubFetch(overrides);
+    let sent = '';
+    mockGenerateContent.mockImplementation((options) => {
+      sent = options.contents[0].parts[0].text;
+      return Promise.resolve(reply);
+    });
+    const result = await run(url, prompt);
+    return { result, sent };
+  }
+
   describe('execute', () => {
     it('should throw validation error when url parameter is missing', async () => {
       const tool = new WebFetchTool(mockConfig);
@@ -114,21 +180,15 @@ describe('WebFetchTool', () => {
       },
     );
 
+    const notHttp =
+      "The 'url' must be a valid URL starting with http:// or https://.";
+    const malformed = "The 'url' is malformed and could not be parsed.";
     it.each([
-      [
-        'ftp://example.com',
-        "The 'url' must be a valid URL starting with http:// or https://.",
-      ],
-      [
-        'http:example.com',
-        "The 'url' must be a valid URL starting with http:// or https://.",
-      ],
-      [
-        'http:/example.com',
-        "The 'url' must be a valid URL starting with http:// or https://.",
-      ],
-      ['https://', "The 'url' is malformed and could not be parsed."],
-      ['http://[::1', "The 'url' is malformed and could not be parsed."],
+      ['ftp://example.com', notHttp],
+      ['http:example.com', notHttp],
+      ['http:/example.com', notHttp],
+      ['https://', malformed],
+      ['http://[::1', malformed],
     ])(
       'should reject invalid or unsupported urls: %s',
       (url, expectedError) => {
@@ -155,20 +215,14 @@ describe('WebFetchTool', () => {
       vi.spyOn(fetchUtils, 'fetchWithPolicy').mockRejectedValue(
         new Error('fetch failed'),
       );
-      const tool = new WebFetchTool(mockConfig);
-      const params = { url: 'https://private.ip', prompt: 'summarize this' };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run('https://private.ip', 'summarize this');
       expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
     });
 
     it('should fall back to raw content when side-query processing fails', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(okResponse());
+      stubFetch();
       mockGenerateContent.mockRejectedValue(new Error('API error'));
-      const tool = new WebFetchTool(mockConfig);
-      const params = { url: 'https://public.ip', prompt: 'summarize this' };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run('https://public.ip', 'summarize this');
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('Content processing failed');
       expect(result.llmContent).toContain('Test content');
@@ -178,15 +232,8 @@ describe('WebFetchTool', () => {
     });
 
     it('should return an error result for non-2xx statuses', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({ status: 404, statusText: 'Not Found' }),
-      );
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://example.com/missing',
-        prompt: 'summarize',
-      });
-      const result = await invocation.execute(new AbortController().signal);
+      stubFetch({ status: 404, statusText: 'Not Found' });
+      const result = await run('https://example.com/missing');
       expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
       expect(result.llmContent).toContain('404 Not Found');
     });
@@ -194,17 +241,9 @@ describe('WebFetchTool', () => {
 
   describe('request headers', () => {
     it('should send a QwenCode User-Agent alongside Accept', async () => {
-      const fetchSpy = vi
-        .spyOn(fetchUtils, 'fetchWithPolicy')
-        .mockResolvedValue(okResponse());
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+      const fetchSpy = stubSummary();
 
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://example.com',
-        prompt: 'summarize',
-      });
-      await invocation.execute(new AbortController().signal);
+      await run('https://example.com');
 
       expect(fetchSpy).toHaveBeenCalledWith(
         'https://example.com',
@@ -225,18 +264,9 @@ describe('WebFetchTool', () => {
     ] as const)(
       'should map format=%s to the Accept header',
       async (format, accept) => {
-        const fetchSpy = vi
-          .spyOn(fetchUtils, 'fetchWithPolicy')
-          .mockResolvedValue(okResponse());
-        mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+        const fetchSpy = stubSummary();
 
-        const tool = new WebFetchTool(mockConfig);
-        const invocation = tool.build({
-          url: 'https://example.com',
-          prompt: 'summarize',
-          format,
-        });
-        await invocation.execute(new AbortController().signal);
+        await run('https://example.com', 'summarize', { format });
 
         expect(fetchSpy).toHaveBeenCalledWith(
           'https://example.com',
@@ -247,179 +277,95 @@ describe('WebFetchTool', () => {
       },
     );
 
-    it('should upgrade http to https for public hosts', async () => {
-      const fetchSpy = vi
-        .spyOn(fetchUtils, 'fetchWithPolicy')
-        .mockResolvedValue(okResponse());
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+    /** Runs `url` and expects the fetch to have gone to `expected`. */
+    async function expectFetchedAs(url: string, expected: string) {
+      const fetchSpy = stubSummary();
+      await run(url);
+      expect(fetchSpy).toHaveBeenCalledWith(expected, expect.anything());
+    }
 
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'http://example.com/page',
-        prompt: 'summarize',
-      });
-      await invocation.execute(new AbortController().signal);
-
-      expect(fetchSpy).toHaveBeenCalledWith(
+    it.each([
+      [
+        'should upgrade http to https for public hosts',
+        'http://example.com/page',
         'https://example.com/page',
-        expect.anything(),
-      );
-    });
+      ],
+      // A public IPv6 literal must not be caught by the single-label
+      // internal-host heuristic just because its hostname has no dots.
+      [
+        'should upgrade public IPv6 literal hosts (bracketed, dot-free)',
+        'http://[2606:4700:4700::1111]/x',
+        'https://[2606:4700:4700::1111]/x',
+      ],
+      // NOT https://example.com:80/page — that would attempt TLS on port 80.
+      [
+        'should drop an explicit :80 when upgrading to https',
+        'http://example.com:80/page',
+        'https://example.com/page',
+      ],
+      [
+        'should NOT upgrade explicit non-default http ports',
+        'http://example.com:8080/api',
+        'http://example.com:8080/api',
+      ],
+      [
+        'should NOT upgrade http for localhost or private hosts',
+        'http://localhost:3000/api',
+        'http://localhost:3000/api',
+      ],
+    ])('%s', (_title, url, expected) => expectFetchedAs(url, expected));
 
     it.each([
       'http://dev.internal/status',
       'http://intranet/wiki',
       'http://host.docker.internal:8080/api',
       'http://nas.local/files',
-    ])('should NOT upgrade internal hostname %s', async (url) => {
-      const fetchSpy = vi
-        .spyOn(fetchUtils, 'fetchWithPolicy')
-        .mockResolvedValue(okResponse());
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
-
-      const tool = new WebFetchTool(mockConfig);
-      await tool
-        .build({ url, prompt: 'summarize' })
-        .execute(new AbortController().signal);
-
-      expect(fetchSpy).toHaveBeenCalledWith(url, expect.anything());
-    });
-
-    it('should upgrade public IPv6 literal hosts (bracketed, dot-free)', async () => {
-      const fetchSpy = vi
-        .spyOn(fetchUtils, 'fetchWithPolicy')
-        .mockResolvedValue(okResponse());
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
-
-      const tool = new WebFetchTool(mockConfig);
-      await tool
-        .build({ url: 'http://[2606:4700:4700::1111]/x', prompt: 'summarize' })
-        .execute(new AbortController().signal);
-
-      // A public IPv6 literal must not be caught by the single-label
-      // internal-host heuristic just because its hostname has no dots.
-      expect(fetchSpy).toHaveBeenCalledWith(
-        'https://[2606:4700:4700::1111]/x',
-        expect.anything(),
-      );
-    });
-
-    it('should drop an explicit :80 when upgrading to https', async () => {
-      const fetchSpy = vi
-        .spyOn(fetchUtils, 'fetchWithPolicy')
-        .mockResolvedValue(okResponse());
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
-
-      const tool = new WebFetchTool(mockConfig);
-      await tool
-        .build({ url: 'http://example.com:80/page', prompt: 'summarize' })
-        .execute(new AbortController().signal);
-
-      // NOT https://example.com:80/page — that would attempt TLS on port 80.
-      expect(fetchSpy).toHaveBeenCalledWith(
-        'https://example.com/page',
-        expect.anything(),
-      );
-    });
-
-    it('should NOT upgrade explicit non-default http ports', async () => {
-      const fetchSpy = vi
-        .spyOn(fetchUtils, 'fetchWithPolicy')
-        .mockResolvedValue(okResponse());
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
-
-      const tool = new WebFetchTool(mockConfig);
-      await tool
-        .build({ url: 'http://example.com:8080/api', prompt: 'summarize' })
-        .execute(new AbortController().signal);
-
-      expect(fetchSpy).toHaveBeenCalledWith(
-        'http://example.com:8080/api',
-        expect.anything(),
-      );
-    });
-
-    it('should NOT upgrade http for localhost or private hosts', async () => {
-      const fetchSpy = vi
-        .spyOn(fetchUtils, 'fetchWithPolicy')
-        .mockResolvedValue(okResponse());
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
-
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'http://localhost:3000/api',
-        prompt: 'summarize',
-      });
-      await invocation.execute(new AbortController().signal);
-
-      expect(fetchSpy).toHaveBeenCalledWith(
-        'http://localhost:3000/api',
-        expect.anything(),
-      );
-    });
+    ])('should NOT upgrade internal hostname %s', (url) =>
+      expectFetchedAs(url, url),
+    );
   });
 
   describe('content handling', () => {
     it('should convert HTML to markdown preserving link hrefs', async () => {
-      let receivedContent = '';
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({
+      const { sent } = await runCapturing(
+        {
           body: Buffer.from(
             '<html><body><p>See <a href="/docs/alpha-guide">the alpha guide</a>.</p></body></html>',
           ),
-        }),
+        },
+        PROCESSED_USAGE_UNSET,
+        'https://example.com',
+        'list links',
       );
-      mockGenerateContent.mockImplementation((options) => {
-        receivedContent = options.contents[0].parts[0].text;
-        return Promise.resolve({ text: 'Processed', usage: undefined });
-      });
 
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://example.com',
-        prompt: 'list links',
-      });
-      await invocation.execute(new AbortController().signal);
-
-      expect(receivedContent).toContain('[the alpha guide](/docs/alpha-guide)');
+      expect(sent).toContain('[the alpha guide](/docs/alpha-guide)');
     });
 
     it('should convert the full HTML body before truncating, with an explicit marker', async () => {
-      // Needle sits beyond 100k chars of markup-light content; the marker
-      // must appear and the needle must be gone from the truncated text,
-      // proving truncation happened AFTER conversion (raw HTML truncation
-      // at 100k would also drop the early content ratio entirely).
+      // Needle sits beyond 100k chars of markup-light content: the marker must
+      // appear and the needle be gone, proving truncation happened AFTER
+      // conversion (raw HTML truncation at 100k would also drop the early
+      // content ratio entirely).
       const para = '<p>' + 'word '.repeat(40) + '</p>';
       const html =
         '<html><body>' +
         para.repeat(Math.ceil(110_000 / (para.length - 7))) +
         '<p>NEEDLE-AT-END</p></body></html>';
-      let receivedContent = '';
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({ body: Buffer.from(html) }),
-      );
-      mockGenerateContent.mockImplementation((options) => {
-        receivedContent = options.contents[0].parts[0].text;
-        return Promise.resolve({ text: 'Processed', usage: undefined });
-      });
 
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://example.com/large',
-        prompt: 'summarize',
-      });
-      await invocation.execute(new AbortController().signal);
-
-      expect(receivedContent).toContain(
-        '[Content truncated: showing first 100,000 of',
+      const { sent } = await runCapturing(
+        { body: Buffer.from(html) },
+        PROCESSED_USAGE_UNSET,
+        'https://example.com/large',
       );
-      expect(receivedContent).not.toContain('NEEDLE-AT-END');
+
+      expect(sent).toContain('[Content truncated: showing first 100,000 of');
+      expect(sent).not.toContain('NEEDLE-AT-END');
     });
 
     it('should keep content past 100k of raw HTML when the text itself fits', async () => {
-      // Heavy markup, light text: 150k+ of raw HTML converts to well under
-      // 100k of markdown, so a needle at the very end must survive. This is
-      // the Gist-class regression test.
+      // Heavy markup, light text: 150k+ of raw HTML converts to well under 100k
+      // of markdown, so a needle at the very end must survive (the Gist-class
+      // regression).
       const item =
         '<li class="item-row"><span class="meta-label">entry</span> <a href="/files/f.txt">f</a></li>';
       const html =
@@ -427,80 +373,57 @@ describe('WebFetchTool', () => {
         item.repeat(Math.ceil(150_000 / item.length)) +
         '<li><a href="/gists/NEEDLE-TARGET-a4b16">NEEDLE-GIST-LINK</a></li></ul></body></html>';
       expect(html.length).toBeGreaterThan(150_000);
-      let receivedContent = '';
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({ body: Buffer.from(html) }),
+
+      const { sent } = await runCapturing(
+        { body: Buffer.from(html) },
+        PROCESSED_USAGE_UNSET,
+        'https://example.com/gists',
+        'find the needle',
       );
-      mockGenerateContent.mockImplementation((options) => {
-        receivedContent = options.contents[0].parts[0].text;
-        return Promise.resolve({ text: 'Processed', usage: undefined });
-      });
 
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://example.com/gists',
-        prompt: 'find the needle',
-      });
-      await invocation.execute(new AbortController().signal);
-
-      expect(receivedContent).toContain('NEEDLE-GIST-LINK');
-      expect(receivedContent).toContain('/gists/NEEDLE-TARGET-a4b16');
+      expect(sent).toContain('NEEDLE-GIST-LINK');
+      expect(sent).toContain('/gists/NEEDLE-TARGET-a4b16');
     });
 
     it('should drop images (incl. data URIs) but keep anchor hrefs', async () => {
-      let receivedContent = '';
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({
+      const { sent } = await runCapturing(
+        {
           body: Buffer.from(
             '<html><body><img src="data:image/png;base64,AAAABBBBCCCC" alt="hero">' +
               '<p>ARTICLE-TEXT with <a href="/docs/guide">a link</a></p></body></html>',
           ),
-        }),
+        },
+        PROCESSED,
+        'https://example.com/article',
       );
-      mockGenerateContent.mockImplementation((options) => {
-        receivedContent = options.contents[0].parts[0].text;
-        return Promise.resolve({ text: 'Processed' });
-      });
 
-      await new WebFetchTool(mockConfig)
-        .build({ url: 'https://example.com/article', prompt: 'summarize' })
-        .execute(new AbortController().signal);
-
-      expect(receivedContent).toContain('ARTICLE-TEXT');
-      expect(receivedContent).toContain('(/docs/guide)');
-      expect(receivedContent).not.toContain('data:image');
-      expect(receivedContent).not.toContain('![');
+      expect(sent).toContain('ARTICLE-TEXT');
+      expect(sent).toContain('(/docs/guide)');
+      expect(sent).not.toContain('data:image');
+      expect(sent).not.toContain('![');
     });
 
     it('should strip script/style/noscript content before conversion', async () => {
-      let receivedContent = '';
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({
+      const { sent } = await runCapturing(
+        {
           body: Buffer.from(
             '<html><head><style>.hydration{color:red}</style><script>window.__BLOB__="HYDRATION-GARBAGE";</script></head>' +
               '<body><noscript>NOSCRIPT-TEXT</noscript><p>REAL-ARTICLE-TEXT</p></body></html>',
           ),
-        }),
+        },
+        PROCESSED,
+        'https://example.com/app',
       );
-      mockGenerateContent.mockImplementation((options) => {
-        receivedContent = options.contents[0].parts[0].text;
-        return Promise.resolve({ text: 'Processed' });
-      });
 
-      await new WebFetchTool(mockConfig)
-        .build({ url: 'https://example.com/app', prompt: 'summarize' })
-        .execute(new AbortController().signal);
-
-      expect(receivedContent).toContain('REAL-ARTICLE-TEXT');
-      expect(receivedContent).not.toContain('HYDRATION-GARBAGE');
-      expect(receivedContent).not.toContain('.hydration');
-      expect(receivedContent).not.toContain('NOSCRIPT-TEXT');
+      expect(sent).toContain('REAL-ARTICLE-TEXT');
+      expect(sent).not.toContain('HYDRATION-GARBAGE');
+      expect(sent).not.toContain('.hydration');
+      expect(sent).not.toContain('NOSCRIPT-TEXT');
     });
 
     it('should process JSON content returned by fallback content negotiation', async () => {
-      let receivedContent = '';
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({
+      const { sent } = await runCapturing(
+        {
           contentType: 'application/json',
           body: Buffer.from(
             JSON.stringify({
@@ -509,66 +432,41 @@ describe('WebFetchTool', () => {
               desc: 'Use &amp; for ampersand',
             }),
           ),
-        }),
+        },
+        PROCESSED_USAGE_UNSET,
+        'https://api.github.com/repos/openai/codex/releases/tags/rust-v0.92.0',
+        'report the published date',
       );
-      mockGenerateContent.mockImplementation((options) => {
-        receivedContent = options.contents[0].parts[0].text;
-        return Promise.resolve({ text: 'Processed', usage: undefined });
-      });
 
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://api.github.com/repos/openai/codex/releases/tags/rust-v0.92.0',
-        prompt: 'report the published date',
-      });
-      await invocation.execute(new AbortController().signal);
-
-      expect(receivedContent).toContain('published_at');
-      expect(receivedContent).toContain('2026-01-27T11:50:52Z');
-      expect(receivedContent).toContain('<p>Release <b>notes</b></p>');
-      expect(receivedContent).toContain('Use &amp; for ampersand');
+      expect(sent).toContain('published_at');
+      expect(sent).toContain('2026-01-27T11:50:52Z');
+      expect(sent).toContain('<p>Release <b>notes</b></p>');
+      expect(sent).toContain('Use &amp; for ampersand');
     });
 
     it('should include markdown content in prompt when server returns markdown', async () => {
-      let receivedContent = '';
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({
+      const { sent } = await runCapturing(
+        {
           contentType: 'text/markdown; charset=utf-8',
           body: Buffer.from('# Hello World\n\nThis is markdown content.'),
-        }),
+        },
+        PROCESSED_USAGE_UNSET,
+        'https://example.com',
       );
-      mockGenerateContent.mockImplementation((options) => {
-        receivedContent = options.contents[0].parts[0].text;
-        return Promise.resolve({ text: 'Processed', usage: undefined });
-      });
 
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://example.com',
-        prompt: 'summarize',
-      });
-      await invocation.execute(new AbortController().signal);
-
-      expect(receivedContent).toContain('# Hello World');
+      expect(sent).toContain('# Hello World');
     });
   });
 
   describe('result shape', () => {
     it('should prefix llmContent with a metadata header and set a summary returnDisplay', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({
-          body: Buffer.from('<html><body>hi</body></html>'),
-          finalUrl: 'https://example.com',
-        }),
-      );
+      stubFetch({
+        body: Buffer.from('<html><body>hi</body></html>'),
+        finalUrl: 'https://example.com',
+      });
       mockGenerateContent.mockResolvedValue({ text: 'A summary.' });
 
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://example.com',
-        prompt: 'summarize',
-      });
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run('https://example.com');
 
       expect(result.llmContent).toContain('URL: https://example.com');
       expect(result.llmContent).toContain('Status: 200 OK');
@@ -580,17 +478,9 @@ describe('WebFetchTool', () => {
     });
 
     it('should note the final URL when redirects were followed', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({ finalUrl: 'https://example.com/moved-here' }),
-      );
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+      stubSummary({ finalUrl: 'https://example.com/moved-here' });
 
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://example.com/old',
-        prompt: 'summarize',
-      });
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run('https://example.com/old');
 
       expect(result.llmContent).toContain(
         'URL: https://example.com/old (final: https://example.com/moved-here)',
@@ -598,15 +488,10 @@ describe('WebFetchTool', () => {
     });
 
     it('should replace an empty side-query response with an explicit note', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(okResponse());
+      stubFetch();
       mockGenerateContent.mockResolvedValue({ text: '' });
 
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://example.com',
-        prompt: 'summarize',
-      });
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run('https://example.com');
 
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain(
@@ -616,8 +501,25 @@ describe('WebFetchTool', () => {
   });
 
   describe('side-query processing', () => {
+    /** Fetches example.com under a fresh controller; `answer` plays the side query. */
+    async function runAnswering(
+      answer: (
+        options: { abortSignal: AbortSignal; model?: string },
+        controller: AbortController,
+      ) => Promise<unknown>,
+    ) {
+      stubFetch();
+      const controller = new AbortController();
+      mockGenerateContent.mockImplementation((options) =>
+        answer(options, controller),
+      );
+      const result = await run('https://example.com', 'summarize', {
+        signal: controller.signal,
+      });
+      return { result, controller };
+    }
+
     it('should stream on the fast model with maxAttempts 1 and a combined abort signal', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(okResponse());
       vi.mocked(mockConfig.getFastModel).mockReturnValue('qwen-flash');
       let received: {
         stream?: boolean;
@@ -625,15 +527,10 @@ describe('WebFetchTool', () => {
         maxAttempts?: number;
         abortSignal?: AbortSignal;
       } = {};
-      mockGenerateContent.mockImplementation((options) => {
+      const { controller } = await runAnswering((options) => {
         received = options;
         return Promise.resolve({ text: 'Summary' });
       });
-
-      const controller = new AbortController();
-      await new WebFetchTool(mockConfig)
-        .build({ url: 'https://example.com', prompt: 'summarize' })
-        .execute(controller.signal);
 
       expect(received.stream).toBe(true);
       expect(received.model).toBe('qwen-flash');
@@ -646,40 +543,27 @@ describe('WebFetchTool', () => {
     });
 
     it('should use the main model when no fast model is configured', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(okResponse());
       let receivedModel: string | undefined;
-      mockGenerateContent.mockImplementation((options) => {
+      await runAnswering((options) => {
         receivedModel = options.model;
         return Promise.resolve({ text: 'Summary' });
       });
-
-      await new WebFetchTool(mockConfig)
-        .build({ url: 'https://example.com', prompt: 'summarize' })
-        .execute(new AbortController().signal);
 
       expect(receivedModel).toBe('qwen-coder');
     });
 
     it('should keep the persisted PDF and its extracted text when processing fails', async () => {
-      const pdfBytes = Buffer.concat([
-        Buffer.from('%PDF-1.4\n'),
-        Buffer.from([0xe2, 0xe3, 0xcf, 0xd3, 0x00, 0x01, 0x02]),
-      ]);
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({ contentType: 'application/pdf', body: pdfBytes }),
-      );
+      stubFetch(PDF);
       mockExtractPDFText.mockResolvedValue({
         success: true,
         text: 'Bid item 24Z010: $1,234.56',
       });
       mockGenerateContent.mockRejectedValue(new Error('Request timed out.'));
 
-      const result = await new WebFetchTool(mockConfig)
-        .build({
-          url: 'https://example.com/doc.pdf',
-          prompt: 'list ALL bid items',
-        })
-        .execute(new AbortController().signal);
+      const result = await run(
+        'https://example.com/doc.pdf',
+        'list ALL bid items',
+      );
 
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('Content processing failed');
@@ -690,22 +574,16 @@ describe('WebFetchTool', () => {
 
     it('should fall back with raw content when the processing backstop fires, without aborting the tool signal', async () => {
       vi.stubEnv('QWEN_WEB_FETCH_PROCESSING_TIMEOUT_MS', '50');
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(okResponse());
-      // Hangs until the composed signal (carrying the backstop timeout)
-      // aborts it — simulating a stalled provider stream.
-      mockGenerateContent.mockImplementation(
-        ({ abortSignal }: { abortSignal: AbortSignal }) =>
+      // Hangs until the composed signal (carrying the backstop timeout) aborts
+      // it — simulating a stalled provider stream.
+      const { result, controller } = await runAnswering(
+        ({ abortSignal }) =>
           new Promise((_resolve, reject) => {
             abortSignal.addEventListener('abort', () =>
               reject(new Error('Request was aborted.')),
             );
           }),
       );
-
-      const controller = new AbortController();
-      const result = await new WebFetchTool(mockConfig)
-        .build({ url: 'https://example.com', prompt: 'summarize' })
-        .execute(controller.signal);
 
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('Content processing failed');
@@ -714,18 +592,12 @@ describe('WebFetchTool', () => {
     });
 
     it('should not return a late side-query success after the user aborts', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(okResponse());
-      const controller = new AbortController();
       // The final stream chunk can already be queued when the user aborts:
       // the side query then resolves successfully despite the abort.
-      mockGenerateContent.mockImplementation(() => {
+      const { result } = await runAnswering((_options, controller) => {
         controller.abort();
         return Promise.resolve({ text: 'Late success' });
       });
-
-      const result = await new WebFetchTool(mockConfig)
-        .build({ url: 'https://example.com', prompt: 'summarize' })
-        .execute(controller.signal);
 
       expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
       expect(result.llmContent).not.toContain('Late success');
@@ -758,18 +630,12 @@ describe('WebFetchTool', () => {
     );
 
     it('should return a proper error result when aborted with a non-Error reason', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(okResponse());
-      const controller = new AbortController();
       // Session.ts aborts with a plain string reason; throwIfAborted rethrows
       // it as-is, so the error path must not assume an Error instance.
-      mockGenerateContent.mockImplementation(() => {
+      const { result } = await runAnswering((_options, controller) => {
         controller.abort('qwen:user-cancel');
         return Promise.resolve({ text: 'Late success' });
       });
-
-      const result = await new WebFetchTool(mockConfig)
-        .build({ url: 'https://example.com', prompt: 'summarize' })
-        .execute(controller.signal);
 
       expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
       expect(result.llmContent).toContain('qwen:user-cancel');
@@ -778,16 +644,10 @@ describe('WebFetchTool', () => {
     });
 
     it('should propagate a user abort instead of fabricating a raw-content result', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(okResponse());
-      const controller = new AbortController();
-      mockGenerateContent.mockImplementation(() => {
+      const { result } = await runAnswering((_options, controller) => {
         controller.abort();
         return Promise.reject(new Error('Request was aborted.'));
       });
-
-      const result = await new WebFetchTool(mockConfig)
-        .build({ url: 'https://example.com', prompt: 'summarize' })
-        .execute(controller.signal);
 
       expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
       expect(result.llmContent).not.toContain('Test content');
@@ -803,12 +663,7 @@ describe('WebFetchTool', () => {
         status: 302,
       });
 
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://example.com/r',
-        prompt: 'what is here?',
-      });
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run('https://example.com/r', 'what is here?');
 
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('REDIRECT DETECTED');
@@ -819,74 +674,51 @@ describe('WebFetchTool', () => {
   });
 
   describe('binary content', () => {
-    const pdfBytes = Buffer.concat([
-      Buffer.from('%PDF-1.4\n'),
-      Buffer.from([0xe2, 0xe3, 0xcf, 0xd3, 0x00, 0x01, 0x02]),
-    ]);
-
     it('should treat textual application types (yaml/ndjson) as text', async () => {
-      let receivedContent = '';
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({
+      const { result, sent } = await runCapturing(
+        {
           contentType: 'application/yaml',
           body: Buffer.from('service:\n  name: fixture-yaml-value\n'),
-        }),
+        },
+        PROCESSED,
+        'https://example.com/config.yaml',
       );
-      mockGenerateContent.mockImplementation((options) => {
-        receivedContent = options.contents[0].parts[0].text;
-        return Promise.resolve({ text: 'Processed' });
-      });
 
-      const result = await new WebFetchTool(mockConfig)
-        .build({ url: 'https://example.com/config.yaml', prompt: 'summarize' })
-        .execute(new AbortController().signal);
-
-      // Regression guard: yaml endpoints must not be persisted as .bin with
-      // an empty side-query.
-      expect(receivedContent).toContain('fixture-yaml-value');
+      // Regression guard: yaml endpoints must not be persisted as .bin with an
+      // empty side-query.
+      expect(sent).toContain('fixture-yaml-value');
       expect(result.llmContent).not.toContain('[Binary content');
       expect(fs.readdirSync(toolResultsDir)).toEqual([]);
     });
 
     it('should treat a headerless recognized .bin filename as binary', async () => {
-      const firmware = Buffer.alloc(64, 0x7f);
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({
-          contentType: '',
-          body: firmware,
-          finalUrl: 'https://example.com/firmware.bin',
-        }),
-      );
+      stubFetch({
+        contentType: '',
+        body: Buffer.alloc(64, 0x7f),
+        finalUrl: 'https://example.com/firmware.bin',
+      });
 
-      const result = await new WebFetchTool(mockConfig)
-        .build({ url: 'https://example.com/firmware.bin', prompt: 'what?' })
-        .execute(new AbortController().signal);
+      const result = await run('https://example.com/firmware.bin', 'what?');
 
       expect(result.llmContent).toMatch(/saved to \S+\.bin\.\]/);
       expect(mockGenerateContent).not.toHaveBeenCalled();
     });
 
     it('should treat a headerless .svg as text, not binary', async () => {
-      let receivedContent = '';
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({
+      const { result, sent } = await runCapturing(
+        {
           contentType: '',
           body: Buffer.from(
             '<svg xmlns="http://www.w3.org/2000/svg"><title>SVG-TITLE-TEXT</title></svg>',
           ),
           finalUrl: 'https://example.com/logo.svg',
-        }),
+        },
+        PROCESSED,
+        'https://example.com/logo.svg',
+        'describe',
       );
-      mockGenerateContent.mockImplementation((options) => {
-        receivedContent = options.contents[0].parts[0].text;
-        return Promise.resolve({ text: 'Processed' });
-      });
 
-      const result = await new WebFetchTool(mockConfig)
-        .build({ url: 'https://example.com/logo.svg', prompt: 'describe' })
-        .execute(new AbortController().signal);
-
-      expect(receivedContent).toContain('SVG-TITLE-TEXT');
+      expect(sent).toContain('SVG-TITLE-TEXT');
       expect(result.llmContent).not.toContain('[Binary content');
     });
 
@@ -896,17 +728,13 @@ describe('WebFetchTool', () => {
         Buffer.from('PNG\r\n'),
         Buffer.from([0x1a, 0x0a, 0x00, 0x01]),
       ]);
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({
-          contentType: '',
-          body: pngBytes,
-          finalUrl: 'https://example.com/photo.png',
-        }),
-      );
+      stubFetch({
+        contentType: '',
+        body: pngBytes,
+        finalUrl: 'https://example.com/photo.png',
+      });
 
-      const result = await new WebFetchTool(mockConfig)
-        .build({ url: 'https://example.com/photo.png', prompt: 'describe' })
-        .execute(new AbortController().signal);
+      const result = await run('https://example.com/photo.png', 'describe');
 
       expect(result.llmContent).toMatch(/saved to \S+\.png\./);
       expect(result.llmContent).not.toContain('�');
@@ -914,17 +742,15 @@ describe('WebFetchTool', () => {
     });
 
     it('should refuse to persist when the session disk budget is exhausted', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({ contentType: 'application/pdf', body: pdfBytes }),
-      );
+      stubFetch(PDF);
       const cappedConfig = {
         ...mockConfig,
         getToolResultBytesWritten: () => 500 * 1024 * 1024,
       } as unknown as Config;
 
-      const result = await new WebFetchTool(cappedConfig)
-        .build({ url: 'https://example.com/doc.pdf', prompt: 'read it' })
-        .execute(new AbortController().signal);
+      const result = await run('https://example.com/doc.pdf', 'read it', {
+        config: cappedConfig,
+      });
 
       expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
       expect(result.llmContent).toContain('disk budget is exhausted');
@@ -932,16 +758,13 @@ describe('WebFetchTool', () => {
     });
 
     it('should pass the abort signal to PDF extraction', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({ contentType: 'application/pdf', body: pdfBytes }),
-      );
+      stubSummary(PDF);
       mockExtractPDFText.mockResolvedValue({ success: true, text: 'text' });
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
 
       const controller = new AbortController();
-      await new WebFetchTool(mockConfig)
-        .build({ url: 'https://example.com/doc.pdf', prompt: 'read it' })
-        .execute(controller.signal);
+      await run('https://example.com/doc.pdf', 'read it', {
+        signal: controller.signal,
+      });
 
       expect(mockExtractPDFText).toHaveBeenCalledWith(
         expect.stringMatching(/\.pdf$/),
@@ -950,31 +773,20 @@ describe('WebFetchTool', () => {
     });
 
     it('should persist PDFs, extract their text, and summarize it', async () => {
-      const fetchSpy = vi
-        .spyOn(fetchUtils, 'fetchWithPolicy')
-        .mockResolvedValue(
-          okResponse({ contentType: 'application/pdf', body: pdfBytes }),
-        );
       mockExtractPDFText.mockResolvedValue({
         success: true,
         text: 'CY 2025 tribal FQHC PPS rate: $718.00',
       });
-      let receivedContent = '';
-      mockGenerateContent.mockImplementation((options) => {
-        receivedContent = options.contents[0].parts[0].text;
-        return Promise.resolve({ text: 'The rate is $718.00.' });
-      });
-
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://example.com/doc.pdf',
-        prompt: 'what is the rate?',
-      });
-      const result = await invocation.execute(new AbortController().signal);
+      const { result, sent } = await runCapturing(
+        PDF,
+        { text: 'The rate is $718.00.' },
+        'https://example.com/doc.pdf',
+        'what is the rate?',
+      );
 
       // Extracted PDF text — not mojibake — reaches the side-query.
-      expect(receivedContent).toContain('$718.00');
-      expect(receivedContent).not.toContain('�');
+      expect(sent).toContain('$718.00');
+      expect(sent).not.toContain('�');
       expect(result.llmContent).toContain('The rate is $718.00.');
       expect(result.llmContent).toMatch(
         /\[Binary content \(application\/pdf, .+\) saved to .+webfetch-.+\.pdf\. Use read_file to examine it \(reads PDFs natively; pass pages for large files\)\.\]/,
@@ -986,12 +798,10 @@ describe('WebFetchTool', () => {
       expect(fs.readFileSync(savedPath!)).toEqual(pdfBytes);
       expect(result.resultFilePaths).toEqual([savedPath]);
 
-      // A same-session repeat is a cache hit: no second fetch, extraction,
-      // or budget charge — and the persisted-file wiring survives the hit.
-      const repeat = await tool
-        .build({ url: 'https://example.com/doc.pdf', prompt: 'again?' })
-        .execute(new AbortController().signal);
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      // A same-session repeat is a cache hit: no second fetch, extraction, or
+      // budget charge — and the persisted-file wiring survives the hit.
+      const repeat = await run('https://example.com/doc.pdf', 'again?');
+      expect(fetchUtils.fetchWithPolicy).toHaveBeenCalledTimes(1);
       expect(mockExtractPDFText).toHaveBeenCalledTimes(1);
       expect(vi.mocked(mockConfig.trackToolResultBytes).mock.calls).toEqual([
         [pdfBytes.length],
@@ -1001,17 +811,13 @@ describe('WebFetchTool', () => {
     });
 
     it('should skip the side-query when PDF extraction fails, with no mojibake', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({ contentType: 'application/pdf', body: pdfBytes }),
-      );
+      stubFetch(PDF);
       // beforeEach default: extraction unavailable
 
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://example.com/doc.pdf',
-        prompt: 'what does it say?',
-      });
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run(
+        'https://example.com/doc.pdf',
+        'what does it say?',
+      );
 
       expect(mockGenerateContent).not.toHaveBeenCalled();
       expect(result.error).toBeUndefined();
@@ -1023,25 +829,18 @@ describe('WebFetchTool', () => {
     });
 
     it('should sniff mislabeled PDFs (application/octet-stream) via magic bytes', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({
-          contentType: 'application/octet-stream',
-          body: pdfBytes,
-          finalUrl: 'https://example.com/download',
-        }),
-      );
+      stubFetch({
+        contentType: 'application/octet-stream',
+        body: pdfBytes,
+        finalUrl: 'https://example.com/download',
+      });
       mockExtractPDFText.mockResolvedValue({
         success: true,
         text: 'Hidden PDF text',
       });
       mockGenerateContent.mockResolvedValue({ text: 'Summary of PDF' });
 
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://example.com/download',
-        prompt: 'summarize',
-      });
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run('https://example.com/download');
 
       // Saved as .pdf and reported as application/pdf despite the header.
       expect(result.llmContent).toMatch(/saved to \S+\.pdf\./);
@@ -1050,17 +849,12 @@ describe('WebFetchTool', () => {
     });
 
     it('should not suggest read_file for binaries it cannot display', async () => {
-      const junk = Buffer.alloc(64, 0x81);
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({ contentType: 'application/octet-stream', body: junk }),
-      );
-
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://example.com/blob',
-        prompt: 'what is this?',
+      stubFetch({
+        contentType: 'application/octet-stream',
+        body: Buffer.alloc(64, 0x81),
       });
-      const result = await invocation.execute(new AbortController().signal);
+
+      const result = await run('https://example.com/blob', 'what is this?');
 
       expect(result.llmContent).toMatch(/saved to \S+\.bin\.\]/);
       expect(result.llmContent).not.toContain('read_file');
@@ -1069,31 +863,23 @@ describe('WebFetchTool', () => {
 
     it('should treat printable octet-stream bodies as text, not .bin', async () => {
       // The reverse mislabel: .log/.patch text behind a misconfigured server.
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({
+      const { result, sent } = await runCapturing(
+        {
           contentType: 'application/octet-stream',
           body: Buffer.from('commit 3f1a\nAuthor: dev\n\n    fix: patch\n'),
-        }),
+        },
+        { text: 'A git log' },
+        'https://example.com/raw',
+        'what is this?',
       );
-      let receivedContent = '';
-      mockGenerateContent.mockImplementation((options) => {
-        receivedContent = options.contents[0].parts[0].text;
-        return Promise.resolve({ text: 'A git log' });
-      });
 
-      const result = await new WebFetchTool(mockConfig)
-        .build({ url: 'https://example.com/raw', prompt: 'what is this?' })
-        .execute(new AbortController().signal);
-
-      expect(receivedContent).toContain('fix: patch');
+      expect(sent).toContain('fix: patch');
       expect(result.llmContent).not.toContain('[Binary content');
       expect(result.resultFilePaths).toBeUndefined();
     });
 
     it('should return an error when binary persistence fails', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({ contentType: 'application/pdf', body: pdfBytes }),
-      );
+      stubFetch(PDF);
       // Point the tool-results dir at an existing FILE so mkdir/write fails.
       const blockedPath = path.join(toolResultsDir, 'occupied');
       fs.writeFileSync(blockedPath, 'plain file');
@@ -1102,9 +888,9 @@ describe('WebFetchTool', () => {
         storage: { getToolResultsDir: () => blockedPath },
       } as unknown as Config;
 
-      const result = await new WebFetchTool(brokenConfig)
-        .build({ url: 'https://example.com/doc.pdf', prompt: 'what is it?' })
-        .execute(new AbortController().signal);
+      const result = await run('https://example.com/doc.pdf', 'what is it?', {
+        config: brokenConfig,
+      });
 
       expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
       expect(result.llmContent).toContain('failed to save');
@@ -1117,31 +903,21 @@ describe('WebFetchTool', () => {
     });
 
     it('should wire Content-Disposition through to the persisted extension', async () => {
-      // Unit-covered in binary-content.test.ts; this locks the wiring from
-      // the response header to sniffFileKind.
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({
-          contentType: 'application/octet-stream',
-          contentDisposition: 'attachment; filename="report.xlsx"',
-          body: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x00, 0x00, 0x00]),
-        }),
-      );
-      const result = await new WebFetchTool(mockConfig)
-        .build({ url: 'https://example.com/download', prompt: 'what is it?' })
-        .execute(new AbortController().signal);
+      // Unit-covered in binary-content.test.ts; this locks the wiring from the
+      // response header to sniffFileKind.
+      stubFetch({
+        contentType: 'application/octet-stream',
+        contentDisposition: 'attachment; filename="report.xlsx"',
+        body: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x00, 0x00, 0x00]),
+      });
+      const result = await run('https://example.com/download', 'what is it?');
       expect(result.resultFilePaths?.[0]).toMatch(/\.xlsx$/);
     });
 
     it('should not persist textual content', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(okResponse());
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+      stubSummary();
 
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://example.com',
-        prompt: 'summarize',
-      });
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run('https://example.com');
 
       expect(result.llmContent).not.toContain('[Binary content');
       expect(fs.readdirSync(toolResultsDir)).toEqual([]);
@@ -1150,72 +926,51 @@ describe('WebFetchTool', () => {
 
   describe('permission model', () => {
     it('always asks — WebFetch is egress, never auto-allowed by host', async () => {
-      const tool = new WebFetchTool(mockConfig);
+      const permissionFor = (url: string) =>
+        new WebFetchTool(mockConfig)
+          .build({ url, prompt: 'summarize' })
+          .getDefaultPermission();
       // A curated docs host no longer auto-allows: a GET's path/query is an
       // exfiltration channel regardless of how trusted the host is.
       expect(
-        await tool
-          .build({
-            url: 'https://docs.python.org/3/library/json.html',
-            prompt: 'summarize',
-          })
-          .getDefaultPermission(),
+        await permissionFor('https://docs.python.org/3/library/json.html'),
       ).toBe('ask');
       // A directly requested curated raw URL no longer auto-allows either.
       expect(
-        await tool
-          .build({
-            url: 'https://raw.githubusercontent.com/QwenLM/qwen-code/main/README.md',
-            prompt: 'summarize',
-          })
-          .getDefaultPermission(),
+        await permissionFor(
+          'https://raw.githubusercontent.com/QwenLM/qwen-code/main/README.md',
+        ),
       ).toBe('ask');
       // An arbitrary host asks, as it always did.
-      expect(
-        await tool
-          .build({ url: 'https://example.com', prompt: 'summarize' })
-          .getDefaultPermission(),
-      ).toBe('ask');
+      expect(await permissionFor('https://example.com')).toBe('ask');
     });
   });
 
   describe('preapproved list — markdown passthrough only', () => {
     it('should gate the raw passthrough on the final URL, not the requested one', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({
-          contentType: 'text/markdown',
-          body: Buffer.from('# Raw QwenLM readme'),
-          finalUrl:
-            'https://raw.githubusercontent.com/QwenLM/qwen-code/main/README.md',
-        }),
-      );
-
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://github.com/QwenLM/qwen-code/blob/main/README.md',
-        prompt: 'summarize',
+      stubFetch({
+        contentType: 'text/markdown',
+        body: Buffer.from('# Raw QwenLM readme'),
+        finalUrl:
+          'https://raw.githubusercontent.com/QwenLM/qwen-code/main/README.md',
       });
-      const result = await invocation.execute(new AbortController().signal);
+
+      const result = await run(
+        'https://github.com/QwenLM/qwen-code/blob/main/README.md',
+      );
 
       expect(mockGenerateContent).not.toHaveBeenCalled();
       expect(result.llmContent).toContain('# Raw QwenLM readme');
     });
 
     it('should return preapproved markdown verbatim without a side query', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({
-          contentType: 'text/markdown',
-          body: Buffer.from('# JSON module\n\nDetailed raw docs.'),
-          finalUrl: 'https://docs.python.org/3/library/json.md',
-        }),
-      );
-
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://docs.python.org/3/library/json.md',
-        prompt: 'summarize',
+      stubFetch({
+        contentType: 'text/markdown',
+        body: Buffer.from('# JSON module\n\nDetailed raw docs.'),
+        finalUrl: 'https://docs.python.org/3/library/json.md',
       });
-      const result = await invocation.execute(new AbortController().signal);
+
+      const result = await run('https://docs.python.org/3/library/json.md');
 
       expect(mockGenerateContent).not.toHaveBeenCalled();
       expect(result.llmContent).toContain('# JSON module');
@@ -1224,20 +979,12 @@ describe('WebFetchTool', () => {
     });
 
     it('should still run the side query for non-preapproved markdown', async () => {
-      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
-        okResponse({
-          contentType: 'text/markdown',
-          body: Buffer.from('# Raw docs'),
-        }),
-      );
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
-
-      const tool = new WebFetchTool(mockConfig);
-      const invocation = tool.build({
-        url: 'https://example.com/readme.md',
-        prompt: 'summarize',
+      stubSummary({
+        contentType: 'text/markdown',
+        body: Buffer.from('# Raw docs'),
       });
-      const result = await invocation.execute(new AbortController().signal);
+
+      const result = await run('https://example.com/readme.md');
 
       expect(mockGenerateContent).toHaveBeenCalled();
       expect(result.llmContent).toContain('Summary');
@@ -1248,22 +995,10 @@ describe('WebFetchTool', () => {
     it('should serve a repeat fetch from cache until the TTL expires', async () => {
       vi.useFakeTimers();
       try {
-        const fetchSpy = vi
-          .spyOn(fetchUtils, 'fetchWithPolicy')
-          .mockResolvedValue(okResponse());
-        mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+        const fetchSpy = stubSummary();
 
-        const tool = new WebFetchTool(mockConfig);
-        const first = tool.build({
-          url: 'https://example.com',
-          prompt: 'summarize',
-        });
-        await first.execute(new AbortController().signal);
-        const second = tool.build({
-          url: 'https://example.com',
-          prompt: 'a different prompt',
-        });
-        const result = await second.execute(new AbortController().signal);
+        await run('https://example.com');
+        const result = await run('https://example.com', 'a different prompt');
 
         expect(fetchSpy).toHaveBeenCalledTimes(1);
         expect(result.error).toBeUndefined();
@@ -1272,9 +1007,7 @@ describe('WebFetchTool', () => {
 
         // Past the 15-minute TTL the entry is stale and must be refetched.
         vi.advanceTimersByTime(15 * 60 * 1000 + 1);
-        await tool
-          .build({ url: 'https://example.com', prompt: 'summarize' })
-          .execute(new AbortController().signal);
+        await run('https://example.com');
         expect(fetchSpy).toHaveBeenCalledTimes(2);
       } finally {
         vi.useRealTimers();
@@ -1282,46 +1015,25 @@ describe('WebFetchTool', () => {
     });
 
     it('should key the cache on format as well as URL', async () => {
-      const fetchSpy = vi
-        .spyOn(fetchUtils, 'fetchWithPolicy')
-        .mockResolvedValue(okResponse());
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+      const fetchSpy = stubSummary();
 
-      const tool = new WebFetchTool(mockConfig);
-      await tool
-        .build({
-          url: 'https://example.com',
-          prompt: 'summarize',
-          format: 'html',
-        })
-        .execute(new AbortController().signal);
-      await tool
-        .build({
-          url: 'https://example.com',
-          prompt: 'summarize',
-          format: 'markdown',
-        })
-        .execute(new AbortController().signal);
+      await run('https://example.com', 'summarize', { format: 'html' });
+      await run('https://example.com', 'summarize', { format: 'markdown' });
 
-      // Different Accept headers can produce different responses — a
-      // URL-only cache key would wrongly serve the html-format entry here.
+      // Different Accept headers can produce different responses — a URL-only
+      // cache key would wrongly serve the html-format entry here.
       expect(fetchSpy).toHaveBeenCalledTimes(2);
     });
 
     it('should fall back to the original http URL on connection-level https failures', async () => {
-      const fetchSpy = vi
-        .spyOn(fetchUtils, 'fetchWithPolicy')
-        .mockRejectedValueOnce(
-          new fetchUtils.FetchError('connect ECONNREFUSED', 'ECONNREFUSED'),
-        )
-        .mockResolvedValueOnce(
-          okResponse({ finalUrl: 'http://wiki.corp.example.com/page' }),
-        );
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+      const url = 'http://wiki.corp.example.com/page';
+      const fetchSpy = stubHttpFallback(
+        'connect ECONNREFUSED',
+        'ECONNREFUSED',
+        url,
+      );
 
-      const result = await new WebFetchTool(mockConfig)
-        .build({ url: 'http://wiki.corp.example.com/page', prompt: 'read' })
-        .execute(new AbortController().signal);
+      const result = await run(url, 'read');
 
       expect(result.error).toBeUndefined();
       expect(fetchSpy).toHaveBeenNthCalledWith(
@@ -1329,53 +1041,63 @@ describe('WebFetchTool', () => {
         'https://wiki.corp.example.com/page',
         expect.anything(),
       );
-      expect(fetchSpy).toHaveBeenNthCalledWith(
-        2,
-        'http://wiki.corp.example.com/page',
-        expect.anything(),
-      );
+      expect(fetchSpy).toHaveBeenNthCalledWith(2, url, expect.anything());
     });
 
     it('should fall back to http when the TLS handshake is reset', async () => {
-      const fetchSpy = vi
-        .spyOn(fetchUtils, 'fetchWithPolicy')
-        .mockRejectedValueOnce(
-          new fetchUtils.FetchError('socket hang up', 'ECONNRESET'),
-        )
-        .mockResolvedValueOnce(
-          okResponse({ finalUrl: 'http://legacy.example.com/page' }),
-        );
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+      const url = 'http://legacy.example.com/page';
+      const fetchSpy = stubHttpFallback('socket hang up', 'ECONNRESET', url);
 
-      const result = await new WebFetchTool(mockConfig)
-        .build({ url: 'http://legacy.example.com/page', prompt: 'read' })
-        .execute(new AbortController().signal);
+      const result = await run(url, 'read');
 
       expect(result.error).toBeUndefined();
-      expect(fetchSpy).toHaveBeenNthCalledWith(
-        2,
-        'http://legacy.example.com/page',
-        expect.anything(),
-      );
+      expect(fetchSpy).toHaveBeenNthCalledWith(2, url, expect.anything());
+    });
+
+    it('should fall back to http when the upgraded host is unreachable (EHOSTUNREACH/ENETUNREACH)', async () => {
+      // An ICMP host/network unreachable (a firewall REJECT, or a missing
+      // route) fails the opportunistic https upgrade before any handshake,
+      // with no RST for ECONNREFUSED to see — the http fallback must still
+      // fire. (A silently DROPped port instead pends the connect and
+      // surfaces as UND_ERR_CONNECT_TIMEOUT.)
+      for (const code of ['EHOSTUNREACH', 'ENETUNREACH'] as const) {
+        const fetchSpy = vi
+          .spyOn(fetchUtils, 'fetchWithPolicy')
+          .mockRejectedValueOnce(
+            new fetchUtils.FetchError(`connect ${code} 203.0.113.1:443`, code),
+          )
+          .mockResolvedValueOnce(
+            okResponse({ finalUrl: 'http://unreachable.example.com/page' }),
+          );
+        mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+
+        const result = await new WebFetchTool(mockConfig)
+          .build({ url: 'http://unreachable.example.com/page', prompt: 'read' })
+          .execute(new AbortController().signal);
+
+        expect(result.error).toBeUndefined();
+        expect(fetchSpy).toHaveBeenNthCalledWith(
+          1,
+          'https://unreachable.example.com/page',
+          expect.anything(),
+        );
+        expect(fetchSpy).toHaveBeenNthCalledWith(
+          2,
+          'http://unreachable.example.com/page',
+          expect.anything(),
+        );
+        fetchSpy.mockRestore();
+      }
     });
 
     it('should fall back to http for curated-list hosts like any other', async () => {
-      // The old auto-allow suppressed the fallback for preapproved hosts
-      // (their grant was https-only). With no auto-allow, a curated docs
-      // host is user-confirmed like any host and gets the same fallback.
-      const fetchSpy = vi
-        .spyOn(fetchUtils, 'fetchWithPolicy')
-        .mockRejectedValueOnce(
-          new fetchUtils.FetchError('socket hang up', 'ECONNRESET'),
-        )
-        .mockResolvedValueOnce(
-          okResponse({ finalUrl: 'http://react.dev/learn' }),
-        );
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+      // The old auto-allow suppressed the fallback for preapproved hosts (their
+      // grant was https-only). With no auto-allow, a curated docs host is
+      // user-confirmed like any host and gets the same fallback.
+      const url = 'http://react.dev/learn';
+      const fetchSpy = stubHttpFallback('socket hang up', 'ECONNRESET', url);
 
-      const result = await new WebFetchTool(mockConfig)
-        .build({ url: 'http://react.dev/learn', prompt: 'read' })
-        .execute(new AbortController().signal);
+      const result = await run(url, 'read');
 
       expect(result.error).toBeUndefined();
       expect(fetchSpy).toHaveBeenNthCalledWith(
@@ -1383,11 +1105,7 @@ describe('WebFetchTool', () => {
         'https://react.dev/learn',
         expect.anything(),
       );
-      expect(fetchSpy).toHaveBeenNthCalledWith(
-        2,
-        'http://react.dev/learn',
-        expect.anything(),
-      );
+      expect(fetchSpy).toHaveBeenNthCalledWith(2, url, expect.anything());
     });
 
     it('should not fall back to http when the caller asked for https', async () => {
@@ -1395,9 +1113,7 @@ describe('WebFetchTool', () => {
         new fetchUtils.FetchError('connect ECONNREFUSED', 'ECONNREFUSED'),
       );
 
-      const result = await new WebFetchTool(mockConfig)
-        .build({ url: 'https://example.com/page', prompt: 'read' })
-        .execute(new AbortController().signal);
+      const result = await run('https://example.com/page', 'read');
 
       // No silent downgrade for explicit https URLs.
       expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
@@ -1405,33 +1121,22 @@ describe('WebFetchTool', () => {
     });
 
     it('should NOT cache an http-fallback response under the https key', async () => {
-      // http://foo upgrades to https://foo, TLS fails, plaintext fallback
-      // succeeds. That plaintext content must not be cached under the https
-      // key: a later explicit https://foo fetch would receive it without
-      // contacting the TLS endpoint — a silent downgrade.
-      const fetchSpy = vi
-        .spyOn(fetchUtils, 'fetchWithPolicy')
-        // First call: http://legacy.example.com upgraded to https → TLS reset.
-        .mockRejectedValueOnce(
-          new fetchUtils.FetchError('socket hang up', 'ECONNRESET'),
-        )
-        // Its http fallback succeeds.
-        .mockResolvedValueOnce(
-          okResponse({ finalUrl: 'http://legacy.example.com/page' }),
-        )
+      // http://foo upgrades to https://foo, TLS fails, the plaintext fallback
+      // succeeds. That content must not be cached under the https key, or a
+      // later explicit https://foo fetch would get it without contacting the
+      // TLS endpoint — a silent downgrade.
+      const fetchSpy = stubHttpFallback(
+        'socket hang up',
+        'ECONNRESET',
+        'http://legacy.example.com/page',
+      )
         // A later explicit https fetch must hit the network, not the cache.
         .mockResolvedValueOnce(
           okResponse({ finalUrl: 'https://legacy.example.com/page' }),
         );
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
 
-      const tool = new WebFetchTool(mockConfig);
-      await tool
-        .build({ url: 'http://legacy.example.com/page', prompt: 'read' })
-        .execute(new AbortController().signal);
-      await tool
-        .build({ url: 'https://legacy.example.com/page', prompt: 'read' })
-        .execute(new AbortController().signal);
+      await run('http://legacy.example.com/page', 'read');
+      await run('https://legacy.example.com/page', 'read');
 
       // 2 for the first (upgrade + fallback) + 1 for the uncached https call.
       expect(fetchSpy).toHaveBeenCalledTimes(3);
@@ -1443,71 +1148,46 @@ describe('WebFetchTool', () => {
     });
 
     it('should not serve cache entries across session swaps (/clear, /new)', async () => {
-      const fetchSpy = vi
-        .spyOn(fetchUtils, 'fetchWithPolicy')
-        .mockResolvedValue(okResponse());
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
-
+      const fetchSpy = stubSummary();
       let sessionId = 'session-a';
-      const swapConfig = {
+      const config = {
         ...mockConfig,
         getSessionId: () => sessionId,
       } as unknown as Config;
 
-      const tool = new WebFetchTool(swapConfig);
-      await tool
-        .build({ url: 'https://example.com', prompt: 'summarize' })
-        .execute(new AbortController().signal);
+      await run('https://example.com', 'summarize', { config });
       // startNewSession keeps the same Config/Storage but changes the ID.
       sessionId = 'session-b';
-      await tool
-        .build({ url: 'https://example.com', prompt: 'summarize' })
-        .execute(new AbortController().signal);
+      await run('https://example.com', 'summarize', { config });
 
       expect(fetchSpy).toHaveBeenCalledTimes(2);
     });
 
     it('should invalidate the cache when the session storage is replaced', async () => {
-      const fetchSpy = vi
-        .spyOn(fetchUtils, 'fetchWithPolicy')
-        .mockResolvedValue(okResponse());
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+      const fetchSpy = stubSummary();
 
-      const tool = new WebFetchTool(mockConfig);
-      await tool
-        .build({ url: 'https://example.com', prompt: 'summarize' })
-        .execute(new AbortController().signal);
-
-      // Simulate /cd: relocateWorkingDirectory replaces config.storage with
-      // a new Storage object on the SAME Config.
+      await run('https://example.com');
+      // Simulate /cd: relocateWorkingDirectory replaces config.storage with a
+      // new Storage object on the SAME Config.
       (mockConfig as unknown as { storage: unknown }).storage = {
         getToolResultsDir: () => toolResultsDir,
       };
-      await tool
-        .build({ url: 'https://example.com', prompt: 'summarize' })
-        .execute(new AbortController().signal);
+      await run('https://example.com');
 
       // A stale entry (with old-workspace persisted paths) must not survive.
       expect(fetchSpy).toHaveBeenCalledTimes(2);
     });
 
     it('should not share the cache across Config instances', async () => {
-      const fetchSpy = vi
-        .spyOn(fetchUtils, 'fetchWithPolicy')
-        .mockResolvedValue(okResponse());
-      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+      const fetchSpy = stubSummary();
 
       // A distinct session has its own Storage instance (the cache key).
       const otherConfig = {
         ...mockConfig,
         storage: { getToolResultsDir: () => toolResultsDir },
       } as unknown as Config;
-      await new WebFetchTool(mockConfig)
-        .build({ url: 'https://example.com', prompt: 'summarize' })
-        .execute(new AbortController().signal);
-      await new WebFetchTool(otherConfig)
-        .build({ url: 'https://example.com', prompt: 'summarize' })
-        .execute(new AbortController().signal);
+      await run('https://example.com');
+      await run('https://example.com', 'summarize', { config: otherConfig });
 
       // Two sessions (Configs) must not see each other's cached entries.
       expect(fetchSpy).toHaveBeenCalledTimes(2);
@@ -1522,109 +1202,81 @@ describe('WebFetchTool', () => {
         .mockResolvedValueOnce(okResponse());
       mockGenerateContent.mockResolvedValue({ text: 'Summary' });
 
-      const tool = new WebFetchTool(mockConfig);
-      const first = tool.build({
-        url: 'https://example.com',
-        prompt: 'summarize',
-      });
-      const firstResult = await first.execute(new AbortController().signal);
+      const firstResult = await run('https://example.com');
       expect(firstResult.error?.type).toBe(
         ToolErrorType.WEB_FETCH_FALLBACK_FAILED,
       );
 
-      const second = tool.build({
-        url: 'https://example.com',
-        prompt: 'summarize',
-      });
-      const secondResult = await second.execute(new AbortController().signal);
+      const secondResult = await run('https://example.com');
       expect(secondResult.error).toBeUndefined();
       expect(fetchSpy).toHaveBeenCalledTimes(2);
     });
   });
 
   describe('getConfirmationDetails', () => {
-    it('should return confirmation details with the correct prompt and urls', async () => {
-      const tool = new WebFetchTool(mockConfig);
-      const params = {
-        url: 'https://example.com',
-        prompt: 'summarize this page',
-      };
-      const invocation = tool.build(params);
+    /** Builds the call, expects 'ask', then the info confirmation for `target`. */
+    async function expectAskThenConfirm(
+      config: Config,
+      params: WebFetchToolParams,
+      target: string,
+      host: string,
+      beforeConfirm: (invocation: { params: unknown }) => void = () => {},
+    ) {
+      const invocation = new WebFetchTool(config).build(params);
       expect(await invocation.getDefaultPermission()).toBe('ask');
+      beforeConfirm(invocation);
 
-      const confirmationDetails = await invocation.getConfirmationDetails(
-        new AbortController().signal,
-      );
-
-      expect(confirmationDetails).toEqual({
+      expect(
+        await invocation.getConfirmationDetails(new AbortController().signal),
+      ).toEqual({
         type: 'info',
         title: 'Confirm Web Fetch',
-        prompt:
-          'Fetch content from https://example.com and process with: summarize this page',
-        urls: ['https://example.com'],
-        permissionRules: ['WebFetch(example.com)'],
+        prompt: `Fetch content from ${target} and process with: ${params.prompt}`,
+        urls: [target],
+        permissionRules: [`WebFetch(${host})`],
         onConfirm: expect.any(Function),
       });
+    }
+
+    it('should return confirmation details with the correct prompt and urls', async () => {
+      await expectAskThenConfirm(
+        mockConfig,
+        { url: 'https://example.com', prompt: 'summarize this page' },
+        'https://example.com',
+        'example.com',
+      );
     });
 
     it('should normalize github blob urls to the raw destination in params and confirmation', async () => {
-      const tool = new WebFetchTool(mockConfig);
-      const params = {
-        url: 'https://github.com/google/gemini-react/blob/main/README.md',
-        prompt: 'summarize the README',
-      };
-      const invocation = tool.build(params);
-      expect(await invocation.getDefaultPermission()).toBe('ask');
-
-      // The scheduler feeds invocation.params into permission-rule
-      // evaluation — the normalized URL here is what makes an ask/deny
-      // rule for raw.githubusercontent.com actually match.
-      expect((invocation.params as { url: string }).url).toBe(
-        'https://raw.githubusercontent.com/google/gemini-react/main/README.md',
+      const raw =
+        'https://raw.githubusercontent.com/google/gemini-react/main/README.md';
+      await expectAskThenConfirm(
+        mockConfig,
+        {
+          url: 'https://github.com/google/gemini-react/blob/main/README.md',
+          prompt: 'summarize the README',
+        },
+        raw,
+        'raw.githubusercontent.com',
+        (invocation) => {
+          // The scheduler feeds invocation.params into permission-rule
+          // evaluation — the normalized URL here is what makes an ask/deny
+          // rule for raw.githubusercontent.com actually match.
+          expect((invocation.params as { url: string }).url).toBe(raw);
+        },
       );
-
-      const confirmationDetails = await invocation.getConfirmationDetails(
-        new AbortController().signal,
-      );
-
-      expect(confirmationDetails).toEqual({
-        type: 'info',
-        title: 'Confirm Web Fetch',
-        prompt:
-          'Fetch content from https://raw.githubusercontent.com/google/gemini-react/main/README.md and process with: summarize the README',
-        urls: [
-          'https://raw.githubusercontent.com/google/gemini-react/main/README.md',
-        ],
-        permissionRules: ['WebFetch(raw.githubusercontent.com)'],
-        onConfirm: expect.any(Function),
-      });
     });
 
     it('should return ask even if approval mode is AUTO_EDIT (approval mode handled by scheduler)', async () => {
-      const tool = new WebFetchTool({
-        ...mockConfig,
-        getApprovalMode: () => ApprovalMode.AUTO_EDIT,
-      } as unknown as Config);
-      const params = {
-        url: 'https://example.com',
-        prompt: 'summarize this page',
-      };
-      const invocation = tool.build(params);
-      expect(await invocation.getDefaultPermission()).toBe('ask');
-
-      const confirmationDetails = await invocation.getConfirmationDetails(
-        new AbortController().signal,
+      await expectAskThenConfirm(
+        {
+          ...mockConfig,
+          getApprovalMode: () => ApprovalMode.AUTO_EDIT,
+        } as unknown as Config,
+        { url: 'https://example.com', prompt: 'summarize this page' },
+        'https://example.com',
+        'example.com',
       );
-
-      expect(confirmationDetails).toEqual({
-        type: 'info',
-        title: 'Confirm Web Fetch',
-        prompt:
-          'Fetch content from https://example.com and process with: summarize this page',
-        urls: ['https://example.com'],
-        permissionRules: ['WebFetch(example.com)'],
-        onConfirm: expect.any(Function),
-      });
     });
 
     it('should have onConfirm as a no-op (approval mode handled by scheduler)', async () => {
@@ -1633,12 +1285,10 @@ describe('WebFetchTool', () => {
         ...mockConfig,
         setApprovalMode,
       } as unknown as Config;
-      const tool = new WebFetchTool(testConfig);
-      const params = {
+      const invocation = new WebFetchTool(testConfig).build({
         url: 'https://example.com',
         prompt: 'summarize this page',
-      };
-      const invocation = tool.build(params);
+      });
       const confirmationDetails = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );

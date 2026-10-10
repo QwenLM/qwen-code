@@ -6,7 +6,29 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { SubagentValidator } from './validation.js';
-import { type SubagentConfig, SubagentError } from './types.js';
+import {
+  type SubagentConfig,
+  SubagentError,
+  type ValidationResult,
+} from './types.js';
+
+/** Valid, with no errors. */
+function expectValid(result: ValidationResult) {
+  expect(result.isValid).toBe(true);
+  expect(result.errors).toHaveLength(0);
+}
+
+/** Invalid, listing `error`. */
+function expectError(result: ValidationResult, error: string) {
+  expect(result.isValid).toBe(false);
+  expect(result.errors).toContain(error);
+}
+
+/** Still valid, but listing `warning`. */
+function expectWarning(result: ValidationResult, warning: string) {
+  expect(result.isValid).toBe(true);
+  expect(result.warnings).toContain(warning);
+}
 
 describe('SubagentValidator', () => {
   let validator: SubagentValidator;
@@ -14,6 +36,40 @@ describe('SubagentValidator', () => {
   beforeEach(() => {
     validator = new SubagentValidator();
   });
+
+  const validConfig: SubagentConfig = {
+    name: 'test-agent',
+    description: 'A test subagent',
+    systemPrompt: 'You are a helpful assistant.',
+    level: 'project',
+    filePath: '/path/to/test-agent.md',
+  };
+
+  it.each(
+    [null, false, 'local', 'docker', '', [], {}].map((executionBackend) => ({
+      executionBackend,
+    })),
+  )(
+    'rejects invalid executionBackend=$executionBackend on direct create/update configurations',
+    ({ executionBackend }) => {
+      const config = {
+        name: 'test-agent',
+        description: 'A test agent',
+        systemPrompt: 'Complete the requested task.',
+        level: 'project',
+        executionBackend,
+      } as unknown as SubagentConfig;
+      expect(validator.validateConfig(config)).toMatchObject({
+        isValid: false,
+        errors: expect.arrayContaining([
+          'executionBackend must be "container" when provided',
+        ]),
+      });
+      expect(() => validator.validateOrThrow(config)).toThrow(
+        'executionBackend',
+      );
+    },
+  );
 
   describe('validateName', () => {
     it('should accept valid names', () => {
@@ -30,70 +86,44 @@ describe('SubagentValidator', () => {
       ];
 
       for (const name of validNames) {
-        const result = validator.validateName(name);
-        expect(result.isValid).toBe(true);
-        expect(result.errors).toHaveLength(0);
+        expectValid(validator.validateName(name));
       }
     });
 
-    it('should reject empty or whitespace names', () => {
-      const invalidNames = ['', '   ', '\t', '\n'];
-
-      for (const name of invalidNames) {
-        const result = validator.validateName(name);
-        expect(result.isValid).toBe(false);
-        expect(result.errors).toContain('Name is required and cannot be empty');
-      }
-    });
-
-    it('should reject names that are too short', () => {
-      const result = validator.validateName('a');
-      expect(result.isValid).toBe(false);
-      expect(result.errors).toContain(
+    it.each([
+      [
+        'should reject empty or whitespace names',
+        ['', '   ', '\t', '\n'],
+        'Name is required and cannot be empty',
+      ],
+      [
+        'should reject names that are too short',
+        ['a'],
         'Name must be at least 2 characters long',
-      );
-    });
-
-    it('should reject names that are too long', () => {
-      const longName = 'a'.repeat(51);
-      const result = validator.validateName(longName);
-      expect(result.isValid).toBe(false);
-      expect(result.errors).toContain('Name must be 50 characters or less');
-    });
-
-    it('should reject names with invalid characters', () => {
-      const invalidNames = ['test@agent', 'agent.name', 'test agent', 'agent!'];
-
-      for (const name of invalidNames) {
-        const result = validator.validateName(name);
-        expect(result.isValid).toBe(false);
-        expect(result.errors).toContain(
-          'Name can only contain letters, numbers, hyphens, and underscores',
-        );
-      }
-    });
-
-    it('should reject names starting with special characters', () => {
-      const invalidNames = ['-agent', '_agent'];
-
-      for (const name of invalidNames) {
-        const result = validator.validateName(name);
-        expect(result.isValid).toBe(false);
-        expect(result.errors).toContain(
-          'Name cannot start with a hyphen or underscore',
-        );
-      }
-    });
-
-    it('should reject names ending with special characters', () => {
-      const invalidNames = ['agent-', 'agent_'];
-
-      for (const name of invalidNames) {
-        const result = validator.validateName(name);
-        expect(result.isValid).toBe(false);
-        expect(result.errors).toContain(
-          'Name cannot end with a hyphen or underscore',
-        );
+      ],
+      [
+        'should reject names that are too long',
+        ['a'.repeat(51)],
+        'Name must be 50 characters or less',
+      ],
+      [
+        'should reject names with invalid characters',
+        ['test@agent', 'agent.name', 'test agent', 'agent!'],
+        'Name can only contain letters, numbers, hyphens, and underscores',
+      ],
+      [
+        'should reject names starting with special characters',
+        ['-agent', '_agent'],
+        'Name cannot start with a hyphen or underscore',
+      ],
+      [
+        'should reject names ending with special characters',
+        ['agent-', 'agent_'],
+        'Name cannot end with a hyphen or underscore',
+      ],
+    ])('%s', (_title, names, error) => {
+      for (const name of names) {
+        expectError(validator.validateName(name), error);
       }
     });
 
@@ -110,18 +140,16 @@ describe('SubagentValidator', () => {
       ];
 
       for (const name of reservedNames) {
-        const result = validator.validateName(name);
-        expect(result.isValid).toBe(false);
-        expect(result.errors).toContain(
+        expectError(
+          validator.validateName(name),
           `"${name}" is a reserved name and cannot be used`,
         );
       }
     });
 
     it('should warn about naming conventions', () => {
-      const result = validator.validateName('TestAgent');
-      expect(result.isValid).toBe(true);
-      expect(result.warnings).toContain(
+      expectWarning(
+        validator.validateName('TestAgent'),
         'Consider using lowercase names for consistency',
       );
     });
@@ -135,9 +163,8 @@ describe('SubagentValidator', () => {
     });
 
     it('should warn about mixed separators', () => {
-      const result = validator.validateName('test-agent_helper');
-      expect(result.isValid).toBe(true);
-      expect(result.warnings).toContain(
+      expectWarning(
+        validator.validateName('test-agent_helper'),
         'Consider using either hyphens or underscores consistently, not both',
       );
     });
@@ -152,37 +179,29 @@ describe('SubagentValidator', () => {
       ];
 
       for (const prompt of validPrompts) {
-        const result = validator.validateSystemPrompt(prompt);
-        expect(result.isValid).toBe(true);
-        expect(result.errors).toHaveLength(0);
+        expectValid(validator.validateSystemPrompt(prompt));
       }
     });
 
     it('should reject empty prompts', () => {
-      const invalidPrompts = ['', '   ', '\t\n'];
-
-      for (const prompt of invalidPrompts) {
-        const result = validator.validateSystemPrompt(prompt);
-        expect(result.isValid).toBe(false);
-        expect(result.errors).toContain(
+      for (const prompt of ['', '   ', '\t\n']) {
+        expectError(
+          validator.validateSystemPrompt(prompt),
           'System prompt is required and cannot be empty',
         );
       }
     });
 
     it('should reject prompts that are too short', () => {
-      const result = validator.validateSystemPrompt('Short');
-      expect(result.isValid).toBe(false);
-      expect(result.errors).toContain(
+      expectError(
+        validator.validateSystemPrompt('Short'),
         'System prompt must be at least 10 characters long',
       );
     });
 
     it('should warn about long prompts', () => {
-      const longPrompt = 'a'.repeat(10001);
-      const result = validator.validateSystemPrompt(longPrompt);
-      expect(result.isValid).toBe(true);
-      expect(result.warnings).toContain(
+      expectWarning(
+        validator.validateSystemPrompt('a'.repeat(10001)),
         'System prompt is quite long (>10,000 characters), consider shortening',
       );
     });
@@ -190,51 +209,44 @@ describe('SubagentValidator', () => {
 
   describe('validateTools', () => {
     it('should accept valid tool arrays', () => {
-      const result = validator.validateTools(['read_file', 'write_file']);
-      expect(result.isValid).toBe(true);
-      expect(result.errors).toHaveLength(0);
+      expectValid(validator.validateTools(['read_file', 'write_file']));
     });
 
     it('should reject non-array inputs', () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const result = validator.validateTools('not-an-array' as any);
-      expect(result.isValid).toBe(false);
-      expect(result.errors).toContain('Tools must be an array of strings');
+      expectError(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        validator.validateTools('not-an-array' as any),
+        'Tools must be an array of strings',
+      );
     });
 
     it('should warn about empty arrays', () => {
-      const result = validator.validateTools([]);
-      expect(result.isValid).toBe(true);
-      expect(result.warnings).toContain(
-        'Empty tools array - subagent will inherit all available tools',
+      expectWarning(
+        validator.validateTools([]),
+        'Empty tools array - subagent will inherit all available tools (any disallowedTools still apply)',
       );
     });
 
     it('should warn about duplicate tools', () => {
-      const result = validator.validateTools([
-        'read_file',
-        'read_file',
-        'write_file',
-      ]);
-      expect(result.isValid).toBe(true);
-      expect(result.warnings).toContain(
+      expectWarning(
+        validator.validateTools(['read_file', 'read_file', 'write_file']),
         'Duplicate tool names found in tools array',
       );
     });
 
     it('should reject non-string tool names', () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const result = validator.validateTools([123, 'read_file'] as any);
-      expect(result.isValid).toBe(false);
-      expect(result.errors).toContain(
+      expectError(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        validator.validateTools([123, 'read_file'] as any),
         'Tool name must be a string, got: number',
       );
     });
 
     it('should reject empty tool names', () => {
-      const result = validator.validateTools(['', 'read_file']);
-      expect(result.isValid).toBe(false);
-      expect(result.errors).toContain('Tool name cannot be empty');
+      expectError(
+        validator.validateTools(['', 'read_file']),
+        'Tool name cannot be empty',
+      );
     });
   });
 
@@ -249,16 +261,15 @@ describe('SubagentValidator', () => {
       ];
 
       for (const model of validModels) {
-        const result = validator.validateModel(model);
-        expect(result.isValid).toBe(true);
-        expect(result.errors).toHaveLength(0);
+        expectValid(validator.validateModel(model));
       }
     });
 
     it('should reject empty model selectors', () => {
-      const result = validator.validateModel('');
-      expect(result.isValid).toBe(false);
-      expect(result.errors).toContain('Model must be a non-empty string');
+      expectError(
+        validator.validateModel(''),
+        'Model must be a non-empty string',
+      );
     });
 
     it('should accept model IDs containing colons with unknown prefix', () => {
@@ -272,17 +283,15 @@ describe('SubagentValidator', () => {
     });
 
     it('should reject missing model IDs after valid authType prefixes', () => {
-      const result = validator.validateModel('openai:');
-      expect(result.isValid).toBe(false);
-      expect(result.errors).toContain(
+      expectError(
+        validator.validateModel('openai:'),
         'Model selector must include a model ID after the authType',
       );
     });
 
     it('should warn when inherit is explicit', () => {
-      const result = validator.validateModel('inherit');
-      expect(result.isValid).toBe(true);
-      expect(result.warnings).toContain(
+      expectWarning(
+        validator.validateModel('inherit'),
         'Explicit "inherit" is optional because omitting the model uses the main conversation model',
       );
     });
@@ -298,16 +307,12 @@ describe('SubagentValidator', () => {
       ];
 
       for (const config of validConfigs) {
-        const result = validator.validateRunConfig(config);
-        expect(result.isValid).toBe(true);
-        expect(result.errors).toHaveLength(0);
+        expectValid(validator.validateRunConfig(config));
       }
     });
 
     it('should reject invalid max_time_minutes', () => {
-      const invalidTimes = [0, -1, 'not-a-number'];
-
-      for (const time of invalidTimes) {
+      for (const time of [0, -1, 'not-a-number']) {
         const result = validator.validateRunConfig({
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           max_time_minutes: time as any,
@@ -317,17 +322,14 @@ describe('SubagentValidator', () => {
     });
 
     it('should warn about very long execution times', () => {
-      const result = validator.validateRunConfig({ max_time_minutes: 120 });
-      expect(result.isValid).toBe(true);
-      expect(result.warnings).toContain(
+      expectWarning(
+        validator.validateRunConfig({ max_time_minutes: 120 }),
         'Very long execution time (>60 minutes) may cause resource issues',
       );
     });
 
     it('should reject invalid max_turns', () => {
-      const invalidTurns = [0, -1, 1.5, 'not-a-number'];
-
-      for (const turns of invalidTurns) {
+      for (const turns of [0, -1, 1.5, 'not-a-number']) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const result = validator.validateRunConfig({ max_turns: turns as any });
         expect(result.isValid).toBe(false);
@@ -335,57 +337,46 @@ describe('SubagentValidator', () => {
     });
 
     it('should warn about high turn limits', () => {
-      const result = validator.validateRunConfig({ max_turns: 150 });
-      expect(result.isValid).toBe(true);
-      expect(result.warnings).toContain(
+      expectWarning(
+        validator.validateRunConfig({ max_turns: 150 }),
         'Very high turn limit (>100) may cause long execution times',
       );
     });
   });
 
   describe('validateConfig', () => {
-    const validConfig: SubagentConfig = {
-      name: 'test-agent',
-      description: 'A test subagent',
-      systemPrompt: 'You are a helpful assistant.',
-      level: 'project',
-      filePath: '/path/to/test-agent.md',
-    };
-
     it('should accept valid configurations', () => {
-      const result = validator.validateConfig(validConfig);
-      expect(result.isValid).toBe(true);
-      expect(result.errors).toHaveLength(0);
+      expectValid(validator.validateConfig(validConfig));
     });
 
     it('should accept valid disallowedTools', () => {
-      const result = validator.validateConfig({
-        ...validConfig,
-        disallowedTools: ['write_file', 'mcp__slack'],
-      });
-      expect(result.isValid).toBe(true);
-      expect(result.errors).toHaveLength(0);
+      expectValid(
+        validator.validateConfig({
+          ...validConfig,
+          disallowedTools: ['write_file', 'mcp__slack'],
+        }),
+      );
     });
 
     it('should reject non-string entries in disallowedTools', () => {
-      const result = validator.validateConfig({
-        ...validConfig,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        disallowedTools: [123, 'write_file'] as any,
-      });
-      expect(result.isValid).toBe(false);
-      expect(result.errors).toContain(
+      expectError(
+        validator.validateConfig({
+          ...validConfig,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          disallowedTools: [123, 'write_file'] as any,
+        }),
         'Tool name must be a string, got: number',
       );
     });
 
     it('should reject empty strings in disallowedTools', () => {
-      const result = validator.validateConfig({
-        ...validConfig,
-        disallowedTools: ['', 'write_file'],
-      });
-      expect(result.isValid).toBe(false);
-      expect(result.errors).toContain('Tool name cannot be empty');
+      expectError(
+        validator.validateConfig({
+          ...validConfig,
+          disallowedTools: ['', 'write_file'],
+        }),
+        'Tool name cannot be empty',
+      );
     });
 
     it('should collect errors from all validation steps', () => {
@@ -416,12 +407,9 @@ describe('SubagentValidator', () => {
   });
 
   describe('validateOrThrow', () => {
-    const validConfig: SubagentConfig = {
-      name: 'test-agent',
-      description: 'A test subagent',
-      systemPrompt: 'You are a helpful assistant.',
-      level: 'project',
-      filePath: '/path/to/test-agent.md',
+    const invalidConfig: SubagentConfig = {
+      ...validConfig,
+      name: '',
     };
 
     it('should not throw for valid configurations', () => {
@@ -429,11 +417,6 @@ describe('SubagentValidator', () => {
     });
 
     it('should throw SubagentError for invalid configurations', () => {
-      const invalidConfig: SubagentConfig = {
-        ...validConfig,
-        name: '',
-      };
-
       expect(() => validator.validateOrThrow(invalidConfig)).toThrow(
         SubagentError,
       );
@@ -443,11 +426,6 @@ describe('SubagentValidator', () => {
     });
 
     it('should include subagent name in error', () => {
-      const invalidConfig: SubagentConfig = {
-        ...validConfig,
-        name: '',
-      };
-
       try {
         validator.validateOrThrow(invalidConfig, 'custom-name');
         expect.fail('Should have thrown');

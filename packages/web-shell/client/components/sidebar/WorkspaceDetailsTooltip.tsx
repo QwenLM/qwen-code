@@ -1,3 +1,4 @@
+import type { DaemonWorkspaceGitStatus } from '@qwen-code/sdk/daemon';
 import {
   useEffect,
   useRef,
@@ -8,6 +9,7 @@ import {
 import {
   BlocksIcon,
   CheckIcon,
+  ChevronRightIcon,
   FileTextIcon,
   FolderClosedIcon,
   FolderOpenIcon,
@@ -16,10 +18,18 @@ import {
   PlugIcon,
   RadioTowerIcon,
   SparklesIcon,
-  TerminalIcon,
+  SquareTerminalIcon,
   WebhookIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import { BranchPickerPopover } from '../BranchPickerPopover';
+import {
+  deriveStatus,
+  gitBranchAriaLabel,
+  gitBranchBadgeTone,
+  gitStatusPhrases,
+  hasComputedTreeSummary,
+} from '../GitBranchIndicator';
 import { Popover, PopoverAnchor, PopoverContent } from '../ui/popover';
 import {
   formatOverviewValue,
@@ -50,6 +60,7 @@ interface WorkspaceDetailsTooltipProps {
   /** Real filesystem path; undefined for a synthetic fallback workspace. */
   cwd?: string;
   branch?: string | null;
+  gitStatus?: DaemonWorkspaceGitStatus;
   /** Session counts lifted out of the header into this popover. */
   sessions?: WorkspaceSessionStats;
   overview: WorkspaceOverviewSnapshot | undefined;
@@ -66,6 +77,20 @@ interface WorkspaceDetailsTooltipProps {
    * on the same machine; rejects when the host could not open it.
    */
   onOpenTerminalLocally?: () => Promise<void>;
+  /**
+   * Interactive Git for this workspace's branch row. Wired only for trusted
+   * workspaces with a real cwd and a known branch; a row without it keeps the
+   * plain-text summary the demand-loading pass left behind.
+   */
+  gitActions?: {
+    workspaceCwd: string;
+    onOpenDiff: () => void;
+    onOpenCommit?: () => void;
+    onStatusRefreshed: (status: DaemonWorkspaceGitStatus) => void;
+    /** A checkout creates no SSE event, so the row must re-read the branch. */
+    onBranchChanged: () => void;
+  };
+  onOpenChange?: (open: boolean) => void;
   children: ReactElement;
 }
 
@@ -142,19 +167,34 @@ export function WorkspaceDetailsTooltip({
   label,
   cwd,
   branch,
+  gitStatus,
   sessions,
   overview,
   items,
   onOpenPathLocally,
   onOpenTerminalLocally,
+  gitActions,
+  onOpenChange,
   children,
 }: WorkspaceDetailsTooltipProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const openTimerRef = useRef<number | undefined>(undefined);
   const closeTimerRef = useRef<number | undefined>(undefined);
   const anchorRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
+  // The picker's state is mirrored in a ref because Radix focuses the picker
+  // as it opens: the focus/blur handlers that follow must already see it as
+  // open, or they close the details out from under the picker.
+  const pickerOpenRef = useRef(false);
+  // Hover is read from the row button, not from this popover's content. The
+  // picker's content is portaled out of the DOM but stays a *React* child of
+  // this content, and React computes enter/leave over the React tree — so a
+  // pointer crossing onto the picker fires no leave here, while a crossing
+  // from anywhere into the picker fires an enter. The row button and the
+  // picker content are siblings in that tree, so its own leave does fire.
+  const rowHoverRef = useRef(false);
   const collisionBoundary = open
     ? resolveSessionDetailsCollisionBoundary(
         anchorRef.current?.closest<HTMLElement>('aside') ?? null,
@@ -168,6 +208,39 @@ export function WorkspaceDetailsTooltip({
     };
   }, []);
 
+  useEffect(() => {
+    onOpenChange?.(open);
+    return () => onOpenChange?.(false);
+  }, [open, onOpenChange]);
+
+  const gitSummary =
+    gitStatusPhrases(deriveStatus(gitStatus), t).join(' · ') ||
+    (hasComputedTreeSummary(gitStatus) ? t('git.clean') : '');
+  // The compact chip's badge dot, lifted beside the branch name: the same
+  // blue/amber/red severity read at a glance, without the icon overlay.
+  const gitDotTone = gitBranchBadgeTone(deriveStatus(gitStatus));
+  const branchRowContent = (
+    <>
+      <GitBranchIcon aria-hidden="true" />
+      <span className={sidebarStyles.sessionDetailsBranch}>
+        <span title={branch ?? undefined}>{branch}</span>
+        {gitDotTone && (
+          <span
+            className={sidebarStyles.sessionDetailsGitDot}
+            data-tone={gitDotTone}
+            aria-hidden="true"
+          />
+        )}
+      </span>
+      <span
+        className={sidebarStyles.sessionDetailsRowValue}
+        title={gitSummary || undefined}
+      >
+        {gitSummary}
+      </span>
+    </>
+  );
+
   const cancelClose = () => window.clearTimeout(closeTimerRef.current);
   const openAfterDelay = () => {
     cancelClose();
@@ -178,13 +251,56 @@ export function WorkspaceDetailsTooltip({
   const close = () => {
     window.clearTimeout(openTimerRef.current);
     cancelClose();
+    // This popover is anchored, not triggered, so Radix has no triggerRef to
+    // restore to and suppresses its own fallback restore. Anything focused
+    // inside either layer — the row, or the picker's own field — is about to
+    // unmount with the content, so hand focus to the folder row rather than
+    // let it fall to <body>. Focus anywhere else (a pointer user's composer)
+    // is left alone.
+    const active = document.activeElement;
+    const focusInsideLayers =
+      active instanceof HTMLElement &&
+      (contentRef.current?.contains(active) === true ||
+        active.closest('[data-slot="popover-content"]') !== null);
+    pickerOpenRef.current = false;
+    rowHoverRef.current = false;
+    setPickerOpen(false);
     setOpen(false);
+    if (focusInsideLayers) {
+      anchorRef.current?.querySelector<HTMLElement>('button')?.focus();
+    }
   };
   const closeAfterDelay = () => {
     window.clearTimeout(openTimerRef.current);
     cancelClose();
+    // Pinned: the branch picker is a separate layer the pointer reaches by
+    // crossing out of this popover, so leaving must not tear it down.
+    if (pickerOpenRef.current) return;
     closeTimerRef.current = window.setTimeout(close, 100);
   };
+  // Closing the picker collapses the details, with one exception: the pointer
+  // is still on the row that opened it. The collapse is not deferred — Radix
+  // returns focus to the row as the picker unmounts, and that focus event
+  // cancels a pending close, stranding the details after View Changes, Commit
+  // or a checkout.
+  const handlePickerOpenChange = (nextOpen: boolean) => {
+    pickerOpenRef.current = nextOpen;
+    setPickerOpen(nextOpen);
+    if (nextOpen) cancelClose();
+    else if (!rowHoverRef.current) close();
+  };
+  // The picker unmounts with `branch` or `gitActions` going away, which Radix
+  // reports to no one: a controlled `open` has no unmount callback. The row
+  // can go the same way, and neither reports the leave it owed. Without this,
+  // a stale `pickerOpenRef` pins the details open for good and a stale
+  // `rowHoverRef` swallows the next collapse.
+  const pickerAvailable = Boolean(branch && gitActions);
+  useEffect(() => {
+    if (pickerAvailable) return;
+    pickerOpenRef.current = false;
+    rowHoverRef.current = false;
+    setPickerOpen(false);
+  }, [pickerAvailable]);
   // The content is portaled, so "focus stayed inside" spans two trees: the
   // anchor (header row) and the popover content.
   const containsFocusTarget = (node: EventTarget | null): boolean =>
@@ -257,7 +373,16 @@ export function WorkspaceDetailsTooltip({
         role="dialog"
         aria-label={label}
         onOpenAutoFocus={(event) => event.preventDefault()}
-        onPointerEnter={cancelClose}
+        // Belt-and-braces for the nested picker. Radix already keeps a press
+        // inside a React descendant off this layer's own outside path, so this
+        // covers a dismissal arriving by some other route (a focus move) while
+        // the picker is open.
+        onInteractOutside={(event) => {
+          if (pickerOpenRef.current) event.preventDefault();
+        }}
+        onPointerEnter={() => {
+          cancelClose();
+        }}
         onPointerLeave={() => {
           // Keyboard parity: while focus lives inside the content the
           // pointer leaving is not a dismiss signal.
@@ -303,7 +428,7 @@ export function WorkspaceDetailsTooltip({
                   <OpenLocallyButton
                     label={t('sidebar.openWorkspaceTerminal')}
                     announcement={t('sidebar.openWorkspaceTerminalOpened')}
-                    icon={TerminalIcon}
+                    icon={SquareTerminalIcon}
                     onOpen={onOpenTerminalLocally}
                     testId="terminal"
                   />
@@ -312,12 +437,47 @@ export function WorkspaceDetailsTooltip({
             )}
           </div>
         )}
-        {branch && (
-          <div className={sidebarStyles.sessionDetailsRow}>
-            <GitBranchIcon aria-hidden="true" />
-            <span title={branch}>{branch}</span>
-          </div>
-        )}
+        {branch &&
+          (gitActions ? (
+            // Nested layer: both contents carry the same popover z-index, and
+            // the picker's portal mounts after this popover's, so it paints on
+            // top by document order alone. Portal something between the two
+            // and that order no longer holds.
+            <BranchPickerPopover
+              open={pickerOpen}
+              onOpenChange={handlePickerOpenChange}
+              workspaceCwd={gitActions.workspaceCwd}
+              side="right"
+              status={gitStatus}
+              onBranchChanged={gitActions.onBranchChanged}
+              onStatusRefreshed={gitActions.onStatusRefreshed}
+              onOpenDiff={gitActions.onOpenDiff}
+              onOpenCommit={gitActions.onOpenCommit}
+            >
+              <button
+                type="button"
+                className={cx(
+                  sidebarStyles.sessionDetailsRow,
+                  sidebarStyles.sessionDetailsRowButton,
+                )}
+                aria-label={gitBranchAriaLabel(branch, gitStatus, t)}
+                data-web-shell-workspace-git
+                onPointerEnter={() => {
+                  rowHoverRef.current = true;
+                }}
+                onPointerLeave={() => {
+                  rowHoverRef.current = false;
+                }}
+              >
+                {branchRowContent}
+                <ChevronRightIcon aria-hidden="true" />
+              </button>
+            </BranchPickerPopover>
+          ) : (
+            <div className={sidebarStyles.sessionDetailsRow}>
+              {branchRowContent}
+            </div>
+          ))}
         {sessions && sessions.total > 0 && (
           <div
             className={sidebarStyles.sessionDetailsRow}

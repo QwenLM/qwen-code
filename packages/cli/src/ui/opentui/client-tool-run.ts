@@ -23,11 +23,7 @@ import {
   type ToolCallConfirmationDetails,
   type ToolCallRequestInfo,
 } from '@qwen-code/qwen-code-core';
-import {
-  extractFileDiff,
-  renderResultDisplay,
-  type OpenTuiStreamEvent,
-} from './event-adapter.js';
+import { toolResultEvent, type OpenTuiStreamEvent } from './event-adapter.js';
 
 interface LooseCompletedCall {
   request: { callId: string; name?: string; args?: unknown };
@@ -109,17 +105,11 @@ export async function* clientToolEvents(
   });
 
   for (const call of completed) {
-    // FileDiff results ride as structured payloads so the tool card renders
-    // colored diff lines (ink DiffResultRenderer parity).
-    const diff = extractFileDiff(call.response?.resultDisplay);
-    if (diff) {
-      yield { type: 'tool-result', id: call.request.callId, display: '', diff };
-    } else {
-      const display = renderResultDisplay(call.response?.resultDisplay);
-      if (display) {
-        yield { type: 'tool-result', id: call.request.callId, display };
-      }
-    }
+    const result = toolResultEvent(
+      call.request.callId,
+      call.response?.resultDisplay,
+    );
+    if (result) yield result;
     const failed = call.status === 'error' || call.status === 'cancelled';
     yield {
       type: 'tool-end',
