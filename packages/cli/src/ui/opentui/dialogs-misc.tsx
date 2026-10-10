@@ -38,7 +38,7 @@ import {
 } from '../editors/editorSettingsManager.js';
 import { getScopeItems } from '../../config/dialogScopeUtils.js';
 import { t } from '../../i18n/index.js';
-import type { DialogListItem } from './dialogs-core.js';
+import { wrappedRows, type DialogListItem } from './dialogs-core.js';
 import {
   DialogFrame,
   DialogSelect,
@@ -47,6 +47,7 @@ import {
   useDialogSelect,
 } from './dialogs-shared.js';
 import { truncateToWidth } from '../utils/textUtils.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { C } from './theme.js';
 import { useGitBranchName } from '../hooks/useGitBranchName.js';
 import { useDeleteCommand } from '../hooks/useDeleteCommand.js';
@@ -69,14 +70,31 @@ export function Shell({
   title,
   children,
   borderStyle = 'rounded',
+  shrinkable = false,
 }: {
   title: string;
   onClose?: () => void;
   children?: ReactNode;
   /** ink's AuthDialog frames itself with `borderStyle="single"`; the rest round. */
   borderStyle?: 'rounded' | 'single';
+  /**
+   * Static bodies (auth, trust, the placeholder pickers) set this: with no
+   * windowed list to protect, a short region sheds their blank rows the way
+   * ink's dialogs shed them, instead of clipping the border and footer off a
+   * body that would fit one row later.
+   */
+  shrinkable?: boolean;
 }) {
   return (
+    // The rule measured for the list-carrying dialog frames in the fixed
+    // region: stay unshrinkable. A shrinkable frame lets a short region take
+    // the deficit out of the body's only unsized child, dropping text rows
+    // from the middle of a list while the keys keep committing them; an
+    // unshrinkable frame keeps its rows contiguous and lets the region's clip
+    // cut the tail, the way ink clips /stats. The clip cuts child text but
+    // not the frame's own border strokes, so a body with an explicit height
+    // (/diff's and /subagents' scrollboxes) must window that height from the
+    // region budget rather than rely on the clip alone.
     <box
       flexDirection="column"
       borderStyle={borderStyle}
@@ -85,8 +103,7 @@ export function Shell({
       paddingRight={1}
       paddingTop={1}
       paddingBottom={1}
-      marginTop={1}
-      flexShrink={0}
+      flexShrink={shrinkable ? 1 : 0}
     >
       <text fg={C.text} attributes={1}>
         {title}
@@ -95,6 +112,19 @@ export function Shell({
     </box>
   );
 }
+
+/** The Shell frame's rows above a sized body: border and padding (4), the
+ * title measured at the shell's content width — a long localized title wraps
+ * to rows a flat count never pays, and the unshrinkable frame grows past the
+ * region by the difference — and the body's marginTop (1). */
+export function shellBodyChromeRows(
+  title: string,
+  contentWidth: number,
+): number {
+  return 5 + wrappedRows(title, contentWidth);
+}
+const DIFF_BODY_ROWS = 14;
+const SUBAGENTS_BODY_ROWS = 12;
 
 const Row = ({ label, value }: { label: string; value: string }) => (
   <box flexDirection="row">
@@ -111,6 +141,8 @@ type P = {
   config?: Config;
   settings: LoadedSettings;
   onClose: () => void;
+  /** The popup region's row budget, for bodies that window themselves. */
+  availableTerminalHeight?: number;
   /** Delete/Resume report their outcome as a command-style message. */
   notify?: (text: string, level?: 'info' | 'error') => void;
   /** Resume: sessions pre-filtered by the command (multiple title matches). */
@@ -348,7 +380,7 @@ export function OpenTuiTrustDialog({ config, onClose }: P) {
   useEsc(onClose);
   const trusted = config?.isTrustedFolder?.() ?? false;
   return (
-    <Shell title="Trust" onClose={onClose}>
+    <Shell title="Trust" onClose={onClose} shrinkable>
       <box flexDirection="column" marginTop={1}>
         <Row label="Folder trusted:" value={trusted ? 'yes' : 'no'} />
         <text fg={C.dim}>
@@ -365,7 +397,12 @@ export function OpenTuiTrustDialog({ config, onClose }: P) {
  * every outcome message are shared rather than re-worded. The live session is
  * disabled in place instead of filtered out, matching ink.
  */
-export function OpenTuiDeleteDialog({ config, onClose, notify }: P) {
+export function OpenTuiDeleteDialog({
+  config,
+  onClose,
+  notify,
+  availableTerminalHeight,
+}: P) {
   const currentBranch = useGitBranchName(config?.getTargetDir() ?? '');
   const currentSessionId = config?.getSessionId() ?? '';
   const { handleDelete, handleDeleteMany } = useDeleteCommand({
@@ -386,6 +423,7 @@ export function OpenTuiDeleteDialog({ config, onClose, notify }: P) {
       sessionService={config?.getSessionService() ?? null}
       currentBranch={currentBranch}
       title={t('Delete Session')}
+      availableTerminalHeight={availableTerminalHeight}
       onSelect={(sessionId) => {
         onClose();
         handleDelete(sessionId);
@@ -411,6 +449,7 @@ export function OpenTuiResumeDialog({
   onClose,
   matchedSessions,
   onSelect,
+  availableTerminalHeight,
 }: P) {
   const currentBranch = useGitBranchName(config?.getTargetDir() ?? '');
   return (
@@ -418,6 +457,7 @@ export function OpenTuiResumeDialog({
       sessionService={config?.getSessionService() ?? null}
       currentBranch={currentBranch}
       initialSessions={matchedSessions}
+      availableTerminalHeight={availableTerminalHeight}
       enablePreview
       onSelect={(sessionId) => {
         onClose();
@@ -431,7 +471,7 @@ export function OpenTuiResumeDialog({
 export function OpenTuiBranchDialog({ onClose }: P) {
   useEsc(onClose);
   return (
-    <Shell title="Branch" onClose={onClose}>
+    <Shell title="Branch" onClose={onClose} shrinkable>
       <box flexDirection="column" marginTop={1}>
         <text fg={C.dim}>
           {'Creates a fork of the current session to explore a new path.'}
@@ -462,7 +502,7 @@ export function readHooksEnabled(
 export function OpenTuiRewindDialog({ onClose }: P) {
   useEsc(onClose);
   return (
-    <Shell title="Rewind" onClose={onClose}>
+    <Shell title="Rewind" onClose={onClose} shrinkable>
       <box flexDirection="column" marginTop={1}>
         <text fg={C.dim}>
           {'Checkpoints let you rewind the conversation to an earlier turn.'}
@@ -472,9 +512,30 @@ export function OpenTuiRewindDialog({ onClose }: P) {
   );
 }
 
-export function OpenTuiDiffDialog({ config, onClose }: P) {
+export function OpenTuiDiffDialog({
+  config,
+  onClose,
+  availableTerminalHeight,
+}: P) {
   useEsc(onClose);
   const sandboxed = Boolean(config?.getShellExecutionSandbox?.());
+  // The Shell frame's chrome (border and padding 4, title 1, the scrollbox's
+  // margin 1) leaves the body region - 6 rows: the unshrinkable frame's
+  // natural height then never exceeds the region, so the bottom border stays
+  // inside it instead of painting past it.
+  const regionHeight = clampDialogHeight(availableTerminalHeight);
+  const { width } = useTerminalDimensions();
+  const bodyRows =
+    regionHeight === undefined
+      ? DIFF_BODY_ROWS
+      : Math.max(
+          1,
+          Math.min(
+            DIFF_BODY_ROWS,
+            regionHeight -
+              shellBodyChromeRows('Diff', dialogContentWidth(width)),
+          ),
+        );
   const [lines, setLines] = useState<string[]>([]);
   useEffect(() => {
     if (sandboxed) return;
@@ -517,7 +578,7 @@ export function OpenTuiDiffDialog({ config, onClose }: P) {
   }
   return (
     <Shell title="Diff" onClose={onClose}>
-      <scrollbox height={14} marginTop={1} stickyScroll={false}>
+      <scrollbox height={bodyRows} marginTop={1} stickyScroll={false}>
         {lines.length === 0 ? (
           <text fg={C.dim}>{'no working-tree changes'}</text>
         ) : (
@@ -540,7 +601,7 @@ export function OpenTuiDiffDialog({ config, onClose }: P) {
 export function OpenTuiSubagentCreateDialog({ onClose }: P) {
   useEsc(onClose);
   return (
-    <Shell title="Subagent Create" onClose={onClose}>
+    <Shell title="Subagent Create" onClose={onClose} shrinkable>
       <box flexDirection="column" marginTop={1}>
         <text fg={C.dim}>{'Define a new subagent (name, tools, prompt).'}</text>
       </box>
@@ -548,8 +609,25 @@ export function OpenTuiSubagentCreateDialog({ onClose }: P) {
   );
 }
 
-export function OpenTuiSubagentListDialog({ config, onClose }: P) {
+export function OpenTuiSubagentListDialog({
+  config,
+  onClose,
+  availableTerminalHeight,
+}: P) {
   useEsc(onClose);
+  const regionHeight = clampDialogHeight(availableTerminalHeight);
+  const { width } = useTerminalDimensions();
+  const bodyRows =
+    regionHeight === undefined
+      ? SUBAGENTS_BODY_ROWS
+      : Math.max(
+          1,
+          Math.min(
+            SUBAGENTS_BODY_ROWS,
+            regionHeight -
+              shellBodyChromeRows('Subagents', dialogContentWidth(width)),
+          ),
+        );
   const [rows, setRows] = useState<Array<{ name: string; desc: string }>>([]);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
@@ -586,7 +664,7 @@ export function OpenTuiSubagentListDialog({ config, onClose }: P) {
   }, [config]);
   return (
     <Shell title="Subagents" onClose={onClose}>
-      <scrollbox height={12} marginTop={1} stickyScroll={false}>
+      <scrollbox height={bodyRows} marginTop={1} stickyScroll={false}>
         {loading ? (
           <text fg={C.dim}>{'loading subagents…'}</text>
         ) : rows.length === 0 ? (

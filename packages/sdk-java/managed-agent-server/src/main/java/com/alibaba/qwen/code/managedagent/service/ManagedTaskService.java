@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTaskEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTask;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEvent;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskPage;
@@ -25,15 +26,13 @@ import org.springframework.stereotype.Service;
 /**
  * The task list, detail and events of a Session (SessionTaskView), read
  * from the Stage H records its Session store holds and the per-task event
- * journal the same commits write. Cancel arrives with the slice whose tasks
- * accept one.
+ * journal the same commits write. A task advertises {@code cancel} while
+ * {@link ManagedTaskCancelService} would admit one for it (H4f).
  */
 @Service
 public class ManagedTaskService {
     private static final Pattern CURSOR = Pattern.compile(
             "^(0|[1-9][0-9]{0,18}):(task_[0-9a-f]{64})$");
-    // No H0c task advertises an action: cancel stays planned.
-    private static final List<String> NO_ACTIONS = List.of();
     private final ManagedAgentService sessions;
     private final ManagedExtensionRecordStore records;
     private final ManagedTaskEventStore events;
@@ -48,30 +47,38 @@ public class ManagedTaskService {
 
     public PublicList<PublicTask> listPublicTasks(String tenantId,
             String actorId, String sessionId, String cursor, int limit) {
-        TaskPage page = page(tenantId, actorId, sessionId, cursor, limit);
+        Viewed<TaskPage> viewed = page(tenantId, actorId, sessionId, cursor,
+                limit);
+        TaskPage page = viewed.value();
         return new PublicList<>("list", page.tasks().stream()
-                .map(task -> publicTask(tenantId, sessionId, task)).toList(),
+                .map(task -> publicTask(tenantId, sessionId, task,
+                        viewed.sessionActive())).toList(),
                 page.hasMore(), nextCursor(page));
     }
 
     public PublicTask getPublicTask(String tenantId, String actorId,
             String sessionId, String taskId) {
-        return publicTask(tenantId, sessionId, task(tenantId, actorId,
-                sessionId, taskId));
+        Viewed<TaskRow> viewed = task(tenantId, actorId, sessionId, taskId);
+        return publicTask(tenantId, sessionId, viewed.value(),
+                viewed.sessionActive());
     }
 
     public WebShellPage<WebShellTask> queryWebShellTasks(String tenantId,
             String actorId, String sessionId, String cursor, int limit) {
-        TaskPage page = page(tenantId, actorId, sessionId, cursor, limit);
+        Viewed<TaskPage> viewed = page(tenantId, actorId, sessionId, cursor,
+                limit);
+        TaskPage page = viewed.value();
         return new WebShellPage<>(page.tasks().stream()
-                .map(task -> webShellTask(tenantId, sessionId, task))
+                .map(task -> webShellTask(tenantId, sessionId, task,
+                        viewed.sessionActive()))
                 .toList(), nextCursor(page), page.hasMore());
     }
 
     public WebShellTask getWebShellTask(String tenantId, String actorId,
             String sessionId, String taskId) {
-        return webShellTask(tenantId, sessionId, task(tenantId, actorId,
-                sessionId, taskId));
+        Viewed<TaskRow> viewed = task(tenantId, actorId, sessionId, taskId);
+        return webShellTask(tenantId, sessionId, viewed.value(),
+                viewed.sessionActive());
     }
 
     public PublicList<PublicTaskEvent> listPublicTaskEvents(String tenantId,
@@ -94,9 +101,21 @@ public class ManagedTaskService {
                 .toList(), page.nextCursor(), page.page().hasMore());
     }
 
-    private TaskPage page(String tenantId, String actorId, String sessionId,
-            String cursor, int limit) {
-        sessions.requireReadableSession(tenantId, actorId, sessionId);
+    /** A read result with whether its Session is active: a task's
+     * {@code cancel} is an action only an active Session admits. */
+    private record Viewed<T>(T value, boolean sessionActive) {
+    }
+
+    private Viewed<TaskPage> page(String tenantId, String actorId,
+            String sessionId, String cursor, int limit) {
+        boolean active = "ACTIVE".equals(sessions.requireReadableSession(
+                tenantId, actorId, sessionId).status());
+        return new Viewed<>(pageOf(tenantId, sessionId, cursor, limit),
+                active);
+    }
+
+    private TaskPage pageOf(String tenantId, String sessionId, String cursor,
+            int limit) {
         if (limit < 1 || limit > 100) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_limit",
                     "Limit must be between 1 and 100.");
@@ -125,12 +144,14 @@ public class ManagedTaskService {
         }
     }
 
-    private TaskRow task(String tenantId, String actorId, String sessionId,
-            String taskId) {
-        sessions.requireReadableSession(tenantId, actorId, sessionId);
-        return records.findTask(tenantId, sessionId, taskId).orElseThrow(() ->
-                new ApiException(HttpStatus.NOT_FOUND, "task_not_found",
-                        "The task was not found."));
+    private Viewed<TaskRow> task(String tenantId, String actorId,
+            String sessionId, String taskId) {
+        boolean active = "ACTIVE".equals(sessions.requireReadableSession(
+                tenantId, actorId, sessionId).status());
+        return new Viewed<>(records.findTask(tenantId, sessionId, taskId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND,
+                        "task_not_found", "The task was not found.")),
+                active);
     }
 
     /** A read page plus its required, never null next cursor. */
@@ -197,7 +218,7 @@ public class ManagedTaskService {
     }
 
     private PublicTask publicTask(String tenantId, String sessionId,
-            TaskRow task) {
+            TaskRow task, boolean sessionActive) {
         TaskProjection view = task.projection();
         CursorPositions positions = events.positions(tenantId, sessionId,
                 task.taskId());
@@ -205,11 +226,12 @@ public class ManagedTaskService {
                 task.kind(), view.state(), view.definitionRevision(),
                 view.runtimeState(), view.createdAt(), view.startedAt(),
                 view.settledAt(), outputCursor(task.taskId(), positions),
-                positions.artifactRefs(), NO_ACTIONS);
+                positions.artifactRefs(),
+                actions(task, view, sessionActive));
     }
 
     private WebShellTask webShellTask(String tenantId, String sessionId,
-            TaskRow task) {
+            TaskRow task, boolean sessionActive) {
         TaskProjection view = task.projection();
         CursorPositions positions = events.positions(tenantId, sessionId,
                 task.taskId());
@@ -217,7 +239,17 @@ public class ManagedTaskService {
                 view.state(), view.definitionRevision(), view.runtimeState(),
                 view.createdAt(), view.startedAt(), view.settledAt(),
                 outputCursor(task.taskId(), positions),
-                positions.artifactRefs(), NO_ACTIONS);
+                positions.artifactRefs(),
+                actions(task, view, sessionActive));
+    }
+
+    /** The task's own actions, and none in a Session that is not active:
+     * the cancel route would refuse a new request there. Contention with
+     * another open operation is transient and stays the route's answer. */
+    private static List<String> actions(TaskRow task, TaskProjection view,
+            boolean sessionActive) {
+        return sessionActive ? ManagedExtensionProjection.taskActions(
+                task.kind(), view.state()) : List.of();
     }
 
     /** The committed tail at the view read; absent until the first event. */

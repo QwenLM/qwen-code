@@ -3746,6 +3746,33 @@ describe('SessionService', () => {
       );
     });
 
+    it('remaps lifecycle ownership into the fork without changing execution identity', async () => {
+      seedSession([
+        sys('lifecycle-1', 'u2', 'ui_telemetry', 2, {
+          uiEvent: {
+            'event.name': 'request_lifecycle',
+            v: 1,
+            kind: 'request',
+            executionId: 'execution-1',
+            sessionId: oldId,
+            promptId: `${oldId}#Explore#0`,
+            model: 'model',
+            startedAt: 10,
+            phase: 'started',
+          },
+        }),
+      ]);
+      const result = await fork();
+      const telemetry = readJsonl(result.filePath).find(
+        (record) => record.subtype === 'ui_telemetry',
+      );
+      expect(telemetry.systemPayload.uiEvent).toMatchObject({
+        sessionId: newId,
+        promptId: `${newId}#Explore#0`,
+        executionId: 'execution-1',
+      });
+    });
+
     it('remaps record and chat_compression promptIds into the fork', async () => {
       // Forked ids must remain visible to the new session's seed.
       const { file, lines } = seedSession();
