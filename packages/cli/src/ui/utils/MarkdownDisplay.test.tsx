@@ -5,14 +5,20 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, type ComponentProps } from 'react';
+import { Box, Text } from 'ink';
+import stringWidth from 'string-width';
 import stripAnsi from 'strip-ansi';
 import { MarkdownDisplay } from './MarkdownDisplay.js';
 import { LoadedSettings } from '../../config/settings.js';
-import { renderWithProviders } from '../../test-utils/render.js';
+import { renderWithProviders, withProviders } from '../../test-utils/render.js';
 import { renderMermaidVisual } from './mermaidVisualRenderer.js';
 import { RenderModeProvider } from '../contexts/RenderModeContext.js';
 import { getScreenBuffer } from '../selection/screen-buffer.js';
 import { getSelectedText } from '../selection/selection-text.js';
+import { fitPendingSlice } from './pending-rendered-height.js';
+import * as codeColorizer from './CodeColorizer.js';
+import * as latexRenderer from './latexRenderer.js';
 
 function copiedFrame(stdout: NodeJS.WriteStream): string {
   const frame = getScreenBuffer(stdout)!.frame!;
@@ -35,6 +41,85 @@ describe('<MarkdownDisplay />', () => {
     vi.clearAllMocks();
   });
 
+  it.each(['\n', '\r\n'])(
+    'renders independently committed math and JS continuations (%j)',
+    async (newline) => {
+      const math = ['$$', '````text', '```', '$$', ''].join(newline);
+      const rows = Array.from({ length: 60 }, (_, i) => `const v${i} = ${i};`);
+      const parts = [
+        math,
+        ...[0, 18, 36, 54].map(
+          (start) =>
+            (start === 0
+              ? `\`\`\`js${newline}`
+              : `\`\`\`js qwen-code:start-line=${start + 1}\n`) +
+            rows.slice(start, start + 18).join(newline) +
+            newline +
+            (start === 54 ? '```' : '```\n'),
+        ),
+      ];
+      const colorSpy = vi.spyOn(codeColorizer, 'colorizeCode');
+      const latexSpy = vi.spyOn(latexRenderer, 'renderInlineLatex');
+      const visibleRows: string[] = [];
+      try {
+        for (const [index, text] of parts.entries()) {
+          colorSpy.mockClear();
+          latexSpy.mockClear();
+          let view!: ReturnType<typeof renderWithProviders>;
+          act(() => {
+            view = renderWithProviders(
+              <RenderModeProvider
+                value={{ renderMode: 'render', setRenderMode: () => undefined }}
+              >
+                <MarkdownDisplay
+                  {...baseProps}
+                  availableTerminalHeight={24}
+                  text={text}
+                  isPending={index === 4}
+                />
+              </RenderModeProvider>,
+            );
+          });
+          try {
+            await vi.waitFor(() => expect(view.lastFrame() ?? '').not.toBe(''));
+            const frame = stripAnsi(view.lastFrame() ?? '');
+            if (index === 0) {
+              expect(colorSpy).not.toHaveBeenCalled();
+              expect(latexSpy).toHaveBeenCalledExactlyOnceWith('````text ```');
+              expect(frame).toContain('LaTeX block');
+              expect(frame).toContain('````text');
+            } else {
+              const start = (index - 1) * 18 + 1;
+              expect(latexSpy).not.toHaveBeenCalled();
+              expect(colorSpy).toHaveBeenCalledTimes(1);
+              expect(colorSpy.mock.calls[0][1]).toBe('js');
+              expect(colorSpy.mock.calls[0][4]?.startLineNumber).toBe(start);
+              expect(frame).not.toContain('LaTeX block');
+              expect(frame).not.toContain('$$');
+              expect(frame).not.toContain('qwen-code:start-line');
+              for (const match of frame.matchAll(
+                /\b(\d+)\s+const v(\d+) = (\d+);/g,
+              )) {
+                expect(Number(match[1])).toBe(Number(match[2]) + 1);
+                expect(match[2]).toBe(match[3]);
+                visibleRows.push(`const v${match[2]} = ${match[3]};`);
+              }
+            }
+          } finally {
+            act(() => {
+              view.unmount();
+              view.cleanup();
+            });
+          }
+        }
+        expect(visibleRows).toEqual(rows);
+      } finally {
+        colorSpy.mockRestore();
+        latexSpy.mockRestore();
+      }
+    },
+  );
+
   it('renders nothing for empty text', () => {
     const { lastFrame } = renderWithProviders(
       <MarkdownDisplay {...baseProps} text="" />,
@@ -48,6 +133,242 @@ describe('<MarkdownDisplay />', () => {
       <MarkdownDisplay {...baseProps} text={text} />,
     );
     expect(lastFrame()).toMatchSnapshot();
+  });
+
+  describe('bounded raw header preview', () => {
+    const table = (header: string, eol = '\n') =>
+      [`| ${header} | B |`, '| --- | --- |', '| tail | SENTINEL |'].join(eol);
+    const props = {
+      isPending: true,
+      contentWidth: 80,
+      availableTerminalHeight: 24,
+    };
+    const tree = (
+      options: ComponentProps<typeof MarkdownDisplay>,
+      mode: 'raw' | 'render' = 'raw',
+    ) => (
+      <RenderModeProvider
+        value={{ renderMode: mode, setRenderMode: () => undefined }}
+      >
+        <Box width={options.contentWidth} flexDirection="column">
+          <MarkdownDisplay {...options} />
+        </Box>
+      </RenderModeProvider>
+    );
+    const frameFor = (
+      options: ComponentProps<typeof MarkdownDisplay>,
+      mode: 'raw' | 'render' = 'raw',
+    ) => {
+      let view!: ReturnType<typeof renderWithProviders>;
+      act(() => {
+        view = renderWithProviders(tree(options, mode));
+      });
+      try {
+        return stripAnsi(view.lastFrame() ?? '');
+      } finally {
+        act(() => {
+          view.unmount();
+          view.cleanup();
+        });
+      }
+    };
+
+    it.each(
+      [20, 21, 40, 80].flatMap((width) =>
+        [
+          'x',
+          '界',
+          '😀',
+          '👩‍💻',
+          'e\u0301',
+          '\u001b[31mx\u001b[39m',
+          'word ',
+        ].map((token) => ({ width, token })),
+      ),
+    )(
+      'shows a bounded header at width $width for $token',
+      ({ width, token }) => {
+        const text = table(
+          token.repeat(Math.ceil((width * 23 + 1) / stringWidth(token))),
+        );
+        expect(
+          fitPendingSlice(text.split('\n'), width, 22, 21, {
+            visualTables: false,
+          }),
+        ).toEqual({ keptLines: 0, clipped: true });
+        const frame = frameFor({ ...props, text, contentWidth: width });
+        expect(frame.startsWith('| ')).toBe(true);
+        expect(frame.split('\n')).toHaveLength(22);
+        expect(frame).not.toContain('SENTINEL');
+      },
+    );
+
+    it.each([1, 2, 3, 4, 10, 24])(
+      'respects the height floor at viewport %i',
+      (height) => {
+        const budget = Math.max(1, height - 2);
+        const frame = frameFor({
+          ...props,
+          text: table('x'.repeat(2000)),
+          availableTerminalHeight: height,
+        });
+        expect(frame.startsWith('|')).toBe(true);
+        expect(frame.split('\n')).toHaveLength(budget);
+      },
+    );
+
+    it.each([-1, 0, 1])(
+      'handles the first-line wrap threshold at delta %i',
+      (delta) => {
+        const text = table('x'.repeat(80 * 22 - 8 + delta));
+        const frame = frameFor({ ...props, text });
+        expect(frame.startsWith('| ')).toBe(true);
+        expect(frame.split('\n')).toHaveLength(22);
+        const visible = frame.replace(/\s/g, '');
+        const header = text.split('\n')[0]!.replace(/\s/g, '');
+        expect(header.startsWith(visible)).toBe(true);
+        if (delta <= 0) expect(visible).toBe(header);
+      },
+    );
+
+    it.each(['\n', '\r\n'])(
+      'keeps final and unbounded source complete (%j)',
+      (eol) => {
+        const text = table('x'.repeat(2000), eol);
+        for (const options of [
+          { ...props, text, isPending: false },
+          { ...props, text, availableTerminalHeight: undefined },
+        ]) {
+          const frame = frameFor(options);
+          expect(frame.replace(/\s/g, '')).toBe(text.replace(/\s/g, ''));
+          expect(frame).toContain('SENTINEL');
+        }
+        const enforced = frameFor({
+          ...props,
+          text,
+          isPending: false,
+          enforceHeightBudget: true,
+        });
+        expect(enforced).toContain('3 more lines not shown');
+        expect(enforced).not.toContain('| ');
+      },
+    );
+
+    it('preserves ordinary tables and the unconfirmed/non-table holdback', () => {
+      const ordinary = table('A');
+      expect(frameFor({ ...props, text: ordinary })).toBe(ordinary);
+      const header = `| ${'x'.repeat(2000)} | B |`;
+      for (const text of [
+        'x'.repeat(2000),
+        header,
+        `${header}\n| --- | --- | --- |`,
+      ]) {
+        expect(frameFor({ ...props, text })).toBe('');
+      }
+    });
+
+    it('preserves raw inline styling and literal inline math in the header', () => {
+      const frame = frameFor({
+        ...props,
+        text: table(`**HEAD** $x^2$ ${'x'.repeat(2000)}`),
+      });
+      expect(frame).toContain('HEAD');
+      expect(frame).toContain('$x^2$');
+      expect(frame.split('\n')).toHaveLength(22);
+    });
+
+    it('fits the conversation prefix with the actual content width', () => {
+      let view!: ReturnType<typeof renderWithProviders>;
+      act(() => {
+        view = renderWithProviders(
+          <RenderModeProvider
+            value={{ renderMode: 'raw', setRenderMode: () => undefined }}
+          >
+            <Box width={80}>
+              <Box width={2} flexShrink={0}>
+                <Text>◆ </Text>
+              </Box>
+              <Box flexGrow={1} flexDirection="column">
+                <MarkdownDisplay
+                  {...props}
+                  text={table('界'.repeat(1000))}
+                  contentWidth={78}
+                />
+              </Box>
+            </Box>
+          </RenderModeProvider>,
+        );
+      });
+      try {
+        const frame = stripAnsi(view.lastFrame() ?? '');
+        expect(frame.startsWith('◆ | ')).toBe(true);
+        expect(frame.split('\n')).toHaveLength(22);
+      } finally {
+        act(() => {
+          view.unmount();
+          view.cleanup();
+        });
+      }
+    });
+
+    it.each(['raw', 'render'] as const)(
+      'updates modes, dimensions and final content from %s',
+      async (initial) => {
+        const text = table('x'.repeat(2000));
+        const expectedVisual = frameFor({ ...props, text }, 'render');
+        expect(expectedVisual).toContain('SENTINEL');
+        let view!: ReturnType<typeof renderWithProviders>;
+        act(() => {
+          view = renderWithProviders(tree({ ...props, text }, initial));
+        });
+        try {
+          for (const mode of ['raw', 'render', 'raw'] as const) {
+            act(() => {
+              view.rerender(withProviders(tree({ ...props, text }, mode)));
+            });
+            await vi.waitFor(() => {
+              const frame = stripAnsi(view.lastFrame() ?? '');
+              if (mode === 'raw') {
+                expect(frame.startsWith('|')).toBe(true);
+                expect(frame.split('\n')).toHaveLength(22);
+              } else expect(frame).toBe(expectedVisual);
+            });
+          }
+          act(() => {
+            view.rerender(
+              withProviders(
+                tree({
+                  ...props,
+                  text,
+                  contentWidth: 21,
+                  availableTerminalHeight: 6,
+                }),
+              ),
+            );
+          });
+          await vi.waitFor(() =>
+            expect(stripAnsi(view.lastFrame() ?? '').split('\n')).toHaveLength(
+              4,
+            ),
+          );
+          act(() => {
+            view.rerender(
+              withProviders(tree({ ...props, text, isPending: false })),
+            );
+          });
+          await vi.waitFor(() => {
+            expect(stripAnsi(view.lastFrame() ?? '').replace(/\s/g, '')).toBe(
+              text.replace(/\s/g, ''),
+            );
+          });
+        } finally {
+          act(() => {
+            view.unmount();
+            view.cleanup();
+          });
+        }
+      },
+    );
   });
 
   const lineEndings = [
@@ -448,6 +769,209 @@ Test
         '│ Cell 1   │  Cell 2  │',
       );
     });
+
+    it.each([false, true])(
+      'renders a delimiter-shaped first body row (isPending=%s)',
+      (isPending) => {
+        const text = [
+          '| Left | Right |',
+          '| :--- | ---: |',
+          '| --- | --- |',
+        ].join(eol);
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay {...baseProps} text={text} isPending={isPending} />,
+        );
+        expect(stripAnsi(lastFrame() ?? '')).toMatch(/│\s*---\s*│\s*---\s*│/);
+      },
+    );
+
+    it.each([false, true])(
+      'preserves delimiter-shaped body rows and each table alignment (isPending=%s)',
+      (isPending) => {
+        const text = [
+          '| First | Second |',
+          '| :--- | ---: |',
+          '| a | b |',
+          '| :---: | ---: |',
+          '| --- | --- |',
+          '',
+          '| First | Second |',
+          '| ---: | :---: |',
+          '| c | d |',
+        ].join(eol);
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay {...baseProps} text={text} isPending={isPending} />,
+        );
+        const output = stripAnsi(lastFrame() ?? '');
+        expect(output).toContain('│ a     │      b │');
+        expect(output).toContain('│ :---: │   ---: │');
+        expect(output).toContain('│ ---   │    --- │');
+        expect(output).toContain('│     c │   d    │');
+      },
+    );
+
+    it.each([false, true])(
+      'holds back an incomplete delimiter-shaped body row only while pending (isPending=%s)',
+      (isPending) => {
+        const text = [
+          '| First | Second |',
+          '| :--- | ---: |',
+          '| a | b |',
+          '| :---: |',
+        ].join(eol);
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay {...baseProps} text={text} isPending={isPending} />,
+        );
+        const output = stripAnsi(lastFrame() ?? '');
+        expect(output).toContain('│ a     │      b │');
+        expect(output.includes(':---:')).toBe(!isPending);
+      },
+    );
+
+    it.each([false, true])(
+      'preserves the bare-separator compatibility boundary (isPending=%s)',
+      (isPending) => {
+        const text = [
+          '| Item | Status |',
+          '| --- | --- |',
+          '--- | ---',
+          '| build | passed |',
+        ].join(eol);
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay {...baseProps} text={text} isPending={isPending} />,
+        );
+        const output = stripAnsi(lastFrame() ?? '');
+        if (isPending) {
+          // The final isolated pipe row is still held as a forming header.
+          expect(output).toBe('');
+        } else {
+          expect(output).toContain('│ Item  │ Status │');
+          expect(output).toContain('│ build │ passed │');
+          expect(output).not.toContain('--- | ---');
+        }
+      },
+    );
+
+    it.each([false, true])(
+      'ignores repeated bare separators without resetting alignment (isPending=%s)',
+      (isPending) => {
+        const text = [
+          '| First | Second |',
+          '| :--- | ---: |',
+          '---: | :---',
+          ':---: | ---: | ---',
+          '| a | b |',
+          '--- | ---',
+          '| :---: | ---: |',
+          '| --- | --- |',
+          '| c | d |',
+          'Done.',
+        ].join(eol);
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay {...baseProps} text={text} isPending={isPending} />,
+        );
+        const output = stripAnsi(lastFrame() ?? '');
+        expect(output).toContain('│ a     │      b │');
+        expect(output).toContain('│ :---: │   ---: │');
+        expect(output).toContain('│ ---   │    --- │');
+        expect(output).toContain('│ c     │      d │');
+        expect(output).not.toContain('---: | :---');
+        expect(output).toContain('Done.');
+      },
+    );
+
+    it.each([false, true])(
+      'does not flash an empty table after repeated bare separators (isPending=%s)',
+      (isPending) => {
+        const text = [
+          '| First | Second |',
+          '| :--- | ---: |',
+          '--- | ---',
+          '---: | :---:',
+          'Done.',
+        ].join(eol);
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay {...baseProps} text={text} isPending={isPending} />,
+        );
+        expect(stripAnsi(lastFrame() ?? '')).toBe('Done.');
+      },
+    );
+
+    it.each([false, true])(
+      'parses alignment from an initial bare delimiter (isPending=%s)',
+      (isPending) => {
+        const text = [
+          '| First | Second |',
+          ':--- | ---:',
+          '---: | :---:',
+          '| a | b |',
+          'Done.',
+        ].join(eol);
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay {...baseProps} text={text} isPending={isPending} />,
+        );
+        expect(stripAnsi(lastFrame() ?? '')).toContain('│ a     │      b │');
+      },
+    );
+
+    it.each([false, true])(
+      'does not accept ordinary body text without outer pipes (isPending=%s)',
+      (isPending) => {
+        const text = [
+          '| First | Second |',
+          '| :--- | ---: |',
+          '| a | b |',
+          'ordinary | body',
+          '| c | d |',
+          'Done.',
+        ].join(eol);
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay {...baseProps} text={text} isPending={isPending} />,
+        );
+        const output = stripAnsi(lastFrame() ?? '');
+        expect(output).toContain('│ a     │      b │');
+        expect(output).toContain('ordinary | body');
+        expect(output).toContain('| c | d |');
+        expect(output).not.toMatch(/│\s*c\s*│\s*d\s*│/);
+      },
+    );
+
+    it.each([80, 20])(
+      'agrees with height accounting after bare separators at width %s',
+      (contentWidth) => {
+        const lines = [
+          'prefix',
+          '| A | B |',
+          '| --- | --- |',
+          '--- | ---',
+          ':--- | ---:',
+          '| --- | --- |',
+          '| a | b |',
+          '--- | ---',
+          '| c | d |',
+          'Done.',
+        ];
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay
+            {...baseProps}
+            text={lines.join(eol)}
+            contentWidth={contentWidth}
+          />,
+        );
+        const output = stripAnsi(lastFrame() ?? '');
+        expect(output).toMatch(/(?:│\s*a\s*│\s*b\s*│|A: a)/);
+        const renderedRows = output.split('\n').length;
+        expect(
+          fitPendingSlice(lines, contentWidth, renderedRows, 1000),
+        ).toEqual({
+          keptLines: lines.length,
+          clipped: false,
+        });
+        expect(
+          fitPendingSlice(lines, contentWidth, renderedRows - 1, 1000),
+        ).toEqual({ keptLines: lines.length - 1, clipped: true });
+      },
+    );
 
     it('handles a table at the end of the input', () => {
       const text = `
@@ -1336,6 +1860,101 @@ $$
       expect(output).not.toContain('α + β');
       expect(output).not.toContain('✓ Done');
       expect(output).not.toContain('│ Important');
+    });
+
+    const separatorHeavyTable = [
+      '| A | B |',
+      '| --- | --- |',
+      ...Array.from({ length: 100 }, () => '--- | ---'),
+      '| x | y |',
+      'Done',
+    ];
+
+    it.each([true, false])(
+      'bounds raw table source when pending=%s (including enforced completed plans)',
+      (isPending) => {
+        const { lastFrame } = renderWithProviders(
+          <RenderModeProvider
+            value={{ renderMode: 'raw', setRenderMode: () => undefined }}
+          >
+            <MarkdownDisplay
+              {...baseProps}
+              text={separatorHeavyTable.join(eol)}
+              isPending={isPending}
+              enforceHeightBudget={!isPending}
+              availableTerminalHeight={24}
+            />
+          </RenderModeProvider>,
+        );
+
+        const output = stripAnsi(lastFrame() ?? '').replace(/\n+$/, '');
+        const sourceRows = output
+          .split('\n')
+          .filter((line) => line.includes('|'));
+        expect(sourceRows).toEqual(separatorHeavyTable.slice(0, 22));
+        expect(output).not.toContain('Done');
+        if (isPending) {
+          expect(output.split('\n')).toHaveLength(22);
+          expect(output).not.toContain('more lines not shown');
+        } else {
+          expect(output).toContain('82 more lines not shown');
+        }
+      },
+    );
+
+    it('preserves full raw table source when no height budget is requested', () => {
+      const { lastFrame } = renderWithProviders(
+        <RenderModeProvider
+          value={{ renderMode: 'raw', setRenderMode: () => undefined }}
+        >
+          <MarkdownDisplay
+            {...baseProps}
+            text={separatorHeavyTable.join(eol)}
+          />
+        </RenderModeProvider>,
+      );
+
+      expect(
+        stripAnsi(lastFrame() ?? '')
+          .replace(/\n+$/, '')
+          .split('\n'),
+      ).toEqual(separatorHeavyTable);
+    });
+
+    it('recalculates the pending row budget when the mounted render mode changes', async () => {
+      const tree = (renderMode: 'render' | 'raw') => (
+        <RenderModeProvider
+          value={{ renderMode, setRenderMode: () => undefined }}
+        >
+          <MarkdownDisplay
+            {...baseProps}
+            text={separatorHeavyTable.join(eol)}
+            isPending={true}
+            availableTerminalHeight={24}
+          />
+        </RenderModeProvider>
+      );
+      const { lastFrame, rerender } = renderWithProviders(tree('render'));
+      const visualFrame = stripAnsi(lastFrame() ?? '');
+      expect(visualFrame).toContain('┌');
+      expect(visualFrame).toContain('A');
+      expect(visualFrame).toContain('x');
+      expect(visualFrame).toContain('Done');
+      expect(visualFrame.replace(/\n+$/, '').split('\n')).toHaveLength(8);
+
+      rerender(withProviders(tree('raw')));
+      await vi.waitFor(() => {
+        expect(
+          stripAnsi(lastFrame() ?? '')
+            .replace(/\n+$/, '')
+            .split('\n'),
+        ).toEqual(separatorHeavyTable.slice(0, 22));
+      });
+
+      rerender(withProviders(tree('render')));
+      await vi.waitFor(() => {
+        expect(stripAnsi(lastFrame() ?? '')).toBe(visualFrame);
+      });
     });
 
     it('applies source copy offsets from previous assistant chunks', () => {
