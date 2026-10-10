@@ -41,7 +41,6 @@ vi.mock('../../WebShellContexts', async () => {
 });
 
 const {
-  extractDiff,
   fencedCodeBlock,
   formatSingleToolSummary,
   formatToolGroupSummary,
@@ -50,10 +49,15 @@ const {
   getToolHeaderKind,
   isWebFetchToolName,
   languageForPath,
+  resolveDiffAnnotation,
   shouldAutoExpand,
   ToolGroup,
   ToolLine,
 } = await import('./ToolGroup');
+
+// The extraction ladder is exercised through the production API; these
+// cases assert the diff string each rung resolves to.
+const extractDiff = (tool: ACPToolCall) => resolveDiffAnnotation(tool).diff;
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -3105,5 +3109,163 @@ describe('pending edit approval rows', () => {
     // hand-back (#10557). Without content in the fixture the expanded card is
     // empty and the two assertions above pass with nothing on screen.
     expect(handedBack.textContent).toContain('handed back content');
+  });
+});
+
+describe('rebuilt edit diff annotation', () => {
+  const editArgs = {
+    file_path: '/repo/app.ts',
+    old_string: 'const a = 1;\n',
+    new_string: 'const a = 2;\nconst b = 3;\n',
+  };
+
+  function expandCompletedEdit(overrides: Partial<ACPToolCall> = {}) {
+    const container = renderToolLine(
+      makeTool({
+        callId: 'edit-1',
+        toolName: 'Edit',
+        status: 'completed',
+        args: editArgs,
+        ...overrides,
+      }),
+      { summaryOnly: true },
+    );
+    const row = container.querySelector(
+      '[class*="lineExpandable"]',
+    ) as HTMLElement;
+    act(() => row.click());
+    return container;
+  }
+
+  it('annotates a completed edit whose diff was rebuilt from its arguments', () => {
+    const container = expandCompletedEdit();
+    expect(container.querySelector('[class*="expandedCard"]')).not.toBeNull();
+    expect(container.textContent).toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+
+  it('does not annotate a recorded fileDiff', () => {
+    const container = expandCompletedEdit({
+      rawOutput: { fileDiff: 'diff --git a/app.ts b/app.ts\n' },
+    });
+    expect(container.textContent).toContain('diff --git a/app.ts b/app.ts');
+    expect(container.textContent).not.toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+
+  it('annotates a tool-provided diff content block', () => {
+    const container = expandCompletedEdit({
+      content: [
+        { type: 'diff', oldText: 'const a = 1;\n', newText: 'const a = 2;\n' },
+      ],
+    });
+    expect(container.textContent).toContain('const a = 2;');
+    expect(container.textContent).toContain('Rendered without hunk headers');
+    expect(container.textContent).not.toContain('tool call arguments');
+  });
+
+  it('keeps a real patch argument unannotated', () => {
+    const container = expandCompletedEdit({
+      args: {
+        ...editArgs,
+        patch:
+          '--- a/app.ts\n+++ b/app.ts\n@@ -1,1 +1,1 @@\n-const a = 1;\n+const a = 2;\n',
+      },
+    });
+    expect(container.textContent).toContain('const a = 2;');
+    expect(container.textContent).not.toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+
+  it('annotates a failed edit diff that arrived as a content block', () => {
+    const container = expandCompletedEdit({
+      status: 'failed',
+      content: [
+        { type: 'diff', oldText: 'const a = 1;\n', newText: 'const a = 2;\n' },
+      ],
+    });
+    expect(container.textContent).toContain('const a = 2;');
+    expect(container.textContent).toContain('Rendered without hunk headers');
+    expect(container.textContent).not.toContain('tool call arguments');
+  });
+
+  it('does not annotate an in-flight edit preview', () => {
+    const container = expandCompletedEdit({ status: 'in_progress' });
+    expect(container.textContent).toContain('const a = 2;');
+    expect(container.textContent).not.toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+
+  it('does not annotate a whole-file write delivered as a content block', () => {
+    const container = expandCompletedEdit({
+      args: {},
+      content: [
+        {
+          type: 'diff',
+          path: '/repo/app.ts',
+          newText: 'const a = 2;\n',
+          oldText: '',
+        },
+      ],
+    });
+    expect(container.textContent).toContain('const a = 2;');
+    expect(container.textContent).not.toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+
+  it('does not annotate a file creation rebuilt from an empty old_string', () => {
+    const container = expandCompletedEdit({
+      args: {
+        file_path: '/repo/app.ts',
+        old_string: '',
+        new_string: 'const a = 2;\nconst b = 3;\n',
+      },
+    });
+    expect(container.textContent).toContain('const a = 2;');
+    expect(container.textContent).not.toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+
+  it('annotates a safe-projection edit that carries preview arg names', () => {
+    const container = expandCompletedEdit({
+      args: {
+        path: '/repo/app.ts',
+        oldText: 'const a = 1;\n',
+        newText: 'const a = 2;\n',
+      },
+    });
+    expect(container.textContent).toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+
+  it('annotates a completed edit whose recorded diff was truncated by session history', () => {
+    const container = expandCompletedEdit({
+      rawOutput: {
+        truncatedForSession: true,
+        fileName: '/repo/app.ts',
+        newContent: 'const a = 2;\nconst b = 3;\n',
+        fileDiff: 'diff --git a/app.ts b/app.ts\n',
+      },
+    });
+    expect(container.textContent).toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+
+  it('does not annotate a whole-file write rebuilt from its arguments', () => {
+    const container = expandCompletedEdit({
+      args: { path: '/repo/app.ts', newText: 'const a = 2;\nconst b = 3;\n' },
+    });
+    expect(container.textContent).toContain('const a = 2;');
+    expect(container.textContent).not.toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
   });
 });

@@ -48,12 +48,13 @@ import {
 import { formatDurationMs } from '../messages/tools/toolDisplay';
 import { ToolFilePreviewButton } from '../messages/ToolFilePreviewButton';
 import {
-  extractDiff,
+  resolveDiffAnnotation,
   fencedCodeBlock,
   ToolSummaryIcon,
 } from '../messages/ToolGroup';
 import { Markdown } from '../messages/Markdown';
 import { DiffView } from '../messages/tools/DiffView';
+import toolChromeStyles from '../messages/tools/ToolChrome.module.css';
 import { parseShellLiveOutput } from '../messages/tools/shellLiveOutput';
 import type { TurnOutputOpenRequest } from './TurnOutputs';
 import { Button } from '../ui/button';
@@ -685,12 +686,22 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
     2000,
   );
   const isShell = isShellToolName(tool.toolName);
-  const { diff, shell, argumentsText, resultText } = useMemo(() => {
-    if (!expanded) return { diff: '', argumentsText: '', resultText: '' };
-    const diff = editTool ? extractDiff(tool) : '';
+  const { diff, noteKey, shell, argumentsText, resultText } = useMemo(() => {
+    if (!expanded)
+      return {
+        diff: '',
+        noteKey: null,
+        argumentsText: '',
+        resultText: '',
+      };
+    // One ladder walk for both the rendered diff and the note copy.
+    const resolved = editTool ? resolveDiffAnnotation(tool) : null;
+    const diff = resolved?.diff ?? '';
+    const noteKey = resolved?.noteKey ?? null;
     const shell = isShell ? shellDetails(tool) : undefined;
     return {
       diff,
+      noteKey,
       shell,
       argumentsText: shell ? shell.command : stringifyValue(block.rawInput),
       resultText: diff
@@ -858,6 +869,11 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
               {diff ? (
                 <>
                   <DiffView diff={diff.slice(0, MAX_DETAIL_LENGTH)} />
+                  {noteKey && (
+                    <p className={toolChromeStyles.expandedCardDetail}>
+                      {t(noteKey)}
+                    </p>
+                  )}
                   {diff.length > MAX_DETAIL_LENGTH && (
                     <p className="text-xs text-muted-foreground">
                       {t('gitDiff.truncated')}

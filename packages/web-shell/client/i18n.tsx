@@ -3797,6 +3797,10 @@ const EN: Messages = {
   'tool.viewCurrentFile': 'View the current file',
   'tool.collapseHint': 'Collapse',
   'tool.status.failed': 'Failed',
+  'toolGroup.diffRebuiltFromArgs':
+    'Diff rebuilt from the tool call arguments: the gutter counts from 0 through the rebuilt text, not the file, and a replace_all edit shows one occurrence.',
+  'toolGroup.diffRenderedHeaderless':
+    'Rendered without hunk headers: the gutter counts from 0 through the shown text, not the file.',
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) =>
     `Ran ${v?.count ?? 0} tool${v?.count === 1 ? '' : 's'}`,
@@ -7853,6 +7857,10 @@ const ZH: Messages = {
   'tool.viewCurrentFile': '查看当前文件',
   'tool.collapseHint': '收起',
   'tool.status.failed': '执行失败',
+  'toolGroup.diffRebuiltFromArgs':
+    'Diff 由工具调用的参数重建：行号从 0 起在重建文本内计数，并非文件行号；replace_all 编辑仅显示单处替换。',
+  'toolGroup.diffRenderedHeaderless':
+    '渲染未带 hunk 头：行号从 0 起在所示文本内计数，并非文件行号。',
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) => `调用了 ${v?.count ?? 0} 个工具`,
   'toolGroup.summary.ranAgents': (v) => `已运行 ${v?.count ?? 0} 个智能体`,
