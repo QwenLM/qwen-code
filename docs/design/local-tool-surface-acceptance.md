@@ -4,7 +4,7 @@
 
 ## Problem and scope
 
-Issue #12333 needs evidence that withholding tool declarations reduces total task cost without losing tool recall or correct results. The existing release benchmark dispatches to a separate pool without a repository-owned settings injection point. A local normal CLI run can already compare configurations; it needs an actual caller and independently checked tasks rather than another unused profiling utility.
+Issue #12333 needs evidence that withholding tool declarations reduces total task cost without losing tool recall or correct results. The existing release benchmark dispatches to a separate pool; its current dispatch inputs and `qwen-benchmark-pool submit` arguments provide no settings injection point, and the repository owns none yet. A local normal CLI run can already compare configurations; it needs an actual caller and independently checked tasks rather than another unused profiling utility.
 
 This change adds a fixed real-model paired acceptance command. It does not change production defaults, add telemetry, replace SWE-bench or Terminal-Bench, or claim to finish the external pool's settings-overlay integration. Like the startup-benchmark harness, it adds no CI gate: only its deterministic result-logic tests run in CI.
 

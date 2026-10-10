@@ -1205,7 +1205,6 @@ export async function run(options, secret) {
             QWEN_ACCEPTANCE_RECEIPT_DIR: receiptDir,
             QWEN_ACCEPTANCE_RECEIPT_TOKEN: receiptToken,
             QWEN_CODE_MAX_WORKFLOW_AGENTS: '2',
-            QWEN_CODE_WORKFLOW_CONCURRENCY: '2',
             QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS: '8',
             QWEN_CODE_MAX_WORKFLOW_SECONDS: '180',
             LANG: 'en_US.UTF-8',

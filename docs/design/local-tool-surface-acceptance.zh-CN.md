@@ -4,7 +4,7 @@
 
 ## 问题与范围
 
-Issue #12333 需要证明：减少工具声明能够降低完整任务成本，同时不损害工具召回与结果正确性。现有 release benchmark 会派发到独立 pool，仓库内没有可用的 settings 注入点。本地正常 CLI 已能对照配置；需要补上实际调用入口和独立验证的任务，而不是再增加没有调用方的统计工具。
+Issue #12333 需要证明：减少工具声明能够降低完整任务成本，同时不损害工具召回与结果正确性。现有 release benchmark 会派发到独立 pool，其当前派发输入与 `qwen-benchmark-pool submit` 参数尚未提供 settings 注入入口，仓库内也暂无可用的注入点。本地正常 CLI 已能对照配置；需要补上实际调用入口和独立验证的任务，而不是再增加没有调用方的统计工具。
 
 本次增加固定任务的真实模型配对验收命令。不改变生产默认配置、不新增遥测、不替代 SWE-bench 或 Terminal-Bench，也不宣称完成外部 pool 的 settings-overlay 接入。与 startup-benchmark harness 一样，本次不新增 CI 门禁：CI 只运行其结果判定测试。
 
