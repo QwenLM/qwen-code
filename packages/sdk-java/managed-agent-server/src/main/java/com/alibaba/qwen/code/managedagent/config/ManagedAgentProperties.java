@@ -20,6 +20,7 @@ public class ManagedAgentProperties {
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
     private final Auth auth = new Auth();
     private final InternalServer internalServer = new InternalServer();
+    private final Automation automation = new Automation();
     private final Channels channels = new Channels();
     private String agentRevision = "1";
     private String trustedActorHeader = "";
@@ -34,6 +35,10 @@ public class ManagedAgentProperties {
 
     public InternalServer getInternalServer() {
         return internalServer;
+    }
+
+    public Automation getAutomation() {
+        return automation;
     }
 
     public Channels getChannels() {
@@ -101,6 +106,26 @@ public class ManagedAgentProperties {
                     "Hosted Workspace files require"
                             + " a supported Harness, Session Store and Session-isolated"
                             + " local-process Broker with Workspace mounts");
+        }
+        if (automation.isEnabled()) {
+            // A non-positive value fails at tick time, nearly silently:
+            // 0 slots per tick stops every scheduled fire behind one
+            // warn line, and 0 concurrency refuses every allow slot.
+            if (automation.getMaxSlotsPerTick() < 1) {
+                throw new IllegalStateException(
+                        "Automation max-slots-per-tick must be a positive count.");
+            }
+            if (automation.getConcurrency() < 1) {
+                throw new IllegalStateException(
+                        "Automation concurrency must be a positive count.");
+            }
+            if (!(automation.getScanDelay().toMillis() > 0)
+                    || !(automation.getLease().toMillis() > 0)
+                    || !(automation.getLateTolerance().toMillis() > 0)
+                    || !(automation.getLookback().toMillis() > 0)) {
+                throw new IllegalStateException(
+                        "Automation scan-delay, lease, late-tolerance and lookback must be positive durations.");
+            }
         }
     }
 
@@ -919,6 +944,73 @@ public class ManagedAgentProperties {
 
         public void setEnvironment(Map<String, String> environment) {
             this.environment = environment;
+        }
+    }
+
+    /** H6b/H6c: the automation scanner, its lease and the slot window. */
+    public static class Automation {
+        private boolean enabled;
+        private Duration scanDelay = Duration.ofSeconds(10);
+        private Duration lease = Duration.ofSeconds(60);
+        private Duration lateTolerance = Duration.ofMinutes(5);
+        private Duration lookback = Duration.ofHours(24);
+        private int maxSlotsPerTick = 1000;
+        private int concurrency = 4;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public Duration getScanDelay() {
+            return scanDelay;
+        }
+
+        public void setScanDelay(Duration scanDelay) {
+            this.scanDelay = scanDelay;
+        }
+
+        public Duration getLease() {
+            return lease;
+        }
+
+        public void setLease(Duration lease) {
+            this.lease = lease;
+        }
+
+        public Duration getLateTolerance() {
+            return lateTolerance;
+        }
+
+        public void setLateTolerance(Duration lateTolerance) {
+            this.lateTolerance = lateTolerance;
+        }
+
+        public Duration getLookback() {
+            return lookback;
+        }
+
+        public void setLookback(Duration lookback) {
+            this.lookback = lookback;
+        }
+
+        public int getMaxSlotsPerTick() {
+            return maxSlotsPerTick;
+        }
+
+        public void setMaxSlotsPerTick(int maxSlotsPerTick) {
+            this.maxSlotsPerTick = maxSlotsPerTick;
+        }
+
+        public int getConcurrency() {
+            return concurrency;
+        }
+
+        public void setConcurrency(int concurrency) {
+            this.concurrency = concurrency;
         }
     }
 

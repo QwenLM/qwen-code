@@ -85,7 +85,7 @@ export function createMonitorWakeRunTurn(params: {
   readonly writeStderr: (line: string) => void;
 }): (
   turn: HostedMonitorWakeTurn,
-) => Promise<'settled' | 'settled_incomplete' | 'busy' | 'held'> {
+) => Promise<'settled' | 'busy' | 'recovery' | 'held' | 'settled_incomplete'> {
   const { session } = params;
   return async (turn) => {
     if (params.busy() || session.blocked) return 'busy';
@@ -132,14 +132,15 @@ export function createMonitorWakeRunTurn(params: {
       // The notification ran and died inside the turn it started.
       // Re-driving it text-only would mint a second user record and an
       // unanswered first call in the model's history, so it is for the
-      // recovery fleet, never for the pump.
+      // recovery fleet, never for the pump. Distinct from 'settled', so a
+      // caller tracking the turn settles its stop the honest way.
       session.blocked = true;
       params.writeStderr(
         'qwen serve: Monitor wake turn ' +
           turn.turnId +
           ' needs recovery, not a re-drive.',
       );
-      return 'settled';
+      return 'recovery';
     }
     // The busy verdict must be re-read after every journal read: a prompt
     // route's own claim in this window would otherwise be cleared here,
@@ -165,7 +166,7 @@ export function createMonitorWakeRunTurn(params: {
             ' is recovery blocked: ' +
             String(cause),
         );
-        return 'settled';
+        return 'recovery';
       }
       try {
         await session.managed.sink.write({
@@ -218,7 +219,7 @@ export function createMonitorWakeRunTurn(params: {
 export function withChildAgentConsumption(
   runWakeTurn: (
     turn: HostedMonitorWakeTurn,
-  ) => Promise<'settled' | 'settled_incomplete' | 'busy' | 'held'>,
+  ) => Promise<'settled' | 'busy' | 'recovery' | 'held' | 'settled_incomplete'>,
   session: {
     blocked: boolean;
     childAgents?: HostedChildAgentSession;
@@ -226,7 +227,7 @@ export function withChildAgentConsumption(
   writeStderr: (line: string) => void = () => {},
 ): (
   turn: HostedMonitorWakeTurn,
-) => Promise<'settled' | 'settled_incomplete' | 'busy' | 'held'> {
+) => Promise<'settled' | 'busy' | 'recovery' | 'held' | 'settled_incomplete'> {
   return async (turn) => {
     const outcome = await runWakeTurn(turn);
     if (
