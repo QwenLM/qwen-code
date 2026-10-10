@@ -148,6 +148,12 @@ export function hasAgentSkillExecBinding(
  * Registry deny/exclude rules remain the bundled-reference resolver's concern;
  * this predicate supplies the per-agent policy that resolver cannot see.
  *
+ * In CodeModeOnly the exec gateway is the ONLY Skill route — the invocation
+ * gate (`AgentCore.canInvokeSkill`) never counts a direct Skill declaration
+ * there — so when `exec` itself is missing from the registry (a deny rule or
+ * a legacy coreTools allowlist keeps it out) no `toolConfig` shape reaches
+ * Skill: not the wildcard, not registry inheritance, not an explicit entry.
+ *
  * Matching is exact, as `prepareTools()`'s is: `SubagentManager` resolves
  * configured names to canonical tool names before they reach a `ToolConfig`.
  *
@@ -161,8 +167,12 @@ export function toolConfigAllowsSkill(
   toolConfig: ToolConfig | undefined,
   execBindingsAvailable = false,
   skillEagerHidden = false,
+  codeModeOnly = false,
 ): boolean {
   if (skillEagerHidden || EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL)) {
+    return false;
+  }
+  if (codeModeOnly && !execBindingsAvailable) {
     return false;
   }
   // No per-agent config inherits the whole registry.

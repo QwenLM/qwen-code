@@ -1380,6 +1380,16 @@ describe('BackgroundAgentResumeService', () => {
       false,
       ToolMode.CodeModeOnly,
     ],
+    // The wildcard inherits the registry, but with exec kept out of a
+    // CodeModeOnly registry the resumed agent has no route to skill, so the
+    // listing must stay silent. Dropping the codeModeOnly argument at the
+    // resume call site turns this row red while the rows above stay green.
+    [
+      'inherits the registry under CodeModeOnly with exec unregistered',
+      { tools: ['*'] },
+      false,
+      ToolMode.CodeModeOnly,
+    ],
     [
       'names exec without skill under Hybrid with registered exec',
       { tools: [ToolNames.EXEC] },

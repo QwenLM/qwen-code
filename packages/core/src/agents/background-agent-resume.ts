@@ -82,6 +82,7 @@ import {
 } from './runtime/subagent-plan-tool-policy.js';
 import { toolSearchBridgeSentence } from '../skills/bundled-reference.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { ToolMode } from '../tools/code-mode.js';
 import { isDirectToolBridgeAvailable } from '../tools/tool-search.js';
 import type {
   AgentExternalInput,
@@ -144,6 +145,7 @@ function subagentWillHaveSkillTool(
   subagentConfig: SubagentConfig | undefined,
   execBindingsAvailable = false,
   skillEagerHidden = false,
+  codeModeOnly = false,
 ): boolean {
   // Launch reads `config.tools?.length ? resolveToolNames(config.tools) : ['*']`,
   // and `resolveToolNames`' `for...of` walks a bare string per character,
@@ -173,6 +175,7 @@ function subagentWillHaveSkillTool(
     },
     execBindingsAvailable,
     skillEagerHidden,
+    codeModeOnly,
   );
 }
 
@@ -1033,6 +1036,7 @@ export class BackgroundAgentResumeService {
                   target.subagentConfig,
                   hasAgentSkillExecBinding(activeAgentConfig),
                   isAgentSkillEagerHidden(activeAgentConfig),
+                  activeAgentConfig.getToolMode?.() === ToolMode.CodeModeOnly,
                 ),
               })
             )[0],

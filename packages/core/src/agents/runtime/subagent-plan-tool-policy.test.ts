@@ -327,6 +327,44 @@ describe('subagent plan tool policy', () => {
       },
     );
 
+    // In CodeModeOnly the exec gateway is the ONLY Skill route — the
+    // invocation gate never counts a direct Skill declaration there — so with
+    // exec kept out of the registry every toolConfig shape must answer false,
+    // including the wildcard the resume path defaults to. Removing the
+    // exec-registration probe from hasAgentSkillExecBinding, or dropping the
+    // codeModeOnly conjunction from the predicate, turns each row red.
+    it.each([
+      ['a wildcard', { tools: ['*'] }],
+      ['an explicit Skill entry', { tools: [ToolNames.SKILL] }],
+      ['no tool config', undefined],
+    ])(
+      'closes every CodeModeOnly Skill route when exec is unregistered: %s',
+      (_label, toolConfig) => {
+        const context = contextWith(ToolMode.CodeModeOnly, false);
+        expect(hasAgentSkillExecBinding(context)).toBe(false);
+        expect(
+          toolConfigAllowsSkill(
+            toolConfig,
+            hasAgentSkillExecBinding(context),
+            isAgentSkillEagerHidden(context),
+            context.getToolMode?.() === ToolMode.CodeModeOnly,
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it('keeps the wildcard route open in CodeModeOnly while exec is registered', () => {
+      const context = contextWith(ToolMode.CodeModeOnly, true);
+      expect(
+        toolConfigAllowsSkill(
+          { tools: ['*'] },
+          hasAgentSkillExecBinding(context),
+          isAgentSkillEagerHidden(context),
+          context.getToolMode?.() === ToolMode.CodeModeOnly,
+        ),
+      ).toBe(true);
+    });
+
     it('reports no exec route in Direct mode even with exec registered', () => {
       expect(hasAgentSkillExecBinding(contextWith(ToolMode.Direct, true))).toBe(
         false,

@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { AgentCore } from '../../agents/runtime/agent-core.js';
 import { buildChildMessage } from './fork-subagent.js';
 import { makeFakeConfig } from '../../test-utils/config.js';
 import { MockTool } from '../../test-utils/mock-tool.js';
@@ -88,4 +89,55 @@ describe('Code-mode fork restriction matches declared call surfaces', () => {
       }
     },
   );
+
+  it('declares, executes, and names exec for a hybrid fork that omits it', async () => {
+    // The fork shape agent.ts builds for fork_tools: ["read_file"] in hybrid
+    // code mode: the parent's declared names stay as the tool list while the
+    // execution allowlist narrows to the requested ones.
+    const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.registerTool(new ExecTool(config));
+    registry.registerTool(new MockTool({ name: ToolNames.READ_FILE }));
+    registry.registerTool(new MockTool({ name: ToolNames.WRITE_FILE }));
+    const core = new AgentCore(
+      'hybrid-fork',
+      config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+      {
+        tools: [ToolNames.EXEC, ToolNames.READ_FILE],
+        executionAllowedTools: [ToolNames.READ_FILE],
+      },
+    );
+
+    // Scoping the unconditional exec carve-out in isToolExecutionAllowed back
+    // to CodeModeOnly turns both of these red.
+    const declarations = await core.prepareTools();
+    expect(declarations.map((declaration) => declaration.name)).toContain(
+      ToolNames.EXEC,
+    );
+    expect(
+      (
+        core as unknown as { isToolExecutionAllowed: (t: string) => boolean }
+      ).isToolExecutionAllowed.call(core, ToolNames.EXEC),
+    ).toBe(true);
+
+    // The child message must not claim the allowlist bounds exec: the gate
+    // admits it for every code mode and every fork_tools value.
+    const message = buildChildMessage(
+      'Inspect the implementation',
+      [ToolNames.READ_FILE],
+      undefined,
+      undefined,
+      ToolMode.CodeMode,
+    );
+    const sentence = message
+      .split('\n')
+      .find((line) => line.includes('allowlist'));
+    expect(sentence).toBeDefined();
+    expect(sentence).toContain(JSON.stringify([ToolNames.READ_FILE]));
+    expect(sentence).toContain(ToolNames.EXEC);
+  });
 });

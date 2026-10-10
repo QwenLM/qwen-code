@@ -4,7 +4,7 @@ import type { Config } from '../../config/config.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import { ToolNames } from '../tool-names.js';
-import { ToolMode } from '../code-mode.js';
+import { isCodeModeEnabled, ToolMode } from '../code-mode.js';
 import {
   getStartupContextLength,
   isSystemReminderContent,
@@ -421,6 +421,13 @@ export function buildChildMessage(
   nestedExecutionAllowedTools?: readonly string[],
   toolMode?: ToolMode,
 ): string {
+  // Under either code mode the gate admits exec ahead of the allowlist check
+  // (and tool_search in CodeModeOnly), so the sentence must name them rather
+  // than claim the list bounds every call.
+  const codeModeAlwaysAdmitted =
+    toolMode === ToolMode.CodeModeOnly
+      ? `${ToolNames.EXEC} and ${ToolNames.TOOL_SEARCH}`
+      : ToolNames.EXEC;
   const executionRestriction =
     nestedExecutionAllowedTools !== undefined
       ? `\n\nTOOL EXECUTION RESTRICTION:
@@ -436,7 +443,11 @@ A nested allowance alone does not authorize a direct call; direct calls must sat
         : executionAllowedTools.length === 0
           ? `\n\nTOOL EXECUTION RESTRICTION:
 You may not execute any tools, even though tool declarations remain visible. Do not attempt tool calls.`
-          : `\n\nTOOL EXECUTION RESTRICTION:
+          : isCodeModeEnabled(toolMode)
+            ? `\n\nTOOL EXECUTION RESTRICTION:
+You may execute only tools matched by this allowlist: ${JSON.stringify(executionAllowedTools)} — except ${codeModeAlwaysAdmitted}, which the active code mode always admits.
+Other visible tool declarations are unavailable to you. Do not call them.`
+            : `\n\nTOOL EXECUTION RESTRICTION:
 You may execute only tools matched by this allowlist: ${JSON.stringify(executionAllowedTools)}.
 Other visible tool declarations are unavailable to you. Do not call them.`;
   const profileGuidance = promptHint

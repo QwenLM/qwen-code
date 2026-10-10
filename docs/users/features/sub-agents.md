@@ -54,11 +54,11 @@ Tool responses and pure system reminders do not count as user turns. Regular nam
 
 ## Restricting Fork Tool Execution with `fork_tools`
 
-Only `subagent_type: "fork"` accepts `fork_tools`. The array may contain exact canonical tool names, such as `read_file` and `grep_search`, or MCP server patterns such as `mcp__github`. The fork still receives the same model-visible tool declarations as an unrestricted fork, preserving its prompt-cache prefix, but its task prompt identifies the restriction and a call not matched by `fork_tools` is rejected before scheduling or approval. One exception: under a code mode (`tools.mode`), listing `exec` admits every code-mode-callable tool through exec's nested `tools.<name>(...)` calls — see the `exec` note under [Tool Configuration](#tool-configuration).
+Only `subagent_type: "fork"` accepts `fork_tools`. The array may contain exact canonical tool names, such as `read_file` and `grep_search`, or MCP server patterns such as `mcp__github`. In `direct` mode the fork still receives the same model-visible tool declarations as an unrestricted fork, preserving its prompt-cache prefix, while under hybrid `tools.mode: "code_mode"` the fork's top-level declarations are filtered by this allowlist; either way its task prompt identifies the restriction, and a call not matched by `fork_tools` is rejected before scheduling or approval. Two code-mode exceptions: under either code mode `exec` is always declared and executable whatever `fork_tools` lists — an empty array included — and listing `exec` admits every code-mode-callable tool this fork's own surface admits through exec's nested `tools.<name>(...)` calls — see the `exec` note under [Tool Configuration](#tool-configuration).
 
 - Forks never execute `ask_user_question`; when user input is required, they report the blocker to their parent agent.
 - Omitting `fork_tools` allows every other inherited tool.
-- An empty array rejects every tool call.
+- An empty array rejects every tool call (under a code mode, `exec` — and `tool_search` in `code_mode_only` — remains admitted anyway; see above).
 - `*` is not accepted; omit `fork_tools` to allow every otherwise-executable inherited tool.
 - Tool names cannot have surrounding whitespace. Wildcards are accepted only as `mcp__*` or as a trailing MCP tool-prefix pattern such as `mcp__github__read_*`.
 - `mcp__*` intentionally allows every MCP tool while still denying unlisted built-in tools.

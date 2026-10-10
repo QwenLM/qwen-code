@@ -679,6 +679,7 @@ export class AgentCore {
       this.toolConfig,
       hasAgentSkillExecBinding(this.runtimeContext),
       isAgentSkillEagerHidden(this.runtimeContext),
+      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
     );
   }
 

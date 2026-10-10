@@ -3237,6 +3237,29 @@ describe('SubagentManager', () => {
         },
       );
 
+      // The exec registration probe alone leaves the wildcard route open:
+      // with exec kept out of a CodeModeOnly registry the agent has no Skill
+      // route at all, so the manager must be withheld even for the default
+      // wildcard config. Dropping the codeModeOnly argument at the
+      // createAgentHeadless call site turns this case red.
+      it('withholds the manager for a wildcard agent in CodeModeOnly without exec', async () => {
+        const parent = makeFakeConfig({ toolMode: 'code_mode_only' });
+        const registry = new ToolRegistry(parent);
+        registry.registerTool(new MockTool({ name: ToolNames.SKILL }));
+        vi.spyOn(parent, 'getSkillManager').mockReturnValue(sessionManager);
+        vi.spyOn(parent, 'getSubagentManager').mockReturnValue(manager);
+        vi.spyOn(parent, 'getToolRegistry').mockReturnValue(registry);
+
+        const { context, dispose } = await launchHandle({}, parent);
+        try {
+          expect(context.getSkillManager()).toBeNull();
+          expect(resolveAgentDelegationSurface(context)).toBe('inline');
+        } finally {
+          await dispose();
+          await registry.stop();
+        }
+      });
+
       it.each([false, true])(
         'withholds the manager for an eager-hidden Hybrid Skill even if parent revealed it: %s',
         async (revealed) => {

@@ -304,6 +304,34 @@ describe('AgentCore skill-gate inputs', () => {
       ).toBe(true);
     });
 
+    it.each([{ tools: ['*'] }, { tools: [ToolNames.SKILL] }])(
+      'stays silent in CodeModeOnly when exec was never registered: %j',
+      async (toolConfig) => {
+        // canInvokeSkill counts only the exec gateway in CodeModeOnly, so an
+        // exec-less registry leaves no Skill route at all: the announcement
+        // must agree with the gate for the wildcard and an explicit entry.
+        const config = makeFakeConfig({ toolMode: ToolMode.CodeModeOnly });
+        const registry = new ToolRegistry(config);
+        vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+        registry.registerTool(new MockTool({ name: ToolNames.SKILL }));
+        registry.registerTool(new MockTool({ name: ToolNames.READ_FILE }));
+        const core = new AgentCore(
+          'skill-gate-no-exec',
+          config,
+          { systemPrompt: '' },
+          { model: 'test-model' },
+          { max_turns: 1 },
+          toolConfig,
+        );
+        const announced = (
+          core as unknown as { willHaveSkillTool: () => boolean }
+        ).willHaveSkillTool();
+        const declared = await declaredNames(core);
+        expect(announced).toBe(false);
+        expect(gate(core, declared)).toBe(false);
+      },
+    );
+
     it.each([true, false])(
       'lists Hybrid exec-only skills when lazy exec is registered: %s',
       (registered) => {

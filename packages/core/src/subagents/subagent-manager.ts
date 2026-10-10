@@ -1217,6 +1217,7 @@ export class SubagentManager {
         toolConfig,
         hasAgentSkillExecBinding(runtimeContext, skillRegistryWillBeRebuilt),
         skillEagerHidden,
+        runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
       );
       const { context: subagentContext, cleanup } =
         await this.buildSubagentContextOverride(
