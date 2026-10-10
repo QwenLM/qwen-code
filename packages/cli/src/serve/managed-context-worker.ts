@@ -28,8 +28,10 @@ import {
 import {
   createManagedToolSet,
   ManagedToolExecutor,
+  realpathDeepestExisting,
   type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
+import { ManagedChildRunSupervisor } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
 import { RemoteShellResultPublisher } from './remote-shell-result-publication.js';
 import type { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
@@ -61,6 +63,18 @@ import {
   MANAGED_MCP_WORKER_ROUTE,
   registerManagedMcpRoutes,
 } from './managed-mcp-routes.js';
+import { ManagedBackgroundShellRegistry } from './managed-background-shell-registry.js';
+import { ManagedShellRuntime } from './managed-shell-runtime.js';
+import {
+  MANAGED_SHELL_WORKER_ROUTE,
+  registerManagedShellRoutes,
+} from './managed-shell-routes.js';
+import { ManagedMonitorRegistry } from './managed-monitor-registry.js';
+import { ManagedMonitorRuntime } from './managed-monitor-runtime.js';
+import {
+  MANAGED_MONITOR_WORKER_ROUTE,
+  registerManagedMonitorRoutes,
+} from './managed-monitor-routes.js';
 
 /**
  * The routes of a worker booted with v2. Attestation v2 is not among them,
@@ -71,6 +85,8 @@ export const MANAGED_CONTEXT_WORKER_ROUTES = Object.freeze([
   WORKSPACE_ACTIVATION_ROUTE,
   MANAGED_MCP_WORKER_ROUTE,
   MANAGED_HOOK_WORKER_ROUTE,
+  MANAGED_SHELL_WORKER_ROUTE,
+  MANAGED_MONITOR_WORKER_ROUTE,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
   ...OWNED_MANAGED_RUNTIME_ROUTES.filter((route) => route.key !== 'attest'),
 ]);
@@ -136,6 +152,55 @@ export class ManagedContextMount {
     }
     return directory;
   }
+
+  /**
+   * The canonical mount root, or undefined when it is unreadable or its
+   * device and inode no longer match the pinned ones. A binding whose own
+   * directory stopped resolving is still judged against the location it
+   * occupied, which needs the same root `resolve` would have joined onto.
+   */
+  async rootDirectory(): Promise<string | undefined> {
+    if (!isHostAbsolute(this.#mountRoot)) {
+      return undefined;
+    }
+    try {
+      const root = await fs.realpath(this.#mountRoot);
+      const stats = await fs.stat(root, { bigint: true });
+      const pinned = this.#root;
+      if (
+        pinned !== undefined &&
+        (pinned.dev !== stats.dev || pinned.ino !== stats.ino)
+      ) {
+        return undefined;
+      }
+      return root;
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+/**
+ * Where an installed sibling Session's directory is now. `mount.resolve`
+ * answers only for a canonical, readable directory; a binding that was
+ * removed, or replaced by a symlink, still has a knowable location. A
+ * resolvable redirect retains ownership of its target; a resolution error
+ * retains the occupied path without vetoing unrelated shared reads.
+ */
+async function siblingDirectory(
+  mount: ManagedContextMount,
+  cwdRelative: string,
+): Promise<string | undefined> {
+  const resolved = await mount.resolve(cwdRelative);
+  if (resolved !== undefined) return resolved;
+  const root = await mount.rootDirectory();
+  if (root === undefined) return undefined;
+  const occupied = path.join(root, ...cwdRelative.split('/'));
+  try {
+    return await realpathDeepestExisting(occupied);
+  } catch {
+    return occupied;
+  }
 }
 
 /**
@@ -147,6 +212,60 @@ function isHostAbsolute(mountRoot: string): boolean {
   return process.platform === 'win32'
     ? /^(?:[A-Za-z]:[\\/]|\\\\)/.test(mountRoot)
     : mountRoot.startsWith('/');
+}
+
+/**
+ * Picks the capture funnel of one prepare by the capture's own identity. A
+ * background Shell or Monitor capture belongs to the record funnel of its
+ * Session; a foreground result belongs to its own publication grant, and
+ * the same Session owning both at once is a legal, ordinary topology — a
+ * Session-level mixed-mode check can never tell the two apart.
+ */
+export function selectShellCapturePublisher(
+  remotePublishers: ManagedShellPublisherRegistry,
+  remotePublisher: RemoteShellResultPublisher,
+): ManagedShellCapturePublisher {
+  return {
+    // The retirement gate reads this flag — the selector owns both funnels'
+    // installed state, exactly like the inline composite it replaced.
+    get hasInstalledPublication() {
+      return (
+        remotePublishers.hasInstalledPublication ||
+        remotePublisher.hasInstalledPublication
+      );
+    },
+    async prepare(request) {
+      if (request.capture.background === true) {
+        // The detached handle carries no result manifest, so an
+        // unregistered Session funnel is the one place the record could
+        // never settle — admission refuses it instead of silently parking
+        // the capture on the publication.
+        if (!remotePublishers.hasSession(request.reference.sessionId))
+          throw new Error(
+            'Background captures require their Session publisher.',
+          );
+        return {
+          ...(await remotePublishers.prepare(request)),
+          publisher: remotePublishers,
+        };
+      }
+      if (remotePublisher.hasExecution(request.capture.executionCallId)) {
+        // The foreground result's own funnel; the Session's background
+        // lane registered beside it is not a conflict.
+        return {
+          ...(await remotePublisher.prepare(request)),
+          publisher: remotePublisher,
+        };
+      }
+      const selected = remotePublishers.hasSession(request.reference.sessionId)
+        ? remotePublishers
+        : remotePublisher;
+      return {
+        ...(await selected.prepare(request)),
+        publisher: selected,
+      };
+    },
+  };
 }
 
 /**
@@ -174,29 +293,7 @@ export function registerManagedContextRoutes(
   const publisher: ManagedShellCapturePublisher | undefined =
     capturePublisher ??
     (remotePublishers && remotePublisher
-      ? {
-          get hasInstalledPublication() {
-            return (
-              remotePublishers.hasInstalledPublication ||
-              remotePublisher.hasInstalledPublication
-            );
-          },
-          async prepare(request) {
-            const local = remotePublishers.hasSession(
-              request.reference.sessionId,
-            );
-            const remote = remotePublisher.hasExecution(
-              request.capture.executionCallId,
-            );
-            if (local && remote)
-              throw new Error('Shell publication modes conflict.');
-            const selected = local ? remotePublishers : remotePublisher;
-            return {
-              ...(await selected.prepare(request)),
-              publisher: selected,
-            };
-          },
-        }
+      ? selectShellCapturePublisher(remotePublishers, remotePublisher)
       : (remotePublishers ?? remotePublisher));
   remotePublisher?.registerInstallRoute(app, boot, admissionOpen);
   const [attestRoute, contextRoute] = MANAGED_CONTEXT_ROUTES;
@@ -272,6 +369,17 @@ export function registerManagedContextRoutes(
     loadManagedHookManifest(process.env['QWEN_MANAGED_HOOK_CONFIG']),
   );
   registerManagedHookRoutes(app, boot, hooks);
+  // H3 background Shells share the delegation the Hook commands already use;
+  // unset or empty both mean no delegation, and the executor keeps its
+  // committed refusal then.
+  const cgroupRoot = process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'];
+  const backgroundSupervisor = cgroupRoot
+    ? ManagedChildRunSupervisor.create({ cgroupRoot })
+    : undefined;
+  const backgroundRegistry = new ManagedBackgroundShellRegistry();
+  // One monitor registry shared by executor and maintenance routes: a
+  // private second instance could only ever answer unknown.
+  const monitorRegistry = new ManagedMonitorRegistry();
   const executor: ManagedToolExecutor = new ManagedToolExecutor(
     async (reference) => {
       const isActive = () =>
@@ -307,6 +415,67 @@ export function registerManagedContextRoutes(
     publisher,
     mcp,
     hooks,
+    async (sessionId, realPath, ownDirectory) => {
+      // A stale binding still owns its missing or symlinked location, but
+      // must not veto targets in unrelated shared directories.
+      const contains = (directory: string, target: string): boolean => {
+        const relative = path.relative(directory, target);
+        return (
+          relative !== '..' &&
+          !relative.startsWith(`..${path.sep}`) &&
+          !path.isAbsolute(relative)
+        );
+      };
+      const root = await mount.rootDirectory();
+      // A target inside the caller's own directory is the caller's business
+      // only when that directory is private: a Session bound at the mount
+      // root (`'.'`, a Workspace selection without `cwd_relative`) delimits
+      // no private area, so its targets stay subject to sibling ownership.
+      const ownEstate =
+        contains(ownDirectory, realPath) &&
+        (root === undefined || ownDirectory !== root);
+      for (const [otherId, binding] of installations.bindings()) {
+        if (otherId === sessionId) continue;
+        const directory = await siblingDirectory(mount, binding.cwdRelative);
+        // A binding that cannot be located at all cannot prove the outside
+        // target is shared — and it cannot veto the caller's own estate
+        // either, which is the caller's business by the test above.
+        if (directory === undefined) {
+          if (ownEstate) continue;
+          return true;
+        }
+        // Only a binding AT the mount root exempts: the shared Workspace
+        // itself owns nothing. One bound at a non-root ancestor of the
+        // caller still owns its whole subtree, including what spills past
+        // the caller's directory.
+        if (root !== undefined && directory === root) continue;
+        if (!contains(directory, realPath)) continue;
+        // Ownership runs in both directions. Inside the caller's own estate
+        // only a Session installed strictly below it owns the target: one at
+        // the same directory shares it, and one above it leaves it intact, or
+        // the caller could not read its own files.
+        if (
+          !ownEstate ||
+          (directory !== ownDirectory && contains(ownDirectory, directory))
+        ) {
+          return true;
+        }
+      }
+      return false;
+    },
+    backgroundSupervisor,
+    backgroundRegistry,
+    monitorRegistry,
+  );
+  registerManagedShellRoutes(
+    app,
+    boot,
+    new ManagedShellRuntime(backgroundRegistry),
+  );
+  registerManagedMonitorRoutes(
+    app,
+    boot,
+    new ManagedMonitorRuntime(monitorRegistry),
   );
   registerManagedRuntimeProviderRoute(
     app,

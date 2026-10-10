@@ -7,7 +7,9 @@
 import { createHash } from 'node:crypto';
 import {
   createAwaitActionHarnessCheckpoint,
+  createAwaitAgentHarnessCheckpoint,
   createAwaitRuntimeHarnessCheckpoint,
+  createConsumedAgentWaitHarnessCheckpoint,
   createConsumedRuntimeResultsHarnessCheckpoint,
   createHookStoppedRuntimeHarnessCheckpoint,
   createInitialHarnessCheckpoint,
@@ -19,6 +21,7 @@ import {
   HARNESS_MODEL_START_PHASES,
   HARNESS_TURN_COMPLETE_BOUNDARY,
   type HarnessActionSource,
+  type HarnessAgentWaitRun,
   type HarnessCheckpointV1,
   type HarnessRunAuthorization,
 } from './managed-harness-checkpoint.js';
@@ -159,6 +162,15 @@ export interface ManagedHarnessHandle {
    */
   run<T>(agent: () => Promise<T>): Promise<T>;
   /**
+   * Commits the initial `before_model` checkpoint when the session has none,
+   * and leaves any existing checkpoint alone. Local hosts whose earlier
+   * slices recorded without checkpoints start their Runtime evidence here:
+   * nothing in such a log names Runtime work, so the checkpoint covers the
+   * committed log as-is. A restored hosted session with content but no
+   * checkpoint stays blocked — it must never call this.
+   */
+  ensureCheckpoint(): Promise<HarnessCheckpointV1>;
+  /**
    * Observes an already-committed turn-complete or durable-wait checkpoint.
    * Does not wait for an in-flight turn, and does not invent a boundary.
    */
@@ -188,6 +200,34 @@ export interface ManagedHarnessHandle {
    */
   resolveDurableWait(): Promise<HarnessCheckpointV1 | null>;
   /**
+   * Commits the agent-wait safety point: admitted foreground child runs as
+   * `await_agent` with `durable_wait`. Agent calls bypass the Broker
+   * pipeline and write no `tool.intent`, so without this checkpoint a
+   * restarted Harness can only decline the parked Turn. Replay-safe: an
+   * identical restated run set answers the same boundary, a conflicting set
+   * conflicts. `turn` binds the wait exactly as `commitAwaitRuntimeBatch`
+   * does — it is required: skipping it skips both the turn-binding guard
+   * and the activation adoption. The batch entries must be unique on
+   * `childRunId` and on `functionCallId` and must not already be consumed.
+   */
+  commitAwaitAgent(
+    runs: readonly HarnessAgentWaitRun[],
+    turn: { readonly turnId: string; readonly promptId: string },
+    attempt?: {
+      readonly attemptId: string;
+      readonly routeRef: ManagedSessionDurableRef;
+    },
+  ): Promise<HarnessDurableWaitBoundary>;
+  /**
+   * Marks one waited child run consumed after its fold committed. The wait
+   * stays `await_agent` while runs remain; with every run consumed the
+   * continuation advances to `model_output_committed`. Returns null when no
+   * durable wait is in progress; rejects when the open durable wait is not
+   * the agent wait; restating an already-consumed run answers the same
+   * checkpoint.
+   */
+  resolveAwaitAgent(childRunId: string): Promise<HarnessCheckpointV1 | null>;
+  /**
    * Commits safety point C: an admitted Runtime tool as `await_runtime` with
    * `durable_wait`. The original executionCallId is dispatched at most once.
    */
@@ -211,9 +251,10 @@ export interface ManagedHarnessHandle {
     outcomeRef: ManagedSessionDurableRef,
   ): Promise<HarnessCheckpointV1 | null>;
   /**
-   * Marks unconsumed settled Runtime receipts as consumed after they are
-   * present on the next model request. No-op when the handle is not at
-   * `results_ready`.
+   * Marks unconsumed settled Runtime receipts as consumed once the host has
+   * recorded them durably ready for the model — on the Hosted turn, present
+   * on the next model request; on the local host, committed before the next
+   * model round starts. No-op when the handle is not at `results_ready`.
    */
   consumeRuntimeResults(): Promise<HarnessCheckpointV1 | null>;
   /**
@@ -255,6 +296,36 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
 
   ensureRunnable(): Promise<HarnessCheckpointV1> {
     return this.mutateCheckpoint(() => this.ensureRunnableUnlocked());
+  }
+
+  async ensureCheckpoint(): Promise<HarnessCheckpointV1> {
+    return this.mutateCheckpoint(async () => {
+      this.assertNotDetached();
+      this.assertCurrentActivation();
+      let authorization = await this.authority.harnessRunAuthorization();
+      // A log without any checkpoint starts here, whether it is empty or
+      // only carries records from slices that wrote none: blocked with no
+      // checkpoint means content from a slice that recorded before this one,
+      // and nothing else reaches the branch.
+      if (
+        authorization.status === 'initial' ||
+        (authorization.status === 'blocked' &&
+          authorization.reason === 'missing_checkpoint')
+      ) {
+        await this.commitInitialBeforeModel();
+        authorization = await this.authority.harnessRunAuthorization();
+      }
+      if (authorization.status === 'blocked') {
+        throw new ManagedHarnessBlockedError(authorization);
+      }
+      if (authorization.status !== 'runnable') {
+        throw new ManagedHarnessBlockedError({
+          status: 'blocked',
+          reason: 'missing_checkpoint',
+        });
+      }
+      return authorization.checkpoint;
+    });
   }
 
   private async ensureRunnableUnlocked(): Promise<HarnessCheckpointV1> {
@@ -305,10 +376,11 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       if (
         latest.boundary === HARNESS_DURABLE_WAIT_BOUNDARY &&
         phase !== 'await_action' &&
-        phase !== 'await_runtime'
+        phase !== 'await_runtime' &&
+        phase !== 'await_agent'
       ) {
         throw new ManagedSessionConflictError(
-          'durable-wait checkpoint is not an await_action or await_runtime phase.',
+          'durable-wait checkpoint is not an await_action, await_runtime, or await_agent phase.',
         );
       }
       return {
@@ -516,6 +588,253 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         `harness:model_output_committed:${this.activation.activationId}:${identity.coveredSequence}`,
         checkpoint,
         null,
+      );
+      return checkpoint;
+    });
+  }
+
+  async commitAwaitAgent(
+    runs: readonly HarnessAgentWaitRun[],
+    turn: { readonly turnId: string; readonly promptId: string },
+    attempt?: {
+      readonly attemptId: string;
+      readonly routeRef: ManagedSessionDurableRef;
+    },
+  ): Promise<HarnessDurableWaitBoundary> {
+    if (runs.length === 0) {
+      throw new ManagedSessionConflictError(
+        'Agent wait batch must contain at least one run.',
+      );
+    }
+    // Boundary-side validation the parser keeps only on the read path:
+    // refuse here, or the duplicate / already-consumed batch becomes a
+    // checkpoint durable-blocked forever at the next read (R1-30).
+    const seenChildRuns = new Set<string>();
+    const seenCalls = new Set<string>();
+    for (const run of runs) {
+      if (
+        seenChildRuns.has(run.childRunId) ||
+        seenCalls.has(run.functionCallId)
+      ) {
+        throw new ManagedSessionConflictError(
+          'Agent wait batch entries must be unique on childRunId and functionCallId.',
+        );
+      }
+      seenChildRuns.add(run.childRunId);
+      seenCalls.add(run.functionCallId);
+      if (run.consumed) {
+        throw new ManagedSessionConflictError(
+          `Agent wait batch run ${run.childRunId} is already consumed.`,
+        );
+      }
+    }
+    return this.mutateCheckpoint(async () => {
+      this.assertNotDetached();
+      this.assertCurrentActivation();
+      const latest = this.authority.latestCheckpoint;
+      if (latest?.boundary === HARNESS_DURABLE_WAIT_BOUNDARY) {
+        const previous = (await this.requireRunnableAuthorization()).checkpoint;
+        // Replay discipline: the identical restated run set against the
+        // same wait answers the same boundary — a re-driven batch names the
+        // same child runs again; anything else conflicts, never a second
+        // wait and never a rewrite.
+        if (previous.continuation.phase === 'await_agent') {
+          const waited = previous.agentWait?.runs ?? [];
+          const same =
+            runs.length === waited.length &&
+            runs.every((run) =>
+              waited.some(
+                (existing) =>
+                  existing.childRunId === run.childRunId &&
+                  existing.functionCallId === run.functionCallId,
+              ),
+            ) &&
+            waited.every((existing) =>
+              runs.some(
+                (run) =>
+                  run.childRunId === existing.childRunId &&
+                  run.functionCallId === existing.functionCallId,
+              ),
+            );
+          if (same) {
+            return {
+              kind: 'durable_wait',
+              checkpointId: latest.checkpointId,
+              coveredSequence: latest.coveredSequence,
+              activationId: this.activation.activationId,
+              epoch: this.activation.epoch,
+            } satisfies HarnessDurableWaitBoundary;
+          }
+          throw new ManagedSessionConflictError(
+            'harness is already waiting on different child runs.',
+          );
+        }
+        throw new ManagedSessionConflictError(
+          'the durable wait in progress must resolve before the agent wait.',
+        );
+      }
+      const runnable = await this.ensureRunnableUnlocked();
+      const startsTurn =
+        runnable.continuation.phase === 'before_model' ||
+        runnable.continuation.phase === 'turn_settled';
+      if (
+        (turn.turnId !== runnable.identity.turnId ||
+          turn.promptId !== runnable.identity.promptId) &&
+        !startsTurn
+      ) {
+        throw new ManagedSessionConflictError(
+          'an agent wait cannot change the current unfinished turn.',
+        );
+      }
+      if (
+        runnable.identity.activationId !== this.activation.activationId &&
+        !startsTurn
+      ) {
+        throw new ManagedSessionConflictError(
+          'an agent wait cannot continue a prior activation.',
+        );
+      }
+      const previous = {
+        ...runnable,
+        identity: {
+          ...runnable.identity,
+          ...turn,
+          activationId: this.activation.activationId,
+        },
+      };
+      const identity = this.nextCheckpointIdentity();
+      const checkpoint = createAwaitAgentHarnessCheckpoint({
+        previous,
+        ...identity,
+        attempt:
+          previous.attempt ??
+          (attempt
+            ? {
+                attemptId: attempt.attemptId,
+                routeRef: attempt.routeRef,
+                capabilityRef: null,
+                samplingRef: null,
+                outputState: 'output_committed',
+                usageRef: null,
+                budgetConsumed: 0,
+              }
+            : null),
+        agentWait: { runs },
+      });
+      await this.commitHarnessCheckpoint(
+        `harness:await_agent:${this.activation.activationId}:${runs.map((run) => run.childRunId).join(',')}:${identity.coveredSequence}`,
+        checkpoint,
+        HARNESS_DURABLE_WAIT_BOUNDARY,
+      );
+      const committed = this.authority.latestCheckpoint;
+      if (committed === undefined) {
+        throw new ManagedSessionConflictError(
+          'agent wait was committed but no checkpoint was recorded.',
+        );
+      }
+      return {
+        kind: 'durable_wait',
+        checkpointId: committed.checkpointId,
+        coveredSequence: committed.coveredSequence,
+        activationId: this.activation.activationId,
+        epoch: this.activation.epoch,
+      };
+    });
+  }
+
+  async resolveAwaitAgent(
+    childRunId: string,
+  ): Promise<HarnessCheckpointV1 | null> {
+    return this.mutateCheckpoint(async () => {
+      this.assertNotDetached();
+      this.assertCurrentActivation();
+      const latest = this.authority.latestCheckpoint;
+      if (latest?.boundary !== HARNESS_DURABLE_WAIT_BOUNDARY) {
+        // The wait already advanced: the carried all-consumed group on
+        // model_output_committed. Restating a consumed run replays
+        // silently under the parking activation, but a fresh activation
+        // owes the Turn-bound commits its identity — `consumeRuntimeResults`
+        // no-ops on this phase, so without the adoption here the next
+        // `commitAwaitRuntimeBatch` would throw "Runtime work cannot
+        // continue a prior activation" (R2-1). `null` means only "this
+        // resolve is inapplicable here": the authorization read itself
+        // must surface — swallowing it would let the continue route start
+        // the model round on an identity the adoption never proved (R2-9).
+        const previous = (await this.requireRunnableAuthorization()).checkpoint;
+        if (
+          previous.continuation.phase !== 'model_output_committed' ||
+          previous.agentWait === null ||
+          !previous.agentWait.runs.every((run) => run.consumed) ||
+          !previous.agentWait.runs.some((run) => run.childRunId === childRunId)
+        ) {
+          return null;
+        }
+        if (previous.identity.activationId === this.activation.activationId) {
+          return previous;
+        }
+        const identity = this.nextCheckpointIdentity();
+        const adopted: HarnessCheckpointV1 = {
+          ...previous,
+          resume: {
+            ...previous.resume,
+            throughSequence: identity.coveredSequence,
+          },
+          identity: {
+            ...previous.identity,
+            checkpointId: identity.checkpointId,
+            coveredSequence: identity.coveredSequence,
+            previousCheckpointId: identity.previousCheckpointId,
+            activationId: this.activation.activationId,
+          },
+        };
+        await this.commitHarnessCheckpoint(
+          `harness:model_output_committed:${this.activation.activationId}:${childRunId}:${identity.coveredSequence}`,
+          adopted,
+          null,
+        );
+        return adopted;
+      }
+      const previous = (await this.requireRunnableAuthorization()).checkpoint;
+      if (previous.continuation.phase !== 'await_agent') {
+        throw new ManagedSessionConflictError(
+          'durable-wait checkpoint is not an await_agent phase.',
+        );
+      }
+      const waited = previous.agentWait?.runs.find(
+        (candidate) => candidate.childRunId === childRunId,
+      );
+      if (waited?.consumed === true) return previous;
+      const identity = this.nextCheckpointIdentity();
+      // A replacement owner that folds the last owed run feeds the Turn's
+      // next tool batch to the model: adopt the Turn's identity on the
+      // advancing commit, or that batch is refused as work of a prior
+      // activation. Consumption before the last run keeps the parking
+      // activation — the wait is still the dead owner's in flight.
+      const willAdvance = previous.agentWait!.runs.every(
+        (run) => run.childRunId === childRunId || run.consumed,
+      );
+      const adopted =
+        willAdvance &&
+        previous.identity.activationId !== this.activation.activationId
+          ? {
+              ...previous,
+              identity: {
+                ...previous.identity,
+                activationId: this.activation.activationId,
+              },
+            }
+          : previous;
+      const checkpoint = createConsumedAgentWaitHarnessCheckpoint({
+        previous: adopted,
+        ...identity,
+        childRunId,
+      });
+      const advanced =
+        checkpoint.continuation.phase === 'model_output_committed';
+      await this.commitHarnessCheckpoint(
+        `harness:${checkpoint.continuation.phase}:${this.activation.activationId}:${childRunId}:${identity.coveredSequence}`,
+        checkpoint,
+        advanced ? null : HARNESS_DURABLE_WAIT_BOUNDARY,
       );
       return checkpoint;
     });

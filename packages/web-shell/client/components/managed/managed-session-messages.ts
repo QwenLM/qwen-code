@@ -19,22 +19,48 @@ function record(value: unknown): Record<string, unknown> {
     : {};
 }
 
+// Only these Turn-bearing types may settle a Turn boundary. Control-plane
+// re-broadcasts (runtime_*, stream_gap, cancelling) must never settle: a
+// stale-Turn runtime_failed landing mid-stream would otherwise split one
+// answer into two bubbles, the first frozen mid-stream.
+const BOUNDARY_SETTLE_TYPES = new Set([
+  'accepted',
+  'assistant_delta',
+  'assistant_thought',
+  'agent_started',
+  'tool_requested',
+  'tool_started',
+  'tool_completed',
+  'tool_result_updated',
+  'completed',
+  'failed',
+  'cancelled',
+]);
+
 export function managedEventsToMessages(
   events: readonly ManagedAgentSessionEvent[],
   truncatedLabel: string,
 ): Message[] {
   const messages: Message[] = [];
   const tools = new Map<string, ACPToolCall>();
+  // Tools the non-fatal runtime_failed diagnostic failed, keyed to their
+  // Turn, so a later same-Turn cancellation can re-mark them: their status
+  // has already flipped to failed by then, which the terminal-event loop
+  // alone skips. An authoritative result or completion retires the booking.
+  const runtimeFailed = new Map<ACPToolCall, string>();
   let textMessage:
     | Extract<Message, { role: 'assistant' | 'thinking' }>
     | undefined;
   let currentTurnId: string | undefined;
-  const settle = () => {
+  const stopStreaming = () => {
     for (const message of messages) {
       if (message.role === 'assistant' || message.role === 'thinking') {
         message.isStreaming = false;
       }
     }
+  };
+  const settle = () => {
+    stopStreaming();
     textMessage = undefined;
   };
   for (const event of events) {
@@ -42,6 +68,7 @@ export function managedEventsToMessages(
     // they must not settle or split the Turn being streamed.
     if (event.type === 'action_updated') continue;
     if (
+      BOUNDARY_SETTLE_TYPES.has(event.type) &&
       event.type !== 'tool_result_updated' &&
       event.turnId !== currentTurnId
     ) {
@@ -89,7 +116,12 @@ export function managedEventsToMessages(
         messages.push(message);
         textMessage = message;
       }
-      if (textMessage) textMessage.content += text;
+      if (textMessage) {
+        textMessage.content += text;
+        // A runtime_failed only stopped the spinner: a Turn that keeps
+        // streaming after it must show as live again.
+        textMessage.isStreaming = true;
+      }
     } else if (event.type === 'agent_started') {
       settle();
     } else if (
@@ -178,7 +210,12 @@ export function managedEventsToMessages(
             result.preview.text +
             (result.preview.truncated === true ? `\n${truncatedLabel}` : '');
         }
-        tool.endTime ??= event.at;
+        // An authoritative result stays authoritative: it supersedes the
+        // diagnostic floor, and the booking retires so a later terminal
+        // event can neither move the end nor re-mark the tool.
+        if (runtimeFailed.has(tool)) tool.endTime = event.at;
+        else tool.endTime ??= event.at;
+        runtimeFailed.delete(tool);
       }
       if (tool.toolResult) {
         if (
@@ -201,11 +238,16 @@ export function managedEventsToMessages(
       if (event.type === 'tool_started') {
         tool.status = 'in_progress';
         tool.startTime = event.at;
+        // A resumed tool outgrows the diagnostic's floor: the end is open
+        // again, while the booking survives so the Turn's terminal event
+        // can still re-stamp it.
+        if (runtimeFailed.has(tool)) tool.endTime = undefined;
       }
       if (event.type === 'tool_completed') {
         tool.status = data['failed'] === true ? 'failed' : 'completed';
         tool.wasCancelled = data['cancelled'] === true;
         tool.endTime = event.at;
+        runtimeFailed.delete(tool);
         if (typeof data['output'] === 'string') {
           tool.rawOutput =
             data['output'] +
@@ -215,14 +257,42 @@ export function managedEventsToMessages(
     } else if (
       event.type === 'completed' ||
       event.type === 'failed' ||
-      event.type === 'cancelled'
+      event.type === 'cancelled' ||
+      // A runtime failure belongs to exactly one Turn: only for the Turn
+      // being streamed does it settle — otherwise the tail and pending
+      // tools render forever, while a stale-Turn failure must not disturb
+      // the live one.
+      (event.type === 'runtime_failed' && event.turnId === currentTurnId)
     ) {
-      settle();
+      // environment.failed is a non-fatal diagnostic and the Turn keeps
+      // streaming: dropping the continuation handle would split one answer
+      // into two bubbles, so only stop the spinner (and fail pending tools).
+      if (event.type === 'runtime_failed') stopStreaming();
+      else settle();
       for (const tool of tools.values()) {
+        if (
+          event.type !== 'runtime_failed' &&
+          runtimeFailed.get(tool) === event.turnId
+        ) {
+          if (event.type === 'cancelled' && tool.status === 'failed')
+            tool.wasCancelled = true;
+          // The Turn's terminal event ends a diagnostic-failed tool; a
+          // result-supplied end cannot occur here because the result and
+          // completion paths retire the booking when they land.
+          tool.endTime = event.at;
+        }
         if (tool.status === 'pending' || tool.status === 'in_progress') {
           tool.status = 'failed';
-          tool.wasCancelled = event.type === 'cancelled';
-          tool.endTime = event.at;
+          // The diagnostic's Turn may still run the tool to completion:
+          // the diagnostic only floors the end, which a result, a
+          // completion or the Turn's terminal event otherwise moves.
+          if (event.type === 'runtime_failed') {
+            runtimeFailed.set(tool, event.turnId);
+            tool.endTime = event.at;
+          } else {
+            tool.wasCancelled = event.type === 'cancelled';
+            tool.endTime = event.at;
+          }
         }
       }
       if (event.type === 'failed' && typeof data['message'] === 'string') {

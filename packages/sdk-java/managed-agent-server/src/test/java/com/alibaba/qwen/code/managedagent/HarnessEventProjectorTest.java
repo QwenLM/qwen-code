@@ -26,6 +26,12 @@ class HarnessEventProjectorTest {
                 .containsEntry("itemId", "item_turn-1_assistant")
                 .containsEntry("contentPartId",
                         "part_turn-1_output_text");
+        // containsEntry cannot prove absence: the raw update map must never
+        // bleed through into the projected, persisted and re-streamed data.
+        // The secret is nested two levels down, so absence is asserted on
+        // the serialized form, which holds at any nesting depth.
+        assertThat(event.data().toString()).doesNotContain("secret")
+                .doesNotContain("must-not-leak");
     }
 
     @Test
@@ -49,6 +55,57 @@ class HarnessEventProjectorTest {
         assertThat(event.errorCode()).isEqualTo("model_failed");
         assertThat(event.data().toString()).doesNotContain("secret")
                 .doesNotContain("/private/workspace");
+    }
+
+    @Test
+    void projectsToolCallsWithoutLeakingOtherUpdateFields() {
+        ProjectedEvent event = projector.project(new SourceEvent(7L,
+                "session_update", Map.of("update", Map.of(
+                        "sessionUpdate", "tool_call",
+                        "toolCallId", "tool-1",
+                        "name", "read_file",
+                        "title", "Read file",
+                        "status", "completed",
+                        "rawInput", Map.of("path", "/private/workspace"),
+                        "secret", "must-not-leak")), "prompt", Map.of()),
+                "turn-1");
+
+        assertThat(event.type()).isEqualTo("item.tool_call.updated");
+        assertThat(event.data()).containsEntry("toolCallId", "tool-1")
+                .containsEntry("name", "read_file")
+                .containsEntry("title", "Read file")
+                .containsEntry("status", "completed");
+        // The same allowlist guards the tool path: the raw update map must
+        // never bleed through, at any nesting depth.
+        assertThat(event.data().toString()).doesNotContain("secret")
+                .doesNotContain("must-not-leak")
+                .doesNotContain("/private/workspace")
+                .doesNotContain("rawInput");
+    }
+
+    @Test
+    void substitutesTheSafeFallbackCodeForAnOutOfAlphabetErrorCode() {
+        ProjectedEvent event = projector.project(new SourceEvent(4L,
+                "turn_error", Map.of("code", "sql=1; DROP TABLE users --",
+                        "message", "tagged"), "prompt", Map.of()), "turn-1");
+
+        assertThat(event.errorCode()).isEqualTo("hosted_harness_error");
+        assertThat(event.type()).isEqualTo("turn.failed");
+        assertThat(event.data().toString()).doesNotContain("DROP TABLE");
+    }
+
+    @Test
+    void substitutesTheSafeFallbackCodeForAnOversizeErrorCode() {
+        ProjectedEvent oversize = projector.project(new SourceEvent(5L,
+                "turn_error", Map.of("code", "a".repeat(129), "message",
+                        "tagged"), "prompt", Map.of()), "turn-1");
+        ProjectedEvent atBound = projector.project(new SourceEvent(6L,
+                "turn_error", Map.of("code", "b".repeat(128), "message",
+                        "tagged"), "prompt", Map.of()), "turn-2");
+
+        assertThat(oversize.errorCode()).isEqualTo("hosted_harness_error");
+        assertThat(oversize.type()).isEqualTo("turn.failed");
+        assertThat(atBound.errorCode()).isEqualTo("b".repeat(128));
     }
 
     @Test

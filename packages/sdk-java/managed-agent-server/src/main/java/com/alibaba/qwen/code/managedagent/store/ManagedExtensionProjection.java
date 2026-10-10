@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import static java.util.Map.entry;
+
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.nio.charset.StandardCharsets;
@@ -21,33 +23,88 @@ import java.util.function.Predicate;
  * module managed-extension-projection.ts there replays the same cases.
  */
 public final class ManagedExtensionProjection {
-    /** The record bodies defined so far; a slice adds its body here. */
-    public static final Map<String, Body> RECORD_BODIES = Map.of(
-            "monitor_run", new Body("monitor",
+    /** The record bodies defined so far; a slice adds its body here. ofEntries, since Map.of caps ten pairs. */
+    public static final Map<String, Body> RECORD_BODIES = Map.ofEntries(
+            entry("monitor_run", new Body(record -> "monitor",
                     ManagedExtensionRecords::requireMonitorRun,
                     body -> body.get("monitorId").textValue(),
                     ManagedExtensionRecords::isMonitorRunStart,
-                    ManagedExtensionRecords::isMonitorRunSuccessor),
-            "mcp_configuration", new Body(null,
+                    ManagedExtensionRecords::isMonitorRunSuccessor)),
+            entry("mcp_configuration", new Body(record -> null,
                     ManagedMcpRecords::requireConfiguration,
                     body -> body.get("configurationId").textValue(),
                     ManagedMcpRecords::isConfigurationStart,
-                    ManagedMcpRecords::isConfigurationSuccessor),
-            "mcp_operation", new Body(null,
+                    ManagedMcpRecords::isConfigurationSuccessor)),
+            entry("mcp_operation", new Body(record -> null,
                     ManagedMcpRecords::requireOperation,
                     body -> body.get("operationId").textValue(),
                     ManagedMcpRecords::isOperationStart,
-                    ManagedMcpRecords::isOperationSuccessor),
-            "hook_registration", new Body(null,
+                    ManagedMcpRecords::isOperationSuccessor)),
+            entry("hook_registration", new Body(record -> null,
                     ManagedHookRecords::requireRegistration,
                     body -> body.get("registrationId").textValue(),
                     ManagedHookRecords::isRegistrationStart,
-                    ManagedHookRecords::isRegistrationSuccessor),
-            "hook_execution", new Body(null,
+                    ManagedHookRecords::isRegistrationSuccessor)),
+            entry("hook_execution", new Body(record -> null,
                     ManagedHookRecords::requireExecution,
                     body -> body.get("hookExecutionId").textValue(),
                     ManagedHookRecords::isExecutionStart,
-                    ManagedHookRecords::isExecutionSuccessor));
+                    ManagedHookRecords::isExecutionSuccessor)),
+            entry("child_run", new Body(ManagedExtensionRecords::childRunTaskKind,
+                    ManagedExtensionRecords::requireChildRun,
+                    ManagedExtensionRecords::childRunRecordId,
+                    ManagedExtensionRecords::isChildRunStart,
+                    ManagedExtensionRecords::isChildRunSuccessor)),
+            entry("channel_route", new Body(record -> null,
+                    ManagedChannelRecords::requireRoute,
+                    body -> body.get("routeId").textValue(),
+                    ManagedChannelRecords::isRouteStart,
+                    ManagedChannelRecords::isRouteSuccessor)),
+            entry("channel_delivery", new Body(record -> null,
+                    ManagedChannelRecords::requireDelivery,
+                    body -> body.get("deliveryId").textValue(),
+                    ManagedChannelRecords::isDeliveryStart,
+                    ManagedChannelRecords::isDeliverySuccessor)),
+            entry("child_acceptance", new Body(record -> null,
+                    ManagedExtensionRecords::requireChildAcceptance,
+                    body -> body.get("childRunId").textValue(),
+                    ManagedExtensionRecords::isChildAcceptanceStart,
+                    ManagedExtensionRecords::isChildAcceptanceSuccessor)),
+            entry("schedule", new Body(record -> null,
+                    ManagedExtensionRecords::requireScheduleRecord,
+                    body -> body.get("scheduleId").textValue(),
+                    ManagedExtensionRecords::isScheduleStart,
+                    ManagedExtensionRecords::isScheduleSuccessor)),
+            entry("automation_run", new Body(record -> "automation_run",
+                    ManagedExtensionRecords::requireAutomationRunRecord,
+                    body -> body.get("automationRunId").textValue(),
+                    ManagedExtensionRecords::isAutomationRunStart,
+                    ManagedExtensionRecords::isAutomationRunSuccessor)),
+            entry("session_message", new Body(record -> null,
+                    ManagedSessionMessageRecords::requireMessage,
+                    body -> body.get("messageId").textValue(),
+                    ManagedSessionMessageRecords::isMessageStart,
+                    ManagedSessionMessageRecords::isMessageSuccessor)),
+            entry("team_state", new Body(record -> null,
+                    ManagedTeamRecords::requireState,
+                    body -> body.get("teamId").textValue(),
+                    ManagedTeamRecords::isStateStart,
+                    ManagedTeamRecords::isStateSuccessor)),
+            entry("team_task", new Body(record -> null,
+                    ManagedTeamRecords::requireTask,
+                    body -> body.get("taskId").textValue(),
+                    ManagedTeamRecords::isTaskStart,
+                    ManagedTeamRecords::isTaskSuccessor)),
+            entry("team_message", new Body(record -> null,
+                    ManagedTeamRecords::requireMessage,
+                    body -> body.get("messageId").textValue(),
+                    ManagedTeamRecords::isMessageStart,
+                    ManagedTeamRecords::isMessageSuccessor)),
+            entry("team_plan", new Body(record -> null,
+                    ManagedTeamRecords::requirePlan,
+                    body -> body.get("requestId").textValue(),
+                    ManagedTeamRecords::isPlanStart,
+                    ManagedTeamRecords::isPlanSuccessor)));
     public static final List<String> TASK_STATES = List.of("pending",
             "running", "waiting", "completed", "failed", "cancelled",
             "degraded", "recovery_blocked");
@@ -55,6 +112,19 @@ public final class ManagedExtensionProjection {
             "workflow", "background_shell", "monitor", "automation_run");
     public static final List<String> RUNTIME_STATES = List.of("unbound",
             "provisioning", "ready", "draining", "lost");
+    /**
+     * H4f: the task kinds whose cancel reaches a durable stop request on
+     * their own record. A child agent's stop request is set once on its
+     * child_run record; every other kind has no public cancel path yet —
+     * H3's Shell and Monitor domains stay disabled, the workflow kind has
+     * no runtime and an automation run carries no stop request.
+     */
+    public static final Set<String> CANCELLABLE_TASK_KINDS = Set.of(
+            "child_agent");
+    /** Task states a cancel may still act on: the run has not ended and
+     * is not waiting on recovery reconciliation. */
+    private static final Set<String> CANCELLABLE_TASK_STATES = Set.of(
+            "pending", "running", "waiting", "degraded");
 
     /**
      * Run states that mean the work began. A blocked run may still prove
@@ -72,10 +142,14 @@ public final class ManagedExtensionProjection {
     /**
      * A record body: how to check it, the identity its revision chain is
      * keyed by, whether it may open a chain and whether it may follow a
-     * revision. Every body embeds its run block under {@code run}.
+     * revision. Every body embeds its run block under {@code run}. The task
+     * kind follows the record — a constant for every body so far except
+     * {@code child_run}, whose kind follows the body's own {@code kind}
+     * field — and is null for a body that projects no task.
      */
-    public record Body(String taskKind, Consumer<JsonNode> require,
-            Function<JsonNode, String> recordId, Predicate<JsonNode> isStart,
+    public record Body(Function<JsonNode, String> taskKindOf,
+            Consumer<JsonNode> require, Function<JsonNode, String> recordId,
+            Predicate<JsonNode> isStart,
             BiPredicate<JsonNode, JsonNode> isSuccessor) {
     }
 
@@ -114,6 +188,19 @@ public final class ManagedExtensionProjection {
      */
     public static TaskProjection project(TaskProjection previous,
             JsonNode run, long occurredAt) {
+        return project(previous, run, occurredAt, false);
+    }
+
+    /**
+     * The same projection with the record's stop request: a stop-requested
+     * record whose run is attached ({@code running_attached}) or still
+     * provisioning ({@code intent}/{@code dispatch_started}) projects its
+     * Runtime as {@code draining}; a lost, terminal or unbound row keeps
+     * its own Runtime state (H3's {@code child_run}; every earlier record
+     * passes false).
+     */
+    public static TaskProjection project(TaskProjection previous,
+            JsonNode run, long occurredAt, boolean stopRequested) {
         String state = run.get("state").textValue();
         JsonNode definition = run.get("definition");
         long createdAt = previous == null ? occurredAt : previous.createdAt();
@@ -128,11 +215,23 @@ public final class ManagedExtensionProjection {
                                 ? startedAt : createdAt))
                         : null;
         return new TaskProjection(taskState(state, run.get("reason")),
-                runtimeState(run),
+                runtimeState(run, stopRequested),
                 definition.isNull() ? null : definition
                         .get("definitionRevision").decimalValue()
                         .longValueExact(),
                 createdAt, startedAt, settledAt);
+    }
+
+    /**
+     * The actions a task supports now, the same for every caller:
+     * {@code cancel} while a cancellable kind's run has not ended. The
+     * task view advertises this list and a new cancel admission rechecks
+     * it under the Session lock.
+     */
+    public static List<String> taskActions(String kind, String state) {
+        return CANCELLABLE_TASK_KINDS.contains(kind)
+                && CANCELLABLE_TASK_STATES.contains(state)
+                ? List.of("cancel") : List.of();
     }
 
     /** Whether the run's delivery is in the outbox. */
@@ -146,15 +245,22 @@ public final class ManagedExtensionProjection {
      * The physical execution state a Broker execution record proves. A
      * claimed dispatch that was not sent yet is still an intent: the Broker
      * grants it again at the next generation instead of calling it unknown.
-     * Only the Runtime's own not_started answer proves a call unsent, and an
+     * Two facts prove a call unsent: the Runtime's own not_started answer,
+     * and the record's own ledger for a call that settles cancelled without
+     * ever being claimed. ToolExecutionRecord refuses a claimed generation
+     * that is not positive, so a dispatchGeneration of 0 is that proof, and
+     * the run line accepts intent to not_started_proven. A claimed cancel
+     * stays settled, since nothing records whether it was sent, and an
      * abandoned record's outcome stays unknown for good.
      */
     public static String executionOf(ToolExecutionRecord.State state,
-            String executionStatus) {
+            String executionStatus, long dispatchGeneration) {
         return switch (state) {
             case PREPARED, DISPATCHING -> "intent";
             case EXECUTING, CANCEL_REQUESTED -> "dispatch_started";
             case SETTLED -> "not_started".equals(executionStatus)
+                    || "cancelled".equals(executionStatus)
+                            && dispatchGeneration == 0
                     ? "not_started_proven" : "settled";
             case UNKNOWN, ABANDONED -> "outcome_unknown";
         };
@@ -170,7 +276,7 @@ public final class ManagedExtensionProjection {
         };
     }
 
-    private static String runtimeState(JsonNode run) {
+    private static String runtimeState(JsonNode run, boolean stopRequested) {
         String execution = run.get("execution").textValue();
         if (ManagedExtensionRecords.TERMINAL.contains(
                 run.get("state").textValue())
@@ -181,13 +287,13 @@ public final class ManagedExtensionProjection {
             return "unbound";
         }
         if ("running_attached".equals(execution)) {
-            return "ready";
+            return stopRequested ? "draining" : "ready";
         }
         if ("runtime_lost".equals(run.get("reason").textValue())) {
             return "lost";
         }
         if ("intent".equals(execution) || "dispatch_started".equals(execution)) {
-            return "provisioning";
+            return stopRequested ? "draining" : "provisioning";
         }
         return null;
     }

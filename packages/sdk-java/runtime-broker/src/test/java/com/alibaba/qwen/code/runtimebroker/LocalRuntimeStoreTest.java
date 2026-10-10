@@ -1,13 +1,42 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import org.junit.jupiter.api.Test;
 
 class LocalRuntimeStoreTest {
+    @org.junit.jupiter.api.condition.DisabledOnOs(org.junit.jupiter.api.condition.OS.WINDOWS)
+    @Test
+    void preflightChecksExistingPrivateStateWithoutChangingIt(
+            @org.junit.jupiter.api.io.TempDir Path directory) throws Exception {
+        Path state = directory.toRealPath().resolve("state");
+        assertThrows(java.io.IOException.class,
+                () -> LocalProcessRuntimeProvisioner.validateStateDirectory(state));
+        assertTrue(Files.notExists(state));
+        var permissions = PosixFilePermissions.fromString("rwxr-xr-x");
+        Files.createDirectory(state);
+        Files.setPosixFilePermissions(state, permissions);
+        assertThrows(java.io.IOException.class,
+                () -> LocalProcessRuntimeProvisioner.validateStateDirectory(state));
+        assertEquals(permissions, Files.getPosixFilePermissions(state));
+        Files.setPosixFilePermissions(state, PosixFilePermissions.fromString("rwx------"));
+        String user = System.getProperty("user.name");
+        System.setProperty("user.name", "qwen-unresolvable-user-4242");
+        try {
+            LocalProcessRuntimeProvisioner.validateStateDirectory(state);
+        } finally {
+            System.setProperty("user.name", user);
+        }
+        try (var entries = Files.list(state)) {
+            assertEquals(0, entries.count());
+        }
+    }
+
     @Test
     void nonLinuxReportsThePlatformAndBothOptOutProperties() {
         String os = System.getProperty("os.name");

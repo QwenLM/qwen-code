@@ -326,56 +326,60 @@ it('does not retry creation after a prop change until the user requests it', asy
   expect(onCreated).toHaveBeenCalledWith('side-task:draft:1', 'side-session-1');
 });
 
-it('renders a restored side task as a full chat pane', () => {
-  connection.sessionId = 'side-session-1';
-  connection.displayName = 'Investigate flaky tests';
-  connection.status = 'connected';
-  transcript.blocks = [{ kind: 'user' }];
-  container = document.createElement('div');
-  document.body.appendChild(container);
-  root = createRoot(container);
+it.each(['/work/project', '/work/secondary'])(
+  'renders a restored side task in its workspace %s',
+  (workspaceCwd) => {
+    connection.sessionId = 'side-session-1';
+    connection.workspaceCwd = workspaceCwd;
+    connection.displayName = 'Investigate flaky tests';
+    connection.status = 'connected';
+    transcript.blocks = [{ kind: 'user' }];
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
 
-  const onTitleChange = vi.fn();
-  const onRightPanelOpen = vi.fn();
-  const onArtifactsChange = vi.fn();
-  act(() => {
-    root!.render(
-      <I18nProvider language="en">
-        <SideTaskPanel
-          tabId="side-task:side-session-1"
-          sessionId="side-session-1"
-          parentSessionId="parent-session"
-          workspaceCwd="/work/project"
-          title="Side task"
-          createSession={vi.fn()}
-          onCreated={vi.fn()}
-          onTitleChange={onTitleChange}
-          onRightPanelOpen={onRightPanelOpen}
-          onArtifactsChange={onArtifactsChange}
-        />
-      </I18nProvider>,
-    );
-  });
+    const onTitleChange = vi.fn();
+    const onRightPanelOpen = vi.fn();
+    const onArtifactsChange = vi.fn();
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <SideTaskPanel
+            tabId="side-task:side-session-1"
+            sessionId="side-session-1"
+            parentSessionId="parent-session"
+            workspaceCwd={workspaceCwd}
+            title="Side task"
+            createSession={vi.fn()}
+            onCreated={vi.fn()}
+            onTitleChange={onTitleChange}
+            onRightPanelOpen={onRightPanelOpen}
+            onArtifactsChange={onArtifactsChange}
+          />
+        </I18nProvider>,
+      );
+    });
 
-  expect(
-    container.querySelector('[data-testid="side-task-chat"]'),
-  ).not.toBeNull();
-  expect(latestChatPaneProps.current).toMatchObject({
-    title: 'Investigate flaky tests',
-    workspaceCwd: '/work/project',
-    embedded: true,
-    onRightPanelOpen,
-    onPaneArtifactsChange: onArtifactsChange,
-  });
-  expect(
-    latestChatPaneProps.current?.['onFirstPromptAdmitted'],
-  ).toBeUndefined();
-  expect(providerProps.current).toMatchObject({
-    sessionId: 'side-session-1',
-    workspaceCwd: '/work/project',
-    autoConnect: true,
-  });
-});
+    expect(
+      container.querySelector('[data-testid="side-task-chat"]'),
+    ).not.toBeNull();
+    expect(latestChatPaneProps.current).toMatchObject({
+      title: 'Investigate flaky tests',
+      workspaceCwd,
+      embedded: true,
+      onRightPanelOpen,
+      onPaneArtifactsChange: onArtifactsChange,
+    });
+    expect(
+      latestChatPaneProps.current?.['onFirstPromptAdmitted'],
+    ).toBeUndefined();
+    expect(providerProps.current).toMatchObject({
+      sessionId: 'side-session-1',
+      workspaceCwd,
+      autoConnect: true,
+    });
+  },
+);
 
 it('threads model management policy to its chat pane', () => {
   connection.sessionId = 'side-session-1';

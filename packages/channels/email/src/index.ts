@@ -3,6 +3,18 @@ import { EmailChannel } from './email-channel.js';
 import { emailSettings } from './config.js';
 
 export { EmailChannel };
+export { ManagedEmailAdapter } from './managed-email-adapter.js';
+export { createManagedEmailDeps } from './managed-email-deps.js';
+export type {
+  EmailReplyContext,
+  ManagedChannelControlPlane,
+  ManagedChannelPolicy,
+  ManagedClaimedDelivery,
+  ManagedEmailAdapterDeps,
+  ManagedEmailAdapterOptions,
+  ManagedInboundEvent,
+  ManagedReceipt,
+} from './managed-email-adapter.js';
 
 const required = [
   'address',

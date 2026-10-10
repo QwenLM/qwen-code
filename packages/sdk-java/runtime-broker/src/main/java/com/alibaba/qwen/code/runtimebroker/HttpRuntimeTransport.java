@@ -54,7 +54,8 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     private static final Set<String> TOOL_RESPONSE_FIELDS = Set.of(
             "protocolVersion", "state", "result", "lastSequence");
     private static final Set<String> TOOL_STATES = Set.of("prepared",
-            "executing", "cancel_requested", "settled", "unknown");
+            "executing", "cancel_requested", "settled", "acknowledged",
+            "unknown");
     private static final Set<String> EXECUTION_STATUSES = Set.of(
             "not_started", "success", "error", "cancelled");
     private static final Set<String> CALLER_REFERENCE_FIELDS = Set.of(
@@ -218,7 +219,10 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                     }
                     throw unavailable(cause);
                 });
-        returned.whenComplete((value, error) -> {
+        // A deadline completes the stage on the shared CompletableFuture delay
+        // thread, and cancelling the exchange closes a socket: keep that off
+        // the caller's completion path and off the timer thread.
+        returned.whenCompleteAsync((value, error) -> {
             if (error != null || returned.isCancelled()) {
                 exchange.cancel(true);
                 result.cancel(false);
@@ -625,13 +629,14 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 if (!(capture instanceof Map<?, ?> data)
                         || !data.keySet().equals(V3_CAPTURE_FIELDS)
                         || !(data.get("captureStatus") instanceof String captureStatus)
-                        || !Set.of("complete", "partial", "unavailable")
-                                .contains(captureStatus)
+                        || !Set.of("complete", "partial", "unavailable",
+                                "detached").contains(captureStatus)
                         || !(data.get("previewTruncated") instanceof Boolean)
                         || !(data.get("deliveryStatus") instanceof String deliveryStatus)
                         || !Set.of("pending", "committed", "blocked")
                                 .contains(deliveryStatus)
-                        || "complete".equals(captureStatus)
+                        || ("complete".equals(captureStatus)
+                                || "detached".equals(captureStatus))
                             != (data.get("captureReason") == null)
                         || data.get("captureReason") != null
                             && (!(data.get("captureReason") instanceof String reason)
@@ -640,8 +645,10 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                                         "cancelled").contains(reason))
                         || data.get("manifest") == null
                             && !"unavailable".equals(captureStatus)
+                            && !"detached".equals(captureStatus)
                         || data.get("manifest") != null
-                            && !validV3ManifestRef(data.get("manifest"))) {
+                            && ("detached".equals(captureStatus)
+                                || !validV3ManifestRef(data.get("manifest")))) {
                     throw protocol("Managed Runtime " + operation
                             + " capture is invalid.");
                 }
@@ -728,8 +735,24 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             return post(lease, ManagedHookProtocol.PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
                     .thenApply(bytes -> ManagedHookProtocol.response(bytes, session, immutable));
         }
+        if (ManagedShellProtocol.isOperation(immutable)) {
+            ManagedShellProtocol.validateSession(session, immutable);
+            Map<String, Object> body = Map.of("protocolVersion", 1,
+                    "runtimeSessionId", session.getRuntimeSessionId(), "operation", immutable);
+            byte[] encoded;
+            try {
+                encoded = encodeToolRequest(body, 16 * 1024);
+            } catch (IllegalArgumentException tooLarge) {
+                throw new RuntimeBrokerException(413, "runtime_control_operation_too_large",
+                        "Runtime Shell operation exceeds its size limit.", false);
+            }
+            return post(lease, ManagedShellProtocol.PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
+                    .thenApply(bytes -> ManagedShellProtocol.response(bytes, session, immutable));
+        }
         ProviderRuntimeProtocol.control(immutable, session.getHarnessSessionId(), session.getRuntimeSessionId());
-        if ("history".equals(immutable.get("kind")) || "raw-file-history".equals(immutable.get("kind"))) {
+        // Workspace context reads the Session's files directly, as file history
+        // does: neither needs a provider Session acquired first.
+        if (Set.of("history", "raw-file-history", "workspace-context").contains(immutable.get("kind"))) {
             return provider(lease, session, immutable);
         }
         return provider(lease, session, Map.of("kind", "acquire"))
@@ -1091,7 +1114,10 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                     }
                     throw unavailable(cause);
                 });
-        returned.whenComplete((value, error) -> {
+        // A deadline completes the stage on the shared CompletableFuture delay
+        // thread, and cancelling the exchange closes a socket: keep that off
+        // the caller's completion path and off the timer thread.
+        returned.whenCompleteAsync((value, error) -> {
             if (error != null || returned.isCancelled()) {
                 exchange.cancel(true);
                 result.cancel(false);

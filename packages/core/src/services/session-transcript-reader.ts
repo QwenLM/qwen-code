@@ -356,7 +356,13 @@ function buildManagedSessionRestoreProjection(
       const uiEvent = (
         record.systemPayload as UiTelemetryRecordPayload | undefined
       )?.uiEvent;
-      if (uiEvent) uiTelemetryEvents.push(uiEvent);
+      if (
+        uiEvent &&
+        uiEvent['event.name'] !== 'request_lifecycle' &&
+        uiEvent['event.name'] !== 'tool_lifecycle'
+      ) {
+        uiTelemetryEvents.push(uiEvent as UiEvent);
+      }
     }
     if (record.subtype === 'attribution_snapshot') {
       const snapshot = (
@@ -1170,7 +1176,9 @@ export function navigationKindForRecord(
   if (
     record.subtype === 'goal_runtime' ||
     record.subtype === 'notification' ||
-    record.subtype === 'mid_turn_user_message'
+    record.subtype === 'mid_turn_user_message' ||
+    record.subtype === 'agent_mention' ||
+    record.subtype === 'agent_message'
   ) {
     return undefined;
   }
@@ -1393,6 +1401,9 @@ const REPLAY_MID_TURN_USER_SUBTYPES: ReadonlySet<string> = new Set([
   'notification',
   'cron',
   'mid_turn_user_message',
+  // Session multi-agent records render inline and never open a turn.
+  'agent_mention',
+  'agent_message',
 ] satisfies ReadonlyArray<NonNullable<ChatRecord['subtype']>>);
 
 export function isReplayTurnStartType(
@@ -3252,7 +3263,13 @@ export class SessionTranscriptReader {
         const uiEvent = (
           record.systemPayload as UiTelemetryRecordPayload | undefined
         )?.uiEvent;
-        if (uiEvent) uiTelemetryEvents.push(uiEvent);
+        if (
+          uiEvent &&
+          uiEvent['event.name'] !== 'request_lifecycle' &&
+          uiEvent['event.name'] !== 'tool_lifecycle'
+        ) {
+          uiTelemetryEvents.push(uiEvent as UiEvent);
+        }
       }
       if (record.uuid === attributionUuid) {
         const snapshot = (

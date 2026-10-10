@@ -47,6 +47,8 @@ vi.mock('./components/WorkspaceSessionProvider', () => ({
 }));
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
+  getFanoutOrigins: () => [],
+  syncFanoutParams: vi.fn(),
   getAllowedDaemonOrigin: (value: string) => value,
   confirmDaemonTarget: vi.fn(),
   isKnownDaemonTarget: () => false,

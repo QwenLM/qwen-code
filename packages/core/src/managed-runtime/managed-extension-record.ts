@@ -425,7 +425,13 @@ function count(value: unknown, label: string, min = 0, max?: number): number {
     label,
   );
   if (number < min || (max !== undefined && number > max)) {
-    fail(`${label} is out of range.`);
+    // Pair to the Java store's identical refusal, so a cross-language
+    // failure reads alike wherever the boundary caught it.
+    fail(
+      max !== undefined
+        ? `${label} must be an integer from ${min} to ${max}.`
+        : `${label} must be an integer from ${min} or more.`,
+    );
   }
   return number;
 }
@@ -773,9 +779,13 @@ export function parseExtensionRun(value: unknown, label = 'run'): ExtensionRun {
     fail(`${label} has nothing dispatched while reserved.`);
   }
   // An execution that nobody can prove never passes for a settled one.
+  // The one failure that needs no proof: the run stopped inside its turn,
+  // so `failed` names the turn, `outcome_unknown` names what could not be
+  // known, and the pair stays visible instead of guessed (F3).
   if (
     (execution === 'outcome_unknown' || execution === 'corrupt') &&
-    state !== 'recovery_blocked'
+    state !== 'recovery_blocked' &&
+    !(execution === 'outcome_unknown' && state === 'failed')
   ) {
     fail(
       `${label}.state must be recovery_blocked while execution is ${execution}.`,
@@ -784,7 +794,8 @@ export function parseExtensionRun(value: unknown, label = 'run'): ExtensionRun {
   if (
     isTerminal(state) &&
     execution !== null &&
-    !PROVEN_EXECUTION_STATES.includes(execution)
+    !PROVEN_EXECUTION_STATES.includes(execution) &&
+    !(state === 'failed' && execution === 'outcome_unknown')
   ) {
     fail(`${label}.state ${state} needs an execution proven to have ended.`);
   }
