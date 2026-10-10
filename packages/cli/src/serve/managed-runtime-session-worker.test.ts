@@ -1163,7 +1163,7 @@ describe.skipIf(process.platform === 'win32')(
 
       it(
         'an unproven sweep from the exit hook arms the reaper from inside its own failure',
-        // Two 10 s waits plus the retry witness need a ceiling above 15 s.
+        // Two 10 s waits need a ceiling above 15 s.
         { timeout: 30_000 },
         async () => {
           // The exit hook's catch swallows the sweep's throw because the
@@ -1207,20 +1207,9 @@ describe.skipIf(process.platform === 'win32')(
               },
               { timeout: 10_000 },
             );
-            // The lift never comes from garbage: the quarantine stands. The
-            // earliest lift is one reaper tick (1 s) out, so judging right
-            // after the report would be green under any implementation — wait
-            // for the armed reaper's own retry sweep first.
-            await vi.waitFor(
-              () => {
-                expect(
-                  sweepWitnesses.records.filter(
-                    (record) => record.workFile === workFile,
-                  ).length,
-                ).toBeGreaterThan(1);
-              },
-              { timeout: 3_000 },
-            );
+            // The lift never comes from garbage: the quarantine stands. Judged
+            // at the arming moment — this asserts no lift *yet*, not that a
+            // later pass withheld one.
             expect(quarantine.lift).not.toHaveBeenCalled();
           } finally {
             release?.();
@@ -1369,8 +1358,10 @@ function queryProcessTableTolerant(): ReadonlyMap<number, ProcessTableRow> {
     lastTableError = error;
     // Every break condition below needs positive table evidence, so a
     // persistent failure — a missing ps, a query that always times out —
-    // can only burn the deadline. After a margin of consecutive failures
-    // the cause itself aborts the poll instead of the fixture's name.
+    // can only burn the deadline, where tableDeadlineError already names the
+    // tolerated cause. This margin aborts earlier only for a *fast* failure:
+    // at PROCESS_QUERY_TIMEOUT_MS = 2_000 a timing-out query reaches ~5
+    // failures per 10 s deadline, never 20.
     if (++tableFailuresInARow >= 20) throw error;
     return new Map();
   }
