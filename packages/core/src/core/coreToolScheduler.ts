@@ -235,7 +235,10 @@ import {
 } from '../utils/invocation-context.js';
 import { evaluateToolInvocationGuard } from './tool-invocation-guard.js';
 import { goalTurnContext } from '../goals/goal-turn-context.js';
-import { goalToolResultProvenance } from '../goals/goal-tool-result-provenance.js';
+import {
+  codeModeToolResultStamp,
+  goalToolResultProvenance,
+} from '../goals/goal-tool-result-provenance.js';
 import {
   extractCodeModeImageContent,
   runWithoutToolCallRuntime,
@@ -7711,7 +7714,7 @@ export class CoreToolScheduler {
         call.response.responseParts,
       );
       const options = nested
-        ? { ...goalProvenance, subtype: 'code_mode_tool_result' as const }
+        ? { ...goalProvenance, ...codeModeToolResultStamp() }
         : goalProvenance;
       recorder.recordToolResult(
         call.response.responseParts,
