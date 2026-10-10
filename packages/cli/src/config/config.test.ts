@@ -127,8 +127,11 @@ const createNativeLspServiceInstance = () => ({
   }),
 });
 
-vi.mock('./trustedFolders.js', () => ({
+vi.mock('./trustedFolders.js', async (importOriginal) => ({
   isWorkspaceTrusted: vi.fn(() => ({ isTrusted: true, source: 'file' })), // Default to trusted
+  createWorkflowAncestorTrustProvider: (
+    await importOriginal<typeof import('./trustedFolders.js')>()
+  ).createWorkflowAncestorTrustProvider,
 }));
 
 const nativeLspServiceMock = vi.mocked(NativeLspService);
@@ -6187,6 +6190,65 @@ describe('loadCliConfig workflowsEnabled', () => {
     const settings: Settings = { tools: { workflowsEnabled: false } };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.isWorkflowsEnabled()).toBe(true);
+  });
+
+  describe('saved-workflow ancestor trust', () => {
+    const load = async (
+      extraArgs: string[],
+      hostPolicy?: Parameters<typeof loadCliConfig>[9],
+    ) => {
+      process.argv = ['node', 'script.js', ...extraArgs];
+      const argv = await parseArguments();
+      return loadCliConfig(
+        { security: { folderTrust: { enabled: false } } },
+        argv,
+        undefined,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        hostPolicy,
+      );
+    };
+
+    it('installs the local trust rules by default', async () => {
+      const provider = (await load([])).getWorkflowAncestorTrustProvider();
+      expect(provider).toEqual(expect.any(Function));
+      // Folder trust disabled: the host answers trusted; core still keeps
+      // the search inside the repository.
+      await expect(provider!(['/repo/packages', '/repo'])).resolves.toEqual([
+        true,
+        true,
+      ]);
+    });
+
+    it('uses the host policy when the host supplies one', async () => {
+      const host = vi.fn(async (dirs: readonly string[]) =>
+        dirs.map(() => false),
+      );
+      const config = await load([], { workflowAncestorTrustProvider: host });
+      expect(config.getWorkflowAncestorTrustProvider()).toBe(host);
+    });
+
+    it('trusts no ancestor when the host supplies the key without a policy', async () => {
+      const config = await load([], {
+        workflowAncestorTrustProvider: undefined,
+      });
+      expect(config.getWorkflowAncestorTrustProvider()).toBeUndefined();
+    });
+
+    it('trusts no ancestor in bare mode or for a read-only agent host', async () => {
+      expect(
+        (await load(['--bare'])).getWorkflowAncestorTrustProvider(),
+      ).toBeUndefined();
+      expect(
+        (
+          await load([], { agentHostReadOnly: true })
+        ).getWorkflowAncestorTrustProvider(),
+      ).toBeUndefined();
+    });
   });
 });
 

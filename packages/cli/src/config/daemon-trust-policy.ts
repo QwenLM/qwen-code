@@ -409,3 +409,29 @@ export function evaluateDaemonWorkspaceTrust(
     explicitTrustLevel: explicitTrustLevel(snapshot, workspaceCwd),
   };
 }
+
+/**
+ * Whether a published snapshot trusts one ancestor of a session's directory
+ * to contribute saved workflows. Only folder-trust rules admit an ancestor:
+ * the IDE's trust covers the folder it has open (the daemon's own cwd), never
+ * that folder's parents, so here it can only deny. Settings or rules that
+ * failed to load deny.
+ */
+export function evaluateDaemonWorkflowAncestorTrust(
+  snapshot: DaemonTrustPolicySnapshot,
+  ancestorDir: string,
+  processCwd = process.cwd(),
+): boolean {
+  if (
+    snapshot.ideTrust === false &&
+    snapshot.folderTrustEnabled &&
+    arePathsEquivalent(ancestorDir, processCwd)
+  ) {
+    return false;
+  }
+  return evaluateDaemonWorkspaceTrust(
+    { ...snapshot, ideTrust: undefined },
+    ancestorDir,
+    processCwd,
+  ).targetTrusted;
+}

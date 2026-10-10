@@ -582,6 +582,16 @@ const SESSION_AGENT_APPROVAL_MODE_ERROR =
 /**
  * Information about an approval mode including display name and description.
  */
+/**
+ * Host answer to "which of these ancestor directories are trusted?" for
+ * saved-workflow discovery. Called with the strict ancestors of the target
+ * directory, nearest first; returns one boolean per directory. Only an
+ * answer of exactly `true` admits a directory.
+ */
+export type WorkflowAncestorTrustProvider = (
+  ancestorDirs: readonly string[],
+) => Promise<readonly boolean[]>;
+
 export interface ApprovalModeInfo {
   id: ApprovalMode;
   name: string;
@@ -1255,6 +1265,12 @@ export interface ConfigParameters {
    * before execution. A configured guard fails closed.
    */
   toolInvocationGuard?: ToolInvocationGuard;
+  /**
+   * Runtime-only host policy for which ancestors of the target directory may
+   * contribute saved workflows; never loaded from settings. Absent, no
+   * ancestor is searched.
+   */
+  workflowAncestorTrustProvider?: WorkflowAncestorTrustProvider;
   /** Internal trusted-host integration; never loaded from workspace settings. */
   shellExecutionSandbox?: Readonly<ShellExecutionSandboxPolicy>;
   toolDiscoveryCommand?: string;
@@ -2847,6 +2863,9 @@ export class Config {
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
   private readonly toolInvocationGuard: ToolInvocationGuard | undefined;
+  private readonly workflowAncestorTrustProvider:
+    | WorkflowAncestorTrustProvider
+    | undefined;
   private modelInvocableCommandsProvider:
     | (() => ReadonlyArray<{ name: string; description: string }>)
     | null = null;
@@ -3420,6 +3439,7 @@ export class Config {
     this.permissionsDeny = params.permissions?.deny || [];
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
     this.toolInvocationGuard = params.toolInvocationGuard;
+    this.workflowAncestorTrustProvider = params.workflowAncestorTrustProvider;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
@@ -12286,6 +12306,17 @@ export class Config {
     return (
       this.isAgentCollaborationEnabled() && this.sessionSourceType === 'agent'
     );
+  }
+
+  /**
+   * The host's ancestor trust policy for saved-workflow discovery. A derived
+   * Config shares its parent's; the directories it is asked about come from
+   * the asking Config's own target directory.
+   */
+  getWorkflowAncestorTrustProvider():
+    | WorkflowAncestorTrustProvider
+    | undefined {
+    return this.workflowAncestorTrustProvider;
   }
 
   getToolInvocationGuard(): ToolInvocationGuard | undefined {

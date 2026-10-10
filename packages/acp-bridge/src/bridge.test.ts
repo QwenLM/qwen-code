@@ -42204,3 +42204,93 @@ describe('background handoff cancellation', () => {
     }
   });
 });
+
+describe('AcpSessionBridge — workflow ancestor trust (child → parent)', () => {
+  const method = SERVE_CONTROL_EXT_METHODS.workflowAncestorTrust;
+  const chain = [
+    path.resolve('/repo/packages'),
+    path.resolve('/repo'),
+    path.parse(path.resolve('/')).root,
+  ];
+
+  async function spawnWith(
+    workflowAncestorTrust?: BridgeOptions['workflowAncestorTrust'],
+  ) {
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      ...(workflowAncestorTrust ? { workflowAncestorTrust } : {}),
+    });
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    return { handle, bridge };
+  }
+
+  it('passes the runtime handler to the channel and returns its answer', async () => {
+    const handler = vi.fn(async (dirs: readonly string[]) =>
+      dirs.map((dir) => dir !== chain[2]),
+    );
+    const { handle, bridge } = await spawnWith(handler);
+    await expect(
+      handle.agentConnection.extMethod(method, { ancestorDirs: chain }),
+    ).resolves.toEqual({ trusted: [true, true, false] });
+    expect(handler).toHaveBeenCalledWith(chain);
+    await bridge.shutdown();
+  });
+
+  it('reports methodNotFound when the runtime installed no handler', async () => {
+    const { handle, bridge } = await spawnWith();
+    await expect(
+      handle.agentConnection.extMethod(method, { ancestorDirs: chain }),
+    ).rejects.toMatchObject({ code: -32601 });
+    await bridge.shutdown();
+  });
+
+  it.each([
+    ['no directories', { ancestorDirs: [] }],
+    ['a relative directory', { ancestorDirs: ['repo'] }],
+    ['a non-normalized directory', { ancestorDirs: [`${chain[1]}/x/..`] }],
+    ['a gap in the chain', { ancestorDirs: [chain[0], chain[2]] }],
+    ['a repeated directory', { ancestorDirs: [chain[2], chain[2]] }],
+    ['a non-string', { ancestorDirs: [42] }],
+    ['an extra parameter', { ancestorDirs: chain, sessionId: 's' }],
+    [
+      'too many directories',
+      {
+        ancestorDirs: Array.from({ length: 65 }, (_, i) =>
+          path.resolve('/', ...Array.from({ length: 65 - i }, () => 'd')),
+        ),
+      },
+    ],
+  ])(
+    'refuses a request with %s before the handler runs',
+    async (_l, params) => {
+      const handler = vi.fn(async (dirs: readonly string[]) =>
+        dirs.map(() => true),
+      );
+      const { handle, bridge } = await spawnWith(handler);
+      await expect(
+        handle.agentConnection.extMethod(method, params as never),
+      ).rejects.toMatchObject({ code: -32602 });
+      expect(handler).not.toHaveBeenCalled();
+      await bridge.shutdown();
+    },
+  );
+
+  it.each([
+    ['throws', async () => Promise.reject(new Error('closed generation'))],
+    ['answers the wrong length', async () => [true]],
+    [
+      'answers non-booleans',
+      async (dirs: readonly string[]) =>
+        dirs.map(() => 'yes' as unknown as boolean),
+    ],
+  ])('fails the request when the handler %s', async (_l, handler) => {
+    const { handle, bridge } = await spawnWith(
+      handler as BridgeOptions['workflowAncestorTrust'],
+    );
+    await expect(
+      handle.agentConnection.extMethod(method, { ancestorDirs: chain }),
+    ).rejects.toBeDefined();
+    await bridge.shutdown();
+  });
+});

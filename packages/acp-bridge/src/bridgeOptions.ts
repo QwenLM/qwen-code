@@ -164,6 +164,18 @@ export type ExternalToolGuardHandler = (
   request: ExternalToolGuardPrepareRequest,
 ) => Promise<ExternalToolGuardPrepareResult>;
 
+/** Most directories one workflow ancestor trust request may name. */
+export const MAX_WORKFLOW_ANCESTOR_TRUST_DIRS = 64;
+
+/**
+ * Answers which of a session's ancestor directories may contribute saved
+ * workflows, one boolean per directory, from the policy of the runtime that
+ * owns the channel. Throwing denies the whole request.
+ */
+export type WorkflowAncestorTrustHandler = (
+  ancestorDirs: readonly string[],
+) => Promise<readonly boolean[]>;
+
 /**
  * Optional injection seam for daemon-host-specific status cells —
  * `process.env` snapshots and the daemon-side preflight checks
@@ -496,6 +508,13 @@ export interface BridgeOptions {
    * the child-to-parent method is unavailable.
    */
   externalToolGuard?: ExternalToolGuardHandler;
+  /**
+   * Optional saved-workflow ancestor trust policy of the runtime that owns
+   * this bridge. When present, its private ACP child may ask which ancestors
+   * of a session's directory are trusted; omitted, the child-to-parent method
+   * is unavailable and the child trusts no ancestor.
+   */
+  workflowAncestorTrust?: WorkflowAncestorTrustHandler;
   /**
    * -- optional callback for persisting `tools.
    * approvalMode` to the workspace settings file. Invoked by
