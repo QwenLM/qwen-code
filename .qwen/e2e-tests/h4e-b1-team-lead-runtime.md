@@ -33,8 +33,9 @@ from the enabled list.
 1. The model lists `read_file`, `write_file`, `edit`, `run_shell_command`,
    `monitor` and `agent`; the agent tool has `description`, `prompt` and
    `run_in_background` and no `name`. **Observed.**
-2. Asked to launch an agent with `name`, the model omits it (the parameter
-   is not declared), and no team record is committed. **Observed.**
+2. Asked to launch an agent with `name` anyway, the call is refused with
+   "Hosted child agent received unsupported argument "name"", and no
+   child_run or team record is committed. **Observed.**
 
 ## Physical acceptance (domains enabled)
 
