@@ -2169,6 +2169,7 @@ export class ExtensionManager {
     const manageds = await this.loadManagedExtensions(
       this.workspaceDir,
       {
+        createDataDir: false,
         onListFailure: () => {
           managedRootUnreadable = true;
         },
@@ -3981,9 +3982,11 @@ export class ExtensionManager {
         this.getLoadedExtensions().find(
           (candidate) => candidate.id === extensionId,
         ) ??
-        (await this.loadManagedExtensions(this.workspaceDir)).find(
-          (candidate) => candidate.id === extensionId,
-        );
+        (
+          await this.loadManagedExtensions(this.workspaceDir, {
+            createDataDir: false,
+          })
+        ).find((candidate) => candidate.id === extensionId);
       if (policy && extensionId === getManagedExtensionId(policy.name)) {
         if (extension) throw new ManagedExtensionReadOnlyError(policy.name);
         await this.assertManagedExtensionAbsent(policy.name);
