@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
@@ -46,6 +47,35 @@ public interface AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest);
+
+    /**
+     * H4b: creates a child Session under its parent's exact binding,
+     * stamping the lineage in the same transaction. The idempotency key
+     * derives from the parent's committed launch, so a replay returns the
+     * original admission and never mints a second Session. The caller is
+     * the control plane (the relay), so this path deliberately skips the
+     * public actor/workspace checks — the parent's row carries them.
+     */
+    default StoreModels.Admission insertChildSessionCommand(String tenantId,
+            String parentSessionId, String idempotencyKey,
+            String requestDigest, String title, List<Map<String, Object>> input,
+            String payloadDigest, StoreModels.SessionLineage lineage) {
+        throw new UnsupportedOperationException("Child Session creation is unavailable");
+    }
+
+    /** The replay of {@link #insertChildSessionCommand}: same key and
+     * digest answers the original admission; either mismatch conflicts. */
+    default StoreModels.Admission replayChildSessionCommand(String tenantId,
+            String parentSessionId, String idempotencyKey,
+            String requestDigest) {
+        throw new UnsupportedOperationException("Child Session creation is unavailable");
+    }
+
+    /** A child Session's persisted lineage, or null for a root Session. */
+    default StoreModels.SessionLineage findChildLineage(String tenantId,
+            String sessionId) {
+        return null;
+    }
 
     Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest, String agentId,
@@ -104,11 +134,33 @@ public interface AgentStateStore {
             OperationKind kind, String actorId, String actorDigest, String key,
             String digest, boolean closeSupported);
 
+    default OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId, OperationKind kind,
+            String actorId, String actorDigest, String key, String digest, boolean supported, int protocolVersion) {
+        if (protocolVersion != 0) {
+            throw new UnsupportedOperationException("Workspace lifecycle protocol is unavailable");
+        }
+        return beginWorkspaceLifecycle(tenantId, sessionId, kind, actorId, actorDigest, key, digest, supported);
+    }
+
     boolean hasCompletedWorkspaceClose(String tenantId, String sessionId);
 
     /** The given Sessions with a completed workspace close, in one read. */
     Set<String> completedWorkspaceCloses(String tenantId,
             List<String> sessionIds);
+
+    /**
+     * Whether the Session's creator-keyed execution facts hold — the
+     * Registry still backs the binding exactly, its state is ACTIVE, and
+     * the create-command actor keeps OPERATOR or above. This is the
+     * passive-attachment subset the execution authority re-verifies, so
+     * any admission certifying a run under the creator's grants checks it
+     * first.
+     */
+    boolean hasExecutionRegistryFacts(String tenantId, String sessionId);
+
+    /** The given Sessions whose execution facts hold, in one read. */
+    Set<String> sessionsWithExecutionRegistryFacts(String tenantId,
+            java.util.Collection<String> sessionIds);
 
     SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,
             String actorId, String scopedKey, String requestDigest);
@@ -121,6 +173,48 @@ public interface AgentStateStore {
     default void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
             String owner, long generation, String failureCode, long availableAt) {
         throw new UnsupportedOperationException("Lifecycle reconciliation is unavailable");
+    }
+
+    /**
+     * Admits a controlled same-Workspace cwd change (W2) on a bound Session,
+     * or returns the operation the same actor already admitted under the
+     * key. The target directory is already normalized and the request digest
+     * already covers it; admission checks the read grant, replays under the
+     * key, then the caller's Workspace role, the deployment gate, the
+     * Session state, the creator-keyed Registry facts, the expected context
+     * revision and the busy barriers in the pinned order.
+     */
+    OperationAdmission beginCwdChangeOperation(String tenantId,
+            String sessionId, String actorId, String actorDigest,
+            String idempotencyKey, String requestDigest,
+            String targetCwdRelative, long expectedContextRevision);
+
+    /**
+     * Settles a claimed cwd change in one transaction: re-verifies the
+     * Session facts, updates the binding directory and context revision,
+     * marks the operation completed or failed, and appends
+     * {@code session.context.changed} on success.
+     *
+     * @return the outcome; a contested claim returns {@code null}
+     */
+    CwdChangeOutcome completeCwdChangeOperation(String tenantId,
+            String sessionId, String operationId, String owner,
+            long claimGeneration);
+
+    /**
+     * Marks a claimed cwd change terminally failed with its public failure
+     * code.
+     *
+     * @return false when the claim is no longer current — the write was
+     *         skipped and the caller must not report a terminal refusal
+     */
+    boolean failCwdChangeOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            String failureCode);
+
+    /** The result of a settled cwd change. */
+    record CwdChangeOutcome(boolean completed, String failureCode,
+            Long resultContextRevision) {
     }
 
     Optional<OperationRecord> findOperation(String tenantId,
@@ -204,6 +298,16 @@ public interface AgentStateStore {
 
     ReplayWindow findReplayWindow(String tenantId, String sessionId);
 
+    /** The Sessions whose Snapshot covers more than their replay floor. */
+    List<ReplayFloorTarget> findReplayFloorTargets(int limit);
+
+    /**
+     * Raises the Session's replay floor, never above the Snapshot's covered
+     * sequence, so a client told to resync can resume from the Snapshot.
+     */
+    ReplayWindow advanceReplayFloor(String tenantId, String sessionId,
+            long floorSequence);
+
     List<MaterializationTarget> findMaterializationTargets(int limit);
 
     MaterializationResult materializeNextBatch(String tenantId,
@@ -233,12 +337,16 @@ public interface AgentStateStore {
     void markSubmissionAttempted(String tenantId, String sessionId,
             String turnId, String owner);
 
+    boolean withdrawSubmissionAttempted(String tenantId, String sessionId,
+            String turnId, String owner);
+
     void recordAdmission(String tenantId, String sessionId, String turnId,
             String owner, String eventEpoch, long lastEventId);
 
     void recordRecoveryAdmission(String tenantId, String sessionId,
-            String turnId, String owner, String expectedEventEpoch,
-            String eventEpoch, long lastEventId);
+            String turnId, String owner, String expectedTurnEventEpoch,
+            String expectedSessionEventEpoch, String eventEpoch,
+            long lastEventId);
 
     /**
      * Clears non-terminal text from a continuation epoch that did not reach

@@ -1,11 +1,13 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -50,16 +52,81 @@ public class WorkspaceExecutionStore {
         }
     }
 
+    public void authorizeLifecycle(SessionRecord session, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        try {
+            WorkspaceLifecycleStore.requireClaim(jdbc, session.tenantId(), session.sessionId(), authority, false);
+        } catch (ApiException error) {
+            throw new RuntimeBrokerException(error.getStatus().value(), error.getCode(), error.getMessage(), false, error);
+        }
+        authorizePassiveAttachment(session, authority);
+        if (storageGuard != null) {
+            storageGuard.verify(session.workspace());
+        }
+    }
+
+    public void authorizeLegacyClose(SessionRecord session) {
+        if (!WorkspaceLifecycleStore.legacyClose(jdbc, session.tenantId(), session.sessionId())) {
+            throw unavailable();
+        }
+        authorizePassiveAttachment(session, null, true);
+        if (storageGuard != null) {
+            storageGuard.verify(session.workspace());
+        }
+    }
+
+    // The mount guard of an execution authority, without the Session-level
+    // checks; the W2 settlement probe must not fail a Session it only
+    // reads. It uses the guard's probe-only entry: momentary I/O failures
+    // classify retryable-with-cause, structural refusals keep the terminal
+    // verdict, and the shared acquire path (claim/assertHeld) is untouched.
+    public void verifyMountForProbe(ContextBinding binding) {
+        if (storageGuard != null) {
+            storageGuard.verifyProbe(binding);
+        }
+    }
+
     public void authorizePassiveAttachment(SessionRecord session) {
+        authorizeAttachment(session, false, false, null, false);
+    }
+
+    private void authorizePassiveAttachment(SessionRecord session,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        authorizeAttachment(session, false, false, authority, false);
+    }
+
+    private void authorizePassiveAttachment(SessionRecord session,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority, boolean legacyClose) {
+        authorizeAttachment(session, false, false, authority, legacyClose);
+    }
+
+    public void authorizeCancellation(SessionRecord session) {
+        authorizeAttachment(session, true, false, null, false);
+    }
+
+    // Action-response delivery only: a refusal stemming solely from
+    // operator-mutable grants or registry state must not certify the
+    // terminal verdict, so it answers with the retryable variant instead.
+    public void authorizeActionResponse(SessionRecord session) {
+        authorizeAttachment(session, false, true, null, false);
+    }
+
+    private void authorizeAttachment(SessionRecord session, boolean cancellation,
+            boolean actionResponse, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority,
+            boolean legacyClose) {
         ContextBinding binding = session.workspace();
-        if (binding == null || !"ACTIVE".equals(session.status())
+        String expectedStatus = authority == null && !legacyClose ? "ACTIVE" : session.status();
+        if (binding == null || !(legacyClose ? "CLOSING".equals(session.status()) : authority == null ? "ACTIVE".equals(session.status())
+                : java.util.List.of("CLOSING", "DELETING").contains(session.status()))
                 || session.deletedAt() != null || !"qwen-code".equals(session.agentId())
                 || !session.tenantId().equals(binding.getTenantId())
                 || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
                         binding.getContextConfigRef())) {
             throw unavailable();
         }
-        List<Boolean> grants = jdbc.query("SELECT s.tenant_id, s.session_id,"
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+        // Verdicts per matched row: 0 structural mismatch, 1 refused only by
+        // operator-mutable grant or registry state, 2 authorized.
+        List<Integer> grants = jdbc.query("SELECT s.tenant_id, s.session_id,"
                 + " s.agent_id AS session_agent, s.status AS session_status,"
                 + " s.deleted_at AS session_deleted_at,"
                 + " s.workspace_id AS session_workspace,"
@@ -68,54 +135,87 @@ public class WorkspaceExecutionStore {
                 + " s.cwd_relative AS session_cwd,"
                 + " s.context_config_ref AS session_context,"
                 + " s.context_revision AS session_revision,"
-                + " s.workspace_config_ref, s.workspace_policy_ref,"
-                + " r.tenant_id AS registry_tenant, r.workspace_id,"
+                + " s.workspace_config_ref, s.workspace_policy_ref"
+                + (cancellation
+                        ? ", t.tenant_id AS cancellation_tenant, t.session_id AS cancellation_session"
+                        : ", r.tenant_id AS registry_tenant, r.workspace_id,"
                 + " r.workspace_generation, r.storage_id, r.state,"
                 + " c.tenant_id AS command_tenant, c.session_id AS command_session,"
                 + " a.tenant_id AS access_tenant, a.workspace_id AS access_workspace,"
-                + " a.can_read, a.can_create FROM managed_agent_session s"
-                + " JOIN managed_workspace_registry r ON r.tenant_id = s.tenant_id"
+                + " a.role")
+                + " FROM managed_agent_session s"
+                + (cancellation
+                        ? " JOIN managed_agent_turn t ON t.tenant_id = s.tenant_id"
+                                + " AND t.session_id = s.session_id AND t.status = 'CANCELLING'"
+                                + " AND (t.submission_attempted = TRUE OR t.harness_event_epoch IS NOT NULL)"
+                        : " JOIN managed_workspace_registry r ON r.tenant_id = s.tenant_id"
                 + " AND r.workspace_id = s.workspace_id"
                 + " JOIN managed_workspace_create_command c ON c.tenant_id = s.tenant_id"
                 + " AND c.session_id = s.session_id"
                 + " JOIN managed_workspace_access a ON a.tenant_id = r.tenant_id"
                 + " AND a.workspace_id = r.workspace_id AND a.actor_id = c.actor_id"
+                + " AND a.role IN ('READER', 'OPERATOR', 'OWNER')")
                 + " WHERE s.tenant_id = ? AND s.session_id = ?",
-                (row, index) -> session.tenantId().equals(row.getString("tenant_id"))
-                        && session.sessionId().equals(row.getString("session_id"))
-                        && "qwen-code".equals(row.getString("session_agent"))
-                        && "ACTIVE".equals(row.getString("session_status"))
-                        && row.getObject("session_deleted_at") == null
-                        && binding.getWorkspaceId().equals(row.getString("session_workspace"))
-                        && binding.getWorkspaceGeneration() == row.getLong("session_generation")
-                        && binding.getStorageId().equals(row.getString("session_storage"))
-                        && binding.getCwdRelative().equals(row.getString("session_cwd"))
-                        && binding.getContextConfigRef().equals(row.getString("session_context"))
-                        && binding.getContextRevision() == row.getLong("session_revision")
-                        && session.tenantId().equals(row.getString("registry_tenant"))
-                        && session.tenantId().equals(row.getString("command_tenant"))
-                        && session.sessionId().equals(row.getString("command_session"))
-                        && session.tenantId().equals(row.getString("access_tenant"))
-                        && binding.getWorkspaceId().equals(row.getString("workspace_id"))
-                        && binding.getWorkspaceId().equals(row.getString("access_workspace"))
-                        && binding.getWorkspaceGeneration() == row.getLong("workspace_generation")
-                        && binding.getStorageId().equals(row.getString("storage_id"))
-                        && "ACTIVE".equals(row.getString("state"))
-                        && row.getBoolean("can_read") && row.getBoolean("can_create")
-                        && WorkspaceExecutionProfile.CONFIG_REF.equals(
-                                row.getString("workspace_config_ref"))
-                        && WorkspaceExecutionProfile.POLICY_REF.equals(
-                                row.getString("workspace_policy_ref")),
+                (row, index) -> {
+                    boolean structural = session.tenantId().equals(row.getString("tenant_id"))
+                            && session.sessionId().equals(row.getString("session_id"))
+                            && "qwen-code".equals(row.getString("session_agent"))
+                            && expectedStatus.equals(row.getString("session_status"))
+                            && row.getObject("session_deleted_at") == null
+                            && binding.getWorkspaceId().equals(row.getString("session_workspace"))
+                            && binding.getWorkspaceGeneration() == row.getLong("session_generation")
+                            && binding.getStorageId().equals(row.getString("session_storage"))
+                            && binding.getCwdRelative().equals(row.getString("session_cwd"))
+                            && binding.getContextConfigRef().equals(row.getString("session_context"))
+                            && binding.getContextRevision() == row.getLong("session_revision")
+                            && WorkspaceExecutionProfile.CONFIG_REF.equals(
+                                    row.getString("workspace_config_ref"))
+                            && WorkspaceExecutionProfile.POLICY_REF.equals(
+                                    row.getString("workspace_policy_ref"))
+                            // Cancellation was authorized when it was persisted;
+                            // retries must not depend on mutable creation grants.
+                            && (cancellation
+                                    ? session.tenantId().equals(row.getString("cancellation_tenant"))
+                                            && session.sessionId().equals(row.getString("cancellation_session"))
+                                    : session.tenantId().equals(row.getString("registry_tenant"))
+                            && session.tenantId().equals(row.getString("command_tenant"))
+                            && session.sessionId().equals(row.getString("command_session"))
+                            && session.tenantId().equals(row.getString("access_tenant"))
+                            && binding.getWorkspaceId().equals(row.getString("workspace_id"))
+                            && binding.getWorkspaceId().equals(row.getString("access_workspace"))
+                            && binding.getWorkspaceGeneration() == row.getLong("workspace_generation")
+                            && binding.getStorageId().equals(row.getString("storage_id")));
+                    if (!structural) {
+                        return 0;
+                    }
+                    // Grants and registry state are operator-mutable: a
+                    // refusal stemming only from them is not the structural
+                    // verdict the terminal exit promises.
+                    return cancellation
+                            || ("ACTIVE".equals(row.getString("state"))
+                                    && WorkspaceAccess.valueOf(row.getString("role"))
+                                            .atLeast(WorkspaceAccess.OPERATOR))
+                            ? 2 : 1;
+                },
                 session.tenantId(), session.sessionId());
-        if (grants.size() != 1 || !grants.getFirst()) {
+        if (grants.size() != 1) {
+            throw unavailable();
+        }
+        if (grants.getFirst() == 1) {
+            throw actionResponse ? unavailablePendingGrant() : unavailable();
+        }
+        if (grants.getFirst() != 2) {
             throw unavailable();
         }
     }
 
     public void claim(ContextBinding binding, RuntimeSessionRecord session) {
+        WorkspaceStorageKindGuard.requireFreshTransaction();
         String key = storageKey(binding);
         String holder = holderKey(session);
         transaction.executeWithoutResult(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
             List<Boolean> live = jdbc.query("SELECT binding_id, runtime_generation, binding_state, drain_requested,"
                     + " tenant_id, workspace_id, workspace_generation, storage_id FROM qwen_runtime_binding"
                     + " WHERE binding_id = ? FOR UPDATE", (row, index) ->
@@ -143,10 +243,10 @@ public class WorkspaceExecutionStore {
                 throw unavailable();
             }
             jdbc.update("INSERT INTO managed_workspace_execution_lease"
-                    + " (storage_key) VALUES (?) ON DUPLICATE KEY UPDATE"
+                    + " (storage_key, storage_kind) VALUES (?, 'LOCAL') ON DUPLICATE KEY UPDATE"
                     + " storage_key = storage_key", key);
             String current = jdbc.queryForObject("SELECT holder_key FROM"
-                    + " managed_workspace_execution_lease WHERE storage_key = ? FOR UPDATE",
+                    + " managed_workspace_execution_lease WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE",
                     String.class, key);
             if (storageGuard != null) {
                 storageGuard.verifyLocked(binding);
@@ -156,7 +256,7 @@ public class WorkspaceExecutionStore {
             }
             jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = ?,"
                     + " binding_id = ?, runtime_generation = ?, runtime_session_id = ?"
-                    + " WHERE storage_key = ?", holder, session.getBindingId(),
+                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL'", holder, session.getBindingId(),
                     session.getRuntimeGeneration(), session.getRuntimeSessionId(), key);
         });
     }
@@ -171,14 +271,17 @@ public class WorkspaceExecutionStore {
     }
 
     public boolean isHeld(ContextBinding binding, RuntimeSessionRecord session) {
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         List<String> holders = jdbc.queryForList("SELECT holder_key FROM"
-                + " managed_workspace_execution_lease WHERE storage_key = ?",
+                + " managed_workspace_execution_lease WHERE storage_key = ? AND storage_kind = 'LOCAL'",
                 String.class, storageKey(binding));
         return holders.size() == 1 && holderKey(session).equals(holders.getFirst());
     }
 
     public void release(ContextBinding binding, RuntimeSessionRecord session) {
         transaction.executeWithoutResult(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
             List<Boolean> live = jdbc.query("SELECT binding_id, runtime_generation, binding_state"
                     + " FROM qwen_runtime_binding WHERE binding_id = ? FOR UPDATE",
                     (row, index) -> session.getBindingId().equals(row.getString("binding_id"))
@@ -191,7 +294,7 @@ public class WorkspaceExecutionStore {
             }
             jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = NULL,"
                     + " binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL"
-                    + " WHERE storage_key = ? AND holder_key = ?",
+                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND holder_key = ?",
                     storageKey(binding), holderKey(session));
         });
     }
@@ -209,6 +312,7 @@ public class WorkspaceExecutionStore {
             throw unavailable();
         }
         transaction.executeWithoutResult(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, saved.getRequest().getScope().getTenantId());
             List<Boolean> exact = jdbc.query("SELECT binding_id, runtime_generation, binding_state, tenant_id,"
                     + " workspace_id, storage_id, record_version, operation_owner, operation_generation,"
                     + " operation_lease_until, loss_evidence_json, stop_evidence_json, UNIX_TIMESTAMP() AS db_seconds,"
@@ -237,7 +341,7 @@ public class WorkspaceExecutionStore {
             }
             String key = digest(saved.getRequest().getScope().getTenantId() + "\u0000" + saved.getRequest().getStorageId());
             jdbc.query("SELECT holder_key, binding_id, runtime_generation, runtime_session_id"
-                    + " FROM managed_workspace_execution_lease WHERE storage_key = ? FOR UPDATE", row -> {
+                    + " FROM managed_workspace_execution_lease WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE", row -> {
                         String holder = row.getString("holder_key");
                         String bindingId = row.getString("binding_id");
                         String sessionId = row.getString("runtime_session_id");
@@ -258,7 +362,7 @@ public class WorkspaceExecutionStore {
                             }
                             int changed = jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = NULL,"
                                     + " binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL"
-                                    + " WHERE storage_key = ? AND holder_key = ? AND binding_id = ?"
+                                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND holder_key = ? AND binding_id = ?"
                                     + " AND runtime_generation = ? AND runtime_session_id = ?",
                                     key, holder, bindingId, generation, sessionId);
                             if (changed != 1) {
@@ -272,6 +376,27 @@ public class WorkspaceExecutionStore {
     public static RuntimeBrokerException unavailable() {
         return new RuntimeBrokerException(409, "workspace_unavailable",
                 "Workspace execution authority is unavailable.", false);
+    }
+
+    // A probe's momentary I/O failure is not the structural verdict the
+    // terminal refusal promises: it retries through the delivery machine,
+    // keeping the cause for the log. Structural refusals keep
+    // unavailable().
+    public static RuntimeBrokerException unavailableTransient(
+            Throwable cause) {
+        return new RuntimeBrokerException(409, "workspace_unavailable",
+                "Workspace mount cannot be verified right now.", true,
+                cause);
+    }
+
+    // A creation grant or the registry state changes under operator
+    // control: refusing a committed decision over it is not the
+    // structural verdict of unavailable(), and the delivery machine must
+    // retry so a restored grant still reaches the Harness. Structural
+    // refusals keep unavailable().
+    public static RuntimeBrokerException unavailablePendingGrant() {
+        return new RuntimeBrokerException(409, "workspace_unavailable",
+                "Workspace access grant or registry state is changing.", true);
     }
 
     private static RuntimeBrokerException busy() {
