@@ -5,12 +5,16 @@
  */
 
 import * as path from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
+import type { Socket } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { promises as fsp } from 'node:fs';
+import { createServer } from 'node:http';
 import * as os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+import express from 'express';
 import {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionService,
@@ -22,6 +26,7 @@ import {
   setDebugLogSession,
   writeSessionPrs,
 } from '@qwen-code/qwen-code-core';
+import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import {
   InvalidRewindTargetError,
   SessionBusyError,
@@ -53,6 +58,30 @@ import {
   workspaceTranscriptCursorExceedsLimitForTesting,
 } from './routes/session.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
+
+const telemetryMocks = vi.hoisted(() => ({
+  span: vi.fn(),
+  attribute: vi.fn(),
+}));
+vi.mock(
+  '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/telemetry/daemon-tracing.js')
+    >()),
+    withDaemonSpan: telemetryMocks.span,
+    addDaemonRequestAttribute: telemetryMocks.attribute,
+  }),
+);
+
+beforeEach(() => {
+  telemetryMocks.span.mockReset();
+  telemetryMocks.span.mockImplementation(
+    (_name: string, _attributes: Record<string, string>, read: () => unknown) =>
+      read(),
+  );
+  telemetryMocks.attribute.mockReset();
+});
 
 const PRIMARY_CWD = path.resolve(path.sep, 'work', 'primary');
 const SECONDARY_CWD = path.resolve(path.sep, 'work', 'secondary');
@@ -7374,6 +7403,530 @@ describe('multi-workspace session dispatch', () => {
   });
 });
 
+describe('batch workspace session live-state route', () => {
+  const batch = (
+    app: ReturnType<typeof makeHarness>['app'],
+    workspaces: string[],
+  ) =>
+    request(app)
+      .post('/sessions/live-state')
+      .set('Host', host())
+      .send({ workspaces });
+
+  it('returns ordered, complete primary and secondary memory snapshots', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      primarySummaries: [
+        makeSummary('primary-session', PRIMARY_CWD, {
+          hasActivePrompt: true,
+          isWaitingForPermission: true,
+        }),
+      ],
+      secondarySummaries: [
+        makeSummary('secondary-session', SECONDARY_CWD, {
+          hasActivePrompt: false,
+          isWaitingForUserQuestion: true,
+        }),
+      ],
+    });
+    const res = await batch(app, ['secondary-id', PRIMARY_CWD]).expect(200);
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(res.body.workspaces).toEqual([
+      {
+        workspace: 'secondary-id',
+        workspaceId: 'secondary-id',
+        cwd: SECONDARY_CWD,
+        v: 1,
+        catalogVersion: expect.objectContaining({ revision: 0 }),
+        sessions: [
+          expect.objectContaining({
+            sessionId: 'secondary-session',
+            hasActivePrompt: false,
+            isWaitingForUserQuestion: true,
+          }),
+        ],
+      },
+      {
+        workspace: PRIMARY_CWD,
+        workspaceId: 'primary-id',
+        cwd: PRIMARY_CWD,
+        v: 1,
+        catalogVersion: expect.objectContaining({ revision: 0 }),
+        sessions: [
+          expect.objectContaining({
+            sessionId: 'primary-session',
+            hasActivePrompt: true,
+            isWaitingForPermission: true,
+          }),
+        ],
+      },
+    ]);
+    expect(primaryBridge.listCalls).toEqual([PRIMARY_CWD]);
+    expect(secondaryBridge.listCalls).toEqual([SECONDARY_CWD]);
+  });
+
+  it('reflects running and waiting changes without advancing catalogVersion', async () => {
+    const { app, primaryBridge } = makeHarness();
+    let state = { hasActivePrompt: true, isWaitingForPermission: false };
+    vi.spyOn(primaryBridge, 'listWorkspaceSessions').mockImplementation(() => [
+      makeSummary('changing-session', PRIMARY_CWD, state),
+    ]);
+    const versions: unknown[] = [];
+    for (const next of [
+      { hasActivePrompt: true, isWaitingForPermission: false },
+      { hasActivePrompt: false, isWaitingForPermission: true },
+      { hasActivePrompt: true, isWaitingForPermission: false },
+      { hasActivePrompt: false, isWaitingForPermission: false },
+    ]) {
+      state = next;
+      const res = await batch(app, ['primary-id']).expect(200);
+      versions.push(res.body.workspaces[0].catalogVersion);
+      expect(res.body.workspaces[0].sessions[0]).toMatchObject(next);
+    }
+    expect(versions[0]).toMatchObject({
+      generation: expect.any(String),
+      revision: 0,
+    });
+    expect(versions).toEqual(Array(4).fill(versions[0]));
+  });
+
+  it('isolates unknown and untrusted members without reading their bridges', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      secondaryTrusted: false,
+    });
+    const res = await batch(app, [
+      'primary-id',
+      'missing-id',
+      'secondary-id',
+    ]).expect(200);
+    expect(res.body.workspaces[0].sessions).toHaveLength(1);
+    expect(res.body.workspaces[1]).toEqual({
+      workspace: 'missing-id',
+      error: {
+        status: 404,
+        code: 'workspace_not_found',
+        message: expect.any(String),
+      },
+    });
+    expect(res.body.workspaces[2]).toMatchObject({
+      workspaceId: 'secondary-id',
+      cwd: SECONDARY_CWD,
+      error: { status: 403, code: 'untrusted_workspace' },
+    });
+    expect(res.body.workspaces[2]).not.toHaveProperty('sessions');
+    expect(primaryBridge.listCalls).toEqual([PRIMARY_CWD]);
+    expect(secondaryBridge.listCalls).toEqual([]);
+  });
+
+  it('rejects an untrusted primary while reading a trusted secondary', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      primaryTrusted: false,
+    });
+    const res = await batch(app, ['primary-id', 'secondary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 403, code: 'untrusted_workspace' },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+    expect(primaryBridge.listCalls).toEqual([]);
+    expect(secondaryBridge.listCalls).toEqual([SECONDARY_CWD]);
+  });
+
+  it('hides internal workspaces without reading their bridges', async () => {
+    const { app, registry, secondaryBridge } = makeHarness();
+    registry.add(
+      makeRuntime({
+        workspaceId: 'internal-id',
+        workspaceCwd: path.resolve(path.sep, 'work', 'internal'),
+        primary: false,
+        trusted: true,
+        bridge: secondaryBridge,
+        provenance: 'live-conversation',
+      }),
+    );
+    const res = await batch(app, ['internal-id']).expect(200);
+    expect(res.body.workspaces).toEqual([
+      {
+        workspace: 'internal-id',
+        error: {
+          status: 404,
+          code: 'workspace_not_found',
+          message: expect.any(String),
+        },
+      },
+    ]);
+    expect(secondaryBridge.listCalls).toEqual([]);
+  });
+
+  it('rejects invalid envelopes before reading any bridge', async () => {
+    const { app, primaryBridge } = makeHarness();
+    for (const body of [
+      { workspaces: [] },
+      { workspaces: Array.from({ length: 21 }, () => 'primary-id') },
+      { workspaces: ['primary-id'], extra: true },
+      { workspaces: [42] },
+      { workspaces: ['x'.repeat(4097)] },
+    ]) {
+      const res = await request(app)
+        .post('/sessions/live-state')
+        .set('Host', host())
+        .send(body)
+        .expect(400);
+      expect(res.body.code).toBe('invalid_session_live_state_batch_request');
+    }
+    expect(primaryBridge.listCalls).toEqual([]);
+  });
+
+  it('accepts the documented maxima', async () => {
+    const { app } = makeHarness();
+    const res = await batch(
+      app,
+      Array.from({ length: 20 }, () => 'primary-id'),
+    ).expect(200);
+    expect(res.body.workspaces).toHaveLength(20);
+    // The route answers a valid batch with 200 and per-member error objects,
+    // so the count alone cannot tell twenty snapshots from twenty failures.
+    for (const member of res.body.workspaces) {
+      expect(member).toMatchObject({
+        workspaceId: 'primary-id',
+        v: 1,
+        sessions: expect.any(Array),
+      });
+    }
+
+    const longest = await batch(app, ['/' + 'a'.repeat(4095)]).expect(200);
+    expect(longest.body.workspaces).toEqual([
+      {
+        workspace: '/' + 'a'.repeat(4095),
+        error: {
+          status: 404,
+          code: 'workspace_not_found',
+          message: expect.any(String),
+        },
+      },
+    ]);
+  });
+
+  it('bounds an oversized successful member without discarding another member', async () => {
+    const { app } = makeHarness({
+      secondarySummaries: [makeSummary('s'.repeat(600 * 1024), SECONDARY_CWD)],
+    });
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 413, code: 'live_state_response_too_large' },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+  });
+
+  it('returns 503 for a transitioning member while preserving a healthy member', async () => {
+    const { app, registry, secondaryBridge } = makeHarness();
+    const entry = registry.getEntryByWorkspaceId('secondary-id')!;
+    registry.beginReplacement(entry, 'new-policy');
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 503, code: 'workspace_runtime_unavailable' },
+    });
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+    expect(secondaryBridge.listCalls).toEqual([]);
+  });
+
+  it('returns 503 for a member whose entry lost its current generation while preserving a healthy member', async () => {
+    const { app, registry, secondaryBridge } = makeHarness();
+    const entry = registry.getEntryByWorkspaceId('secondary-id')!;
+    // The trust reconciler reaches this state when a contained replacement
+    // fails to activate: the entry stays resolvable but has no generation.
+    entry.current = undefined;
+    registry.blockReplacement(entry, 'apply failed');
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 503, code: 'workspace_runtime_unavailable' },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(secondaryBridge.listCalls).toEqual([]);
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+  });
+
+  it('fails closed if the selected runtime is replaced during its read', async () => {
+    const { app, registry, secondaryBridge } = makeHarness();
+    const entry = registry.getEntryByWorkspaceId('secondary-id')!;
+    const list = secondaryBridge.listWorkspaceSessions.bind(secondaryBridge);
+    vi.spyOn(secondaryBridge, 'listWorkspaceSessions').mockImplementation(
+      (cwd) => {
+        const sessions = list(cwd);
+        registry.beginReplacement(entry, 'new-policy');
+        return sessions;
+      },
+    );
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 503, code: 'workspace_runtime_unavailable' },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+  });
+  it('returns a generic 500 member for an unexpected bridge failure without leaking details', async () => {
+    const { app, secondaryBridge } = makeHarness();
+    vi.spyOn(secondaryBridge, 'listWorkspaceSessions').mockImplementation(
+      () => {
+        throw new Error('private bridge detail ENOMEM');
+      },
+    );
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toEqual({
+      workspace: 'secondary-id',
+      workspaceId: 'secondary-id',
+      cwd: SECONDARY_CWD,
+      error: {
+        status: 500,
+        code: 'session_live_state_failed',
+        message: expect.any(String),
+      },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(JSON.stringify(res.body)).not.toContain('private bridge detail');
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+  });
+
+  it('fails closed if the selected runtime starts draining during its read', async () => {
+    const { app, registry, secondaryBridge } = makeHarness();
+    const entry = registry.getEntryByWorkspaceId('secondary-id')!;
+    const list = secondaryBridge.listWorkspaceSessions.bind(secondaryBridge);
+    vi.spyOn(secondaryBridge, 'listWorkspaceSessions').mockImplementation(
+      (cwd) => {
+        const sessions = list(cwd);
+        registry.beginDrain(entry.current!.runtime);
+        return sessions;
+      },
+    );
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 503, code: 'workspace_runtime_unavailable' },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+  });
+
+  it('logs the discarded bridge error for a failed member', async () => {
+    const daemonLog = makeDaemonLog();
+    const { app, secondaryBridge } = makeHarness({ daemonLog });
+    vi.spyOn(secondaryBridge, 'listWorkspaceSessions').mockImplementation(
+      () => {
+        throw new Error('private bridge detail ENOMEM');
+      },
+    );
+    await batch(app, ['secondary-id']).expect(200);
+    expect(daemonLog.error).toHaveBeenCalledTimes(1);
+    expect(daemonLog.error).toHaveBeenCalledWith(
+      'private bridge detail ENOMEM',
+      expect.any(Error),
+      expect.objectContaining({
+        route: 'POST /sessions/live-state',
+        workspaceId: 'secondary-id',
+      }),
+    );
+  });
+
+  it('logs a routing failure warning for an untrusted member', async () => {
+    const daemonLog = makeDaemonLog();
+    const { app } = makeHarness({ daemonLog, secondaryTrusted: false });
+    await batch(app, ['secondary-id']).expect(200);
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'session routing failed',
+      expect.objectContaining({
+        route: 'POST /sessions/live-state',
+        resolutionKind: 'untrusted_workspace',
+        workspaceId: 'secondary-id',
+        workspaceCwd: SECONDARY_CWD,
+      }),
+    );
+  });
+
+  it('stops reading members once the client disconnects mid-batch', async () => {
+    const { app, registry, primaryBridge } = makeHarness();
+    const thirdCwd = path.resolve(path.sep, 'work', 'third');
+    const thirdBridge = makeBridge(thirdCwd, [
+      makeSummary('33333333-3333-4333-a333-333333333333', thirdCwd),
+    ]);
+    registry.add(
+      makeRuntime({
+        workspaceId: 'third-id',
+        workspaceCwd: thirdCwd,
+        primary: false,
+        trusted: true,
+        bridge: thirdBridge,
+      }),
+    );
+    const server = app.listen(0);
+    const sockets = new Set<Socket>();
+    server.on('connection', (socket) => sockets.add(socket));
+    const list = primaryBridge.listWorkspaceSessions.bind(primaryBridge);
+    vi.spyOn(primaryBridge, 'listWorkspaceSessions').mockImplementation(
+      (cwd) => {
+        const sessions = list(cwd);
+        for (const socket of sockets) socket.destroy();
+        return sessions;
+      },
+    );
+    const pending = request(server)
+      .post('/sessions/live-state')
+      .set('Host', host())
+      .send({ workspaces: ['primary-id', 'secondary-id', 'third-id'] });
+    pending.end(() => {});
+    try {
+      await vi.waitFor(() =>
+        expect(primaryBridge.listCalls).toEqual([PRIMARY_CWD]),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // Socket close delivery lags the destroy by a turn or two, so the
+      // member after the disconnect may still be read; the batch must stop
+      // before the member after that.
+      expect(thirdBridge.listCalls).toEqual([]);
+    } finally {
+      pending.abort();
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it('skips the response when the client disconnects during the last member read', async () => {
+    const { app, primaryBridge } = makeHarness();
+    const server = app.listen(0);
+    const sockets = new Set<Socket>();
+    server.on('connection', (socket) => sockets.add(socket));
+    let responseClosed = false;
+    const jsonSpies: Array<ReturnType<typeof vi.fn>> = [];
+    server.on('request', (_req, res) => {
+      res.once('close', () => {
+        responseClosed = true;
+      });
+      const jsonSpy = vi.fn();
+      jsonSpies.push(jsonSpy);
+      (res as unknown as { json: unknown }).json = jsonSpy;
+    });
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    telemetryMocks.span.mockImplementation(
+      async (
+        _name: string,
+        _attributes: Record<string, string>,
+        read: () => unknown,
+      ) => {
+        for (const socket of sockets) socket.destroy();
+        // Hold the last member read until the disconnect has been delivered,
+        // so the post-loop abort check — not the in-loop one — decides.
+        await readGate;
+        return read();
+      },
+    );
+    const pending = request(server)
+      .post('/sessions/live-state')
+      .set('Host', host())
+      .send({ workspaces: ['primary-id'] });
+    pending.end(() => {});
+    try {
+      await vi.waitFor(() => expect(responseClosed).toBe(true));
+      releaseRead();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // The member read itself always completes; the guard is what keeps the
+      // response from being written to the destroyed socket.
+      expect(primaryBridge.listCalls).toEqual([PRIMARY_CWD]);
+      expect(jsonSpies).toHaveLength(1);
+      expect(jsonSpies[0]).not.toHaveBeenCalled();
+    } finally {
+      releaseRead();
+      pending.abort();
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it('skips every member read when the client disconnects before the handler runs', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+    let dispatched = false;
+    // Parse the body while the socket is alive, then dispatch to the serve
+    // app only after the disconnect has been delivered, so the handler
+    // observes an already-destroyed response instead of attaching its close
+    // listener in time. The app's own json parser skips the re-parse because
+    // the body is already read.
+    const outer = express();
+    outer.use(express.json());
+    outer.use((req, res, _next) => {
+      res.once('close', () => {
+        dispatched = true;
+        app(req, res);
+      });
+      req.socket.destroy();
+    });
+    const server = createServer(outer);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const pending = request(server)
+      .post('/sessions/live-state')
+      .set('Host', host())
+      .send({ workspaces: ['primary-id', 'secondary-id'] });
+    pending.end(() => {});
+    try {
+      await vi.waitFor(() => expect(dispatched).toBe(true));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(primaryBridge.listCalls).toEqual([]);
+      expect(secondaryBridge.listCalls).toEqual([]);
+    } finally {
+      pending.abort();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it('attributes the batch request and each member span to its workspace', async () => {
+    const memberScope = new AsyncLocalStorage<string>();
+    const writes: Array<{ scope?: string; key: string; value: unknown }> = [];
+    telemetryMocks.span.mockImplementation(
+      (
+        _name: string,
+        attributes: Record<string, string>,
+        read: () => unknown,
+      ) => memberScope.run(attributes['qwen-code.workspace.hash']!, read),
+    );
+    telemetryMocks.attribute.mockImplementation(
+      (key: string, value: unknown) => {
+        writes.push({ scope: memberScope.getStore(), key, value });
+      },
+    );
+    const { app } = makeHarness();
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces).toHaveLength(2);
+    const memberSpans = telemetryMocks.span.mock.calls.filter(
+      ([name]) => name === 'qwen-code.daemon.session_live_state_batch.member',
+    );
+    expect(
+      memberSpans.map(
+        ([, attributes]) => attributes['qwen-code.workspace.hash'],
+      ),
+    ).toEqual([
+      hashDaemonWorkspace(SECONDARY_CWD),
+      hashDaemonWorkspace(PRIMARY_CWD),
+    ]);
+    expect(
+      writes.filter(
+        (write) =>
+          write.key === 'qwen-code.daemon.session_live_state_batch.members',
+      ),
+    ).toEqual([
+      {
+        scope: undefined,
+        key: 'qwen-code.daemon.session_live_state_batch.members',
+        value: 2,
+      },
+    ]);
+  });
+});
+
 describe('workspace session live-state route', () => {
   const liveStatePath = (selector: string) =>
     `/workspaces/${selector}/sessions/live-state`;
@@ -7695,10 +8248,11 @@ describe('workspace session live-state route', () => {
 
       // The live-state exposure invalidates both scopes before answering.
       const live = await request(app)
-        .get(liveStatePath('secondary-id'))
+        .post('/sessions/live-state')
         .set('Host', host())
+        .send({ workspaces: ['secondary-id'] })
         .expect(200);
-      expect(live.body.catalogVersion.revision).toBe(1);
+      expect(live.body.workspaces[0].catalogVersion.revision).toBe(1);
       expect(ids((await organized('')).body).sort()).toEqual([
         activeOne,
         activeTwo,

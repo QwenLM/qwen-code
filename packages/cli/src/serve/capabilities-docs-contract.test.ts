@@ -72,6 +72,12 @@ it('advertises batched session catalogs for single and multiple workspaces', () 
   ).toContain('session_catalog_batch');
 });
 
+it('advertises batched workspace live-state snapshots', () => {
+  expect(getAdvertisedServeFeatures()).toContain(
+    'workspace_session_live_state_batch',
+  );
+});
+
 it('derives the hosted persona tags from the registry, never a hand list', () => {
   // The Java client hard-refuses a Harness omitting
   // managed_session_journal_delta_v1, so the persona's wire list is
