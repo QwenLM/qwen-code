@@ -907,6 +907,26 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
+    void cwdCapabilityChecksTheCallerRoleOnEachWorkspaceOfAMixedPage() {
+        Fixture fixture = new Fixture(Clock.systemUTC(), true);
+        String tenant = "cwd-" + UUID.randomUUID();
+        String readRow = fixture.createCwdSessions(tenant, 1).getFirst();
+        fixture.jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-2', 1, 'storage-2', 'Workspace 2', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+        fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace-2', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
+        String operateRow = fixture.tx.execute(status -> fixture.store.insertWorkspaceSessionCommand(tenant, "actor", UUID.randomUUID().toString(), "digest", "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace-2", "."))).sessionId();
+        fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'READER')", tenant, "other".getBytes(StandardCharsets.UTF_8));
+        fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace-2', ?, 'OPERATOR')", tenant, "other".getBytes(StandardCharsets.UTF_8));
+        fixture.ledger.reset();
+        var page = fixture.service.listWebShellSessions(tenant, "other", null, 20).data();
+        java.util.Map<String, Boolean> cwd = new java.util.HashMap<>();
+        for (var row : page) {
+            cwd.put(row.sessionId(), row.capabilities().cwdChange());
+        }
+        assertThat(cwd).hasSize(2).containsEntry(operateRow, true).containsEntry(readRow, false);
+        assertThat(fixture.ledger.count("join managed_workspace_registry", "join managed_workspace_create_command")).isEqualTo(1);
+    }
+
+    @Test
     void cwdCapabilityDoesNotPayForRegistryFactsWhenDisabledOrReaderOnly() {
         for (boolean enabled : new boolean[] {false, true}) {
             Fixture fixture = new Fixture(Clock.systemUTC(), enabled);
