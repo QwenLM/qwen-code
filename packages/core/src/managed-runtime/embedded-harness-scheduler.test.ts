@@ -17,7 +17,11 @@ import {
 
 // Journal fault injection: a failed append whose tail repair succeeds is a
 // transient store failure; one whose repair fails is consistency damage.
-const fsFault = vi.hoisted(() => ({ failAppends: 0, failTruncates: 0 }));
+const fsFault = vi.hoisted(() => ({
+  failAppends: 0,
+  failTruncates: 0,
+  tornWrite: false,
+}));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:fs/promises')>();
@@ -26,6 +30,14 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     appendFile: async (...args: Parameters<typeof original.appendFile>) => {
       if (fsFault.failAppends > 0) {
         fsFault.failAppends--;
+        if (fsFault.tornWrite) {
+          const [file, data] = args;
+          const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
+          await original.appendFile(
+            file,
+            bytes.subarray(0, Math.max(1, Math.floor(bytes.byteLength / 2))),
+          );
+        }
         throw new Error('disk busy');
       }
       return original.appendFile(...args);
@@ -110,6 +122,7 @@ describe('EmbeddedHarnessScheduler', () => {
     schedulers.length = 0;
     fsFault.failAppends = 0;
     fsFault.failTruncates = 0;
+    fsFault.tornWrite = false;
     vi.useRealTimers();
     await rm(root, { recursive: true, force: true });
   });
@@ -546,6 +559,7 @@ describe('EmbeddedHarnessScheduler', () => {
 
     fsFault.failAppends = 1;
     fsFault.failTruncates = 1;
+    fsFault.tornWrite = true;
     now = 130;
     await vi.advanceTimersByTimeAsync(30);
     // The injected append/truncate failures themselves are synchronous, but
@@ -779,6 +793,7 @@ describe('EmbeddedHarnessScheduler', () => {
 
     fsFault.failAppends = 1;
     fsFault.failTruncates = 1;
+    fsFault.tornWrite = true;
     await expect(scheduler.start()).rejects.toThrow('disk busy');
 
     expect(scheduler.haltedError?.message).toBe('disk busy');
@@ -821,6 +836,7 @@ describe('EmbeddedHarnessScheduler', () => {
     // repair fails too — consistency damage halts the whole worker.
     fsFault.failAppends = 1;
     fsFault.failTruncates = 1;
+    fsFault.tornWrite = true;
     await waitUntil(() => scheduler.haltedError !== undefined);
 
     expect(scheduler.haltedError?.message).toBe('disk busy');
@@ -1527,8 +1543,10 @@ describe('EmbeddedHarnessScheduler', () => {
     // The initial release and the three retries fail transiently; the
     // terminal write is held in flight, the worker is disposed, and only
     // then does the write fail with consistency damage (its journal repair
-    // fails too).
+    // fails too). Every failed append tears the tail, or no repair would
+    // run at all.
     fsFault.failAppends = 5;
+    fsFault.tornWrite = true;
     gate.resolve();
     await waitUntil(() => releaseCalls === 1);
     await advanceTimersUntil(() => releaseCalls === 4, 250);

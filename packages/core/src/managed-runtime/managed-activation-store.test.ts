@@ -28,7 +28,6 @@ const fsFault = vi.hoisted(() => ({
   failAppends: 0,
   failTruncates: 0,
   tornWrite: false,
-  truncateEnoent: false,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -54,9 +53,6 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     truncate: async (...args: Parameters<typeof original.truncate>) => {
       if (fsFault.failTruncates > 0) {
         fsFault.failTruncates--;
-        if (fsFault.truncateEnoent) {
-          throw Object.assign(new Error('gone'), { code: 'ENOENT' });
-        }
         throw new Error('repair failed');
       }
       return original.truncate(...args);
@@ -99,7 +95,6 @@ describe('FileManagedActivationStore', () => {
     fsFault.failAppends = 0;
     fsFault.failTruncates = 0;
     fsFault.tornWrite = false;
-    fsFault.truncateEnoent = false;
     await rm(root, { recursive: true, force: true });
   });
 
@@ -170,11 +165,14 @@ describe('FileManagedActivationStore', () => {
 
   // Only a failed repair leaves the journal's state unknown — the store
   // still fails closed then, with the repair failure on the causal chain.
+  // The torn write forces a real repair: an intact journal needs no
+  // truncate at all (the next case).
   it('halts when a failed write cannot be repaired', async () => {
     const store = await openStore();
     await store.enqueue(activation('a1'), limits);
 
     fsFault.failAppends = 1;
+    fsFault.tornWrite = true;
     fsFault.failTruncates = 1;
     await expect(
       store.claim(activation('a1'), 'worker-a', 60_000),
@@ -185,6 +183,25 @@ describe('FileManagedActivationStore', () => {
     await expect(
       store.claim(activation('a1'), 'worker-a', 60_000),
     ).rejects.toThrow('disk busy');
+  });
+
+  // Regression for review round 9 (R9-5): a failed append that left the
+  // journal intact needs no repair, so a truncate the filesystem would have
+  // refused is never attempted — the failure stays transient and the store
+  // keeps serving.
+  it('stays transient when an intact journal needs no repair', async () => {
+    const store = await openStore();
+    await store.enqueue(activation('a1'), limits);
+
+    fsFault.failAppends = 1;
+    fsFault.failTruncates = 1;
+    await expect(
+      store.claim(activation('a1'), 'worker-a', 60_000),
+    ).rejects.toThrow('disk busy');
+    expect(store.haltedError).toBeUndefined();
+
+    const lease = await store.claim(activation('a1'), 'worker-a', 60_000);
+    expect(lease?.epoch).toBe(1);
   });
 
   // A first-ever write that fails before the journal file exists (the repair
@@ -209,15 +226,16 @@ describe('FileManagedActivationStore', () => {
   it('halts when the journal vanishes after synced writes', async () => {
     const store = await openStore();
     await store.enqueue(activation('a1'), limits);
+    await rm(filePath);
 
     fsFault.failAppends = 1;
-    fsFault.failTruncates = 1;
-    fsFault.truncateEnoent = true;
     await expect(
       store.claim(activation('a1'), 'worker-a', 60_000),
     ).rejects.toThrow('disk busy');
     expect(store.haltedError?.message).toBe('disk busy');
-    expect((store.haltedError?.cause as Error).message).toBe('gone');
+    expect((store.haltedError?.cause as NodeJS.ErrnoException).code).toBe(
+      'ENOENT',
+    );
   });
 
   // The fifth cell of the fault matrix: the journal is shorter than the

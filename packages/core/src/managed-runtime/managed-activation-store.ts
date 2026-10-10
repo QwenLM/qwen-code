@@ -554,7 +554,13 @@ export class FileManagedActivationStore {
               ` the ${this.syncedBytes} already synced.`,
           );
         }
-        await truncate(this.filePath, this.syncedBytes);
+        // Only a torn tail needs the truncate: at exactly the synced length
+        // the journal is intact and the failed write provably never
+        // happened, so a no-op truncate a read-only filesystem refuses must
+        // not halt the healthy store (review round 9, R9-5).
+        if (size > this.syncedBytes) {
+          await truncate(this.filePath, this.syncedBytes);
+        }
       } catch (repairError) {
         if (
           (repairError as NodeJS.ErrnoException).code !== 'ENOENT' ||

@@ -1062,7 +1062,34 @@ public class ManagedAgentStore implements AgentStateStore {
             }
         }
         requireNoOpenOperation(tenantId, sessionId);
-        validateOperationStart(session, kind);
+        String sessionStatusBefore = session.status();
+        boolean resumed = false;
+        if (kind != OperationKind.ACTION_RESPONSE
+                && kind != OperationKind.CWD_CHANGE
+                && pendingStatus(kind).equals(session.status())) {
+            // A terminally FAILED operation leaves the Session in the
+            // pending status, which validateOperationStart refuses forever:
+            // the Session would be un-closable and un-deletable without
+            // database surgery (review round 9, R9-3). With no operation
+            // open, the same kind is re-admitted — a Session with a live
+            // operation still cannot double-close, because
+            // requireNoOpenOperation above throws first. The new operation
+            // carries the failed one's original pre-operation status, so its
+            // settle runs the steps the failed attempt was owed: an
+            // ACTIVE-before close asks the Harness to stop again, and a
+            // CLOSED-before delete still makes no Runtime calls.
+            String failedBefore =
+                    latestFailedOperationStatusBefore(tenantId, sessionId,
+                            kind);
+            if (failedBefore == null) {
+                validateOperationStart(session, kind);
+            } else {
+                sessionStatusBefore = failedBefore;
+                resumed = true;
+            }
+        } else {
+            validateOperationStart(session, kind);
+        }
         if (protocolVersion == 1) {
             WorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper, tenantId, sessionId);
         }
@@ -1083,10 +1110,23 @@ public class ManagedAgentStore implements AgentStateStore {
                 tenantId, sessionId, operationId, kind.name(), actorDigest,
                 idempotencyKey, requestDigest,
                 archive ? "COMPLETED" : "PENDING",
-                archive ? "CONFIRMED" : "PENDING", session.status(),
+                archive ? "CONFIRMED" : "PENDING", sessionStatusBefore,
                 archive ? publicId("rcpt") : null, now, now, now,
                 archive ? now : null, protocolVersion);
-        if (protocolVersion == 1) {
+        if (protocolVersion == 1 && resumed) {
+            // failOperation kept the fence row and released the dead
+            // operation's claim on it, so the re-admitted operation rebinds
+            // the row rather than inserting a duplicate.
+            jdbc.update("UPDATE qwen_runtime_harness_drain SET"
+                            + " operation_id = ? WHERE tenant_key = ? AND"
+                            + " harness_key = ? AND tenant_id = ? AND"
+                            + " harness_session_id = ? AND phase ="
+                            + " 'LIFECYCLE_ONLY' AND operation_id IS NULL",
+                    operationId,
+                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    tenantId, sessionId);
+        } else if (protocolVersion == 1) {
             jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, tenantId, sessionId, operationId);
                 return null;
@@ -3374,6 +3414,20 @@ public class ManagedAgentStore implements AgentStateStore {
     private static String mutationSource(String operation,
             String idempotencyKey, String phase) {
         return "control:" + operation + ":" + idempotencyKey + ":" + phase;
+    }
+
+    // The most recent terminally failed operation of the same kind, if any:
+    // its recorded pre-operation status is the one a re-admission continues
+    // from.
+    private String latestFailedOperationStatusBefore(String tenantId,
+            String sessionId, OperationKind kind) {
+        List<String> rows = jdbc.queryForList("SELECT session_status_before"
+                        + " FROM managed_agent_operation WHERE tenant_id = ?"
+                        + " AND session_id = ? AND operation_kind = ? AND"
+                        + " state = 'FAILED' ORDER BY updated_at DESC,"
+                        + " created_at DESC LIMIT 1",
+                String.class, tenantId, sessionId, kind.name());
+        return rows.isEmpty() ? null : rows.getFirst();
     }
 
     // One lifecycle change at a time: a pending rename or unarchive command

@@ -75,6 +75,16 @@ public class SessionLifecycleCoordinator {
     // re-arming. Greater than one by contract — the first retry's success
     // is the documented transient case.
     private static final int CWD_CHANGE_ATTEMPT_BUDGET = 8;
+    // A settle that reached the Harness — the answered close, or the durable
+    // effects receipt — is never recorded as one that did not, so the steps
+    // that remain (the completion write, the workspace close) cannot join
+    // the settle's own terminal arm. They still cannot wait forever: a
+    // fault that outlives this larger multiple of the operation budget is
+    // permanent for the caller, and the operation then terminates with
+    // session_close_completion_unsettled, which says exactly what stayed
+    // unsettled, instead of wedging the Session behind the open-operation
+    // barrier forever (review round 9, R9-4).
+    private static final int SETTLED_COMPLETION_BUDGET_FACTOR = 4;
     private final AgentStateStore store;
     private com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore lifecycle;
 
@@ -285,15 +295,45 @@ public class SessionLifecycleCoordinator {
             // The budget bounds every settle outcome that could have made
             // progress, blocked or not, and the terminal record keeps the
             // cause instead of certifying a completion that never settled.
-            // A failure thrown AFTER settle() returned also keeps waiting:
-            // the settle did happen then, and a terminal
-            // session_lifecycle_delivery_failed would certify the opposite;
-            // the completion write is simply retried (settle is idempotent).
-            if (!cwdChange && harnessConfirmed == null
-                    && !harnessSettled.get()
-                    && claimed.attemptCount() - claimed.budgetExemptAttempt()
-                            >= maxOperationRetries
-                    && valid.get() && !exemptWait && !staleBoot) {
+            // A settle that DID reach the Harness — the answered close or
+            // the durable effects receipt — is never recorded as one that
+            // did not: the steps that remain get the larger settled budget,
+            // and past it the terminal record carries
+            // session_close_completion_unsettled, which says exactly what
+            // stayed unsettled, instead of certifying the opposite or
+            // retrying forever behind the open-operation barrier (review
+            // round 7, R7-2; round 9, R9-4).
+            boolean settleReachedHarness =
+                    harnessSettled.get() || harnessConfirmed != null;
+            long adjustedAttempts =
+                    claimed.attemptCount() - claimed.budgetExemptAttempt();
+            boolean budgetSpent = settleReachedHarness
+                    ? adjustedAttempts >= (long) maxOperationRetries
+                            * SETTLED_COMPLETION_BUDGET_FACTOR
+                    : adjustedAttempts >= maxOperationRetries;
+            if (!cwdChange && budgetSpent && valid.get() && !exemptWait
+                    && !staleBoot) {
+                String terminalCode = settleReachedHarness
+                        ? "session_close_completion_unsettled" : failureCode;
+                if (writerLive) {
+                    // Nothing is terminated and nothing is released under a
+                    // live journal writer: the terminal record would stand
+                    // while the release it owes never ran, stranded behind a
+                    // row nothing re-drives (review round 9, R7-3). Publish
+                    // the wait instead — budget-exempt, re-driven by the
+                    // recovery scan, readable as recovery_blocked with the
+                    // refusal's own code; once the writer stops the terminal
+                    // arm fires for real.
+                    LOG.warn("Managed Session operation waits on a live"
+                                    + " journal writer tenant={} session={}"
+                                    + " operation={} code={}",
+                            tenantId, sessionId, operationId, failureCode);
+                    store.blockLifecycleOperation(tenantId, sessionId,
+                            operationId, owner, claimed.claimGeneration(),
+                            failureCode,
+                            Math.addExact(clock.millis(), delay), true);
+                    return;
+                }
                 LOG.error("Managed Session operation exhausted retries"
                                 + " tenant={} session={} operation={}"
                                 + " attempts={}",
@@ -306,24 +346,12 @@ public class SessionLifecycleCoordinator {
                 // without the original worker's stop verified is what the
                 // blocked code exists to refuse — and a delete of an
                 // already closed Session makes zero calls, as settle() does.
-                // Under a live journal writer nothing is released either:
-                // the terminal arm is reachable here only because the settle
-                // never reached the Harness (a permanent refusal thrown
-                // before the stop), so the writer lease is live and stays
-                // live — and settle() itself refuses this same release
-                // behind a live writer. The terminal record stands; the
-                // release waits for the writer (review round 7, R7-3).
+                // A live journal writer never reaches here: the published
+                // wait above already returned (review round 9, R7-3).
                 try {
                     boolean bound = store.requireSession(tenantId, sessionId)
                             .workspace() != null;
-                    if (writerLive) {
-                        LOG.warn("Managed Session operation terminal with a"
-                                        + " live journal writer; the Runtime"
-                                        + " binding is not released"
-                                        + " tenant={} session={}"
-                                        + " operation={}",
-                                tenantId, sessionId, operationId);
-                    } else if (bound && closedSessionDeletion(claimed)) {
+                    if (bound && closedSessionDeletion(claimed)) {
                         // The completed CLOSE is the cleanup authority.
                     } else if (bound) {
                         if (runtimeWarmer.supportsWorkspaceClose()) {
@@ -357,7 +385,7 @@ public class SessionLifecycleCoordinator {
                 try {
                     if (!store.failOperation(tenantId, sessionId,
                             operationId, owner, claimed.claimGeneration(),
-                            failureCode)) {
+                            terminalCode)) {
                         LOG.warn("Managed Session operation was claimed by"
                                         + " another worker tenant={}"
                                         + " session={} operation={}",
@@ -594,13 +622,18 @@ public class SessionLifecycleCoordinator {
                 if (!harness.supportsLifecycle()) {
                     throw com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
                 }
-                lifecycle.saveEffects(operation, harness.settleLifecycle(operation));
+                JsonNode receipt = harness.settleLifecycle(operation);
+                // The Harness was asked to stop and answered: even when the
+                // receipt write below refuses, the settle did reach the
+                // Harness and a later failure of this attempt is not "the
+                // settle never happened" (review round 9, R7-2).
+                harnessSettled.set(true);
+                lifecycle.saveEffects(operation, receipt);
+            } else {
+                // The recovered receipt is durable proof a prior attempt
+                // reached the Harness.
+                harnessSettled.set(true);
             }
-            // The effects receipt is durable from here on — whether it was
-            // just saved or recovered from a prior attempt — so the settle
-            // did reach the Harness; a later failure of this attempt is not
-            // "the settle never happened".
-            harnessSettled.set(true);
             harness.detachLifecycle(operation);
             if (sessionStore.hasLiveWriter(operation.tenantId(), operation.sessionId())) {
                 throw com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");

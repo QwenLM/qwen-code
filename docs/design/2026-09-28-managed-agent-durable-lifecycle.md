@@ -218,9 +218,14 @@ attempt renegotiates and the close can still succeed; only a Harness that
 restarts between every attempt keeps the operation waiting, and then until
 the old process's writer lease expires. Neither
 wait keys on the journal alone — the writer wait also requires the failure to
-still be retryable, so a permanent refusal thrown before the Harness was ever
-asked to stop reaches the terminal arm instead of waiting on its own writer
-lease. Both waits' attempts stay budget-exempt — only attempts that could
+still be retryable. A permanent refusal thrown before the Harness was ever
+asked to stop is not a writer wait, but it cannot terminate while the writer
+is live either: the terminal arm owes the Runtime binding a release that
+cannot run under a live writer, and a terminal record written anyway would
+strand both behind a row nothing re-drives. Past the budget such a refusal
+publishes its own wait — budget-exempt, `recovery_blocked` with the refusal's
+code — and the terminal arm fires once the writer stops or its lease lapses.
+Both waits' attempts stay budget-exempt — only attempts that could
 have made progress consume the budget — and once the budget is spent each row
 reads `recovery_blocked` with its own code, `session_close_writer_live` or
 `hosted_harness_generation_mismatch`, so a wedged close is visible instead of
@@ -243,12 +248,19 @@ them a delete of an active Session waiting on a residual writer, and nothing
 else would ever pick them up. `recovery_blocked` therefore labels a row that
 is still being retried; it is neither a terminal state nor a pause.
 
-A budget-terminated operation leaves its Session in the pending status
-(`closing` or `deleting`) with the failure code on the operation row, and no
-route admits a fresh operation onto that status today: once the cause the
-code names is resolved, an operator reconciles the Session by hand (the
-operation row is the audit record), and admitting a new close or delete onto
-it from the API is follow-up work.
+A settle that reached the Harness is never recorded as one that did not, so
+its remaining steps — the workspace close, the completion write — cannot join
+the settle's own terminal arm. They cannot wait forever either: past four
+times the operation budget they terminate with
+`session_close_completion_unsettled`, which says exactly what stayed
+unsettled. A budget-terminated operation leaves its Session in the pending
+status (`closing` or `deleting`) with the failure code on the operation row.
+That status is not a dead end: once the cause the code names is resolved, a
+fresh close or delete of the same kind is admitted again — with no operation
+open, the admission reads the failed operation of the same kind and continues
+from its recorded pre-operation status, so the retried settle runs the steps
+the failed attempt was owed. A different kind, and a Session with a live
+operation, stay refused.
 
 A Harness that stopped writing the Session's journal cannot close it either.
 After any failed journal commit, for example one made while Java or its
@@ -277,13 +289,13 @@ Session and drains its own Runtime binding.
 
 ### 4.6 Operation fields
 
-| Field             | Values                                                                                                                                                                                                                                                                                                  |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status`          | `pending` when admitted, `running` from the first claim, `completed` at the end, `failed` when the retry budget is spent (4.5).                                                                                                                                                                         |
-| `admission_stage` | `java_durable`; at completion `harness_confirmed` if the Harness that held the Session acknowledged its close.                                                                                                                                                                                          |
-| `delivery_state`  | `pending` between attempts, `leased` during one, `confirmed` at the terminal state, `blocked` while recovery-blocked.                                                                                                                                                                                   |
-| `receipt_id`      | An opaque `rcpt_` receipt that Java issues when the operation reaches a terminal state.                                                                                                                                                                                                                 |
-| `failure_code`    | The settle failure that spent the budget, or the code a `recovery_blocked` operation waits on: the workspace-close refusal, `session_close_writer_live` while a Harness still holds the journal writer, or `hosted_harness_generation_mismatch` while this replica's view of the Harness boot is stale. |
+| Field             | Values                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`          | `pending` when admitted, `running` from the first claim, `completed` at the end, `failed` when the retry budget is spent (4.5).                                                                                                                                                                                                                                                                                                                   |
+| `admission_stage` | `java_durable`; at completion `harness_confirmed` if the Harness that held the Session acknowledged its close.                                                                                                                                                                                                                                                                                                                                    |
+| `delivery_state`  | `pending` between attempts, `leased` during one, `confirmed` at the terminal state, `blocked` while recovery-blocked.                                                                                                                                                                                                                                                                                                                             |
+| `receipt_id`      | An opaque `rcpt_` receipt that Java issues when the operation reaches a terminal state.                                                                                                                                                                                                                                                                                                                                                           |
+| `failure_code`    | The settle failure that spent the budget, `session_close_completion_unsettled` when a settle that reached the Harness could not finish its remaining steps past the settled budget, or the code a `recovery_blocked` operation waits on: the workspace-close refusal, `session_close_writer_live` while a Harness still holds the journal writer, or `hosted_harness_generation_mismatch` while this replica's view of the Harness boot is stale. |
 
 The Harness that held the Session is the one whose boot ID the Session
 recorded: Turn dispatch records the boot it attaches to, and a rename records

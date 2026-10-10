@@ -159,6 +159,92 @@ class ManagedSessionOperationStoreTest {
                 "worker", Duration.ofSeconds(30))).isEmpty();
     }
 
+    // A terminally failed close must not make the Session un-closable
+    // forever: with no operation open, the same kind is re-admitted under a
+    // fresh idempotency key, and the new operation carries the failed one's
+    // original pre-operation status so its settle runs the same steps
+    // (review round 9, R9-3). A different kind stays refused, and a Session
+    // with a live operation still cannot double-close.
+    @Test
+    void aFailedTerminationLeavesTheSessionReclosable() {
+        ManagedAgentStore store = store();
+        String sessionId = store.insertSessionCommand(TENANT,
+                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
+                List.of(), null).sessionId();
+        String operationId = store.beginOperation(TENANT, sessionId,
+                OperationKind.CLOSE, "", "close", "digest").operation()
+                .operationId();
+        OperationRecord claimed = store.claimOperation(TENANT, sessionId,
+                operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
+        assertThat(store.failOperation(TENANT, sessionId, operationId,
+                "worker", claimed.claimGeneration(),
+                "session_lifecycle_delivery_failed")).isTrue();
+        assertThat(store.requireSession(TENANT, sessionId).status())
+                .isEqualTo("CLOSING");
+
+        var readmitted = store.beginOperation(TENANT, sessionId,
+                OperationKind.CLOSE, "", "close-2", "digest");
+        assertThat(readmitted.replayed()).isFalse();
+        assertThat(readmitted.operation().operationId())
+                .isNotEqualTo(operationId);
+        // The re-admitted close owes the steps the failed attempt was owed:
+        // the Session was ACTIVE when the first close began.
+        assertThat(readmitted.operation().sessionStatusBefore())
+                .isEqualTo("ACTIVE");
+        assertThat(store.requireSession(TENANT, sessionId).status())
+                .isEqualTo("CLOSING");
+        assertThat(targets(store))
+                .containsExactly(readmitted.operation().operationId());
+
+        // A different kind stays refused: the re-admitted close is open,
+        // and the open-operation barrier blocks the delete.
+        assertThatThrownBy(() -> store.beginOperation(TENANT, sessionId,
+                OperationKind.DELETE, "", "delete", "digest"))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode())
+                                .isEqualTo("session_operation_active"));
+    }
+
+    // The v1 resumption rebinds the fence row the failed operation's
+    // terminal write released rather than inserting a duplicate, and the
+    // phase stays LIFECYCLE_ONLY.
+    @Test
+    void aFailedV1TerminationLeavesTheSessionReclosable() {
+        ManagedAgentStore store = workspaceStore();
+        var transactions = new TransactionTemplate(
+                new DataSourceTransactionManager(dataSource));
+        String sessionId = transactions.execute(ignored ->
+                store.insertWorkspaceSessionCommand(TENANT, "owner", "create",
+                        "digest", "qwen-code", null, null, List.of(), null,
+                        new WorkspaceSelection("workspace", ".")).sessionId());
+        String operationId = store.beginWorkspaceLifecycle(TENANT, sessionId,
+                OperationKind.CLOSE, "owner", "a".repeat(64), "close",
+                "digest", true, 1).operation().operationId();
+        OperationRecord claimed = store.claimOperation(TENANT, sessionId,
+                operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
+        assertThat(store.failOperation(TENANT, sessionId, operationId,
+                "worker", claimed.claimGeneration(),
+                "workspace_lifecycle_protocol_unavailable")).isTrue();
+        assertThat(jdbc.queryForObject("SELECT operation_id FROM"
+                        + " qwen_runtime_harness_drain", String.class))
+                .isNull();
+
+        var readmitted = store.beginWorkspaceLifecycle(TENANT, sessionId,
+                OperationKind.CLOSE, "owner", "a".repeat(64), "close-2",
+                "digest", true, 1);
+        assertThat(readmitted.replayed()).isFalse();
+        assertThat(readmitted.operation().operationId())
+                .isNotEqualTo(operationId);
+        assertThat(jdbc.queryForObject("SELECT operation_id FROM"
+                        + " qwen_runtime_harness_drain", String.class))
+                .isEqualTo(readmitted.operation().operationId());
+        assertThat(jdbc.queryForObject("SELECT phase FROM"
+                        + " qwen_runtime_harness_drain", String.class))
+                .isEqualTo("LIFECYCLE_ONLY");
+        assertThat(readmitted.operation().sessionStatusBefore())
+                .isEqualTo("ACTIVE");
+    }
+
     // A protocol-v1 admission raises a LIFECYCLE_ONLY claim mirror in
     // qwen_runtime_harness_drain, and every rescheduling mutator keeps that
     // mirror in step. The terminal write must release the dead operation's
