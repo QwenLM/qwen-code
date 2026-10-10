@@ -39,13 +39,20 @@ import {
   type PeerFrame,
   type PeerInbox,
 } from '@qwen-code/qwen-code-core';
+
 import {
   MAX_ACCEPTED_BACKLOG,
   MESSAGING_SOCKET_ENV,
   MESSAGING_TOKEN_ENV,
+  PeerMidTurnBudget,
   PeerMessaging,
+  peerMidTurnBudgetOf,
   type PeerQueuedDelivery,
 } from './peer-messaging.js';
+import {
+  PEER_MID_TURN_BUDGET_DEFAULT,
+  PEER_MID_TURN_WINDOW_MS,
+} from './mid-turn-constants.js';
 
 // Holds the inbox's post-listen socket chmod, keeping startPeerInbox
 // pending while the socket already accepts connections.
@@ -767,6 +774,51 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       .filter((receipt) => receipt.origMsgId === frame.msgId)
       .map((receipt) => receipt.status);
     expect(statuses).toEqual(['held', 'misaddressed']);
+  });
+
+  it('keeps the urgency the sender asked for on the queued delivery', async () => {
+    const sender = await startSenderInbox();
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      getSessionId: () => 'session-a',
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    const queued: PeerQueuedDelivery[] = [];
+    started.setSubmitFn((_modelText, _displayText, delivery) => {
+      if (delivery) queued.push(delivery);
+      return true;
+    });
+
+    await send(
+      started.socketPath!,
+      peerFrame({
+        content: 'redirect the deploy',
+        from: sender.socketPath,
+        toSessionId: 'session-a',
+        priority: 'now',
+      }),
+    );
+    await settle();
+    await send(
+      started.socketPath!,
+      peerFrame({
+        content: 'whenever its turn ends',
+        from: sender.socketPath,
+        toSessionId: 'session-a',
+      }),
+    );
+    await settle();
+
+    // Only the non-default urgency is stored: `"next"` is the wire default, so
+    // absence already means it, and the mid-turn drain tests for `"now"` alone.
+    expect(queued).toHaveLength(2);
+    expect(queued[0]?.priority).toBe('now');
+    expect(queued[1]).not.toHaveProperty('priority');
   });
 
   it('drops a queued envelope whose pin the session outgrew at drain', async () => {
@@ -2667,5 +2719,159 @@ describe.skipIf(isWindows)('PeerMessaging drops', () => {
           r.origMsgId === a3.msgId,
       ),
     ).toBe(true);
+  });
+});
+
+describe('PeerMidTurnBudget', () => {
+  const T0 = 10_000_000;
+
+  it('pays for at most the capacity of the window, then refuses', () => {
+    const budget = new PeerMidTurnBudget();
+    expect([
+      budget.tryConsume(T0, 2),
+      budget.tryConsume(T0 + 1000, 2),
+      budget.tryConsume(T0 + 2000, 2),
+    ]).toEqual([true, true, false]);
+  });
+
+  it('refuses every envelope at a zero capacity', () => {
+    // 0 must mean "mid-turn delivery off", not "unlimited" — the ceiling
+    // exists because a peer spends this session's model work.
+    const budget = new PeerMidTurnBudget();
+    expect(budget.tryConsume(T0, 0)).toBe(false);
+    expect(budget.tryConsume(T0 + 1000, 0)).toBe(false);
+  });
+
+  it('frees allowance as the window rolls on', () => {
+    const budget = new PeerMidTurnBudget();
+    expect(budget.tryConsume(T0, 1)).toBe(true);
+    expect(budget.tryConsume(T0 + 1000, 1)).toBe(false);
+    // Still inside the window: nothing was freed.
+    expect(budget.tryConsume(T0 + PEER_MID_TURN_WINDOW_MS - 1, 1)).toBe(false);
+    // The first envelope has aged out, so one allowance is back.
+    expect(budget.tryConsume(T0 + PEER_MID_TURN_WINDOW_MS, 1)).toBe(true);
+  });
+
+  it('opens the window when the host clock steps back', () => {
+    // A stamp from the future is broken time, not a recent delivery: kept
+    // alive, it pins the window shut after every step back — the silent
+    // throttle on an idle queue this budget must never produce. The peek
+    // and the consume share the drop, or the drain defers work it would
+    // actually pay for.
+    const budget = new PeerMidTurnBudget();
+    expect(budget.tryConsume(T0, 2)).toBe(true);
+    expect(budget.tryConsume(T0 + 10, 2)).toBe(true);
+    expect(budget.hasAllowance(T0 + 20, 2)).toBe(false);
+    expect(budget.hasAllowance(T0 - 8 * 3_600_000, 2)).toBe(true);
+    expect(budget.tryConsume(T0 - 8 * 3_600_000, 2)).toBe(true);
+  });
+
+  it('counts each delivered envelope, not each drain', () => {
+    // A drain may take one envelope at a time across many tool rounds; the
+    // ceiling is on envelopes steered into a turn, so each costs separately.
+    const budget = new PeerMidTurnBudget();
+    for (let i = 0; i < 3; i++) {
+      expect(budget.tryConsume(T0 + i * 100, 3)).toBe(true);
+    }
+    expect(budget.tryConsume(T0 + 300, 3)).toBe(false);
+  });
+
+  it('gives allowance back when a drained batch is restored', () => {
+    // A submission that never reached the model cost no mid-turn delivery, so
+    // cancelling turns repeatedly must not be able to starve the budget.
+    const budget = new PeerMidTurnBudget();
+    expect(budget.tryConsume(T0, 1)).toBe(true);
+    expect(budget.tryConsume(T0 + 10, 1)).toBe(false);
+    budget.refund(1);
+    expect(budget.tryConsume(T0 + 20, 1)).toBe(true);
+  });
+
+  it('ignores a refund of nothing', () => {
+    // The allowance has to be spent first. On an empty window every splice is
+    // a no-op, so the assertion could not tell "gave nothing back" from "gave
+    // the whole window back". With two stamps live, a refund that reached
+    // splice would wipe the window at count 0 (`splice(-0)` is `splice(0)`)
+    // and drop the newest stamp at count -1 (`splice(1)`).
+    const budget = new PeerMidTurnBudget();
+    expect(budget.tryConsume(T0, 2)).toBe(true);
+    expect(budget.tryConsume(T0 + 10, 2)).toBe(true);
+    expect(budget.tryConsume(T0 + 20, 2)).toBe(false);
+    budget.refund(0);
+    budget.refund(-1);
+    expect(budget.tryConsume(T0 + 30, 2)).toBe(false);
+  });
+});
+
+describe('PeerMidTurnBudget.hasAllowance', () => {
+  const T0 = 10_000_000;
+
+  it('says yes to an empty budget and no once the window is full', () => {
+    const budget = new PeerMidTurnBudget();
+    // Nothing spent yet: the first peek of the window is always free.
+    expect(budget.hasAllowance(T0, 2)).toBe(true);
+    expect(budget.tryConsume(T0, 2)).toBe(true);
+    // One of two paid for: the window still has room for one more.
+    expect(budget.hasAllowance(T0 + 10, 2)).toBe(true);
+    expect(budget.tryConsume(T0 + 10, 2)).toBe(true);
+    expect(budget.hasAllowance(T0 + 20, 2)).toBe(false);
+  });
+
+  it('spends nothing when it peeks', () => {
+    // A peek that consumed would starve the very turn it exists to protect:
+    // the drain asks, finds nothing to pop, and pays for an envelope no one
+    // received. So the peeks must leave the window as they found it.
+    const budget = new PeerMidTurnBudget();
+    for (let i = 0; i < PEER_MID_TURN_BUDGET_DEFAULT; i++) {
+      expect(budget.hasAllowance(T0, PEER_MID_TURN_BUDGET_DEFAULT)).toBe(true);
+    }
+    expect(budget.tryConsume(T0, PEER_MID_TURN_BUDGET_DEFAULT)).toBe(true);
+    // And a spent window keeps saying no, however often it is asked.
+    const drained = new PeerMidTurnBudget();
+    expect(drained.tryConsume(T0, 1)).toBe(true);
+    expect(drained.hasAllowance(T0 + 10, 1)).toBe(false);
+    expect(drained.hasAllowance(T0 + 20, 1)).toBe(false);
+    expect(drained.tryConsume(T0 + 30, 1)).toBe(false);
+  });
+
+  it('frees the peek as the window rolls on', () => {
+    const budget = new PeerMidTurnBudget();
+    expect(budget.tryConsume(T0, 1)).toBe(true);
+    expect(budget.hasAllowance(T0 + PEER_MID_TURN_WINDOW_MS - 1, 1)).toBe(
+      false,
+    );
+    // The envelope has aged out, so the window is open again — and the peek
+    // sees it without opening the door any wider.
+    expect(budget.hasAllowance(T0 + PEER_MID_TURN_WINDOW_MS, 1)).toBe(true);
+    expect(budget.tryConsume(T0 + PEER_MID_TURN_WINDOW_MS, 1)).toBe(true);
+  });
+
+  it('refuses a peek at a zero or negative capacity', () => {
+    // Same contract as `tryConsume`: an off budget reads as full, never as
+    // unlimited, so a drain peeking at 0 must defer to the idle path.
+    const budget = new PeerMidTurnBudget();
+    expect(budget.hasAllowance(T0, 0)).toBe(false);
+    expect(budget.hasAllowance(T0, -1)).toBe(false);
+    expect(budget.hasAllowance(T0 + 1000, 0)).toBe(false);
+  });
+});
+
+describe('peerMidTurnBudgetOf', () => {
+  it('falls back to the default for anything unparseable', () => {
+    for (const value of [undefined, null, 'lots', {}, [], NaN, Infinity]) {
+      expect(peerMidTurnBudgetOf(value)).toBe(PEER_MID_TURN_BUDGET_DEFAULT);
+    }
+  });
+
+  it('keeps an explicit zero, which disables mid-turn delivery', () => {
+    expect(peerMidTurnBudgetOf(0)).toBe(0);
+  });
+
+  it('clamps a negative allowance to zero rather than to unlimited', () => {
+    expect(peerMidTurnBudgetOf(-1)).toBe(0);
+    expect(peerMidTurnBudgetOf(-1000)).toBe(0);
+  });
+
+  it('floors a fractional allowance', () => {
+    expect(peerMidTurnBudgetOf(2.9)).toBe(2);
   });
 });

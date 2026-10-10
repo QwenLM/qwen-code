@@ -983,7 +983,10 @@ not coming from the user, but the gate knows it came from the session's
 own process: under the mode-parity default it is delivered without review
 (a peer in the same position would be held), while an explicit
 `agents.crossSessionInbound` of `hold` or `refuse` applies to it as to
-anything else. The model sees it as
+anything else. Marked `"now"`, an own-process injection also qualifies
+for mid-turn steering of the running turn whenever
+`agents.crossSessionMidTurn` is on, exactly as a peer or controller
+frame does. The model sees it as
 `<cross_session_message from="own process" origin="own-process">` with a
 notice that it came from a script or hook the session ran, not from the
 user.

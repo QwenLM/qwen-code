@@ -14,6 +14,7 @@ import type {
 import { getSettingsSchema } from './settingsSchema.js';
 import { t } from '../i18n/index.js';
 import { isAutoLanguage } from '../i18n/languageUtils.js';
+import { PEER_MID_TURN_BUDGET_DEFAULT } from '../peerMessaging/mid-turn-constants.js';
 
 // The schema is now nested, but many parts of the UI and logic work better
 // with a flattened structure and dot-notation keys. This section flattens the
@@ -357,6 +358,24 @@ export const WORKSPACE_TIGHTEN_ONLY_SETTINGS = [
             : value === 'refuse'
               ? 3
               : 2,
+  },
+  {
+    section: 'agents',
+    key: 'crossSessionMidTurn',
+    // Only `true` widens delivery into a running turn, so it ranks looser
+    // than the idle-only default; an unreadable value keeps that default.
+    strictness: (value: unknown): number => (value === true ? 0 : 1),
+  },
+  {
+    section: 'agents',
+    key: 'crossSessionMidTurnBudget',
+    // A larger allowance is looser, so strictness counts down from it; an
+    // unreadable value ranks with the schema default rather than with
+    // "unlimited", matching `peerMidTurnBudgetOf`'s fallback.
+    strictness: (value: unknown): number =>
+      typeof value === 'number' && Number.isFinite(value)
+        ? -Math.max(0, Math.floor(value))
+        : -PEER_MID_TURN_BUDGET_DEFAULT,
   },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;

@@ -31,6 +31,7 @@ import {
   VisionNoticeMessage,
   SuccessMessage,
   AwayRecapMessage,
+  PeerMessage,
 } from './messages/StatusMessages.js';
 import { Box, Text, useStdout } from 'ink';
 import { theme } from '../semantic-colors.js';
@@ -412,9 +413,12 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'user' && (
         <UserMessage text={itemForDisplay.text} />
       )}
-      {itemForDisplay.type === 'notification' && (
-        <InfoMessage text={itemForDisplay.text} />
-      )}
+      {itemForDisplay.type === 'notification' &&
+        (itemForDisplay.display?.peer ? (
+          <PeerMessage text={itemForDisplay.text} />
+        ) : (
+          <InfoMessage text={itemForDisplay.text} />
+        ))}
       {itemForDisplay.type === 'user_shell' && (
         <UserShellMessage text={itemForDisplay.text} />
       )}

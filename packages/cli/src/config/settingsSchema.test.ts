@@ -409,6 +409,49 @@ describe('SettingsSchema', () => {
       expect(crossSessionInbound.description).toContain('child processes');
     });
 
+    it('should keep mid-turn cross-session delivery off by default', () => {
+      // A peer carries none of this session's user authority, so steering a
+      // running turn is opt-in and delivery stays idle-only unless the user
+      // says otherwise. The sender has to ask too, so the wording is pinned.
+      expect(
+        getSettingsSchema().agents.properties.crossSessionMidTurn,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: false,
+        showInDialog: false,
+      });
+      expect(
+        getSettingsSchema().agents.properties.crossSessionMidTurn.description,
+      ).toContain('"now"');
+    });
+
+    it('should bound mid-turn cross-session delivery per window', () => {
+      // The ceiling is what keeps a chatty peer from holding a busy session.
+      // 0 is a real value: mid-turn off without touching the setting above.
+      // The default is `PEER_MID_TURN_BUDGET_DEFAULT`, pinned literally so a
+      // change on either side of that single source is caught.
+      expect(
+        getSettingsSchema().agents.properties.crossSessionMidTurnBudget,
+      ).toMatchObject({
+        type: 'integer',
+        default: 3,
+        minimum: 0,
+        requiresRestart: false,
+        showInDialog: false,
+      });
+      // Three copies of this sentence exist — this description, the
+      // `settings.md` row, and the generated JSON schema mirror — and the
+      // shipped reader is the authority: `peerMidTurnBudgetOf` clamps a
+      // negative to 0, which means mid-turn off, while only an unreadable
+      // value takes the default. Pin the clause so a copy edited against that
+      // behaviour fails here instead of promising a user the opposite.
+      expect(
+        getSettingsSchema().agents.properties.crossSessionMidTurnBudget
+          .description,
+      ).toContain('a negative number is read as 0');
+    });
+
     it('should offer exactly the hold lifetimes core knows how to parse', () => {
       // Three copies of this vocabulary exist: core's table, these
       // options, and the generated JSON schema. Adding an option here
