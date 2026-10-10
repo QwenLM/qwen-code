@@ -366,28 +366,65 @@ describe('Hosted real-process gates', () => {
     },
   );
 
-  it('keeps the HostedHarnessMySqlIT ceilings inside the shared fork budget', () => {
-    const forkSeconds = Number(
+  // The Hosted*IT classes share one failsafe fork, so a case stalled to its
+  // @Timeout must still leave the fork its healthy runtime: on main the
+  // classes measured 437–546s with HostedTeamLeadMySqlIT adding ~65s, and
+  // the fork itself ~14s, so 650s covers them. A larger ceiling lets
+  // failsafe kill the fork mid-run, and the classes left unrun never report,
+  // failing the gate undiagnosably (#13780).
+  const hostedForkHealthySeconds = 650;
+  const hostedForkSeconds = () =>
+    Number(
       read('packages/sdk-java/managed-agent-server/pom.xml')
         .split('<id>hosted-harness-mysql</id>')[1]
         .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
     );
-    const source = read(
-      'packages/sdk-java/managed-agent-server/src/test/java/' +
-        'com/alibaba/qwen/code/managedagent/HostedHarnessMySqlIT.java',
-    );
-    const ceilings = [...source.matchAll(/@Timeout\((\d+)\)/g)].map((m) =>
+  const hostedTestPath = (className) =>
+    'packages/sdk-java/managed-agent-server/src/test/java/' +
+    `com/alibaba/qwen/code/managedagent/${className}.java`;
+  // Java code without its string literals and comments, so neither a
+  // commented-out annotation nor a "/*" inside a string skews the counts.
+  const hostedTestSource = (className) =>
+    read(hostedTestPath(className))
+      .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/.*$/gm, '');
+  const ceilingsOf = (source) =>
+    [...source.matchAll(/@(?:[\w.]+\.)?Timeout\((\d+)\)/g)].map((m) =>
       Number(m[1]),
     );
+
+  it('keeps the HostedHarnessMySqlIT ceilings inside the shared fork budget', () => {
+    const ceilings = ceilingsOf(hostedTestSource('HostedHarnessMySqlIT'));
     expect(ceilings.length).toBeGreaterThan(0);
-    // The Hosted*IT classes share one failsafe fork, so a method stalled to
-    // its full @Timeout must still leave the fork its healthy runtime: the
-    // sibling classes measure ~532s and the fork itself ~14s, covered by the
-    // same 600s allowance the step-ceiling row carries. A larger ceiling
-    // lets failsafe kill the fork mid-run, and the classes left unrun never
-    // report, failing the gate undiagnosably (#13780).
     for (const ceiling of ceilings) {
-      expect(ceiling + 600).toBeLessThanOrEqual(forkSeconds);
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
     }
+  });
+
+  it('keeps every HostedTeamLeadMySqlIT ceiling together inside the shared fork budget', () => {
+    const source = hostedTestSource('HostedTeamLeadMySqlIT');
+    const cases = [
+      ...source.matchAll(
+        /@(?:[\w.]+\.)?(Test|RepeatedTest|ParameterizedTest|TestFactory|TestTemplate)\b/g,
+      ),
+    ].length;
+    const ceilings = ceilingsOf(source);
+    expect(cases).toBeGreaterThan(0);
+    expect(ceilings).toHaveLength(cases);
+    // A regression such as a lost wake Turn leaves no failed row for the
+    // cases to stop on, so every case may stall to its ceiling at once.
+    const total = ceilings.reduce((sum, ceiling) => sum + ceiling, 0);
+    expect(total + hostedForkHealthySeconds).toBeLessThanOrEqual(
+      hostedForkSeconds(),
+    );
+    // Awaitility ignores the interrupt a @Timeout sends, so a ceiling holds
+    // only when every wait goes through the helper that fails on it.
+    expect([...source.matchAll(/\bawait\(\)/g)]).toHaveLength(1);
+    expect(read(hostedTestPath('HostedTeamLeadMySqlIT'))).toContain(
+      'await().failFast("The case\'s @Timeout interrupted it"',
+    );
   });
 });
