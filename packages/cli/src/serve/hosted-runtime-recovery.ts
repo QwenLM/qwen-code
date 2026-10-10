@@ -43,6 +43,7 @@ import {
   HOSTED_AGENT_WAIT_ABANDONED_TEXT,
   hostedAgentBackgroundStartedText,
   hostedChildRunIdFor,
+  hostedTeamJoinedText,
   hostedRuntimeSessionId,
   journaledToolResultIds,
   truncateHostedGlobResponse,
@@ -405,6 +406,7 @@ async function answerAbandonedTurnCalls(input: {
   cwd: string;
   promptId: string;
   message: string;
+  children?: HostedChildAgentSession;
   teams?: HostedTeamSession;
 }): Promise<void> {
   const records = (await input.session.sink.project()).filter(
@@ -425,29 +427,50 @@ async function answerAbandonedTurnCalls(input: {
         owed.set(call.id, { name: call.name, messageId: record.uuid });
     }
   for (const [functionCallId, call] of owed) {
-    // H4e-b1: a team tool writes only to the journal, before its answer.
-    const committed =
-      input.teams !== undefined &&
-      HOSTED_TEAM_TOOL_NAMES.includes(call.name) &&
-      input.teams.committedBy(
+    const callKey = hostedChildRunIdFor(input.promptId, functionCallId);
+    // A background launch and a team tool write only to the journal, before
+    // their answers: what committed is answered as committed, never as a
+    // call that never ran.
+    const launched =
+      call.name === 'agent' ? input.children?.record(callKey) : undefined;
+    let parts: Part[];
+    if (launched?.completion === 'sent') {
+      const member = input.teams?.membership(callKey);
+      parts = convertToFunctionResponse(call.name, functionCallId, [
+        {
+          text:
+            hostedAgentBackgroundStartedText(
+              managedTaskId(
+                managedExtensionRecordKey(
+                  input.session.authority.sessionHeader.sessionKey.sessionId,
+                  'child_run',
+                  launched.run.executionCallId ?? callKey,
+                ),
+              ),
+            ) + (member === undefined ? '' : hostedTeamJoinedText(member)),
+        },
+      ]);
+    } else {
+      const committed =
+        input.teams !== undefined &&
+        HOSTED_TEAM_TOOL_NAMES.includes(call.name) &&
+        input.teams.committedBy(call.name, callKey);
+      parts = convertToFunctionErrorResponse(
         call.name,
-        hostedChildRunIdFor(input.promptId, functionCallId),
+        functionCallId,
+        [],
+        committed
+          ? `The turn was interrupted after this call committed its team change, in full or in part (${input.message}); read task_list before retrying it.`
+          : `The tool call never ran: ${input.message}.`,
       );
-    const parts = convertToFunctionErrorResponse(
-      call.name,
-      functionCallId,
-      [],
-      committed
-        ? `The turn was interrupted after this call committed its team change, in full or in part (${input.message}); read task_list before retrying it.`
-        : `The tool call never ran: ${input.message}.`,
-    );
-    const response = parts[0]?.functionResponse;
-    if (!response || parts.length !== 1)
-      throw new Error('Runtime result cannot be represented durably.');
-    response.response = {
-      ...response.response,
-      executionStatus: 'cancelled',
-    };
+      const response = parts[0]?.functionResponse;
+      if (!response || parts.length !== 1)
+        throw new Error('Runtime result cannot be represented durably.');
+      response.response = {
+        ...response.response,
+        executionStatus: 'cancelled',
+      };
+    }
     await input.session.sink.write({
       uuid: randomUUID(),
       parentUuid: call.messageId,
@@ -896,6 +919,7 @@ export async function settleInterruptedTurnRuntime(input: {
         action !== undefined && action.state !== 'requested'
           ? `the approval ended ${action.state} after the Harness that asked was interrupted`
           : 'the Harness that asked was interrupted',
+      children: input.children,
       teams: input.teams,
     });
   }

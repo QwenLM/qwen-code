@@ -512,7 +512,13 @@ describe('the board', () => {
     );
     await teams.run(
       'task_update',
-      { taskId: '1', metadata: { b: null, c: 3, __proto__: 'x' } },
+      {
+        taskId: '1',
+        // Parsed, as tool arguments are, so the unsafe keys are own keys.
+        metadata: JSON.parse(
+          '{"b":null,"c":3,"__proto__":{"x":1},"constructor":1,"prototype":2}',
+        ),
+      },
       'prompt:meta',
     );
     const task = () =>

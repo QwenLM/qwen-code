@@ -561,6 +561,14 @@ export function hostedChildRunIdFor(promptId: string, callId: string): string {
  * gap fill's background-orphan branch: one sentence naming the task the
  * model should track and exactly how results land on it.
  */
+/** H4e-b1: what a member's started answer adds once its join committed. */
+export function hostedTeamJoinedText(member: {
+  readonly teamName: string;
+  readonly name: string;
+}): string {
+  return ` It joined team "${member.teamName}" as "${member.name}", and its result arrives labeled with that name.`;
+}
+
 export function hostedAgentBackgroundStartedText(taskId: string): string {
   return `Child agent started in the background as ${taskId}; the task surface stays current with it. A completed child delivers its result as a durable notification input; a failed or cancelled child produces no notification — read the task surface instead of waiting.`;
 }
@@ -3079,12 +3087,24 @@ export class HostedWorkspaceToolTurn {
         childRunId,
       });
       if ('ended' in joined) {
-        const ended = convertToFunctionErrorResponse(
-          request.call.name,
-          request.call.callId,
-          [],
-          `Child agent ${taskId} ended (${joined.ended.run.state}, ${joined.ended.stopReason ?? 'unknown'}) before it joined team "${member.teamName}", so the name "${member.name}" stays free.`,
-        );
+        // A run that finished first still delivers its result, unlabeled.
+        const ended =
+          joined.ended.run.state === 'settled'
+            ? convertToFunctionResponse(
+                request.call.name,
+                request.call.callId,
+                [
+                  {
+                    text: `Child agent ${taskId} finished before it joined team "${member.teamName}", so the name "${member.name}" stays free; its result arrives as an ordinary notification.`,
+                  },
+                ],
+              )
+            : convertToFunctionErrorResponse(
+                request.call.name,
+                request.call.callId,
+                [],
+                `Child agent ${taskId} ended (${joined.ended.run.state}, ${joined.ended.stopReason ?? 'unknown'}) before it joined team "${member.teamName}", so the name "${member.name}" stays free.`,
+              );
         await this.commit('tool_result', ended, model);
         return ended;
       }
@@ -3094,7 +3114,7 @@ export class HostedWorkspaceToolTurn {
         ? unjoined === undefined
           ? ''
           : ` It did not join the team: ${unjoined}`
-        : ` It joined team "${member.teamName}" as "${member.name}", and its result arrives labeled with that name.`;
+        : hostedTeamJoinedText(member);
     const started = convertToFunctionResponse(
       request.call.name,
       request.call.callId,

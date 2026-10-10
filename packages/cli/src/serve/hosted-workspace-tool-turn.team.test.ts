@@ -35,6 +35,8 @@ import { settleInterruptedTurnRuntime } from './hosted-runtime-recovery.js';
 import {
   HOSTED_APPROVAL_OPTIONS,
   HOSTED_TOOL_APPROVAL_POLICY,
+  HostedApprovalWaiters,
+  resolveHostedAction,
 } from './hosted-tool-approval.js';
 
 // H4e-b1: team_state and team_task stay disabled until the physical
@@ -406,7 +408,9 @@ it('replays a named launch into its one child and one roster entry', async () =>
   expect(roster()).toHaveLength(1);
 });
 
-it('completes a join that a crash between launch and join interrupted', async () => {
+// No production path re-runs an executed call; this pins the funnel's own
+// replay safety for a batch that would be driven again.
+it('a re-driven named launch completes a join its first run lost', async () => {
   await execute(createTurn(), [
     call('team_create', { team_name: 'review' }, 'call-team'),
   ]);
@@ -445,41 +449,67 @@ it('completes a join that a crash between launch and join interrupted', async ()
   );
 });
 
-it('answers a launch whose run ended before the join with its failure', async () => {
-  await execute(createTurn(), [
-    call('team_create', { team_name: 'review' }, 'call-team'),
-  ]);
-  // The relay refuses the creation in the window between launch and join.
-  const failingFirst = new HostedTeamSession(
-    {
-      resources: session.resources,
-      authority: Object.create(session.authority, {
-        commitExtensionRecord: {
-          value: async (
-            ...args: Parameters<
-              HostedTeamStore['authority']['commitExtensionRecord']
-            >
-          ) => {
-            if (args[0].commandId.endsWith(':join'))
-              await children.settleFailed('prompt:call-alice', {
-                stopReason: 'creation_failed',
-                reason: null,
-                started: false,
-              });
-            return session.authority.commitExtensionRecord(...args);
+it.each(['failed', 'finished'] as const)(
+  'answers a launch whose run %s before the join, leaving the name free',
+  async (outcome) => {
+    await execute(createTurn(), [
+      call('team_create', { team_name: 'review' }, 'call-team'),
+    ]);
+    // The relay ends the run in the window between launch and join.
+    const childRunId = 'prompt:call-alice';
+    const endFirst = new HostedTeamSession(
+      {
+        resources: session.resources,
+        authority: Object.create(session.authority, {
+          commitExtensionRecord: {
+            value: async (
+              ...args: Parameters<
+                HostedTeamStore['authority']['commitExtensionRecord']
+              >
+            ) => {
+              if (args[0].commandId.endsWith(':join')) {
+                if (outcome === 'failed') {
+                  await children.settleFailed(childRunId, {
+                    stopReason: 'creation_failed',
+                    reason: null,
+                    started: false,
+                  });
+                } else {
+                  await children.dispatchStarted(childRunId, {
+                    dispatchId: 'dispatch-1',
+                    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+                  });
+                  await children.attach(childRunId, 'session-child');
+                  await children.settleCompleted(childRunId, {
+                    result: Buffer.from('done', 'utf8'),
+                    receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+                  });
+                }
+              }
+              return session.authority.commitExtensionRecord(...args);
+            },
           },
-        },
-      }),
-    },
-    sessionKey,
-  );
-  const answer = await execute(createTurn({ funnel: failingFirst }), [
-    member('alice', 'call-alice'),
-  ]);
-  expect(answer).toContain('ended (failed, creation_failed) before it joined');
-  expect(answer).toContain('the name \\"alice\\" stays free');
-  expect(roster()).toHaveLength(0);
-});
+        }),
+      },
+      sessionKey,
+    );
+    const answer = await execute(createTurn({ funnel: endFirst }), [
+      member('alice', 'call-alice'),
+    ]);
+    expect(answer).toContain('the name \\"alice\\" stays free');
+    if (outcome === 'failed') {
+      expect(answer).toContain(
+        'ended (failed, creation_failed) before it joined',
+      );
+      expect(answer).toContain('"error":');
+    } else {
+      expect(answer).toContain('finished before it joined');
+      expect(answer).toContain('arrives as an ordinary notification');
+      expect(answer).not.toContain('"error":');
+    }
+    expect(roster()).toHaveLength(0);
+  },
+);
 
 it('labels a member result notification with its name', async () => {
   const turn = createTurn();
@@ -516,7 +546,9 @@ it('labels a member result notification with its name', async () => {
   expect(text).toContain('all clean');
 });
 
-it('answers an interrupted turn honestly for a team call that committed', async () => {
+it('answers an interrupted turn by what each journal-only call committed', async () => {
+  // An earlier turn opened the team.
+  await teams.run('team_create', { team_name: 'review' }, 'earlier:call-team');
   const authority = session.authority;
   const harness = createManagedHarnessHandle(session);
   await authority.submitInput(
@@ -532,7 +564,7 @@ it('answers an interrupted turn honestly for a team call that committed', async 
       source: 'hosted-harness',
       contentRef: await session.resources.publish(
         'managed-input',
-        Buffer.from(JSON.stringify([{ type: 'text', text: 'make a team' }])),
+        Buffer.from(JSON.stringify([{ type: 'text', text: 'staff the team' }])),
       ),
       admissionRef: await session.resources.publish(
         'managed-admission',
@@ -544,6 +576,15 @@ it('answers an interrupted turn honestly for a team call that committed', async 
   );
   await harness.ensureRunnable();
   const messageId = randomUUID();
+  const calls = [
+    call(
+      'task_create',
+      { subject: 'audit', description: 'audit it' },
+      'call-task',
+    ),
+    member('alice', 'call-alice'),
+    call('task_list', {}, 'call-list'),
+  ];
   await session.sink.write({
     uuid: messageId,
     parentUuid: null,
@@ -556,26 +597,13 @@ it('answers an interrupted turn honestly for a team call that committed', async 
     daemonPromptId: 'prompt',
     message: {
       role: 'model',
-      parts: [
-        {
-          functionCall: {
-            id: 'call-team',
-            name: 'team_create',
-            args: { team_name: 'review' },
-          },
-        },
-        {
-          functionCall: {
-            id: 'call-task',
-            name: 'task_create',
-            args: { subject: 'audit', description: 'audit it' },
-          },
-        },
-      ],
+      parts: calls.map((each) => ({
+        functionCall: { id: each.callId, name: each.name, args: each.args },
+      })),
     },
   });
-  // The team committed; the Harness then died asking about the next call.
-  await teams.run('team_create', { team_name: 'review' }, 'prompt:call-team');
+  // The batch was approved (which binds the Turn), then ran until the
+  // Harness died: the task and the member committed, no answer did.
   const inputRef = await session.resources.publish(
     'managed-tool-input',
     Buffer.from('{}'),
@@ -597,8 +625,8 @@ it('answers an interrupted turn honestly for a team call that committed', async 
             toolName: 'task_create',
             policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
             inputRevision: 1,
-            createdAt: 1,
-            expiresAt: 2,
+            createdAt: Date.now(),
+            expiresAt: Date.now() + 60_000,
             options: HOSTED_APPROVAL_OPTIONS,
           }),
         ),
@@ -610,6 +638,36 @@ it('answers an interrupted turn honestly for a team call that committed', async 
     },
     { turnId: 'prompt', promptId: 'prompt' },
   );
+  expect(
+    await resolveHostedAction(session, new HostedApprovalWaiters(), requestId, {
+      optionId: 'allow',
+      inputRevision: authority.action(requestId)!.inputRevision,
+      policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+    }),
+  ).toMatchObject({ status: 200 });
+  await harness.resolveDurableWait();
+  await teams.run(
+    'task_create',
+    { subject: 'audit', description: 'audit it' },
+    'prompt:call-task',
+  );
+  const admitted = teams.admitMember('alice');
+  await children.admit({
+    childRunId: 'prompt:call-alice',
+    ownerScopeId: sessionKey.sessionId,
+    rootSessionId: sessionKey.sessionId,
+    completion: 'sent',
+    description: 'alice task',
+    prompt: 'review the change',
+    definition: {
+      definitionId: 'hosted-agent/hosted-workspace-shell/1',
+      definitionRevision: 1,
+      definitionDigest: authority.sessionHeader.definitionRef.digest,
+    },
+    workingDirectory: '.',
+    executionCallId: 'prompt:call-alice',
+  });
+  await teams.join({ ...admitted, childRunId: 'prompt:call-alice' });
   await settleInterruptedTurnRuntime({
     session,
     sessionId: sessionKey.sessionId,
@@ -617,6 +675,7 @@ it('answers an interrupted turn honestly for a team call that committed', async 
     promptId: 'prompt',
     brokerOptions: undefined,
     toolProfile: true,
+    children,
     teams,
   });
   const answers = new Map(
@@ -628,10 +687,14 @@ it('answers an interrupted turn honestly for a team call that committed', async 
         JSON.stringify(part.functionResponse?.response),
       ]),
   );
-  expect(answers.get('call-team')).toContain(
+  expect(answers.get('call-task')).toContain(
     'committed its team change, in full or in part',
   );
-  expect(answers.get('call-task')).toContain('The tool call never ran');
+  expect(answers.get('call-alice')).toContain('started in the background');
+  expect(answers.get('call-alice')).toContain(
+    'joined team \\"review\\" as \\"alice\\"',
+  );
+  expect(answers.get('call-list')).toContain('The tool call never ran');
 });
 
 it('fires PostToolUse for a team tool that ran, never for one it refused', async () => {
