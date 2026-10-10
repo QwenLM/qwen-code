@@ -11319,7 +11319,7 @@ describe('LlmChat', async () => {
       },
     );
 
-    it('does not persist a buffered terminal turn hidden by an abort', async () => {
+    it('does not persist a terminal turn when an abort follows it', async () => {
       const recordAssistantTurn = vi.fn();
       const recordingChat = chatWithRecorder(recordAssistantTurn);
       const abortError = new DOMException('Aborted', 'AbortError');
@@ -11343,7 +11343,9 @@ describe('LlmChat', async () => {
           }
         })(),
       ).rejects.toBe(abortError);
-      expect(delivered).toEqual([]);
+      // The abort propagates (main's trailing-failure contract): the output
+      // was delivered, but neither history nor the record keeps the turn.
+      expect(chunkTexts(delivered)).toEqual(['hidden']);
       expect(recordingChat.getHistory()).toEqual([
         { role: 'user', parts: [{ text: 'essay' }] },
       ]);
@@ -11404,9 +11406,10 @@ describe('LlmChat', async () => {
       expect(recordingChat.getLastModelMessageText()).toBe('Hello world');
       expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
       expect(recordedText(recordAssistantTurn)).toBe('Hello world');
+      // The aborted recovery attempt never delivered its terminal chunk, so
+      // only the committed initial attempt's usage is billed.
       expect(recordGoalTurnUsage.mock.calls.map((call) => call[1])).toEqual([
         initialUsage,
-        recoveryUsage,
       ]);
       expect(
         recordAssistantTurn.mock.calls[0]![0].goalTokensAlreadyAccumulated,
@@ -11625,7 +11628,7 @@ describe('LlmChat', async () => {
       expect(recordedText(recordAssistantTurn)).toBe('done');
     });
 
-    it('keeps yielded tool-result terminal text after a trailing abort', async () => {
+    it('does not persist tool-result terminal text when an abort follows it', async () => {
       const recordAssistantTurn = vi.fn();
       const recordingChat = chatWithRecorder(recordAssistantTurn);
       const abortError = new DOMException('Aborted', 'AbortError');
@@ -11668,9 +11671,10 @@ describe('LlmChat', async () => {
         })(),
       ).rejects.toBe(abortError);
 
-      expect(recordingChat.getLastModelMessageText()).toBe('Part 1Part 2');
-      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
-      expect(recordedText(recordAssistantTurn)).toBe('Part 1Part 2');
+      // An abort after the finish propagates and the turn is not persisted:
+      // history and the record agree by both lacking it.
+      expect(recordingChat.getHistory().at(-1)?.role).toBe('user');
+      expect(recordAssistantTurn).not.toHaveBeenCalled();
     });
 
     it('bounds the recovery terminal drain when provider EOF never arrives', async () => {
@@ -11730,7 +11734,7 @@ describe('LlmChat', async () => {
       }
     });
 
-    it('does not await teardown after a post-terminal provider error', async () => {
+    it('does not await teardown after an accepted post-terminal provider frame', async () => {
       let nextCount = 0;
       const returnIterator = vi.fn(
         () => new Promise<IteratorResult<GenerateContentResponse>>(() => {}),
@@ -11746,7 +11750,10 @@ describe('LlmChat', async () => {
               value: makeChunk([{ text: 'done' }], 'STOP'),
             };
           }
-          throw new Error('post-terminal failure');
+          throw Object.assign(new Error("'id'"), {
+            code: 'KeyError',
+            requestID: 'req-post-terminal',
+          });
         },
         return: returnIterator,
       } as unknown as AsyncGenerator<GenerateContentResponse>;
@@ -12130,7 +12137,7 @@ describe('LlmChat', async () => {
       await iterator.return?.(undefined);
     });
 
-    it('keeps a tool-result STOP when the provider throws after it', async () => {
+    it('keeps a tool-result STOP when an accepted status-less frame follows it', async () => {
       const recordAssistantTurn = vi.fn();
       const recordingChat = chatWithRecorder(recordAssistantTurn);
       recordingChat.setHistory([
@@ -12149,7 +12156,10 @@ describe('LlmChat', async () => {
       ]);
       const response = (async function* () {
         yield makeChunk([{ text: 'done' }], 'STOP');
-        throw new Error('after terminal');
+        throw Object.assign(new Error("'id'"), {
+          code: 'KeyError',
+          requestID: 'req-after-terminal',
+        });
       })();
       const internalChat = recordingChat as unknown as {
         processStreamResponse(
@@ -13869,7 +13879,7 @@ describe('LlmChat', async () => {
       expect(recordedText(recordAssistantTurn)).toBe('visible');
     });
 
-    it('commits an initial terminal turn when the provider throws while closing', async () => {
+    it('does not commit an initial MAX_TOKENS turn when the provider fails while closing', async () => {
       const recordAssistantTurn = vi.fn();
       const recordingChat = chatWithRecorder(recordAssistantTurn);
       vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
@@ -13892,19 +13902,24 @@ describe('LlmChat', async () => {
           ? terminal.value.value.candidates?.[0]?.finishReason
           : undefined,
       ).toBe(FinishReason.MAX_TOKENS);
-      await iterator.return?.(undefined);
-      expect(recordingChat.getLastModelMessageText()).toBe('visible');
-      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
-      expect(recordedText(recordAssistantTurn)).toBe('visible');
+      // MAX_TOKENS is not a closed finish, and a generic failure is not a
+      // class the trailing-failure gate accepts: the turn fails, so neither
+      // history nor the record keeps it.
+      await expect(iterator.next()).rejects.toThrow('provider close failed');
+      expect(recordingChat.getHistory().at(-1)?.role).toBe('user');
+      expect(recordAssistantTurn).not.toHaveBeenCalled();
     });
 
-    it('commits an ordinary STOP when the provider throws while closing', async () => {
+    it('commits an ordinary STOP when an accepted status-less frame follows it', async () => {
       const recordAssistantTurn = vi.fn();
       const recordingChat = chatWithRecorder(recordAssistantTurn);
       vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
         (async function* () {
           yield makeChunk([{ text: 'complete' }], 'STOP');
-          throw new Error('provider close failed');
+          throw Object.assign(new Error("'id'"), {
+            code: 'KeyError',
+            requestID: 'req-terminal-close',
+          });
         })(),
       );
 
@@ -13921,14 +13936,17 @@ describe('LlmChat', async () => {
       expect(recordedText(recordAssistantTurn)).toBe('complete');
     });
 
-    it('commits a recovered STOP when the provider throws while closing', async () => {
+    it('commits a recovered STOP when an accepted status-less frame follows it', async () => {
       const recordAssistantTurn = vi.fn();
       const recordingChat = chatWithRecorder(recordAssistantTurn);
       const streams = [
         makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
         (async function* () {
           yield makeChunk([{ text: ' ending.' }], 'STOP');
-          throw new Error('provider close failed');
+          throw Object.assign(new Error("'id'"), {
+            code: 'KeyError',
+            requestID: 'req-terminal-close',
+          });
         })(),
       ];
       let callIndex = 0;
@@ -16593,47 +16611,9 @@ describe('LlmChat', async () => {
       );
     });
 
-    it('keeps an unsigned thought separate from a following signed block', async () => {
-      const recordingChat = chatWithRecorder(vi.fn());
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        makeStream([
-          makeChunk(
-            [
-              { text: 'Unsigned.', thought: true },
-              {
-                text: 'Signed.',
-                thought: true,
-                thoughtSignature: 'sig-signed',
-              },
-              { text: 'Answer.' },
-            ],
-            'STOP',
-          ),
-        ]),
-      );
-
-      const stream = await recordingChat.sendMessageStream(
-        'gemini-3-pro',
-        { message: 'think twice' },
-        'prompt-unsigned-then-signed-thought',
-      );
-      for await (const _event of stream) {
-        // consume
-      }
-
-      expect(recordingChat.getHistory().at(-1)?.parts).toEqual([
-        { text: 'Unsigned.', thought: true },
-        {
-          text: 'Signed.',
-          thought: true,
-          thoughtSignature: 'sig-signed',
-        },
-        { text: 'Answer.' },
-      ]);
-    });
-
-    it('keeps unsigned thought blocks separated by visible content', async () => {
-      const recordingChat = chatWithRecorder(vi.fn());
+    it('keeps unsigned thought blocks in stream position around visible content', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
       vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
         makeStream([
           makeChunk(
@@ -16657,11 +16637,17 @@ describe('LlmChat', async () => {
         // consume
       }
 
+      // History keeps each reasoning episode where it streamed (#8260), and
+      // the durable record is projected from that same turn.
       expect(recordingChat.getHistory().at(-1)?.parts).toEqual([
         { text: 'First thought.', thought: true },
+        { text: 'Visible.' },
         { text: 'Second thought.', thought: true },
-        { text: 'Visible.Answer.' },
+        { text: 'Answer.' },
       ]);
+      expect(recordAssistantTurn.mock.calls[0]![0].message).toEqual(
+        recordingChat.getHistory().at(-1)?.parts,
+      );
     });
 
     it('assembles Anthropic thought and signature deltas by block', async () => {
@@ -16716,8 +16702,9 @@ describe('LlmChat', async () => {
       );
     });
 
-    it('keeps consecutive signed thought blocks separate', async () => {
-      const recordingChat = chatWithRecorder(vi.fn());
+    it('joins a trailing signature-only fragment onto the open thought episode', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
       vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
         makeStream([
           makeChunk([{ text: 'First', thought: true, thoughtSignature: 's1' }]),
@@ -16735,15 +16722,20 @@ describe('LlmChat', async () => {
         // consume
       }
 
+      // A text-less signature chunk continues the open episode: signature
+      // fragments concatenate, as Anthropic signature_delta does (#8260).
       expect(recordingChat.getHistory().at(-1)?.parts).toEqual([
-        { text: 'First', thought: true, thoughtSignature: 's1' },
-        { text: '', thought: true, thoughtSignature: 's2' },
+        { text: 'First', thought: true, thoughtSignature: 's1s2' },
         { text: 'Answer.' },
       ]);
+      expect(recordAssistantTurn.mock.calls[0]![0].message).toEqual(
+        recordingChat.getHistory().at(-1)?.parts,
+      );
     });
 
-    it('preserves metadata while consolidating thought and text fragments', async () => {
-      const recordingChat = chatWithRecorder(vi.fn());
+    it('records the consolidated thought and text fragments as history holds them', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
       vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
         makeStream([
           makeChunk(
@@ -16775,17 +16767,16 @@ describe('LlmChat', async () => {
         // consume
       }
 
+      // Main's consolidation (#8260) rebuilds a thought episode from its text
+      // and signature only, and a merged text part keeps its first fragment's
+      // metadata. Whatever history holds, the record must hold the same.
       expect(recordingChat.getHistory().at(-1)?.parts).toEqual([
-        {
-          text: 'Think more.',
-          thought: true,
-          partMetadata: { thoughtStart: true, thoughtEnd: true },
-        },
-        {
-          text: 'Answer done.',
-          partMetadata: { textStart: true, textEnd: true },
-        },
+        { text: 'Think more.', thought: true },
+        { text: 'Answer done.', partMetadata: { textStart: true } },
       ]);
+      expect(recordAssistantTurn.mock.calls[0]![0].message).toEqual(
+        recordingChat.getHistory().at(-1)?.parts,
+      );
     });
 
     it('merges text metadata across a recovery boundary', async () => {

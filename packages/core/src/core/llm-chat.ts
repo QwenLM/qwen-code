@@ -381,90 +381,6 @@ export function redactStructuredOutputArgsForRecording(
   };
 }
 
-/** Join fragments of one thought block without collapsing signed blocks. */
-function buildThoughtContentParts(parts: readonly Part[]): Part[] {
-  const result: Part[] = [];
-  let text = '';
-  let signature = '';
-  let signatureArrivedWithText = false;
-  let partMetadata: Record<string, unknown> | undefined;
-  const flush = () => {
-    const thoughtText = signature ? text : text.trim();
-    if (thoughtText || signature || partMetadata) {
-      const thoughtPart: Part = { text: thoughtText, thought: true };
-      if (signature) {
-        thoughtPart.thoughtSignature = signature;
-      }
-      if (partMetadata) {
-        thoughtPart.partMetadata = partMetadata;
-      }
-      result.push(thoughtPart);
-    }
-    text = '';
-    signature = '';
-    signatureArrivedWithText = false;
-    partMetadata = undefined;
-  };
-
-  for (const part of parts) {
-    if (!part.thought) {
-      flush();
-      continue;
-    }
-    const partText = typeof part.text === 'string' ? part.text : '';
-    const partSignature = part.thoughtSignature ?? '';
-    if (
-      (partSignature && signature && signatureArrivedWithText) ||
-      (partText && (signature || (partSignature && text)))
-    ) {
-      flush();
-    }
-    text += partText;
-    if (partSignature) {
-      signature += partSignature;
-      signatureArrivedWithText ||= Boolean(partText);
-    }
-    if (part.partMetadata) {
-      partMetadata = { ...partMetadata, ...part.partMetadata };
-    }
-  }
-  flush();
-  return result;
-}
-
-function normalizeStreamedModelParts(parts: readonly Part[]): {
-  thoughtContentParts: Part[];
-  consolidatedHistoryParts: Part[];
-} {
-  const thoughtContentParts = buildThoughtContentParts(parts);
-  const consolidatedHistoryParts: Part[] = [];
-  for (const part of parts) {
-    if (part.thought) continue;
-    const lastPart = consolidatedHistoryParts.at(-1);
-    if (
-      lastPart?.text &&
-      isValidNonThoughtTextPart(lastPart) &&
-      isValidNonThoughtTextPart(part)
-    ) {
-      consolidatedHistoryParts[consolidatedHistoryParts.length - 1] = {
-        ...lastPart,
-        text: lastPart.text + part.text,
-        ...(part.partMetadata
-          ? {
-              partMetadata: {
-                ...lastPart.partMetadata,
-                ...part.partMetadata,
-              },
-            }
-          : {}),
-      };
-    } else if (isValidContentPart(part)) {
-      consolidatedHistoryParts.push(part);
-    }
-  }
-  return { thoughtContentParts, consolidatedHistoryParts };
-}
-
 /**
  * Copy a surviving history turn into its durable record while applying the
  * same structured-output redaction as the ordinary recording path.
@@ -5143,8 +5059,8 @@ export class LlmChat {
             rollbackActiveRecoveryAttempt?.();
             return;
           }
-          const normalizedVisibleParts = normalizeStreamedModelParts(
-            visibleNonFunctionCallParts,
+          const normalizedVisibleParts = consolidateModelResponseParts(
+            visibleNonFunctionCallParts.map((part) => ({ ...part })),
           );
           if (activeRecoveryReplayedPartMetadata && recoveryBase.parts) {
             const replayBoundaryIndex = findLastPlainTextPartIndex(
@@ -5164,9 +5080,7 @@ export class LlmChat {
           }
           recoveryBase.parts = appendRecoveryContinuationParts(
             recoveryBase.parts,
-            normalizedVisibleParts.thoughtContentParts.concat(
-              normalizedVisibleParts.consolidatedHistoryParts,
-            ),
+            normalizedVisibleParts,
             true,
           );
           const previousDeferredRecord = self.deferredMaxTokensRecords.findLast(
@@ -5574,16 +5488,14 @@ export class LlmChat {
                 self.popPendingPartialAssistantTurn();
                 return;
               }
-              const normalizedVisibleParts = normalizeStreamedModelParts(
-                visibleNonFunctionCallParts,
+              const normalizedVisibleParts = consolidateModelResponseParts(
+                visibleNonFunctionCallParts.map((part) => ({ ...part })),
               );
               const modelContent: Content = {
                 role: 'model',
                 parts: appendRecoveryContinuationParts(
                   undefined,
-                  normalizedVisibleParts.thoughtContentParts.concat(
-                    normalizedVisibleParts.consolidatedHistoryParts,
-                  ),
+                  normalizedVisibleParts,
                 ),
               };
               self.history.push(modelContent);
@@ -5728,9 +5640,14 @@ export class LlmChat {
                 self.popPendingPartialAssistantTurn();
               }
               abandonEscalatedAttempt?.();
-              const redisplayEvents = !escalatedAttemptCommitted
-                ? restoreTruncatedTurnOnAbort()
-                : [];
+              // A user cancel ends the turn with only what the escalated
+              // attempt made visible: the discarded truncated turn is not
+              // restored. Other escalation failures still restore it.
+              const redisplayEvents =
+                !escalatedAttemptCommitted &&
+                !params.config?.abortSignal?.aborted
+                  ? restoreTruncatedTurnOnAbort()
+                  : [];
               if (exposedFunctionCall) {
                 yield {
                   type: StreamEventType.RETRY,
@@ -7607,7 +7524,6 @@ export class LlmChat {
     // disagree on suppressed or stripped finish chunks.
     let yieldedFinishReason: FinishReason | undefined;
     let firstObservedTerminalFinishReason: string | undefined;
-    let firstObservedTerminalModelPartIndex: number | undefined;
     const terminalChunks: GenerateContentResponse[] = [];
     // The first closed finish reason seen, if any — tracked so a stream
     // that fails *after* the model closed its answer can be accepted as
@@ -7653,7 +7569,6 @@ export class LlmChat {
     let terminalDrainTimedOut = false;
     let terminalDrainTimeout: ReturnType<typeof terminalDrainDelay> | undefined;
     let providerIterationFailed = false;
-    let postTerminalAbortError: unknown = null;
 
     try {
       for (;;) {
@@ -7701,7 +7616,6 @@ export class LlmChat {
           chunk.candidates = [];
         } else if (incomingFinishReason !== undefined) {
           firstObservedTerminalFinishReason = incomingFinishReason;
-          firstObservedTerminalModelPartIndex = allModelParts.length;
         }
         const preparations = getToolCallPreparations(chunk);
         if (preparations.length > 0) {
@@ -7936,15 +7850,11 @@ export class LlmChat {
       }
     } catch (e) {
       providerIterationFailed = true;
-      // A non-abort failure after a terminal chunk goes through the
-      // trailing-failure acceptance gate below, which accepts only the
-      // transport and status-less classes and lets every other class reach
-      // its own retry arm or propagate.
-      if (firstObservedTerminalFinishReason !== undefined && isAbortError(e)) {
-        postTerminalAbortError = e;
-      } else {
-        streamError = e;
-      }
+      // A failure after a terminal chunk goes through the trailing-failure
+      // acceptance gate below like any other: it accepts only the transport
+      // and status-less classes and lets every other class, including an
+      // abort, reach its own retry arm or propagate.
+      streamError = e;
     } finally {
       terminalDrainTimeout?.skip();
       // Cancellation can close the generator at a yield, skipping everything
@@ -8060,16 +7970,6 @@ export class LlmChat {
       throw streamError;
     }
     abortSignal?.throwIfAborted();
-
-    if (postTerminalAbortError !== null && terminalChunks.length > 0) {
-      allModelParts.length = firstObservedTerminalModelPartIndex ?? 0;
-      hasToolCall = allModelParts.some(
-        (part) => part.functionCall !== undefined,
-      );
-      if (allModelParts.length === 0) {
-        throw postTerminalAbortError;
-      }
-    }
 
     const recordedUsage = coercedUsage
       ? { ...usageMetadata, ...coercedUsage }
@@ -8704,9 +8604,6 @@ export class LlmChat {
     if (pendingProtocolChunk) yield pendingProtocolChunk;
     if (recoveredChunk) yield recoveredChunk;
     abortSignal?.throwIfAborted();
-    if (postTerminalAbortError !== null) {
-      throw postTerminalAbortError;
-    }
     const bufferedTerminalHasFinishReason = terminalChunks.some((chunk) =>
       Boolean(firstCandidateFinishReason(chunk)),
     );
