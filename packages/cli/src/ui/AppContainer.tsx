@@ -3388,8 +3388,54 @@ export const AppContainer = (props: AppContainerProps) => {
               setPromptSuggestion(result.nextSuggestion);
             }
           })
-          .catch(() => {
-            // Fallback: submit normally
+          .catch((err: unknown) => {
+            // Falling back to a normal submit hides the reason the accept failed.
+            // The overlay carries the underlying cause (EACCES from ENOSPC from
+            // ENOTDIR), so record it rather than dropping it on the floor.
+            const appliedFiles =
+              err &&
+              typeof err === 'object' &&
+              'applied' in err &&
+              Array.isArray((err as { applied?: unknown }).applied)
+                ? (err as { applied: string[] }).applied
+                : [];
+            logSpeculation(
+              config,
+              new SpeculationEvent({
+                outcome: 'failed',
+                turns_used: spec.messages.filter((m) => m.role === 'model')
+                  .length,
+                files_written: appliedFiles.length,
+                tool_use_count: spec.toolUseCount,
+                duration_ms: Date.now() - spec.startTime,
+                boundary_type: spec.boundary?.type,
+                had_pipelined_suggestion: !!spec.pipelinedSuggestion,
+              }),
+            );
+            debugLogger.error(
+              'Failed to accept speculation',
+              err,
+              'Cause:',
+              err instanceof Error ? err.cause : undefined,
+            );
+            if (appliedFiles.length > 0) {
+              // Some edits are already on disk. Resubmitting the same turn would
+              // run the same tool calls again over files that already carry their
+              // result, so the second run compounds the first -- and the tool
+              // results the model reads back would describe an edit applied
+              // twice. Report what landed and stop; a normal submit is only safe
+              // when nothing was written.
+              historyManager.addItem(
+                {
+                  type: MessageType.ERROR,
+                  text: `Speculative execution applied ${appliedFiles.length} file(s) before failing, so the request was not resubmitted: ${appliedFiles.join(', ')}. Re-running it would apply those edits a second time -- check the files above first, then re-run if the result is what you want.`,
+                },
+                Date.now(),
+              );
+              return;
+            }
+            // Fallback: submit normally. Nothing reached disk, so a resubmit
+            // cannot duplicate an edit.
             addMessage(submittedValue, false, submittedPrompt, shellModeActive);
           });
         speculationRef.current = IDLE_SPECULATION;
