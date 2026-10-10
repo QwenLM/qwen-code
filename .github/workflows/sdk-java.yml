@@ -534,12 +534,13 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (25 + 9×10 + 20 = 135 — the Verify and O4 steps
-    # sit above their failsafe fork timeouts) plus ~10 minutes for the
+    # The step ceilings (35 + 9×10 + 20 = 145 — the Verify and O4 steps
+    # sit above their failsafe fork timeouts; the FG7 channel classes
+    # raised the hosted fork 900→1200 s) plus ~13 minutes for the
     # uncapped setup steps (Checkout..Install MySQL binaries, the report
-    # checks) need ~145; 148 keeps a thin margin, and each arm buys its
+    # checks) need ~158; 160 keeps a thin margin, and each arm buys its
     # own 10 instead of sharing an envelope.
-    timeout-minutes: 148
+    timeout-minutes: 160
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -590,12 +591,13 @@ jobs:
           cd integration-tests
           npx vitest run helpers/hosted-relay-headers.test.ts
       - name: 'Verify Hosted Java, Spring and MySQL processes'
-        # Must outlive the hosted-harness-mysql failsafe fork timeout (900 s)
-        # plus the wrapped compile/surefire/spotbugs/checkstyle work: a step
-        # killed before its fork leaves no per-test failure lines, so the
-        # main-CI failure analyzer can only file an undiagnosable per-commit
-        # issue (#13503). hosted-process-ci.test.js pins this ordering.
-        timeout-minutes: 25
+        # Must outlive the hosted-harness-mysql failsafe fork timeout (1200 s,
+        # raised 900→1200 for the FG7 channel classes) plus the wrapped
+        # compile/surefire/spotbugs/checkstyle work: a step killed before its
+        # fork leaves no per-test failure lines, so the main-CI failure
+        # analyzer can only file an undiagnosable per-commit issue (#13503).
+        # hosted-process-ci.test.js pins this ordering.
+        timeout-minutes: 35
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"

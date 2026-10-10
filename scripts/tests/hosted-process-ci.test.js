@@ -252,11 +252,11 @@ describe('Hosted real-process gates', () => {
       (total, step) => total + (step['timeout-minutes'] ?? 0),
       0,
     );
-    // Step ceilings today (25 + 9x10 + 20); the uncapped setup steps need
+    // Step ceilings today (35 + 9x10 + 20); the uncapped setup steps need
     // their own allowance, which is exactly what the job comment claims.
-    expect(summed).toBe(135);
+    expect(summed).toBe(145);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 10);
-    expect(job['timeout-minutes']).toBe(148);
+    expect(job['timeout-minutes']).toBe(160);
   });
 
   it.each([
