@@ -1023,6 +1023,41 @@ describe('ToolApproval accessibility', () => {
     );
   });
 
+  it('renders the plan as markdown in the exit-plan approval', () => {
+    // The exit_plan_mode schema tells the model the plan "Supports markdown",
+    // so the approval panel must render it instead of showing literal "##".
+    const plan =
+      '## Plan\n\n1. Add the endpoint\n2. Wire up the tests\n\n- **Verify** with `npm test`';
+    render(undefined, {
+      ...planRequest,
+      content: [{ type: 'text', text: plan }],
+    });
+
+    expect(container!.querySelector('h2')?.textContent).toBe('Plan');
+    const items = Array.from(container!.querySelectorAll('li')).map(
+      (li) => li.textContent,
+    );
+    expect(items).toEqual([
+      'Add the endpoint',
+      'Wire up the tests',
+      'Verify with npm test',
+    ]);
+    // The raw-text <pre> is gone; the rendered plan keeps a plain-text
+    // equivalent for the alertdialog's aria-describedby (raw text as title).
+    expect(container!.querySelector('pre')).toBeNull();
+    const panel = container!.querySelector('[role="alertdialog"]')!;
+    const describedBy = panel.getAttribute('aria-describedby')!;
+    expect(
+      describedBy
+        .split(' ')
+        .map((id) => document.getElementById(id)?.textContent ?? '')
+        .some((text) => text.includes('Add the endpoint')),
+    ).toBe(true);
+    expect(
+      container!.querySelector('[class*="planContent"]')?.getAttribute('title'),
+    ).toBe(plan);
+  });
+
   it('shows a dependency-free Plan Mode workflow as a list', () => {
     render(undefined, planRequest, [
       { id: 'review', content: 'Review the change', status: 'pending' },

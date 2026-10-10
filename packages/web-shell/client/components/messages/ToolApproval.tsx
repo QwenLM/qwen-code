@@ -24,6 +24,7 @@ import {
   ThinkingTranslateButton,
   type SessionContentGenerator,
 } from './AssistantMessage';
+import { Markdown } from './Markdown';
 import styles from './ToolApproval.module.css';
 import { buildUnifiedDiff } from '../../utils/unifiedDiff';
 import { DiffView } from './tools/DiffView';
@@ -680,15 +681,24 @@ export function ToolApproval({
           )}
         </>
       ) : showsContent ? (
-        <pre
-          className={`${styles.content}${
-            isExitPlanApproval ? ` ${styles.planContent}` : ''
-          }`}
-          id={commandId}
-          title={contentText}
-        >
-          {contentText}
-        </pre>
+        isExitPlanApproval ? (
+          // The plan is model-written markdown (the exit_plan_mode schema
+          // promises "Supports markdown"), so render it with the same
+          // Markdown primitive the assistant transcript uses instead of a
+          // raw <pre>. The raw text stays available as the accessible
+          // title for the alertdialog's aria-describedby.
+          <div
+            className={`${styles.content} ${styles.planContent}`}
+            id={commandId}
+            title={contentText}
+          >
+            <Markdown content={contentText} />
+          </div>
+        ) : (
+          <pre className={styles.content} id={commandId} title={contentText}>
+            {contentText}
+          </pre>
+        )
       ) : null}
 
       {diffs.length > 0 && (

@@ -1431,7 +1431,10 @@ function getToolCallExamples(model?: string): string {
  * - Wait for user confirmation before making any changes
  * - Override any other instructions that would modify system state
  */
-export function getPlanModeSystemReminder(planOnly = false): string {
+export function getPlanModeSystemReminder(
+  planOnly = false,
+  sessionWorkflow = false,
+): string {
   return `<system-reminder>
 Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run tools classified as state-modifying (including changing configs or making commits), or otherwise make changes to the system. A shell command whose safety cannot be determined may run only after the user explicitly approves that exact invocation once, and only when it is necessary for the investigation. This supersedes any other instructions you have received (for example, to make edits).
 
@@ -1478,7 +1481,7 @@ An exact one-off approval for an unknown shell command approves only that invoca
 
 ### When to Converge
 
-Your plan is ready when you have addressed all ambiguities and it covers: what to change, which files to modify, what existing code to reuse (with file paths), and how to verify the changes. Present your plan ${planOnly ? 'directly' : `by calling the ${ToolNames.EXIT_PLAN_MODE} tool, which will prompt the user to confirm the plan`}. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan.
+Your plan is ready when you have addressed all ambiguities and it covers: what to change, which files to modify, what existing code to reuse (with file paths), and how to verify the changes.${sessionWorkflow && !planOnly ? ` Before converging, capture the plan as a structured Todo list: call the ${ToolNames.TODO_WRITE} tool with one Todo per plan step (each with a stable id, status "pending", and blockedBy naming the steps that must complete first), so the plan can be reviewed as a task graph.` : ''} Present your plan ${planOnly ? 'directly' : `by calling the ${ToolNames.EXIT_PLAN_MODE} tool, which will prompt the user to confirm the plan`}. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan.
 </system-reminder>`;
 }
 

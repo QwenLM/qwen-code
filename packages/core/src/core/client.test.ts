@@ -9309,7 +9309,12 @@ Other open files:
         const send = () => run([{ text: 'Plan this change' }], promptId);
         await (inSubagent ? runWithAgentContext('agent-1', send) : send());
 
-        expect(getPlanModeSystemReminder).toHaveBeenCalledWith(forSubagent);
+        // The mock Config has no session-workflow gate, so the reminder's
+        // sessionWorkflow dimension is off.
+        expect(getPlanModeSystemReminder).toHaveBeenCalledWith(
+          forSubagent,
+          false,
+        );
       },
     );
 

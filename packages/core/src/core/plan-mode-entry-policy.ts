@@ -13,6 +13,9 @@ export const PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE =
 const PLAN_MODE_LIFECYCLE_REMINDERS = [
   getPlanModeSystemReminder(false),
   getPlanModeSystemReminder(true),
+  // Session Workflow on: the only extra variant enter_plan_mode can emit,
+  // since plan-only mode keeps its reminder unchanged.
+  getPlanModeSystemReminder(false, true),
 ];
 
 export function getPlanModeLifecyclePrefix(
