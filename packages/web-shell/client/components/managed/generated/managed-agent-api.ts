@@ -544,7 +544,7 @@ export interface components {
         };
         WebShellSessionCapabilities: {
             /**
-             * @description True when Workspace files are enabled, the bound Session is active and undeleted, the caller is its creator and the exact ACTIVE Registry generation/storage and creator OPERATOR/OWNER grant still hold, matching cwd admission. This does not promise an idle Session and is independent of workspaceTurns execution-profile gates. Missing means false. Existing operations remain queryable under read authorization even when this capability is false.
+             * @description True when Workspace files are enabled, the bound Session is active and undeleted, the caller holds OPERATOR or above on the Workspace and the exact ACTIVE Registry generation/storage and create-command-actor OPERATOR/OWNER grant still hold, matching cwd admission. This does not promise an idle Session and is independent of workspaceTurns execution-profile gates. Missing means false. Existing operations remain queryable under read authorization even when this capability is false.
              * @default false
              */
             cwdChange?: boolean;

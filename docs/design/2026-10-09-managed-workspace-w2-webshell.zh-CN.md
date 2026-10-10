@@ -4,7 +4,7 @@
 
 ## 问题与基线
 
-W2 控制面（#13247）已有同一 Workspace 内持久化、幂等的 cwd 变更和 `session.context.changed` 事件。WebShell 能显示绑定目录，但没有切换入口。Session summary 的 TypeScript 合同缺少 context revision，事件投影也忽略上下文变更。基线为 main `15c11bb8982`；#13545（角色权限）和 #13564（Hosted 规则缓存失效）仍 open。
+W2 控制面（#13247）已有同一 Workspace 内持久化、幂等的 cwd 变更和 `session.context.changed` 事件。WebShell 能显示绑定目录，但没有切换入口。Session summary 的 TypeScript 合同缺少 context revision，事件投影也忽略上下文变更。基线为 main `5b1c701400` 之后；#13545（角色权限）已合入且本分支已与其角色模型统一，#13564（Hosted 规则缓存失效）仍 open。
 
 ## 交互
 
@@ -16,7 +16,7 @@ W2 控制面（#13247）已有同一 Workspace 内持久化、幂等的 cwd 变�
 
 复用 BFF `/sessions/cwd/change`、`/operations/query` 和 `/sessions/get`。可选 provider `cwdChange` 操作组提供 submit/query，返回已有 cwd operation。summary 补可选 contextRevision/state 和 cwdChange capability。Java 仅在显式提供含租户、账号身份的 productScope 时暴露操作组。Daemon 和旧服务端保持不支持。
 
-BFF 实现已预留的可选 `cwdChange`，依据部署执行开关、活跃 Session、绑定/Registry 事实和与 cwd admission 相同的调用者授权判定。页面采用批量查询，不能复用有额外执行 profile 限制的 workspaceTurns。权限由服务端裁决并随 #13545 演进。能力不保证 Session 当前空闲。不增加 endpoint、数据库表、operation 历史、公共能力字段或 context state 推导。
+BFF 实现已预留的可选 `cwdChange`，依据部署执行开关、活跃 Session、绑定/Registry 事实和与 cwd admission 相同的调用者授权判定。页面采用批量查询，不能复用有额外执行 profile 限制的 workspaceTurns。权限由服务端按 #13545 的角色模型裁决。能力不保证 Session 当前空闲。不增加 endpoint、数据库表、operation 历史、公共能力字段或 context state 推导。
 
 ## 浏览器持久化意图
 

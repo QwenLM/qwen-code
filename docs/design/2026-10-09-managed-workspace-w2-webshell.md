@@ -4,7 +4,7 @@
 
 ## Problem and baseline
 
-The W2 control plane (#13247) already admits durable, idempotent same-Workspace cwd changes and publishes `session.context.changed`. WebShell shows the bound directory but cannot change it. Session summaries omit the context revision in their TypeScript contract, and the event projector ignores context changes. Baseline: main `15c11bb8982`; #13545 (actor roles) and #13564 (Hosted instruction cache invalidation) remain open.
+The W2 control plane (#13247) already admits durable, idempotent same-Workspace cwd changes and publishes `session.context.changed`. WebShell shows the bound directory but cannot change it. Session summaries omit the context revision in their TypeScript contract, and the event projector ignores context changes. Baseline: main past `5b1c701400`; #13545 (actor roles) has landed and this branch converges on its role model, while #13564 (Hosted instruction cache invalidation) remains open.
 
 ## Interaction
 
@@ -16,7 +16,7 @@ Disable new changes during an active turn, pending approval, unconfirmed prompt 
 
 Use existing BFF `/sessions/cwd/change`, `/operations/query` and `/sessions/get`. The optional provider `cwdChange` group has submit/query methods returning the existing cwd operation shape. Extend the summary with optional contextRevision/state and cwdChange capability. Java exposes the group only with an explicit productScope containing tenant/account identity. Daemon and old servers remain unsupported.
 
-The BFF implements the existing optional `cwdChange` capability using the deployment execution flag, active Session, binding/Registry facts and the same caller authorization predicate as cwd admission. Batch page reads; do not reuse workspaceTurns, which has additional execution-profile constraints. Permission remains authoritative on the server and evolves with #13545. Capability does not promise an idle Session. No endpoints, database tables, operation history, public capability expansion or context-state derivation are added.
+The BFF implements the existing optional `cwdChange` capability using the deployment execution flag, active Session, binding/Registry facts and the same caller authorization predicate as cwd admission. Batch page reads; do not reuse workspaceTurns, which has additional execution-profile constraints. Permission remains authoritative on the server under #13545's role model. Capability does not promise an idle Session. No endpoints, database tables, operation history, public capability expansion or context-state derivation are added.
 
 ## Durable browser intent
 

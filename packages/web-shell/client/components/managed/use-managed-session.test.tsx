@@ -140,6 +140,14 @@ describe('useManagedSession', () => {
       expect(composed.aborted).toBe(false);
       caller.abort();
       expect(composed.aborted).toBe(true);
+      // The other half of the composition: the hook lifetime aborts it too.
+      await act(async () => {
+        await latest.refreshSummary(new AbortController().signal);
+      });
+      const second = getSession.mock.calls.at(-1)?.[1]?.signal as AbortSignal;
+      expect(second.aborted).toBe(false);
+      act(() => root!.unmount());
+      expect(second.aborted).toBe(true);
     } finally {
       (AbortSignal as unknown as { any?: unknown }).any = original;
     }
