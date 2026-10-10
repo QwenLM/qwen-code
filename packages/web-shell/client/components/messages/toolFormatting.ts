@@ -685,7 +685,8 @@ export function getAgentDisplayStatus(
 }
 
 export function formatTokenCount(tokens: number): string {
-  if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}M tokens`;
+  // 999,950 rounds to 1000k, so it belongs in the next unit.
+  if (tokens >= 999_950) return `${(tokens / 1000000).toFixed(1)}M tokens`;
   if (tokens >= 1000)
     return (tokens / 1000).toFixed(1).replace(/\.0$/, '') + 'k tokens';
   return `${tokens} tokens`;
