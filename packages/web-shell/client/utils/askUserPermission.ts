@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { PermissionRequest } from '../adapters/types';
-import { isAskUserQuestionToolName } from '../components/messages/toolFormatting';
+import type { PermissionRequest } from '../adapters/types.js';
+import { isAskUserQuestionToolName } from '../components/messages/toolFormatting.js';
 
 /**
  * True when a pending permission is an AskUserQuestion prompt (it carries a

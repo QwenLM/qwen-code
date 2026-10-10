@@ -918,10 +918,11 @@ describe('SettingsMessage user-scope editing', () => {
       setEnabled: vi.fn(async () => {}),
       refreshPermission: vi.fn(),
       syncLanguage: vi.fn(),
+      requestPermissionOnce: vi.fn(),
     };
     const state = makeState([themeSetting()], vi.fn());
     const baseline = renderPanel(state);
-    expect(baseline.textContent).toContain('Browser task notifications');
+    expect(baseline.textContent).toContain('Task notifications');
     const container = renderPanel(state, {
       presentation: { includeItems: ['builtin:chat-width'] },
     });
@@ -930,7 +931,7 @@ describe('SettingsMessage user-scope editing', () => {
       expect(container.querySelectorAll('nav button')).toHaveLength(1);
       expect(container.textContent).toContain('Chat width');
       expect(container.textContent).not.toContain('Theme');
-      expect(container.textContent).not.toContain('Browser task notifications');
+      expect(container.textContent).not.toContain('Task notifications');
     }
   });
 
@@ -1045,13 +1046,8 @@ describe('SettingsMessage user-scope editing', () => {
   });
 
   it.each([
-    ['builtin:chat-width', 'UI', 'Chat width', 'Browser task notifications'],
-    [
-      'builtin:browser-notifications',
-      'UI',
-      'Browser task notifications',
-      'Chat width',
-    ],
+    ['builtin:chat-width', 'UI', 'Chat width', 'Task notifications'],
+    ['builtin:browser-notifications', 'UI', 'Task notifications', 'Chat width'],
     ['builtin:live-setup', 'Experimental', 'Qwen Live', undefined],
     ['builtin:local-control', 'Daemon', 'Local Control', undefined],
     ['builtin:model-management', 'Model', 'model-management', undefined],
@@ -1067,6 +1063,7 @@ describe('SettingsMessage user-scope editing', () => {
         setEnabled: vi.fn(async () => {}),
         refreshPermission: vi.fn(),
         syncLanguage: vi.fn(),
+        requestPermissionOnce: vi.fn(),
       };
       const container = renderPanel(makeState([], vi.fn(), liveSetup(false)), {
         modelManagementSectionProps: makeModelManagement(),

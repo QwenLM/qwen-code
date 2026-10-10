@@ -1,6 +1,6 @@
-import type { ACPToolCall } from '../../adapters/types';
+import type { ACPToolCall } from '../../adapters/types.js';
 
-export { isActiveToolStatus } from '../../adapters/toolClassification';
+export { isActiveToolStatus } from '../../adapters/toolClassification.js';
 
 /**
  * Internal-tool-name → display-name lookup. This is a standalone copy of

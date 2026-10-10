@@ -13,6 +13,7 @@ import { isEditableTarget } from '../../utils/dom';
 import { Spinner } from '../ui/spinner';
 import { localizeToolDisplayName } from './toolFormatting';
 import styles from './AskUserQuestion.module.css';
+import { BrowserNotificationControl } from './BrowserNotificationControl';
 
 interface Question {
   question: string;
@@ -730,6 +731,7 @@ export function AskUserQuestion({
               />
             </svg>
           </button>
+          <BrowserNotificationControl />
         </div>
       </div>
 

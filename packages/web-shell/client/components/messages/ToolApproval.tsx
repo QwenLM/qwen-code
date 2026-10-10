@@ -28,6 +28,7 @@ import styles from './ToolApproval.module.css';
 import { buildUnifiedDiff } from '../../utils/unifiedDiff';
 import { DiffView } from './tools/DiffView';
 import { useWebShellCustomization } from '../../customization';
+import { BrowserNotificationControl } from './BrowserNotificationControl';
 
 interface ToolApprovalProps {
   request: PermissionRequest;
@@ -643,6 +644,7 @@ export function ToolApproval({
         <span className={styles.name} id={headingId}>
           {toolName}
         </span>
+        <BrowserNotificationControl />
       </div>
 
       {descriptionText && (

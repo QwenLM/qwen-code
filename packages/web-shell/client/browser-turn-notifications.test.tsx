@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { webcrypto } from 'node:crypto';
-import { act, useContext, type ReactNode } from 'react';
+import { act, StrictMode, useContext, useEffect, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -118,6 +118,207 @@ afterEach(() => {
 });
 
 describe('browser task notifications', () => {
+  it('settles a first-panel grant when the panel mounts under Strict Mode', async () => {
+    FakeNotification.permission = 'default';
+    function FirstPanel() {
+      const request = useBrowserNotificationSettings()?.requestPermissionOnce;
+      useEffect(() => request?.(), [request]);
+      return null;
+    }
+    const capture: Capture = {};
+    render(capture, (node) => (
+      <StrictMode>
+        <BrowserTurnNotifications language="en">
+          <FirstPanel />
+          {node}
+        </BrowserTurnNotifications>
+      </StrictMode>
+    ));
+    await act(async () => {});
+    expect(FakeNotification.requestPermission).toHaveBeenCalledOnce();
+    expect(capture.settings!.pending).toBe(false);
+    expect(capture.settings!.enabled).toBe(true);
+    expect(capture.settings!.permission).toBe('granted');
+  });
+
+  it('attempts first-panel authorization once across panels and remounts, with manual retry', async () => {
+    FakeNotification.permission = 'default';
+    FakeNotification.requestPermission.mockResolvedValue('default');
+    const first: Capture = {};
+    const root = render(first);
+    await act(async () => {
+      first.settings!.requestPermissionOnce();
+      first.settings!.requestPermissionOnce();
+    });
+    expect(FakeNotification.requestPermission).toHaveBeenCalledOnce();
+    expect(first.settings!.pending).toBe(false);
+    expect(first.settings!.enabled).toBe(false);
+    act(() => root.unmount());
+    const next: Capture = {};
+    render(next);
+    await act(async () => next.settings!.requestPermissionOnce());
+    expect(FakeNotification.requestPermission).toHaveBeenCalledOnce();
+    FakeNotification.requestPermission.mockImplementation(async () => {
+      FakeNotification.permission = 'granted';
+      return 'granted';
+    });
+    await act(async () => next.settings!.setEnabled(true));
+    expect(FakeNotification.requestPermission).toHaveBeenCalledTimes(2);
+    expect(next.settings!.enabled).toBe(true);
+    expect(next.settings!.permission).toBe('granted');
+  });
+
+  it.each(['off', 'denied', 'granted', 'unavailable'] as const)(
+    'does not auto-request notification authorization when %s',
+    async (reason) => {
+      FakeNotification.permission = reason === 'denied' ? 'denied' : 'default';
+      if (reason === 'granted') FakeNotification.permission = 'granted';
+      if (reason === 'off')
+        localStorage.setItem(BROWSER_NOTIFICATIONS_STORAGE_KEY, 'false');
+      if (reason === 'unavailable') vi.stubGlobal('isSecureContext', false);
+      const capture: Capture = {};
+      render(capture);
+      await act(async () => capture.settings!.requestPermissionOnce());
+      expect(FakeNotification.requestPermission).not.toHaveBeenCalled();
+      expect(capture.settings!.enabled).toBe(false);
+    },
+  );
+
+  it('enables notifications after a first-panel grant and deduplicates without storage', async () => {
+    FakeNotification.permission = 'default';
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new Error('storage blocked');
+    });
+    const capture: Capture = {};
+    render(capture);
+    await act(async () => {
+      capture.settings!.requestPermissionOnce();
+      capture.settings!.requestPermissionOnce();
+    });
+    expect(FakeNotification.requestPermission).toHaveBeenCalledOnce();
+    expect(capture.settings!.enabled).toBe(true);
+    expect(capture.settings!.permission).toBe('granted');
+    expect(capture.settings!.persistent).toBe(false);
+  });
+
+  it.each([
+    [
+      'approval',
+      'This session needs your approval. Return to review the request.',
+    ],
+    ['question', 'This session is waiting for your answer. Return to respond.'],
+  ] as const)(
+    'delivers a %s reminder and opens its captured session without consuming completion',
+    async (attention, body) => {
+      window.localStorage.setItem(BROWSER_NOTIFICATIONS_STORAGE_KEY, 'true');
+      const capture: Capture = {};
+      render(capture);
+      attach(capture);
+      const target = {
+        sessionId: 'session',
+        sessionContext: { kind: 'workspace' as const, cwd: '/workspace' },
+      };
+      const open = vi.fn();
+      capture.navigationTarget!.addEventListener('qwen:open-session', open);
+      const event = {
+        type: 'permission_request',
+        data: { sessionId: 'session', requestId: 'prompt' },
+      };
+      await act(async () => {
+        capture.observer!.observe('scope', 'session', event, false, {
+          attention,
+          sessionTitle: 'Review changes',
+          target,
+        });
+        await vi.waitFor(() => expect(notifications).toHaveLength(1));
+      });
+      expect(notifications[0]?.title).toBe('QwenCode · Review changes');
+      expect(notifications[0]?.options.body).toBe(body);
+      const focus = vi.spyOn(window, 'focus').mockImplementation(() => {});
+      notifications[0]?.onclick?.();
+      expect(focus).toHaveBeenCalledOnce();
+      expect((open.mock.calls[0]![0] as CustomEvent).detail).toEqual(target);
+      expect(notifications[0]?.close).toHaveBeenCalledOnce();
+      await settle(capture);
+      expect(notifications).toHaveLength(2);
+      expect(notifications[1]?.options.tag).not.toBe(
+        notifications[0]?.options.tag,
+      );
+    },
+  );
+
+  it.each(['foreground', 'disabled', 'denied', 'history'] as const)(
+    'keeps an action request silent when %s, without later backfill',
+    async (reason) => {
+      if (reason !== 'disabled')
+        window.localStorage.setItem(BROWSER_NOTIFICATIONS_STORAGE_KEY, 'true');
+      if (reason === 'denied') FakeNotification.permission = 'denied';
+      if (reason === 'foreground')
+        vi.mocked(document.hasFocus).mockReturnValue(true);
+      const capture: Capture = {};
+      render(capture);
+      attach(capture);
+      const event = {
+        type: 'permission_request',
+        data: { sessionId: 'session', requestId: 'quiet' },
+      };
+      await act(async () => {
+        capture.observer!.observe(
+          'scope',
+          'session',
+          event,
+          reason === 'history',
+          { attention: 'question' },
+        );
+      });
+      expect(notifications).toHaveLength(0);
+      if (reason === 'history') return;
+      FakeNotification.permission = 'granted';
+      vi.mocked(document.hasFocus).mockReturnValue(false);
+      await act(() => capture.settings!.setEnabled(true));
+      await act(async () => {
+        capture.observer!.observe('scope', 'session', event, false, {
+          attention: 'question',
+        });
+      });
+      await settle(capture, 'quiet-marker');
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]?.options.body).toBe('This turn has completed.');
+    },
+  );
+
+  it('localizes action reminders in Chinese', async () => {
+    window.localStorage.setItem(BROWSER_NOTIFICATIONS_STORAGE_KEY, 'true');
+    const capture: Capture = {};
+    render(capture, (node) => (
+      <BrowserTurnNotifications language="zh-CN">
+        {node}
+      </BrowserTurnNotifications>
+    ));
+    attach(capture);
+    await act(async () => {
+      for (const attention of ['approval', 'question'] as const) {
+        capture.observer!.observe(
+          'scope',
+          'session',
+          {
+            type: 'permission_request',
+            data: { sessionId: 'session', requestId: attention },
+          },
+          false,
+          { attention },
+        );
+      }
+      await vi.waitFor(() => expect(notifications).toHaveLength(2));
+    });
+    expect(
+      notifications.map((notification) => notification.options.body),
+    ).toEqual([
+      '此会话需要你的审批，请返回查看请求。',
+      '此会话正在等待你的回答，请返回处理。',
+    ]);
+  });
+
   it('defaults on only when configured and preserves an explicit off choice after remount', async () => {
     const capture: Capture = {};
     const wrapper = (node: ReactNode) => (

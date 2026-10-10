@@ -3924,6 +3924,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 );
               }
               if (sessionRef.current === activeSession) {
+                if (event.type === 'permission_request') flushTranscriptSync();
                 turnNotifications.observe(activeSession, event, false, () =>
                   getTurnNotificationContent(
                     event,
