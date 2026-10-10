@@ -222,6 +222,7 @@ describe.skipIf(process.platform === 'win32')(
       // is scheduler-paced, so the group may still be running at the settle.
       const events: string[] = [];
       const realWait = ledger.waitForGroupExit.bind(ledger);
+      let killed: number | undefined;
       const doubled = {
         addGroup: () => {
           events.push('record-fail');
@@ -230,6 +231,11 @@ describe.skipIf(process.platform === 'win32')(
         outstandingGroups: ledger.outstandingGroups.bind(ledger),
         waitForGroupExit: (pgid: number, budgetMs: number) => {
           events.push('kill-started');
+          // The doubled addGroup keeps this group out of every ledger view,
+          // so the afterEach net is the only reaper left if the test fails
+          // before close().
+          strayGroups.add(pgid);
+          killed = pgid;
           return realWait(pgid, budgetMs);
         },
         killOutstanding: ledger.killOutstanding.bind(ledger),
@@ -253,6 +259,7 @@ describe.skipIf(process.platform === 'win32')(
       expect(events.slice(0, 2)).toEqual(['record-fail', 'kill-started']);
       expect(result.executionStatus).toBe('error');
       await exec.close();
+      strayGroups.delete(killed!);
     });
 
     it('fails the call and kills the group when the ledger cannot record it', async () => {

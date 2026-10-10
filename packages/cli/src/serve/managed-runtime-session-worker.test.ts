@@ -959,8 +959,8 @@ describe.skipIf(process.platform === 'win32')(
         // A close that finds its ledger unprovable reports the quarantine
         // once and arms the reaper; a repeated close must not pay a second
         // proof budget over the same path — and deferring is not proving:
-        // it rejects with the SAME reason that armed the reaper rather than
-        // resolving as if the stop were done.
+        // each close rejects with the SAME reason that armed the reaper
+        // rather than resolving as if the stop were done.
         const ledgerDir = path.join(root, 'ledgers');
         const quarantine = { report: vi.fn(), lift: vi.fn() };
         const created = ledgerWorker('ok', { ledgerDir, quarantine });
@@ -970,23 +970,29 @@ describe.skipIf(process.platform === 'win32')(
         // read, too young to retire.
         await writeFile(workFile, 'not a ledger at all', 'utf8');
 
-        await created.close().catch(() => undefined);
-        const deadline = Date.now() + 10_000;
-        while (quarantine.report.mock.calls.length === 0) {
-          if (Date.now() > deadline) throw new Error('never quarantined');
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
+        const first = await created.close().catch((error: unknown) => error);
+        expect(first).toBeInstanceOf(AggregateError);
         expect(quarantine.report).toHaveBeenCalledTimes(1);
-
-        const repeated = await created.close().catch((error: unknown) => error);
-        expect(repeated).toBeInstanceOf(AggregateError);
         // The host lifts by reason identity, so the rejection must carry the
         // very instance that armed the reaper — a same-message twin (every
         // sweep of this file builds its message from workFile alone) is not
         // the pairing the quarantine keeps.
         const armedReason = quarantine.report.mock.calls[0]![0] as Error;
+        const sweepsBefore = sweepWitnesses.records.filter(
+          (record) => record.workFile === workFile,
+        ).length;
+
+        const repeated = await created.close().catch((error: unknown) => error);
+        expect(repeated).toBeInstanceOf(AggregateError);
         expect((repeated as AggregateError).errors).toContain(armedReason);
         expect(quarantine.report).toHaveBeenCalledTimes(1);
+        // The repeated close paid no new sweep over this ledger: the armed
+        // reaper owns it.
+        expect(
+          sweepWitnesses.records.filter(
+            (record) => record.workFile === workFile,
+          ).length,
+        ).toBe(sweepsBefore);
       });
 
       it('a deleted unreadable ledger is no proof: the reaper never lifts', async () => {
@@ -1134,36 +1140,9 @@ describe.skipIf(process.platform === 'win32')(
         }
       });
 
-      it('close rejects with the arming reason while the reaper it armed keeps proving', async () => {
-        // A stop a reaper is still proving is not a clean close: the first
-        // close() arms the reaper and rejects; a second close() must not
-        // resolve on the back of the first's work. It rejects with the SAME
-        // reason the arming sweep produced — deferring is not proving.
-        const ledgerDir = path.join(root, 'ledgers');
-        const quarantine = { report: vi.fn(), lift: vi.fn() };
-        const created = ledgerWorker('ok', { ledgerDir, quarantine });
-        await created.execute('read_file', { file_path: 'a.txt' }, signal);
-        const workFile = path.join(ledgerDir, `${await incarnation()}.json`);
-        await writeFile(workFile, 'not a ledger at all', 'utf8');
-
-        sweepWitnesses.records.length = 0;
-        const first = await created.close().catch((error: unknown) => error);
-        expect(first).toBeInstanceOf(AggregateError);
-        expect(quarantine.report).toHaveBeenCalledTimes(1);
-        const armedReason = quarantine.report.mock.calls[0]![0] as Error;
-        const [sweepsAfterFirst] = [sweepWitnesses.records.length];
-
-        const second = await created.close().catch((error: unknown) => error);
-        expect(second).toBeInstanceOf(AggregateError);
-        const reasons = (second as AggregateError).errors as Error[];
-        expect(reasons).toContain(armedReason);
-        // The second close paid no new sweep: the armed reaper owns it.
-        expect(sweepWitnesses.records.length).toBe(sweepsAfterFirst);
-      });
-
       it(
         'an unproven sweep from the exit hook arms the reaper from inside its own failure',
-        // Two 10 s waits need a ceiling above 15 s.
+        // Two 10 s waits plus the retry witness need a ceiling above 15 s.
         { timeout: 30_000 },
         async () => {
           // The exit hook's catch swallows the sweep's throw because the
@@ -1207,9 +1186,20 @@ describe.skipIf(process.platform === 'win32')(
               },
               { timeout: 10_000 },
             );
-            // The lift never comes from garbage: the quarantine stands. Judged
-            // at the arming moment — this asserts no lift *yet*, not that a
-            // later pass withheld one.
+            // The lift never comes from garbage: the quarantine stands. The
+            // reaper retries strictly in sequence, so a third sweep begins
+            // only after the first retry settled its verdict — and a lift
+            // stops the reaper, so a lifting retry never lets a third begin.
+            await vi.waitFor(
+              () => {
+                expect(
+                  sweepWitnesses.records.filter(
+                    (record) => record.workFile === workFile,
+                  ).length,
+                ).toBeGreaterThan(2);
+              },
+              { timeout: 8_000 },
+            );
             expect(quarantine.lift).not.toHaveBeenCalled();
           } finally {
             release?.();
