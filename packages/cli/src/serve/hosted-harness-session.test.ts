@@ -2691,6 +2691,82 @@ describe('Hosted Harness no-tool session', () => {
     }
   });
 
+  it('journals a Broker-fenced wake park as unobserved, never a witnessed cancellation', async () => {
+    // R10-1: the aftermath's stop counts the fenced execution into the
+    // unobserved carry, and the settle must receive it — otherwise the
+    // reclaimed record certifies a cancellation nobody observed.
+    const inputId = await prewriteAutomationParkedWakeSession();
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      }),
+    });
+    try {
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+        async function (this: HostedWorkspaceBroker) {
+          this.runtime = {
+            bindingId: 'binding',
+            generation: '1',
+            workspaceGeneration: '1',
+          };
+        },
+      );
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+        state: 'abandoned',
+      });
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+      const session = {
+        managed,
+        automations: new HostedAutomationSession(
+          {
+            authority: managed.authority,
+            resources: managed.resources,
+            sink: managed.sink,
+          },
+          key,
+        ),
+      } as never;
+      const aftermath = await settleCrashedWakeTurnAftermath({
+        session,
+        sessionId: SESSION_ID,
+        cwd: state.root,
+        brokerOptions: { token: 'test', baseUrl: 'http://127.0.0.1:1' },
+        turnId: inputId,
+      });
+      expect(aftermath).toBe('settled');
+      const toolResults = (await managed.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === inputId && entry.type === 'tool_result',
+      );
+      expect(toolResults).toHaveLength(1);
+      const response = toolResults[0]?.message?.parts?.[0]?.functionResponse
+        ?.response as Record<string, unknown> | undefined;
+      expect(response?.['executionStatus']).toBe('unknown');
+      expect(String(response?.['error'])).toContain('could not be observed');
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+  });
+
   it('refuses a prompt retriably when the wake park probe read nothing', async () => {
     await prewriteAutomationParkedWakeSession();
     const repair = mockRepairBroker();

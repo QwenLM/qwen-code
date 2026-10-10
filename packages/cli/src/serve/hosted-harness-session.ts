@@ -806,6 +806,12 @@ export async function settleCrashedWakeTurnAftermath(params: {
         );
         let broker: HostedWorkspaceBroker | undefined;
         if (runtimeItems.some((item) => item.state === 'in_progress')) {
+          // The same cross-retry honesty carry the takeover cancel drive
+          // keeps: a stop that counted unobserved ids must hand them to the
+          // settle, or a reclaimed record certifies as a witnessed
+          // cancellation. Owned here — outside the adopt block and the
+          // transcript retry loop — so a compensating retry still sees them.
+          const carried = new Set<string>();
           try {
             // A parked crash on a replacement Broker owns nothing until
             // adopted: status queries answer 404
@@ -839,14 +845,15 @@ export async function settleCrashedWakeTurnAftermath(params: {
             // catch as a failed pass — wedging the consume behind a poll
             // that can never answer. Skip it; the 409-aware release
             // block below still completes what the lease owes.
-            if (adopted)
-              broker = (
-                await stopParkedRuntimeExecutions({
-                  session: session.managed,
-                  promptId: turnId,
-                  brokerOptions,
-                })
-              ).broker;
+            if (adopted) {
+              const stopped = await stopParkedRuntimeExecutions({
+                session: session.managed,
+                promptId: turnId,
+                brokerOptions,
+                carryUnobservedInto: carried,
+              });
+              broker = stopped.broker;
+            }
           } catch (cause) {
             // A decline is deterministic evidence read from the journal
             // (a shell under a hooks/MCP definition, a mismatched own
@@ -871,6 +878,7 @@ export async function settleCrashedWakeTurnAftermath(params: {
                 sessionId,
                 cwd,
                 promptId: turnId,
+                unobserved: carried,
               });
               break;
             } catch (cause) {

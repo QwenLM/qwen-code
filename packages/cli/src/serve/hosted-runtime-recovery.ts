@@ -453,13 +453,20 @@ export async function stopParkedRuntimeExecutions(input: {
       unobserved.add(item.executionCallId);
       throw cause;
     }
-    if (before?.state === 'unknown')
+    if (before?.state === 'unknown') {
+      unobserved.add(item.executionCallId);
       throw new Error('Runtime execution outcome is unknown.');
+    }
     if (before?.state === 'abandoned') {
       unobserved.add(item.executionCallId);
       continue;
     }
-    if (stopComplete(before)) continue;
+    if (stopComplete(before)) {
+      // A positive witness drops an id a transient fault counted on an
+      // earlier attempt; a not-found read is no witness (see above).
+      if (before?.state === 'settled') unobserved.delete(item.executionCallId);
+      continue;
+    }
     await broker.cancel(item.executionCallId).catch(() => undefined);
     const deadline = Date.now() + 30_000;
     for (;;) {
@@ -478,7 +485,10 @@ export async function stopParkedRuntimeExecutions(input: {
         unobserved.add(item.executionCallId);
         break;
       }
-      if (status.state === 'settled') break;
+      if (status.state === 'settled') {
+        unobserved.delete(item.executionCallId);
+        break;
+      }
       if (Date.now() >= deadline) {
         unobserved.add(item.executionCallId);
         throw new Error(
