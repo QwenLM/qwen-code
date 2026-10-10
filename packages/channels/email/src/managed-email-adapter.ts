@@ -823,6 +823,23 @@ export class ManagedEmailAdapter {
       } catch (error) {
         const status = (error as { status?: unknown }).status;
         const code = (error as { code?: unknown }).code;
+        // The instance row is gone — the same poll-level registration
+        // claim the submit and claim routes arm. Keep the entry and reset
+        // the generation: the next poll re-registers first, the re-driven
+        // receipt then settles or meets the deterministic drop below, and
+        // this tick's pull still runs. delivery_not_found is excluded —
+        // that 404 comes from requireClaim, not requireInstance, and stays
+        // a drop.
+        if (
+          this.isRegistrationRefusal(error) &&
+          code !== 'delivery_not_found'
+        ) {
+          this.registeredGeneration = 0;
+          this.log(
+            `Managed email receipt for ${entry.deliveryId} was refused as not registered (${String(status)} ${String(code)}); it re-drives after the next poll re-registers.`,
+          );
+          return;
+        }
         // A deterministic refusal (the route Session closed, the delivery
         // is unknown to the control plane) never converges on re-drive, and
         // a held entry runs before every outbox pull: it would stall every

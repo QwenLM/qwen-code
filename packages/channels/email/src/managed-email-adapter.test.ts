@@ -86,6 +86,7 @@ class FakeControlPlane implements ManagedChannelControlPlane {
   refuseSubmitsWithStatus = 0;
   failRegisters = 0;
   submitErrors: Array<{ status: number; code?: string }> = [];
+  receiptErrors: Array<{ status: number; code?: string }> = [];
   submitAttempts = 0;
   disconnected = false;
 
@@ -139,6 +140,13 @@ class FakeControlPlane implements ManagedChannelControlPlane {
     return claimed;
   }
   async receipt(deliveryId: string, receipt: ManagedReceipt) {
+    if (this.receiptErrors.length > 0) {
+      const failure = this.receiptErrors.shift()!;
+      throw Object.assign(new Error(`HTTP ${failure.status}`), {
+        status: failure.status,
+        code: failure.code,
+      });
+    }
     this.receipts.push({ deliveryId, receipt });
   }
 }
@@ -455,6 +463,25 @@ describe('managed email inbound', () => {
     // "refused", never "did not answer".
     expect(lines.some((line) => line.includes('did not answer'))).toBe(false);
     expect(lines.some((line) => line.includes('was refused'))).toBe(true);
+  });
+
+  it('keeps a refused event the provider later expunges (R3-3)', async () => {
+    // The refusal branch's pendingEvents.set is the only thing standing
+    // between this mail and a provider expunge during the disconnect:
+    // without it the re-drive rebuilds from the platform copy, finds the
+    // message gone, and drops the claim the branch exists to keep.
+    const lines: string[] = [];
+    const adapter = make({}, { log: (line: string) => lines.push(line) });
+    await adapter.connect();
+    plane.submitErrors = [{ status: 409, code: 'channel_disconnected' }];
+    const uid = append(raw('waiting', 'expunge me'));
+    await adapter.tick();
+    box.messages.delete(uid);
+    await adapter.tick();
+    expect(plane.events.at(-1)).toMatchObject({ text: 'expunge me' });
+    expect(
+      lines.some((line) => line.includes('can no longer be rebuilt')),
+    ).toBe(false);
   });
 
   it('stops re-driving the pending backlog once a refusal resets registration (R3-3)', async () => {
@@ -974,6 +1001,43 @@ describe('managed email outbound', () => {
       { accountGeneration: 1 },
     ]);
     expect(sent).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-registers when a held receipt reports the instance is gone (R3-3)', async () => {
+    // A send whose receipt answer died leaves its accepted outcome held in
+    // state.outbound, and reportOrphanedOutbound re-drives it ahead of
+    // every outbox pull. When the instance row is gone that re-drive meets
+    // the same 404 channel_not_found as the claim route: without the
+    // poll-level arm the tick dies before pullOutbox and nothing ever
+    // re-registers — outbound wedges behind the held receipt.
+    const lines: string[] = [];
+    const adapter = make({}, { log: (line: string) => lines.push(line) });
+    await adapter.connect();
+    plane.outbox = [delivery('d-held')];
+    const original = plane.receipt.bind(plane);
+    plane.receipt = async () => {
+      throw new Error('answer lost');
+    };
+    await adapter.tick();
+    plane.receipt = original;
+    expect(state(adapter).outbound).toHaveLength(1);
+    plane.receiptErrors = [{ status: 404, code: 'channel_not_found' }];
+    plane.outbox = [delivery('d-queued')];
+    // The tick resolves: the held receipt keeps its entry and resets the
+    // generation, and the pull behind it still sends.
+    await adapter.tick();
+    expect(sent).toHaveBeenCalledTimes(2);
+    await adapter.tick();
+    expect(plane.registrations).toEqual([
+      { accountGeneration: 1 },
+      { accountGeneration: 1 },
+    ]);
+    expect(state(adapter).outbound).toEqual([]);
+    expect(plane.receipts.map((entry) => entry.deliveryId)).toEqual([
+      'd-queued',
+      'd-held',
+    ]);
+    expect(lines.some((line) => line.includes('not registered'))).toBe(true);
   });
 
   it('rethrows a transport failure from the outbox claim (R3-3)', async () => {
