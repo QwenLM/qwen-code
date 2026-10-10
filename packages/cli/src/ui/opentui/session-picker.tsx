@@ -588,6 +588,7 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
               availableWidth={boxWidth}
               availableTerminalHeight={height}
               thoughtsExpanded
+              initialAnchor="top"
             />
           ) : previewLoad.status === 'error' ? (
             <CenteredNotice text={previewLoad.message} color={C.red} />
