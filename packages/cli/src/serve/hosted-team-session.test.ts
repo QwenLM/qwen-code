@@ -380,7 +380,9 @@ describe('the board', () => {
       await refusal(
         teams.run('task_update', { taskId: '1', owner: 'bob' }, 'prompt:u3'),
       ),
-    ).toBe('Member "bob" has finished and cannot own a task.');
+    ).toBe(
+      'Member "bob" has finished, so it can own only a completed task. Set status "completed" to record it as the owner.',
+    );
     const assigned = await teams.run(
       'task_update',
       { taskId: '1', status: 'in_progress', owner: 'Alice' },
@@ -446,21 +448,88 @@ describe('the board', () => {
         'prompt:drop',
       ),
     ).toBe('Task #2 deleted.');
-    // Only a new owner must be running: handing the task back is refused.
+    // A new owner must be running unless the task stays completed, so
+    // the completed task can be handed back to its finished member.
     await teams.run(
       'task_update',
       { taskId: '1', owner: 'leader' },
       'prompt:to-leader',
     );
     expect(
+      await teams.run(
+        'task_update',
+        { taskId: '1', owner: 'alice' },
+        'prompt:back',
+      ),
+    ).toContain('Task #1 updated (status: completed, owner: alice).');
+  });
+
+  // The physical pass: a one-shot member finished before the lead's
+  // assignment landed, so the board could never name it. A finished
+  // member may be recorded on the task the same call completes; a member
+  // that failed or was cancelled may not, and an open task still needs a
+  // running owner.
+  it('records a finished member on the task the call completes', async () => {
+    await createTeam();
+    await addMember('alice');
+    await addMember('bob');
+    for (const subject of ['audit', 'fix', 'ship'])
+      await teams.run(
+        'task_create',
+        { subject, description: subject },
+        `prompt:create-${subject}`,
+      );
+    await settle('run-alice');
+    await children.settleFailed('run-bob', {
+      stopReason: 'creation_failed',
+      reason: null,
+      started: false,
+    });
+    expect(
       await refusal(
         teams.run(
           'task_update',
-          { taskId: '1', owner: 'alice' },
-          'prompt:back',
+          { taskId: '1', status: 'in_progress', owner: 'alice' },
+          'prompt:open',
         ),
       ),
-    ).toBe('Member "alice" has finished and cannot own a task.');
+    ).toBe(
+      'Member "alice" has finished, so it can own only a completed task. Set status "completed" to record it as the owner.',
+    );
+    expect(
+      await teams.run(
+        'task_update',
+        { taskId: '1', status: 'completed', owner: 'alice' },
+        'prompt:done',
+      ),
+    ).toContain('Task #1 updated (status: completed, owner: alice).');
+    expect(
+      parseTeamTask(
+        session.authority.extensionRecord('team_task', 'prompt:call-team#1')!
+          .record,
+      ),
+    ).toMatchObject({ status: 'completed', owner: 'alice' });
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '2', status: 'completed', owner: 'bob' },
+          'prompt:failed',
+        ),
+      ),
+    ).toBe('Member "bob" has failed and cannot own a task.');
+    await teams.run(
+      'task_update',
+      { taskId: '3', status: 'completed' },
+      'prompt:closed',
+    );
+    expect(
+      await teams.run(
+        'task_update',
+        { taskId: '3', owner: 'alice' },
+        'prompt:late',
+      ),
+    ).toContain('Task #3 updated (status: completed, owner: alice).');
   });
 
   it('commits no revision for an update that changes nothing', async () => {

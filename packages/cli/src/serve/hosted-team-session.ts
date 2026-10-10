@@ -159,7 +159,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'task_update',
     description:
-      'Update a board task: status, owner, subject, description, active form, metadata and dependencies. Set status to "deleted" to remove it. A task in progress needs an owner: "leader" or a member that is still running. Dependencies only grow, and a completed or deleted blocker stops blocking. Members are not told about the update.',
+      'Update a board task: status, owner, subject, description, active form, metadata and dependencies. Set status to "deleted" to remove it. A task in progress needs an owner: "leader" or a member that is still running; a member that has finished can own only a completed task. Dependencies only grow, and a completed or deleted blocker stops blocking. Members are not told about the update.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -784,11 +784,13 @@ export class HostedTeamSession {
       throw new HostedTeamRefusal(
         `Cannot assign task #${number}: owner must include at least one letter, number, or hyphen.`,
       );
+    const status =
+      (args['status'] as TeamTaskStatus | undefined) ?? task.status;
     // A task keeps an owner whose run ended; only a new owner is checked.
-    if (owner != null && owner !== task.owner) this.assertOwner(team, owner);
+    if (owner != null && owner !== task.owner)
+      this.assertOwner(team, owner, status === 'completed');
     if (
-      ((args['status'] as TeamTaskStatus | undefined) ?? task.status) ===
-        'in_progress' &&
+      status === 'in_progress' &&
       (owner === undefined ? task.owner : owner) === null
     )
       throw new HostedTeamRefusal(
@@ -898,8 +900,17 @@ export class HostedTeamSession {
     return team;
   }
 
-  /** An owner is the leader or a member whose run has not ended. */
-  private assertOwner(team: TeamState, owner: string): void {
+  /**
+   * An owner is the leader or a member whose run has not ended. A member
+   * whose run completed may also be named on a task the call leaves
+   * completed: a one-shot member usually finishes before the lead's next
+   * call lands, and the board should still record who did the work.
+   */
+  private assertOwner(
+    team: TeamState,
+    owner: string,
+    completing: boolean,
+  ): void {
     if (owner === MANAGED_TEAM_LEADER) return;
     const member = team.members.find((each) => each.name === owner);
     if (member === undefined)
@@ -907,10 +918,12 @@ export class HostedTeamSession {
         `"${owner}" is not a member of team "${team.name}". An owner is "leader" or a member name.`,
       );
     const state = this.memberState(member.childRunId);
-    if (state !== 'running')
-      throw new HostedTeamRefusal(
-        `Member "${owner}" has ${state === 'completed' ? 'finished' : state} and cannot own a task.`,
-      );
+    if (state === 'running' || (state === 'completed' && completing)) return;
+    throw new HostedTeamRefusal(
+      state === 'completed'
+        ? `Member "${owner}" has finished, so it can own only a completed task. Set status "completed" to record it as the owner.`
+        : `Member "${owner}" has ${state} and cannot own a task.`,
+    );
   }
 
   private tasksOf(teamId: string): TeamTask[] {
