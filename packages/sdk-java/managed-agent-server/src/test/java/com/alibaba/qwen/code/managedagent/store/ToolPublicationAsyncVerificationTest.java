@@ -143,6 +143,23 @@ public class ToolPublicationAsyncVerificationTest {
     }
 
     @Test
+    void settledCsiRetirementStillVerifiesAcceptedWork() {
+        acceptCsiOperation();
+        var registration = new WorkspaceCsiRegistration("tenant-1", "fixture-storage", "fixture-cluster",
+                "fixture", "fixture-claim", "fixture-pvc", "fixture-volume", "fixture-pv",
+                "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial", "/workspace", 1);
+        new WorkspaceCsiReservationStore(fixture.jdbc, fixture.manager, JSON).beginRetirement(
+                registration, fixture.bindings, fixture.bindings.findById("binding-1"),
+                fixture.csiReservation, UUID.randomUUID().toString());
+        var execution = fixture.executions.findByExecutionCallId("execution-1");
+        assertThat(fixture.executions.compareAndSet(execution, execution.withResult(
+                java.util.Map.of("executionStatus", "success"), execution.getLastSequence(), Instant.now()),
+                "dispatcher", execution.getDispatchGeneration())).isNotNull();
+        assertThat(data.verifyNextOperation()).isTrue();
+        assertThat(status("csi").path("state").asText()).isEqualTo("SUCCEEDED");
+    }
+
+    @Test
     void missingReplicaCredentialKeyDoesNotBecomePermanentCsiFailure() {
         DataSource source = acceptCsiOperation();
         var bindings = new JdbcRuntimeBindingRepository(source,

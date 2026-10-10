@@ -171,8 +171,10 @@ public final class ToolPublicationStore {
     ProducerBinding producerVerificationBindingLocked(String scope, String publicationId,
             String bindingDigest, String tokenHash) {
         require(bindingDigest != null && tokenHash != null, "Accepted verification identity is missing");
+        // Completing an accepted claim. CLAIM still allows a settled CSI execution
+        // after retirement; PRODUCE would fail that claim permanently.
         return producerBindingWithHashLocked(scope, publicationId, tokenHash, bindingDigest,
-                Access.PRODUCE, true);
+                Access.CLAIM, true);
     }
 
     private ProducerBinding producerBindingWithHashLocked(String scope, String publicationId,
