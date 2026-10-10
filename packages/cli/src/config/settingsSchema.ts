@@ -3822,7 +3822,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as number | undefined,
         minimum: 1,
         description:
-          'Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Use maxParallelAgentsByModel to cap a specific model below this global limit.',
+          'Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Foreground per-model launches are bounded by maxParallelAgentsByModel and do not consume this global background budget. Use maxParallelAgentsByModel to cap a specific model below this global limit.',
         showInDialog: false,
         jsonSchemaOverride: {
           type: 'integer',
@@ -3836,7 +3836,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as Record<string, number> | undefined,
         description:
-          'Per-model maximum number of background sub-agents that can run concurrently, keyed by model ID (e.g. { "qwen3-max": 2 }). Useful when a model has a lower concurrency capacity. Takes precedence over the global maxParallelAgents for the matched model; models not listed here fall back to the global limit.',
+          'Per-model maximum number of top-level sub-agents that can run concurrently on a given model, keyed by model ID (e.g. { "qwen3-max": 2 }). Bounds both background and foreground launches: a foreground launch on a capped model queues inline (showing "Waiting for a model slot") until a slot frees. Applies to top-level launches only — nested sub-agents, teammate fan-out, foreground interactive forks, external-executor subagents, and agents dispatched by a workflow script are not capped by this setting. For background launches the tighter of this cap and the global maxParallelAgents binds; foreground launches are bounded by this cap alone. Models not listed here fall back to the global maxParallelAgents for background launches and are uncapped for foreground launches — list a model here to bound its foreground fan-out.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.SHALLOW_MERGE,
         jsonSchemaOverride: {
@@ -4390,8 +4390,30 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Enable persistent workspace Agents collaborating on shared task threads (experimental). Independent of Agent Team: neither flag implies the other. Enabling permits collaboration; opening an Agent to outside callers, trusting a connection and registering a host each still require their own explicit configuration. Can also be enabled via QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.',
+          'Enable persistent workspace Agents that you can @-mention in a chat session (experimental). Each mentioned Agent answers in the same session from its own native session. Independent of Agent Team: neither flag implies the other. Enabling permits collaboration; opening an Agent to outside callers, trusting a connection and registering a host each still require their own explicit configuration. Can also be enabled via QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.',
         showInDialog: true,
+      },
+      agentChainLimit: {
+        type: 'number',
+        label: 'Agent Chain Limit',
+        category: 'Experimental',
+        requiresRestart: false,
+        default: 0,
+        minimum: 0,
+        description:
+          'Maximum number of agent-to-agent hops when Agents @-mention each other in a chat session (experimental). A message from you resets the count. 0 means unlimited; every hop is a separate paid Agent run, and "Stop all agents" is always available.',
+        showInDialog: false,
+      },
+      agentTokenBudget: {
+        type: 'number',
+        label: 'Agent Token Budget',
+        category: 'Experimental',
+        requiresRestart: false,
+        default: 1_000_000,
+        minimum: 0,
+        description:
+          'Tokens Agents may spend in one chat session between two of your messages before they stop waking each other (experimental). Agents still answer what they were asked; your next message resets the budget. 0 means unlimited.',
+        showInDialog: false,
       },
       artifact: {
         type: 'boolean',

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { artifact } from './managed-tool-result.test-fixtures';
 import { createJavaManagedAgentProvider } from './java-managed-agent-provider';
 
@@ -649,6 +649,13 @@ describe('createJavaManagedAgentProvider', () => {
         )
         .mockResolvedValueOnce(
           jsonResponse({ operationId: 'op-1', status: 'running' }),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({
+            operationId: 'op-1',
+            type: 'action_response',
+            status: 'completed',
+          }),
         );
       const provider = createJavaManagedAgentProvider({
         baseUrl: 'https://product.example',
@@ -698,6 +705,14 @@ describe('createJavaManagedAgentProvider', () => {
           optionId: 'deny',
         },
       });
+      // The accepted answer is followed on its own operation, not re-sent.
+      expect(String(fetchImpl.mock.calls[2][0])).toBe(
+        'https://product.example/api/agent/web-shell/v1/operations/query',
+      );
+      expect(JSON.parse(String(fetchImpl.mock.calls[2][1]?.body))).toEqual({
+        sessionId: 'session-1',
+        operationId: 'op-1',
+      });
 
       fetchImpl.mockResolvedValueOnce(
         new Response(
@@ -745,6 +760,102 @@ describe('createJavaManagedAgentProvider', () => {
       }
     },
   );
+
+  describe('an accepted approval answer', () => {
+    const action = {
+      actionId: 'tool_approval_1',
+      sessionId: 'session-1',
+      turnId: 'turn-1',
+      functionCallId: 'call-1',
+      toolName: 'write_file',
+      inputRevision: 1,
+      policyRevision: 'hosted-tool-approval/1',
+      expiresAt: 600_001,
+      options: [
+        { id: 'allow', label: 'Allow' },
+        { id: 'deny', label: 'Deny' },
+      ],
+    };
+    const operation = (status: string, failureCode?: string) =>
+      jsonResponse({
+        operationId: 'op-1',
+        sessionId: 'session-1',
+        type: 'action_response',
+        status,
+        admissionStage: 'java_durable',
+        deliveryState: status === 'running' ? 'leased' : 'confirmed',
+        ...(failureCode ? { failureCode } : {}),
+        replayed: false,
+      });
+    const urls = (fetchImpl: ReturnType<typeof vi.fn<typeof fetch>>) =>
+      fetchImpl.mock.calls.map(([url]) =>
+        String(url).replace(
+          'https://product.example/api/agent/web-shell/v1',
+          '',
+        ),
+      );
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('rejects when the operation it was accepted on later fails', async () => {
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(operation('pending'))
+        .mockResolvedValueOnce(operation('running'))
+        .mockResolvedValueOnce(operation('failed', 'workspace_unavailable'));
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: fetchImpl,
+      });
+
+      // eslint-disable-next-line vitest/valid-expect -- awaited via `answer` below, after the fake timers advance (handler attached early so the rejection is not unhandled)
+      const answer = expect(
+        provider.actions!.respond(action, 'allow', {
+          clientId: 'client-1',
+          idempotencyKey: 'tool_approval_1:allow',
+        }),
+      ).rejects.toThrow('approval answer failed (workspace_unavailable)');
+      await vi.advanceTimersByTimeAsync(30_000);
+      await answer;
+      expect(urls(fetchImpl)).toEqual([
+        '/actions/respond',
+        '/operations/query',
+        '/operations/query',
+      ]);
+    });
+
+    it('reports an answer still unsettled after the polling budget as unconfirmed', async () => {
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockImplementation(async () => operation('running'));
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: fetchImpl,
+      });
+
+      // eslint-disable-next-line vitest/valid-expect -- awaited via `answer` below, after the fake timers advance (handler attached early so the rejection is not unhandled)
+      const answer = expect(
+        provider.actions!.respond(action, 'allow', {
+          clientId: 'client-1',
+          idempotencyKey: 'tool_approval_1:allow',
+        }),
+      ).rejects.toThrow('not confirmed yet (operation op-1 is running)');
+      await vi.advanceTimersByTimeAsync(60_000);
+      await answer;
+      const calls = urls(fetchImpl);
+      // One answer, then reads of that same operation only.
+      expect(calls[0]).toBe('/actions/respond');
+      expect(calls.slice(1).every((url) => url === '/operations/query')).toBe(
+        true,
+      );
+      expect(calls.length).toBeGreaterThan(2);
+    });
+  });
 
   it('reports the actions capability only when the Session has it', async () => {
     const session = {
@@ -809,31 +920,41 @@ describe('createJavaManagedAgentProvider', () => {
     ).toEqual({ canSend: false, canCancel: false });
   });
 
-  it('lets the allowed caller cancel a running Turn of a bound Session', async () => {
-    const provider = createJavaManagedAgentProvider({
-      baseUrl: 'https://product.example',
-      fetch: vi.fn<typeof fetch>().mockResolvedValue(
-        jsonResponse({
-          sessionId: 'bound-1',
-          status: 'ACTIVE',
-          createdAt: 1,
-          updatedAt: 2,
-          lastSequence: 5,
-          workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
-          activeTurn: {
-            turnId: 'turn-2',
+  it.each([true, false])(
+    'offers cancel for a running bound Turn when workspaceTurns is %s',
+    async (workspaceTurns) => {
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: vi.fn<typeof fetch>().mockResolvedValue(
+          jsonResponse({
             sessionId: 'bound-1',
-            status: 'RUNNING',
-            submittedAt: 2,
-          },
-          capabilities: { tasks: true, workspaceTurns: true },
-        }),
-      ),
-    });
-    expect(
-      (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
-    ).toEqual({ canSend: false, canCancel: true, workspaceTurns: true });
-  });
+            status: 'ACTIVE',
+            createdAt: 1,
+            updatedAt: 2,
+            lastSequence: 5,
+            workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+            activeTurn: {
+              turnId: 'turn-2',
+              sessionId: 'bound-1',
+              status: 'RUNNING',
+              submittedAt: 2,
+            },
+            capabilities: { tasks: true, workspaceTurns },
+          }),
+        ),
+      });
+      // The creator may still cancel after the Workspace stops admitting
+      // new work, so cancel does not follow workspaceTurns; the server
+      // refuses anyone else.
+      expect(
+        (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
+      ).toEqual({
+        canSend: false,
+        canCancel: true,
+        ...(workspaceTurns ? { workspaceTurns: true } : {}),
+      });
+    },
+  );
 
   it('passes download cancellation through the host sink to the content fetch', async () => {
     const abort = new AbortController();

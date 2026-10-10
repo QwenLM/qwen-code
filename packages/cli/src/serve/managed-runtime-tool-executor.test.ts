@@ -4,31 +4,29 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import fs, { readFileSync } from 'node:fs';
+import fs, { readFileSync, existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import os from 'node:os';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
+import os, { tmpdir } from 'node:os';
 import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import type { LocalShellCaptureRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
+import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import type { AnyDeclarativeTool } from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
   unregisterSessionModel,
   unregisterSessionProjectDir,
 } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
-import type { AnyDeclarativeTool } from '@qwen-code/qwen-code-core/tools/tools.js';
-import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
-import {
-  ManagedToolExecutor,
-  ManagedToolConflictError,
-  ManagedToolInvalidError,
-  ManagedToolUnavailableError,
-  relativizeGlobText,
-  type ManagedShellCapturePublisher,
-  type ManagedShellCaptureSink,
-  type ManagedToolSet,
-} from './managed-runtime-tool-executor.js';
-import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
-import type { LocalShellCaptureRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
 import {
   parseManagedCsiBoot,
   ManagedCsiAckRequestError,
@@ -38,9 +36,391 @@ import {
   type ManagedCsiBoot,
   type ManagedCsiPodIdentity,
 } from './managed-csi-envelope.js';
-import { ManagedMcpRuntime } from './managed-mcp-runtime.js';
 import { ManagedHookRuntime } from './managed-hook-runtime.js';
+import { ManagedMcpRuntime } from './managed-mcp-runtime.js';
 import { ManagedRuntimeFileHistory } from './managed-runtime-file-history.js';
+import {
+  ManagedRuntimeLedger,
+  processGroupLiveness,
+  queryProcessTable,
+} from './managed-runtime-ledger.js';
+import {
+  ManagedMcpToolUnknownError,
+  ManagedToolConflictError,
+  ManagedToolExecutor,
+  ManagedToolInvalidError,
+  ManagedToolUnavailableError,
+  relativizeGlobText,
+  type ManagedShellCapturePublisher,
+  type ManagedShellCaptureSink,
+  type ManagedToolReference,
+  type ManagedToolSet,
+} from './managed-runtime-tool-executor.js';
+
+// A long-running foreground command the Shell tool admits: a bare
+// `sleep N` trips its standalone-sleep refusal long before the budget.
+const LONG_RUN = `"${process.execPath}" -e 'setInterval(()=>{},1000)'`;
+
+// The evidence contract of a cancelled Shell is a POSIX process-group one.
+describe.skipIf(process.platform === 'win32')(
+  'ManagedToolExecutor physical stop',
+  () => {
+    let workspace: string;
+    let ledgerFile: string;
+    let ledger: ManagedRuntimeLedger;
+    const strayGroups = new Set<number>();
+
+    beforeEach(async () => {
+      workspace = await mkdtemp(path.join(tmpdir(), 'qwen-m5c-exec-'));
+      ledgerFile = path.join(workspace, 'runtime', 'ledger.json');
+      ledger = ManagedRuntimeLedger.create({
+        workFile: ledgerFile,
+        worker: {
+          pid: process.pid,
+          pgid: process.pid,
+          incarnation: 'inc-1',
+          startedAt: Date.now(),
+        },
+      });
+    });
+
+    afterEach(async () => {
+      for (const pgid of strayGroups) {
+        try {
+          process.kill(-pgid, 'SIGKILL');
+        } catch {
+          // gone already
+        }
+      }
+      strayGroups.clear();
+      await rm(workspace, { recursive: true, force: true });
+    });
+
+    function reference(callId: string, input: unknown): ManagedToolReference {
+      return {
+        sessionId: 'session-b',
+        promptId: 'prompt-1',
+        callId,
+        argsDigest: `sha256:${managedToolDigest(
+          input as Record<string, unknown>,
+        )}`,
+      };
+    }
+
+    function executor(groupEvidenceTimeoutMs = 1_000): ManagedToolExecutor {
+      return ManagedToolExecutor.forWorkspace(workspace, 'session-b', {
+        ledger,
+        groupEvidenceTimeoutMs,
+      });
+    }
+
+    async function recordedGroup(): Promise<number> {
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        const outstanding = ledger.outstandingGroups();
+        if (outstanding.length > 0) return outstanding[0]!.pgid;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      throw new Error('No Shell process group reached the ledger.');
+    }
+
+    it('records a Shell group on disk before the call can settle', async () => {
+      const exec = executor();
+      const input = {
+        command: `sleep 0.2`,
+        description: 'short sleeper',
+      };
+      const running = exec.execute(
+        reference('call-1', input),
+        'run_shell_command',
+        input,
+      );
+      const pgid = await recordedGroup();
+      strayGroups.add(pgid);
+      // Durable for a crash sweep while the call is still running.
+      const onDisk = JSON.parse(readFileSync(ledgerFile, 'utf8')) as {
+        groups: Array<{ pgid: number }>;
+      };
+      expect(onDisk.groups.map((group) => group.pgid)).toContain(pgid);
+
+      const result = await running;
+      expect(result.executionStatus).toBe('success');
+      strayGroups.delete(pgid);
+    });
+
+    it('settles a cancel only once the whole process group is gone', async () => {
+      const exec = executor();
+      const input = {
+        command: LONG_RUN,
+        description: 'long-running foreground process',
+      };
+      const ref = reference('call-2', input);
+      const running = exec.execute(ref, 'run_shell_command', input);
+      const pgid = await recordedGroup();
+      strayGroups.add(pgid);
+
+      exec.cancel(ref);
+      const result = await running;
+      expect(result.executionStatus).toBe('cancelled');
+      // The settlement carried the evidence: no member of the group answers.
+      expect(processGroupLiveness(pgid)).toBe('gone');
+      await exec.close();
+      strayGroups.delete(pgid);
+    });
+
+    it('makes the call unknown when the group outlives the evidence budget', async () => {
+      // The exit-evidence answer is doubled: a real group that outlives the
+      // escalation window needs a coordination the test host cannot always
+      // provide, and what the executor must map is the outcome, not the
+      // weather. The ledger double answers 'denied', as an unkillable group
+      // would.
+      const waitForGroupExit = vi.fn(async () => 'denied' as const);
+      const doubled = {
+        addGroup: ledger.addGroup.bind(ledger),
+        outstandingGroups: ledger.outstandingGroups.bind(ledger),
+        waitForGroupExit,
+        killOutstanding: ledger.killOutstanding.bind(ledger),
+        complete: ledger.complete.bind(ledger),
+        prune: ledger.prune.bind(ledger),
+        watch: ledger.watch.bind(ledger),
+      } as unknown as ManagedRuntimeLedger;
+      const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-b', {
+        ledger: doubled,
+        groupEvidenceTimeoutMs: 800,
+      });
+      const input = {
+        command: LONG_RUN,
+        description: 'long-running foreground process',
+      };
+      const ref = reference('call-3', input);
+      const running = exec.execute(ref, 'run_shell_command', input);
+      const pgid = await recordedGroup();
+      strayGroups.add(pgid);
+
+      exec.cancel(ref);
+      await expect(running).rejects.toBeInstanceOf(ManagedMcpToolUnknownError);
+      expect(exec.status(ref)).toMatchObject({ state: 'unknown' });
+      // The call is not journaled settled anywhere: status reports unknown
+      // and the ledger keeps naming the group.
+      expect(waitForGroupExit).toHaveBeenCalledWith(pgid, 800);
+      expect(ledger.outstandingGroups().map((group) => group.pgid)).toContain(
+        pgid,
+      );
+      await exec.close();
+      strayGroups.delete(pgid);
+    });
+
+    it('fails the call and kills the group when the ledger cannot record it', async () => {
+      // A group that never reached the ledger must not outlive the failure:
+      // the pid callback stops it first, then the call fails loudly.
+      const realWait = ledger.waitForGroupExit.bind(ledger);
+      const seen: number[] = [];
+      const doubled = {
+        addGroup: () => {
+          throw new Error('ledger disk full');
+        },
+        outstandingGroups: ledger.outstandingGroups.bind(ledger),
+        waitForGroupExit: (pgid: number, budgetMs: number) => {
+          seen.push(pgid);
+          return realWait(pgid, budgetMs);
+        },
+        killOutstanding: ledger.killOutstanding.bind(ledger),
+        complete: ledger.complete.bind(ledger),
+        prune: ledger.prune.bind(ledger),
+        watch: ledger.watch.bind(ledger),
+      } as unknown as ManagedRuntimeLedger;
+      const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-b', {
+        ledger: doubled,
+        groupEvidenceTimeoutMs: 800,
+      });
+      const input = {
+        command: LONG_RUN,
+        description: 'long-running foreground process',
+      };
+      const result = await exec.execute(
+        reference('call-3a', input),
+        'run_shell_command',
+        input,
+      );
+      expect(result.executionStatus).toBe('error');
+      expect(result.error?.message).toContain('ledger disk full');
+      expect(seen).toHaveLength(1);
+      // The callback killed the group it could not record.
+      expect(processGroupLiveness(seen[0]!)).toBe('gone');
+      await exec.close();
+    });
+
+    it('maps a throwing group-exit proof to an unknown outcome', async () => {
+      // The settle-evidence read is itself a filesystem move: its failure is
+      // contained as 'denied', which makes the outcome unknown — never a
+      // settled cancel over a group that may still run.
+      const waitForGroupExit = vi.fn(async () => {
+        throw new Error('ledger unreadable');
+      });
+      const doubled = {
+        addGroup: ledger.addGroup.bind(ledger),
+        outstandingGroups: ledger.outstandingGroups.bind(ledger),
+        waitForGroupExit,
+        killOutstanding: ledger.killOutstanding.bind(ledger),
+        complete: ledger.complete.bind(ledger),
+        prune: ledger.prune.bind(ledger),
+        watch: ledger.watch.bind(ledger),
+      } as unknown as ManagedRuntimeLedger;
+      const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-b', {
+        ledger: doubled,
+        groupEvidenceTimeoutMs: 800,
+      });
+      const input = {
+        command: LONG_RUN,
+        description: 'long-running foreground process',
+      };
+      const ref = reference('call-3b', input);
+      const running = exec.execute(ref, 'run_shell_command', input);
+      const pgid = await recordedGroup();
+      strayGroups.add(pgid);
+
+      exec.cancel(ref);
+      await expect(running).rejects.toBeInstanceOf(ManagedMcpToolUnknownError);
+      expect(exec.status(ref)).toMatchObject({ state: 'unknown' });
+      await exec.close();
+      strayGroups.delete(pgid);
+    });
+
+    it('close() leaves an unproven survivor named in the ledger on disk', async () => {
+      // A group that could not be proven stopped keeps the ledger truth for
+      // the host's sweeps; close() itself still completes.
+      const survivor = { pgid: 42424242, callId: 'c-x', startedAt: 1 };
+      const complete = vi.fn(() => true);
+      const doubled = {
+        addGroup: ledger.addGroup.bind(ledger),
+        outstandingGroups: ledger.outstandingGroups.bind(ledger),
+        waitForGroupExit: ledger.waitForGroupExit.bind(ledger),
+        killOutstanding: vi.fn(async () => [survivor]),
+        complete,
+        prune: ledger.prune.bind(ledger),
+        watch: ledger.watch.bind(ledger),
+      } as unknown as ManagedRuntimeLedger;
+      const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-b', {
+        ledger: doubled,
+      });
+      await expect(exec.close()).resolves.toBeUndefined();
+      expect(complete).not.toHaveBeenCalled();
+      expect(existsSync(ledgerFile)).toBe(true);
+    });
+
+    it('close() contains a failing ledger sweep instead of rejecting', async () => {
+      // A bookkeeping filesystem failure at close keeps the ledger and never
+      // turns into a shutdown rejection.
+      const doubled = {
+        addGroup: ledger.addGroup.bind(ledger),
+        outstandingGroups: ledger.outstandingGroups.bind(ledger),
+        waitForGroupExit: ledger.waitForGroupExit.bind(ledger),
+        killOutstanding: vi.fn(async () => {
+          throw new Error('ledger directory vanished');
+        }),
+        complete: ledger.complete.bind(ledger),
+        prune: ledger.prune.bind(ledger),
+        watch: ledger.watch.bind(ledger),
+      } as unknown as ManagedRuntimeLedger;
+      const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-b', {
+        ledger: doubled,
+      });
+      await expect(exec.close()).resolves.toBeUndefined();
+      expect(existsSync(ledgerFile)).toBe(true);
+    });
+
+    it('close() kills what is still running and removes a proven ledger', async () => {
+      const exec = executor();
+      const input = {
+        command: LONG_RUN,
+        description: 'long-running foreground process',
+      };
+      const running = exec.execute(
+        reference('call-4', input),
+        'run_shell_command',
+        input,
+      );
+      void running.catch(() => undefined);
+      const pgid = await recordedGroup();
+      strayGroups.add(pgid);
+
+      await exec.close();
+      expect(processGroupLiveness(pgid)).toBe('gone');
+      expect(existsSync(ledgerFile)).toBe(false);
+      strayGroups.delete(pgid);
+    });
+
+    it('leaves a Write outside the ledger and settles without evidence', async () => {
+      const exec = executor();
+      const input = {
+        file_path: path.join(workspace, 'a.txt'),
+        content: 'hello',
+      };
+      const result = await exec.execute(
+        reference('call-5', input),
+        'write_file',
+        input,
+      );
+      expect(result.executionStatus).toBe('success');
+      expect(ledger.outstandingGroups()).toEqual([]);
+      await exec.close();
+      expect(existsSync(ledgerFile)).toBe(false);
+    });
+
+    it('settles a cancel without evidence when no ledger is present', async () => {
+      // A worker never given a ledger keeps the M5a behavior: the cancel is
+      // the invocation's word, with no group bookkeeping anywhere.
+      const bare = ManagedToolExecutor.forWorkspace(workspace, 'session-b');
+      const input = {
+        command: `"${process.execPath}" -e 'process.on("SIGTERM",()=>{});setInterval(()=>{},100)' & echo $!; wait`,
+        description: 'group with a SIGTERM-ignoring member',
+      };
+      const ref = reference('call-6', input);
+      const running = bare.execute(ref, 'run_shell_command', input);
+      const deadline = Date.now() + 5_000;
+      while (bare.status(ref)?.state !== 'executing') {
+        if (Date.now() > deadline) throw new Error('call never started');
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      bare.cancel(ref);
+      const result = await running;
+      expect(result.executionStatus).toBe('cancelled');
+      // The member it printed kept running past the leader's exit: the M5a
+      // witness, cleaned up here by bare hands.
+      const printed = JSON.stringify(result.responseParts);
+      const member = Number(/\b(\d{2,6})\b/u.exec(printed)?.[1]);
+      if (Number.isSafeInteger(member) && member > 1) {
+        try {
+          process.kill(member, 'SIGKILL');
+        } catch {
+          // gone already
+        }
+      }
+      // Fallback: the runaway member advertises its -e body in ps.
+      for (const row of queryProcessTable().values()) {
+        if (row.args.includes('setInterval(()=>{},100)')) {
+          try {
+            process.kill(row.pid, 'SIGKILL');
+          } catch {
+            // gone already
+          }
+        }
+      }
+      await bare.close();
+    });
+  },
+);
+import { MANAGED_WORKSPACE_CONTEXT_FILE_CHARS } from './managed-runtime-provider-protocol.js';
+
+/** A FIFO is the only non-regular file that blocks a read instead of failing. */
+const hasMkfifo = (() => {
+  try {
+    execFileSync('mkfifo', ['--version'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 function deferred() {
   let resolve!: () => void;
@@ -1454,6 +1834,334 @@ describe('relativizeGlobText', () => {
     const text =
       'Found 3 file(s) matching "etc*/host*" within /\n---\netc/hosts\netc/hostname';
     expect(relativizeGlobText(text, '/')).toBe(text);
+  });
+});
+
+describe('readWorkspaceContext', () => {
+  it('does not promote a sibling Session file through an in-mount symlink', async () => {
+    // Two Sessions share one mount. Session 1's AGENTS.md is a symlink to
+    // Session 2's: its realpath stays inside the mount root, so a boundary at
+    // the mount would admit the sibling's text into Session 1's instruction.
+    const mount = await mkdtemp(path.join(os.tmpdir(), 'ctx-mount-'));
+    try {
+      const session1 = path.join(mount, 'session-1');
+      const session2 = path.join(mount, 'session-2');
+      await mkdir(session1);
+      await mkdir(session2);
+      await writeFile(path.join(session2, 'AGENTS.md'), 'sibling text');
+      await writeFile(path.join(session1, 'QWEN.md'), 'own text');
+      await symlink(
+        path.join(session2, 'AGENTS.md'),
+        path.join(session1, 'AGENTS.md'),
+      );
+
+      const toolSet: ManagedToolSet = {
+        sessionId: 'session-1',
+        directory: session1,
+        workspaceRoot: mount,
+        tools: new Map(),
+        admitsDirectory: () => true,
+      };
+      const executor = new ManagedToolExecutor(async () => toolSet);
+      const { files } = await executor.readWorkspaceContext('session-1');
+
+      expect(files.map((file) => file.name)).toEqual(['QWEN.md']);
+      expect(files[0]?.text).toBe('own text');
+      expect(files.some((file) => file.text.includes('sibling text'))).toBe(
+        false,
+      );
+    } finally {
+      await rm(mount, { recursive: true, force: true });
+    }
+  });
+
+  it('does not promote a sibling Session file when the caller is bound at the mount root', async () => {
+    // The ordinary Workspace selection omits `cwd_relative`, so the Session
+    // directory IS the mount and the realpath escape test confines nothing:
+    // `<root>/AGENTS.md -> b/AGENTS.md` stays inside the boundary. Only the
+    // ownership arm the file tools already consult refuses it, and `read_file`
+    // of the very same path does refuse it.
+    const mount = await mkdtemp(path.join(os.tmpdir(), 'ctx-root-'));
+    try {
+      const sibling = path.join(mount, 'b');
+      await mkdir(sibling);
+      await writeFile(path.join(sibling, 'AGENTS.md'), 'sibling private rules');
+      await writeFile(path.join(mount, 'QWEN.md'), 'own text');
+      await symlink(
+        path.join(sibling, 'AGENTS.md'),
+        path.join(mount, 'AGENTS.md'),
+      );
+
+      const toolSet: ManagedToolSet = {
+        sessionId: 'session-root',
+        directory: mount,
+        workspaceRoot: mount,
+        tools: new Map(),
+        admitsDirectory: () => true,
+      };
+      // Mirrors the supplier in managed-context-worker.ts: a binding at the
+      // mount root owns nothing, a caller bound there has no private estate.
+      // The executor feeds this arm realpath-resolved paths only, so the
+      // fixture's estate is compared in the same domain — on macOS tmpdir
+      // is a symlink layer and the two spellings never compare equal.
+      const siblingReal = await fs.promises.realpath(sibling);
+      const mountReal = await fs.promises.realpath(mount);
+      const installations = new Map([['session-b', siblingReal]]);
+      const contains = (directory: string, target: string): boolean => {
+        const relative = path.relative(directory, target);
+        return (
+          relative !== '..' &&
+          !relative.startsWith(`..${path.sep}`) &&
+          !path.isAbsolute(relative)
+        );
+      };
+      const ownsAnotherSessionDir = async (
+        sessionId: string,
+        realPath: string,
+        ownDirectory: string,
+      ): Promise<boolean> => {
+        const ownEstate =
+          contains(ownDirectory, realPath) && ownDirectory !== mountReal;
+        for (const [otherId, directory] of installations) {
+          if (otherId === sessionId || directory === mountReal) continue;
+          if (!contains(directory, realPath)) continue;
+          if (
+            !ownEstate ||
+            (directory !== ownDirectory && contains(ownDirectory, directory))
+          )
+            return true;
+        }
+        return false;
+      };
+      const executor = new ManagedToolExecutor(
+        async () => toolSet,
+        undefined,
+        undefined,
+        undefined,
+        ownsAnotherSessionDir,
+      );
+
+      const { files } = await executor.readWorkspaceContext('session-root');
+
+      expect(files.map((file) => file.name)).toEqual(['QWEN.md']);
+      expect(files.some((file) => file.text.includes('sibling private'))).toBe(
+        false,
+      );
+    } finally {
+      await rm(mount, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!hasMkfifo)(
+    'skips a FIFO at an instruction name instead of blocking on it',
+    async () => {
+      // `fs.readFile` on a FIFO blocks in open(2) forever: the control never
+      // answers, and each later attachment pins another threadpool thread.
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'ctx-fifo-'));
+      const fifo = path.join(directory, 'AGENTS.md');
+      let unblock: number | undefined;
+      try {
+        await writeFile(path.join(directory, 'QWEN.md'), 'own text');
+        execFileSync('mkfifo', [fifo]);
+
+        const toolSet: ManagedToolSet = {
+          sessionId: 'session-1',
+          directory,
+          workspaceRoot: directory,
+          tools: new Map(),
+          admitsDirectory: () => true,
+        };
+        const executor = new ManagedToolExecutor(async () => toolSet);
+
+        // Raced so that a regression fails the case instead of hanging the
+        // suite; a stuck reader is released before the assertion throws.
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const blocked = new Promise<'blocked'>((resolve) => {
+          timer = setTimeout(() => resolve('blocked'), 5000);
+        });
+        const outcome = await Promise.race([
+          executor.readWorkspaceContext('session-1'),
+          blocked,
+        ]);
+        clearTimeout(timer);
+        if (outcome === 'blocked') {
+          unblock = fs.openSync(fifo, 'w');
+          throw new Error(
+            'readWorkspaceContext blocked on a FIFO instead of skipping it',
+          );
+        }
+
+        expect(outcome.files.map((file) => file.name)).toEqual(['QWEN.md']);
+      } finally {
+        if (unblock !== undefined) fs.closeSync(unblock);
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('reads only the prefix that can fill the character cap', async () => {
+    // The cap bounds the reply, not the allocation: a sparse 400 Mi file costs
+    // no disk and still materialised in full, in the worker every Session on
+    // that runtime shares.
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ctx-cap-'));
+    const budget = MANAGED_WORKSPACE_CONTEXT_FILE_CHARS * 4;
+    const overBudget = path.join(directory, 'AGENTS.md');
+    const readFileSpy = vi.spyOn(fs.promises, 'readFile');
+    const openSpy = vi.spyOn(fs.promises, 'open');
+    try {
+      await writeFile(path.join(directory, 'QWEN.md'), 'own text');
+      await writeFile(overBudget, 'a'.repeat(budget + 4096));
+
+      const toolSet: ManagedToolSet = {
+        sessionId: 'session-1',
+        directory,
+        workspaceRoot: directory,
+        tools: new Map(),
+        admitsDirectory: () => true,
+      };
+      const executor = new ManagedToolExecutor(async () => toolSet);
+      const { files } = await executor.readWorkspaceContext('session-1');
+
+      // The reply is unchanged: same names, same capped length, same note.
+      expect(files.map((file) => file.name)).toEqual(['QWEN.md', 'AGENTS.md']);
+      expect(files[1]?.text).toHaveLength(MANAGED_WORKSPACE_CONTEXT_FILE_CHARS);
+      expect(files[1]?.text).toContain('[Truncated');
+      expect(files[0]?.text).toBe('own text');
+      // An over-budget file is never handed to a whole-file read; a small one
+      // still is, so the prefix path stays size-conditional. The executor
+      // resolves before it reads, so the spy target is the realpath spelling
+      // (macOS tmpdir is a symlink layer).
+      const overBudgetReal = await fs.promises.realpath(overBudget);
+      const smallReal = await fs.promises.realpath(
+        path.join(directory, 'QWEN.md'),
+      );
+      expect(
+        readFileSpy.mock.calls.filter(([target]) => target === overBudgetReal),
+      ).toEqual([]);
+      expect(
+        readFileSpy.mock.calls.filter(([target]) => target === smallReal),
+      ).toHaveLength(1);
+      expect(
+        openSpy.mock.calls.filter(([target]) => target === overBudgetReal),
+      ).toHaveLength(1);
+    } finally {
+      readFileSpy.mockRestore();
+      openSpy.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a Session directory that no longer resolves', async () => {
+    // The realpath that establishes the boundary runs outside the per-file
+    // try. A directory removed after the tool set was built must answer the
+    // declared error: a raw ENOENT reaches the worker's catch-all, which
+    // forwards `error.message` — the runtime host's absolute path — to the
+    // Broker as a 409 provider failure.
+    const mount = await mkdtemp(path.join(os.tmpdir(), 'ctx-gone-'));
+    const directory = path.join(mount, 'session-1');
+    try {
+      await mkdir(directory);
+      await writeFile(path.join(directory, 'QWEN.md'), 'own text');
+      await rm(directory, { recursive: true, force: true });
+
+      const toolSet: ManagedToolSet = {
+        sessionId: 'session-1',
+        directory,
+        workspaceRoot: mount,
+        tools: new Map(),
+        admitsDirectory: () => true,
+      };
+      const executor = new ManagedToolExecutor(async () => toolSet);
+      const pending = executor.readWorkspaceContext('session-1');
+
+      await expect(pending).rejects.toBeInstanceOf(ManagedToolUnavailableError);
+      await expect(pending).rejects.toThrow(
+        'Workspace context is unavailable.',
+      );
+    } finally {
+      await rm(mount, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses the read once admission is sealed', async () => {
+    // A worker that has begun retiring starts no new filesystem work; its
+    // sibling control op refuses in the same state.
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ctx-sealed-'));
+    try {
+      await writeFile(path.join(directory, 'QWEN.md'), 'own text');
+
+      const toolSet: ManagedToolSet = {
+        sessionId: 'session-1',
+        directory,
+        workspaceRoot: directory,
+        tools: new Map(),
+        admitsDirectory: () => true,
+      };
+      const executor = new ManagedToolExecutor(async () => toolSet);
+      executor.sealAdmission(retirementId);
+
+      await expect(
+        executor.readWorkspaceContext('session-1'),
+      ).rejects.toBeInstanceOf(ManagedToolUnavailableError);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a tool set that has retired', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ctx-retired-'));
+    try {
+      await writeFile(path.join(directory, 'QWEN.md'), 'own text');
+
+      const toolSet: ManagedToolSet = {
+        sessionId: 'session-1',
+        directory,
+        workspaceRoot: directory,
+        tools: new Map(),
+        admitsDirectory: () => true,
+        isActive: () => false,
+      };
+      const executor = new ManagedToolExecutor(async () => toolSet);
+
+      await expect(
+        executor.readWorkspaceContext('session-1'),
+      ).rejects.toBeInstanceOf(ManagedToolUnavailableError);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('counts an in-flight read as pending drain work', async () => {
+    // The drain must not complete underneath a read this worker started.
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ctx-drain-'));
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      await writeFile(path.join(directory, 'QWEN.md'), 'own text');
+
+      const toolSet: ManagedToolSet = {
+        sessionId: 'session-1',
+        directory,
+        workspaceRoot: directory,
+        tools: new Map(),
+        admitsDirectory: () => true,
+      };
+      const executor = new ManagedToolExecutor(async () => {
+        await gate;
+        return toolSet;
+      });
+
+      const pending = executor.readWorkspaceContext('session-1');
+      executor.sealAdmission(retirementId);
+      expect(executor.getDrainObservation(retirementId).pendingStarts).toBe(1);
+
+      release();
+      await expect(pending).rejects.toBeInstanceOf(ManagedToolUnavailableError);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });
 

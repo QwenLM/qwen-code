@@ -33,6 +33,10 @@ compares the mapped routes, the `ApiModels` records and real responses with it;
 `src/test/resources/openapi/contract-known-gaps.txt` lists the differences that
 a later slice still has to close; none remain after D4. The WebShell client types are generated from the
 same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
+The test-tree `SurfaceRegistry` names every mounted route, internal ones
+included, with its admission rule class; `SurfaceRegistryGateTest` fails any
+mounted route the registry lacks, so a new public or WebShell route needs both
+a spec operation and a registry entry ([actor-roles design](../../../docs/design/2026-10-07-managed-agent-actor-roles.md), D5).
 Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
 `1`) when they are created. `POST /v1/agents`, `GET /v1/agents/{id}` and
 `POST /v1/agents/{id}` store tenant-scoped, immutable AgentDefinition
@@ -44,7 +48,11 @@ deltas lose their text and identity, later deltas may name other Parts, and a
 `stream.reconciled` event announces it. A client that sees one reloads the
 Items and resumes after their `snapshot_through_sequence`. A
 cursor below a Session's replay floor gets `409 cursor_expired` from the JSON
-event query and one `agent.session.resync_required` frame from either stream.
+event query and one `agent.session.resync_required` frame from either stream
+only while the Snapshot backs the floor
+(`replay_floor_sequence <= snapshot_through_sequence`); a stream reconciliation
+discards the Snapshot without lowering the floor, and during that rebuild such
+a cursor is served from the retained events.
 `GET /v1/agents/sessions/{id}/turns` lists a Session's Turns newest first with
 an opaque cursor, and `GET /v1/agents/sessions/{id}/turns/{turnId}` reads one.
 Design: [English](../../../docs/design/2026-09-27-managed-agent-api-contract.md) |
@@ -210,15 +218,37 @@ until no Harness holds its journal writer under an unexpired lease (the
 holding Harness seals it when closing), drains the Runtime binding (currently
 only an in-process retirement flag) and completes the operation; a failed
 attempt is retried with the dispatch backoff until it succeeds, so a `202`
-never means that tools stopped. After the Hosted Harness restarts, its calls fail with a
-generation error until Java restarts too, as Turns do, and the operation waits. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
+never means that tools stopped (a Harness whose capability digest no longer
+matches retries the same way, logged with the permanent reason — nothing
+may complete honestly before an operator realigns the versions, because a
+confirmation requires the Harness's own acknowledgement). When the Hosted
+Harness restarts, a live
+control plane adopts the new process generation: the connector renegotiates
+once instead of failing every bound Session, pending Turns re-attach through
+the takeover load as their retries come due, and the Session's bound boot ID
+moves to the new generation without a Java restart. A takeover load that can
+never continue (its parked state is not one a replacement can drive) ends the
+Turn as `managed_runtime_recovery_blocked` with a typed reason instead of
+retrying forever — in this slice that includes a Turn parked mid model round,
+whose safe reissue is the named Step 3 follow-up. The Session row and its
+generation binding survive that decline, but the declined Turn's input stays
+unsettled in the journal, so the Session cannot admit a further Turn until
+the Step 3 reissue lands — close it and start a new Session. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
 needs no Harness. Archive accepts only a closed Session and completes at once;
 unarchive restores it to closed. Rename waits for the Harness to durably commit
 `session_metadata`. When a rename failure is recorded, its `PENDING` command becomes `FAILED`
 while retaining its receipt and request digest. The same
 key retries the same content with the replay flag set; changed content or a
 different Session conflicts. A successful concurrent request can still complete
-the receipt, and a failing sibling cannot overwrite that completed outcome.
+the receipt, and a failing sibling cannot overwrite that completed outcome. It
+cannot complete a retired receipt once a later rename has completed either: that
+sibling answers `409 session_mutation_superseded` and the newer public SQL title stays.
+The Harness title was already written before this check; ordering overlapping
+Harness writes remains a follow-up tracked in #13269. A
+same-key request sent after the later rename is the newest request and still
+applies, including when a concurrent sibling retires its receipt again. Each
+new attempt records the Session's current journal sequence on its command row;
+existing receipts use their original requested event until they are retried.
 Retries do not re-append the original `requested` event. If the command store
 is unavailable during cleanup, the original API failure is preserved and the
 same key can resume its receipt when storage returns. Only an in-flight
@@ -323,6 +353,33 @@ Production deployments must add mTLS or equivalent service authentication;
 the tenant and writer headers are scope and fencing inputs, not a substitute
 for transport identity. Responses under the private prefix use
 `Cache-Control: no-store`.
+
+## Managed automation (H6)
+
+The control plane runs the H6 automation runtime for `persistent`
+definitions: a definition is created, revised, read and retired under the
+Workspace-bound Session its creator owns (`/v1/agent-automations`), a
+scanner derives each definition's due slots on this host's tz database,
+claims the definition under a lease with a fence, records every occurrence
+decision in its own ledger (V57) and fires a run as one idempotent Hosted
+Harness operation; a manual run is the same operation keyed by its
+`Idempotency-Key`. The Session journal's `schedule` and `automation_run`
+chains stay the authority; the ledger locates, leases and indexes. The
+`per_run` target and the delivery policy are refused until their slices
+land. Design:
+[managed automation runtime](../../../docs/design/2026-10-07-managed-automation-runtime.md).
+
+All settings below use the `qwen.managed-agent.automation` prefix:
+
+| Setting              | Default | Meaning                                                                                                                                                                                            |
+| -------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`            | `false` | Run the scanner and admit the mutation routes (`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED`); the read routes answer either way.                                                                        |
+| `scan-delay`         | `10s`   | Fixed delay between scanner ticks.                                                                                                                                                                 |
+| `lease`              | `60s`   | How long one scanner holds a definition; a stalled scanner yields it afterwards, and the fence it held no longer writes.                                                                           |
+| `late-tolerance`     | `5m`    | A slot older than this when the scanner sees it is late and follows the definition's catch-up policy (`none`, `latest`, `bounded`).                                                                |
+| `lookback`           | `24h`   | Slots older than this are neither fired nor recorded; it bounds every catch-up by age.                                                                                                             |
+| `max-slots-per-tick` | `1000`  | Slots **returned** per definition per tick: the walk itself follows the lookback window (its minutes are enumerated regardless), and the result set's surplus is cut at the oldest end and logged. |
+| `concurrency`        | `4`     | Non-terminal runs an `allow` definition may hold at once; beyond it an occurrence is recorded `skipped` with reason `count_limit`.                                                                 |
 
 ## Full WebShell dual-path development entry
 
@@ -454,8 +511,10 @@ then trusted as the actor for the request's tenant. It is disabled by default;
 never enable it where untrusted clients can reach the server.
 
 `QWEN_MANAGED_AGENT_APPROVAL_MODE` defaults to `yolo`. In `default` and
-`auto-edit`, the Session creator can list, inspect and answer pending permission
-Actions through the public API or WebShell. Responses are durable, idempotent
+`auto-edit`, any caller with a read grant on the bound Workspace can list and
+inspect pending permission Actions through the public API or WebShell;
+answering one needs the Session's recorded owner or a caller holding OPERATOR
+or above, and that read grant as well. Responses are durable, idempotent
 operations; their final result follows the committed Harness decision.
 `QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT` defaults to `10m` and accepts `1s` to `24h`.
 The approval mode is pinned at Session creation and must be confirmed by the
@@ -472,14 +531,19 @@ creation with input, including replays, while empty bound creation remains
 available. The directory mounted for a Workspace is trusted deployment data,
 not a filesystem sandbox.
 
-Later Turns may be submitted by the Session's creator under the
-same opt-in while they can still read and create in the Workspace (the
-per-caller `workspaceTurns` capability flag reflects the caller's current
-grants and the Workspace registry's `ACTIVE` state), and the creator may cancel
-the Session's running Turns and rename the Session. Workspace close follows
-its separate close capability and lifecycle admission. Archive, delete and
-unarchive follow their separate retention capabilities after reliable Workspace
-close. Controlled cwd changes ship below (W2); broad Workspace capability
+Later Turns may be submitted by any caller holding OPERATOR on the bound
+Workspace under the same opt-in while the Session's creator-keyed execution
+facts hold (the Workspace registry still backs the binding and stays `ACTIVE`,
+and the actor recorded by the Workspace create command keeps OPERATOR or
+above; the WebShell adapter's per-caller `workspaceTurns` capability flag
+mirrors exactly that rule, though the public surface publishes no such
+flag), and such a caller may cancel the Session's running Turns and rename
+the Session — a readable actor below OPERATOR gets `403
+session_operation_forbidden`, and an admitted OPERATOR blocked by the shape
+or fact gates gets `409 workspace_unavailable`. Workspace close follows its
+separate close capability and lifecycle admission. Archive, delete and
+unarchive follow their separate retention capabilities after reliable
+Workspace close. Controlled cwd changes ship below (W2); broad Workspace capability
 advertisement remains gated. Shell and in-flight recovery are separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.
@@ -538,8 +602,9 @@ Design: [English](../../../docs/design/managed-agent-broker-auth.md)
 
 ### Controlled cwd change (W2)
 
-Under the same `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED` opt-in, the creator
-of a bound Session moves its relative directory within the same Workspace:
+Under the same `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED` opt-in, any caller
+holding OPERATOR on a bound Session's Workspace moves its relative directory
+within the same Workspace:
 
 ```bash
 curl -sS -X POST \
@@ -551,7 +616,11 @@ curl -sS -X POST \
 ```
 
 `202` admits a durable `cwd_change` operation; it does not activate the
-directory. The change is same-Workspace only and creator-only, requires an idle
+directory. The change is same-Workspace only and requires the caller's OPERATOR
+role plus the Session's creator-keyed execution facts (the registry still backs
+the binding and stays `ACTIVE`, and the recorded create actor keeps OPERATOR or
+above; the V56-persisted initiator is re-checked at settlement the same way, so
+demoting either actor fails the operation with `workspace_unavailable`), an idle
 Session (`409 session_context_busy` while a Turn or another operation is open)
 and a matching `expected_context_revision` (`409 context_revision_conflict`
 otherwise); a retry with the same key returns the original operation even after
@@ -564,10 +633,11 @@ or await the event. A target the mount cannot verify fails the operation with
 never retry, while a mount fault the probe cannot reach (a stale export)
 retries internally up to an 8-attempt budget and then fails the same type,
 releasing the Session back to turns and lifecycle operations. Legacy Sessions answer `400 unsupported_feature`, an unreadable
-actor `404 session_not_found` and a readable non-creator `403
+actor `404 session_not_found` and a readable actor below OPERATOR `403
 session_operation_forbidden`, matching the sibling lifecycle refusals; a
 probe refusal the turn layer would share also uses `409
-workspace_unavailable`. The WebShell adapter offers the same flow as
+workspace_unavailable`, and so does an admitted OPERATOR once the
+creator-keyed facts moved. The WebShell adapter offers the same flow as
 `/api/agent/web-shell/v1/sessions/cwd/change` plus `/operations/query`.
 Subsequent turns acquire a fresh Runtime Session and install the new context
 before tools run, so an unverifiable change can never redirect tool execution.
@@ -725,14 +795,17 @@ Foreground Shell may create detached descendants. Use this only with trusted
 local workloads. The W0e recovery above handles trusted host reboot; it
 does not provide physical isolation or recovery after worker-only death.
 Public bound Turn admission is limited to the opt-in initial file Turn described
-in G0 above and to later Turns submitted by the Session's creator under the same
-opt-in while they can still read and create in the Workspace (the per-caller
-`workspaceTurns` capability flag reflects the caller's current grants and the
-registry's `ACTIVE` state); the creator may also cancel the Session's running
-Turns and rename the Session. Later Turns run
-under the creator's Workspace grants, so any other actor keeps the existing
-refusal: `workspace_unavailable` when the actor can read the Workspace,
-`session_not_found` when they cannot. Public close follows its separate close
+in G0 above and to later Turns submitted by any caller holding OPERATOR on the
+Workspace under the same opt-in while the Session's creator-keyed execution
+facts hold (the WebShell adapter's per-caller `workspaceTurns` capability
+flag mirrors that same rule; the public surface publishes no such flag);
+such a caller may also cancel the Session's running Turns and rename the
+Session. Later Turns run
+under the creator's Workspace grants, so an actor without a read grant keeps the
+existing `session_not_found` invisibility, a readable actor below OPERATOR is
+refused `session_operation_forbidden`, and an admitted OPERATOR whose Session
+lost the creator-keyed facts meets the family's domain `workspace_unavailable`.
+Public close follows its separate close
 capability and lifecycle admission. Archive, delete and unarchive follow their
 separate retention capabilities after reliable Workspace close;
 the private Shell profile is not enabled through public creation.
@@ -816,9 +889,11 @@ history remain on their saved identities. The marker is a continuity check,
 not a backup or protection against a malicious same-UID writer. See the
 [W1 design](../../../docs/design/2026-09-29-managed-workspace-w1-recovery.md).
 Hosted Workspace cold-load validation is always enabled, independently of the Java mount-guard option. Omitted tool profile and Shell `captureBytes` use the saved definition; supplied values must match exactly. Saved approval settings remain pinned. Integrity checks run before new model work or Broker prepare/execute and cover retained private resources plus complete remote Shell output, including pages, segments and empty-stream seals. Preserve O2 recovery of original `results_ready`, consumed-final and `not_started` receipts. An incomplete receipt may produce a blocked ACK or original-history repair before load is refused, so refusal does not promise zero journal writes or ACKs. Restore validation uses a fixed committed cut, and continuation still requires current writer ownership and authorization. Missing old resources or unsupported recovery domains block loading. Passive Harness loading does not implement unknown-execution cleanup; use original Broker execution identities. Rollback to old binaries requires entry points to remain stopped because those binaries ignore the fence columns. Public
-Workspace next-turn admission for the Session's creator under the G0 opt-in
-described above has landed; public Workspace resume still requires product-route
-integration, and this internal guard is not a public resume capability yet.
+Workspace next-turn admission for any caller holding OPERATOR on the bound
+Workspace, while the Session's creator-keyed execution facts hold, under the G0 opt-in
+described above has landed; public Workspace resume still requires
+product-route integration, and this internal guard is not a public resume
+capability yet.
 
 Build the container from the repository root:
 
@@ -930,6 +1005,18 @@ requires one tool execution, one further continuation, only the replacement's
 answer in the public transcript, and one terminal event. Both modes run in the
 Hosted MySQL CI job.
 
+The `--big-output` long-answer mode is also Workspace-bound:
+
+```bash
+npm run test:e2e:managed-big-output
+```
+
+It streams a long answer, verifies the complete public text and stored record,
+deletes the original Harness and Runtime homes, and checks the complete answer
+in a cold replacement's model context. A short answer remains inline. This
+mode executes no tools and has no Runtime binding to reclaim, so it keeps
+`durable-local-process` disabled and does not require Linux.
+
 A zero-delay run checks the real-model path as shown above; a controlled
 cold-start delay additionally tests output before Runtime readiness:
 
@@ -952,3 +1039,25 @@ credentials. The runner removes that file, the MySQL data directory,
 workspaces, and child processes on exit. Override the source with
 `--settings /path/to/settings.json`; credentials are never printed by the
 runner.
+
+### W1c offline Workspace migration
+
+See the [English design](../../../docs/design/workspace-storage-migration.md) and [Chinese design](../../../docs/design/workspace-storage-migration.zh-CN.md). Run only after every service is upgraded, admission/dispatch is disabled, accepted work is settled, Harness writers are stopped, and automatic restart is disabled. The source remains accessible on the same trusted Linux host. Export the original canonical absolute `QWEN_HOME` in the private maintenance and registration commands as well as the Broker/Harness environment, with no symlink components. `fileHistoryRoot` must equal the canonical `$QWEN_HOME/file-history` directory. Preserve that home and its independent history volume; do not move it with the Workspace.
+
+W1c adds Flyway V48–V50 after main's V47 channel-persistence migration, preserving all published migration bytes and applied history. Databases using earlier unpublished W1c migration numbers require fresh disposable fixtures; do not repair production Flyway history to reuse them.
+
+The private artifact is `qwen-managed-agent-server-0.1.0-alpha-workspace-migration.jar`. Set `W1_JDBC_URL`, `W1_JDBC_USER`, `W1_JDBC_PASSWORD`, `W1_RUNTIME_CREDENTIAL_KEY_ID`, and `W1_RUNTIME_CREDENTIAL_KEY` to the original deployment database and Broker credential key. The full request file contains `version` (the JSON integer `1`), `migrationOperationId`, `tenantId`, `storageId`, `fenceOperationId`, `captureOperationId`, `mountRevision`, `sourceRoot`, `targetRoot`, `bundleRoot`, `fileHistoryRoot`, `stateDirectory`, `nodeExecutable`, and `cliEntry`. Fence admission is storage-scoped for bound Sessions; unbound legacy Sessions are outside that ownership. Metadata transactions share the tenant placement lock, so other storages of the same tenant may wait until those transactions finish; file scans and physical retirement hold no such lock. Paths must be canonical absolute deployment paths; roots and the durable Runtime state directory cannot overlap. IDs must be distinct UUIDs. Keep this exact request file for retries.
+
+Before starting a new operation, the original Runtime state directory and retained history directory must exist at canonical paths, and the unchanged Linux identity reader must prove the history volume, including unambiguous birth time. Run maintenance as the original service user; the Runtime state directory must belong to that UID with exact POSIX `0700` permissions, checked by the same durable provider validator without creating or changing it. Failure returns `migration_state_unavailable` or `migration_history_unverified` before creating a migration row/fence or retiring placements. The target copy is still prepared after retirement. Run `java -jar <migration.jar> retire <request.json> --offline-confirmed` first. Then use the existing registration command to fence the original revision with the request's fence ID, and capture the W1b bundle with the request's capture ID. Prepare the target Workspace through the external offline copy procedure, preserving modes and the copied source marker. Run `prepare` and then `promote` with the same arguments. The first `prepare` and every new `promote` attempt verify sealed content, live source, target, retained history and original physical identities. Replaying `prepare` after PREPARED or any completed operation returns the saved receipt without rescanning; use `promote` for fresh transition verification. `inspect <request.json>` reads progress and the original receipt. `abort <request.json> --offline-confirmed` requires all placements retired and W1a still fenced; it does not restart anything or remove target artifacts. After abort or invalidation, prepare a fresh external target copy matching the new capture before starting a new operation; foreign marker or temporary files are rejected.
+
+If the original history root has birth time equal to mtime, including when the first Session backup creates it, preflight conservatively returns `migration_history_unverified`. With all writers stopped, confirm the filesystem exposes a genuine persistent birth time, then update only the original history directory's mtime as the service user and retry `retire` with the same request:
+
+```bash
+touch -m -- "$QWEN_HOME/file-history"
+```
+
+Do not recreate or move the directory, change `QWEN_HOME`, or modify retained backups. Mtime is not an identity field; the root's device, inode and birth time must remain unchanged. A filesystem without a provable birth time remains unsupported after `touch`.
+
+Promotion increments mount revision once. Successful `prepare` and `promote` commits clear the migration's previous error code. Update the deployment's Workspace root and restart Broker/Harness with the original QWEN_HOME before opening admission. An old deployment mapping fails closed. New file Turns and undo use fresh Runtime identities. Source rows, messages, journal, keys and backup names remain unchanged. Failure preserves the fence; missing stop proof, unsupported profiles or drift require diagnosis. Reverse migration is a new verified operation at a higher revision.
+
+The target marker is the sole manifest exception and must match the copied source marker or the exact operation-pinned target marker. Do not hand-edit it. No online drain, directory copying, public migration route, Shell/MCP/Hook migration or source-lost recovery is provided. Uninitialized retained members without a verifiable frozen private definition are refused. Production Linux/MySQL acceptance evidence must be recorded separately from injected-identity tests.

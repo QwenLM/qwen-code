@@ -787,7 +787,11 @@ const EXPECTED_REGISTERED_FEATURES = [
   // stage1 order.
   ...EXPECTED_STAGE1_FEATURES.flatMap((feature) => {
     if (feature === 'session_create') {
-      return [feature, 'hosted_harness_private_v1'];
+      return [
+        feature,
+        'hosted_harness_private_v1',
+        'managed_session_journal_delta_v1',
+      ];
     }
     if (feature === 'workspace_skills') {
       return [feature, 'workspace_skills_config_runtime'];
@@ -3497,7 +3501,10 @@ describe('createServeApp', () => {
       // predicate must be false, otherwise the tag would fail the
       // "default-off" property baseline tags get for free.
       for (const [feature, predicate] of CONDITIONAL_SERVE_FEATURES) {
-        if (feature === 'hosted_harness_private_v1') {
+        if (
+          feature === 'hosted_harness_private_v1' ||
+          feature === 'managed_session_journal_delta_v1'
+        ) {
           expect(predicate({ hostedHarness: true })).toBe(true);
           expect(predicate({ hostedHarness: false })).toBe(false);
           expect(predicate({})).toBe(false);
@@ -5320,7 +5327,7 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
-    it('does not mount collaboration routes or recovery when the opt-in is off', async () => {
+    it('does not mount collaboration routes when the opt-in is off', async () => {
       const app = createServeApp(baseOpts, undefined, { bridge: fakeBridge() });
       const capabilities = await request(app)
         .get('/capabilities')
@@ -5329,7 +5336,7 @@ describe('createServeApp', () => {
       expect(capabilities.body.features).not.toContain(
         'agent_collaboration_v1',
       );
-      expect(app.locals['stopWorkspaceAgentRecovery']).toBeUndefined();
+      expect(app.locals['stopSessionAgentOrchestrators']).toBeUndefined();
 
       const primary = capabilities.body.workspaces.find(
         (workspace: { primary?: boolean }) => workspace.primary,
@@ -5405,7 +5412,9 @@ describe('createServeApp', () => {
         );
       } finally {
         (
-          app?.locals['stopWorkspaceAgentRecovery'] as (() => void) | undefined
+          app?.locals['stopSessionAgentOrchestrators'] as
+            | (() => void)
+            | undefined
         )?.();
         restoreEnv('QWEN_HOME', previousQwenHome);
         resetHomeEnvBootstrapForTesting();

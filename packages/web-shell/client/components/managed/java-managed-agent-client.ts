@@ -184,6 +184,14 @@ export class JavaManagedAgentClient {
     return this.post('/actions/respond', request, signal);
   }
 
+  /** Reads an operation's latest durable status; polling is not a replay. */
+  queryOperation(
+    request: Schemas['WebShellOperationRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellOperation']> {
+    return this.post('/operations/query', request, signal);
+  }
+
   getToolResult(sessionId: string, itemId: string, signal?: AbortSignal) {
     return this.post<ManagedToolResultResponse>(
       '/tool-results/get',

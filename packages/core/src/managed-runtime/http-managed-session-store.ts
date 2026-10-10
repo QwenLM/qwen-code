@@ -29,10 +29,15 @@ import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
 import { tryParseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
 import { MANAGED_EXTENSION_RECORD_BODIES } from './managed-extension-projection.js';
 import {
+  MANAGED_MESSAGE_CHUNKS_KIND,
+  managedMessageChunkParts,
+} from './managed-message-chunks.js';
+import {
   HOSTED_TOOL_RESULT_RESOURCE_LIMITS,
   type DurableToolResultResourceStore,
 } from './resource-tool-result-store.js';
 import {
+  ManagedSessionCommitRejectedError,
   scanManagedSessionJournal,
   type ManagedSessionJournalHandle,
   type ManagedSessionJournalScan,
@@ -87,6 +92,11 @@ export interface HttpManagedSessionStoreOptions {
   readonly allowInsecureHttp?: boolean;
 }
 
+export interface ManagedSessionLifecycleAuthority {
+  readonly operationId: string;
+  readonly claimGeneration: number;
+}
+
 export interface HttpManagedSessionStores {
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
@@ -94,6 +104,9 @@ export interface HttpManagedSessionStores {
   readonly toolResultResources: DurableToolResultResourceStore;
   assertWritable(): Promise<void>;
   close(): Promise<void>;
+  setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void;
+  authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void>;
+  authorizeOrdinary(kind?: 'legacy-close'): Promise<void>;
 }
 
 export interface HttpToolPublicationOwner {
@@ -142,6 +155,10 @@ export function createHttpManagedSessionStores(
     },
     assertWritable: () => client.assertWritable(),
     close: () => client.seal(),
+    setLifecycleAuthority: (authority) =>
+      client.setLifecycleAuthority(authority),
+    authorizeLifecycle: (kind) => client.authorizeLifecycle(kind),
+    authorizeOrdinary: (kind) => client.authorizeOrdinary(kind),
   };
 }
 
@@ -296,7 +313,7 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
     for (const prior of revisions.values()) requireSameRef(prior, ref);
     revisions.set(revision, ref);
     references.set(ref.resourceId, revisions);
-    const nested = nestedResourceRefs(ref, stored.bytes);
+    const nested = collectNestedResourceRefs(ref, stored.bytes);
     pending.push(...nested.map((ref) => ({ revision, ref })));
   }
   if (resources.size !== references.size) {
@@ -482,7 +499,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       const staged = this.staged.get(ref.resourceId);
       if (staged !== undefined) {
         requireSameRef(staged.ref, ref);
-        pending.push(...nestedResourceRefs(ref, staged.bytes));
+        pending.push(...collectNestedResourceRefs(ref, staged.bytes));
       }
     }
     return [...closure.values()].map((ref) => {
@@ -568,8 +585,39 @@ class ManagedSessionStoreHttpClient {
   private readonly fetchFn: typeof fetch;
   private grant: WriterGrant | undefined;
   private renewPromise: Promise<void> | undefined;
+  private renewingAuthority?: ManagedSessionLifecycleAuthority;
   private renewTimer: NodeJS.Timeout | undefined;
   private sealed = false;
+  private lifecycleAuthority?: ManagedSessionLifecycleAuthority;
+
+  setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void {
+    this.lifecycleAuthority = authority;
+  }
+
+  async authorizeOrdinary(kind?: 'legacy-close'): Promise<void> {
+    await this.assertWritable();
+    await this.json('/execution:authorize', 'POST', {
+      ...(kind ? { kind } : {}),
+      workspaceId: this.sessionKey.workspaceId,
+      writerId: this.writerId,
+      writerGeneration: this.grant!.writerGeneration,
+    });
+  }
+
+  async authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void> {
+    if (kind) await this.assertWritable();
+    const grant = this.grant;
+    if (!grant)
+      throw new ManagedSessionRecordError(
+        'the HTTP Managed Session writer is not active.',
+      );
+    await this.json('/lifecycle:authorize', 'POST', {
+      ...(kind ? { kind } : {}),
+      workspaceId: this.sessionKey.workspaceId,
+      writerId: this.writerId,
+      writerGeneration: grant.writerGeneration,
+    });
+  }
   private readonly publicationAdmissions = new Map<string, string>();
 
   constructor(
@@ -790,6 +838,22 @@ class ManagedSessionStoreHttpClient {
               );
         break;
       } catch (error) {
+        if (
+          attempt === 0 &&
+          error instanceof ManagedSessionStoreHttpError &&
+          ((error.status === 409 &&
+            (error.remoteCode === 'workspace_lifecycle_admission_closed' ||
+              // The verdict/mint gate's refusal is a rollbackable
+              // non-commit: the corrected retry must reach the backend
+              // without the authority latching a write failure behind it.
+              error.remoteCode === 'child_run_lineage_minted')) ||
+            (this.lifecycleAuthority &&
+              (error.status === 403 ||
+                (error.status === 409 &&
+                  (error.remoteCode.startsWith('workspace_lifecycle_') ||
+                    error.remoteCode === 'workspace_unavailable')))))
+        )
+          throw new ManagedSessionCommitRejectedError(error);
         const uncertain =
           (error instanceof ManagedSessionStoreHttpError &&
             (error.status === 429 || error.status >= 500)) ||
@@ -1089,8 +1153,20 @@ class ManagedSessionStoreHttpClient {
   }
 
   private renewWriter(): Promise<void> {
-    if (this.renewPromise !== undefined) return this.renewPromise;
+    if (this.renewPromise !== undefined) {
+      if (
+        this.lifecycleAuthority?.operationId ===
+          this.renewingAuthority?.operationId &&
+        this.lifecycleAuthority?.claimGeneration ===
+          this.renewingAuthority?.claimGeneration
+      )
+        return this.renewPromise;
+      return this.renewPromise.then(() => this.renewWriter());
+    }
     const grant = this.requireGrant();
+    this.renewingAuthority = this.lifecycleAuthority
+      ? { ...this.lifecycleAuthority }
+      : undefined;
     const renewal = (async () => {
       const renewed = parseWriterGrant(
         await this.json('/writers:renew', 'POST', {
@@ -1264,6 +1340,15 @@ class ManagedSessionStoreHttpClient {
             this.sessionKey.tenantId,
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
             this.writerToken,
+          ...(this.lifecycleAuthority
+            ? {
+                'X-Qwen-Lifecycle-Operation-Id':
+                  this.lifecycleAuthority.operationId,
+                'X-Qwen-Lifecycle-Claim-Generation': String(
+                  this.lifecycleAuthority.claimGeneration,
+                ),
+              }
+            : {}),
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -1609,10 +1694,18 @@ function parseRestoreHead(value: unknown): RestoreHead {
   };
 }
 
-function nestedResourceRefs(
+/**
+ * Every ref a committed resource closes over transitively. Exported so the
+ * envelope-closure invariant (a `managed-input` carrying attachment refs)
+ * has a directly testable seam.
+ */
+export function collectNestedResourceRefs(
   ref: ManagedSessionDurableRef,
   bytes: Buffer,
 ): ManagedSessionDurableRef[] {
+  if (ref.kind === MANAGED_MESSAGE_CHUNKS_KIND) {
+    return managedMessageChunkParts(ref.kind, bytes);
+  }
   if (ref.kind === 'managed-checkpoint') {
     const parsed = tryParseHarnessCheckpointV1(bytes);
     return parsed.ok ? collectRefs([parsed.checkpoint]) : [];
@@ -1632,6 +1725,23 @@ function nestedResourceRefs(
     if (ref.kind === 'managed-hook-message-chunks')
       return collectRefs((record as { parts: unknown[] }).parts);
     return collectRefs([record]);
+  }
+  // An input's envelope embeds what it admits — a channel attachment's ref
+  // among them. The commit closes over those bytes exactly like an
+  // explicit ref, or a reopened reader finds the envelope but 404s on its
+  // attachments (R8 P1). A body this parse cannot represent has no refs
+  // to close over by definition.
+  if (ref.kind === 'managed-input') {
+    try {
+      return collectRefs([
+        parseManagedSessionRecordJson(
+          bytes.toString('utf8'),
+          MANAGED_SESSION_LIMITS.maxEventBytes,
+        ),
+      ]);
+    } catch {
+      return [];
+    }
   }
   return [];
 }

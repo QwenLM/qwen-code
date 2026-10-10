@@ -10,13 +10,25 @@ import {
   MANAGED_EXTENSION_RECORD_BODIES,
   MANAGED_TASK_KINDS,
 } from './managed-extension-projection.js';
-import { CHILD_RUN_STOP_REASONS } from './managed-child-run-record.js';
-import { MANAGED_SESSION_ENABLED_DOMAINS } from './managed-session-records.js';
+import {
+  CHILD_AGENT_STOP_REASONS,
+  CHILD_RUN_STOP_REASONS,
+  isChildSessionRun,
+  parseChildRun,
+  parseChildShellRun,
+  type AnyChildRun,
+} from './managed-child-run-record.js';
+import {
+  MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS,
+  MANAGED_SESSION_ENABLED_DOMAINS,
+  assertManagedSessionChildRunKindEnabled,
+} from './managed-session-records.js';
 
-type Domain = 'child_run';
 interface Fixture {
   id: string;
-  domain: Domain;
+  domain: 'child_run';
+  /** The fixture template the case merges onto; the domain's own by default. */
+  template?: string;
   patch: Record<string, unknown>;
   valid: boolean;
   start: boolean;
@@ -35,7 +47,10 @@ const fixtures = JSON.parse(
   keys: readonly string[];
   fixedKeys: readonly string[];
   stopReasons: Record<string, readonly string[]>;
-  templates: Record<Domain, Record<string, unknown>>;
+  childAgentKeys: readonly string[];
+  childAgentFixedKeys: readonly string[];
+  childAgentStopReasons: Record<string, readonly string[]>;
+  templates: Record<string, Record<string, unknown>>;
   cases: Fixture[];
   successors: Array<
     Omit<Fixture, 'patch' | 'start'> & {
@@ -64,15 +79,49 @@ function merge(
   return value;
 }
 
+/** Resolves a fixture's template, or fails loudly: a silent miss degenerates. */
+function templateOf(fixture: {
+  id: string;
+  domain: string;
+  template?: string;
+}) {
+  const name = fixture.template ?? fixture.domain;
+  const template = fixtures.templates[name];
+  if (template === undefined) {
+    throw new Error(`fixture ${fixture.id} names an unknown template`);
+  }
+  return template;
+}
+
 describe('managed-child-run-record/1 shared contract', () => {
-  it('projects a background_shell task and stays disabled for submission', () => {
-    // The body lands before its producer: enabling the domain is the H3
-    // enablement slice's own explicit step.
-    expect(MANAGED_EXTENSION_RECORD_BODIES.child_run!.taskKind).toBe(
-      'background_shell',
+  it('projects per-kind tasks behind a per-kind enablement gate', () => {
+    // H4b admits the child_agent kind; the domain itself still stays off
+    // the plain enabled list, so H3's shell keeps its own disabled gate,
+    // and H4c registers the workflow kind without admitting it.
+    const body = MANAGED_EXTENSION_RECORD_BODIES.child_run!;
+    expect(
+      body.taskKindOf(parseChildRun(fixtures.templates['child_run'])),
+    ).toBe('background_shell');
+    expect(
+      body.taskKindOf(parseChildRun(fixtures.templates['child_agent'])),
+    ).toBe('child_agent');
+    expect(body.taskKindOf(parseChildRun(fixtures.templates['workflow']))).toBe(
+      'workflow',
     );
     expect(MANAGED_TASK_KINDS).toContain('background_shell');
+    expect(MANAGED_TASK_KINDS).toContain('child_agent');
+    expect(MANAGED_TASK_KINDS).toContain('workflow');
     expect(MANAGED_SESSION_ENABLED_DOMAINS).not.toContain('child_run');
+    expect(MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS).toEqual(['child_agent']);
+    expect(() =>
+      assertManagedSessionChildRunKindEnabled('child_agent'),
+    ).not.toThrow();
+    expect(() => assertManagedSessionChildRunKindEnabled('shell')).toThrow(
+      'domain child_run kind shell is registered but not enabled for submission.',
+    );
+    expect(() => assertManagedSessionChildRunKindEnabled('workflow')).toThrow(
+      'domain child_run kind workflow is registered but not enabled for submission.',
+    );
   });
 
   it('pins the closed keys and the closed stop-reason vocabulary', () => {
@@ -99,11 +148,51 @@ describe('managed-child-run-record/1 shared contract', () => {
       failed: [...CHILD_RUN_STOP_REASONS.failed],
       cancelled: [...CHILD_RUN_STOP_REASONS.cancelled],
     });
+    expect(fixtures.childAgentKeys).toEqual(
+      [
+        'childRunId',
+        'childSessionId',
+        'completion',
+        'depth',
+        'inputRef',
+        'kind',
+        'ownerScopeId',
+        'predecessorChildRunId',
+        'resultRef',
+        'resultVersion',
+        'rootSessionId',
+        'run',
+        'stopReason',
+        'stopRequested',
+        'terminalReceiptRef',
+        'workspaceMode',
+        'workingDirectory',
+      ].sort(),
+    );
+    expect(fixtures.childAgentFixedKeys).toEqual(
+      [
+        'childRunId',
+        'completion',
+        'depth',
+        'inputRef',
+        'kind',
+        'ownerScopeId',
+        'predecessorChildRunId',
+        'rootSessionId',
+        'workspaceMode',
+        'workingDirectory',
+      ].sort(),
+    );
+    expect(fixtures.childAgentStopReasons).toEqual({
+      settled: [...CHILD_AGENT_STOP_REASONS.settled],
+      failed: [...CHILD_AGENT_STOP_REASONS.failed],
+      cancelled: [...CHILD_AGENT_STOP_REASONS.cancelled],
+    });
   });
 
   it.each(fixtures.cases)('$id', (fixture) => {
     const body = MANAGED_EXTENSION_RECORD_BODIES[fixture.domain]!;
-    const record = merge(fixtures.templates[fixture.domain], fixture.patch);
+    const record = merge(templateOf(fixture), fixture.patch);
     if (fixture.valid) {
       const parsed = body.parse(record);
       // The committed body round-trips the input and is deeply frozen.
@@ -129,12 +218,44 @@ describe('managed-child-run-record/1 shared contract', () => {
   });
 
   it.each(fixtures.successors)('$id', (fixture) => {
-    const template = fixtures.templates[fixture.domain];
+    const template = templateOf(fixture);
     expect(
       MANAGED_EXTENSION_RECORD_BODIES[fixture.domain]!.isSuccessor(
         merge(template, fixture.before),
         merge(template, fixture.after),
       ),
     ).toBe(fixture.valid);
+  });
+
+  it('classifies each child Session kind by name', () => {
+    expect(
+      isChildSessionRun(parseChildRun(fixtures.templates['child_agent'])),
+    ).toBe(true);
+    expect(
+      isChildSessionRun(parseChildRun(fixtures.templates['workflow'])),
+    ).toBe(true);
+    expect(
+      isChildSessionRun(parseChildRun(fixtures.templates['child_run'])),
+    ).toBe(false);
+    // The parse refuses any other kind before this runs; past it, an
+    // unlisted kind still joins no child Session rule by default.
+    expect(
+      isChildSessionRun({
+        ...parseChildRun(fixtures.templates['child_agent']),
+        kind: 'unregistered',
+      } as unknown as AnyChildRun),
+    ).toBe(false);
+  });
+
+  it('refuses a child Session body at the shell-only entry point', () => {
+    expect(() => parseChildShellRun(fixtures.templates['child_agent'])).toThrow(
+      "Child run kind must be 'shell' for this consumer, got child_agent.",
+    );
+    expect(() => parseChildShellRun(fixtures.templates['workflow'])).toThrow(
+      "Child run kind must be 'shell' for this consumer, got workflow.",
+    );
+    expect(parseChildShellRun(fixtures.templates['child_run']).kind).toBe(
+      'shell',
+    );
   });
 });

@@ -2,7 +2,7 @@
 
 [English](2026-09-09-agent-service-collaboration.md) | [简体中文](2026-09-09-agent-service-collaboration.zh-CN.md)
 
-Status: continuation design, not yet implemented. 2026-09-09.
+Status: continuation design, not yet implemented. 2026-09-09. Superseded for collaboration: the thread model described here (threads, `thread_*` tools, the dispatcher and Host v1 leases) was replaced and removed by the [session multi-agent design](2026-10-05-session-multi-agent.md); the A2A contract is in [2026-09-09-a2a-frozen-contract.md](2026-09-09-a2a-frozen-contract.md).
 
 Core goal: Qwen Code can expose local Agents to authorized external callers and contact existing local or remote Agents. Users still start work from their existing conversation entry and view delegation, intervene, and accept results in the same interface. Independent identity does not require a permanently running process; an external Agent need not become a Qwen subagent or Team member.
 
