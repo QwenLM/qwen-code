@@ -18,7 +18,10 @@ import {
   defaultChromeBridgeSocketDirectory,
   type BridgeRequest,
 } from '../protocol.js';
-import { ChromeExtensionTransport } from './chrome-extension-transport.js';
+import {
+  ChromeExtensionTransport,
+  disconnectedMessage,
+} from './chrome-extension-transport.js';
 import { encodeFrame, FrameDecoder } from './framing.js';
 
 const roots: string[] = [];
@@ -427,6 +430,59 @@ it.skipIf(process.platform === 'win32')(
     expect(transport.isConnected()).toBe(false);
   },
 );
+
+it('names Windows as unsupported instead of advising an extension install', () => {
+  // No Native Messaging host is ever registered off macOS and Linux, so the
+  // Web Store advice that helps there is a dead end everywhere else.
+  const windows = disconnectedMessage('Chrome extension disconnected', 'win32');
+  expect(windows).toContain('Windows');
+  const other = disconnectedMessage('Chrome extension disconnected', 'freebsd');
+  expect(other).toContain('freebsd');
+  expect(other).not.toContain('Windows');
+  for (const message of [windows, other]) {
+    expect(message).not.toContain('install the extension from');
+    expect(message).not.toContain('chrome://extensions');
+    // The reason and the next step are the whole point of this branch, and
+    // both platforms share this tail verbatim.
+    expect(message).toContain(
+      'because its Native Messaging host is only registered on macOS and Linux. Run Qwen Code on macOS or Linux to use Browser Use.',
+    );
+    // The real diagnostic stays visible on this branch too.
+    expect(message).toContain('Chrome extension disconnected');
+  }
+  for (const platform of ['darwin', 'linux'] as const) {
+    expect(
+      disconnectedMessage('Chrome extension disconnected', platform),
+    ).toContain(
+      'install the extension from https://chromewebstore.google.com/detail/qwen-code/hdhmmjclhibojdddmancfgbkleahfaph or enable it at chrome://extensions, then retry. Chrome extension disconnected',
+    );
+  }
+});
+
+it('reports Windows as unsupported when discovery finds no host', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-client-'));
+  roots.push(root);
+  const transport = discovering(root, 200);
+  // Stubbed only after construction: the constructor resolves the default
+  // socket path from the real platform, and this file never restores mocks.
+  const platform = vi
+    .spyOn(process, 'platform', 'get')
+    .mockReturnValue('win32');
+  try {
+    const error = await transport.start().then(
+      () => undefined,
+      (value: unknown) => value as Error,
+    );
+    expect(error).toMatchObject({ code: 'BROWSER_DISCONNECTED' });
+    const message = error?.message ?? '';
+    expect(message).toContain('Windows');
+    expect(message).not.toContain('install the extension from');
+  } finally {
+    platform.mockRestore();
+    vi.restoreAllMocks();
+  }
+  expect(transport.isConnected()).toBe(false);
+});
 
 it('explicit endpoint listing reports no browsers when nothing listens', async () => {
   const f = await fixture();

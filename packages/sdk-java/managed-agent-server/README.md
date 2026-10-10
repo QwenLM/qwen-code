@@ -790,7 +790,7 @@ scanned, skipped and deleted counts and duration; failures retry on the next tic
 
 Enabling retention makes historical receipts and idempotency guarantees finite.
 After cleanup, existing missing-record responses apply. Callers must not reuse
-expired Runtime Session IDs or idempotency keys. Deploy Flyway V63 and the code
+expired Runtime Session IDs or idempotency keys. Deploy Flyway V65 and the code
 with cleanup disabled, upgrade every publication writer to the new locking
 protocol, then enable it. Disable retention before reverting to older writers;
 disabling prevents future cleanup but cannot restore deleted records. See the

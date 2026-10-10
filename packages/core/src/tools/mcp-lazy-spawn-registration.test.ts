@@ -14,13 +14,19 @@ import type { ToolRegistry } from './tool-registry.js';
  * but never ran `discover()`, leaving the server CONNECTED with zero tools
  * for the session's lifetime. An `httpUrl` server is never pooled, so the
  * probe always takes the lazy-spawn branch pinned here. Only the transport
- * (`McpClient`) is faked; the manager and registries are real.
+ * (`McpClient`) is faked; the manager and registries are real. The last
+ * three cases pin the other half of the contract: discovery on this branch
+ * is best-effort, so a server that advertises nothing, rejects, or hangs
+ * past the spawn budget still serves the read.
  */
 const h = vi.hoisted(() => ({
   instances: [] as Array<{ readonly calls: string[] }>,
-  // A flag, not a hook: readResource() builds its Promise.race synchronously.
+  // Flags, not hooks: readResource() builds its Promise.race synchronously.
   failConnect: false,
   connectError: new Error('ECONNREFUSED 192.168.0.28:3939'),
+  // Discovery outcomes, read the same way (at `discover()` call time).
+  discoverError: undefined as Error | undefined,
+  discoverHangs: false,
 }));
 
 vi.mock('./mcp-client.js', async () => {
@@ -49,8 +55,24 @@ vi.mock('./mcp-client.js', async () => {
       this.status = actual.MCPServerStatus.CONNECTED;
     }
 
-    async discover() {
+    async discover(
+      _cliConfig?: unknown,
+      opts?: { preserveStatusOnFailure?: boolean },
+    ) {
       this.calls.push('discover');
+      if (h.discoverHangs) {
+        // Never settles: the manager's bound must fire.
+        await new Promise<never>(() => {});
+        return;
+      }
+      if (h.discoverError) {
+        // Mirrors the real discover(): status flips to DISCONNECTED before the
+        // error is re-thrown, unless the caller opted out.
+        if (!opts?.preserveStatusOnFailure) {
+          this.status = actual.MCPServerStatus.DISCONNECTED;
+        }
+        throw h.discoverError;
+      }
       // Mirrors the real discover(): advertised tools land in the registry.
       this.toolRegistry.registerTool({
         name: `mcp__${this.serverName}__echo`,
@@ -59,6 +81,10 @@ vi.mock('./mcp-client.js', async () => {
 
     async readResource(uri: string) {
       this.calls.push('readResource');
+      // Mirrors the real readResource()'s first statement.
+      if (this.status !== actual.MCPServerStatus.CONNECTED) {
+        throw new Error('Client is not connected.');
+      }
       return { contents: [{ uri, text: 'resource-body' }] };
     }
 
@@ -118,6 +144,8 @@ describe('McpClientManager lazy-spawn tool registration (#13796)', () => {
   beforeEach(() => {
     h.instances.length = 0;
     h.failConnect = false;
+    h.discoverError = undefined;
+    h.discoverHangs = false;
   });
 
   afterEach(async () => {
@@ -189,5 +217,78 @@ describe('McpClientManager lazy-spawn tool registration (#13796)', () => {
     // The disconnect() cleanup is gated on `weReservedSlot`, false under the
     // default `off` budget mode — pre-existing bookkeeping, not asserted here.
     expect(h.instances[0].calls).toEqual(['connect']);
+  });
+
+  it('still serves the read when discovery finds nothing to register', async () => {
+    const ctx = setup();
+    manager = ctx.manager;
+    h.discoverError = new Error(
+      'No prompts, tools, or resources found on the server.',
+    );
+
+    await expect(
+      manager.readResource('zoteus', 'mcp://zoteus/doc'),
+    ).resolves.toEqual({
+      contents: [{ uri: 'mcp://zoteus/doc', text: 'resource-body' }],
+    });
+
+    // Best-effort: nothing got registered, but the spawn happened and the
+    // read was served on the client it brought up.
+    expect(ctx.toolRegistry.registerTool).not.toHaveBeenCalled();
+    expect(h.instances[0].calls).toEqual([
+      'connect',
+      'discover',
+      'readResource',
+    ]);
+  });
+
+  it('keeps the connection across a failed discovery, so a later read reuses it', async () => {
+    const ctx = setup();
+    manager = ctx.manager;
+    h.discoverError = new Error(
+      'No prompts, tools, or resources found on the server.',
+    );
+
+    await manager.readResource('zoteus', 'mcp://zoteus/a');
+    await manager.readResource('zoteus', 'mcp://zoteus/b');
+
+    // A discovery failure must not read as "the connection failed". The real
+    // `discover()` flips the client to DISCONNECTED, and the real
+    // `readResource()` refuses a non-CONNECTED client — the fake mirrors both,
+    // so a missing status opt-out fails the first read here instead of
+    // silently respawning a server that is already up.
+    expect(h.instances).toHaveLength(1);
+    expect(h.instances[0].calls).toEqual([
+      'connect',
+      'discover',
+      'readResource',
+      'readResource',
+    ]);
+  });
+
+  it('still serves the read when discovery outlives the spawn budget', async () => {
+    const ctx = setup({
+      zoteus: {
+        httpUrl: 'http://192.168.0.28:3939/mcp',
+        discoveryTimeoutMs: 100,
+      },
+    });
+    manager = ctx.manager;
+    h.discoverHangs = true;
+
+    await expect(
+      manager.readResource('zoteus', 'mcp://zoteus/doc'),
+    ).resolves.toEqual({
+      contents: [{ uri: 'mcp://zoteus/doc', text: 'resource-body' }],
+    });
+
+    // The probe neither hangs on `tools/list` nor takes the spawn-timeout
+    // cleanup path: the spawn succeeded, only discovery ran out of budget.
+    expect(ctx.toolRegistry.registerTool).not.toHaveBeenCalled();
+    expect(h.instances[0].calls).toEqual([
+      'connect',
+      'discover',
+      'readResource',
+    ]);
   });
 });

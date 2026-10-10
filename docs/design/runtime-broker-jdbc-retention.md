@@ -34,7 +34,7 @@ Add indexes for binding state/time/ID, tenant/state and embedding reference keys
 
 Enabling retention makes historical receipts and idempotency guarantees finite. After deletion, existing missing-record behavior applies; callers must not reuse expired runtime-session IDs or idempotency keys. No permanent execution tombstones are added.
 
-Deploy V63 after the existing V62 task-cancel migration with retention disabled, and verify upgrades from V62 preserve existing terminal receipts. Enable only after every instance uses the new publication locking protocol. Observe scan/deletion/skip counts, duration and failures. Disable retention before reverting to older writers. Disabling stops future cleanup but cannot restore deleted records.
+Deploy V65 after the existing V64 session-message relay migration with retention disabled, and verify upgrades from V64 preserve existing terminal receipts. Enable only after every instance uses the new publication locking protocol. Observe scan/deletion/skip counts, duration and failures. Disable retention before reverting to older writers. Disabling stops future cleanup but cannot restore deleted records.
 
 ## Validation and acceptance
 

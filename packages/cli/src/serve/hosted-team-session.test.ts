@@ -111,6 +111,7 @@ async function launch(childRunId: string): Promise<void> {
       definitionRevision: 1,
       definitionDigest: session.authority.sessionHeader.definitionRef.digest,
     },
+    workspaceMode: 'shared',
     workingDirectory: '.',
     executionCallId: childRunId,
   });
