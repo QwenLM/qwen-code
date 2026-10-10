@@ -210,6 +210,7 @@ try {
       `${fault}: fault did not fire`,
     );
     const blocked = !['prepare', 'start'].includes(fault);
+    const retryRelease = ['release', 'release-before-forward'].includes(fault);
     assert.equal(
       (await json(`/session/${sessionId}/status`)).recoveryBlocked,
       blocked,
@@ -238,8 +239,13 @@ try {
     const terminals = events.filter(
       (event) => event.promptId === promptId && event.type.startsWith('turn_'),
     );
-    assert.equal(terminals.length, blocked ? 0 : 1, JSON.stringify(events));
-    if (!blocked) assert.equal(terminals[0].type, 'turn_complete');
+    assert.equal(
+      terminals.length,
+      blocked && !retryRelease ? 0 : 1,
+      JSON.stringify(events),
+    );
+    if (!blocked || retryRelease)
+      assert.equal(terminals[0].type, 'turn_complete');
     const results = events.filter(
       (event) => event.data.record?.type === 'tool_result',
     );
@@ -306,7 +312,6 @@ try {
     }
     const traffic = exchanges.length;
     const callsBeforeReload = modelCalls;
-    const retryRelease = ['release', 'release-before-forward'].includes(fault);
     const rejectLoad = blocked && !retryRelease;
     await json(`/session/${sessionId}/detach`, {}, 204);
     const loaded = await json(
@@ -342,7 +347,7 @@ try {
                 event.promptId === promptId && event.type.startsWith('turn_'),
             )
             .map((event) => event.type),
-          fault === 'release' ? ['turn_complete'] : [],
+          ['turn_complete'],
         );
         assert.equal(
           recoveredEvents.filter(

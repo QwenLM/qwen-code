@@ -5104,6 +5104,16 @@ describe('Hosted Harness no-tool session', () => {
       generation: '1',
     });
     expect(state.model).not.toHaveBeenCalled();
+    const nextPrompt = [{ type: 'text', text: 'must remain blocked' }];
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .send({
+        prompt: nextPrompt,
+        promptId: randomUUID(),
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
+      })
+      .expect(409);
+    expect((await readJournal()).events).toHaveLength(parked.events.length);
+    expect(state.model).not.toHaveBeenCalled();
     const redriven = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
     ).send({

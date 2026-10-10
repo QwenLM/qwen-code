@@ -3923,16 +3923,22 @@ export function registerHostedHarnessSessionRoutes(
                 // record is durable: a release persisted earlier would
                 // wedge the retry on runtime_session_not_acquirable.
                 if (brokerOptions && hasHostedCleanupDebt(session.managed)) {
-                  if (
-                    runtime.broker &&
-                    !(await releaseHeldRuntime(
-                      session,
-                      brokerOptions,
-                      turn.turnId,
-                    ))
-                  )
-                    return 'busy';
-                  await retryHostedCleanup(session, brokerOptions);
+                  try {
+                    if (
+                      runtime.broker &&
+                      !(await releaseHeldRuntime(
+                        session,
+                        brokerOptions,
+                        turn.turnId,
+                      ))
+                    )
+                      return 'busy';
+                    await retryHostedCleanup(session, brokerOptions);
+                  } catch (cause) {
+                    if (!session.blocked) session.cleanupBlocked = true;
+                    session.blocked = true;
+                    throw cause;
+                  }
                 } else {
                   await runtime.broker?.release().catch((cause: unknown) => {
                     if (

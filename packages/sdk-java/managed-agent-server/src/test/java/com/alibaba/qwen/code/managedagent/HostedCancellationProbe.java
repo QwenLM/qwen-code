@@ -123,7 +123,7 @@ final class HostedCancellationProbe implements AutoCloseable {
             assertThat(count(executions, id)).isEqualTo(1);
             assertThat(count(completions, id)).as("Cancellation ACK is not physical settlement").isZero();
             assertThat(count(cancellations, id)).isEqualTo(blocked ? 2 : 1);
-            assertJournal(session, false, false, "await_runtime");
+            assertJournal(session, false, false, "await_runtime", false);
         } else {
             assertThat(phase).isIn("release", "finished");
             assertThat(execution.get("execution_state")).isEqualTo("SETTLED");
@@ -133,8 +133,8 @@ final class HostedCancellationProbe implements AutoCloseable {
             assertThat(count(cancellations, id)).isEqualTo(prepared ? 0 : blocked ? 2 : 1);
             assertThat(Files.readString(Path.of(session.get("directory").toString()).resolve("proof.txt")))
                     .isEqualTo(prepared ? "x" : "xx");
-            assertJournal(session, !blocked, phase.equals("finished") && !blocked,
-                    blocked ? "await_runtime" : phase.equals("release") ? "results_ready" : "before_model");
+            assertJournal(session, !blocked, !blocked,
+                    blocked ? "await_runtime" : "before_model", phase.equals("finished") && !blocked);
         }
         assertThat(((Number) execution.get("dispatch_generation")).longValue())
                 .isEqualTo(phase.equals("prepared") || prepared ? 0 : 1);
@@ -168,7 +168,8 @@ final class HostedCancellationProbe implements AutoCloseable {
         System.out.println("FG6D_LEDGER " + session.get("fault") + " " + JSON.writeValueAsString(check(session, "finished")));
     }
 
-    private void assertJournal(Map<String, Object> session, boolean result, boolean terminal, String phase) throws Exception {
+    private void assertJournal(Map<String, Object> session, boolean result, boolean terminal, String phase,
+            boolean cleanupConfirmed) throws Exception {
         String id = session.get("sessionId").toString();
         var rows = jdbc.queryForList("SELECT * FROM qwen_managed_session_journal_tx"
                 + " WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, id);
@@ -202,6 +203,14 @@ final class HostedCancellationProbe implements AutoCloseable {
         if (terminal) {
             assertThat(terminals.getFirst().path("payload").path("outcome").asText()).isEqualTo("cancelled");
             assertThat(terminals.getFirst().path("payload").path("turnId").asText()).isEqualTo(execution.get("turn_id"));
+        }
+        var cleanup = events.stream().filter(event -> event.path("kind").asText().equals("hosted.cleanup")).toList();
+        assertThat(cleanup).hasSize(cleanupConfirmed ? 2 : 1);
+        assertThat(cleanup.getFirst().path("payload").path("state").asText()).isEqualTo("owed");
+        if (cleanupConfirmed) {
+            assertThat(cleanup.getLast().path("payload").path("state").asText()).isEqualTo("confirmed");
+            assertThat(cleanup.getLast().path("sequence").asLong())
+                    .isGreaterThan(terminals.getFirst().path("sequence").asLong());
         }
         assertThat(events.stream().filter(event -> event.path("kind").asText().equals("message.committed")
                 && event.path("payload").path("role").asText().equals("tool_result"))).hasSize(result ? 1 : 0);
