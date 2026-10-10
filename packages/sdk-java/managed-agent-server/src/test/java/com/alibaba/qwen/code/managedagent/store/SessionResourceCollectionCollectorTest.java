@@ -174,7 +174,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         head(session);
         publish("segment", CONTENT, new byte[64]);
         retire();
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET state = 'SEALED'"
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET state = 'ACTIVE'"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
         assertThat(collector(true, Duration.ZERO).runOnce()).isFalse();
         var ledger = ledger();
