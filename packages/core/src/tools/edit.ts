@@ -28,12 +28,7 @@ import {
 import type { SandboxFileVersion } from '../sandbox/file-version.js';
 import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
 import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
-import {
-  FileEncoding,
-  needsUtf8Bom,
-  detectLineEnding,
-} from '../services/fileSystemService.js';
-import type { LineEnding } from '../services/fileSystemService.js';
+import { FileEncoding, needsUtf8Bom } from '../services/fileSystemService.js';
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import { ReadFileTool } from './read-file.js';
@@ -54,6 +49,7 @@ import type {
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { safeLiteralReplace } from '../utils/textUtils.js';
 import {
+  applyReplacementPreservingLineEndings,
   countOccurrences,
   extractEditSnippet,
   maybeAugmentOldStringForDeletion,
@@ -123,6 +119,13 @@ interface CalculatedEdit {
   sandboxFileVersion?: SandboxFileVersion | null;
   currentContent: string | null;
   newContent: string;
+  /**
+   * Payload to write. For a new file it is `newContent`; for an existing file
+   * containing CRLF, the replacement is spliced into the original bytes so
+   * untouched line endings are preserved. Uniformly CRLF files still match the
+   * previous write path.
+   */
+  contentForWrite: string;
   occurrences: number;
   error?: { display: string; raw: string; type: ToolErrorType };
   isNewFile: boolean;
@@ -130,8 +133,6 @@ interface CalculatedEdit {
   encoding: string;
   /** Whether the existing file has a UTF-8 BOM */
   bom: boolean;
-  /** Original line ending style of the existing file */
-  lineEnding: LineEnding;
 }
 
 class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
@@ -166,8 +167,8 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       | { display: string; raw: string; type: ToolErrorType }
       | undefined = undefined;
     let useBOM = false;
+    let rawContent: string | null = null;
     let detectedEncoding = 'utf-8';
-    let detectedLineEnding: LineEnding = 'lf';
     // Prior-read enforcement runs before any content is read so that
     // the read pipeline below (and the content-derived error codes
     // it can produce — NO_OCCURRENCE_FOUND, EXPECTED_OCCURRENCE_MISMATCH,
@@ -190,6 +191,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         return {
           currentContent: null,
           newContent: '',
+          contentForWrite: '',
           occurrences: 0,
           error: {
             display: decision.displayMessage,
@@ -199,7 +201,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           isNewFile: false,
           encoding: 'utf-8',
           bom: false,
-          lineEnding: 'lf',
         };
       }
     }
@@ -216,9 +217,11 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
             fileInfo.content.codePointAt(0) === 0xfeff;
         }
         detectedEncoding = fileInfo._meta?.encoding || 'utf-8';
-        // Detect original line ending style before normalizing
-        detectedLineEnding = detectLineEnding(fileInfo.content);
         // Normalize line endings to LF for consistent processing.
+        // `rawContent` keeps the bytes as read: the normalization above is for
+        // matching and the diff, and it must not reach disk (see
+        // applyReplacementPreservingLineEndings).
+        rawContent = fileInfo.content;
         currentContent = fileInfo.content.replace(/\r\n/g, '\n');
         fileExists = true;
         // Encoding and BOM are returned from the same I/O pass, avoiding redundant reads.
@@ -259,6 +262,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         return {
           currentContent: null,
           newContent: '',
+          contentForWrite: '',
           occurrences: 0,
           error: {
             display: postDecision.displayMessage,
@@ -268,7 +272,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           isNewFile: false,
           encoding: 'utf-8',
           bom: false,
-          lineEnding: 'lf',
         };
       }
     }
@@ -343,22 +346,55 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         )
       : (currentContent ?? '');
 
-    if (!error && fileExists && currentContent === newContent) {
+    // The bytes that go to disk, spliced out of the content as read. For a
+    // local edit to a mixed-ending file, bytes outside the matched span remain
+    // unchanged. An inline editor replacement can span the whole file; that
+    // case keeps the previous writer's file-wide CRLF behavior.
+    const contentForWrite =
+      !error && !isNewFile && rawContent !== null && currentContent !== null
+        ? applyReplacementPreservingLineEndings(
+            rawContent,
+            currentContent,
+            finalOldString,
+            finalNewString,
+          )
+        : newContent;
+
+    // `currentContent` and `newContent` are both the LF-normalized view, but the
+    // bytes that reach disk are `contentForWrite`. Those two can disagree about
+    // whether anything changed: on a mixed-ending file, re-joining a span with
+    // the ending it already carries reproduces the original bytes exactly. Gate
+    // on the bytes as well, or the tool reports success, rewrites an identical
+    // file, and takes a history backup for a change nobody made.
+    if (
+      !error &&
+      fileExists &&
+      (currentContent === newContent ||
+        (rawContent !== null && contentForWrite === rawContent))
+    ) {
       error = {
-        display:
-          'No changes to apply. The new content is identical to the current content.',
-        raw: `No changes to apply. The new content is identical to the current content in file: ${params.file_path}`,
+        // Phrased over the file's contents rather than the normalized view,
+        // because the second branch above fires when only the bytes agree.
+        display: `No changes to apply. The edit does not change the file's contents.`,
+        raw: `No changes to apply. The edit does not change the file's contents in file: ${params.file_path}`,
         type: ToolErrorType.EDIT_NO_CHANGE,
       };
     }
 
     // Scan the full resulting content, not just new_string, so a secret split
     // across multiple edits (each fragment alone undetectable) is still caught.
+    // Only the bytes that reach disk need scanning: for an existing file that is
+    // `contentForWrite`, and `newContent` is the LF-normalized view of those same
+    // bytes, so a scan of both would run the same content through the detector
+    // twice. A brand-new file writes `newContent` directly, which is why it is
+    // the one named in the first position below.
     if (!error) {
+      const projectRoot = this.config.getProjectRoot();
+      const bytesToWrite = isNewFile ? newContent : contentForWrite;
       const teamMemoryError = checkTeamMemorySecrets(
         params.file_path,
-        newContent,
-        this.config.getProjectRoot(),
+        bytesToWrite,
+        projectRoot,
       );
       if (teamMemoryError) {
         // If the secret is already in the on-disk file, this edit can't clear it
@@ -384,13 +420,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     return {
       currentContent,
       newContent,
+      contentForWrite,
       sandboxFileVersion,
       occurrences,
       error,
       isNewFile,
       bom: useBOM,
       encoding: detectedEncoding,
-      lineEnding: detectedLineEnding,
     };
   }
 
@@ -624,7 +660,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           this.config,
           {
             path: this.params.file_path,
-            content: editData.newContent,
+            content: editData.contentForWrite,
             toolWriteOrigin: 'edit',
             _meta: {
               bom: useBOM,
@@ -638,12 +674,20 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           this.config,
           {
             path: this.params.file_path,
-            content: editData.newContent,
+            content: editData.contentForWrite,
             toolWriteOrigin: 'edit',
             _meta: {
               bom: editData.bom,
               encoding: editData.encoding,
-              lineEnding: editData.lineEnding,
+              // No `lineEnding` here on purpose. `contentForWrite` already
+              // carries the file's own terminators, and
+              // `prepareTextFileContent` expands *every* `\n` when it is told
+              // the file is `crlf` — which `detectLineEnding` reports as soon as
+              // the file contains a single `\r\n`. Passing the verdict back
+              // would undo the splice above. Direct local and sandbox writes
+              // honor these bytes except for Windows .bat/.cmd normalization.
+              // Daemon/SSH backends can still re-derive a whole-file ending;
+              // their write policies are outside this caller's control.
             },
           },
           editData.sandboxFileVersion,

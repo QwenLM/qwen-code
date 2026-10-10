@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { safeLiteralReplace } from './textUtils.js';
+
 /**
  * Helpers for reconciling LLM-proposed edits with on-disk text.
  *
@@ -474,4 +476,282 @@ export function extractEditSnippet(
     totalLines,
     content: snippetLines.join('\n'),
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Line-ending preserving splice                                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The line ending that follows `index` in `content`, or `null` when `index` is
+ * not immediately followed by a line break.
+ */
+function lineEndingAfter(content: string, index: number): string | null {
+  if (content.startsWith('\r\n', index)) {
+    return '\r\n';
+  }
+  if (content[index] === '\n') {
+    return '\n';
+  }
+  return null;
+}
+
+/**
+ * The line ending that most recently precedes `index` in `content`, or `null`
+ * when the text before `index` has no line break in it.
+ */
+function lineEndingBefore(content: string, index: number): string | null {
+  for (let i = index - 1; i >= 0; i--) {
+    if (content[i] === '\n') {
+      if (i > 0 && content[i - 1] === '\r') {
+        return '\r\n';
+      }
+      return '\n';
+    }
+  }
+  return null;
+}
+
+/**
+ * The first line ending in `content`, or `'\n'` when it has none.
+ *
+ * This is a last resort when an edit span starts on the first line, does not end
+ * on a break, and is not immediately followed by one. It is reached only from
+ * code that has already established the content contains a CRLF, so a bare
+ * `'\n'` here would put an LF into a CRLF file.
+ */
+function firstLineEnding(content: string): string {
+  const index = content.indexOf('\n');
+  if (index === -1) {
+    return '\n';
+  }
+  return index > 0 && content[index - 1] === '\r' ? '\r\n' : '\n';
+}
+
+/**
+ * Answers "which line ending most recently precedes this index" for a series of
+ * indices that only move forwards.
+ *
+ * Matches are consumed in increasing order within one splice. Carrying the
+ * answer forward means this cursor scans each preceding character at most once.
+ */
+class PrecedingLineEnding {
+  private readonly content: string;
+  private scanned = 0;
+  private ending: string | null = null;
+
+  constructor(content: string) {
+    this.content = content;
+  }
+
+  at(index: number): string | null {
+    if (index < this.scanned) {
+      // Not expected: the caller only ever moves forward. Answer directly rather
+      // than trusting the cursor, so a future caller cannot get a wrong answer.
+      return lineEndingBefore(this.content, index);
+    }
+    for (let i = this.scanned; i < index; i++) {
+      if (this.content[i] === '\n') {
+        this.ending = i > 0 && this.content[i - 1] === '\r' ? '\r\n' : '\n';
+      }
+    }
+    this.scanned = index;
+    return this.ending;
+  }
+}
+
+/**
+ * The line ending `content[end - 1]` ends with, when the span `content.slice(
+ * start, end)` itself finishes on a line break.
+ */
+function spanTrailingLineEnding(
+  content: string,
+  start: number,
+  end: number,
+): string | null {
+  if (end - 1 > start && content[end - 1] === '\n') {
+    if (content[end - 2] === '\r') {
+      return '\r\n';
+    }
+    return '\n';
+  }
+  return null;
+}
+
+/**
+ * Maps every offset in the LF-normalized `normalizedContent` back to the offset
+ * it came from in `rawContent`.
+ *
+ * Normalizing only ever removes the `\r` of a `\r\n`, so the mapping is
+ * monotonic and one pass is enough. Entry `i` is the raw offset that produced
+ * normalized offset `i`; the final entry is `rawContent.length`.
+ */
+function normalizedToRawOffsets(
+  rawContent: string,
+  normalizedLength: number,
+): number[] {
+  const offsets: number[] = new Array(normalizedLength + 1);
+  let normalizedIndex = 0;
+  for (let rawIndex = 0; rawIndex < rawContent.length; rawIndex++) {
+    if (rawContent[rawIndex] === '\r' && rawContent[rawIndex + 1] === '\n') {
+      // Normalization drops this `\r`, so the `\n` behind it keeps the
+      // normalized index the `\r` would have taken.
+      continue;
+    }
+    if (normalizedIndex < normalizedLength) {
+      offsets[normalizedIndex] = rawIndex;
+    }
+    normalizedIndex++;
+  }
+  // A match that runs to the end of the normalized text starts after the last
+  // character, which is the end of the raw text.
+  offsets[normalizedLength] = rawContent.length;
+  return offsets;
+}
+
+/**
+ * Applies the same replacement as `applyReplacement`, but splices the result
+ * into the bytes that were read instead of into the LF-normalized copy.
+ *
+ * `applyReplacement` runs on LF-normalized text so that matching and the
+ * confirmation diff are line-ending agnostic, and `prepareTextFileContent`
+ * re-expanded that text to one style per file. Between them, a file that mixes
+ * CRLF and LF had every terminator rewritten by an edit that touched one line:
+ * `detectLineEnding` answers `crlf` as soon as the file contains a single
+ * `\r\n`, and `ensureCrlfLineEndings` then converts every `\n`.
+ *
+ * For a local span, the untouched prefix and suffix are copied verbatim from
+ * `rawContent`. Inserted text takes the ending of the replaced region — the
+ * break the span starts on, else its trailing break, else the break immediately
+ * after it, else the most recent break before it, else the file's first break.
+ * Ending choices use the original rawContent; earlier replacements do not
+ * change the context for later matches.
+ * A whole-file span keeps the previous writer's file-wide CRLF
+ * conversion because there are no outside bytes to preserve. Uniformly
+ * terminated files remain byte-identical to the previous path, with one
+ * exception: where the matched span is followed by a CRLF or by nothing, a
+ * `newString` ending in a bare `\r` loses that `\r` here, and the previous path
+ * kept it as a stray character mid-line. A tail opening with a bare `\n` is not
+ * that case: there the caller's `\r` completes the pair and is kept.
+ *
+ * Two paths, and which one runs is decided by whether the file contains a CRLF
+ * at all. A file with none takes the plain literal replace, so the replacement's
+ * own line endings are inserted exactly as given and a CRLF inside the
+ * replacement will leave the file mixed — which is what the previous path did to
+ * such a file as well. A file that does contain a CRLF takes the splice. Local
+ * spans use one resolved ending throughout, so a mixed span can change breaks
+ * inside that span even when its normalized text is unchanged. A whole-file
+ * span uses CRLF throughout, matching the previous writer. Bytes outside matched
+ * spans stay unchanged.
+ *
+ * Matches are located in the normalized text and mapped back, so the spans are
+ * the same ones `safeLiteralReplace` would have replaced, including its
+ * replace-all behaviour.
+ */
+export function applyReplacementPreservingLineEndings(
+  rawContent: string,
+  normalizedContent: string,
+  oldString: string,
+  newString: string,
+): string {
+  if (oldString === '' || !normalizedContent.includes(oldString)) {
+    return rawContent;
+  }
+
+  if (!rawContent.includes('\r\n')) {
+    // Nothing to map: with no CRLF in the file the normalized copy is byte for
+    // byte the file itself, so the replacement can be applied to it directly.
+    // This is also exactly what the write path used to do for such a file.
+    return safeLiteralReplace(rawContent, oldString, newString);
+  }
+
+  const offsets = normalizedToRawOffsets(rawContent, normalizedContent.length);
+
+  let result = '';
+  let copiedUpTo = 0;
+  let searchFrom = 0;
+  const preceding = new PrecedingLineEnding(rawContent);
+  let fileEnding: string | null = null;
+  for (;;) {
+    const matchAt = normalizedContent.indexOf(oldString, searchFrom);
+    if (matchAt === -1) {
+      break;
+    }
+    const matchEnd = matchAt + oldString.length;
+    let rawStart = offsets[matchAt];
+    // Normalization drops the `\r` of every CRLF, so a normalized `\n` maps to
+    // the raw index of the `\n` and never to the `\r` in front of it. A match
+    // that starts on such a newline owns that `\r`, so pull it into the span
+    // rather than leave it in the untouched prefix -- otherwise the pair is
+    // split and the file ends up with a doubled `\r`.
+    if (
+      rawStart > 0 &&
+      rawContent[rawStart - 1] === '\r' &&
+      rawContent[rawStart] === '\n'
+    ) {
+      rawStart--;
+    }
+    let rawEnd = offsets[matchEnd];
+    // Normalization drops the `\r` of every CRLF, so a span can end up holding
+    // one. That `\r` is not part of the text being replaced — it is the first
+    // half of the break that follows the span — and leaving it out is what keeps
+    // the pair intact for the untouched tail.
+    while (
+      rawEnd > rawStart &&
+      rawContent[rawEnd - 1] === '\r' &&
+      rawContent[rawEnd] === '\n'
+    ) {
+      rawEnd--;
+    }
+
+    // A line break the edit matched is replaced by one of the same kind: when
+    // the span starts on a break, that break belonged to the line in front of
+    // it, so the inserted text's first break keeps the ending of the line it
+    // terminates. `lineEndingAfter` also keeps a bare `\r` from being mistaken
+    // for half of a CRLF break.
+    const matchedLeadingEnding = lineEndingAfter(rawContent, rawStart);
+    const spansWholeFile =
+      copiedUpTo === 0 && rawStart === 0 && rawEnd === rawContent.length;
+    // A full-file replacement has no untouched bytes to splice around. Keep the
+    // previous writer's file-wide CRLF behavior for it; inline editor changes
+    // can submit the whole normalized file as one replacement span.
+    const ending = spansWholeFile
+      ? '\r\n'
+      : matchedLeadingEnding !== null
+        ? matchedLeadingEnding
+        : (spanTrailingLineEnding(rawContent, rawStart, rawEnd) ??
+          lineEndingAfter(rawContent, rawEnd) ??
+          preceding.at(rawStart) ??
+          (fileEnding ??= firstLineEnding(rawContent)));
+    const insertedEnding = ending;
+    // A `\r` the caller wrote at the very end of `new_string` is absorbed into
+    // the break that follows the span, which is what the previous write path did
+    // and what keeps a CRLF tail from doubling. The one shape where that is not
+    // right is a tail opening with a *bare* `\n`: the caller's `\r` and that `\n`
+    // are a pair they asked for, so absorbing it rewrites the content -- `y` ->
+    // `y\r` against a tail of `\nz` has to come back as `y\r\nz`, not `y\nz`.
+    const tailOpensWithBareLf =
+      rawContent.startsWith('\n', rawEnd) &&
+      !rawContent.startsWith('\r\n', rawEnd);
+    const inserted = newString
+      .split(/\r\n|\n/)
+      .map((text, index, segments) => {
+        // The split consumes each complete CRLF break, so a trailing `\r` in
+        // an intermediate segment is user content and is always kept.
+        const body =
+          index === segments.length - 1 &&
+          !tailOpensWithBareLf &&
+          text.endsWith('\r')
+            ? text.slice(0, -1)
+            : text;
+        return index === 0 ? body : `${insertedEnding}${body}`;
+      })
+      .join('');
+
+    result += rawContent.slice(copiedUpTo, rawStart) + inserted;
+    copiedUpTo = rawEnd;
+    searchFrom = matchEnd;
+  }
+
+  return result + rawContent.slice(copiedUpTo);
 }
