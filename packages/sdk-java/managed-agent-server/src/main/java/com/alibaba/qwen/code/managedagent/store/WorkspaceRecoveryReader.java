@@ -66,6 +66,7 @@ final class WorkspaceRecoveryReader {
             check(text(ref, "kind").equals(row.get("kind")) && ref.path("schemaVersion").asInt() == number(row, "schema_version")
                     && ref.path("byteLength").asLong() == number(row, "byte_length")
                     && text(ref, "digest").equals(row.get("sha256")), "resource_reference_conflict");
+            check(!"COLLECTED".equals(row.get("state")), "resource_collected");
             if ("MYSQL_INLINE".equals(row.get("storage_kind"))) {
                 boolean published = "PUBLISHED".equals(row.get("state"))
                         && Set.of("managed-tool-result-content", "managed-tool-result-manifest", "managed-tool-result-page").contains(text(ref, "kind"));
@@ -78,6 +79,17 @@ final class WorkspaceRecoveryReader {
                         + " AND journal_revision <= ?", Long.class, text(head, "tenantId"), text(head, "workspaceId"),
                         text(head, "sessionId"), text(ref, "resourceId"), head.path("journalRevision").asLong());
                 check(published || references != null && references > 0, "resource_out_of_cut");
+                if (bytes == null) {
+                    // The publication collector frees inline bytes without moving state off
+                    // REFERENCED and marks the cataloged object COLLECTED in the same
+                    // transaction; that marker is the positive evidence separating a
+                    // collected row from an unexplained byte loss, which stays fail-closed.
+                    Long collected = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object"
+                                    + " WHERE scope_key = ? AND resource_id = ? AND state = 'COLLECTED'",
+                            Long.class, scope(head), text(ref, "resourceId"));
+                    check(collected != null && collected > 0, "resource_corrupt");
+                    throw WorkspaceRecoveryStore.failure("resource_collected");
+                }
             } else {
                 check("TOOL_PUBLICATION".equals(row.get("storage_kind")) && "REFERENCED".equals(row.get("state"))
                         && row.get("inline_bytes") == null && row.get("object_version_id") == null
@@ -115,7 +127,11 @@ final class WorkspaceRecoveryReader {
                 + " AND publication_id = ? AND slot_key = ?", scope(head), publicationId, slot);
         check(rows.size() == 1, "publication_object_missing");
         var row = rows.getFirst();
-        check("VERIFIED".equals(row.get("state")), "publication_object_unverified");
+        // A COLLECTED object is the publication collector's positive freed-marker, so the
+        // byte loss is permanent: name the terminal resource_collected rather than
+        // publication_object_unverified, which never moves the capture out of CAPTURING.
+        check("VERIFIED".equals(row.get("state")),
+                "COLLECTED".equals(row.get("state")) ? "resource_collected" : "publication_object_unverified");
         long length = number(row, "byte_length");
         int maximum = (slot.startsWith("segment:") || slot.startsWith("content:")) ? 16 * 1024 * 1024
                 : slot.startsWith("page:") ? 256 * 1024 : slot.startsWith("manifest:") ? 64 * 1024 : 2 * 1024 * 1024;
