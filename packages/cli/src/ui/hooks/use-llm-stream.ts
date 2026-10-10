@@ -2146,6 +2146,7 @@ export const useLlmStream = (
         let firstCodeHandoff = -1;
         let allowMathExit = false;
         let capAllowsCodeSplit = false;
+        let capFenceStart = -1;
         // The last split entry has no terminating newline, even when empty.
         for (let k = 0; k < bufferLines.length - 1; k++) {
           const sourceLine = bufferLines[k]!;
@@ -2190,6 +2191,8 @@ export const useLlmStream = (
             capAllowsCodeSplit =
               activeCodeFence !== null &&
               activeCodeLanguage?.toLowerCase() !== 'mermaid';
+            capFenceStart =
+              activeCodeFence !== null ? activeCodeFenceStart : -1;
             allowMathExit = inMathBlock;
           }
           const allowBlockExit = allowTableExit || allowMathExit;
@@ -2212,6 +2215,8 @@ export const useLlmStream = (
           if (k >= keptLines && (boundaryIndex > 0 || !allowBlockExit)) break;
         }
         let target: number;
+        let fenceHandoff = false;
+        let fallbackSplitPoint = -1;
         const mathHandoff =
           carriedMath &&
           firstCodeHandoff > 0 &&
@@ -2231,6 +2236,15 @@ export const useLlmStream = (
           const fallbackIndex = capAllowsCodeSplit
             ? charIndexAfterLine(newLlmMessageBuffer, keptLines)
             : fencedBoundaryIndex;
+          fallbackSplitPoint =
+            capAllowsCodeSplit && capFenceStart > 0 && fallbackIndex > 0
+              ? findLastSafeSplitPoint(newLlmMessageBuffer, fallbackIndex)
+              : -1;
+          fenceHandoff =
+            capAllowsCodeSplit &&
+            capFenceStart > 0 &&
+            fallbackSplitPoint >= 0 &&
+            fallbackSplitPoint < capFenceStart;
           const fenceInfo =
             fallbackIndex > 0
               ? getEnclosingFenceInfo(newLlmMessageBuffer, fallbackIndex)
@@ -2239,16 +2253,21 @@ export const useLlmStream = (
           // must stay whole, and mermaid needs its whole source to render a
           // diagram — splitting it mid-block would break the render — so both
           // stay pending until they complete.
-          if (!fenceInfo || fenceInfo.lang?.toLowerCase() === 'mermaid') {
+          if (
+            !fenceHandoff &&
+            (!fenceInfo || fenceInfo.lang?.toLowerCase() === 'mermaid')
+          ) {
             break; // no safe boundary yet → keep pending
           }
-          target = fallbackIndex;
+          target = fenceHandoff ? capFenceStart : fallbackIndex;
         } else {
           target = boundaryIndex;
         }
         const splitPoint =
-          boundaryIndex < 0 && !mathHandoff
-            ? findLastSafeSplitPoint(newLlmMessageBuffer, target)
+          boundaryIndex < 0 && !mathHandoff && !fenceHandoff
+            ? fallbackSplitPoint >= 0
+              ? fallbackSplitPoint
+              : findLastSafeSplitPoint(newLlmMessageBuffer, target)
             : target;
         if (splitPoint <= 0 || splitPoint >= newLlmMessageBuffer.length) {
           break;
@@ -2265,7 +2284,7 @@ export const useLlmStream = (
         // Repair fences when the split lands inside a code block so the tail
         // does not render as prose (see splitFencedMarkdown).
         const { before: beforeText, after: afterText } =
-          boundaryIndex < 0 && !mathHandoff
+          boundaryIndex < 0 && !mathHandoff && !fenceHandoff
             ? splitFencedMarkdown(newLlmMessageBuffer, splitPoint)
             : {
                 before: newLlmMessageBuffer.slice(0, splitPoint),

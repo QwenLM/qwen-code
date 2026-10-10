@@ -17,6 +17,8 @@ import { RenderModeProvider } from '../contexts/RenderModeContext.js';
 import { getScreenBuffer } from '../selection/screen-buffer.js';
 import { getSelectedText } from '../selection/selection-text.js';
 import { fitPendingSlice } from './pending-rendered-height.js';
+import * as codeColorizer from './CodeColorizer.js';
+import * as latexRenderer from './latexRenderer.js';
 
 function copiedFrame(stdout: NodeJS.WriteStream): string {
   const frame = getScreenBuffer(stdout)!.frame!;
@@ -38,6 +40,85 @@ describe('<MarkdownDisplay />', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
+
+  it.each(['\n', '\r\n'])(
+    'renders independently committed math and JS continuations (%j)',
+    async (newline) => {
+      const math = ['$$', '````text', '```', '$$', ''].join(newline);
+      const rows = Array.from({ length: 60 }, (_, i) => `const v${i} = ${i};`);
+      const parts = [
+        math,
+        ...[0, 18, 36, 54].map(
+          (start) =>
+            (start === 0
+              ? `\`\`\`js${newline}`
+              : `\`\`\`js qwen-code:start-line=${start + 1}\n`) +
+            rows.slice(start, start + 18).join(newline) +
+            newline +
+            (start === 54 ? '```' : '```\n'),
+        ),
+      ];
+      const colorSpy = vi.spyOn(codeColorizer, 'colorizeCode');
+      const latexSpy = vi.spyOn(latexRenderer, 'renderInlineLatex');
+      const visibleRows: string[] = [];
+      try {
+        for (const [index, text] of parts.entries()) {
+          colorSpy.mockClear();
+          latexSpy.mockClear();
+          let view!: ReturnType<typeof renderWithProviders>;
+          act(() => {
+            view = renderWithProviders(
+              <RenderModeProvider
+                value={{ renderMode: 'render', setRenderMode: () => undefined }}
+              >
+                <MarkdownDisplay
+                  {...baseProps}
+                  availableTerminalHeight={24}
+                  text={text}
+                  isPending={index === 4}
+                />
+              </RenderModeProvider>,
+            );
+          });
+          try {
+            await vi.waitFor(() => expect(view.lastFrame() ?? '').not.toBe(''));
+            const frame = stripAnsi(view.lastFrame() ?? '');
+            if (index === 0) {
+              expect(colorSpy).not.toHaveBeenCalled();
+              expect(latexSpy).toHaveBeenCalledExactlyOnceWith('````text ```');
+              expect(frame).toContain('LaTeX block');
+              expect(frame).toContain('````text');
+            } else {
+              const start = (index - 1) * 18 + 1;
+              expect(latexSpy).not.toHaveBeenCalled();
+              expect(colorSpy).toHaveBeenCalledTimes(1);
+              expect(colorSpy.mock.calls[0][1]).toBe('js');
+              expect(colorSpy.mock.calls[0][4]?.startLineNumber).toBe(start);
+              expect(frame).not.toContain('LaTeX block');
+              expect(frame).not.toContain('$$');
+              expect(frame).not.toContain('qwen-code:start-line');
+              for (const match of frame.matchAll(
+                /\b(\d+)\s+const v(\d+) = (\d+);/g,
+              )) {
+                expect(Number(match[1])).toBe(Number(match[2]) + 1);
+                expect(match[2]).toBe(match[3]);
+                visibleRows.push(`const v${match[2]} = ${match[3]};`);
+              }
+            }
+          } finally {
+            act(() => {
+              view.unmount();
+              view.cleanup();
+            });
+          }
+        }
+        expect(visibleRows).toEqual(rows);
+      } finally {
+        colorSpy.mockRestore();
+        latexSpy.mockRestore();
+      }
+    },
+  );
 
   it('renders nothing for empty text', () => {
     const { lastFrame } = renderWithProviders(

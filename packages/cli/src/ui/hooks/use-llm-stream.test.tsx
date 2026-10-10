@@ -12734,6 +12734,191 @@ describe('useLlmStream', () => {
       },
     );
 
+    it.each(
+      (['raw', 'render'] as const).flatMap((mode) =>
+        ['\n', '\r\n'].flatMap((newline) =>
+          [
+            'literal text',
+            'literal mermaid',
+            'literal tilde',
+            'closed math',
+            'plain code',
+          ].map((fixture) => ({ mode, newline, fixture })),
+        ),
+      ),
+    )(
+      'hands completed math to tall code with $fixture in $mode ($newline)',
+      async ({ mode, newline, fixture }) => {
+        const mathRows =
+          fixture === 'literal text'
+            ? ['$$', '````text', '```', '$$']
+            : fixture === 'literal mermaid'
+              ? ['$$', '````mermaid', '```', '$$']
+              : fixture === 'literal tilde'
+                ? ['$$', '~~~~text', '~~~', '$$']
+                : fixture === 'closed math'
+                  ? ['$$', 'x', '$$']
+                  : [];
+        const math = mathRows.length ? mathRows.join(newline) + newline : '';
+        const rows = Array.from(
+          { length: 60 },
+          (_, i) => `const v${i} = ${i};`,
+        );
+        const content = math + ['```js', ...rows, '```'].join(newline);
+        const codeParts = [0, 18, 36, 54].map((start) => {
+          const opening =
+            start === 0
+              ? `\`\`\`js${newline}`
+              : `\`\`\`js qwen-code:start-line=${start + 1}\n`;
+          return (
+            opening +
+            rows.slice(start, start + 18).join(newline) +
+            newline +
+            (start === 54 ? '```' : '```\n')
+          );
+        });
+        const committedPrefix = [
+          ...(math ? [math] : []),
+          ...codeParts.slice(0, 3),
+        ];
+        const later = `${newline}${newline}Later prose.`;
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { current: mode },
+        );
+        const stream = await streamStages(result, [content, later]);
+        const assertSource = (expected: string) => {
+          const parts = [
+            ...llmContentItems().map((item) => item.text),
+            ...result.current.pendingHistoryItems.map(
+              (item) => item.text ?? '',
+            ),
+          ];
+          const source = parts
+            .map((part, index) => {
+              let text = part.replace(/^```js qwen-code:start-line=\d+\n/, '');
+              if (
+                /^```js qwen-code:start-line=\d+\n/.test(parts[index + 1] ?? '')
+              ) {
+                expect(text.endsWith('```\n')).toBe(true);
+                text = text.slice(0, -4);
+              }
+              return text;
+            })
+            .join('');
+          expect(source).toBe(expected);
+          expect(
+            parts.flatMap((part) =>
+              Array.from(part.matchAll(/^const v(\d+) = \d+;/gm), (match) =>
+                Number(match[1]),
+              ),
+            ),
+          ).toEqual(Array.from({ length: 60 }, (_, i) => i));
+          const code = parts.filter((part) => part.startsWith('```js'));
+          expect(code).toHaveLength(4);
+          expect(
+            code.map((part) =>
+              Number(/qwen-code:start-line=(\d+)/.exec(part)?.[1] ?? 1),
+            ),
+          ).toEqual([1, 19, 37, 55]);
+          for (const part of code) {
+            const start = Number(
+              /qwen-code:start-line=(\d+)/.exec(part)?.[1] ?? 1,
+            );
+            expect(part).toContain(`const v${start - 1} = ${start - 1};`);
+            expect(part).toMatch(/(?:^|\r?\n)```(?:\r?\n|$)/);
+          }
+        };
+        try {
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          expect(llmContentItems().map((item) => item.text)).toEqual(
+            committedPrefix,
+          );
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(
+            codeParts[3],
+          );
+          assertSource(content);
+          await stream.advance();
+          expect(llmContentItems().map((item) => item.text)).toEqual(
+            committedPrefix,
+          );
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(
+            codeParts[3] + later,
+          );
+          assertSource(content + later);
+          await stream.advance();
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+          expect(result.current.pendingHistoryItems).toEqual([]);
+          expect(llmContentItems().map((item) => item.text)).toEqual([
+            ...committedPrefix,
+            codeParts[3] + later,
+          ]);
+          assertSource(content + later);
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
+    it.each(
+      (['raw', 'render'] as const).flatMap((mode) =>
+        ['inline fence', 'real mermaid'].map((fixture) => ({ mode, fixture })),
+      ),
+    )(
+      'retains the existing tall-code gate for $fixture in $mode',
+      async ({ mode, fixture }) => {
+        const content =
+          fixture === 'inline fence'
+            ? [
+                '```js',
+                'const literal = "```";',
+                ...Array.from({ length: 60 }, (_, i) => `const v${i} = ${i};`),
+                '```',
+              ].join('\n')
+            : [
+                '```mermaid',
+                'graph TD;',
+                ...Array.from({ length: 60 }, (_, i) => `A${i} --> B${i};`),
+                '```',
+              ].join('\n');
+        const later = '\n\nLater prose.';
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { current: mode },
+        );
+        const stream = await streamStages(result, [content, later]);
+        try {
+          expect(llmContentItems()).toHaveLength(0);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(content);
+          await stream.advance();
+          expect(llmContentItems()).toHaveLength(0);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(
+            content + later,
+          );
+          await stream.advance();
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+          expect(result.current.pendingHistoryItems).toEqual([]);
+          expect(llmContentItems().map((item) => item.text)).toEqual([
+            content + later,
+          ]);
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
     const makeBoundaryTable = (rows: number) =>
       [
         '| A | B |',

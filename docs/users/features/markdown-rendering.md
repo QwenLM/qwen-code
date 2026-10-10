@@ -55,6 +55,10 @@ message-size limit. When that limit divides a large math block, later code
 blocks retain their fences and continuous line numbers. After a small closed
 math block, available complete source lines are preserved at that limit.
 
+A short completed display-math block stays whole when literal fence syntax
+inside it precedes a tall ordinary code block. The code continues with its
+original language and line numbers.
+
 ## Assistant and Tool Images
 
 Image parts use a separate TUI display path and behave the same in Markdown
