@@ -1177,15 +1177,15 @@ or contract version too.
   run, and how to drive the WebView through CDP. Check the Android workflow's
   trigger filters even for web-shell-only changes; report _lane never ran_
   when untriggered, and name any Android behaviour left _Not covered_.
-- **Java-centred PRs** (`packages/sdk-java/`) in the CI lane: the
-  optional JDK/Maven preparation is available only with `QWEN_VERIFY_JAVA=1`,
-  as described above. Measure `command -v java` and `command -v mvn` first.
-  If the flag is unset or either tool is absent, list the Java side under
-  _Not covered_; when the central claim lives in Java, the verdict is
-  `inconclusive`, never `merge-ready`. Historical example: a sandbox run
-  with no JDK left roughly
-  900 Java lines unexecuted (SQL contention, stale release, settlement, a
-  migration), and a later maintainer round had to cover them.
+- **Java-centred PRs** (`packages/sdk-java/`) in the CI lane: JDK 21 and
+  Maven are provisioned for these diffs, gated on `QWEN_VERIFY_JAVA=1` (see
+  the environment contract). Measure `command -v java` first. If it is
+  absent, the toolchain install failed: list the Java side under _Not
+  covered_; when the central claim lives in Java, the verdict is
+  `inconclusive`, never `merge-ready`. Measured example: a sandbox run
+  with no JDK left roughly 900 Java lines unexecuted (SQL contention,
+  stale release, settlement, a migration), and a later maintainer round
+  had to cover them.
 
 ## Artifact contract (the workflow collects and publishes these)
 
