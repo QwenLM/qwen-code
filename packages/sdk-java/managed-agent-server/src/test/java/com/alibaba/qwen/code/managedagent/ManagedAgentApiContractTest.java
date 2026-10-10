@@ -1679,6 +1679,20 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
                         .formatted(sessionId, childTask));
+        // The closed request object refuses an unknown field, and an
+        // overlong key is the contract's malformed-key refusal.
+        exchange(drift, "cancelWebShellTask", 400,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
+                        + "\"idempotencyKey\":\"contract-web-unknown\","
+                        + "\"extra\":true}").formatted(sessionId, childTask));
+        assertThat(json(exchange(drift, "cancelWebShellTask", 400,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
+                        + "\"idempotencyKey\":\"%s\"}").formatted(sessionId,
+                        childTask, "k".repeat(129))))
+                .at("/error/code").asText())
+                .isEqualTo("invalid_idempotency_key");
         exchange(drift, "cancelWebShellTask", 404,
                 post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
                 ("{\"sessionId\":\"%s\",\"taskId\":\"task_missing\","

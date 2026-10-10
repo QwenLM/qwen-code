@@ -718,6 +718,21 @@ class ManagedExtensionRecordStoreTest {
         assertThat(stopped.runtimeState()).isEqualTo("draining");
         // Requests coalesce: a stop already recorded still takes a cancel.
         assertThat(stopped.actionCapabilities()).containsExactly("cancel");
+        // A Session that is not active admits no new cancel, so its live
+        // tasks advertise none, on both surfaces.
+        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSING'"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT,
+                sessionId);
+        assertThat(tasks.getPublicTask(TENANT, TENANT, sessionId, taskId)
+                .actionCapabilities()).isEmpty();
+        assertThat(tasks.queryWebShellTasks(TENANT, TENANT, sessionId, null,
+                10).data().getFirst().actionCapabilities()).isEmpty();
+        jdbc.update("UPDATE managed_agent_session SET status = 'ACTIVE'"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT,
+                sessionId);
+        assertThat(tasks.queryWebShellTasks(TENANT, TENANT, sessionId, null,
+                10).data().getFirst().actionCapabilities())
+                .containsExactly("cancel");
         var target = records.findTaskTarget(TENANT, sessionId, taskId)
                 .orElseThrow();
         assertThat(target.domain()).isEqualTo("child_run");

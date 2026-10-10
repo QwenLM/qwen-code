@@ -173,10 +173,81 @@ class TaskCancelCoordinatorTest {
         attempts = TaskCancelCoordinator.ATTEMPT_BUDGET - 1;
         coordinator.dispatch(TENANT, SESSION, OPERATION);
         verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
-                eq(OPERATION), anyString(), eq(1L),
+                eq(OPERATION), anyString(),
+                eq((long) TaskCancelCoordinator.ATTEMPT_BUDGET),
                 eq(TaskCancelOutcome.recoveryBlocked(
                         "task_cancel_unconfirmed")),
                 eq(1_000 + TaskCancelCoordinator.PARKED_RECHECK.toMillis()));
+    }
+
+    // A claim that outlived its lease never counted a retry, so the
+    // budget counts claims: one past it parks on the record alone.
+    @Test
+    void aClaimPastTheBudgetParksWithoutSending() {
+        target.set(childRun("running", false));
+        attempts = TaskCancelCoordinator.ATTEMPT_BUDGET;
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        assertThat(sent).isEmpty();
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(),
+                eq((long) TaskCancelCoordinator.ATTEMPT_BUDGET + 1),
+                eq(TaskCancelOutcome.recoveryBlocked(
+                        "task_cancel_unconfirmed")), anyLong());
+        // The record still decides first: a stop recorded meanwhile
+        // completes it even past the budget.
+        target.set(childRun("running", true));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(),
+                eq((long) TaskCancelCoordinator.ATTEMPT_BUDGET + 1),
+                eq(TaskCancelOutcome.completed()), eq(0L));
+    }
+
+    // A delivery that outlasts its lease keeps it, so no other worker
+    // re-claims the operation underneath the hanging send.
+    @Test
+    void aSlowDeliveryRenewsItsLease() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getDispatch().setLeaseDuration(
+                java.time.Duration.ofMillis(30));
+        coordinator = new TaskCancelCoordinator(store, records, harness,
+                new DirectExecutor(),
+                Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC),
+                properties);
+        target.set(childRun("running", false));
+        doAnswer(args -> {
+            Thread.sleep(200);
+            target.set(childRun("running", true));
+            return null;
+        }).when(harness).runChildOperation(eq(TENANT), eq(SESSION), any());
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(store, org.mockito.Mockito.atLeastOnce())
+                .renewLifecycleOperation(eq(TENANT), eq(SESSION),
+                        eq(OPERATION), anyString(), eq(1L),
+                        eq(java.time.Duration.ofMillis(30)));
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.completed()), eq(0L));
+    }
+
+    // An unreadable record must not pin a parked cancel at the head of
+    // the page: it is parked again for a whole recheck.
+    @Test
+    void aParkedReconciliationThatFailsWaitsAWholeRecheck() {
+        when(store.findParkedTaskCancels(anyInt()))
+                .thenReturn(List.of(new OperationTarget(TENANT, SESSION,
+                        OPERATION)));
+        when(store.findOperation(TENANT, SESSION, OPERATION))
+                .thenReturn(Optional.of(operation("RECOVERY_BLOCKED", 16)));
+        when(records.findTaskTarget(TENANT, SESSION, TASK))
+                .thenThrow(new IllegalStateException("resource gone"));
+        coordinator.recover();
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), isNull(), eq(0L),
+                eq(TaskCancelOutcome.recoveryBlocked(
+                        "task_cancel_unconfirmed")),
+                eq(1_000 + TaskCancelCoordinator.PARKED_RECHECK.toMillis()));
+        assertThat(sent).isEmpty();
     }
 
     @Test
@@ -230,8 +301,8 @@ class TaskCancelCoordinatorTest {
         return new OperationRecord(TENANT, SESSION, OPERATION,
                 OperationKind.TASK_CANCEL, "digest", state, "JAVA_DURABLE",
                 "RUNNING".equals(state) ? "LEASED" : "BLOCKED", "ACTIVE",
-                null, "owner", 1, attempts, null, null, null, null, 0, null,
-                TASK);
+                null, "owner", attempts + 1, attempts, null, null, null,
+                null, 0, null, TASK);
     }
 
     private static final class DirectExecutor

@@ -1789,7 +1789,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Same authorized task cancellation semantics as the public API: key validation, current access, idempotent replay, then new-request capability, Session and task checks. Replay returns the same operation and latest durable state. 202 is durable admission, completed is authority acceptance, and neither proves physical stop. Admission requires no other open operation on the Session (409 session_operation_active), as on the lifecycle routes. A requestId in the body becomes the response's X-Request-Id and stays out of the request digest. */
+            /** @description Same authorized task cancellation semantics as the public API: key validation, current access, idempotent replay, then new-request capability, Session, task and storage-migration checks (409 workspace_unavailable under a migration fence). Replay returns the same operation and latest durable state. 202 is durable admission, completed is authority acceptance, and neither proves physical stop. Admission requires no other open operation on the Session (409 session_operation_active), as on the lifecycle routes. A requestId in the body becomes the response's X-Request-Id and stays out of the request digest. */
             202: {
                 headers: {
                     "X-Request-Id": components["headers"]["RequestId"];

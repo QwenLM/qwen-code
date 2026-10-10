@@ -1447,6 +1447,13 @@ public class ManagedAgentStore implements AgentStateStore {
                     "task_action_unavailable",
                     "The task does not accept a cancellation now.");
         }
+        // A bound Session under storage migration admits no new work, as
+        // every sibling bound admission refuses it: a cancel admitted
+        // behind the fence would wedge the migration's idle checks.
+        if (session.workspace() != null) {
+            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId,
+                    session.workspace().getStorageId());
+        }
         requireNoOpenOperation(tenantId, sessionId);
         long now = lifecycleDatabaseTime();
         String operationId = publicId("op");
@@ -1488,10 +1495,13 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     public List<OperationTarget> findParkedTaskCancels(int limit) {
+        // delivery_state leads the pending index, so the per-second scan
+        // never reads the whole table.
         return jdbc.query("SELECT tenant_id, session_id, operation_id FROM"
-                        + " managed_agent_operation WHERE operation_kind ="
-                        + " 'TASK_CANCEL' AND state = 'RECOVERY_BLOCKED'"
-                        + " AND available_at <= ? ORDER BY available_at"
+                        + " managed_agent_operation WHERE delivery_state ="
+                        + " 'BLOCKED' AND available_at <= ? AND"
+                        + " operation_kind = 'TASK_CANCEL' AND state ="
+                        + " 'RECOVERY_BLOCKED' ORDER BY available_at"
                         + " LIMIT ?",
                 operationTargetMapper, lifecycleDatabaseTime(), limit);
     }

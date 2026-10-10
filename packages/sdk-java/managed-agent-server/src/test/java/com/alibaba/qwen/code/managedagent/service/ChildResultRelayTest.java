@@ -1274,6 +1274,51 @@ class ChildResultRelayTest {
         assertThat(row.get().state()).isEqualTo("delivering");
     }
 
+    // The contract preserves a natural terminal outcome: a child whose
+    // Turn failed on its own settles child_failed, never cancelled.
+    @Test
+    void aNaturalFailureThatWinsTheRaceStaysFailed() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "FAILED", now + 1, "provider_error", true,
+                "epoch-1"));
+        relay.scan();
+        verify(sessions, never()).cancelChildTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString());
+        assertThat(harness.operations).hasSize(1);
+        assertThat(harness.operations.getFirst())
+                .containsEntry("kind", "fail")
+                .containsEntry("stopReason", "child_failed");
+        assertThat(row.get().state()).isEqualTo("done");
+    }
+
+    // Only an accepted or running Turn takes the cancel: any other live
+    // status owns its own outcome and is waited on without re-driving.
+    @Test
+    void aTurnBlockedOnItsRecoveryIsWaitedOn() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "RECOVERY_BLOCKED", null, null, true, "epoch-1"));
+        relay.scan();
+        verify(sessions, never()).cancelChildTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString());
+        verify(store).scheduleRetry(any(RelayRow.class), anyString(),
+                anyLong(), anyLong(), anyLong());
+        assertThat(harness.operations).isEmpty();
+        // An accepted Turn not yet dispatched is cancelled like a running one.
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "ACCEPTED", null, null, false, null));
+        relay.scan();
+        verify(sessions).cancelChildTurn(TENANT, PARENT, CHILD, RUN,
+                "turn-1");
+    }
+
     @Test
     void aMintedChildThatNeverDispatchedDiesNamed() {
         // Creation committed its lineage, the row never learned it, and

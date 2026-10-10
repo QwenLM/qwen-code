@@ -18,6 +18,11 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -39,18 +44,21 @@ import org.springframework.stereotype.Component;
  * journal, and is read again.</li>
  * </ul>
  * A delivery whose outcome stays unproven retries with the dispatch
- * backoff, bounded at {@link #ATTEMPT_BUDGET} attempts; past it the
+ * backoff, bounded at {@link #ATTEMPT_BUDGET} claims; past it the
  * operation parks as {@code recovery_blocked} — acceptance unknown, never
  * delivered again — and only reconciles from the record: a later stop
  * request (another cancel, the close cascade) completes it, an end
- * without one fails it. A parked cancel holds no lifecycle hostage.
+ * without one fails it. A parked cancel holds no lifecycle hostage. The
+ * budget counts claims, not completed retries, and a live delivery
+ * renews its lease, so an attempt that hangs past the lease can neither
+ * be re-claimed underneath itself nor escape the budget.
  */
 @Component
 public class TaskCancelCoordinator {
     private static final Logger LOG = LoggerFactory.getLogger(
             TaskCancelCoordinator.class);
     private static final int SCAN_LIMIT = 50;
-    /** Delivery attempts before an unproven outcome parks. */
+    /** Claims before an unproven outcome parks (one claim per attempt). */
     static final int ATTEMPT_BUDGET = 16;
     /** How often a parked cancel re-reads its task's record. */
     static final Duration PARKED_RECHECK = Duration.ofMinutes(5);
@@ -65,6 +73,17 @@ public class TaskCancelCoordinator {
     private final ManagedAgentProperties.Dispatch dispatch;
     private final String owner = UUID.randomUUID().toString();
     private final Set<String> active = ConcurrentHashMap.newKeySet();
+    private final ScheduledExecutorService renewals =
+            Executors.newSingleThreadScheduledExecutor(task -> {
+                Thread thread = new Thread(task, "task-cancel-renewal");
+                thread.setDaemon(true);
+                return thread;
+            });
+
+    @PreDestroy
+    void stopRenewals() {
+        renewals.shutdownNow();
+    }
 
     public TaskCancelCoordinator(AgentStateStore store,
             ManagedExtensionRecordStore records, HarnessConnector harness,
@@ -106,10 +125,22 @@ public class TaskCancelCoordinator {
             try {
                 reconcileParked(target);
             } catch (RuntimeException error) {
+                // An unreadable record must not pin the parked row at the
+                // head of the page: it waits a whole recheck like any
+                // other unproven one.
                 LOG.warn("Parked task cancel reconciliation failed tenant={}"
                                 + " session={} operation={} failure={}",
                         target.tenantId(), target.sessionId(),
                         target.operationId(), error.getMessage());
+                try {
+                    store.settleTaskCancel(target.tenantId(),
+                            target.sessionId(), target.operationId(), null,
+                            0, TaskCancelOutcome.recoveryBlocked(UNCONFIRMED),
+                            Math.addExact(clock.millis(),
+                                    PARKED_RECHECK.toMillis()));
+                } catch (RuntimeException ignored) {
+                    // The next scan retries the whole reconciliation.
+                }
             }
         }
     }
@@ -151,9 +182,37 @@ public class TaskCancelCoordinator {
         if (claimed == null) {
             return;
         }
+        long period = Math.max(1, dispatch.getLeaseDuration().toMillis() / 3);
+        ScheduledFuture<?> renewal = renewals.scheduleWithFixedDelay(() -> {
+            try {
+                store.renewLifecycleOperation(tenantId, sessionId,
+                        operationId, owner, claimed.claimGeneration(),
+                        dispatch.getLeaseDuration());
+            } catch (RuntimeException ignored) {
+                // A lost lease fails the guarded settlement writes below.
+            }
+        }, period, period, TimeUnit.MILLISECONDS);
+        try {
+            deliverClaimed(claimed);
+        } finally {
+            renewal.cancel(false);
+        }
+    }
+
+    private void deliverClaimed(OperationRecord claimed) {
+        String tenantId = claimed.tenantId();
+        String sessionId = claimed.sessionId();
+        String operationId = claimed.operationId();
         Verdict verdict;
         try {
             verdict = verdict(claimed);
+            if (verdict.live()
+                    && claimed.claimGeneration() > ATTEMPT_BUDGET) {
+                // Only claims that outlived their lease get here: never
+                // send past the budget, park on the evidence at hand.
+                retryOrPark(claimed, "the claim budget is spent");
+                return;
+            }
             if (verdict.live()) {
                 send(claimed, verdict.target());
                 verdict = verdict(claimed);
@@ -197,7 +256,7 @@ public class TaskCancelCoordinator {
     }
 
     private void retryOrPark(OperationRecord operation, String failure) {
-        if (operation.attemptCount() + 1 >= ATTEMPT_BUDGET) {
+        if (operation.claimGeneration() >= ATTEMPT_BUDGET) {
             store.settleTaskCancel(operation.tenantId(),
                     operation.sessionId(), operation.operationId(), owner,
                     operation.claimGeneration(),
@@ -206,7 +265,7 @@ public class TaskCancelCoordinator {
             LOG.warn("Task cancel parks unconfirmed tenant={} session={}"
                             + " operation={} attempts={} failure={}",
                     operation.tenantId(), operation.sessionId(),
-                    operation.operationId(), operation.attemptCount() + 1,
+                    operation.operationId(), operation.claimGeneration(),
                     failure);
             return;
         }

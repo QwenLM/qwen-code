@@ -215,7 +215,9 @@ public class ChildResultRelay {
         // the run by the parent authority) is honored here, by the worker
         // that owns the child's walk, before any arm could start, watch or
         // fail it — never by a second driver racing this ledger row.
-        if (!"close_debt".equals(row.state())) {
+        // A delivering row's run already settled with its result.
+        if (!"close_debt".equals(row.state())
+                && !"delivering".equals(row.state())) {
             try {
                 ChildResultRelayStore.StopState stop = relayStore.stopState(
                         row.tenantId(), row.parentSessionId(),
@@ -248,14 +250,16 @@ public class ChildResultRelay {
     /**
      * H4f: stops a run whose stop request committed while it still runs.
      * A run that never minted a child settles unstarted without creating
-     * one; a child whose Turn still runs has that Turn cancelled through
-     * the child's own command line and is looked at again on the
-     * heartbeat; a child whose Turn ended without a result has its close
+     * one; a child whose Turn is accepted or running has that Turn
+     * cancelled through the child's own command line, and any other live
+     * Turn (cancelling, blocked on recovery) is only waited on, both on
+     * the heartbeat; a child whose Turn was cancelled has its close
      * admitted and the run settles {@code cancelled} by
      * {@code stop_requested}, with the start pairing its committed
-     * evidence proves. A Turn that completed first wins: the ordinary walk
-     * delivers its result and the request stays recorded on the settled
-     * run. Returns false exactly then.
+     * evidence proves. A natural outcome that arrived first wins — a
+     * completed Turn delivers its result, a failed one settles
+     * {@code child_failed} — through the ordinary walk, and the request
+     * stays recorded on the settled run. Returns false exactly then.
      */
     private boolean stopChild(RelayRow row, long now) {
         String child = row.childSessionId() != null ? row.childSessionId()
@@ -273,14 +277,19 @@ public class ChildResultRelay {
         if (turn == null) {
             throw new RelayRetry("child Session has no Turn yet");
         }
-        if ("COMPLETED".equals(turn.status())) {
+        // The stop's own Turn cancel ends CANCELLED; COMPLETED or FAILED
+        // is the child's own outcome and keeps its ordinary settlement.
+        if ("COMPLETED".equals(turn.status())
+                || "FAILED".equals(turn.status())) {
             return false;
         }
-        if (!"CANCELLED".equals(turn.status())
-                && !"FAILED".equals(turn.status())) {
-            // A Turn already cancelling owns its own delivery: look again
-            // on the heartbeat rather than re-driving the same command.
-            if (!"CANCELLING".equals(turn.status())) {
+        if (!"CANCELLED".equals(turn.status())) {
+            // Only an accepted or running Turn takes the cancel; one that
+            // is already cancelling, or blocked on its own recovery, owns
+            // its outcome — look again on the heartbeat rather than
+            // re-driving a command that can have no effect.
+            if ("ACCEPTED".equals(turn.status())
+                    || "RUNNING".equals(turn.status())) {
                 sessions.cancelChildTurn(row.tenantId(),
                         row.parentSessionId(), child, row.childRunId(),
                         turn.turnId());
@@ -289,7 +298,7 @@ public class ChildResultRelay {
                     now + LEASE_MS, now);
             return true;
         }
-        // The child's work ended without a result. The settling revision
+        // The child's work was cancelled before any result. The settling revision
         // parses only over a chain whose attach committed, so the start
         // pairing comes from the record's own evidence, replayed if lost.
         boolean started = reconcileAttach(row, child);

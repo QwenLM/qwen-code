@@ -551,10 +551,20 @@ public final class ApiModels {
             @NotBlank String taskId) {
     }
 
-    /** H4f: {@code requestId} is trace-only and stays out of the digest. */
+    /**
+     * H4f: {@code requestId} is trace-only and stays out of the digest. A
+     * missing key is {@code 400 invalid_request}; a blank or overlong one
+     * reaches the service, whose check answers the contract's {@code 400
+     * invalid_idempotency_key}.
+     */
     public record WebShellTaskCancelRequest(@Size(max = 128) String requestId,
             @NotBlank String sessionId, @NotBlank @Size(max = 128) String taskId,
-            @NotBlank @Size(max = 128) String idempotencyKey) {
+            @NotNull String idempotencyKey) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException(
+                    "Unknown task cancel request field: " + name);
+        }
     }
 
     public record WebShellPage<T>(List<T> data, String nextCursor,

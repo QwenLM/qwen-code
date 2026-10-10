@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore.TaskCancelOutcome;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
@@ -13,6 +14,8 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Duration;
@@ -75,10 +78,11 @@ class ManagedTaskCancelOperationTest {
                 return Instant.ofEpochMilli(now.get());
             }
         };
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
         store = new ManagedAgentStore(jdbc, new ObjectMapper(), clock,
                 ignored -> {
-                }, new ManagedWorkspaceRegistry(jdbc),
-                new ManagedAgentProperties());
+                }, new ManagedWorkspaceRegistry(jdbc), properties);
         sessionId = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
                 + " session_id, agent_id, status, created_at, updated_at)"
@@ -155,6 +159,46 @@ class ManagedTaskCancelOperationTest {
                 "a".repeat(64));
         refused(() -> begin("key-4", "digest-4", RUNNING_CHILD),
                 HttpStatus.CONFLICT, "task_action_unavailable");
+    }
+
+    // A bound Session under storage migration admits no new cancel, as
+    // its sibling bound admissions refuse; a retained key still replays.
+    @Test
+    void theMigrationFenceRefusesANewCancelButNotItsReplay() {
+        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+                + " workspace_id, workspace_generation, storage_id,"
+                + " display_name, config_ref, policy_ref, state) VALUES (?,"
+                + " 'ws', 1, 'storage-1', 'ws', 'config', 'policy',"
+                + " 'ACTIVE')", TENANT);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+                + " workspace_id, actor_id, role) VALUES (?, 'ws', ?,"
+                + " 'OPERATOR')", TENANT,
+                "actor".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String bound = new TransactionTemplate(
+                new DataSourceTransactionManager(jdbc.getDataSource()))
+                .execute(status -> store.insertWorkspaceSessionCommand(
+                        TENANT, "actor", "create-bound", "create-digest",
+                        "qwen-code", null, null, List.of(), null,
+                        new WorkspaceSelection("ws", "services"))
+                        .sessionId());
+        String previous = sessionId;
+        sessionId = bound;
+        task(RUNNING_CHILD, "child_run", "child_agent", "running");
+        OperationRecord admitted = begin("key-1", "digest-1", RUNNING_CHILD)
+                .operation();
+        settle(admitted, TaskCancelOutcome.completed());
+        jdbc.update("INSERT INTO qwen_runtime_storage_fence VALUES (?, ?, ?,"
+                + " 'storage-1', ?)",
+                JdbcRuntimeBindingRepository.storageFenceKey(TENANT),
+                JdbcRuntimeBindingRepository.storageFenceKey("storage-1"),
+                TENANT, UUID.randomUUID().toString());
+        assertThat(begin("key-1", "digest-1", RUNNING_CHILD).replayed())
+                .isTrue();
+        assertThatThrownBy(() -> begin("key-2", "digest-2", RUNNING_CHILD))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode())
+                                .isEqualTo("workspace_unavailable"));
+        sessionId = previous;
     }
 
     @Test

@@ -20,7 +20,7 @@ The slice must avoid two failure modes: a cancel that reports success without th
 
 ## Current state
 
-The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`).
+The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`), and still hold at `1f4484d34a`, which added only TypeScript and docs commits.
 
 - **Contract.**
   - Both cancel routes are `planned`, with v1.23's settled text: the check order (A6) and the outcomes (A7).
@@ -48,7 +48,7 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`).
 1. **v1 cancels `child_agent` tasks only, and says so in the task view.**
    - `ManagedExtensionProjection.taskActions(kind, state)` is the single rule. It advertises `cancel` exactly for a `child_agent` task in `pending`, `running`, `waiting` or `degraded`.
    - Every other kind, and any terminal or `recovery_blocked` task, advertises no action. A new cancel for it answers `409 task_action_unavailable`.
-   - The task view and the admission recheck read the same function, so the advertised action and the route agree.
+   - The task view and the admission recheck read the same function, and the view advertises no action in a Session that is not `ACTIVE`, so the advertised action and the route's task and Session checks agree. Contention with another open operation (`409 session_operation_active`) is transient and is not reflected in the view.
    - A task whose stop is already recorded still advertises `cancel`: requests coalesce (contract section 4.4) and each operation gets its own outcome.
 
 2. **Admission runs in the A6 order, with authorization decided here.**
@@ -56,7 +56,7 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`).
      1. the key: missing is `400 invalid_request`, malformed is `400 invalid_idempotency_key`;
      2. current access: `404 session_not_found`, then `404 task_not_found`, then `403 task_forbidden`;
      3. under the Session lock, the retained key, scoped to tenant, Session, kind, actor and key;
-     4. only for a new request: `409 session_not_active`, then `409 task_action_unavailable` (re-read with a locking read of the task's own projection row, which serializes admission with the transition that would settle it), then `409 session_operation_active`;
+     4. only for a new request: `409 session_not_active`, then `409 task_action_unavailable` (re-read with a locking read of the task's own projection row, which serializes admission with the transition that would settle it), then for a bound Session the Workspace storage-migration fence (`409 workspace_unavailable`, as every sibling bound admission answers it), then `409 session_operation_active`;
      5. the insert.
    - `capabilities.tasks` is always true, so `400 unsupported_feature` is unreachable.
    - The digest covers the Session, the kind and the task id. It does not cover the trace-only request id.
@@ -88,12 +88,14 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`).
 
 5. **A bounded delivery parks; a parked cancel only reconciles.**
    - A live run whose request is still not visible retries with the dispatch backoff, up to 16 attempts. With the 1 s to 1 min defaults the 15 waits add up to about ten minutes.
+   - The budget counts claims (the operation's claim generation), not completed retries, and a delivery renews its lease every third of the lease while it runs. An attempt that hangs past the lease (for example on a cold Harness load) is therefore neither re-claimed underneath itself nor able to escape the budget; a claim past the budget parks on the record without sending.
    - After that the operation becomes `recovery_blocked` with `task_cancel_unconfirmed`, `java_durable`, `blocked`.
    - Every five minutes the parked cancel re-reads the record:
      - a stop request recorded since (another cancel, the close cascade) completes it;
      - an end without one fails it;
      - otherwise it parks again.
    - It is never sent again. The contract forbids re-executing an operation of unknown acceptance, and the caller can always issue a new cancel, because a parked one is not open.
+   - A reconciliation that cannot read the record parks the operation again for a whole recheck, so one unreadable record never pins the head of the parked scan, which reads through the `(delivery_state, available_at)` index.
 
 6. **The relay stops the child physically.**
    - Its new stop arm runs before any other arm for a run whose committed record has `stopRequested` and has not ended. The relay already owns the child's walk, so no second driver races its ledger row.
@@ -102,11 +104,12 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`).
      | Child                                           | Stop arm                                                                                                                                                                                                                                                            |
      | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
      | No child minted (ledger and lineage both empty) | Settle `close_scope` `started: false` without creating one. The verdict/mint commit gate refuses this if a creation lands first, and the retry then names the child.                                                                                                |
-     | Child Turn still running                        | Cancel that Turn through the child's own durable Turn cancel (`ManagedAgentService.cancelChildTurn`, keyed by parent, run and Turn), then look again on the heartbeat. A Turn already `CANCELLING` is only waited on.                                               |
-     | Child Turn ended without a result               | Get the start pairing from committed evidence (`reconcileAttach`, which replays a lost dispatch or attach). Admit the child's close, then settle `close_scope`. A minted child that never started dies named. A close-incapable host keeps the close debt as today. |
-     | Child Turn completed first                      | The ordinary walk delivers the result. The settled run keeps the recorded request.                                                                                                                                                                                  |
+     | Child Turn `ACCEPTED` or `RUNNING`              | Cancel that Turn through the child's own durable Turn cancel (`ManagedAgentService.cancelChildTurn`, keyed by parent, run and Turn), then look again on the heartbeat.                                                                                              |
+     | Child Turn in any other live status             | Wait on the heartbeat: a Turn already `CANCELLING`, or blocked on its own recovery, owns its outcome, and re-driving a cancel there could have no effect.                                                                                                           |
+     | Child Turn `CANCELLED`                          | Get the start pairing from committed evidence (`reconcileAttach`, which replays a lost dispatch or attach). Admit the child's close, then settle `close_scope`. A minted child that never started dies named. A close-incapable host keeps the close debt as today. |
+     | Child Turn `COMPLETED` or `FAILED` first        | The child's natural outcome wins (contract section 4.4): the ordinary walk delivers the result, or settles `failed` by `child_failed`. The settled run keeps the recorded request.                                                                                  |
 
-   - The task becomes `cancelled` only through that settlement, and its runtime reads `draining` until then. A foreground parent waiting on the child is answered "Child agent run cancelled (stop_requested)" by its existing waiter.
+   - The task becomes `cancelled` only through that settlement. Until then its state stays as it was, and its runtime reads `draining` while the child is provisioning or attached (an unbound pending run keeps `unbound`). A foreground parent waiting on the child is answered "Child agent run cancelled (stop_requested)" by its existing waiter.
 
 7. **The `unknown` delivery's operator story (H4b open question 1).**
    - A `child_run` delivery becomes `unknown` only on a run that already settled with a result, so its task is terminal and has no `cancel`.
@@ -144,39 +147,43 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`).
 
 ## Validation
 
-- **Store, on H2 with Flyway** (`ManagedTaskCancelOperationTest`, 7 tests):
+- **Store, on H2 with Flyway** (`ManagedTaskCancelOperationTest`, 8 tests):
   - admission, replay and digest conflict, including across actors;
-  - a retained key replaying through a `CLOSING` and then a `DELETED` Session;
+  - a retained key replaying through a `CLOSING` Session, and a `DELETED` one answering `404` (the service's access check answers it before any replay, as A6 allows);
+  - the storage-migration fence refusing a new cancel while a retained key still replays;
   - the action rule per state;
   - one open operation per Session in both directions (a cancel blocks close), and two competing keys admitting exactly one;
   - a parked cancel that is never claimed again, does not count as open, and reconciles only while parked;
   - the contract's state fields per outcome, under the claim.
-- **Delivery** (`TaskCancelCoordinatorTest`, 7 tests):
+- **Delivery** (`TaskCancelCoordinatorTest`, 10 tests):
   - completion from the record, and coalescing without a send;
   - `task_already_settled` without a send;
   - a refusal and a lost reply judged by the record;
-  - the budgeted retry, then the parking;
+  - the budgeted retry, then the parking, and a claim past the budget parking without a send;
+  - a slow delivery renewing its lease;
   - a kind without a cancel path;
-  - parked reconciliation that never re-sends.
-- **Relay** (`ChildResultRelayTest`, 6 new tests):
+  - parked reconciliation that never re-sends, and one that cannot read the record waiting a whole recheck.
+- **Relay** (`ChildResultRelayTest`, 8 new tests):
   - unstarted settlement without creation;
-  - Turn cancel, then a `close_scope` `started: true` settlement with the close admitted;
-  - a completion that wins the race;
+  - Turn cancel, a `CANCELLING` Turn only waited on, then a `close_scope` `started: true` settlement with the close admitted;
+  - a completion that wins the race, and a natural failure that stays `child_failed`;
+  - a Turn blocked on its recovery only waited on, and an `ACCEPTED` one cancelled;
   - a minted, never-dispatched child that dies named;
   - a refused settlement that defers instead of classifying;
   - an ended run that is never stopped again.
 - **Real records** (`ManagedExtensionRecordStoreTest`): a `child_agent` chain committed through the Session store, through stop request and cancellation. It checks:
-  - the advertised action at each step;
+  - the advertised action at each step, and none while the Session is not `ACTIVE`;
   - `draining`;
   - the target the delivery reads;
   - the five journaled `state_changed` events and the output cursor (F2).
 - **Contract:**
-  - `ManagedAgentApiContractTest` serves both routes: `202`, replay, cross-surface replay, conflict, action refusal, `400`, `404`, the tenant filter's `403`, and the operation read-back carrying `task_id`.
+  - `ManagedAgentApiContractTest` serves both routes: `202`, replay, cross-surface replay, conflict, action refusal, `400` (including an unknown WebShell field and an overlong key answering `invalid_idempotency_key`), `404`, the tenant filter's `403`, and the operation read-back carrying `task_id`.
   - `PlannedTaskContractTest` now pins both routes as `partial` and checks the `requestId` instances.
   - `SurfaceRegistry` gains both routes under a new `TASK_OPERATOR` rule class, which `SurfaceAdmissionAcceptanceTest` probes on both surfaces: `404` below read, `403 task_forbidden` for a reader, and an OPERATOR or owner-rank caller admitted to the route's own `409`.
 - **Not run:**
   - a product-stack run with a live Hosted Harness and a real child Session;
   - the #12380 Stage F fault round for this kind (lost cancel reply, cancel during settlement, cancel racing the parent close, cancel after the owner is gone). The unit suites above cover each of those orderings against the recorded control-plane calls, not on a real stack.
+- **Shared with the relay, not changed here:** delivery reaches the parent through the same Hosted attachment the child result relay uses. Whatever stops that path (a parent whose creator lost the Workspace grants its execution needs, or a Session another process still holds attached) stops the relay's own commits the same way, and a cancel then parks after its budget.
 
 ## Follow-up work
 
