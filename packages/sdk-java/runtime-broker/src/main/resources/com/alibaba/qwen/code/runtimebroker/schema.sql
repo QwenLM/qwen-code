@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS managed_workspace_execution_lease (
     csi_reservation_id CHAR(36),
     csi_registration_key CHAR(64),
     csi_registration_revision BIGINT,
-    csi_provision_request_id VARCHAR(512)
+    csi_provision_request_id VARCHAR(512),
+    maintenance_id CHAR(32),
+    INDEX idx_execution_lease_maintenance (maintenance_id)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE TABLE IF NOT EXISTS qwen_runtime_placement_guard (
