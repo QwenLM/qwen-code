@@ -107,6 +107,18 @@ public interface HarnessConnector extends AutoCloseable {
     }
 
     /**
+     * H4d-b: one session message operation onto the Session's journal,
+     * from the control plane's message relay (handover, receive, accepted,
+     * consumed, cancelled, rejected). The Hosted side settles it before
+     * answering.
+     */
+    default void runMessageOperation(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        throw new UnsupportedOperationException(
+                "Message operations are unavailable");
+    }
+
+    /**
      * H5b/H5c: one channel operation onto the Session's journal, from the
      * control plane's channel service (submit_input, claim_delivery,
      * segment_receipt, settle_delivery, cancel_delivery, resend_delivery).

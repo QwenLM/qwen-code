@@ -53,6 +53,8 @@ class ChildResultRelayTest {
         private boolean available = true;
         volatile String refuseKind;
         volatile String refuseRecord;
+        volatile String refuseCode;
+        volatile String refuseCodeKind;
 
         @Override
         public boolean isAvailable() {
@@ -96,6 +98,9 @@ class ChildResultRelayTest {
                 Map<String, Object> body) {
             if (refuseRecord != null && refuseRecord.equals(body.get("kind")))
                 throw recordRefusal();
+            if (refuseCodeKind != null
+                    && refuseCodeKind.equals(body.get("kind")))
+                throw refusal(refuseCode);
             if (refuseKind != null && refuseKind.equals(body.get("kind")))
                 throw new IllegalStateException("harness down");
             operations.add(Map.copyOf(body));
@@ -106,12 +111,16 @@ class ChildResultRelayTest {
          * package-private inside qwencode, so the double reaches it
          * reflectively. */
         private static DaemonHttpException recordRefusal() {
+            return refusal("child_operation_record");
+        }
+
+        static DaemonHttpException refusal(String code) {
             try {
                 var ctor = DaemonHttpException.class.getDeclaredConstructor(
                         String.class, int.class, String.class);
                 ctor.setAccessible(true);
                 return ctor.newInstance("runChildOperation", 409,
-                        "{\"code\":\"child_operation_record\"}");
+                        "{\"code\":\"" + code + "\"}");
             } catch (Exception error) {
                 throw new IllegalStateException(error);
             }
@@ -1187,6 +1196,177 @@ class ChildResultRelayTest {
         assertThat(harness.operations)
                 .extracting(operation -> operation.get("kind"))
                 .containsExactly("attach", "attach", "fail");
+    }
+
+    /** A row already past attach, watching its child. */
+    private void watching() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
+                        null));
+        when(store.terminalResultText(TENANT, CHILD, "turn-1"))
+                .thenReturn("first answer");
+    }
+
+    // H4d-b: a message on the child's edge that still owes its handover
+    // holds the settlement — the child's own runtime, not a failed step.
+    @Test
+    void holdsAChildWhileAMessageOnItsEdgeOwesItsHandover() {
+        watching();
+        when(store.undeliveredEdgeMessages(TENANT, PARENT, RUN, CHILD))
+                .thenReturn(1);
+        relay.scan();
+        assertThat(harness.operations).isEmpty();
+        assertThat(row.get().state()).isEqualTo("watching");
+        assertThat(row.get().attempts()).isZero();
+        verify(store).scheduleRetry(any(RelayRow.class), anyString(),
+                anyLong(), anyLong(), anyLong());
+    }
+
+    @Test
+    void holdsAChildWhoseJournalOwesAMessageTurn() {
+        watching();
+        when(store.hasSessionMessages(TENANT, CHILD)).thenReturn(true);
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(1, null));
+        relay.scan();
+        assertThat(harness.operations).isEmpty();
+        assertThat(row.get().attempts()).isZero();
+    }
+
+    // The message's wake turn ran after the API Turn: it is the child's
+    // newest answer, read from the journal it alone appears in.
+    @Test
+    void settlesFromTheMessageTurnTheChildRanLast() {
+        watching();
+        when(store.hasSessionMessages(TENANT, CHILD)).thenReturn(true);
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(0,
+                        new ChildResultRelayStore.SettledTurn(
+                                "msg_1:message", "completed",
+                                "session_message", 42L)));
+        when(store.journalTurnText(TENANT, CHILD, "msg_1:message"))
+                .thenReturn("the updated answer");
+        relay.scan();
+        Map<String, Object> commit = harness.operations.stream()
+                .filter(operation -> "commit_result"
+                        .equals(operation.get("kind")))
+                .findFirst().orElseThrow();
+        assertThat(commit.get("result")).isEqualTo("the updated answer");
+        assertThat((String) commit.get("receipt"))
+                .contains("\"turnId\":\"msg_1:message\"")
+                .contains("\"completedAt\":42");
+        verify(store, never()).terminalResultText(TENANT, CHILD,
+                "msg_1:message");
+        assertThat(row.get().state()).isEqualTo("delivering");
+    }
+
+    @Test
+    void failsFromAMessageTurnThatEndedIncomplete() {
+        watching();
+        when(store.hasSessionMessages(TENANT, CHILD)).thenReturn(true);
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(0,
+                        new ChildResultRelayStore.SettledTurn(
+                                "msg_1:message", "error", "session_message",
+                                42L)));
+        relay.scan();
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
+        assertThat(harness.operations.getFirst().get("stopReason"))
+                .isEqualTo("child_failed");
+    }
+
+    // A message that opened after the relay's reads is the parent's own
+    // veto at the settle seam: watch again, never spend an attempt.
+    @Test
+    void watchesAgainWhenTheParentHoldsTheSettleForAMessage() {
+        watching();
+        harness.refuseCodeKind = "commit_result";
+        harness.refuseCode = "child_messages_pending";
+        relay.scan();
+        assertThat(harness.operations).isEmpty();
+        assertThat(row.get().state()).isEqualTo("watching");
+        assertThat(row.get().attempts()).isZero();
+        verify(store, never()).defer(any(RelayRow.class), anyString(),
+                anyLong(), any(), anyLong(), anyLong());
+    }
+
+    // H4d-b: a continuation's first input carries its chain's history.
+    @Test
+    void createsAContinuationWithItsChainHistory() {
+        when(store.readResource(TENANT, "resource-body")).thenReturn(
+                "{\"inputRef\":{\"resourceId\":\"resource-input\"},"
+                        + "\"completion\":\"sent\","
+                        + "\"predecessorChildRunId\":\"run-0\"}");
+        when(store.childRunBody(TENANT, PARENT, "run-0")).thenReturn(json(
+                "{\"inputRef\":{\"resourceId\":\"input-0\"},"
+                        + "\"resultRef\":{\"resourceId\":\"result-0\"},"
+                        + "\"predecessorChildRunId\":null}"));
+        when(store.readResource(TENANT, "input-0")).thenReturn(
+                "{\"description\":\"audit the diff\",\"prompt\":\"first task\"}");
+        when(store.readResource(TENANT, "result-0"))
+                .thenReturn("first result");
+        var prompt = org.mockito.ArgumentCaptor.forClass(String.class);
+        when(sessions.createChildSession(Mockito.eq(TENANT),
+                Mockito.eq(PARENT), Mockito.eq(RUN),
+                Mockito.eq("audit the diff"), prompt.capture())).thenReturn(
+                new CommandAdmission(CHILD, null, "accepted", false));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("binding");
+        assertThat(prompt.getValue())
+                .startsWith("This continues your earlier work on this task.")
+                .contains("<earlier-run>\n<instruction>\nfirst task\n"
+                        + "</instruction>\n<result>\nfirst result\n</result>")
+                .endsWith("Your next instruction:\nreview");
+    }
+
+    // The history stays under the Hosted prompt bound: the oldest run is
+    // left out first, and a newest run that alone does not fit is cut.
+    @Test
+    void boundsAContinuationHistoryOldestFirst() throws Exception {
+        when(store.readResource(TENANT, "resource-body")).thenReturn(
+                "{\"inputRef\":{\"resourceId\":\"resource-input\"},"
+                        + "\"completion\":\"sent\","
+                        + "\"predecessorChildRunId\":\"run-1b\"}");
+        when(store.childRunBody(TENANT, PARENT, "run-1b")).thenReturn(json(
+                "{\"inputRef\":{\"resourceId\":\"input-1b\"},"
+                        + "\"resultRef\":{\"resourceId\":\"result-1b\"},"
+                        + "\"predecessorChildRunId\":\"run-0\"}"));
+        when(store.childRunBody(TENANT, PARENT, "run-0")).thenReturn(json(
+                "{\"inputRef\":{\"resourceId\":\"input-0\"},"
+                        + "\"resultRef\":{\"resourceId\":\"result-0\"},"
+                        + "\"predecessorChildRunId\":null}"));
+        when(store.readResource(TENANT, "input-0")).thenReturn(
+                "{\"description\":\"d\",\"prompt\":\"oldest task\"}");
+        when(store.readResource(TENANT, "result-0"))
+                .thenReturn("oldest result");
+        when(store.readResource(TENANT, "input-1b")).thenReturn(
+                "{\"description\":\"d\",\"prompt\":\"newer task\"}");
+        when(store.readResource(TENANT, "result-1b"))
+                .thenReturn("\"".repeat(40 * 1024));
+        var prompt = org.mockito.ArgumentCaptor.forClass(String.class);
+        when(sessions.createChildSession(Mockito.eq(TENANT),
+                Mockito.eq(PARENT), Mockito.eq(RUN), anyString(),
+                prompt.capture())).thenReturn(
+                new CommandAdmission(CHILD, null, "accepted", false));
+        relay.scan();
+        String composed = prompt.getValue();
+        assertThat(composed).contains("newer task").contains("(truncated)")
+                .doesNotContain("oldest task");
+        assertThat(new ObjectMapper().writeValueAsString(composed)
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8).length)
+                .isLessThanOrEqualTo(48 * 1024);
+    }
+
+    private static com.fasterxml.jackson.databind.JsonNode json(String text) {
+        try {
+            return new ObjectMapper().readTree(text);
+        } catch (Exception error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     /** The retry window arrived: the parked row is due again. */

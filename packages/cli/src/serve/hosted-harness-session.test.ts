@@ -112,6 +112,7 @@ import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { LocalShellStreamCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-stream-capture.js';
 import { monitorWakeNeedsRecovery } from './hosted-monitor-wake-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { HostedSessionMessageSession } from './hosted-session-message-session.js';
 
 const wakeDeps = vi.hoisted(() => ({
   last: undefined as unknown,
@@ -5078,6 +5079,244 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(204);
   });
 
+  // H4d-b: a parent with one attached child run, built through the real
+  // funnels; `build` then commits the message state under test.
+  async function prewriteMessageSession(
+    build: (sides: {
+      children: HostedChildAgentSession;
+      messages: HostedSessionMessageSession;
+    }) => Promise<void>,
+  ): Promise<void> {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: resources,
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: SESSION_ID,
+              toolProfile: 'hosted-workspace-shell/1',
+              hookCatalog: hookPin,
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: state.root })),
+        ),
+        createdBy: 'hosted-harness',
+      },
+    });
+    try {
+      const store = {
+        authority: managed.authority,
+        resources: managed.resources,
+      };
+      const children = new HostedChildAgentSession(store, key);
+      await children.admit({
+        childRunId: 'run-1',
+        ownerScopeId: SESSION_ID,
+        rootSessionId: SESSION_ID,
+        completion: 'sent',
+        description: 'audit the diff',
+        prompt: 'review the change',
+        definition: {
+          definitionId: 'hosted-agent/hosted-workspace-shell/1',
+          definitionRevision: 1,
+          definitionDigest:
+            managed.authority.sessionHeader.definitionRef.digest,
+        },
+        workingDirectory: '.',
+        executionCallId: 'run-1',
+      });
+      await children.dispatchStarted('run-1', {
+        dispatchId: 'dispatch-1',
+        runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+      });
+      await children.attach('run-1', CHILD_SESSION_ID);
+      await build({
+        children,
+        messages: new HostedSessionMessageSession(
+          store,
+          key,
+          children,
+          undefined,
+        ),
+      });
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+  }
+
+  const CHILD_SESSION_ID = '550e8400-e29b-41d4-a716-446655440001';
+
+  async function journalEvents() {
+    return (
+      await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+      )
+    ).events;
+  }
+
+  // H4d-b: a Session whose journal carries a child's message must reopen
+  // (the restore verifier admits the domain), run the message's wake turn,
+  // and commit the receipt's consumption once that turn settles.
+  it('reopens a Session holding a child message and consumes it after its wake turn', async () => {
+    const content = Buffer.from('which branch should I use?');
+    await prewriteMessageSession(async ({ messages }) => {
+      await messages.receive({
+        messageId: 'msg_up',
+        route: 'to_parent',
+        childRunId: 'run-1',
+        senderSessionId: CHILD_SESSION_ID,
+        content,
+        contentDigest: createHash('sha256').update(content).digest('hex'),
+      });
+    });
+    mockBrokerBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        const events = await journalEvents();
+        expect(
+          events.some(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === 'msg_up:message',
+          ),
+        ).toBe(true);
+        expect(
+          events.filter(
+            (event) =>
+              event.kind === 'domain.committed' &&
+              event.payload['domain'] === 'session_message',
+          ),
+        ).toHaveLength(2);
+      },
+      { timeout: 15_000, interval: 100 },
+    );
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+  });
+
+  it('maps the message route refusals and holds a child settlement for its message', async () => {
+    await prewriteMessageSession(async ({ children }) => {
+      await children.sendToChild({
+        taskId: children.taskIdOf('run-1'),
+        text: 'also check the tests',
+        messageId: 'msg_down',
+        continuationRunId: 'prompt:call-1',
+        executionCallId: 'prompt:call-1',
+        closing: false,
+      });
+    });
+    mockBrokerBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    const clientId = loaded.body.clientId as string;
+    const message = (body: Record<string, unknown>) =>
+      headers(
+        supertest(server).post(`/session/${SESSION_ID}/messages/operations`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ operationId: randomUUID(), ...body });
+    const child = (body: Record<string, unknown>) =>
+      headers(
+        supertest(server).post(`/session/${SESSION_ID}/children/operations`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ operationId: randomUUID(), childRunId: 'run-1', ...body });
+    const invalid = await message({ messageId: 'msg_down', kind: 'teleport' });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.code).toBe('invalid_message_operation');
+    const missing = await message({
+      messageId: 'msg_none',
+      kind: 'handover',
+      targetSessionId: CHILD_SESSION_ID,
+    });
+    expect(missing.status).toBe(409);
+    expect(missing.body.code).toBe('session_message_record');
+    const pending = await child({
+      kind: 'commit_result',
+      result: 'done',
+      receipt: '{}',
+    });
+    expect(pending.status).toBe(409);
+    expect(pending.body.code).toBe('child_messages_pending');
+    await message({
+      messageId: 'msg_down',
+      kind: 'handover',
+      targetSessionId: CHILD_SESSION_ID,
+    }).expect(202);
+    const wrongTarget = await message({
+      messageId: 'msg_down',
+      kind: 'handover',
+      targetSessionId: randomUUID(),
+    });
+    expect(wrongTarget.status).toBe(409);
+    expect(wrongTarget.body.code).toBe('session_message_conflict');
+    await message({
+      messageId: 'msg_down',
+      kind: 'accepted',
+      inputId: 'msg_down:message',
+    }).expect(202);
+    await child({
+      kind: 'commit_result',
+      result: 'done',
+      receipt: '{}',
+    }).expect(202);
+    const content = Buffer.from('late question');
+    const refused = await message({
+      messageId: 'msg_late',
+      kind: 'receive',
+      route: 'to_parent',
+      childRunId: 'run-2',
+      senderSessionId: CHILD_SESSION_ID,
+      contentBase64: content.toString('base64'),
+      contentDigest: createHash('sha256').update(content).digest('hex'),
+    });
+    // No such child run here: the target's own rules refuse it for good.
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('session_message_conflict');
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+  });
+
   // An array-valued `lineage` must not be silently accepted as a root
   // Session — every non-plain-object lineage is a 400 with the same code
   // the malformed object shapes already get, and only absent or `null`
@@ -9030,8 +9269,10 @@ describe('Hosted Harness no-tool session', () => {
         'write_file',
         'edit',
         'run_shell_command',
-        // H4b: a Shell-laned root Session advertises its Agent tool.
+        // H4b: a Shell-laned root Session advertises its Agent tool,
+        // and (H4d-b) messages the child tasks it launched.
         'agent',
+        'send_message',
       ]);
       return { text: 'text without side effects', model: 'test-model' };
     });
@@ -9107,8 +9348,10 @@ describe('Hosted Harness no-tool session', () => {
       'edit',
       'run_shell_command',
       'monitor',
-      // H4b: a Shell-laned root Session advertises its Agent tool.
+      // H4b: a Shell-laned root Session advertises its Agent tool,
+      // and (H4d-b) messages the child tasks it launched.
       'agent',
+      'send_message',
     ]);
     expect(state.model).toHaveBeenCalledTimes(2);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(

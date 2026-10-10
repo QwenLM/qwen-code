@@ -83,7 +83,16 @@ import {
   hostedHookOccurrenceId,
 } from './hosted-hook-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
-import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import {
+  ChildMessagesPendingError,
+  HostedChildAgentSession,
+} from './hosted-child-agent-session.js';
+import {
+  HostedSessionMessageSession,
+  SESSION_MESSAGE_INPUT_SOURCE,
+  SessionMessageNotReadyError,
+  withSessionMessageConsumption,
+} from './hosted-session-message-session.js';
 import { HostedMonitorSession } from './hosted-monitor-session.js';
 import {
   AutomationNotFoundError,
@@ -251,6 +260,8 @@ interface HostedSession {
   /** H6: the Session's automation definitions and runs, on every profile. */
   automations?: HostedAutomationSession;
   childAgents?: HostedChildAgentSession;
+  /** H4d-b: the Session's messages along its lineage, beside its children. */
+  messages?: HostedSessionMessageSession;
   /** Depth of this Session in its child tree; absent or 0 is the root. */
   childDepth?: number;
   /** Tool-arm results answered by a turn; flushed at that turn's settle. */
@@ -594,7 +605,8 @@ function isWakeInputSource(source: string): boolean {
   return (
     source === 'monitor' ||
     source === AUTOMATION_INPUT_SOURCE ||
-    source === 'child_agent'
+    source === 'child_agent' ||
+    source === SESSION_MESSAGE_INPUT_SOURCE
   );
 }
 
@@ -1642,6 +1654,8 @@ async function verifyWorkspaceRestore(
         'automation_run',
         // H4b: the parent acceptance joins its child_run chains.
         'child_acceptance',
+        // H4d-b: messages along the lineage, outbox entries and receipts.
+        'session_message',
         // H5: channel routes and deliveries, parsed by their own bodies.
         'channel_route',
         'channel_delivery',
@@ -2254,6 +2268,7 @@ async function executeHostedTurn(
                     queueConsumption: (childRunId) =>
                       session.childConsumption.add(childRunId),
                   },
+                  messages: session.messages,
                 },
               )
             : undefined;
@@ -3149,7 +3164,7 @@ export function registerHostedHarnessSessionRoutes(
         // H4b: the Session's own child orchestrator, on the Shell lanes
         // the notification wake is proven over — files profiles keep their
         // exact current surface (their child admission is its own gate).
-        if (session.shell || session.backgroundLane)
+        if (session.shell || session.backgroundLane) {
           session.childAgents = new HostedChildAgentSession(
             {
               authority: session.managed.authority,
@@ -3157,6 +3172,25 @@ export function registerHostedHarnessSessionRoutes(
             },
             session.managed.authority.sessionHeader.sessionKey,
           );
+          // H4d-b: the Session messages along its lineage on the same
+          // writes chain; a child names its parent from its definition.
+          session.messages = new HostedSessionMessageSession(
+            {
+              authority: session.managed.authority,
+              resources: session.managed.resources,
+            },
+            session.managed.authority.sessionHeader.sessionKey,
+            session.childAgents,
+            session.childDepth !== undefined &&
+            typeof savedLineage?.['parentSessionId'] === 'string' &&
+            typeof savedLineage['parentChildRunId'] === 'string'
+              ? {
+                  parentSessionId: savedLineage['parentSessionId'],
+                  parentChildRunId: savedLineage['parentChildRunId'],
+                }
+              : undefined,
+          );
+        }
       }
       if (
         session.toolProfile &&
@@ -3410,8 +3444,12 @@ export function registerHostedHarnessSessionRoutes(
             // H4b: the consumption commits follow the turn's real settle,
             // the acceptance's step before the run's, never before the
             // turn is real.
-            const wakeWithConsumption = withChildAgentConsumption(
-              runWakeTurn,
+            const wakeWithConsumption = withSessionMessageConsumption(
+              withChildAgentConsumption(
+                runWakeTurn,
+                session,
+                writeStderrLineSafe,
+              ),
               session,
               writeStderrLineSafe,
             );
@@ -5212,6 +5250,10 @@ export function registerHostedHarnessSessionRoutes(
         }
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
+        // H4d-b: not yet, never a conflict — the relay watches again.
+        if (cause instanceof ChildMessagesPendingError) {
+          return error(res, 409, 'child_messages_pending', message);
+        }
         if (cause instanceof ManagedSessionConflictError) {
           return error(res, 409, 'child_operation_conflict', message);
         }
@@ -5231,6 +5273,120 @@ export function registerHostedHarnessSessionRoutes(
         );
       }
     }
+  });
+
+  /**
+   * H4d-b: the control plane's message relay onto this Session's journal.
+   * A sender's outbox entry moves through its handover, its acceptance and
+   * its last step; a target commits the receipt together with the input
+   * and wake that carry the message. Every verb is replay-safe by the
+   * funnel's derived command ids, so a redriven relay request never mints
+   * a second input. A turn in flight is not a refusal: the input queues
+   * behind it in the journal.
+   */
+  app.post('/session/:id/messages/operations', async (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.messages)
+      return error(res, 409, 'hosted_messages_unavailable');
+    if (session.blocked)
+      return error(res, 409, 'hosted_turn_recovery_required');
+    const body = object(req.body);
+    const operationId = body?.['operationId'];
+    const messageId = body?.['messageId'];
+    const kind = body?.['kind'];
+    if (
+      typeof operationId !== 'string' ||
+      !HOSTED_UUID.test(operationId) ||
+      typeof messageId !== 'string' ||
+      messageId.length < 1 ||
+      messageId.length > 320
+    ) {
+      return error(res, 400, 'invalid_message_operation');
+    }
+    const messages = session.messages;
+    let inputId: string | undefined;
+    try {
+      switch (kind) {
+        case 'handover': {
+          const targetSessionId = body?.['targetSessionId'];
+          if (
+            typeof targetSessionId !== 'string' ||
+            !HOSTED_UUID.test(targetSessionId)
+          ) {
+            return error(res, 400, 'invalid_message_operation');
+          }
+          await messages.handover(messageId, targetSessionId);
+          break;
+        }
+        case 'accepted': {
+          const accepted = body?.['inputId'];
+          if (typeof accepted !== 'string' || accepted.length < 1) {
+            return error(res, 400, 'invalid_message_operation');
+          }
+          await messages.accepted(messageId, accepted);
+          break;
+        }
+        case 'consumed':
+        case 'cancelled':
+        case 'rejected':
+          await messages.settle(messageId, kind);
+          break;
+        case 'receive': {
+          const route = body?.['route'];
+          const childRunId = body?.['childRunId'];
+          const senderSessionId = body?.['senderSessionId'];
+          const content = body?.['contentBase64'];
+          const contentDigest = body?.['contentDigest'];
+          if (
+            (route !== 'to_child' && route !== 'to_parent') ||
+            typeof childRunId !== 'string' ||
+            childRunId.length < 1 ||
+            childRunId.length > 320 ||
+            typeof senderSessionId !== 'string' ||
+            !HOSTED_UUID.test(senderSessionId) ||
+            typeof content !== 'string' ||
+            content.length < 1 ||
+            typeof contentDigest !== 'string' ||
+            !/^[0-9a-f]{64}$/.test(contentDigest)
+          ) {
+            return error(res, 400, 'invalid_message_operation');
+          }
+          inputId = await messages.receive({
+            messageId,
+            route,
+            childRunId,
+            senderSessionId,
+            content: Buffer.from(content, 'base64'),
+            contentDigest,
+          });
+          session.monitorWake?.kick();
+          break;
+        }
+        default:
+          return error(res, 400, 'invalid_message_operation');
+      }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (cause instanceof SessionMessageNotReadyError) {
+        return error(res, 409, 'session_message_not_ready', message);
+      }
+      if (cause instanceof ManagedSessionConflictError) {
+        return error(res, 409, 'session_message_conflict', message);
+      }
+      if (cause instanceof ManagedSessionRecordError) {
+        return error(res, 409, 'session_message_record', message);
+      }
+      writeStderrLineSafe(
+        `qwen serve: Hosted message operation ${kind} of session ${req.params['id']} failed: ${message}`,
+      );
+      return error(res, 503, 'session_message_failed', message);
+    }
+    res.status(202).json({
+      operationId,
+      state: 'settled',
+      ...(inputId === undefined ? {} : { inputId }),
+    });
   });
 
   /**
@@ -5588,6 +5744,7 @@ export function registerHostedHarnessSessionRoutes(
               queueConsumption: (childRunId) =>
                 session.childConsumption.add(childRunId),
             },
+            messages: session.messages,
           },
         );
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
@@ -6330,6 +6487,7 @@ export function registerHostedHarnessSessionRoutes(
           sources: [
             ...(session.monitors ? ['monitor'] : []),
             ...(session.childAgents ? ['child_agent'] : []),
+            ...(session.messages ? [SESSION_MESSAGE_INPUT_SOURCE] : []),
             ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
             ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),
           ],

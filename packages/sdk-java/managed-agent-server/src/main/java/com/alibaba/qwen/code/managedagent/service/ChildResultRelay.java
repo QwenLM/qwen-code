@@ -1,7 +1,10 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.Supplier;
@@ -16,6 +19,7 @@ import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.RelayRow;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 
@@ -52,6 +56,11 @@ public class ChildResultRelay {
     // discharged until the capability returns, which takes a restart:
     // look again rarely instead of on every heartbeat.
     private static final long CLOSE_DEBT_IDLE_MS = 300_000;
+    // H4d-b: a continuation's first input carries its chain's history,
+    // measured as the JSON text the Hosted prompt bound reads, below that
+    // 64 KiB bound with room for the record around it.
+    private static final int CONTINUATION_INPUT_BYTES = 48 * 1024;
+    private static final int CONTINUATION_CHAIN_LIMIT = 64;
 
     private final ChildResultRelayStore relayStore;
     private final ManagedAgentService sessions;
@@ -246,11 +255,113 @@ public class ChildResultRelay {
                 "child launch envelope");
         String description = envelope.required("description").asText();
         String prompt = envelope.required("prompt").asText();
+        JsonNode predecessor = body.path("predecessorChildRunId");
+        if (predecessor.isTextual()) {
+            prompt = continuationPrompt(pending, predecessor.textValue(),
+                    prompt);
+        }
         var admission = sessions.createChildSession(pending.tenantId(),
                 pending.parentSessionId(), pending.childRunId(), description,
                 prompt);
         relayStore.advance(row, owner, "binding", admission.sessionId(), 0,
                 null, now + LEASE_MS, now);
+    }
+
+    /**
+     * H4d-b: a continuation runs in a new child Session, so its first input
+     * carries the chain's history — each earlier run's instruction and
+     * result from the parent's own committed records, oldest first — and
+     * then the new instruction. The history is bounded below the Hosted
+     * prompt bound by leaving the oldest runs out (the newest one is cut
+     * instead when it alone does not fit), and it is composed only from
+     * committed records, so a replayed creation names the same input.
+     */
+    private String continuationPrompt(PendingChild pending,
+            String predecessorId, String message) {
+        List<String[]> runs = new ArrayList<>();
+        String id = predecessorId;
+        while (id != null && runs.size() < CONTINUATION_CHAIN_LIMIT) {
+            JsonNode run = relayStore.childRunBody(pending.tenantId(),
+                    pending.parentSessionId(), id);
+            if (run == null || !run.path("resultRef").isObject()) {
+                throw new RelayRetry("continued run " + id
+                        + " has no readable result yet");
+            }
+            String instruction = readJson(relayStore.readResource(
+                    pending.tenantId(), run.required("inputRef")
+                            .required("resourceId").asText()),
+                    "continued run's launch envelope")
+                    .required("prompt").asText();
+            String result = relayStore.readResource(pending.tenantId(),
+                    run.required("resultRef").required("resourceId")
+                            .asText());
+            if (result == null) {
+                throw new RelayRetry("continued run " + id
+                        + "'s result is not readable yet");
+            }
+            runs.add(new String[] {instruction, result});
+            JsonNode previous = run.path("predecessorChildRunId");
+            id = previous.isTextual() ? previous.textValue() : null;
+        }
+        String head = "This continues your earlier work on this task. Your"
+                + " earlier instructions and results follow, oldest first;"
+                + " the oldest are left out when they do not fit.\n\n";
+        String tail = "Your next instruction:\n" + message;
+        int budget = CONTINUATION_INPUT_BYTES - jsonBytes(head + tail);
+        List<String> blocks = new ArrayList<>();
+        for (String[] run : runs) {
+            String block = earlierRun(run[0], run[1]);
+            if (jsonBytes(block) <= budget) {
+                blocks.add(block);
+                budget -= jsonBytes(block);
+                continue;
+            }
+            if (blocks.isEmpty()) {
+                String instruction = fit(run[0], budget / 3);
+                blocks.add(earlierRun(instruction, fit(run[1],
+                        budget - jsonBytes(earlierRun(instruction, "")))));
+            }
+            break;
+        }
+        Collections.reverse(blocks);
+        return head + String.join("", blocks) + tail;
+    }
+
+    private static String earlierRun(String instruction, String result) {
+        return "<earlier-run>\n<instruction>\n" + instruction
+                + "\n</instruction>\n<result>\n" + result
+                + "\n</result>\n</earlier-run>\n\n";
+    }
+
+    /** The longest code-point prefix of {@code text} that fits {@code
+     * budget} JSON bytes together with its truncation marker. */
+    private String fit(String text, int budget) {
+        String marker = "\n… (truncated)";
+        if (jsonBytes(text) <= budget) {
+            return text;
+        }
+        int[] points = text.codePoints().toArray();
+        int low = 0;
+        int high = points.length;
+        while (low < high) {
+            int middle = (low + high + 1) >>> 1;
+            if (jsonBytes(new String(points, 0, middle) + marker) <= budget) {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        return new String(points, 0, low) + marker;
+    }
+
+    private int jsonBytes(String text) {
+        try {
+            return mapper.writeValueAsString(text)
+                    .getBytes(StandardCharsets.UTF_8).length;
+        } catch (Exception error) {
+            throw new IllegalStateException("continuation text is unwritable",
+                    error);
+        }
     }
 
     private void bind(RelayRow row, long now) {
@@ -300,8 +411,63 @@ public class ChildResultRelay {
         if (turn == null) {
             throw new RelayRetry("child Session has no Turn yet");
         }
-        switch (turn.status()) {
-            case "COMPLETED" -> complete(row, pending, turn, now);
+        String status = turn.status();
+        String turnId = turn.turnId();
+        long completedAt = turn.completedAt() == null ? 0L
+                : turn.completedAt();
+        boolean journalTurn = false;
+        boolean ended = "COMPLETED".equals(status)
+                || "CANCELLED".equals(status) || "FAILED".equals(status);
+        // H4d-b: the child's last Turn is its result only once nothing on
+        // its edge still owes a handover and its own journal holds no input
+        // waiting for a Turn — a message's wake turn runs after the API
+        // Turn and is the child's newest answer, read from the journal it
+        // alone appears in. Both waits are the child's own runtime, not a
+        // failed step.
+        if (ended && relayStore.undeliveredEdgeMessages(row.tenantId(),
+                row.parentSessionId(), row.childRunId(),
+                row.childSessionId()) > 0) {
+            relayStore.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                    now + LEASE_MS, now);
+            return;
+        }
+        if (ended && relayStore.hasSessionMessages(row.tenantId(),
+                row.childSessionId())) {
+            ChildResultRelayStore.JournalTurns journal = relayStore
+                    .journalTurns(row.tenantId(), row.childSessionId());
+            if (journal.pendingInputs() > 0) {
+                relayStore.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                        now + LEASE_MS, now);
+                return;
+            }
+            ChildResultRelayStore.SettledTurn last = journal.lastSettled();
+            if (last != null && "session_message".equals(last.source())) {
+                status = "completed".equals(last.outcome()) ? "COMPLETED"
+                        : "FAILED";
+                turnId = last.turnId();
+                completedAt = last.settledAt();
+                journalTurn = true;
+            }
+        }
+        try {
+            settleFrom(row, pending, status, turnId, completedAt, journalTurn,
+                    now);
+        } catch (DaemonHttpException error) {
+            if (!"child_messages_pending".equals(error.getErrorCode())) {
+                throw error;
+            }
+            // A message opened after the reads above: watch again.
+            relayStore.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                    now + LEASE_MS, now);
+        }
+    }
+
+    private void settleFrom(RelayRow row, PendingChild pending,
+            String status, String turnId, long completedAt,
+            boolean journalTurn, long now) {
+        switch (status) {
+            case "COMPLETED" -> complete(row, pending, status, turnId,
+                    completedAt, journalTurn, now);
             case "CANCELLED", "FAILED" -> {
                 // Close before the fail commit: a faltered admission now
                 // parks the row while delivery is still discoverable; the
@@ -320,7 +486,7 @@ public class ChildResultRelay {
                 harness.runChildOperation(row.tenantId(),
                         row.parentSessionId(), fail);
                 finishOrRetainDebt(row, row.childSessionId(), closed, "done",
-                        "child Turn " + turn.status(), now);
+                        "child Turn " + status, now);
             }
             // A running child is not a failed watch: look again after the
             // scan gap instead of eating the attempt budget — the lifetime
@@ -331,10 +497,13 @@ public class ChildResultRelay {
         }
     }
 
-    private void complete(RelayRow row, PendingChild pending,
-            ChildResultRelayStore.TurnLine turn, long now) {
-        String text = relayStore.terminalResultText(row.tenantId(),
-                row.childSessionId(), turn.turnId());
+    private void complete(RelayRow row, PendingChild pending, String status,
+            String turnId, long completedAt, boolean journalTurn, long now) {
+        String text = journalTurn
+                ? relayStore.journalTurnText(row.tenantId(),
+                        row.childSessionId(), turnId)
+                : relayStore.terminalResultText(row.tenantId(),
+                        row.childSessionId(), turnId);
         if (text == null) {
             throw new RelayRetry(
                     "child Turn settled without an assistant result");
@@ -360,10 +529,9 @@ public class ChildResultRelay {
         }
         JsonNode receiptJson = mapper.createObjectNode()
                 .put("childSessionId", row.childSessionId())
-                .put("turnId", turn.turnId())
-                .put("status", turn.status())
-                .put("completedAt",
-                        turn.completedAt() == null ? 0L : turn.completedAt());
+                .put("turnId", turnId)
+                .put("status", status)
+                .put("completedAt", completedAt);
         String receipt = receiptJson.toString();
         Map<String, Object> commit = new LinkedHashMap<>();
         commit.put("operationId", UUID.randomUUID().toString());

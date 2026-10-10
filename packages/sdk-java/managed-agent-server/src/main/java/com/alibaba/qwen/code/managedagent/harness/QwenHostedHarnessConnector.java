@@ -525,6 +525,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public void runMessageOperation(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        try {
+            HarnessSessionRef ref = attachment(tenantId, sessionId, true);
+            client().runMessageOperation(ref, body);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
     public Map<String, Object> runChannelOperation(String tenantId,
             String sessionId, Map<String, Object> body) {
         try {

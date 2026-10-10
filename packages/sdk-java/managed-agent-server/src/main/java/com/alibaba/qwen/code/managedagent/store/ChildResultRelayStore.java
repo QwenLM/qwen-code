@@ -1,6 +1,13 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -187,6 +194,13 @@ public class ChildResultRelayStore {
 
     /** One inline resource's bytes, or null when it is not inline-held. */
     public String readResource(String tenantId, String resourceId) {
+        byte[] bytes = readResourceBytes(tenantId, resourceId);
+        return bytes == null ? null
+                : new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    /** The same read, as the exact bytes a digest binds. */
+    public byte[] readResourceBytes(String tenantId, String resourceId) {
         List<byte[]> rows = jdbc.query(
                 "SELECT inline_bytes FROM qwen_managed_session_resource"
                         + " WHERE tenant_id = ? AND resource_id = ?"
@@ -194,9 +208,211 @@ public class ChildResultRelayStore {
                         + " AND state = 'REFERENCED'",
                 (result, row) -> result.getBytes("inline_bytes"), tenantId,
                 resourceId);
+        return rows.isEmpty() ? null : rows.getFirst();
+    }
+
+    /** The newest settled Turn of a Session's own journal, with the
+     * source of the input that started it. */
+    public record SettledTurn(String turnId, String outcome, String source,
+            long settledAt) {
+    }
+
+    /** What a Session's journal proves about its Turns: how many accepted
+     * inputs still wait for their Turn to settle, and the newest settled
+     * Turn (null while none settled). */
+    public record JournalTurns(int pendingInputs, SettledTurn lastSettled) {
+    }
+
+    // The outbox entries the message relay still owes a handover: a
+    // message the relay gave up on or orphaned no longer holds anything.
+    private static final String UNDELIVERED_MESSAGES_SQL =
+            "SELECT r.record_resource_id"
+                    + " FROM qwen_managed_session_extension_record r"
+                    + " LEFT JOIN qwen_managed_session_message_relay m"
+                    + " ON m.sender_session_id = r.session_id"
+                    + " AND m.message_id = r.record_id"
+                    + " WHERE r.tenant_id = ? AND r.session_id = ?"
+                    + " AND r.domain = 'session_message'"
+                    + " AND r.delivery_state IN ('planned', 'accepting',"
+                    + " 'unknown')"
+                    + " AND (m.state IS NULL OR m.state NOT IN ('done',"
+                    + " 'orphaned', 'unknown'))";
+
+    /**
+     * H4d-b: the messages on one parent–child edge that still owe their
+     * handover — the parent's to this run, and every one the child sent
+     * (a child's outbox entries all go to its parent). A child settles only
+     * once none are left, so no message lands behind its last Turn. An
+     * unreadable body counts as owed: it cannot prove it is elsewhere.
+     */
+    public int undeliveredEdgeMessages(String tenantId, String parentSessionId,
+            String childRunId, String childSessionId) {
+        int owed = 0;
+        for (String resource : jdbc.query(UNDELIVERED_MESSAGES_SQL,
+                (result, row) -> result.getString("record_resource_id"),
+                tenantId, parentSessionId)) {
+            JsonNode body = readTree(readResource(tenantId, resource));
+            if (body == null || "to_child".equals(body.path("route").asText())
+                    && childRunId.equals(body.path("childRunId").asText())) {
+                owed++;
+            }
+        }
+        return owed + jdbc.query(UNDELIVERED_MESSAGES_SQL,
+                (result, row) -> result.getString("record_resource_id"),
+                tenantId, childSessionId).size();
+    }
+
+    /** Whether a Session's journal holds any session message at all. */
+    public boolean hasSessionMessages(String tenantId, String sessionId) {
+        return !jdbc.query("SELECT record_key FROM"
+                        + " qwen_managed_session_extension_record"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND domain = 'session_message' LIMIT 1",
+                (result, row) -> result.getString("record_key"), tenantId,
+                sessionId).isEmpty();
+    }
+
+    /**
+     * H4d-b: the Turns a Session's own journal proves — the wake turns
+     * that read its messages never become API Turns, so the journal is
+     * their only record. A compacted journal cannot prove what it dropped
+     * and answers by refusal, never by guess.
+     */
+    public JournalTurns journalTurns(String tenantId, String sessionId) {
+        Set<String> pending = new HashSet<>();
+        Map<String, String> sources = new HashMap<>();
+        SettledTurn[] last = {null};
+        forEachJournalEvent(tenantId, sessionId, event -> {
+            JsonNode payload = event.path("payload");
+            String turnId = payload.path("turnId").asText(null);
+            String kind = event.path("kind").asText();
+            if ("input.accepted".equals(kind)) {
+                pending.add(turnId);
+                sources.put(turnId, payload.path("source").asText(null));
+            } else if ("turn.settled".equals(kind)) {
+                pending.remove(turnId);
+                last[0] = new SettledTurn(turnId,
+                        payload.path("outcome").asText(null),
+                        sources.get(turnId),
+                        event.path("occurredAt").asLong(0));
+            }
+        });
+        return new JournalTurns(pending.size(), last[0]);
+    }
+
+    /** The joined text of the newest assistant message one journal Turn
+     * committed, or null while it committed none. */
+    public String journalTurnText(String tenantId, String sessionId,
+            String turnId) {
+        List<JsonNode> refs = new ArrayList<>();
+        forEachJournalEvent(tenantId, sessionId, event -> {
+            if ("message.committed".equals(event.path("kind").asText())
+                    && "assistant".equals(event.path("payload").path("role")
+                            .asText())) {
+                refs.add(event.path("payload").path("contentRef"));
+            }
+        });
+        for (int index = refs.size() - 1; index >= 0; index--) {
+            byte[] bytes = readMessageBody(tenantId, refs.get(index));
+            JsonNode record = bytes == null ? null
+                    : readTree(new String(bytes, StandardCharsets.UTF_8));
+            if (record == null) {
+                throw new IllegalStateException("Session " + sessionId
+                        + "'s assistant message is unreadable");
+            }
+            if (!turnId.equals(record.path("daemonPromptId").asText())) {
+                continue;
+            }
+            StringBuilder text = new StringBuilder();
+            for (JsonNode part : record.path("message").path("parts")) {
+                if (part.path("text").isTextual()
+                        && !part.path("thought").asBoolean(false)) {
+                    text.append(part.path("text").textValue());
+                }
+            }
+            return text.isEmpty() ? null : text.toString();
+        }
+        return null;
+    }
+
+    /** The latest committed body of one child run, or null without one. */
+    public JsonNode childRunBody(String tenantId, String parentSessionId,
+            String childRunId) {
+        List<String> rows = jdbc.query(
+                "SELECT record_resource_id FROM"
+                        + " qwen_managed_session_extension_record"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND domain = 'child_run' AND record_id = ?",
+                (result, row) -> result.getString("record_resource_id"),
+                tenantId, parentSessionId, childRunId);
         return rows.isEmpty() ? null
-                : new String(rows.getFirst(),
-                        java.nio.charset.StandardCharsets.UTF_8);
+                : readTree(readResource(tenantId, rows.getFirst()));
+    }
+
+    private void forEachJournalEvent(String tenantId, String sessionId,
+            java.util.function.Consumer<JsonNode> visitor) {
+        List<Long> heads = jdbc.query("SELECT compacted_through_revision"
+                        + " FROM qwen_managed_session_journal_head"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                (result, row) -> result.getLong(1), tenantId, sessionId);
+        if (!heads.isEmpty() && heads.getFirst() != 0) {
+            throw new IllegalStateException("Session " + sessionId
+                    + "'s journal is compacted");
+        }
+        for (byte[] bytes : jdbc.query("SELECT record_bytes FROM"
+                        + " qwen_managed_session_journal_tx"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " ORDER BY journal_revision",
+                (result, row) -> result.getBytes(1), tenantId, sessionId)) {
+            for (String line : new String(bytes, StandardCharsets.UTF_8)
+                    .split("\n")) {
+                JsonNode record = line.isBlank() ? null : readTree(line);
+                if (record == null) {
+                    throw new IllegalStateException("Session " + sessionId
+                            + "'s journal is unreadable");
+                }
+                JsonNode event = record.path("managedSession");
+                if (event.isObject()) {
+                    visitor.accept(event);
+                }
+            }
+        }
+    }
+
+    /** A message body, joined from its parts when it was published in
+     * chunks; null while any part is not inline-held. */
+    private byte[] readMessageBody(String tenantId, JsonNode ref) {
+        byte[] bytes = readResourceBytes(tenantId,
+                ref.path("resourceId").asText());
+        if (bytes == null
+                || !"managed-message-chunks".equals(ref.path("kind").asText())) {
+            return bytes;
+        }
+        JsonNode chunks = readTree(new String(bytes, StandardCharsets.UTF_8));
+        if (chunks == null) {
+            return null;
+        }
+        ByteArrayOutputStream joined = new ByteArrayOutputStream();
+        for (JsonNode part : chunks.path("parts")) {
+            byte[] chunk = readResourceBytes(tenantId,
+                    part.path("resourceId").asText());
+            if (chunk == null) {
+                return null;
+            }
+            joined.writeBytes(chunk);
+        }
+        return joined.toByteArray();
+    }
+
+    private static JsonNode readTree(String text) {
+        if (text == null) {
+            return null;
+        }
+        try {
+            return MAPPER.readTree(text);
+        } catch (Exception error) {
+            return null;
+        }
     }
 
     /** One non-terminal child run a closing Session still owns. */

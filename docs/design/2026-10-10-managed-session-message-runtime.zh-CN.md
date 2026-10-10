@@ -1,0 +1,123 @@
+# Managed session message 运行时(H4d-b)
+
+[English](2026-10-10-managed-session-message-runtime.md) | [简体中文](2026-10-10-managed-session-message-runtime.zh-CN.md)
+
+状态:已在本变更中实现。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 **H4d** 切片中运行时那一半,即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段,由 [#13744](https://github.com/QwenLM/qwen-code/issues/13744) 跟踪。它生产 [H4d-a 契约](2026-10-09-managed-session-messages.zh-CN.md) 固定下来的记录:managed `send_message` 工具、控制面的消息 relay、投递边界、消费、已完成 child 的复活,以及启用。凡是消息会改变"child 何时算完成"的地方,它修订 H4b 的 [child Session 运行时](2026-10-07-managed-child-session-runtime.zh-CN.md)。下文"契约"指 H4d-a 设计,"自动化设计"指 #12827 所固定提交上的 [automation、Channels 与 child 投递设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-automation.md) 第 5.1 节。
+
+## 问题与范围
+
+H4d-a 让投递所需的每个事实都成为已提交的记录,并在两种语言中给出提交时规则;由于没有生产者,两项能力都保持禁用。本切片就是这些生产者:
+
+- **managed `send_message` 工具**,位于 Hosted 的 Shell 车道:父向它启动的 child 任务发消息(`task_id`),child 向它的父发消息(`to: "parent"`)。运行中的 child 收到消息,已完成的 child 得到续跑,其他结局得到具名拒绝(契约的后续工作行)。
+- **`managed-agent-server` 中的消息 relay**:认领、目标解析、带 input 与 wake 的回执、推进发送方,以及崩溃恢复。
+- 读取回执的 turn 结算后对回执的**消费**,以及发送方对应的最后一步。
+- **复活**:续跑启动一个新的 child Session,并带上其链的历史。
+- **契约为本切片列出的义务**:H4b 的完成判据必须考虑未投递与未消费的消息;Hosted 恢复白名单必须放行 `session_message`;续跑要经过 launch 准入;无论 child 是否已完成,发送都适用同一个上限。
+- `session_message` 与续跑的**启用**。
+
+## 现状
+
+以下事实来自 `main` 的 `ba8615f4c4`。
+
+- **记录。** `managed-session_message` 已在 TypeScript 与 Java 中登记并校验,但不在 `MANAGED_SESSION_ENABLED_DOMAINS` 中;`MANAGED_SESSION_CHILD_CONTINUATIONS_ENABLED` 为 `false`。`childContinuationBody` 已存在,但无人调用。
+- **Hosted turn。** 私有 Hosted profile 不声明 `send_message`;未声明的工具在准入时被拒绝。Agent 工具存在于 Shell 车道(`hosted-workspace-shell/1..2`),受 `child_agent` kind 门禁控制。
+- **Wake pump。** 通知类 input(`monitor`、`automation`、`child_agent`、`channel`)在 Session 空闲时作为 wake turn 运行;wake turn 是 Hosted 内部的,永远不会成为 API Turn(`managed_agent_turn`),所以它的输出只出现在该 Session 自己的 journal 中。
+- **H4b relay。** `ChildResultRelay` 依据 child 最新的 API Turn 结算它,随后关闭它。排在该 Turn 之后投递的消息会在结算之后才运行,其结果丢失,而 child 的关闭也会与它竞争。
+- **恢复。** `verifyWorkspaceRestore` 会拒绝持有白名单之外 domain 的 `domain.committed` 的 journal,而白名单中没有 `session_message`。
+- **Java。** 没有任何 worker 读取 `session_message` 行;V54 的 `(domain, delivery_state)` 索引已存在。Flyway 处于 V60。
+
+## 决策
+
+1. **一个工具、两种形式,沿血缘发送。** `send_message` 有父形式(`task_id`、`message`)与子形式(`to: "parent"`、`message`)。Session 在可以启动 child 的地方(Shell 车道的根,受 `child_agent` kind 门禁控制)声明父形式,在其定义记录了血缘的地方声明子形式。二者都位于 `session_message` domain 门禁之后。team 收件方属于 H4e,具名 peer 属于以后的路由(契约决策 2);它们的参数以具名范围拒绝。该工具不需要 Runtime:只含消息的批次不占用 Workspace 挂载,也不做 Broker 预留,与 Agent launch 完全一样。
+2. **父方的路由在它的 child funnel 写入链上决定。** `task_id` 指向任意一代的 child run;路由沿其链走到链头,即最新的、未被证明从未启动的续跑(契约决策 9 会释放这样的前驱)。尚未结束的链头收到消息;以 `completed` 结束且从未请求停止的链头被续跑;请求过停止或以其他方式结束的链头被具名拒绝。决定及其提交与 H4b 的结算运行在同一条写入链上,所以一条消息要么在 run 结算之前开启(随后挡住该结算,见决策 8),要么发现 run 已结束而成为续跑。被重新驱动的调用会按证据比较并重放已提交的消息或续跑,绝不会路由两次。
+3. **两条路径共用一个发送上限。** 发往某个任务的消息,必须能放入以该任务自己的 launch 描述与定义构造的续跑 launch 信封(≤ 32 KiB,即 H4b 的信封上限),无论链头在运行还是已完成。该信封不依赖任何后来的状态,所以 child 的状态永远不会改变答复。child 发往父的消息受 64 KiB 内容上限约束。拒绝是工具错误,且不提交任何东西。
+4. **身份由发送方生成,且重放稳定。** `messageId` 为 `msg_` 加上 `sha256(senderSessionId | turnId | callId)` 的 32 个十六进制字符:跨 Session 唯一(契约决策 1),且被重新驱动的调用得到同一个值。续跑的 `childRunId` 就是 Agent launch 会使用的那个调用键。在目标中承载消息的 input 与 wake turn 为 `<messageId>:message`。
+5. **消息 relay 位于 `managed-agent-server`,受它自己的 ledger 约束。** `SessionMessageRelay` 扫描处于 `planned`、`accepting` 或 `unknown` 的 `session_message` 行(只有 outbox 条目会进入这些状态,所以 V54 索引服务于该扫描),以及 ledger 行为 `delivered` 的 `accepted` 行。V61 新增 `qwen_managed_session_message_relay`:每个已认领的 outbox 条目一行,记录认领租约、退避与持久分类。每一步都依据两个 journal 的已提交记录对账:
+   - **交接。** 此时固定目标(契约决策 4):`to_child` 取该 run 所 attach 的 Session,run 尚未 attach 时持有;`to_parent` 取发送方血缘行所记录的父。交接前 run 已结束,或目标已不再活跃,则取消该条目(`planned → cancelled`,从未交出)。否则发送方提交带目标的 `planned → accepting`。
+   - **回执。** relay 把发送方的内容字节复制给目标,目标发布自己的副本,按发送方的摘要校验它,并在同一事务中提交回执及其 input 与 wake(契约决策 6)。重投递会重放已提交的回执。父方对其 run 尚未 attach 的 child 消息以 `session_message_not_ready` 作答,relay 持有该消息。目标规则的拒绝(`session_message_record` 或 `session_message_conflict`)会拒绝该条目(`accepting → rejected`)。已经提交的回执直接跳到发送方的那一步。
+   - **接受与消费。** 发送方提交带 input id 的 `accepting → accepted`;之后,一旦目标的回执为 `consumed`,再提交 `accepted → consumed`。
+   - **分类。** 条目被接受之前就正在关闭或已不存在的发送方不再得到任何东西,该行为 `orphaned`;失败 64 次的步骤为 `unknown`。二者都绝不会被呈现为已投递。已被接受的条目在任一侧于消费前关闭时为 `done`:发送方的条目停留在 `accepted`,目标的回执才是消费的事实依据。H4b 会在 child 结算后立即关闭它,所以 child 发往父的消息通常以这种方式结束。
+6. **投递边界是目标的 wake pump,只基于已提交的 input(契约开放问题 2)。** 消息等待目标当前的 turn 结束,并以带契约决策 7 有界通知文本的独立 wake turn 运行。它的 input 在 journal 中,所以能在 Runtime 被回收、Harness 被替换后存活。轮中投递仍是非目标。
+7. **消费跟随 wake turn 的真实结算。** 消息的 wake turn 以 `completed` 结算时,目标提交其回执 `accepted → consumed`。以其他方式结束的 turn 让回执停留在 `accepted`:这是欠下的证据,绝不扩大(H4b 决策 6)。关闭的 Session 会像取消其他 wake input 一样取消其待处理的消息 input。
+8. **消息结束了,child 才算结束(修订 H4b 决策 8)。** relay 只在以下条件都满足时结算 child:其最新 API Turn 已终止;其边上没有仍欠交接的消息(父发往该 run 的,以及 child 发出的每一条;消息 relay 已放弃或判为孤儿的消息不再阻挡任何东西);child 的 journal 中没有缺少已结算 turn 的已接受 input。child 的结果是其最新的已结算 turn:最后运行的是消息 wake turn 时,从 child 自己的 journal 读取(该 turn 最新的 assistant 记录,分块存储的 body 按字节拼接),否则仍是 H4b 的 API Turn 结果,不变。被压缩的 journal 无法证明其 turn,会被拒绝,绝不猜测。父方在自己的接缝处兜底:只要有发往该 run 的消息仍欠交接,`commit_result` 就以 `409 child_messages_pending` 拒绝,relay 再次观察而不消耗尝试次数。失败结算永不被阻挡:relay 会取消它仍为已结束 run 持有的消息。
+9. **复活启动一个带链历史的新 child Session(契约开放问题 1)。** 续跑是新的链节点,有自己的 child Session 与血缘边,所以契约的血缘规则成立。它的第一条输入由 relay 依据父方的已提交记录组成:每个更早 run 的指令(launch 信封的 prompt)与结果(父方的结果副本),由旧到新,然后是新指令。组合受 Hosted prompt 上限约束(48 KiB 的 JSON 文本),超出时先略去最旧的 run;若最新的更早 run 单独都放不下,则带标记截断其文本。它只读取已提交记录,所以重放的创建给出同一条输入,创建保持幂等。这里携带的是父方看到的对话,而不是 child 的工具历史:transcript 导入(带恢复证明的 `history_copy`)需要 authority 尚不支持的 header 级导入,属于后续工作。
+10. **发送方关闭时的 outbox 保持已提交的样子(契约开放问题 3)。** 生命周期门禁继续在关闭声明下拒绝 `session_message`;relay 把正在关闭的发送方的条目分类为 `orphaned`。没有任何东西在 journal 内取消它们,也没有任何东西投递它们。
+11. **relay 在记录之外证明了什么(契约开放问题 5)。** input 的文本绑定目标自己的副本,目标在提交之前按发送方的摘要校验该副本;回执以 `messageId` 与摘要指名发送方的消息;父方接受来自其 run 已结束的 child 的消息,所以结束之前发出的消息仍能到达。
+12. **审批与预览。** `send_message` 在 Agent 工具需要审批的模式下同样请求审批,并在两种语言中加入封闭的输入预览集合(`HOSTED_INPUT_PREVIEW_TOOLS`、Java `PREVIEW_TOOLS`),所以审批卡片会显示正在批准的消息。
+13. **启用,server 优先。** `session_message` 加入 `MANAGED_SESSION_ENABLED_DOMAINS`,续跑门禁打开。Java store 自 H4d-a 发布起就校验二者,relay 与写入方在同一个版本中发布,所以 H1–H4c 的 server 优先顺序成立:不运行该 relay 的 server 永远不会遇到生产这些记录的写入方。
+14. **不改公开契约。** OpenAPI 契约、其路由与 `contract-known-gaps.txt` 都不变。新的 Hosted 路由 `POST /session/:id/messages/operations` 是控制面与 `qwen serve` 之间的私有路由,与 H4b 的 `/children/operations` 相同。V61 是唯一的迁移。
+
+## 流水线
+
+父发往运行中 child 的一条消息:
+
+| 步骤 | Journal | 提交                                                  | 执行者             |
+| ---- | ------- | ----------------------------------------------------- | ------------------ |
+| 1    | 父      | outbound `planned`,目标未定                           | `send_message`     |
+| 2    | 父      | outbound `accepting`,目标 = 该 run 所 attach 的 child | relay(交接)        |
+| 3    | child   | inbound `accepted` + input + wake                     | relay(receive)     |
+| 4    | 父      | outbound `accepted`,`inputId`                         | relay              |
+| 5    | child   | wake turn 运行并结算;inbound `consumed`               | child 的 wake pump |
+| 6    | 父      | outbound `consumed`                                   | relay              |
+| 7    | 父      | child run 依据 child 最新的 turn 结算(决策 8)         | H4b relay          |
+
+child 发往父的消息走同样的步骤,只是两个 journal 互换;其第 2 步从 child 的血缘取得目标,父方的第 3 步等到该 run attach 之后。发往已完成 child 的消息则是一次续跑 launch:第 1 步提交一个指名前驱的 `child_run`,由 H4b 的流水线以决策 9 组成的第一条输入运行它。
+
+## 上限
+
+| 上限                  | 取值                                       | 拒绝方式                      |
+| --------------------- | ------------------------------------------ | ----------------------------- |
+| 发往 child 任务的消息 | 能放入该任务的续跑信封(≤ 32 KiB)           | 工具错误,`byte_limit`         |
+| 发往父的消息          | ≤ 64 KiB UTF-8                             | 工具错误                      |
+| 承载通知              | 序列化后 ≤ 48 KiB,先转义再带标记截断       | 截断,绝不拒绝                 |
+| 续跑的第一条输入      | ≤ 48 KiB 的 JSON 文本;略去最旧的 run       | 截断,绝不拒绝                 |
+| 每条消息的 relay 尝试 | 64 次,带退避                               | ledger `unknown`,绝不二次投递 |
+| 续跑的 launch 准入    | H4b/H4c:关闭中、活跃上限 4、launch 预算 64 | 指名原因的工具错误            |
+
+## 非目标
+
+- team 收件方与 mailbox(H4e,[#13745](https://github.com/QwenLM/qwen-code/issues/13745))、血缘之外的具名 peer(契约决策 2),以及轮中投递。
+- 续跑的 transcript 导入(决策 9)。
+- `queryChildRun`,契约规定不实现它。
+- 任何公开契约变更,以及对 Legacy `send_message` 的任何改动。
+
+## 涉及文件
+
+- `packages/core/src/managed-runtime/managed-session-message-operations.ts`(新增):消息 id 与每个修订体。
+- `packages/core/src/managed-runtime/managed-session-records.ts`:启用 `session_message` 与续跑。
+- `packages/cli/src/serve/hosted-child-agent-session.ts`:父方路由(`sendToChild`)、链头、结算挡板、共用的有界通知构造器。
+- `packages/cli/src/serve/hosted-session-message-session.ts`(新增):child 的发送、relay 的发送方与目标方动词、消费、通知文本。
+- `packages/cli/src/serve/hosted-workspace-tool-turn.ts`:两个 `send_message` 声明及其准入与执行。
+- `packages/cli/src/serve/hosted-harness-session.ts`:funnel 接线、wake 来源、wake turn 之后的消费、关闭时的结算、恢复白名单,以及 `/messages/operations` 路由。
+- `packages/sdk-java/qwencode`:`HostedHarnessClient.runMessageOperation`。
+- `packages/sdk-java/managed-agent-server`:`V61__managed_session_message_relay.sql`、`SessionMessageRelayStore`、`SessionMessageRelay`、其调度器、`HarnessConnector.runMessageOperation`、`ChildResultRelay` 中的完成判据与续跑组合、`ChildResultRelayStore` 中的 journal 读取,以及 `PREVIEW_TOOLS`。
+- 两种语言中各文件旁的测试;两种语言的本设计;H4d-a 与 H4b 设计中的指引。
+
+## 验证
+
+- **TypeScript。** funnel 测试套件驱动两个真实的 managed Session:outbox 条目及其重放、结算挡板、续跑及其信封与链头、从未启动的续跑释放其前驱、每种具名拒绝与上限、每个 relay 步骤及其步骤感知、只提交一次的带 input 与 wake 的回执、摘要校验、血缘校验,以及消费。tool-turn 测试套件覆盖两个声明、参数拒绝、两条路由,以及不占用任何挂载。Hosted 测试套件重新打开一个 journal 中持有 child 消息的 Session,运行其 wake turn 并消费它,并映射该路由的各种拒绝,包括 `child_messages_pending`。H4d-a 的门禁测试现在固定门禁为打开,并通过 mock 关闭它们,以固定 authority 在发布任何东西之前先检查门禁。
+- **Java。** relay 测试套件让一条消息走完交接、回执与接受,以及 attach 之前的持有、已结束 run 或不活跃目标的取消、子到父的路由、not-ready 持有、拒绝、重放的回执、消费、孤儿与放弃。H4b relay 测试套件增加完成判据:边上的持有、journal 的持有、依据消息 turn 结算(完成与未完成)、父方的 `child_messages_pending` 否决,以及续跑组合及其上限。H2 store 测试套件覆盖 ledger 的分页与租约、排除已放弃行的边计数、血缘读取、journal 读取(待处理 input、最新已结算 turn、assistant 文本、在字符中间切开的分块 body),以及被压缩 journal 的拒绝。
+- **所有既有测试套件保持通过**:H1–H4c 与 H4d-a 的契约重放、authority、store、tool-turn 与生命周期测试套件,以及完整的 `managed-agent-server` surefire 测试套件。
+
+## 验收标准
+
+- 父发往运行中 child 的消息恰好送达一次,即使 relay 重启也如此,且 child 的结果反映读取了它的那个 turn。
+- child 发往父的消息恰好送达一次,在 run attach 之前被持有。
+- 发往已完成 child 的消息把它续跑为一个新 run,其第一条输入携带链的历史;失败或已取消的 child 被具名拒绝。
+- accepted 与 consumed 在两侧都可见,各自指名所依据的 input;没有完成的 turn 不会消费任何东西。
+- 正在关闭的发送方的消息永远不会被投递;child 永远不会在仍有发给它的消息欠着时被结算。
+- 两道门禁都已打开,恢复白名单放行 `session_message`,公开契约不变。
+
+## 开放问题
+
+1. **续跑的 transcript 导入。** 复活是否应通过带恢复证明的 header 级导入复制前驱的完整 transcript(包括工具调用),还是保持决策 9 的有界"指令与结果"历史。
+2. **发往忙碌前台父的消息。** 前台 child 发往正等待其结果的父的消息会立即被接受,并在父的 turn 之后才被读取,而那时父已收到结果。是否应改为拒绝前台 child 的 `send_message`,留待产品证据决定。
+
+## 后续工作
+
+| 切片 | 范围                                                                                       |
+| ---- | ------------------------------------------------------------------------------------------ |
+| H4e  | team 与 mailbox;`send_message` 的 team 路由。                                              |
+| H4f  | 公开任务取消,以及 `unknown` 投递的运维处置,其中也包括被分类为 `unknown` 的消息 ledger 行。 |
+| 导入 | 续跑的 transcript 导入(开放问题 1)。                                                       |
+| Peer | 血缘之外的具名 peer,及其授权证明与路由值。                                                 |
