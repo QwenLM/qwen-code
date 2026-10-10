@@ -290,6 +290,11 @@ function buildInheritedAgentContentGeneratorConfig(
       authOverrides.authType,
       'baseUrl',
     );
+  // A side model pointed at another baseUrl is a different route, so the
+  // parent's per-route wire shape must not follow it there.
+  if (nextConfig.baseUrl !== parentConfig.baseUrl) {
+    nextConfig.toolParametersMandatory = undefined;
+  }
   nextConfig.apiKeyEnvKey = sameProvider
     ? parentConfig.apiKeyEnvKey
     : undefined;
@@ -354,6 +359,7 @@ function applyResolvedModelConfig(
     authOverrides.baseUrl ??
     resolvedModel.baseUrl ??
     (sameProvider ? parentConfig.baseUrl : undefined);
+  const sameRoute = targetConfig.baseUrl === parentConfig.baseUrl;
 
   if (resolvedModel.envKey) {
     targetConfig.apiKey =
@@ -381,12 +387,17 @@ function applyResolvedModelConfig(
   // model capabilities such as thinkingMandatory, which must not leak, and
   // enableRequestMetadata, which is a per-model decision: an inherited true
   // would ship the DashScope tracing object to a vendor-forwarded side model.
+  // toolParametersMandatory is scoped to a route rather than a model: an
+  // inherited true pushes the empty-object schema at an endpoint that rejects
+  // it, so a side model on its own baseUrl loses the parent's value unless its
+  // own entry sets one.
   for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
     const registryValue = resolvedModel.generationConfig[field];
     if (
       registryValue !== undefined ||
       field === 'thinkingMandatory' ||
-      field === 'enableRequestMetadata'
+      field === 'enableRequestMetadata' ||
+      (field === 'toolParametersMandatory' && !sameRoute)
     ) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (targetConfig as any)[field] = registryValue;
