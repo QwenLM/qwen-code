@@ -271,7 +271,7 @@ export function ContextUsagePopover({
         {(controls?.compressing || controls?.result !== dismissedResult) && (
           <ContextCompressionFeedback
             controls={controls}
-            className="text-muted-foreground [&[role=alert]]:text-destructive"
+            className="text-muted-foreground [&[data-tone=error]]:text-destructive"
           />
         )}
         {(controls || onOpenDetails) && (
