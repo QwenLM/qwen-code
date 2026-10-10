@@ -419,6 +419,51 @@ public class WorkspaceExecutionStore {
         return count != null && count > 0;
     }
 
+    public boolean canStopDrained(RuntimeBindingRecord saved) {
+        if ((saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST)
+                || !saved.isDrainRequested() || !saved.getRequest().isManagedContext() || saved.getOperationOwner() == null
+                || !"local-process".equals(saved.getRequest().getProvisionerKind())
+                || !"session".equals(saved.getRequest().getScope().getIsolationClass())) {
+            return false;
+        }
+        var claims = jdbc.query("SELECT binding_state, drain_requested, operation_owner, operation_generation,"
+                + " operation_lease_until, tenant_id, storage_id, UNIX_TIMESTAMP() AS db_seconds,"
+                + " EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) AS db_micros FROM qwen_runtime_binding"
+                + " WHERE binding_id = ? AND runtime_generation = ?", (row, index) ->
+                        saved.getState().name().equals(row.getString("binding_state")) && row.getBoolean("drain_requested")
+                        && saved.getOperationOwner().equals(row.getString("operation_owner"))
+                        && saved.getOperationGeneration() == row.getLong("operation_generation")
+                        && row.getTimestamp("operation_lease_until") != null
+                        && row.getTimestamp("operation_lease_until", java.util.Calendar.getInstance(
+                                java.util.TimeZone.getTimeZone("UTC"))).toInstant().isAfter(java.time.Instant.ofEpochSecond(
+                                        row.getLong("db_seconds"), row.getLong("db_micros") * 1000))
+                        && saved.getRequest().getScope().getTenantId().equals(row.getString("tenant_id"))
+                        && saved.getRequest().getStorageId().equals(row.getString("storage_id")),
+                saved.getBindingId(), saved.getGeneration());
+        if (claims.size() != 1 || !claims.getFirst()
+                || jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE binding_id = ?"
+                        + " AND runtime_generation = ? AND execution_state NOT IN ('SETTLED', 'ABANDONED')",
+                        Long.class, saved.getBindingId(), saved.getGeneration()) != 0) {
+            return false;
+        }
+        var holders = jdbc.query("SELECT holder_key, binding_id, runtime_generation, runtime_session_id"
+                + " FROM managed_workspace_execution_lease WHERE storage_key = ? AND storage_kind = 'LOCAL'", (row, index) -> {
+                    String holder = row.getString("holder_key");
+                    String binding = row.getString("binding_id");
+                    String session = row.getString("runtime_session_id");
+                    long generation = row.getLong("runtime_generation");
+                    if (holder == null) {
+                        return binding == null && session == null && row.getObject("runtime_generation") == null;
+                    }
+                    return saved.getBindingId().equals(binding) && saved.getGeneration() == generation && session != null
+                            && holder.equals(digest(binding + "\u0000" + generation + "\u0000" + session))
+                            && jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_session WHERE binding_id = ?"
+                                    + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?",
+                                    Long.class, binding, generation, session, saved.getRequest().getIsolationKey()) == 1;
+                }, digest(saved.getRequest().getScope().getTenantId() + "\u0000" + saved.getRequest().getStorageId()));
+        return holders.isEmpty() || holders.size() == 1 && holders.getFirst();
+    }
+
     public void releaseLost(RuntimeBindingRecord saved) {
         if (!saved.getRequest().isManagedContext() || saved.getState() != RuntimeBindingRecord.State.LOST
                 || !saved.hasStoppedWriters() || saved.getOperationOwner() == null) {

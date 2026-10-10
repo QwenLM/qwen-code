@@ -376,13 +376,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 // The sessions release — and their sweep of provably ended
                 // background exits — run BEFORE the unsettled gate: a row the
                 // sweep can prove never blocks the close on a stale active.
-                drainSessions(draining, null).thenCompose(ignored -> {
+                drainSessions(draining, renewal, null).thenCompose(ignored -> {
                     if (sessionRepository.countActiveByBinding(draining.getBindingId(), draining.getGeneration()) != 0
                             || executionRepository.hasActiveByBinding(draining.getBindingId(), draining.getGeneration())) {
                         throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
                     }
-                    return draining.getDrainReceipt() == null ? provisioner.stopDrained(draining)
-                            : CompletableFuture.completedFuture(draining.getDrainReceipt());
+                    var receipt = renewal.current.get().getDrainReceipt();
+                    return receipt == null ? provisioner.stopDrained(draining)
+                            : CompletableFuture.completedFuture(receipt);
                 }).thenAccept(receipt -> {
                     var current = renewal.stopAndGet();
                     if (current == null || bindingRepository.compareAndSet(current, current.withDrainReceipt(receipt)
@@ -400,30 +401,53 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 });
     }
 
-    private CompletionStage<Void> drainSessions(RuntimeBindingRecord binding, String cursor) {
+    private CompletionStage<Void> drainSessions(RuntimeBindingRecord binding, BindingRenewal renewal, String cursor) {
         var batch = sessionRepository.findByBinding(binding.getBindingId(), binding.getGeneration(), cursor, 100);
         CompletionStage<Void> work = CompletableFuture.completedFuture(null);
         for (var record : batch) {
             if (!record.isActive()) {
                 continue;
             }
-            work = work.thenCompose(ignored -> releaseSavedSession(binding, record));
+            work = work.thenCompose(ignored -> releaseSavedSession(binding, record, renewal));
         }
         return work.thenCompose(ignored -> batch.size() < 100 ? CompletableFuture.completedFuture(null)
-                : drainSessions(binding, batch.getLast().getRuntimeSessionId()));
+                : drainSessions(binding, renewal, batch.getLast().getRuntimeSessionId()));
     }
 
-    private CompletionStage<Void> releaseSavedSession(RuntimeBindingRecord binding, RuntimeSessionRecord record) {
+    private CompletionStage<Void> releaseSavedSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,
+            BindingRenewal renewal) {
         if (binding.getLease() == null || binding.getProvisionSeed() == null || binding.getResourceHandle() == null
                 || !binding.getRequest().getIsolationKey()
                 .equals(record.getSession().getHarnessSessionId())
                 || !binding.getRequest().getScope().equals(record.getSession().getScope())) {
             return failed(conflict("workspace_close_identity_unverified", "Saved release identity is incomplete"));
         }
+        if (renewal != null && renewal.releaseStoppedSession(record)) {
+            return CompletableFuture.completedFuture(null);
+        }
         CompletionStage<SessionContext> context = sessions.get(record.getRuntimeSessionId());
+        CompletionStage<Void> result;
         if (context == null) {
-            context = provisioner.reconcile(binding.getRequest(), binding.getProvisionSeed(),
-                    binding.getResourceHandle(), binding.getLease()).thenApply(observation -> {
+            result = provisioner.reconcile(binding.getRequest(), binding.getProvisionSeed(),
+                    binding.getResourceHandle(), binding.getLease()).thenCompose(observation -> {
+                        if (observation != null
+                                && observation.getOutcome() == RuntimeObservation.Outcome.NOT_FOUND
+                                && observation.getLossEvidence() != null
+                                && observation.getLossEvidence().matches(binding.getProvisionSeed(),
+                                        binding.getResourceHandle(), binding.getLease())) {
+                            if (renewal == null) {
+                                return drainBinding(binding);
+                            }
+                            if (executionRepository.hasActiveByBinding(binding.getBindingId(), binding.getGeneration())) {
+                                throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
+                            }
+                            // Absence cannot confirm a Session release. Persist the
+                            // original worker's stop receipt before releasing its rows.
+                            return provisioner.stopDrained(binding).thenAccept(receipt -> {
+                                renewal.persistDrainReceipt(receipt);
+                                renewal.releaseStoppedSession(record);
+                            });
+                        }
                         if (observation == null || observation.getOutcome() != RuntimeObservation.Outcome.READY
                                 || !binding.getResourceHandle().equals(observation.getHandle())
                                 || !binding.getLease().getRuntimeInstanceId().equals(observation.getRuntimeInstanceId())
@@ -432,10 +456,32 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 || !binding.getLease().getEndpoint().equals(observation.getEndpoint())) {
                             throw conflict("workspace_close_identity_unverified", "Original worker cannot be observed");
                         }
-                        return new SessionContext(record.getSession(), binding, binding.getLease());
+                        var adopted = CompletableFuture.completedFuture(
+                                new SessionContext(record.getSession(), binding, binding.getLease()));
+                        var existing = sessions.putIfAbsent(record.getRuntimeSessionId(), adopted);
+                        return releaseOriginalSession(binding, record, existing == null ? adopted : existing)
+                                .whenComplete((ignored, error) -> {
+                                    if (existing == null && error != null) {
+                                        sessions.remove(record.getRuntimeSessionId(), adopted);
+                                    }
+                                });
                     });
+        } else {
+            result = releaseOriginalSession(binding, record, context);
         }
+        return result.exceptionallyCompose(error -> {
+            Throwable cause = unwrap(error);
+            if (cause instanceof RuntimeBrokerException failure && !failure.isRetryable()) {
+                return failed(conflict("workspace_close_identity_unverified", "Original Session release cannot be confirmed", cause));
+            }
+            return failed(cause);
+        });
+    }
+
+    private CompletionStage<Void> releaseOriginalSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,
+            CompletionStage<SessionContext> context) {
         return context.thenCompose(original -> {
+            requireSameSession(original.session(), record.getSession());
             if (!original.binding().getBindingId().equals(binding.getBindingId())
                     || original.binding().getGeneration() != binding.getGeneration()) {
                 throw conflict("workspace_close_identity_unverified", "Release generation differs");
@@ -445,12 +491,6 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     throw unavailable("runtime_session_release_failed", "Original Session has not released");
                 }
             });
-        }).exceptionallyCompose(error -> {
-            Throwable cause = unwrap(error);
-            if (cause instanceof RuntimeBrokerException failure && !failure.isRetryable()) {
-                return failed(conflict("workspace_close_identity_unverified", "Original Session release cannot be confirmed", cause));
-            }
-            return failed(cause);
         });
     }
 
@@ -1603,6 +1643,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 sessions.remove(runtimeSessionId, adopted);
                             }
                         });
+                    }
+                    if (record.isActive() && binding != null && binding.getRequest().isManagedContext()
+                            && binding.getGeneration() == record.getRuntimeGeneration()
+                            && (binding.getState() == RuntimeBindingRecord.State.READY
+                                    || binding.getState() == RuntimeBindingRecord.State.DRAINING)
+                            && bindingRepository.isHarnessDraining(record.getSession().getScope().getTenantId(),
+                                    harnessSessionId)) {
+                        return releaseSavedSession(binding, record, null).thenApply(ignored -> true);
                     }
                     // A Broker that died mid-acquire or mid-release leaves the
                     // Session ACQUIRING or RELEASING; both pin a LOST
@@ -4178,12 +4226,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private void finishSessionRelease(RuntimeSessionRecord releasing) {
+        finishSessionRelease(releasing, null);
+    }
+
+    private void finishSessionRelease(RuntimeSessionRecord releasing, RuntimeBindingRecord stopped) {
         RuntimeSessionRecord current = releasing;
         for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
             if (current.getState() == RuntimeSessionRecord.State.RELEASED) {
                 return;
             }
-            RuntimeSessionRecord updated = bindingRepository.completeSessionRelease(sessionRepository, current);
+            RuntimeSessionRecord updated = stopped == null
+                    ? bindingRepository.completeSessionRelease(sessionRepository, current)
+                    : bindingRepository.completeStoppedSessionRelease(sessionRepository, executionRepository, current, stopped);
             if (updated != null
                     || current.getState()
                             == RuntimeSessionRecord.State.RELEASED) {
@@ -4700,6 +4754,61 @@ public final class RuntimeBrokerService implements AutoCloseable {
             } finally {
                 monitor.unlock();
             }
+        }
+
+        void persistDrainReceipt(RuntimeDrainReceipt receipt) {
+            monitor.lock();
+            try {
+                var expected = requireDrainClaim();
+                if (receipt == null || !receipt.matches(expected)) {
+                    throw conflict("workspace_close_identity_unverified", "Original stop receipt differs");
+                }
+                var updated = bindingRepository.compareAndSet(expected, expected.withDrainReceipt(receipt));
+                if (updated == null) {
+                    valid.set(false);
+                    closeLocked();
+                    throw unavailable("runtime_close_claim_pending", "Original stop receipt was fenced");
+                }
+                current.set(updated);
+            } finally {
+                monitor.unlock();
+            }
+        }
+
+        boolean releaseStoppedSession(RuntimeSessionRecord record) {
+            monitor.lock();
+            try {
+                var binding = requireDrainClaim();
+                var receipt = binding.getDrainReceipt();
+                if (receipt == null) {
+                    return false;
+                }
+                if (!receipt.matches(binding) || !binding.getBindingId().equals(record.getBindingId())
+                        || binding.getGeneration() != record.getRuntimeGeneration()) {
+                    throw conflict("workspace_close_identity_unverified", "Stopped Session identity differs");
+                }
+                if (executionRepository.hasActiveByBinding(binding.getBindingId(), binding.getGeneration())) {
+                    throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
+                }
+                finishSessionRelease(transitionSessionToReleasing(
+                        new SessionContext(record.getSession(), binding, binding.getLease())), binding);
+                sessions.remove(record.getRuntimeSessionId());
+                return true;
+            } finally {
+                monitor.unlock();
+            }
+        }
+
+        private RuntimeBindingRecord requireDrainClaim() {
+            var binding = current.get();
+            if (closed.get() || stopped.get() || !valid.get()
+                    || !brokerOwnerId.equals(binding.getOperationOwner())
+                    || !binding.isDrainRequested() || binding.getState() != RuntimeBindingRecord.State.DRAINING
+                    || binding.getOperationLeaseUntil() == null
+                    || !binding.getOperationLeaseUntil().isAfter(clock.instant())) {
+                throw unavailable("runtime_close_claim_pending", "Original drain claim expired");
+            }
+            return binding;
         }
 
         boolean persistResourceHandle(
