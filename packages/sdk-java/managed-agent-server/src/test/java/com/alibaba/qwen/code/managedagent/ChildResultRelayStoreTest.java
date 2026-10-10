@@ -542,6 +542,30 @@ class ChildResultRelayStoreTest {
         assertThat(relayStore.readResource(TENANT, "res-2")).isNull();
     }
 
+    // Two workers read the same expired lease; the first renews it. The
+    // second, deciding from its stale read, must meet that fresh lease
+    // rather than take the run's walk over as well.
+    @Test
+    void anExpiredLeaseIsWonByOneOfTwoWorkersThatReadIt() {
+        String session = UUID.randomUUID().toString();
+        relayStore.claim(TENANT, session, "run-race", "key-race", "owner-a",
+                31_000, 1_000);
+        RelayRow stale = relayStore.find(TENANT, session, "run-race");
+        assertThat(relayStore.claim(TENANT, session, "run-race", "key-race",
+                "owner-a", 70_000, 40_000)).isNotNull();
+        ChildResultRelayStore staleReader = new ChildResultRelayStore(jdbc) {
+            @Override
+            public RelayRow find(String tenantId, String parentSessionId,
+                    String childRunId) {
+                return stale;
+            }
+        };
+        assertThat(staleReader.claim(TENANT, session, "run-race", "key-race",
+                "owner-b", 70_000, 40_000)).isNull();
+        assertThat(relayStore.find(TENANT, session, "run-race").claimedBy())
+                .isEqualTo("owner-a");
+    }
+
     @Test
     void readsTheTurnLineAndTerminalResult() {
         String session = UUID.randomUUID().toString();

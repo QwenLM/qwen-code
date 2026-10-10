@@ -591,11 +591,13 @@ describe('the session message funnel (H4d-b)', () => {
       text: 'done with part one',
       messageId: 'msg_up',
       executionCallId: 'turn:call-1',
+      closing: false,
     });
     await child.messages.sendToParent({
       text: 'done with part one',
       messageId: 'msg_up',
       executionCallId: 'turn:call-1',
+      closing: false,
     });
     expect(child.messages.message('msg_up')).toMatchObject({
       direction: 'outbound',
@@ -630,6 +632,7 @@ describe('the session message funnel (H4d-b)', () => {
         text: `progress ${index}`,
         messageId: `msg_up${index}`,
         executionCallId: `turn:call-${index + 2}`,
+        closing: false,
       });
     }
     await expect(
@@ -637,14 +640,32 @@ describe('the session message funnel (H4d-b)', () => {
         text: 'one too many',
         messageId: 'msg_up_over',
         executionCallId: 'turn:call-99',
+        closing: false,
       }),
     ).rejects.toThrow('count_limit');
+    // A closing child sends no more, yet replays what it committed.
+    await expect(
+      child.messages.sendToParent({
+        text: 'after the close',
+        messageId: 'msg_closing',
+        executionCallId: 'turn:call-98',
+        closing: true,
+      }),
+    ).rejects.toThrow('closing and sends no more messages');
+    expect(child.messages.message('msg_closing')).toBeUndefined();
+    await child.messages.sendToParent({
+      text: 'done with part one',
+      messageId: 'msg_up',
+      executionCallId: 'turn:call-1',
+      closing: true,
+    });
     const root = await side(randomUUID());
     await expect(
       root.messages.sendToParent({
         text: 'hello',
         messageId: 'msg_root',
         executionCallId: 'turn:call-1',
+        closing: false,
       }),
     ).rejects.toThrow('Only a child Session');
   });

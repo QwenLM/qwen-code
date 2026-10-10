@@ -207,6 +207,30 @@ class SessionMessageRelayStoreTest {
                 40_000)).isNotNull();
     }
 
+    // Two workers read the same expired lease; the first renews it. The
+    // second, deciding from its stale read, must meet that fresh lease
+    // rather than take the row over as well.
+    @Test
+    void anExpiredLeaseIsWonByOneOfTwoWorkersThatReadIt() {
+        String sender = UUID.randomUUID().toString();
+        store.claim(TENANT, sender, "msg_race", "owner-a", 31_000, 1_000);
+        MessageRow stale = store.find(TENANT, sender, "msg_race");
+        assertThat(store.claim(TENANT, sender, "msg_race", "owner-a",
+                70_000, 40_000)).isNotNull();
+        SessionMessageRelayStore staleReader = new SessionMessageRelayStore(
+                jdbc) {
+            @Override
+            public MessageRow find(String tenantId, String senderSessionId,
+                    String messageId) {
+                return stale;
+            }
+        };
+        assertThat(staleReader.claim(TENANT, sender, "msg_race", "owner-b",
+                70_000, 40_000)).isNull();
+        assertThat(store.find(TENANT, sender, "msg_race").claimedBy())
+                .isEqualTo("owner-a");
+    }
+
     @Test
     void readsTheLineageOfAChildOnly() {
         String child = UUID.randomUUID().toString();

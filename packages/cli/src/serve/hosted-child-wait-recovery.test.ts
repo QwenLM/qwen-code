@@ -1604,6 +1604,7 @@ describe('hosted child wait recovery (#13708)', () => {
         text: 'which branch?',
         messageId: messageIdOf('call-6'),
         executionCallId: `${PROMPT_ID}:call-6`,
+        closing: false,
       });
       await session.sink.write({
         uuid: 'assistant-2',

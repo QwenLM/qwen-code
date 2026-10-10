@@ -135,6 +135,8 @@ export class HostedSessionMessageSession {
     readonly text: string;
     readonly messageId: string;
     readonly executionCallId: string;
+    /** The Session's close began: like a parent's, it sends no more. */
+    readonly closing: boolean;
   }): Promise<void> {
     const lineage = this.lineage;
     if (lineage === undefined) {
@@ -162,6 +164,11 @@ export class HostedSessionMessageSession {
           );
         }
         return;
+      }
+      if (params.closing) {
+        throw new ManagedSessionRecordError(
+          'This Session is closing and sends no more messages.',
+        );
       }
       const sentBefore = this.store.authority
         .extensionRecordsInDomain('session_message')

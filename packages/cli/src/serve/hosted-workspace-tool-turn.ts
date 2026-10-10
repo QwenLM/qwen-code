@@ -3146,6 +3146,7 @@ export class HostedWorkspaceToolTurn {
           text,
           messageId,
           executionCallId: callKey,
+          closing: authority.currentActivation?.phase !== 'active',
         });
       } catch (cause) {
         if (!isMessageRefusal(cause)) throw cause;

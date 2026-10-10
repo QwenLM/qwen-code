@@ -171,6 +171,9 @@ public class SessionMessageRelayStore {
         }
         if (owner.equals(existing.claimedBy())
                 || existing.claimedUntil() < now) {
+            // The guard binds the claimant, never the owner the read saw:
+            // two workers that both read an expired lease must not both
+            // win it, so the second meets the first one's fresh lease.
             int claimed = jdbc.update(
                     "UPDATE qwen_managed_session_message_relay SET"
                             + " claimed_by = ?, claimed_until = ?,"
@@ -178,7 +181,7 @@ public class SessionMessageRelayStore {
                             + " AND sender_session_id = ? AND message_id = ?"
                             + " AND (claimed_by = ? OR claimed_until < ?)",
                     owner, leaseUntil, now, tenantId, senderSessionId,
-                    messageId, existing.claimedBy(), now);
+                    messageId, owner, now);
             if (claimed == 1) {
                 return find(tenantId, senderSessionId, messageId);
             }

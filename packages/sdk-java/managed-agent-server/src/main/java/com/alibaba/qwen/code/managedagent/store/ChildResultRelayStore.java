@@ -697,6 +697,9 @@ public class ChildResultRelayStore {
         }
         if (owner.equals(existing.claimedBy())
                 || existing.claimedUntil() < now) {
+            // The guard binds the claimant, never the owner the read saw:
+            // two workers that both read an expired lease must not both
+            // win it, so the second meets the first one's fresh lease.
             int claimed = jdbc.update(
                     "UPDATE qwen_managed_child_result_relay SET claimed_by = ?,"
                             + " claimed_until = ?, updated_at = ?"
@@ -704,7 +707,7 @@ public class ChildResultRelayStore {
                             + " AND child_run_id = ? AND (claimed_by = ? OR"
                             + " claimed_until < ?)",
                     owner, leaseUntil, now, tenantId, parentSessionId,
-                    childRunId, existing.claimedBy(), now);
+                    childRunId, owner, now);
             if (claimed == 1) {
                 return find(tenantId, parentSessionId, childRunId);
             }
