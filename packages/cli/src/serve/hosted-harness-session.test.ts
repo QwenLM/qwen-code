@@ -1134,7 +1134,13 @@ describe('Hosted Harness no-tool session', () => {
   });
   afterEach(async () => {
     vi.restoreAllMocks();
-    await rm(state.root, { recursive: true, force: true });
+    await rm(state.root, {
+      recursive: true,
+      force: true,
+      // A wake pump's final writes can still be in flight at teardown.
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   });
 
   it.each(['close', 'delete'] as const)(
@@ -2989,7 +2995,7 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it('refuses a prompt retriably when the wake park probe read nothing', async () => {
-    await prewriteAutomationParkedWakeSession();
+    const inputId = await prewriteAutomationParkedWakeSession();
     const repair = mockRepairBroker();
     const server = await app(true);
     const loaded = await headers(
@@ -2998,14 +3004,13 @@ describe('Hosted Harness no-tool session', () => {
     expect(loaded.status).toBe(200);
     // Only the route's checkpoint probe takes this spy: an erased verdict
     // must not answer "no park" over state nobody read.
-    vi.spyOn(
-      LocalManagedSessionAuthority.prototype,
-      'harnessRunAuthorization',
-    ).mockResolvedValue({
-      status: 'blocked',
-      reason: 'missing_state',
-      message: 'managed session store answered 503',
-    } as never);
+    const checkpointRead = vi
+      .spyOn(LocalManagedSessionAuthority.prototype, 'harnessRunAuthorization')
+      .mockResolvedValue({
+        status: 'blocked',
+        reason: 'missing_state',
+        message: 'managed session store answered 503',
+      } as never);
     const authorize = (request: supertest.Test) =>
       headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
     const prompt = [{ type: 'text', text: 'hello' }];
@@ -3031,8 +3036,33 @@ describe('Hosted Harness no-tool session', () => {
       ),
     ).toBe(false);
     repair.unlatch();
+    // Drain the parked settle before teardown: an unsettled park keeps the
+    // wake pump retrying past this test's end, and its settle failures land
+    // in later tests' stderr spies. The pump's own view is the journal —
+    // watch the consume, not a route.
+    checkpointRead.mockRestore();
+    await vi.waitFor(
+      async () => {
+        const journal = await LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: SESSION_ID,
+          },
+        );
+        expect(
+          journal.events.some(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === inputId,
+          ),
+        ).toBe(true);
+      },
+      { timeout: 15_000 },
+    );
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
-  });
+  }, 45_000);
 
   it('settles the parked runtime after a broker fault, releasing its lease and unblocking', async () => {
     const inputId = await prewriteAutomationParkedWakeSession();
@@ -6771,7 +6801,11 @@ describe('Hosted Harness no-tool session', () => {
     ).send({ ...operation, input: { ...operation.input, message: 'changed' } });
     expect(conflict.status).toBe(409);
     expect(conflict.body.code).toBe('hosted_hook_operation_conflict');
-    expect(log).not.toHaveBeenCalled();
+    // An earlier test's wake pump can outlive its own teardown and log
+    // here: only a line about this test's own operation fails it.
+    expect(
+      log.mock.calls.filter((call) => String(call[0]).includes(operationId)),
+    ).toEqual([]);
     expect(
       requests.filter((request) => request.kind === 'hook-execute'),
     ).toHaveLength(1);
@@ -13153,7 +13187,11 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 10_000 },
     );
-    expect(log).not.toHaveBeenCalled();
+    // An earlier test's wake pump can outlive its own teardown and log
+    // here: only a line about this test's own turn fails it.
+    expect(
+      log.mock.calls.filter((call) => String(call[0]).includes(PROMPT_ID)),
+    ).toEqual([]);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
@@ -13353,7 +13391,13 @@ describe('Hosted Harness tool approvals', () => {
   });
   afterEach(async () => {
     vi.restoreAllMocks();
-    await rm(state.root, { recursive: true, force: true });
+    await rm(state.root, {
+      recursive: true,
+      force: true,
+      // A wake pump's final writes can still be in flight at teardown.
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   });
 
   const files = 'hosted-workspace-files/1';
@@ -14702,7 +14746,13 @@ describe('Hosted Harness Runtime turn takeover', () => {
   });
   afterEach(async () => {
     vi.restoreAllMocks();
-    await rm(state.root, { recursive: true, force: true });
+    await rm(state.root, {
+      recursive: true,
+      force: true,
+      // A wake pump's final writes can still be in flight at teardown.
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   });
 
   function replacementApp() {
