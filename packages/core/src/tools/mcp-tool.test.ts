@@ -21,7 +21,9 @@ import type { Config } from '../config/config.js';
 import type { CallableTool, Part } from '@google/genai';
 import { SdkError, SdkErrorCode } from '@modelcontextprotocol/client';
 import { ToolErrorType } from './tool-error.js';
+import { MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS } from './mcp-app-resource-limits.js';
 import {
+  MCP_DEFAULT_TIMEOUT_MSEC,
   MCPServerStatus,
   removeMCPServerStatus,
   updateMCPServerStatus,
@@ -1310,7 +1312,7 @@ describe('DiscoveredMCPTool', () => {
     });
 
     const expectDiscardedLimitWarn = (
-      key: 'appResourceMaxBytes' | 'appResourceTimeoutMs',
+      key: 'appResourceMaxBytes' | 'appResourceTimeoutMs' | 'timeout',
       warned: string | undefined,
     ) => {
       // The display warning legitimately names the key too, so match on the
@@ -1472,59 +1474,128 @@ describe('DiscoveredMCPTool', () => {
       },
     );
 
+    // An extension-declared server has no `mcpServers.<name>` settings path,
+    // so `appLimitSettingRef` returns a descriptive form instead. Pin the
+    // composed sentence: the source is named descriptively, the cap clause
+    // then names the bare key that lifts it without repeating the source.
+    it('names the extension-declared source and the cap in one sentence', async () => {
+      const timeoutController = new AbortController();
+      const timeoutSpy = vi
+        .spyOn(AbortSignal, 'timeout')
+        .mockReturnValue(timeoutController.signal);
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(
+          async () =>
+            new Promise<never>((_resolve, reject) => {
+              timeoutController.abort(
+                new DOMException('The operation timed out', 'TimeoutError'),
+              );
+              reject(timeoutController.signal.reason);
+            }),
+        ),
+      };
+      try {
+        const result = await createAppTool(mcpClient, undefined, 60_000, {
+          timeout: 60_000,
+          extensionName: 'demo-ext',
+        })
+          .build({ param: 'test' })
+          .execute(new AbortController().signal);
+        expectAppLoadWarning(
+          result,
+          `resource read timed out (limit: ${MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS} ms; ` +
+            `timeout for server '${serverName}' declared by extension 'demo-ext', ` +
+            `capped at ${MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS} ms; ` +
+            `only appResourceTimeoutMs lifts that cap)`,
+        );
+      } finally {
+        timeoutSpy.mockRestore();
+      }
+    });
+
     it.each([
+      // Neither `timeout` nor `appResourceTimeoutMs` is written. Production
+      // still hands the tool `timeout ?? MCP_DEFAULT_TIMEOUT_MSEC`, so a
+      // finite `mcpTimeout` must not be read as "the operator wrote
+      // `timeout`": the App resource default owns the deadline and is the
+      // key to name, together with its default value.
       {
-        mcpTimeout: undefined,
+        mcpTimeout: MCP_DEFAULT_TIMEOUT_MSEC,
+        timeoutWritten: false,
         deadline: true,
         expectedTimeout: 10_000,
         expectedKey: 'appResourceTimeoutMs',
+        expectDefaultHint: true,
       },
+      // A written `timeout` at or above the cap yields exactly the cap, so
+      // the warning names `timeout` as the source AND the cap that pinned
+      // it -- raising `timeout` further changes nothing, only
+      // `appResourceTimeoutMs` does.
       {
         mcpTimeout: 60_000,
+        timeoutWritten: true,
         deadline: true,
         expectedTimeout: 10_000,
-        expectedKey: 'appResourceTimeoutMs',
+        expectedKey: 'timeout',
+        expectCapHint: true,
       },
+      // Written, and equal to the default: still the operator's own key.
       {
-        mcpTimeout: 600_000,
+        mcpTimeout: MCP_DEFAULT_TIMEOUT_MSEC,
+        timeoutWritten: true,
         deadline: true,
         expectedTimeout: 10_000,
-        expectedKey: 'appResourceTimeoutMs',
+        expectedKey: 'timeout',
+        expectCapHint: true,
       },
       {
         mcpTimeout: 10_000,
+        timeoutWritten: true,
         deadline: true,
         expectedTimeout: 10_000,
-        expectedKey: 'appResourceTimeoutMs',
+        expectedKey: 'timeout',
+        expectCapHint: true,
       },
+      // Below the cap it is not binding: raising `timeout` does lift the
+      // deadline, so naming the cap would send the operator the wrong way.
       {
         mcpTimeout: 500,
+        timeoutWritten: true,
         deadline: false,
         expectedTimeout: 500,
         expectedKey: 'timeout',
       },
       {
         mcpTimeout: 50,
+        timeoutWritten: true,
         deadline: false,
         expectedTimeout: 50,
         expectedKey: 'timeout',
       },
-      // An explicit App timeout owns the deadline, so the warning names it.
+      // An explicit App timeout owns the deadline, so the warning names it
+      // alone -- the cap does not apply to it.
       {
         mcpTimeout: 60_000,
+        timeoutWritten: true,
         appResourceTimeoutMs: 30_000,
         deadline: true,
         expectedTimeout: 30_000,
         expectedKey: 'appResourceTimeoutMs',
       },
     ])(
-      'reports the resource timeout with MCP timeout $mcpTimeout',
+      'reports the resource timeout with MCP timeout $mcpTimeout (written: $timeoutWritten)',
       async ({
         mcpTimeout,
+        timeoutWritten,
         appResourceTimeoutMs,
         deadline,
         expectedTimeout,
         expectedKey,
+        expectCapHint,
+        expectDefaultHint,
       }) => {
         const timeoutController = new AbortController();
         const timeoutSpy = vi
@@ -1553,14 +1624,14 @@ describe('DiscoveredMCPTool', () => {
         );
 
         try {
-          const result = await createAppTool(
-            mcpClient,
-            undefined,
-            mcpTimeout,
-            appResourceTimeoutMs === undefined
-              ? undefined
-              : { appResourceTimeoutMs },
-          )
+          const result = await createAppTool(mcpClient, undefined, mcpTimeout, {
+            // Production builds the limits from the raw server config,
+            // so `timeout` is present only when the operator wrote it.
+            ...(timeoutWritten ? { timeout: mcpTimeout } : {}),
+            ...(appResourceTimeoutMs === undefined
+              ? {}
+              : { appResourceTimeoutMs }),
+          })
             .build({ param: 'test' })
             .execute(new AbortController().signal);
 
@@ -1569,9 +1640,16 @@ describe('DiscoveredMCPTool', () => {
             { uri: 'ui://demo/dashboard' },
             { timeout: expectedTimeout, signal: expect.any(AbortSignal) },
           );
+          // The cap clause rides along only where the cap actually binds;
+          // the default clause only where nothing was written.
+          const capHint = expectCapHint
+            ? `, capped at ${MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS} ms; only appResourceTimeoutMs lifts that cap`
+            : expectDefaultHint
+              ? ` (default ${MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS} ms)`
+              : '';
           expectAppLoadWarning(
             result,
-            `resource read timed out (limit: ${expectedTimeout} ms; mcpServers.${serverName}.${expectedKey})`,
+            `resource read timed out (limit: ${expectedTimeout} ms; mcpServers.${serverName}.${expectedKey}${capHint})`,
           );
           expect(mockDebugWarn).toHaveBeenCalledWith(
             expect.stringContaining(
@@ -1583,6 +1661,100 @@ describe('DiscoveredMCPTool', () => {
         }
       },
     );
+
+    // `mcpServers` is not validated at runtime (the settings schema is a TS
+    // cast), so a hand-edited `"timeout": "60000"` reaches the tool as a
+    // string, both raw and through `timeout ?? MCP_DEFAULT_TIMEOUT_MSEC`.
+    // `boundedAppLimit` ignores it, the App default owns the deadline, and
+    // the warning must not credit -- or cap -- a `timeout` that did nothing.
+    it('names the App default when a written timeout is not a number', async () => {
+      const timeoutController = new AbortController();
+      const timeoutSpy = vi
+        .spyOn(AbortSignal, 'timeout')
+        .mockReturnValue(timeoutController.signal);
+      const mcpClient = appClient(
+        vi.fn(
+          async () =>
+            new Promise<never>((_resolve, reject) => {
+              timeoutController.abort(
+                new DOMException('The operation timed out', 'TimeoutError'),
+              );
+              reject(timeoutController.signal.reason);
+            }),
+        ),
+      );
+      const handEdited = '60000' as unknown as number;
+      try {
+        const result = await createAppTool(mcpClient, undefined, handEdited, {
+          timeout: handEdited,
+        })
+          .build({ param: 'test' })
+          .execute(new AbortController().signal);
+        expect(timeoutSpy).toHaveBeenCalledWith(
+          MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS,
+        );
+        expectAppLoadWarning(
+          result,
+          `resource read timed out (limit: ${MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS} ms; ` +
+            `mcpServers.${serverName}.appResourceTimeoutMs ` +
+            `(default ${MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS} ms))`,
+        );
+      } finally {
+        timeoutSpy.mockRestore();
+      }
+    });
+
+    it('warns when a written server timeout is not a finite number', async () => {
+      const mcpClient = appClient(
+        vi.fn(async () => {
+          throw new Error('boom');
+        }),
+      );
+      const handEdited = '60000' as unknown as number;
+      await createAppTool(mcpClient, undefined, handEdited, {
+        timeout: handEdited,
+      })
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+      expectDiscardedLimitWarn('timeout', '"60000"');
+    });
+
+    it('treats a written null server timeout as unset, not as a discarded value', async () => {
+      const mcpClient = appClient(
+        vi.fn(async () => {
+          throw new Error('boom');
+        }),
+      );
+      // `mcpServers` carries no runtime validation, so a hand-written
+      // `"timeout": null` reaches the tool. Production reads it as "use the
+      // default" (`timeout ?? MCP_DEFAULT_TIMEOUT_MSEC`) and the pool
+      // fingerprint collapses null and absent, so the App path must not
+      // announce a discard on every load.
+      const written = null as unknown as number;
+      await createAppTool(mcpClient, undefined, written, { timeout: written })
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+      expectDiscardedLimitWarn('timeout', undefined);
+    });
+
+    it('names the deadline actually used as the fallback for a discarded server timeout', async () => {
+      const mcpClient = appClient(
+        vi.fn(async () => {
+          throw new Error('boom');
+        }),
+      );
+      // An explicit appResourceTimeoutMs owns the deadline, so the discard
+      // line for `timeout` must name 30000 -- the value the read is given --
+      // and not the App resource default the deadline never reaches.
+      const handEdited = '60000' as unknown as number;
+      await createAppTool(mcpClient, undefined, handEdited, {
+        timeout: handEdited,
+        appResourceTimeoutMs: 30_000,
+      })
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+      expectDiscardedLimitWarn('timeout', 'falling back to 30000');
+    });
 
     it.each(['text', 'blob'] as const)(
       'loads larger configured %s resources through tool projections',

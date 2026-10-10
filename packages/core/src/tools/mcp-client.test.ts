@@ -1517,6 +1517,7 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         'apps',
         {
           command: 'test-command',
+          timeout: 45_000,
           appResourceMaxBytes: 2_097_152,
           appResourceTimeoutMs: 30_000,
         },
@@ -1527,14 +1528,67 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         applyConfigFilters: false,
       });
 
+      // The raw written `timeout` rides along (not the defaulted
+      // `mcpTimeout`), so App warnings can tell it from the default.
       expect(snapshot.tools[0]?.appResourceLimits).toEqual({
         appResourceMaxBytes: 2_097_152,
         appResourceTimeoutMs: 30_000,
+        timeout: 45_000,
       });
       expect(snapshot.tools[0]?.appResourceUri).toBe('ui://demo/dash');
       expect(snapshot.tools[0]?.appResourceUi).toEqual({
         csp: { connectDomains: ['https://api.example.com'] },
         permissions: { clipboardWrite: {} },
+      });
+    });
+
+    it('App resource limits carries no timeout key when the server config omits one', async () => {
+      const ui = {
+        csp: { connectDomains: ['https://api.example.com'] },
+        permissions: { clipboardWrite: {} },
+      };
+      mockStdioClient({
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
+        getServerCapabilities: vi.fn().mockReturnValue({
+          tools: {},
+          resources: {},
+        }),
+        listTools: vi.fn().mockResolvedValue({
+          tools: [
+            {
+              name: 'show_dashboard',
+              _meta: { ui: { resourceUri: 'ui://demo/dash' } },
+            },
+          ],
+        }),
+        listResources: vi.fn().mockResolvedValue({
+          resources: [{ uri: 'ui://demo/dash', name: 'dash', _meta: { ui } }],
+        }),
+        listPrompts: vi.fn().mockResolvedValue({ prompts: [] }),
+        request: vi.fn().mockResolvedValue({ prompts: [] }),
+      });
+      mockToolDecls('show_dashboard');
+
+      const client = await connectedClient(
+        'apps',
+        {
+          command: 'test-command',
+          appResourceMaxBytes: 2_097_152,
+          appResourceTimeoutMs: 30_000,
+        },
+        toolReg(),
+        promptReg(),
+      );
+      const snapshot = await client.discoverAndReturn(cfgWithResources(), {
+        applyConfigFilters: false,
+      });
+
+      // Nothing was written, so no `timeout` key rides along. Defaulting the
+      // field at the construction site would restore the defect this PR fixes
+      // for the majority configuration, and only this case witnesses it.
+      expect(snapshot.tools[0]?.appResourceLimits).toEqual({
+        appResourceMaxBytes: 2_097_152,
+        appResourceTimeoutMs: 30_000,
       });
     });
 
