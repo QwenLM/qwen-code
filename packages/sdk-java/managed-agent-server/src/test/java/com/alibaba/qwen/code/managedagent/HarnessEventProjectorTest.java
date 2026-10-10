@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
 import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
+import com.alibaba.qwen.code.managedagent.store.EventIdentity;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -55,6 +56,41 @@ class HarnessEventProjectorTest {
         assertThat(event.errorCode()).isEqualTo("model_failed");
         assertThat(event.data().toString()).doesNotContain("secret")
                 .doesNotContain("/private/workspace");
+    }
+
+    @Test
+    void toolCallIdentityMatchesTheStoredProjectionRule() {
+        ProjectedEvent event = projector.project(new SourceEvent(5L,
+                "session_update", Map.of("update", Map.of(
+                        "sessionUpdate", "tool_call", "toolCallId",
+                        "call-1")), "prompt", Map.of()), "turn-1");
+
+        // EventIdentity's version-1 rule names the Item for the stored
+        // event and the published tool result; a projector-side divergence
+        // splits the call into an orphan in_progress Item and a separate
+        // result Item, so assert against the authority, not a re-derived
+        // literal.
+        assertThat(event.data().get("itemId"))
+                .isEqualTo(EventIdentity.of("item.tool_call.updated",
+                        "turn-1", 5L, Map.of("callId", "call-1"), null)
+                        .itemId());
+    }
+
+    @Test
+    void sourcePrefixedCallIdDoesNotCollideWithTheNoIdFallback() {
+        ProjectedEvent called = projector.project(new SourceEvent(1L,
+                "session_update", Map.of("update", Map.of(
+                        "sessionUpdate", "tool_call", "toolCallId",
+                        "source:7")), "prompt", Map.of()), "turn-1");
+        ProjectedEvent fallback = projector.project(new SourceEvent(7L,
+                "session_update", Map.of("update", Map.of(
+                        "sessionUpdate", "tool_call_update")),
+                "prompt", Map.of()), "turn-1");
+
+        // Both identities used to hash identically: the literal callId
+        // "source:<n>" matched the no-id fallback for SourceEvent.id = n.
+        assertThat(called.data().get("itemId"))
+                .isNotEqualTo(fallback.data().get("itemId"));
     }
 
     @Test

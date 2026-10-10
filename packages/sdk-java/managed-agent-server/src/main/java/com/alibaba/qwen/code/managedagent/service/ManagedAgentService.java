@@ -452,8 +452,16 @@ public class ManagedAgentService {
                             status == null ? HttpStatus.CONFLICT : status,
                             refusal.getCode(), refusal.getMessage());
                 }
-                throw dependencyUnavailable("hosted_harness_unavailable",
-                        "The Hosted Harness could not persist the Session title.");
+                // Chain and log the root cause: a plain 503 leaves on-call
+                // unable to tell a network fault from a daemon bug. The
+                // catch wraps the store calls too, so the WARN names the
+                // operation rather than a subsystem the fault may not be in.
+                LOG.warn("Managed Agent rename failed tenant={} session={}",
+                        tenantId, sessionId, error);
+                throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE,
+                        "hosted_harness_unavailable",
+                        "The Hosted Harness could not persist the Session title.",
+                        error);
             }
         }
         return new SessionMutationResult<>(getPublicSession(tenantId,
@@ -1140,12 +1148,6 @@ public class ManagedAgentService {
                     "session_not_found", "The Session was not found.");
         }
         return session;
-    }
-
-    private static ApiException dependencyUnavailable(String code,
-            String message) {
-        return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, code,
-                message);
     }
 
     private Admission replay(String tenantId, String operation,

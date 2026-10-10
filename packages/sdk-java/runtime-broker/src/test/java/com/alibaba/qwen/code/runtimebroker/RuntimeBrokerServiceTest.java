@@ -977,6 +977,40 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void teardownReleaseStillResolvesTheScopeWhenAdmissionIsFenced() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            // The admission fence gates warm, but the durable release and
+            // the unknown-outcome reconciliation share persistedSession and
+            // must keep resolving the closed Session's placement, or they
+            // die on the fence with a non-retryable 409 forever.
+            RuntimeBrokerException closed = new RuntimeBrokerException(409,
+                    "runtime_broker_session_closed",
+                    "Harness Session is closed.", false);
+            fixture.resolver.admissionResult =
+                    CompletableFuture.failedFuture(closed);
+            // persistedSession confirms the historical record's parent
+            // binding before it settles anything.
+            RuntimeBindingRecord binding = fixture.bindingRepository
+                    .findOrCreate(new RuntimeProvisionRequest(
+                            WORKSPACE_SCOPE, null));
+            RuntimeSessionRecord created = fixture.sessionRepository
+                    .findOrCreate(new RuntimeSessionRecord(
+                            new RuntimeSession("harness", "runtime",
+                                    "bootstrap", WORKSPACE_SCOPE),
+                            binding.getBindingId(), binding.getGeneration(),
+                            RuntimeSessionRecord.State.ACQUIRING, 0,
+                            Instant.now()));
+            fixture.sessionRepository.compareAndSet(created,
+                    created.withState(RuntimeSessionRecord.State.RELEASED,
+                            Instant.now()));
+
+            assertTrue(join(fixture.service.release("harness", "runtime")));
+            assertEquals("runtime_broker_session_closed",
+                    failure(fixture.service.warm("harness")).getCode());
+        }
+    }
+
+    @Test
     void releaseWaitsForActiveExecutionAndThenRemovesSession() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             CompletableFuture<Map<String, Object>> result =
@@ -5492,6 +5526,7 @@ class RuntimeBrokerServiceTest {
             implements HarnessSessionResolver {
         final AtomicReference<String> lastHarness = new AtomicReference<>();
         volatile CompletionStage<RuntimeScope> result;
+        volatile CompletionStage<RuntimeScope> admissionResult;
 
         FakeResolver(RuntimeScope scope) {
             result = CompletableFuture.completedFuture(scope);
@@ -5502,6 +5537,13 @@ class RuntimeBrokerServiceTest {
                 String harnessSessionId) {
             lastHarness.set(harnessSessionId);
             return result;
+        }
+
+        @Override
+        public CompletionStage<RuntimeScope> resolveAdmission(
+                String harnessSessionId) {
+            CompletionStage<RuntimeScope> admission = admissionResult;
+            return admission == null ? resolve(harnessSessionId) : admission;
         }
     }
 

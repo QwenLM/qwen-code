@@ -464,7 +464,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         String harnessId = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
                 "harnessSessionId");
-        return resolveScope(harnessId, authority)
+        return resolveScope(harnessId, true, authority)
                 .thenCompose(scope -> ensureBinding(
                         provisionRequest(scope, harnessId)))
                 .thenApply(BindingContext::record);
@@ -499,7 +499,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 }
             });
         }
-        return resolveScope(harnessId, authority).thenCompose(scope -> {
+        // A Runtime Session this process does not hold yet admits new work
+        // (ensureBinding can provision a Runtime), so it takes the admission
+        // resolve like warm; release and reconcile stay off the fence.
+        return resolveScope(harnessId, true, authority).thenCompose(scope -> {
             RuntimeSession session = new RuntimeSession(harnessId,
                     runtimeId, turnKind, scope);
             return acquireSession(session);
@@ -4277,8 +4280,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private CompletionStage<RuntimeScope> resolveScope(
             String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        return resolveScope(harnessSessionId, false, authority);
+    }
+
+    private CompletionStage<RuntimeScope> resolveScope(
+            String harnessSessionId, boolean admission,
+            RuntimeLifecycleAuthority authority) {
         return mapFailure(safeStage(
-                () -> sessionResolver.resolve(harnessSessionId, authority)),
+                () -> admission
+                        ? sessionResolver.resolveAdmission(harnessSessionId,
+                                authority)
+                        : sessionResolver.resolve(harnessSessionId, authority)),
                 "runtime_scope_resolution_failed",
                 "Runtime scope resolution failed").thenApply(scope -> {
                     if (scope == null) {

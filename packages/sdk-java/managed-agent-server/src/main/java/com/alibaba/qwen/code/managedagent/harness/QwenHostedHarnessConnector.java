@@ -42,6 +42,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final ManagedActionStore actions;
     private final WriterCredentialPolicy credentials;
     private volatile HostedHarnessClient client;
+    private volatile boolean closed;
     private final ReentrantLock clientLock = new ReentrantLock();
     // Sessions whose takeover load reported parked Runtime work that no
     // continue/cancel has been admitted for yet.
@@ -81,7 +82,22 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             throw new IllegalStateException("Enabled Hosted Harness requires"
                     + " token and capability digest");
         }
-        URI.create(this.properties.getBaseUrl());
+        URI baseUri = URI.create(this.properties.getBaseUrl());
+        String scheme = baseUri.getScheme();
+        if (scheme == null
+                || !(scheme.equalsIgnoreCase("http")
+                        || scheme.equalsIgnoreCase("https"))
+                || baseUri.getHost() == null
+                || baseUri.getUserInfo() != null
+                || baseUri.getQuery() != null
+                || baseUri.getFragment() != null) {
+            // The credentials, query, and fragment clauses mirror the client
+            // builder's rules: "localhost:4170" parses as an opaque URI and
+            // the rest would only fail at the first RPC, so reject them
+            // while the service is starting.
+            throw new IllegalStateException("Enabled Hosted Harness requires"
+                    + " an absolute http(s) base URL");
+        }
         // The load timeout is operator-settable, so a bad value must fail
         // here: the client builder rejects it, and failing lazily inside
         // client() would surface as an endless transient retry that logs
@@ -558,7 +574,20 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     @Override
     public void close() {
-        HostedHarnessClient current = client;
+        HostedHarnessClient current;
+        clientLock.lock();
+        try {
+            closed = true;
+            current = client;
+            client = null;
+        } finally {
+            clientLock.unlock();
+        }
+        // client.close() awaits its executors for seconds; holding
+        // clientLock across it stalls every client() caller behind the
+        // shutdown wait. The capture keeps the no-leak guarantee: builds
+        // publish under the same lock, so a client built later either sees
+        // closed or is captured here.
         if (current != null) {
             current.close();
         }
@@ -856,9 +885,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         // A ReentrantLock, not a monitor: the first build blocks on the
         // capabilities round trip, and callers waiting to enter a monitor
         // pin their virtual-thread carriers on JDK 21 while AQS waiters
-        // unmount.
+        // unmount. Failing before construction still matters: building here
+        // starts executors and a heartbeat that nothing would ever close
+        // once close() has run.
         clientLock.lock();
         try {
+            if (closed) {
+                throw new IllegalStateException(
+                        "Hosted Harness connector is closed");
+            }
             current = client;
             if (current == null) {
                 current = createClient();
