@@ -16,6 +16,7 @@ import {
   getDialogSettingKeys,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
   WORKSPACE_TIGHTEN_ONLY_SETTINGS,
+  WORKSPACE_TIGHTEN_ONLY_SETTING_KEYS,
   // Business logic utilities
   TEST_ONLY,
   settingExistsInScope,
@@ -1231,7 +1232,7 @@ describe('setNestedProperty prototype-pollution guards', () => {
 });
 
 describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
-  it('lists the name-only lock and the cross-session keys, and the restricted list does not', () => {
+  it('lists the name-only lock, the cross-session keys and the auto-update switch, and the restricted list does not', () => {
     const keys = WORKSPACE_TIGHTEN_ONLY_SETTINGS.map(
       ({ section, key }) => `${section}.${key}`,
     );
@@ -1239,7 +1240,10 @@ describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
       'tools.workflowNameOnly',
       'agents.crossSessionMessaging',
       'agents.crossSessionInbound',
+      'general.enableAutoUpdate',
     ]);
+    // The derived export feeds the daemon write guard; it must stay in sync.
+    expect(WORKSPACE_TIGHTEN_ONLY_SETTING_KEYS).toEqual(keys);
     for (const key of keys) {
       expect(WORKSPACE_RESTRICTED_SETTING_KEYS).not.toContain(key);
     }
@@ -1294,5 +1298,20 @@ describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
       messaging.strictness(false),
     );
     expect(messaging.strictness(undefined)).toBe(messaging.strictness(true));
+  });
+
+  it('ranks the auto-update switch off as stricter than on, and unset as on', () => {
+    // The schema default is on, so a workspace `false` must outrank an
+    // unset user scope or a repository could never turn updates off.
+    // Anything the reader does not recognize keeps the switch on, like
+    // `true`.
+    const autoUpdate = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'enableAutoUpdate',
+    )!;
+    expect(autoUpdate.strictness(false)).toBeGreaterThan(
+      autoUpdate.strictness(true),
+    );
+    expect(autoUpdate.strictness(undefined)).toBe(autoUpdate.strictness(true));
+    expect(autoUpdate.strictness('false')).toBe(autoUpdate.strictness(true));
   });
 });

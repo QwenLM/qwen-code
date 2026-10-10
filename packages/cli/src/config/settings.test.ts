@@ -4507,6 +4507,53 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('auto-update scope handling', () => {
+    it('drops a workspace opt-in that would reopen the user opt-out', () => {
+      // A cloned repository must not schedule the unattended binary
+      // replacement its operator opted out of.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({ general: { enableAutoUpdate: false } });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              general: { enableAutoUpdate: true, vimMode: true },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.general?.enableAutoUpdate).toBe(false);
+      // ...while other workspace general settings still merge.
+      expect(settings.merged.general?.vimMode).toBe(true);
+      const warning = getSettingsWarnings(settings).find((w) =>
+        w.includes('general.enableAutoUpdate'),
+      );
+      expect(warning).toContain('would loosen the User value');
+    });
+
+    it('honors a workspace that turns auto-update off over the default on', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ general: { enableAutoUpdate: false } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.general?.enableAutoUpdate).toBe(false);
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('general.enableAutoUpdate'),
+        ),
+      ).toBe(false);
+    });
+  });
+
   // The workspace is compared against the value in force without it. User
   // overrides SystemDefaults in the merge, so a User value that loosened a
   // SystemDefaults one is the baseline, and a workspace may tighten it back.

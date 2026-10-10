@@ -193,6 +193,68 @@ describe('V2ToV3Migration', () => {
       ).toBe(true);
     });
 
+    it('should omit enableAutoUpdate=true when migrating workspace scope', () => {
+      const v2Settings = {
+        $version: 2,
+        general: {
+          disableAutoUpdate: false,
+          disableUpdateNag: false,
+        },
+      };
+
+      const { settings: result, warnings } = migration.migrate(
+        v2Settings,
+        'Workspace',
+      ) as {
+        settings: Record<string, unknown>;
+        warnings: string[];
+      };
+
+      expect(result['$version']).toBe(3);
+      // Workspace scope may only tighten enableAutoUpdate (set it to false), so
+      // the "auto update was not disabled" default must not be emitted.
+      expect(result['general']).toEqual({});
+      expect(warnings).toHaveLength(0);
+    });
+
+    it('should still emit enableAutoUpdate=false when migrating workspace scope', () => {
+      const v2Settings = {
+        $version: 2,
+        general: { disableAutoUpdate: true },
+      };
+
+      const { settings: result, warnings } = migration.migrate(
+        v2Settings,
+        'Workspace',
+      ) as {
+        settings: Record<string, unknown>;
+        warnings: string[];
+      };
+
+      expect(result['$version']).toBe(3);
+      expect(
+        (result['general'] as Record<string, unknown>)['enableAutoUpdate'],
+      ).toBe(false);
+      expect(warnings).toHaveLength(0);
+    });
+
+    it('should keep emitting enableAutoUpdate=true for non-workspace scopes', () => {
+      const v2Settings = {
+        $version: 2,
+        general: { disableUpdateNag: 'false' },
+      };
+
+      const { settings: result } = migration.migrate(v2Settings, 'System') as {
+        settings: Record<string, unknown>;
+        warnings: unknown[];
+      };
+
+      expect(result['$version']).toBe(3);
+      expect(
+        (result['general'] as Record<string, unknown>)['enableAutoUpdate'],
+      ).toBe(true);
+    });
+
     it('should preserve other settings during migration', () => {
       const v2Settings = {
         $version: 2,

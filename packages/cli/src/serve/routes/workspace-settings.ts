@@ -7,7 +7,11 @@
 import type { Application, Request, Response } from 'express';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
-import { loadSettings, SettingScope } from '../../config/settings.js';
+import {
+  loadSettings,
+  SettingScope,
+  workspaceTightenOnlyWriteVerdict,
+} from '../../config/settings.js';
 import {
   redactMcpServersSetting,
   restoreRedactedMcpServersSetting,
@@ -24,6 +28,7 @@ import {
   validateSettingValue,
   WORKSPACE_RESTRICTED_ROOT_SETTINGS,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
+  WORKSPACE_TIGHTEN_ONLY_SETTING_KEYS,
 } from '../../config/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
@@ -157,6 +162,56 @@ function rejectWorkspaceRestrictedWrite(
     return true;
   }
   return false;
+}
+
+/**
+ * Refuse a workspace-scope write of a tighten-only setting that the merge
+ * strips anyway, the same trap `rejectWorkspaceRestrictedWrite` closes one
+ * list over. `general.enableAutoUpdate` is tighten-only — the key must stay
+ * out of `WORKSPACE_RESTRICTED_SETTING_KEYS` so a workspace `false` keeps
+ * working — but a workspace `true` under a user-scope `false` was accepted,
+ * persisted into the committable `.qwen/settings.json`, and answered 200 +
+ * `requiresRestart: false` while the merge dropped it at every load.
+ *
+ * The refusal is on the verdict, never on the key: a write is refused only
+ * when it would loosen an operator scope or when System scope sets the key.
+ * `kept` (the tightening direction) and `same` (repeats what is in force)
+ * writes proceed.
+ *
+ * Returns true when the request was answered and the caller must stop.
+ */
+function rejectWorkspaceTightenOnlyWrite(
+  res: Response,
+  scope: string,
+  key: string,
+  value: unknown,
+  workspace: string,
+): boolean {
+  if (scope !== 'workspace') return false;
+  if (!WORKSPACE_TIGHTEN_ONLY_SETTING_KEYS.includes(key)) return false;
+  if (value === undefined || value === null) return false;
+  const loaded = loadSettings(workspace, {
+    skipLoadEnvironment: true,
+    skipWorkspaceSettings: true,
+    workspaceTrusted: true,
+  });
+  const verdict = workspaceTightenOnlyWriteVerdict(key, value, {
+    system: loaded.system.settings,
+    systemDefaults: loaded.systemDefaults.settings,
+    user: loaded.user.settings,
+  });
+  if (verdict === undefined || verdict.kept || verdict.reason === 'same') {
+    return false;
+  }
+  const reason =
+    verdict.reason === 'system-sets'
+      ? 'System scope settings also set it'
+      : `it would loosen the ${verdict.against} value`;
+  res.status(400).json({
+    error: `Setting "${key}" is not honored from workspace scope because ${reason}; a workspace may only make this setting stricter`,
+    code: 'workspace_tighten_only_setting',
+  });
+  return true;
 }
 
 /** Keys the daemon may serve to Web Shell clients; exported for tests. */
@@ -594,6 +649,10 @@ export function registerWorkspaceSettingsRoutes(
       }
 
       if (rejectWorkspaceRestrictedWrite(res, scope, key)) return;
+      if (
+        rejectWorkspaceTightenOnlyWrite(res, scope, key, value, boundWorkspace)
+      )
+        return;
 
       if (LIVE_MANAGED_SETTINGS.has(key)) {
         res.status(400).json({
@@ -876,6 +935,16 @@ export function registerWorkspaceQualifiedSettingsRoutes(
       }
 
       if (rejectWorkspaceRestrictedWrite(res, scope, key)) return;
+      if (
+        rejectWorkspaceTightenOnlyWrite(
+          res,
+          scope,
+          key,
+          value,
+          runtime.workspaceCwd,
+        )
+      )
+        return;
       if (LIVE_MANAGED_SETTINGS.has(key)) {
         res.status(400).json({
           error: `Setting "${key}" must be changed through the Live setup API`,
