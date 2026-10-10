@@ -2722,10 +2722,12 @@ describe('NativeLspService disk document synchronization', () => {
     );
 
     it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
-      'names a server that became ready during the %s query as never asked',
+      'asks a server that became ready during the %s query before deciding',
       async (operation) => {
         const lateConnection = createConnection();
-        mockDiagnosticsResponses(lateConnection);
+        mockDiagnosticsResponses(lateConnection, [
+          { range, severity: 1, message: 'late report' },
+        ]);
         const lateHandle: LspServerHandle = {
           ...handle,
           config: { ...handle.config, name: 'late' },
@@ -2746,16 +2748,17 @@ describe('NativeLspService disk document synchronization', () => {
             : { kind: 'full', items: [] };
         });
         const result = await run(queryDiagnosticsTool(operation));
-        // The late server received zero requests, so its slice of the answer
-        // is unbacked; the wording must not read as though it answered.
-        expect(lateConnection.request).not.toHaveBeenCalled();
-        expect(result.error).toMatchObject({
-          type: ToolErrorType.EXECUTION_FAILED,
-        });
-        expect(result.error?.message).toContain(
-          'late became ready during the query and was not asked',
+        // The startup race must not discard that server's slice: it is asked
+        // before the gate reads the unreachable list, so its report backs the
+        // result instead of vetoing as a server that was never asked.
+        expect(lateConnection.request).toHaveBeenCalledWith(
+          operation === 'workspaceDiagnostics'
+            ? 'workspace/diagnostic'
+            : 'textDocument/diagnostic',
+          expect.anything(),
         );
-        expect(result.llmContent).not.toContain('No diagnostics found');
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toContain('late report');
       },
     );
 

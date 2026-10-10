@@ -821,6 +821,26 @@ export class NativeLspService {
   }
 
   /**
+   * Ready handles a diagnostics query has not asked yet, read from live state
+   * so a server that finished starting while the query was in flight is asked
+   * rather than reported as unreachable. Uses the same relevance test as
+   * `unreachableDiagnosticServers`, so a server the queried file provably
+   * excludes is neither asked nor named.
+   */
+  private newlyReadyDiagnosticHandles(
+    asked: ReadonlyArray<readonly [string, unknown]>,
+    serverName?: string,
+    uri?: string,
+  ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
+    const extension = uri ? this.diagnosticFileExtension(uri) : undefined;
+    return this.getReadyHandles(serverName).filter(
+      ([name, handle]) =>
+        !asked.some(([askedName]) => askedName === name) &&
+        !this.serverDeclaredIrrelevant(handle, extension),
+    );
+  }
+
+  /**
    * Lowercased extension of the queried file URI, or undefined when the URI
    * is unparseable or the file has no extension: an extensionless file
    * cannot prove any server irrelevant, so the veto decision fails closed.
@@ -955,16 +975,19 @@ export class NativeLspService {
   /**
    * Rendered states of the servers a diagnostics query did not reach and
    * still cannot reach, recomputed from live handle state at the decision
-   * point: a server that finished starting mid-query is no longer named as
-   * pending, but a server that became ready without being queried is no
-   * clean bill either — it received zero requests, so its slice of the
-   * answer is as unbacked as any other unreachable server's, and it is
-   * named with wording that cannot be mistaken for an answer. For a
-   * document query (`uri` given), only servers the file does not provably
-   * exclude can veto — a server that could never own the file must not
-   * discard another server's authoritative empty report. For a workspace
-   * query every unreachable server vetoes, since the report would otherwise
-   * certify that server's slice of the workspace as clean.
+   * point. The query loop re-reads that state after every pull and asks
+   * whatever became ready, so a server that finished starting mid-query is
+   * normally queried instead of being named here; only a server whose
+   * readiness becomes observable after the loop's last read can still arrive
+   * as ready-and-unasked, and it is no clean bill either — it received zero
+   * requests, so its slice of the answer is as unbacked as any other
+   * unreachable server's, and it is named with wording that cannot be
+   * mistaken for an answer. For a document query (`uri` given), only servers
+   * the file does not provably exclude can veto — a server that could never
+   * own the file must not discard another server's authoritative empty
+   * report. For a workspace query every unreachable server vetoes, since the
+   * report would otherwise certify that server's slice of the workspace as
+   * clean.
    */
   private unreachableDiagnosticServers(
     queried: ReadonlyArray<readonly [string, unknown]>,
@@ -2197,7 +2220,11 @@ export class NativeLspService {
     // Ownership is only decidable for an extension the tables can place. For
     // anything else (`h`, `mts`, an extensionless file) the answer is backed by
     // relevance alone, because no declaration can be shown to cover the file
-    // and a refusal on that basis would reject a configuration that works.
+    // and a refusal on that basis would reject a configuration that works. A
+    // non-`file:` URI (`jdt://…`) lands here too: `synchronizeDocument` returns
+    // early for it, so the server was never sent a `didOpen`, and refusing the
+    // pass-through would fail servers that answer for their own virtual
+    // documents; the design doc records that residue.
     const attributable =
       extension !== undefined &&
       ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(extension);
@@ -2228,7 +2255,16 @@ export class NativeLspService {
     // Only this ledger can certify an attributable extension clean.
     let answeredOwner = 0;
 
-    for (const [name, handle] of handles) {
+    // Every pull re-reads live handle state and appends whatever became ready,
+    // so a server that finishes starting while this query is in flight is
+    // asked too instead of vetoing as unasked at the decision point.
+    const queried: Array<
+      [string, LspServerHandle & { connection: LspConnectionInterface }]
+    > = [];
+    const pending = [...handles];
+    for (let index = 0; index < pending.length; index++) {
+      const [name, handle] = pending[index]!;
+      queried.push([name, handle]);
       // A sync failure must reject, not report incomplete diagnostics as clean.
       await this.warmupAndTrack(name, handle);
       await this.ensureDocumentSynchronized(name, handle, uri);
@@ -2318,6 +2354,9 @@ export class NativeLspService {
           failures.push({ name, handle, error });
         }
       }
+      pending.push(
+        ...this.newlyReadyDiagnosticHandles(pending, serverName, uri),
+      );
     }
 
     if (allDiagnostics.length === 0) {
@@ -2330,7 +2369,7 @@ export class NativeLspService {
         ({ handle }) => !this.serverDeclaredIrrelevant(handle, extension),
       );
       const unreachable = this.unreachableDiagnosticServers(
-        handles,
+        queried,
         serverName,
         uri,
       );
@@ -2387,7 +2426,16 @@ export class NativeLspService {
     const failures: Array<{ name: string; error: unknown }> = [];
     const unsupported: Array<{ name: string; error: unknown }> = [];
 
-    for (const [name, handle] of handles) {
+    // Same worklist as the document leg: a server that finishes starting while
+    // this sweep is in flight is asked, so its slice of the workspace is
+    // queried instead of vetoing the report as unasked.
+    const queried: Array<
+      [string, LspServerHandle & { connection: LspConnectionInterface }]
+    > = [];
+    const pending = [...handles];
+    for (let index = 0; index < pending.length; index++) {
+      const [name, handle] = pending[index]!;
+      queried.push([name, handle]);
       const connection = handle.connection;
       // Capture the tracked set before warmup: for a TypeScript server the warmup's
       // own connection-change reset would otherwise wipe it first, including the
@@ -2538,6 +2586,8 @@ export class NativeLspService {
         }
       }
 
+      pending.push(...this.newlyReadyDiagnosticHandles(pending, serverName));
+
       if (results.length >= limit) {
         break;
       }
@@ -2545,7 +2595,7 @@ export class NativeLspService {
 
     if (results.length === 0) {
       const unreachable = this.unreachableDiagnosticServers(
-        handles,
+        queried,
         serverName,
       );
       if (failures.length > 0 || unreachable.length > 0) {

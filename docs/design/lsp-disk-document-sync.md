@@ -137,7 +137,16 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   extension the tables can place, positively owned; a file whose extension no
   table can place (`.h`, `.mts`, an extensionless name) has no decidable owner
   and is judged on relevance alone, as it was before ownership became a
-  requirement. Relevance is decided against every extension the diagnostics
+  requirement. A non-`file:` URI (`jdt://…`) reaches the same undecidable case
+  by another route: `synchronizeDocument` returns before sending any `didOpen`,
+  so the server answers for a document it was never sent, and the pass-through
+  is kept rather than refused, because refusing would break servers that
+  diagnose their own virtual documents. Its empty answer is therefore surfaced
+  as clean on relevance alone — as it was before this change, so it is a
+  pre-existing fail-open on the merge base rather than a regression, and no
+  scan can distinguish it from a genuinely clean render. Whether such an answer
+  should instead be labelled unbacked is an open ruling, not something this
+  change settles. Relevance is decided against every extension the diagnostics
   tables can place — the language-ID mapping, the diagnostics-local alias rows
   and the identity-mapped language IDs — and the JS/TS family widening is
   one-directional: a `typescript` declaration covers the JavaScript side, while
@@ -149,7 +158,12 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   server that could never own the queried file does not veto a document query;
   a workspace query refuses an unbacked clean report while any configured
   server is unreachable, and while any pull failed for a reason other than a
-  refusal. That relevance rule excuses a server from vetoing
+  refusal. A server that finishes starting while a query is in flight is asked
+  before that decision, not reported as unreachable: each pull re-reads live
+  handle state and appends whatever became ready, and only handles not queried
+  yet are added, so the pass is bounded and cannot repeat a server. A handle
+  whose readiness becomes observable only after the last such read still vetoes
+  as never asked. That relevance rule excuses a server from vetoing
   _another_ server's answer, never from being the only answer: a document
   query that no queried server answered rejects even when every recorded
   failure belongs to a server the queried file excludes. Other request/pull
@@ -243,7 +257,11 @@ reason); `declaredDiagnosticExtensions` widens all four JS/TS family IDs again
 (`does not let a downed javascript sibling veto a clean answer it cannot own`
 and its `javascriptreact` twin); the document leg drops the queried `uri` from
 its `unreachableDiagnosticServers` call (`does not let a downed python sibling
-veto a clean answer it cannot own`, with the identity-mapped rows).
+veto a clean answer it cannot own`, with the identity-mapped rows). The
+late-ready retry adds one: dropping either leg's `pending.push` of
+`newlyReadyDiagnosticHandles` (`asks a server that became ready during the
+diagnostics query before deciding` for the document leg, its
+`workspaceDiagnostics` twin for the sweep).
 
 The touched service and manager and their collocated unit tests were renamed to
 kebab-case per AGENTS.md. Their barrel exports, native client type imports,
