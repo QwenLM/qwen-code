@@ -130,7 +130,7 @@ release 状态转换。
 ## 实现增量
 
 Owner 路由调用 `readOwnerResource`，内部 publication 校验保留 `readResource`。
-V64 新增空的原生读取历史，已发布 migration 保持不变。两个短事务使用同一现有
+V66 新增空的原生读取历史，已发布 migration 保持不变。两个短事务使用同一现有
 DataSource，事务 timeout 为 10 秒。入场只读元数据，不读 inline bytes。Fetch
 在 SQL 事务外显式管理 JDBC 资源生命周期；每次完成先锁定并比对完整持久入场，
 再改变状态。RETURNED 包括已知交付或校验失败，保存结束时间；OPEN 与 UNKNOWN
@@ -236,3 +236,5 @@ unsupported 私有历史，并接入不可变应用 cut，才能将此表解释�
 即使所有租约过期，已有 OPEN/UNKNOWN 记录也必须阻断后续 cut。持久 worker
 finalize、原物理 stop/unpublish、原子 release/reuse、全新目标 Linux/云上及
 security/portability 验证仍在后面；CI 成功或本地 fixture 不能替代它们。
+
+读取 migration 在更早有界报告中以未发布 V64 提交。当前它在已发布 main62 与有序未发布 CSI63–65 之后使用 V66，SQL 字节不变。精确已发布62 resource 已纳入，新 resource 集合需独立 main62→66 升级验收。旧未发布开发数据库历史不会自动迁移。SQL 字节相同不能把先前测试或 review 证据转为新候选验收。

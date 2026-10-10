@@ -111,3 +111,18 @@ migration 重号与 private-parent child admission，再验证修复后的拒绝
 Broker 字节。此前 f252 producer 结果与五组更早负向运行保留各自源码/产物
 版本，不重新标成集成提交行为。原生 review 仍不可用，保持 Draft/maintainer
 审查要求。
+
+## 最新主线 V62 resource 后续同步
+
+最新 main `83d422d251bd1aed957c3d1aff085bec093c0a3a` 发布 `V62__managed_task_cancel_operation.sql`。本后续增量逐字节导入该已发布 resource，不合入无关 H4f 生产改动。止于62的59个 migration 与该 main 前缀完全相同。四个仍未发布的 CSI migration 整体从61–64移至63–66，保持 SQL 字节与依赖顺序；只移动 activation 会把 request61 留在已经应用的 main62 之前。上文编号和验收属于历史记录。保留正常 validation，不使用 repair 或 outOfOrder 绕过。已经应用旧未发布 CSI 序列的开发数据库需单独明确策略。候选验收保留 target47 升级，增加真实 main62→66、旧 history 全行不变、旧业务列值保留及 native pin 仍为 NULL 的验证。文件名检查不能证明数据库升级，也不能转移旧产物验收。
+
+独立封存候选通过两个原 MySQL 升级调用和全部15个原 H2 schema 对照。独立真实
+main62→66 probe 校验全部59条旧 history 与全部旧业务列值，仅追加63–66，
+native pin 保持 NULL、普通 CSI guard 保持 FALSE，实测62表 / 828列。原
+filename guard 报告63个唯一 migration。全部7948项 record/input/origin/cleanup
+谓词通过，自有资源已释放。Observer setup、序列化、query 与 audit 失败保留原
+非零退出码；没有为了修 observer 重跑17个已经通过的原测试。
+报告 SHA256：`cf7d2e6fa154754a8de74d76b95eb5ab971b06a6407540b3ea0a85dfcda6cade`；
+freeze SHA256：`9b3c2f183845fa7c5dae7f4ce0ccb3a3903e92bd9b513195deaaf0b55fd48dc3`。
+Resource/test source 与该候选准确一致。此迁移报告不验收之后 producer-wrapper
+变化。本地 MariaDB、新 head CI、native review 与完整 K2 仍分别待做。

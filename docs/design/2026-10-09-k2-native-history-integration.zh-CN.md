@@ -939,3 +939,7 @@ Root 独立解码全部57表、原输出和结果字节，再核对288项封存 
 ### 7.15 与已发布 automation 和 child Workspace migration 合并后的最终交付
 
 本次交付还合入 main `1f4484d34aec85eeba4a3fcf0937efe97cb5362c`，其发布 H6b/H6c automation ledger V57 与 child Workspace capability V60，跳过 V58/V59。merge-tree 预演在修复前复现已发布 automation 与未发布 CSI request pin 的 V57 冲突。已发布 V1–V60 字节全部保持，只将三个仍未发布的 CSI 文件顺延为 request V61、activation V62、native authorization V63，SQL 字节/顺序不变；完整序列止于 V63。同一合并把 H6b/H6c 基于 journal 的未应答 prompt 排除带入共享 Hosted turn runner，普通与 tool-profile turn 都从模型 history 过滤已定落的 error/cancelled prompt；recovered Runtime turn 路径保留其既有过滤。合并后须在新推送提交运行检查，不能把此前验收转移到新 head；更早未发布编号仍需独立明确迁移方案。
+
+## 最新主线 V62 migration 后续同步
+
+后续 schema-resource 增量逐字节保留 main `83d422d251bd1aed957c3d1aff085bec093c0a3a` 已发布 V62，将仍未发布的 CSI request/activation/authorization/read 序列移至63/64/65/66，不改 SQL。上文更早交付记录中的编号保留为历史。已发布前缀绑定、实际升级要求及独立开发历史限制见 [main 同步后续说明](2026-10-08-k2-lifecycle-main-sync.zh-CN.md#最新主线-v62-resource-后续同步)。本增量不合入 H4f 生产，不回填 authority，也不把先前验收转移给新候选。

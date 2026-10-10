@@ -160,7 +160,7 @@ switch, collector deletion or release transition in this design.
 ## Implementation increment
 
 The owner route calls `readOwnerResource`, while internal publication validation
-keeps `readResource`. V64 adds the empty native read history; published migrations
+keeps `readResource`. V66 adds the empty native read history; published migrations
 remain unchanged. The two short transactions use the existing DataSource and a
 10-second transaction timeout. Admission reads metadata without inline bytes.
 The fetch uses explicit JDBC resource lifetimes outside SQL; each completion
@@ -300,3 +300,5 @@ records must block that later cut even after every lease expires. Durable worker
 finalize, original physical stop/unpublish, atomic release/reuse and fresh target
 Linux/cloud/security/portability verification still follow; CI success or a
 local fixture cannot substitute for them.
+
+The read migration originally shipped as unpublished V64 in the earlier bounded report. It is now V66 after published main62 and the ordered unpublished CSI63–65 sequence; its SQL bytes are unchanged. The exact published62 resource is included, and this new resource set requires its own main62→66 upgrade validation. Old unpublished development database history is not automatically migrated. No earlier test or review evidence becomes new-candidate acceptance merely because the SQL bytes match.

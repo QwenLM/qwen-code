@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -19,6 +20,8 @@ import java.sql.Connection;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -32,6 +35,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -60,18 +65,49 @@ class WorkspaceMigrationMySqlIT {
         jdbc = new JdbcTemplate(data);
     }
 
-    @Test
-    void upgradesCurrentMainWithoutChangingAppliedMigrations() {
-        Flyway.configure().dataSource(data).locations("classpath:db/migration").target("47").load().migrate();
+    @ParameterizedTest
+    @ValueSource(strings = {"47", "62"})
+    void upgradesCurrentMainWithoutChangingAppliedMigrations(String baseline) throws Exception {
+        Flyway.configure().dataSource(data).locations("classpath:db/migration").target(baseline).load().migrate();
+        var legacy = new TreeMap<String, List<Map<String, Object>>>();
+        if ("62".equals(baseline)) {
+            assertThat(jdbc.queryForObject("SELECT script FROM flyway_schema_history"
+                    + " WHERE version = '62'", String.class)).isEqualTo("V62__managed_task_cancel_operation.sql");
+            JdbcRepositoryContract.writeLegacyRows(data, "main62");
+            jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, tool_profile,"
+                    + " created_at, updated_at) VALUES ('main62', 'session', 'qwen-code', 'ACTIVE', 'full', 0, 0)");
+            for (String table : List.of("managed_agent_session", "qwen_runtime_binding",
+                    "qwen_runtime_session", "qwen_tool_execution")) {
+                legacy.put(table, jdbc.queryForList("SELECT * FROM " + table));
+            }
+        }
         var applied = jdbc.queryForList("SELECT * FROM flyway_schema_history ORDER BY installed_rank");
         int lastRank = jdbc.queryForObject("SELECT MAX(installed_rank) FROM flyway_schema_history", Integer.class);
         Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
         assertThat(jdbc.queryForList("SELECT * FROM flyway_schema_history"
                 + " WHERE installed_rank <= ? ORDER BY installed_rank", lastRank)).isEqualTo(applied);
-        assertThat(jdbc.queryForList("SELECT version FROM flyway_schema_history"
+        var added = jdbc.queryForList("SELECT version FROM flyway_schema_history"
                 + " WHERE installed_rank > ? AND success = TRUE ORDER BY installed_rank",
-                String.class, lastRank)).containsExactly("48", "49", "50",
-                "51", "52", "53", "54", "55", "56", "57", "60", "61", "62", "63", "64");
+                String.class, lastRank);
+        if ("47".equals(baseline)) {
+            assertThat(added).containsExactly("48", "49", "50", "51", "52", "53", "54", "55", "56", "57",
+                    "60", "62", "63", "64", "65", "66");
+        } else {
+            assertThat(added).containsExactly("63", "64", "65", "66");
+            legacy.forEach((table, rows) -> {
+                String columns = "`" + String.join("`,`", rows.getFirst().keySet()) + "`";
+                assertThat(jdbc.queryForList("SELECT " + columns + " FROM " + table))
+                        .usingRecursiveComparison().isEqualTo(rows);
+            });
+            assertThat(jdbc.queryForObject("SELECT runtime_request_key FROM managed_agent_session",
+                    String.class)).isNull();
+            assertThat(jdbc.queryForObject("SELECT csi_guard FROM managed_agent_session", Boolean.class)).isFalse();
+            assertThat(jdbc.queryForObject("SELECT first_activation_journal_revision FROM qwen_runtime_binding",
+                    Long.class)).isNull();
+            assertThat(jdbc.queryForList("SELECT native_authorization_json FROM qwen_tool_execution", String.class))
+                    .containsOnlyNulls();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_csi_resource_read", Integer.class)).isZero();
+        }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Integer.class)).isZero();
     }

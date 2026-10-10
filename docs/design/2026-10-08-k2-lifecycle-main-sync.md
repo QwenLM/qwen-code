@@ -134,3 +134,21 @@ bytes before a fresh owned MySQL mixed/export run. Previous f252 producer
 results and five earlier negative groups retain their own source/product
 versions; they are not relabeled as new integrated-commit behavior. Native
 review remains unavailable and Draft/maintainer review stays required.
+
+## Latest-main V62 resource continuation
+
+Latest main `83d422d251bd1aed957c3d1aff085bec093c0a3a` publishes `V62__managed_task_cancel_operation.sql`. This continuation imports that published resource byte-for-byte, without importing the unrelated H4f production changes. All 59 migrations through62 match that main prefix exactly. The four still-unpublished CSI migrations move together from61–64 to63–66, preserving SQL bytes and dependency order; moving only activation would leave request61 below the already-applied main62. Earlier numbering and acceptance above are historical. Normal validation remains enabled; no repair or outOfOrder bypass is used. Development databases that applied the older unpublished CSI sequence need an explicit separate strategy. Candidate verification must retain the target47 upgrade, add actual main62→66 with all earlier history rows unchanged, preserve old business-column values and keep native pins NULL. Filename checks alone do not establish a database upgrade or transfer older product acceptance.
+
+The independent frozen candidate passes both original MySQL upgrade invocations
+and all 15 original H2 schema controls. A separate real main62→66 probe validates
+all 59 old history rows and all old business-column values, appends only 63–66,
+keeps native pins NULL and the ordinary CSI guard FALSE, and measures 62 tables /
+828 columns. The original filename guard reports 63 unique migrations. All 7948
+record/input/origin/cleanup predicates pass with owned resources released.
+Observer setup, serialization, query and audit failures retain their original
+nonzero exits; the 17 green original tests were not rerun to repair observers.
+Report SHA256: `cf7d2e6fa154754a8de74d76b95eb5ab971b06a6407540b3ea0a85dfcda6cade`;
+freeze SHA256: `9b3c2f183845fa7c5dae7f4ce0ccb3a3903e92bd9b513195deaaf0b55fd48dc3`.
+The resource/test sources match this candidate exactly. Later producer-wrapper
+changes are not accepted by this migration report. Local MariaDB, new-head CI,
+native review and complete K2 remain separately pending.
