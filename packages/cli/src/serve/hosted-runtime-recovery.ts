@@ -34,6 +34,7 @@ import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/m
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
+  fitChildResultInline,
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
   HOSTED_AGENT_WAIT_ABANDONED_TEXT,
   hostedAgentBackgroundStartedText,
@@ -676,33 +677,11 @@ export async function fillParkedRoundAgentGaps(input: {
           const text = (
             await input.managed.resources.read(acceptance.contentRef)
           ).toString('utf8');
-          const whole = convertToFunctionResponse(name, callId, [{ text }]);
-          // The same fit discipline as the live arm: the answer still must
-          // land, folded to the inline bound with its marker instead of
-          // erroring the recovered Turn — the full bytes stay on the
-          // acceptance record, and the fit predicate, not an estimate,
-          // measures the fold.
-          let fitted: Part[] | undefined;
-          if (fits(whole)) {
-            fitted = whole;
-          } else {
-            const marker =
-              '\n… (truncated: the full result is on the acceptance record)';
-            for (
-              let head = Math.floor(text.length / 2);
-              head > 0 && fitted === undefined;
-              head = Math.floor(head / 2)
-            ) {
-              const folded = convertToFunctionResponse(name, callId, [
-                { text: text.slice(0, head) + marker },
-              ]);
-              if (fits(folded)) fitted = folded;
-            }
-          }
-          if (fitted === undefined)
-            throw new Error(
-              'Admitted child agent result cannot be recorded inline.',
-            );
+          // One fit discipline with the live arm (R3-2): the answer still
+          // must land, folded to the inline bound with its marker instead
+          // of erroring the recovered Turn — the full bytes stay on the
+          // acceptance record, and the exact template measures the fold.
+          const fitted = fitChildResultInline(name, callId, text, fits);
           if (foldOwed) {
             await writeFold(fitted);
             filled += 1;
@@ -848,6 +827,12 @@ export async function settleInterruptedTurnRuntime(input: {
           runs: outstanding,
         });
       }
+      // The funnel settles the way the takeover cancellation does — so it
+      // must never outlive its own settlement: an admitted orphan folds
+      // the abandoned answer at once, never a deadline-less poll that
+      // would hang the attach/redrive path it runs on (R3-1).
+      const settleFillAbort = new AbortController();
+      settleFillAbort.abort();
       await fillParkedRoundAgentGaps({
         managed: input.session,
         sessionId: input.sessionId,
@@ -855,6 +840,7 @@ export async function settleInterruptedTurnRuntime(input: {
         cwd: input.cwd,
         gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
         children: input.children,
+        signal: settleFillAbort.signal,
         consume: input.consume,
       });
     }

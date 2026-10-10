@@ -946,6 +946,12 @@ function parseAgentWait(
   const runs = jsonArray(record['runs'], 'agentWait.runs').map((item, index) =>
     parseAgentWaitRun(item, `agentWait.runs[${index}]`),
   );
+  // Fail-closed on cardinality too: no producer ever mints an empty
+  // group, and an empty one would otherwise read as an `await_agent`
+  // report with zero executions (R3-3).
+  if (runs.length === 0) {
+    fail('agent wait requires at least one run.');
+  }
   uniqueIds(
     runs.map((run) => run.childRunId),
     'agentWait.runs.childRunId',
@@ -1182,6 +1188,12 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
       checkpoint.agentWait.runs.length === 0
     ) {
       fail('await_agent requires the agent wait runs.');
+    }
+    // Every run consumed means the wait already advanced — an all-consumed
+    // group belongs only at model_output_committed, so reading it as still
+    // awaited must fail closed too (R3-3).
+    if (checkpoint.agentWait.runs.every((run) => run.consumed)) {
+      fail('await_agent cannot keep an all-consumed agent wait.');
     }
     if (checkpoint.approval?.state === 'requested') {
       fail('await_agent cannot keep a requested approval.');

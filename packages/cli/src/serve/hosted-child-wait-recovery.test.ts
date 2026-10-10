@@ -1214,4 +1214,67 @@ describe('hosted child wait recovery (#13708)', () => {
       await replacement.close();
     }
   });
+
+  it('the interrupted-turn settlement does not wait on an admitted orphan (R3-1)', async () => {
+    await parkWedged(true);
+    const orphanRunId = `${PROMPT_ID}:call-2`;
+    const first = await open('boot-2', false);
+    try {
+      const consumption: string[] = [];
+      await settleTheChild(first);
+      await resumeTurn(first, consumption).resumeAgentWaitRuns(
+        [{ ...waitRun, functionCallId: 'call-1' }],
+        'recovered',
+        new AbortController().signal,
+      );
+      await childrenOf(first).admit({
+        childRunId: orphanRunId,
+        ownerScopeId: SESSION_ID,
+        rootSessionId: SESSION_ID,
+        completion: 'tool',
+        description: 'second audit',
+        prompt: 'review two',
+        definition: {
+          definitionId: 'hosted-agent/hosted-workspace-files/1',
+          definitionRevision: 1,
+          definitionDigest: first.authority.sessionHeader.definitionRef.digest,
+        },
+        workingDirectory: '.',
+        executionCallId: orphanRunId,
+      });
+    } finally {
+      await first.close();
+    }
+    const replacement = await open('boot-3', false);
+    try {
+      // The admitted orphan never terminates in this test: the funnel's
+      // settlement must fold the abandoned answer at once, exactly like
+      // the takeover cancellation, not poll past its own settle.
+      const settle = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions: undefined,
+        toolProfile: true,
+        children: childrenOf(replacement),
+      });
+      expect(settle.kind).toBe('ready');
+      const projected = await replacement.sink.project();
+      const callTwo = toolResultEntries(projected).find((entry) =>
+        entry.message?.parts?.some(
+          (part) => part.functionResponse?.id === 'call-2',
+        ),
+      );
+      expect(JSON.stringify(callTwo?.message?.parts)).toContain(
+        'cancelled before the child agent finished',
+      );
+      // The ledger keeps the orphan: it is abandoned, never revoked.
+      const record = childrenOf(replacement).record(orphanRunId);
+      expect(record).toBeDefined();
+      expect(record?.run.state).not.toBe('cancelled');
+    } finally {
+      await replacement.close();
+    }
+  }, 10_000);
 });

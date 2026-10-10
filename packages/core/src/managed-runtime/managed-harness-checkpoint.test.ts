@@ -937,14 +937,15 @@ describe('harness checkpoint v1', () => {
       attempt: committedAttempt(),
       agentWait: agentWaitOf(['run-1']),
     });
-    // Empty run list cannot authorize the phase.
+    // Empty run list cannot authorize the phase (read-path cardinality
+    // fires before the phase shape ever judges it, R3-3).
     expect(() =>
       parseHarnessCheckpointV1(
         mutate(wait, (value) => {
           value['agentWait'] = { runs: [] };
         }),
       ),
-    ).toThrow(/requires the agent wait runs/);
+    ).toThrow(/requires at least one run/);
     // In-flight Runtime work excludes the agent wait.
     const runtime = inProgressRuntime();
     expect(() =>
@@ -1150,6 +1151,31 @@ describe('harness checkpoint v1', () => {
       previousCheckpointId: 'ckpt-5',
       childRunId: 'run-1',
     });
+    // The read path is fail-closed on cardinality too: no producer mints
+    // an empty group, at any phase (R3-3).
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(consumed, (value) => {
+          value['agentWait'] = { runs: [] };
+        }),
+      ),
+    ).toThrow(/requires at least one run/);
+    // And an all-consumed group read as still awaited fails closed: that
+    // shape only ever means the wait already advanced (R3-3).
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(wait, (value) => {
+          value['agentWait'] = JSON.parse(
+            JSON.stringify({
+              runs: wait.agentWait!.runs.map((run) => ({
+                ...run,
+                consumed: true,
+              })),
+            }),
+          );
+        }),
+      ),
+    ).toThrow(/cannot keep an all-consumed agent wait/);
     expect(
       createModelOutputCommittedHarnessCheckpoint({
         previous: consumed,
