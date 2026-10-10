@@ -11256,7 +11256,11 @@ describe('Session', () => {
               'same prompt',
               undefined,
               withDisplayText
-                ? { displayText: 'visible prompt', hookContext: '' }
+                ? {
+                    displayText: 'visible prompt',
+                    displayProjection: true,
+                    hookContext: '',
+                  }
                 : undefined,
               expect.stringContaining('test-session-id########'),
               currentPromptId,
@@ -12424,6 +12428,7 @@ describe('Session', () => {
         undefined,
         {
           displayText: text,
+          displayProjection: false,
           hookContext: '',
           inputAnnotations: expectedAnnotations,
         },
@@ -12475,6 +12480,7 @@ describe('Session', () => {
         undefined,
         {
           displayText: 'hello',
+          displayProjection: false,
           hookContext: '',
           inputAnnotations: [valid],
         },
@@ -12558,6 +12564,7 @@ describe('Session', () => {
           undefined,
           {
             displayText: text,
+            displayProjection: false,
             hookContext: '',
             resourceLinks: expectedLinks,
           },
@@ -12605,6 +12612,7 @@ describe('Session', () => {
           undefined,
           {
             displayText: text,
+            displayProjection: false,
             hookContext: '',
             embeddedResources: [expectedResource],
           },
@@ -12744,6 +12752,7 @@ describe('Session', () => {
         undefined,
         {
           displayText: 'describe this',
+          displayProjection: false,
           hookContext: '',
           attachmentReferences: [imageReference, fileReference],
         },
@@ -12785,6 +12794,7 @@ describe('Session', () => {
         undefined,
         {
           displayText: '',
+          displayProjection: false,
           hookContext: '',
           attachmentReferences: [attachmentReference],
         },
@@ -12835,6 +12845,7 @@ describe('Session', () => {
         undefined,
         {
           displayText: '',
+          displayProjection: false,
           hookContext: '',
           attachmentReferences: [attachmentReference],
           embeddedResources: [directResource],
@@ -12877,6 +12888,34 @@ describe('Session', () => {
         expect.objectContaining({
           embeddedResources: [directResource, nativeResource],
         }),
+        expect.stringContaining('test-session-id########'),
+        undefined,
+      );
+    });
+
+    it('drops more than 256 attachment references on a one-block prompt', async () => {
+      const attachmentReferences = Array.from({ length: 257 }, (_, index) => ({
+        type: 'image' as const,
+        attachmentId: `media-${index}`,
+        mimeType: 'image/png',
+        size: 3,
+      }));
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'describe these' }],
+        _meta: {
+          'qwen.daemon.attachmentReferences': attachmentReferences,
+        },
+      });
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        'describe these',
+        undefined,
+        undefined,
         expect.stringContaining('test-session-id########'),
         undefined,
       );
@@ -12945,6 +12984,7 @@ describe('Session', () => {
         undefined,
         {
           displayText: '',
+          displayProjection: false,
           hookContext: '',
           attachmentReferences,
         },
@@ -17885,7 +17925,7 @@ describe('Session', () => {
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
         'internal channel instructions\n\nhello',
         undefined,
-        { displayText: 'hello', hookContext: '' },
+        { displayText: 'hello', displayProjection: true, hookContext: '' },
         expect.stringContaining('test-session-id########'),
         undefined,
       );
@@ -29755,6 +29795,7 @@ describe('Session', () => {
           undefined,
           {
             displayText: '/advisor check my work',
+            displayProjection: false,
             hookContext: '',
             inputAnnotations: [
               {
@@ -29810,8 +29851,66 @@ describe('Session', () => {
           undefined,
           {
             displayText: '/advisor check my work',
+            displayProjection: false,
             hookContext: '',
             embeddedResourcesTruncated: true,
+          },
+          expect.stringContaining('test-session-id########'),
+          'daemon-advisor',
+        );
+      });
+
+      it('records resource links and retained embedded resources for a deferred custom advisor command', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Shadowed advisor prompt' }],
+          resolvedCommand: {
+            name: 'advisor',
+            kind: CommandKind.FILE,
+          },
+        });
+        mockChatRecordingService.recordUserMessage.mockClear();
+        const resourceLink = {
+          type: 'resource_link' as const,
+          uri: 'transit://resource-a',
+          name: 'notes.md',
+        };
+        const embeddedResource = {
+          type: 'resource' as const,
+          resource: {
+            uri: 'context://example/selection',
+            mimeType: 'application/json',
+            text: '{"items":["example"]}',
+          },
+        };
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: '/advisor check my work' },
+              resourceLink,
+              embeddedResource,
+            ],
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-advisor',
+          },
+        );
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          '/advisor check my work',
+          undefined,
+          {
+            displayText: '/advisor check my work',
+            displayProjection: false,
+            hookContext: '',
+            resourceLinks: [resourceLink],
+            embeddedResources: [embeddedResource],
           },
           expect.stringContaining('test-session-id########'),
           'daemon-advisor',

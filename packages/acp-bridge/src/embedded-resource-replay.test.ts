@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 import {
+  readDaemonAttachmentReferences,
   readDaemonNativeResourceIndexes,
   snapshotReplayableEmbeddedResources,
 } from './embedded-resource-replay.js';
@@ -126,6 +127,59 @@ describe('snapshotReplayableEmbeddedResources', () => {
     expect(snapshot).toEqual({ resources: [valid], truncated: false });
   });
 
+  it('accumulates the byte budget across resources instead of per resource', () => {
+    // Two 200 KiB blocks each fit a per-resource reading of the 256 KiB
+    // bound; only accumulation drops the second. A per-resource budget keeps
+    // both and lets N just-under-bound resources journal in full.
+    const first = textResource(
+      'context://example/first',
+      'x'.repeat(200 * 1024),
+    );
+    const second = textResource(
+      'context://example/second',
+      'y'.repeat(200 * 1024),
+    );
+
+    const snapshot = snapshotReplayableEmbeddedResources([first, second]);
+
+    expect(snapshot.truncated).toBe(true);
+    expect(snapshot.resources).toEqual([first]);
+  });
+
+  it('strips daemon-owned _meta keys from retained resources and keeps client metadata', () => {
+    // On the legacy ambiguous same-URI path the daemon's own native
+    // expansion is journaled too; its attachmentContext _meta carries the
+    // daemon host's absolute filesystem path and must not be replayed
+    // verbatim as user-authored content.
+    const daemonExpanded = {
+      ...textResource('attachment:///notes.txt', 'native'),
+      _meta: { 'qwen.daemon.attachmentContext': '/etc/daemon-host/notes.txt' },
+    } as ContentBlock;
+    const direct = {
+      ...textResource('context://example/direct', 'direct'),
+      _meta: {
+        'qwen.daemon.attachmentContext': '/etc/daemon-host/other.txt',
+        selection: 'current',
+      },
+    } as ContentBlock;
+
+    const snapshot = snapshotReplayableEmbeddedResources([
+      daemonExpanded,
+      direct,
+    ]);
+
+    expect(snapshot).toEqual({
+      resources: [
+        textResource('attachment:///notes.txt', 'native'),
+        {
+          ...textResource('context://example/direct', 'direct'),
+          _meta: { selection: 'current' },
+        },
+      ],
+      truncated: false,
+    });
+  });
+
   it('exempts daemon-native positions from retention', () => {
     const direct = textResource('context://example/direct', 'direct');
     const prompt = [textResource('attachment:///notes.txt', 'native'), direct];
@@ -133,6 +187,19 @@ describe('snapshotReplayableEmbeddedResources', () => {
     const snapshot = snapshotReplayableEmbeddedResources(prompt, [0]);
 
     expect(snapshot).toEqual({ resources: [direct], truncated: false });
+  });
+});
+
+describe('readDaemonAttachmentReferences', () => {
+  it('rejects reference lists beyond maxReferences and admits at it', () => {
+    const references = Array.from({ length: 257 }, (_, index) =>
+      resourceReference(`notes-${index}.txt`),
+    );
+
+    expect(readDaemonAttachmentReferences(references, 256)).toBeUndefined();
+    expect(
+      readDaemonAttachmentReferences(references.slice(0, 256), 256),
+    ).toHaveLength(256);
   });
 });
 

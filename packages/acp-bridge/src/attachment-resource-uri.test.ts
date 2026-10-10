@@ -54,4 +54,29 @@ describe('attachmentResourceUri', () => {
       readDaemonNativeResourceIndexes(undefined, prompt, [reference]),
     ).toEqual([0]);
   });
+
+  it('round-trips an encoded id through the position-based matcher', () => {
+    // Current daemons send expansion positions, so this is the matcher leg
+    // that actually runs; an unencoded URI here discards the whole
+    // reference array (the position path is all-or-nothing).
+    const reference: SessionAttachmentReference = {
+      type: 'resource',
+      attachmentId: 'my report #1 (final).pdf',
+      mimeType: 'application/pdf',
+      size: 1,
+    };
+    const prompt: ContentBlock[] = [
+      {
+        type: 'resource',
+        resource: {
+          uri: attachmentResourceUri(reference.attachmentId),
+          text: 'native',
+        },
+      },
+    ];
+
+    expect(readDaemonNativeResourceIndexes([0], prompt, [reference])).toEqual([
+      0,
+    ]);
+  });
 });

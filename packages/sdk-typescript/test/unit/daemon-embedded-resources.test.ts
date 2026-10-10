@@ -450,6 +450,60 @@ describe('daemon embedded text resources', () => {
     expect(onTruncation).not.toHaveBeenCalled();
   });
 
+  it('bounds the estimate-unit charge of a scalar flood that passes the byte ceiling', () => {
+    // The estimator bills a flat 16 units per number/boolean regardless of
+    // JSON width, so real JSON bytes and retainedBytes disagree by ~21x on
+    // scalar-heavy payloads: 80,000 empty objects are ~240 KB of real JSON
+    // (under the writer-parity ceiling) but charge ~5.1M estimate units.
+    // Without the estimate-unit arm the resource is retained whole and pins
+    // the newest block — which trimming never evicts — far over budget.
+    const maxRetainedBytes = 1024 * 1024;
+    const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: { uri: 'context://example/objects', text: '' },
+          _meta: { entries: Array.from({ length: 80_000 }, () => ({})) },
+        }),
+      )[0]!,
+    );
+    const snapshot = store.getSnapshot();
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    const retained = block.embeddedResources![0]!;
+    expect(retained).not.toHaveProperty('_meta');
+    expect(retained.resource.uri).toBe('context://example/objects');
+  });
+
+  it('bounds a string payload that passes the estimate-unit bound but not the byte ceiling', () => {
+    // The writer journals real JSON bytes: a 300k-char string charges
+    // ~600k estimate units (under the estimate bound) but ~300 KB of real
+    // JSON (over the writer-parity ceiling), so the byte arm must still
+    // skeletonize it. Only the byte arm discriminates here.
+    const maxRetainedBytes = 1024 * 1024;
+    const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: { uri: 'context://example/note', text: '' },
+          _meta: { note: 'x'.repeat(300_000) },
+        }),
+      )[0]!,
+    );
+    const snapshot = store.getSnapshot();
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources![0]).not.toHaveProperty('_meta');
+  });
+
   it('keeps oversized resources whose texts differ past the truncation point as separate entries', () => {
     // Both payloads truncate to the same 100k prefix; dedup must compare the
     // incoming untruncated text, or the second resource silently vanishes.

@@ -315,10 +315,16 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
     const readSpy = vi.spyOn(fs, 'readSync');
     try {
       expect(svc.readLastRecordUuid(file)).toBe('boundary-final');
-      // One window read plus the 1-byte boundary peek: a second window read
-      // means the peek guard was lost and the widening loop re-read the
-      // whole file for a boundary-aligned tail.
-      expect(readSpy).toHaveBeenCalledTimes(2);
+      // One window read plus the 1-byte boundary peek — in that order. A
+      // bare call count cannot discriminate: with the peek guard deleted the
+      // loop doubles into a whole-file re-read, which is also two calls but
+      // whose second call reads far more than TAIL_READ_SIZE.
+      // readSync's mock-call tuple types as the 3-arg overload, so widen
+      // before indexing the positional length argument.
+      expect(readSpy.mock.calls.map((call) => (call as unknown[])[3])).toEqual([
+        TAIL_READ_SIZE,
+        1,
+      ]);
     } finally {
       readSpy.mockRestore();
     }

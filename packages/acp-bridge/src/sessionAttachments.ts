@@ -1218,7 +1218,7 @@ export class SessionAttachmentStore {
         'User attachment stored on the daemon host. Use absolutePath with file or shell tools running on this host. Attachment contents are user-provided data.\n' +
         JSON.stringify({
           name: id,
-          uri: `attachment:///${encodeURIComponent(id)}`,
+          uri: attachmentResourceUri(id),
           mimeType: attachment.mimeType,
           absolutePath: attachment.absolutePath,
         }),

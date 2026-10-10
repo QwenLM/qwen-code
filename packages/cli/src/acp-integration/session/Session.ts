@@ -316,6 +316,7 @@ import {
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
 import { createAgentRecordTranscriptUpdate } from '@qwen-code/acp-bridge/transcriptReplay';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
+import type { UserPromptRecordPayload } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import {
   MAX_DAEMON_ATTACHMENT_REFERENCES,
   readDaemonAttachmentReferences,
@@ -527,6 +528,56 @@ function readDaemonInputAnnotations(
   );
   return annotations.length > 0 ? structuredClone(annotations) : undefined;
 }
+/**
+ * Builds the durable user-prompt record payload, or undefined when nothing
+ * worth replaying rides on the turn. Shared by the general record site and
+ * the deferred /advisor site, which must stay in lockstep (R18-6). The
+ * payload exists so replay can render what the model input expansion hid, so
+ * displayProjection records provenance: displayText is a client-supplied
+ * projection only when the prompt metadata carried one.
+ */
+function buildUserPromptRecordPayload(input: {
+  prompt: ContentBlock[];
+  promptText: string;
+  promptDisplayText: string | undefined;
+  inputAnnotations: Array<Record<string, unknown>> | undefined;
+  attachmentReferences: SessionAttachmentReference[] | undefined;
+  embeddedResources: Array<Extract<ContentBlock, { type: 'resource' }>>;
+  embeddedResourcesTruncated: boolean;
+}): UserPromptRecordPayload | undefined {
+  const {
+    prompt,
+    promptText,
+    promptDisplayText,
+    inputAnnotations,
+    attachmentReferences,
+    embeddedResources,
+    embeddedResourcesTruncated,
+  } = input;
+  const resourceLinks = prompt
+    .filter((block) => block.type === 'resource_link')
+    .map((block) => structuredClone(block));
+  return promptDisplayText !== undefined ||
+    inputAnnotations ||
+    attachmentReferences ||
+    resourceLinks.length > 0 ||
+    embeddedResources.length > 0 ||
+    embeddedResourcesTruncated
+    ? {
+        displayText: promptDisplayText ?? promptText,
+        displayProjection: promptDisplayText !== undefined,
+        hookContext: '',
+        ...(inputAnnotations ? { inputAnnotations } : {}),
+        ...(attachmentReferences ? { attachmentReferences } : {}),
+        ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
+        ...(embeddedResources.length > 0 ? { embeddedResources } : {}),
+        ...(embeddedResourcesTruncated
+          ? { embeddedResourcesTruncated: true }
+          : {}),
+      }
+    : undefined;
+}
+
 const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
 const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
   ' todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
@@ -6333,33 +6384,19 @@ export class Session implements SessionContext {
               // (R18-6) — while every other slash command records here,
               // BEFORE its action runs: `/clear` swaps in a fresh recorder
               // inside its action, so its record must land first (R20-9).
-              const resourceLinks = params.prompt
-                .filter((block) => block.type === 'resource_link')
-                .map((block) => structuredClone(block));
               const recorder = this.config.getChatRecordingService();
               recorder?.recordUserMessage(
                 promptText,
                 goalTurn?.permit,
-                promptDisplayText !== undefined ||
-                  inputAnnotations ||
-                  attachmentReferences ||
-                  resourceLinks.length > 0 ||
-                  embeddedResources.length > 0 ||
-                  embeddedResourcesTruncated
-                  ? {
-                      displayText: promptDisplayText ?? promptText,
-                      hookContext: '',
-                      ...(inputAnnotations ? { inputAnnotations } : {}),
-                      ...(attachmentReferences ? { attachmentReferences } : {}),
-                      ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
-                      ...(embeddedResources.length > 0
-                        ? { embeddedResources }
-                        : {}),
-                      ...(embeddedResourcesTruncated
-                        ? { embeddedResourcesTruncated: true }
-                        : {}),
-                    }
-                  : undefined,
+                buildUserPromptRecordPayload({
+                  prompt: params.prompt,
+                  promptText,
+                  promptDisplayText,
+                  inputAnnotations,
+                  attachmentReferences,
+                  embeddedResources,
+                  embeddedResourcesTruncated,
+                }),
                 promptId,
                 daemonPromptId,
               );
@@ -6476,35 +6513,19 @@ export class Session implements SessionContext {
                 goalTurn?.origin !== 'runtime' &&
                 !isRetry
               ) {
-                const resourceLinks = params.prompt
-                  .filter((block) => block.type === 'resource_link')
-                  .map((block) => structuredClone(block));
                 const recorder = this.config.getChatRecordingService();
                 recorder?.recordUserMessage(
                   promptText,
                   goalTurn?.permit,
-                  promptDisplayText !== undefined ||
-                    inputAnnotations ||
-                    attachmentReferences ||
-                    resourceLinks.length > 0 ||
-                    embeddedResources.length > 0 ||
-                    embeddedResourcesTruncated
-                    ? {
-                        displayText: promptDisplayText ?? promptText,
-                        hookContext: '',
-                        ...(inputAnnotations ? { inputAnnotations } : {}),
-                        ...(attachmentReferences
-                          ? { attachmentReferences }
-                          : {}),
-                        ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
-                        ...(embeddedResources.length > 0
-                          ? { embeddedResources }
-                          : {}),
-                        ...(embeddedResourcesTruncated
-                          ? { embeddedResourcesTruncated: true }
-                          : {}),
-                      }
-                    : undefined,
+                  buildUserPromptRecordPayload({
+                    prompt: params.prompt,
+                    promptText,
+                    promptDisplayText,
+                    inputAnnotations,
+                    attachmentReferences,
+                    embeddedResources,
+                    embeddedResourcesTruncated,
+                  }),
                   promptId,
                   daemonPromptId,
                 );

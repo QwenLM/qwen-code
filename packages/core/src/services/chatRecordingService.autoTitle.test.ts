@@ -515,6 +515,51 @@ describe('ChatRecordingService - auto-title trigger', () => {
     expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual(['']);
   });
 
+  it('keeps an explicit display projection as a title projection marker', () => {
+    chatRecordingService.recordUserMessage(
+      [{ text: 'hidden channel instructions' }],
+      undefined,
+      { displayText: '你好', hookContext: '', displayProjection: true },
+    );
+
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
+      '你好',
+    ]);
+  });
+
+  it('does not treat a resource-carrying raw-text record as a title projection marker', () => {
+    // The ACP record site writes displayProjection:false when displayText is
+    // the raw request text rather than a client projection. Without the
+    // marker, one ordinary prompt carrying an inline resource flips the
+    // whole session into projection mode and drops every payload-less turn
+    // from the title input.
+    chatRecordingService.recordUserMessage([{ text: 'hi' }]);
+    chatRecordingService.recordUserMessage(
+      [{ text: 'here is the log @context://example/selection' }],
+      undefined,
+      {
+        displayText: 'here is the log @context://example/selection',
+        displayProjection: false,
+        hookContext: '',
+        embeddedResources: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'context://example/selection',
+              mimeType: 'application/json',
+              text: '{"items":["example"]}',
+            },
+          },
+        ],
+      },
+    );
+
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
+      undefined,
+      undefined,
+    ]);
+  });
+
   it('restores resource-only records without a title projection marker', () => {
     const messages: ChatRecord[] = [
       {

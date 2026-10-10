@@ -1408,7 +1408,93 @@ describe('createTranscriptReplayMachine', () => {
       ).toEqual([
         { type: 'text', text: '[Embedded resource too large to replay]' },
       ]);
+      // The placeholder is a user chunk like any other: dropping its _meta
+      // would orphan it from the prompt it belongs to on replay clients.
+      expect(projected[0]?._meta).toMatchObject({
+        qwenTranscript: { sourceRecordIds: ['user-truncated-embedded'] },
+      });
     });
+
+    it.each([
+      {
+        name: 'a retained embedded resource',
+        payload: {
+          embeddedResources: [
+            {
+              type: 'resource',
+              resource: {
+                uri: 'context://example/kept',
+                text: 'small',
+              },
+            },
+          ],
+        },
+        expected: [
+          {
+            type: 'resource',
+            resource: { uri: 'context://example/kept', text: 'small' },
+          },
+        ],
+      },
+      {
+        name: 'a retained resource link',
+        payload: {
+          resourceLinks: [
+            { type: 'resource_link', uri: 'transit://kept', name: 'notes.md' },
+          ],
+        },
+        expected: [
+          { type: 'resource_link', uri: 'transit://kept', name: 'notes.md' },
+        ],
+      },
+      {
+        name: 'a retained attachment reference',
+        payload: {
+          attachmentReferences: [
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 3,
+            },
+          ],
+        },
+        expected: [
+          {
+            type: 'resource',
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+            size: 3,
+          },
+        ],
+      },
+    ])(
+      'does not add the placeholder beside $name on a partially truncated prompt',
+      ({ payload, expected }) => {
+        // projectedAny is the only thing keeping the truncation placeholder
+        // off a turn that already projects something; without it the replay
+        // contradicts itself (a retained resource followed by a chunk
+        // asserting the resource was too large to replay).
+        const projected = updates(
+          createTranscriptReplayMachine(),
+          record('user-partial-truncated', 'user', {
+            message: { role: 'user', parts: [{ text: '' }] },
+            systemPayload: {
+              displayText: '',
+              hookContext: '',
+              ...payload,
+              embeddedResourcesTruncated: true,
+            },
+          }),
+        );
+
+        expect(
+          projected.map((update) =>
+            'content' in update ? update.content : update,
+          ),
+        ).toEqual(expected);
+      },
+    );
 
     it('does not add a placeholder when the truncated prompt has visible text', () => {
       const projected = updates(

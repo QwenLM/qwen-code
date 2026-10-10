@@ -95,13 +95,35 @@ export function snapshotReplayableEmbeddedResources(
       truncated = true;
       continue;
     }
+    // A text longer than the whole budget can never be retained, and UTF-8
+    // byte length is bounded below by code-unit length — skip the full JSON
+    // serialization for the shape that dominates the helper's cost.
+    if (block.resource.text.length > MAX_RECORDED_EMBEDDED_RESOURCES_BYTES) {
+      truncated = true;
+      continue;
+    }
     const blockBytes = Buffer.byteLength(JSON.stringify(block), 'utf8');
     if (retainedBytes + blockBytes > MAX_RECORDED_EMBEDDED_RESOURCES_BYTES) {
       truncated = true;
       continue;
     }
     retainedBytes += blockBytes;
-    resources.push(structuredClone(block));
+    const retained = structuredClone(block);
+    // The daemon's own expansion metadata is wire-local (the
+    // attachmentContext leg carries the daemon host's absolute path), so
+    // drop every `qwen.daemon.*` key: the journal and replay keep only
+    // client-supplied metadata.
+    if (retained._meta) {
+      for (const key of Object.keys(retained._meta)) {
+        if (key.startsWith('qwen.daemon.')) {
+          delete retained._meta[key];
+        }
+      }
+      if (Object.keys(retained._meta).length === 0) {
+        delete retained._meta;
+      }
+    }
+    resources.push(retained);
   }
   return { resources, truncated };
 }

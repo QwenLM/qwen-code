@@ -577,6 +577,16 @@ export interface UserPromptRecordPayload {
    * this payload when no projection, references, or input annotations exist.
    */
   displayText: string;
+  /**
+   * ACP record sites set this from whether the client supplied a display
+   * projection: false means displayText is the raw request text recorded so
+   * replay can render carried references/resources, and the title tracker
+   * must not treat the turn as a projection (a single raw-text marker would
+   * otherwise flip the whole session into title-projection mode and drop
+   * every payload-less turn from the title input). Absent on older journals
+   * and non-ACP paths, which keep the historical payload-shape heuristic.
+   */
+  displayProjection?: boolean;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
   /** UI-only annotations; interpreted by transcript consumers, not the model. */
@@ -1456,16 +1466,19 @@ export class ChatRecordingService {
     }
   }
 
-  // A resource-only record stores displayText '' but hides no model context,
-  // unlike a channel projection marker — it must not flip the title
-  // projection on, or the session loses auto-titling.
+  // A record whose displayText is raw request text (displayProjection
+  // === false) hides no model context, unlike a channel projection marker —
+  // it must not flip the title projection on, or the session loses
+  // auto-titling. Legacy payloads predate the marker, so absence falls back
+  // to the shape heuristic: a resource-only record stores displayText ''.
   private trackUserDisplayTextForTitlePayload(
     payload: UserPromptRecordPayload | undefined,
   ): void {
     this.trackUserDisplayTextForTitle(
-      payload?.displayText === '' &&
-        ((payload.embeddedResources?.length ?? 0) > 0 ||
-          payload.embeddedResourcesTruncated === true)
+      payload?.displayProjection === false ||
+        (payload?.displayText === '' &&
+          ((payload.embeddedResources?.length ?? 0) > 0 ||
+            payload.embeddedResourcesTruncated === true))
         ? undefined
         : payload?.displayText,
     );

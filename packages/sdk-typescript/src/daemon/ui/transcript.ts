@@ -88,6 +88,19 @@ const TEXT_TRUNCATED_SUFFIX = '\n[truncated]\n';
  * ceiling.
  */
 const MAX_EMBEDDED_RESOURCE_BYTES = 256 * 1024;
+/**
+ * Estimate-unit bound on one retained resource's non-text payload — the
+ * retention budget's own unit (`estimateRetainedBytes`, with the separately
+ * bounded text arm excluded). The byte ceiling alone cannot bound what the
+ * store accounts: the estimator bills a flat 16 units per number/boolean
+ * regardless of JSON width, so a payload that passes the byte ceiling can
+ * still pin the newest block — which trimming never evicts — several times
+ * over `maxRetainedBytes`. Sized above the largest writer-parity witness (a
+ * scalar-heavy `_meta` the writer journaled at ~80 KB of real JSON charges
+ * ~641k units) so replay keeps it, and far below the empty-object flood
+ * (~5.1M units) that exists only to pin the store.
+ */
+const MAX_EMBEDDED_RESOURCE_EXTRA_ESTIMATE = 1024 * 1024;
 const jsonByteEncoder = new TextEncoder();
 const MAX_CLONE_DEPTH = 16;
 const truncationCallbacks = new WeakMap<
@@ -2550,6 +2563,21 @@ function realJsonBytesOf(value: DaemonEmbeddedResource): number {
 }
 
 /**
+ * True when a retained resource exceeds either bound: the writer-parity
+ * ceiling in real JSON bytes, or the retention budget's own estimate units
+ * for the non-text payload (the text arm is bounded separately at
+ * MAX_TEXT_BLOCK_LENGTH). The skeleton cascade re-runs the same combined
+ * test after each cut.
+ */
+function overEmbeddedResourceBounds(value: DaemonEmbeddedResource): boolean {
+  return (
+    realJsonBytesOf(value) > MAX_EMBEDDED_RESOURCE_BYTES ||
+    estimateRetainedBytes(value) - value.resource.text.length * 2 >
+      MAX_EMBEDDED_RESOURCE_EXTRA_ESTIMATE
+  );
+}
+
+/**
  * Append one slot to a fingerprint array kept index-aligned with
  * `embeddedResources`, which is append-only; COW clones share the array by
  * reference, so append by replacement only.
@@ -2577,12 +2605,12 @@ function appendFingerprint(
  *
  * The text bound alone is not sufficient: the open index signature lets a
  * large `blob` or vendor key ride through at either level, so the whole
- * resource is measured in real JSON bytes — the writer's own unit — and
- * falls back to the display skeleton when it exceeds the ceiling, reported
- * through the same truncation channel. The skeleton is itself re-measured
- * and clipped to the same ceiling, and the whole-object bound is skipped
- * when the state's byte budget is infinite (the trim-free offline
- * projection).
+ * resource is measured in real JSON bytes — the writer's own unit — AND in
+ * the estimate units the retention budget accounts, and falls back to the
+ * display skeleton when it exceeds either bound, reported through the same
+ * truncation channel. The skeleton is itself re-measured against both units
+ * and clipped until it fits, and the whole-object bound is skipped when the
+ * state's byte budget is infinite (the trim-free offline projection).
  */
 function boundEmbeddedResource(
   state: DaemonTranscriptState,
@@ -2609,7 +2637,7 @@ function boundEmbeddedResource(
   // bytes), so a payload the writer journaled intact must survive replay
   // there.
   if (!Number.isFinite(state.maxRetainedBytes)) return bounded;
-  if (realJsonBytesOf(bounded) <= MAX_EMBEDDED_RESOURCE_BYTES) {
+  if (!overEmbeddedResourceBounds(bounded)) {
     return bounded;
   }
   const skeleton: DaemonEmbeddedResource = {
@@ -2636,20 +2664,20 @@ function boundEmbeddedResource(
     Object.keys(bounded).length > Object.keys(skeleton).length ||
     Object.keys(bounded.resource).length >
       Object.keys(skeleton.resource).length;
-  if (realJsonBytesOf(skeleton) > MAX_EMBEDDED_RESOURCE_BYTES) {
+  if (overEmbeddedResourceBounds(skeleton)) {
     if (skeleton['_meta'] !== undefined) {
       delete skeleton['_meta'];
       clipped = true;
     }
     if (
-      realJsonBytesOf(skeleton) > MAX_EMBEDDED_RESOURCE_BYTES &&
+      overEmbeddedResourceBounds(skeleton) &&
       skeleton.resource['_meta'] !== undefined
     ) {
       delete skeleton.resource['_meta'];
       clipped = true;
     }
     if (
-      realJsonBytesOf(skeleton) > MAX_EMBEDDED_RESOURCE_BYTES &&
+      overEmbeddedResourceBounds(skeleton) &&
       skeleton.resource.uri.length > MAX_TEXT_BLOCK_LENGTH
     ) {
       skeleton.resource.uri = truncateTextAtLimit(skeleton.resource.uri);
@@ -2660,7 +2688,7 @@ function boundEmbeddedResource(
     // non-string payload otherwise rides through the ceiling unbounded
     // and, because the skeleton kept the same keys, unreported.
     const mimeType = skeleton.resource.mimeType;
-    if (realJsonBytesOf(skeleton) > MAX_EMBEDDED_RESOURCE_BYTES) {
+    if (overEmbeddedResourceBounds(skeleton)) {
       if (typeof mimeType === 'string') {
         if (mimeType.length > MAX_TEXT_BLOCK_LENGTH) {
           skeleton.resource.mimeType = truncateTextAtLimit(mimeType);
