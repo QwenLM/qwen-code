@@ -2408,7 +2408,6 @@ describe('Hosted Harness no-tool session', () => {
   // its tool_result landed: the aftermath answers it from its record before
   // the Turn settles, so the next Turn's model is never told to retry it.
   it('answers a committed team call of a crashed wake Turn from its record', async () => {
-    domainEnablement.teams = true;
     const inputId = await prewriteAutomationCrashedTurnSession();
     const key = {
       tenantId: 'tenant',
@@ -2498,7 +2497,6 @@ describe('Hosted Harness no-tool session', () => {
         'committed its team change',
       );
     } finally {
-      domainEnablement.teams = false;
       await managed.close().catch(() => undefined);
     }
   });
@@ -18894,7 +18892,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
   // retry it and the retry opens a second task.
   it('answers a committed team call of a cancelled user Turn from its record', async () => {
     domainEnablement.childRun = true;
-    domainEnablement.teams = true;
     try {
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
       vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
@@ -19041,7 +19038,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
         supertest(replacement).delete(`/session/${SESSION_ID}`),
       );
     } finally {
-      domainEnablement.teams = false;
       domainEnablement.childRun = false;
     }
   }, 30_000);
@@ -19054,7 +19050,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
     'answers a committed team sibling of a Runtime park through the %s route',
     async (route) => {
       domainEnablement.childRun = true;
-      domainEnablement.teams = true;
       try {
         vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
         acquireSpy = vi
@@ -19290,7 +19285,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
           supertest(replacement).delete(`/session/${SESSION_ID}`),
         );
       } finally {
-        domainEnablement.teams = false;
         domainEnablement.childRun = false;
       }
     },
@@ -19311,7 +19305,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
     'answers a committed %s sibling before the bare-load resume of a publication Session',
     async (sibling, expected) => {
       domainEnablement.childRun = true;
-      domainEnablement.teams = true;
       try {
         const key = {
           tenantId: 'tenant',
@@ -19602,7 +19595,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
         );
         await headers(supertest(second).delete(`/session/${SESSION_ID}`));
       } finally {
-        domainEnablement.teams = false;
         domainEnablement.childRun = false;
       }
     },
@@ -19619,7 +19611,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
     async (sibling) => {
       const kind = 'task_create' as 'task_create' | 'agent';
       domainEnablement.childRun = true;
-      domainEnablement.teams = true;
       try {
         vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
         vi.spyOn(
@@ -19835,7 +19826,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(retried).toBe(0);
         expect(domainCommits('team_task')).toBe(1);
       } finally {
-        domainEnablement.teams = false;
         domainEnablement.childRun = false;
       }
     },
