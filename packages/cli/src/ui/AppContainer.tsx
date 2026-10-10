@@ -3411,21 +3411,29 @@ export const AppContainer = (props: AppContainerProps) => {
               }),
             );
             debugLogger.error(
-              'Failed to accept speculation, resubmitting normally',
+              'Failed to accept speculation',
               err,
               'Cause:',
               err instanceof Error ? err.cause : undefined,
             );
             if (appliedFiles.length > 0) {
+              // Some edits are already on disk. Resubmitting the same turn would
+              // run the same tool calls again over files that already carry their
+              // result, so the second run compounds the first -- and the tool
+              // results the model reads back would describe an edit applied
+              // twice. Report what landed and stop; a normal submit is only safe
+              // when nothing was written.
               historyManager.addItem(
                 {
-                  type: MessageType.WARNING,
-                  text: `Speculative execution applied ${appliedFiles.length} file(s) before failing: ${appliedFiles.join(', ')}. Resubmitting normally.`,
+                  type: MessageType.ERROR,
+                  text: `Speculative execution applied ${appliedFiles.length} file(s) before failing, so the request was not resubmitted: ${appliedFiles.join(', ')}. Re-running it would apply those edits a second time -- check the files above first, then re-run if the result is what you want.`,
                 },
                 Date.now(),
               );
+              return;
             }
-            // Fallback: submit normally
+            // Fallback: submit normally. Nothing reached disk, so a resubmit
+            // cannot duplicate an edit.
             addMessage(submittedValue, false, submittedPrompt, shellModeActive);
           });
         speculationRef.current = IDLE_SPECULATION;

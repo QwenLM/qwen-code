@@ -380,7 +380,7 @@ describe('AppContainer State Management', () => {
     unmount();
   });
 
-  it('logs the cause and records a failed speculation before resubmitting', async () => {
+  it('logs the cause and records a failed speculation without resubmitting when a file was applied', async () => {
     const suggestion = 'apply the speculative edit';
     const cause = Object.assign(new Error('directory is blocked'), {
       code: 'EEXIST',
@@ -403,6 +403,15 @@ describe('AppContainer State Management', () => {
       toolUseCount: 1,
     };
     const addMessage = vi.fn();
+    const historyManager = {
+      history: [] as HistoryItem[],
+      addItem: vi.fn(),
+      updateItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+      truncateToItem: vi.fn(),
+    };
+    mockedUseHistory.mockReturnValue(historyManager);
     const submitQuery = vi.fn().mockResolvedValue(undefined);
     const llmClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
@@ -429,7 +438,153 @@ describe('AppContainer State Management', () => {
       drainQueue: vi.fn().mockReturnValue([]),
       popNextSubmission: vi.fn().mockReturnValue(null),
     });
+    mockedUseLlmStream.mockReturnValue({
+      streamingState: StreamingState.Responding,
+      submitQuery,
+      initError: null,
+      pendingHistoryItems: [],
+      thought: null,
+      cancelOngoingRequest: vi.fn(),
+      streamingResponseLengthRef: { current: 0 },
+      isReceivingContent: false,
+    });
+    const view = render(
+      <AppContainer
+        config={mockConfig}
+        settings={mockSettings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+    mockedUseLlmStream.mockReturnValue({
+      streamingState: StreamingState.Idle,
+      submitQuery,
+      initError: null,
+      pendingHistoryItems: [],
+      thought: null,
+      cancelOngoingRequest: vi.fn(),
+      streamingResponseLengthRef: { current: 0 },
+      isReceivingContent: false,
+    });
+    await act(async () => {
+      view.rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+    });
+    await vi.waitFor(() => expect(startSpeculationMock).toHaveBeenCalledOnce());
+    await act(async () => {
+      capturedUIActions.handleFinalSubmit(suggestion, {
+        submittedPrompt: suggestion,
+      });
+    });
+    await vi.waitFor(() =>
+      expect(historyManager.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.stringContaining('/workspace/test.ts'),
+        }),
+        expect.any(Number),
+      ),
+    );
 
+    expect(acceptSpeculationMock).toHaveBeenCalledOnce();
+    // The edit to /workspace/test.ts is already on disk. Resubmitting the same
+    // turn would run the same tool calls again over that file, so the request
+    // must not be sent a second time.
+    expect(addMessage).not.toHaveBeenCalled();
+    expect(logSpeculationMock).toHaveBeenCalledOnce();
+    const event = logSpeculationMock.mock.calls[0]![1] as {
+      outcome: string;
+      turns_used: number;
+      files_written: number;
+      tool_use_count: number;
+      duration_ms: number;
+      boundary_type?: string;
+      had_pipelined_suggestion: boolean;
+    };
+    expect(event).toMatchObject({
+      outcome: 'failed',
+      turns_used: 1,
+      files_written: 1,
+      tool_use_count: 1,
+      had_pipelined_suggestion: false,
+    });
+    expect(event.boundary_type).toBeUndefined();
+    expect(event.duration_ms).toBeGreaterThanOrEqual(0);
+    expect(debugLoggerMock.error).toHaveBeenCalledWith(
+      'Failed to accept speculation',
+      failure,
+      'Cause:',
+      cause,
+    );
+    view.unmount();
+  });
+
+  it('resubmits normally when a failed apply left nothing on disk', async () => {
+    // Nothing reached the workspace, so a normal submit cannot duplicate an
+    // edit and stays the better fallback.
+    const suggestion = 'apply the speculative edit';
+    const cause = Object.assign(new Error('permission denied'), {
+      code: 'EACCES',
+    });
+    const failure = Object.assign(
+      new Error('Could not apply 1 of 1 file(s)', { cause }),
+      {
+        applied: [],
+        failed: ['/workspace/blocked.ts'],
+      },
+    );
+    const spec = {
+      id: 'spec-1',
+      status: 'completed',
+      suggestion,
+      overlayFs: null,
+      abortController: new AbortController(),
+      messages: [{ role: 'model', parts: [{ text: 'speculated' }] }],
+      startTime: Date.now(),
+      toolUseCount: 1,
+    };
+    const addMessage = vi.fn();
+    const historyManager = {
+      history: [] as HistoryItem[],
+      addItem: vi.fn(),
+      updateItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+      truncateToItem: vi.fn(),
+    };
+    mockedUseHistory.mockReturnValue(historyManager);
+    const submitQuery = vi.fn().mockResolvedValue(undefined);
+    const llmClient = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      setTools: vi.fn().mockResolvedValue(undefined),
+      isInitialized: vi.fn().mockReturnValue(false),
+      getHistoryTail: vi.fn().mockReturnValue([]),
+    } as unknown as LlmClient;
+    vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+    vi.spyOn(mockConfig, 'getSdkMode').mockReturnValue(false);
+    vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue(llmClient);
+    mockSettings.merged.ui = {
+      ...mockSettings.merged.ui,
+      enableSpeculation: true,
+    };
+    generatePromptSuggestionMock.mockResolvedValue({ suggestion });
+    startSpeculationMock.mockResolvedValue(spec);
+    acceptSpeculationMock.mockRejectedValue(failure);
+    mockedUseMessageQueue.mockReturnValue({
+      messageQueue: [],
+      addMessage,
+      clearQueue: vi.fn(),
+      getQueuedMessagesText: vi.fn().mockReturnValue(''),
+      popAllMessages: vi.fn().mockReturnValue(null),
+      drainQueue: vi.fn().mockReturnValue([]),
+      popNextSubmission: vi.fn().mockReturnValue(null),
+    });
     mockedUseLlmStream.mockReturnValue({
       streamingState: StreamingState.Responding,
       submitQuery,
@@ -486,31 +641,19 @@ describe('AppContainer State Management', () => {
     expect(logSpeculationMock).toHaveBeenCalledOnce();
     const event = logSpeculationMock.mock.calls[0]![1] as {
       outcome: string;
-      turns_used: number;
       files_written: number;
-      tool_use_count: number;
-      duration_ms: number;
-      boundary_type?: string;
-      had_pipelined_suggestion: boolean;
     };
     expect(event).toMatchObject({
       outcome: 'failed',
-      turns_used: 1,
-      files_written: 1,
-      tool_use_count: 1,
-      had_pipelined_suggestion: false,
+      files_written: 0,
     });
-    expect(event.boundary_type).toBeUndefined();
-    expect(event.duration_ms).toBeGreaterThanOrEqual(0);
-    expect(debugLoggerMock.error).toHaveBeenCalledWith(
-      'Failed to accept speculation, resubmitting normally',
-      failure,
-      'Cause:',
-      cause,
+    // No file landed, so there is nothing for the user to reconcile by hand.
+    expect(historyManager.addItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: MessageType.ERROR }),
+      expect.any(Number),
     );
     view.unmount();
   });
-
   // One test below runs the real config.initialize(), which warms the tool
   // registry; under heavy parallel CI load that can exceed the default
   // timeout without any real hang.
