@@ -1597,8 +1597,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             ToolExecutionRecord parent = invocation;
             CompletableFuture.completedFuture(null)
-                    .thenComposeAsync(ignored -> observeProcessRow(context,
-                            parent, row))
+                    .thenComposeAsync(ignored -> observeScannedProcessRow(
+                            context, parent, row))
                     .exceptionally(failure -> null);
         }
     }
@@ -1830,7 +1830,21 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private CompletionStage<ToolExecutionRecord> observeProcessRow(
             SessionContext context, ToolExecutionRecord invocation,
             ToolExecutionRecord process) {
-        return controlProcessRow(context, invocation, process, "shell-status");
+        return controlProcessRow(context, invocation, process, "shell-status",
+                true);
+    }
+
+    /**
+     * The scan's read-only maintenance ask runs unfenced: it must not hold
+     * `activeControls` past the sweep's own proof, or a release that settled
+     * every row would still refuse `runtime_session_busy` solely for the
+     * outstanding status answer (#13830 review).
+     */
+    private CompletionStage<ToolExecutionRecord> observeScannedProcessRow(
+            SessionContext context, ToolExecutionRecord invocation,
+            ToolExecutionRecord process) {
+        return controlProcessRow(context, invocation, process, "shell-status",
+                false);
     }
 
     /**
@@ -1843,6 +1857,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private CompletionStage<ToolExecutionRecord> controlProcessRow(
             SessionContext context, ToolExecutionRecord invocation,
             ToolExecutionRecord process, String kind) {
+        return controlProcessRow(context, invocation, process, kind, true);
+    }
+
+    private CompletionStage<ToolExecutionRecord> controlProcessRow(
+            SessionContext context, ToolExecutionRecord invocation,
+            ToolExecutionRecord process, String kind, boolean fenced) {
         if (process.isTerminal()) {
             return CompletableFuture.completedFuture(process);
         }
@@ -1855,7 +1875,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
         operation.put("operationId", process.getExecutionCallId());
         operation.put("targetOperationId",
                 referenceString(invocation.getReference(), "callId"));
-        context.beginControl();
+        if (fenced) {
+            context.beginControl();
+        }
         return mapFailure(safeStage(() -> {
             requireUsableLease(context);
             return transport.control(context.lease(), context.session(),
@@ -1871,7 +1893,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         .findByExecutionCallId(process.getExecutionCallId());
                 return current == null ? process : current;
             })
-            .whenComplete((ignored, error) -> context.endControl());
+            .whenComplete((ignored, error) -> {
+                if (fenced) {
+                    context.endControl();
+                }
+            });
     }
 
     /**

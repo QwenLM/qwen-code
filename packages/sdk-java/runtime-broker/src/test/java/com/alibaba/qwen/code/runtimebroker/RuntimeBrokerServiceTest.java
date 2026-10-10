@@ -1918,6 +1918,49 @@ class RuntimeBrokerServiceTest {
         }
     }
 
+    @Test
+    void releaseSettlesWhileAScanObservationIsInFlight() throws Exception {
+        // A scan observation outstanding at release must not hold
+        // activeControls past the sweep's own proof: the sweep settles the
+        // row and the release succeeds (#13830 review).
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "bg-overlap");
+        String processId = admitDetachedBackgroundProcess(bindings, sessions,
+                executions, recovery, "call");
+
+        Map<String, Object> exited = new LinkedHashMap<>();
+        exited.put("operationId", "call");
+        exited.put("state", "exited");
+        exited.put("evidence", Map.of("exitCode", 0));
+        FakeTransport transport = new FakeTransport();
+        AtomicInteger controlCalls = new AtomicInteger();
+        CompletableFuture<Object> neverAnswered = new CompletableFuture<>();
+        transport.controlHandler = operation ->
+                controlCalls.incrementAndGet() == 1
+                        ? neverAnswered
+                        : CompletableFuture.completedFuture(exited);
+        RuntimeScope scope = recovery.binding.getRequest().getScope();
+        try (var service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(scope),
+                readyAdoptionProvisioner(), transport, bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(10),
+                Duration.ofSeconds(10))) {
+            String harness = recovery.session.getSession()
+                    .getHarnessSessionId();
+            String runtimeSession = recovery.session.getRuntimeSessionId();
+            join(service.acquire(harness, runtimeSession, "bootstrap"));
+            await(() -> controlCalls.get() >= 1);
+            assertEquals(ToolExecutionRecord.State.PREPARED,
+                    executions.findByExecutionCallId(processId).getState());
+            assertTrue(join(service.release(harness, runtimeSession)));
+            assertEquals(ToolExecutionRecord.State.SETTLED,
+                    executions.findByExecutionCallId(processId).getState());
+        }
+    }
+
     /** Seeds a settled-detached invocation plus its live `:process` row. */
     private static String admitDetachedBackgroundProcess(
             RuntimeBindingRepository bindings,
