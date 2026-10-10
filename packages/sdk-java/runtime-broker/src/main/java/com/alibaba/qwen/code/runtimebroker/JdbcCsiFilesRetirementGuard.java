@@ -195,6 +195,12 @@ public final class JdbcCsiFilesRetirementGuard {
         return original;
     }
 
+    public static void requireReadCompletion(Connection connection, Original original) throws SQLException {
+        requireTransaction(connection);
+        original.requireContinuation();
+        JdbcCsiRetirementSeal.lock(connection, original);
+    }
+
     public static void requireSingleSession(Connection connection, Original original) throws SQLException {
         requireTransaction(connection);
         try (PreparedStatement statement = statement(connection,

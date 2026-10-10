@@ -14,7 +14,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /** Durable Session-root protection; elapsed time never closes a physical PUT. */
 public final class ToolPublicationRetentionStore {
-    private static final long READ_BUDGET_MILLIS = 120_000;
+    static final long READ_BUDGET_MILLIS = 120_000;
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
 

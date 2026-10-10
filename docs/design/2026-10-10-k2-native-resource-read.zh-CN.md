@@ -2,8 +2,11 @@
 
 [English](2026-10-10-k2-native-resource-read.md) | [简体中文](2026-10-10-k2-native-resource-read.zh-CN.md)
 
-状态：提案；调查完成，实现和独立验证待完成。基线
-`f39cf1db9da6489d8d2e0562b15a10214f918da9`。
+状态：本 owner-read 增量已实现，独立有界候选行为验证完成，包括 writer 到期与
+冲突 pin control；原生 review 因配置模型
+额度耗尽（HTTP 403）不可用，没有生成审查结论。
+当前独立基线 `02d7eabe3b7ca616cd354eb8d1dbec0ef48b28ff`。
+历史基线 `f39cf1db9da6489d8d2e0562b15a10214f918da9`。
 关联 #12380、#13395 和 Draft PR #13526。整体 K2 尚未完成。
 
 ## 问题与现有行为
@@ -19,7 +22,10 @@ writer 身份，也没有已完成或未知的 I/O 历史。租约过期和删�
 不同于私有文件 profile，必须继续可用。
 
 Hosted cold restore 先改变当前 writer claim，再安装 successor activation。
-genesis 恢复也先于首次 activation。因此，资源读取不能统一要求已安装原生 writer。
+当前 native receipt 断点恢复已成功完成，claim 到 activation 安装之间未发生资源 GET。
+这不撤销当前 writer 已有的 owner 读取能力：兼容的 owner 读取可以先于 activation。
+genesis 恢复也先于首次 activation。资源读取不能统一要求已安装原生 writer；
+自然恢复与观察器主动发起的兼容性 GET 是独立验证组。
 
 ## 目标与范围
 
@@ -31,7 +37,7 @@ fetch 前记录原入场身份，并保留持久的完成或未知结果。保�
 read/PUT 回调、unsupported 私有历史 collector、配额过期、物理对象流、绑定 cut
 的历史 reader 属于后续增量。本设计不证明这些 writer 已封闭，也不证明聚合
 DRAINED、物理 writer 终止、NodeUnpublish、RELEASED、安全复用或公开
-Spring/Hosted 选择。阿里云 ACK 仍是可选的 Kubernetes 测试环境。
+Spring/Hosted 选择。阿里云 ACK 已选为后续 Kubernetes 资格化环境。
 
 ## Owner 路由与入场
 
@@ -90,7 +96,9 @@ JDBC 清理 helper 可能吞掉 SQL close 失败，其 query 正常返回不足�
 删除故障分别测试。
 
 完成阶段在独立事务中先取同一原 parent，再取子锁，并校验已持久入场的不可变
-origin。允许原 READY 或已封闭的 DRAINING binding 继续，不接受替换 binding。
+origin。继续 DRAINING parent 前还须校验原 retirement seal、registration 与物理
+holder 关联；仅有 binding flag 不足以合格。允许原 READY 或已封闭的 DRAINING
+binding 继续，不接受替换 binding。
 仅记录旧 I/O 已结束时，不要求入场 writer 仍拥有 head。成功 bytes 交付和
 `last_verified_at` 更新还要求锁定 head 上当前匹配的 writer grant、scope、
 未变资源身份及未过期交付租约。先验证 bytes，再更新时间，避免给尚未读取的
@@ -119,6 +127,20 @@ UNKNOWN 保留租约，等待后续合格策略处理。完成异常不能转成
 本设计没有公开生命周期路由、通用权限 resolver、可选死开关、collector 删除或
 release 状态转换。
 
+## 实现增量
+
+Owner 路由调用 `readOwnerResource`，内部 publication 校验保留 `readResource`。
+V64 新增空的原生读取历史，已发布 migration 保持不变。两个短事务使用同一现有
+DataSource，事务 timeout 为 10 秒。入场只读元数据，不读 inline bytes。Fetch
+在 SQL 事务外显式管理 JDBC 资源生命周期；每次完成先锁定并比对完整持久入场，
+再改变状态。RETURNED 包括已知交付或校验失败，保存结束时间；OPEN 与 UNKNOWN
+不声称结束时间，重试不更新任何旧记录。
+
+`JdbcCsiFilesRetirementGuard.requireReadCompletion` 校验已有原 retirement seal、
+registration 和物理 holder 关联，不要求已安装 activation。只有 binding flag
+不足以继续 DRAINING parent；这也不授予 worker finalize、drain 或 release 权限。
+历史索引覆盖原 binding/generation/state，保留每次已入场读取。
+
 ## 验证与验收
 
 按 `/feat-dev` 顺序执行，由独立只读 test-engineer 验证。首先尝试全局 `qwen`
@@ -127,7 +149,7 @@ release 状态转换。
 持久租约、完成后消失及缺失原完成历史。旧原生运行只能复用 harness 源码，
 不能算作新证据。
 
-该 commit 的独立基线到达一个真实原生窗口：10 次成功 resource GET、一次错误
+历史 `f39cf1db9` 的独立基线到达一个真实原生窗口：10 次成功 resource GET、一次错误
 credential 的 403、10 次临时租约插入/删除。实际发现的全部 57 张表、726 列均
 没有原生 read-end 历史。每次成功 GET 仅改变对应资源的校验时间戳，拒绝的 GET
 不改变这些表。全局 `qwen` discovery 成功但没有私有 Java 入口，因此这些观察
@@ -143,8 +165,58 @@ credential 的 403、10 次临时租约插入/删除。实际发现的全部 57 
 观察，不代表自然过期、JDBC close 故障、冷恢复、原 parent 隔离级别争用或提案
 reader 验收；这些未执行组和整体 K2 仍待完成。
 
-验收要求真实原生 owner HTTP 读取及精确资源 bytes、首次 activation、successor
-安装前恢复、旧/过期 credential、封闭后拒绝新 read、封闭后完成已入场 read、
+`02d7eabe3` 的全新独立基线覆盖自然冷恢复和 28 次成功 GET、28 次临时租约
+插入/删除。全值审计覆盖 61 张表、801 列，仅对应资源的校验时间戳改变。两个
+successor 安装前兼容 GET 使用真实 acquire 的 writer，在响应传回 Hosted 前
+暂时持有；它们由 observer 发起，自然安装前 GET 仍为零。另一个故障窗口证明
+三个真实 JDBC cleanup 故障仍返回 200 且无持久历史，RC/RR 原 placement parent
+锁未阻止旧 GET，真实 operation claim 和 retirement seal 后仍能新开 GET。
+这些证明基线缺口，不代表候选验收。此前失败窗口仍保持失败；自然过期和 reader
+已预热的 RR snapshot 仍需候选验证。
+
+精确候选 diff `1b47c745a085d34ff9bba5eba72b322eb8ece3df51fe67d3c6de49739ea8036c`
+与 Java/Node 产品及依赖已独立封存。G1/G2/G5/G6 完成 51 项检查：35 次精确
+bytes GET 200、五次故障 GET 500、一次错误 owner 403。最终持久 membership
+为 35 RETURNED、四 UNKNOWN、一 OPEN，保留五个租约。真实 MySQL
+READ COMMITTED 和已预热 REPEATABLE READ 在子写入前等待原 parent。
+自然冷恢复与两个显式 successor 安装前兼容 GET 通过，自然安装前 GET 为零。
+
+独立故障/seal 观察覆盖 G3/G5/G6，包括保留原异常及 suppressed 完成异常、
+rollback 保留 OPEN。首次故障窗口因 observer 未记录 Spring-resolved 异常链
+而失败。第二窗口观察到 75 项 predicate，aggregate 仍退出 1：40 秒 HTTP
+client 先于真实 120 秒交付截止时间超时。服务端随后提交 RETURNED/expired、
+准备 409，并遇到 broken pipe；没有向该客户端交付 409。全新窄 G4 窗口使用
+180 秒 client 截止时间，完成 31 项检查，实际在自然交付过期后收到 409。
+真实原 seal 前入场的两个 read 均保留 OPEN 与自己的租约；一个在封闭后返回
+精确 bytes，另一个保存 RETURNED/expired 并只删除自己的租约。封闭后的新
+read 返回 409 且所有表不变。没有通过 SQL 改写截止时间。
+
+原始全值审计覆盖全部 62 张表、827 列，无意外变更或 source/product drift；
+专属进程、端口、数据库均已清理。Synthetic Kubernetes/attestation、透明 HTTP
+adapter、确定性 SSE、Darwin mount mapping 仍是显式 harness seam。JDBC
+close 故障是实际 driver close 返回后由 adapter 注入的 SQLException。
+结果只资格化本地 owner-read 行为，不证明物理 CSI 退役或对象流清理。
+
+Build/typecheck/bundle、11 项 Broker 针对性测试、203 项 Agent 针对性测试
+及最终 Java packaging/static checks 通过。更广 Agent 运行有 1,848 项测试、
+零 failure/error、一个 skip，排除了既有 APFS 非法文件名 case；命令仍因一个
+空行 Checkstyle 错误退出 1，之后已删除并重新验证。最初失败的完整运行及错误
+wildcard 选中可选 MySQL integration tests 的运行继续保留为失败。最终文档
+记录这些观察，已测试的 production 和 migration bytes 不变。
+
+Owner credential 绑定 Session scope，cold writer recovery 合法沿用相同值。
+当前 writer grant 到期必须拒绝读取；successor recovery 不是 credential rotation。
+独立自然到期 GET 与显式 adversarial original-pin conflict control 在全新封存窗口
+完成 21 项检查，两者均返回 409 且全部 62 表不变。Pin fixture 准备和精确恢复
+独立审计，恢复后的正向 GET 返回 200。该到期窗口没有启动 successor。
+单测任意无效 credential 不是真实 writer 到期或被替换观察。
+
+最终 production 与 migration bytes 匹配独立测试产品。最终 test 变更仅准确
+重命名 invalid-credential 断言，rename 后全部 14 项 native-read unit case 再次
+通过。配对文档补充这些验证结果与 native-review 不可用结果。
+
+验收要求真实原生 owner HTTP 读取及精确资源 bytes、首次 activation、自然冷恢复、
+successor 安装前兼容读取、无效 credential 与过期 writer grant、封闭后拒绝新 read、封闭后完成已入场 read、
 JDBC fetch 延迟超过交付期限、不确定 fetch/完成及独立重试历史。使用专属 MySQL
 READ COMMITTED 和已预热 REPEATABLE READ，观察原 parent→head 等待；
 H2 fixture 不能证明这些锁。保留实际发现的全部表/列及原始值，逐 key 列明允许

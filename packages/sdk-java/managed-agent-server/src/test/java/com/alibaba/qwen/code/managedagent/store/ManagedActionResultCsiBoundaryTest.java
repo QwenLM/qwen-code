@@ -258,7 +258,7 @@ class ManagedActionResultCsiBoundaryTest {
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, JSON.valueToTree(rows));
         }
-        assertThat(result).hasSize(57);
+        assertThat(result).hasSize(62);
         return result;
     }
 
