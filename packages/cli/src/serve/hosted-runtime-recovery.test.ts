@@ -31,6 +31,7 @@ import {
 } from './hosted-file-history.js';
 import { HARNESS_MODEL_START_PHASES } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import { hostedRuntimeSessionId } from './hosted-workspace-tool-turn.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
 const SESSION_ID = '22222222-2222-4222-8222-222222222222';
@@ -1225,6 +1226,127 @@ describe('recoverHostedRuntimeTurn', () => {
       });
       expect(acquire).not.toHaveBeenCalled();
       expect(execute).not.toHaveBeenCalled();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('derives a parked Shell owner Broker identity under the mapped wake id', async () => {
+    // A shell-profile wake turn parks under a colon-bearing logical id:
+    // the owner its recovery Broker takes is the mapped path-safe id the
+    // tool turn acquired under, never the raw one.
+    const wakePromptId = 'arun_x:input';
+    const session = await open('boot-1', true, 'hosted-workspace-shell/1');
+    const harness = createManagedHarnessHandle(session);
+    const authority = session.authority;
+    const contentRef = await session.resources.publish(
+      'managed-input',
+      Buffer.from(JSON.stringify([{ type: 'text', text: 'run it' }])),
+    );
+    const admissionRef = await session.resources.publish(
+      'managed-admission',
+      Buffer.from('{}'),
+    );
+    await authority.submitInput(
+      {
+        operation: 'submitInput',
+        commandId: wakePromptId,
+        sessionKey: authority.sessionHeader.sessionKey,
+        contentDigest: DIGEST,
+      },
+      {
+        inputId: wakePromptId,
+        turnId: wakePromptId,
+        source: 'hosted-harness',
+        contentRef,
+        admissionRef,
+        deadline: null,
+        wakeReason: 'input',
+      },
+    );
+    await harness.ensureRunnable();
+    const definitionRef = await session.resources.publish(
+      'managed-tool-definition',
+      Buffer.from(JSON.stringify({ name: 'run_shell_command' })),
+    );
+    const activation = session.activation;
+    const argsRef = await session.resources.publish(
+      'managed-tool-args',
+      Buffer.from(
+        JSON.stringify({
+          toolName: 'run_shell_command',
+          input: { command: 'cat x' },
+        }),
+      ),
+    );
+    await authority.appendExecutionEvent(
+      {
+        operation: 'toolIntent',
+        commandId: `tool-intent:${EXECUTION_ID}`,
+        sessionKey: authority.sessionHeader.sessionKey,
+        contentDigest: argsRef.digest,
+      },
+      (sequence) => ({
+        v: 1,
+        sequence,
+        eventId: `tool-intent:${EXECUTION_ID}`,
+        sessionKey: authority.sessionHeader.sessionKey,
+        kind: 'tool.intent',
+        occurredAt: Date.now(),
+        subject: {
+          type: 'activation',
+          scopeId: activation.activationId,
+          ...activation,
+        },
+        payload: {
+          executionCallId: EXECUTION_ID,
+          batchId: 'batch-1',
+          ordinal: 0,
+          toolDefinitionRef: definitionRef,
+          argsRef,
+          outcomeSource: 'runtime',
+        },
+      }),
+      { class: 'harness', activation },
+    );
+    await harness.commitAwaitRuntimeBatch(
+      [
+        {
+          functionCallId: 'call-1',
+          toolName: 'run_shell_command',
+          executionCallId: EXECUTION_ID,
+          invocationBindingId: EXECUTION_ID,
+          capabilityVersion: 'workspace-capability/1',
+          policyVersion: 'preapproved-workspace-tools/1',
+          mediaVersion: null,
+          modelMessageId: 'message-1',
+          partIndex: 0,
+          ordinal: 0,
+          inputDigest: DIGEST,
+          progressCursor: null,
+          attemptId: 'attempt-1',
+          routeRef: argsRef,
+        },
+      ],
+      { turnId: wakePromptId, promptId: wakePromptId },
+    );
+    await session.close();
+    resetManagedRuntimeDispatchGatesForTest();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'settled',
+    } as never);
+    const replacement = await open('boot-2', false);
+    try {
+      const broker = await stopParkedRuntimeExecutions({
+        session: replacement,
+        promptId: wakePromptId,
+        brokerOptions,
+      });
+      expect(broker.runtimeSessionId).toBe(
+        hostedRuntimeSessionId(wakePromptId),
+      );
+      expect(broker.runtimeSessionId).toMatch(/^wake-[0-9a-f]{64}$/);
+      expect(broker.runtimeSessionId).not.toBe(wakePromptId);
     } finally {
       await replacement.close();
     }
