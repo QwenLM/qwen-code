@@ -84,8 +84,8 @@ public final class ApiModels {
     }
 
     public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
-            boolean workspaceTurns, boolean sessionClose, boolean sessionArchive, boolean sessionUnarchive,
-            boolean sessionDelete) {
+            boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
+            boolean sessionUnarchive, boolean sessionDelete) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -330,6 +330,79 @@ public final class ApiModels {
             WebShellTurn activeTurn, Object environment, long lastSequence,
             WebShellWorkspace workspace,
             WebShellSessionCapabilities capabilities) {
+    }
+
+    /** H6b: the definition fields a create or revise request carries. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record AutomationDefinitionRequest(
+            @JsonProperty("session_id") String sessionId, String goal,
+            String cron, String timezone, String prompt,
+            @JsonProperty("session_mode") String sessionMode, String overlap,
+            @JsonProperty("catch_up") String catchUp,
+            @JsonProperty("catch_up_limit") Long catchUpLimit,
+            Boolean enabled) {
+    }
+
+    /** H6b: one automation definition at its current revision. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicAutomation(String id, String object,
+            @JsonProperty("session_id") String sessionId,
+            @JsonProperty("definition_revision") long definitionRevision,
+            String digest, String goal, String cron, String timezone,
+            @JsonProperty("session_mode") String sessionMode, String overlap,
+            @JsonProperty("catch_up") String catchUp,
+            @JsonProperty("catch_up_limit") Long catchUpLimit,
+            boolean enabled, String state,
+            @JsonProperty("created_at") long createdAt,
+            @JsonProperty("updated_at") long updatedAt) {
+    }
+
+    /** H5c: one route binding of a channel connection (PublicChannelRoute). */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicChannelRoute(
+            @JsonProperty("platform_event_id") String platformEventId,
+            @JsonProperty("account_generation") long accountGeneration,
+            @JsonProperty("semantic_revision") long semanticRevision,
+            @JsonProperty("sender_id") String senderId,
+            @JsonProperty("chat_id") String chatId,
+            @JsonProperty("thread_id") String threadId,
+            @JsonProperty("session_id") String sessionId,
+            String state,
+            @JsonProperty("input_id") String inputId,
+            @JsonProperty("staged_attachment_refs")
+                    List<String> stagedAttachmentRefs,
+            @JsonProperty("created_at") long createdAt) {
+    }
+
+    /** H5c: one channel connection with its newest route bindings. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicChannel(String id, String object, String platform,
+            @JsonProperty("account_generation") long accountGeneration,
+            String state, List<PublicChannelRoute> routes,
+            @JsonProperty("created_at") long createdAt) {
+    }
+
+    /** H5c: one outbound delivery of a channel. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicChannelDelivery(String id, String object,
+            @JsonProperty("channel_id") String channelId,
+            @JsonProperty("segment_id") String segmentId,
+            int ordinal, String state,
+            @JsonProperty("provider_receipt") String providerReceipt,
+            @JsonProperty("created_at") long createdAt,
+            @JsonProperty("updated_at") long updatedAt) {
+    }
+
+    /** H6b: one occurrence decision of an automation, with its run's state. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicAutomationRun(String id, String object,
+            @JsonProperty("automation_id") String automationId,
+            @JsonProperty("session_id") String sessionId,
+            @JsonProperty("occurrence_key") String occurrenceKey, String slot,
+            String trigger, String outcome, String reason,
+            @JsonProperty("definition_revision") long definitionRevision,
+            String state, @JsonProperty("created_at") long createdAt,
+            @JsonProperty("updated_at") long updatedAt) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

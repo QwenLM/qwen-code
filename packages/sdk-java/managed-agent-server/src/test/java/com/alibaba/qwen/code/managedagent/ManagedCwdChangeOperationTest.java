@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore.CwdChangeOutcome;
+import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
@@ -17,8 +18,12 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -41,6 +46,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -92,7 +99,8 @@ class ManagedCwdChangeOperationTest {
     }
 
     // A retry after the settlement replays the completed operation even
-    // though the revision CAS could never pass again.
+    // though the revision CAS could never pass again, and a retained
+    // Runtime context cannot block its own replay either.
     @Test
     void replayOutlivesItsRevisionCheck() {
         Fixture fixture = fixture(true);
@@ -104,11 +112,82 @@ class ManagedCwdChangeOperationTest {
         assertThat(settle(fixture,
                 sessionId, claimed.operationId(), "owner",
                 claimed.claimGeneration()).completed()).isTrue();
+        fixture.insertRuntimeOwner(TENANT, sessionId,
+                RuntimeSessionRecord.State.READY);
         OperationAdmission replay = begin(fixture, sessionId, "key-1",
                 "digest-1", "services/b", 1);
         assertThat(replay.replayed()).isTrue();
         assertThat(replay.operation().state()).isEqualTo("COMPLETED");
         assertThat(replay.operation().resultContextRevision()).isEqualTo(2);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = RuntimeSessionRecord.State.class,
+            names = {"ACQUIRING", "READY", "RELEASING", "FAILED"})
+    void retainedRuntimeContextRefusesAdmissionWithoutAnActiveTurn(
+            RuntimeSessionRecord.State state) {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        fixture.insertRuntimeOwner(TENANT, sessionId, state);
+        assertThatThrownBy(() -> fixture.tx(() -> begin(fixture, sessionId,
+                "key", "digest", "services/b", 1)))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertRefusal(error, HttpStatus.CONFLICT,
+                                "session_context_busy"));
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM"
+                + " managed_agent_operation WHERE tenant_id = ? AND"
+                + " session_id = ?", Integer.class, TENANT, sessionId)).isZero();
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getContextRevision()).isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = RuntimeSessionRecord.State.class,
+            names = {"ACQUIRING", "READY", "RELEASING", "FAILED"})
+    void runtimeContextAcquiredAfterAdmissionRefusesCommit(
+            RuntimeSessionRecord.State state) {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        OperationRecord operation = fixture.tx(() -> begin(fixture,
+                sessionId, "key", "digest", "services/b", 1)).operation();
+        OperationRecord claimed = claim(fixture, sessionId,
+                operation.operationId(), "owner");
+        fixture.insertRuntimeOwner(TENANT, sessionId, state);
+        CwdChangeOutcome outcome = settle(fixture, sessionId,
+                operation.operationId(), "owner", claimed.claimGeneration());
+        assertThat(outcome.completed()).isFalse();
+        assertThat(outcome.failureCode()).isEqualTo("session_context_busy");
+        assertFailed(fixture, sessionId, operation.operationId(),
+                "session_context_busy");
+        ContextBinding binding = fixture.store.requireSession(TENANT,
+                sessionId).workspace();
+        assertThat(binding.getCwdRelative()).isEqualTo("services/api");
+        assertThat(binding.getContextRevision()).isEqualTo(1);
+        assertThat(fixture.events(sessionId).stream().map(fixture::event)
+                .filter(event -> "session.context.changed"
+                        .equals(event.path("type").asText())).count()).isZero();
+    }
+
+    @Test
+    void confirmedReleaseAndOtherHarnessOwnersPermitTheDirectoryChange() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        fixture.insertRuntimeOwner(TENANT, sessionId,
+                RuntimeSessionRecord.State.RELEASED);
+        fixture.insertRuntimeOwner("another-tenant", sessionId,
+                RuntimeSessionRecord.State.READY);
+        fixture.insertRuntimeOwner(TENANT, "another-harness",
+                RuntimeSessionRecord.State.READY);
+        OperationRecord operation = fixture.tx(() -> begin(fixture,
+                sessionId, "key", "digest", "services/b", 1)).operation();
+        OperationRecord claimed = claim(fixture, sessionId,
+                operation.operationId(), "owner");
+        assertThat(settle(fixture, sessionId, operation.operationId(),
+                "owner", claimed.claimGeneration()).completed()).isTrue();
+        ContextBinding binding = fixture.store.requireSession(TENANT,
+                sessionId).workspace();
+        assertThat(binding.getCwdRelative()).isEqualTo("services/b");
+        assertThat(binding.getContextRevision()).isEqualTo(2);
     }
 
     @Test
@@ -205,7 +284,7 @@ class ManagedCwdChangeOperationTest {
     }
 
     @Test
-    void admissionRequiresTheOptInAndTheCreatorGrant() {
+    void admissionRequiresTheOptInAndTheOperatorRole() {
         Fixture disabled = fixture(false);
         String gatedId = disabled.createBoundSession(TENANT, WS);
         assertThatThrownBy(() -> begin(disabled, gatedId, "key", "digest",
@@ -223,29 +302,53 @@ class ManagedCwdChangeOperationTest {
 
         Fixture fixture = fixture(true);
         String sessionId = fixture.createBoundSession(TENANT, WS);
-        // A stranger (no read grant) is invisible; a readable grantee who
-        // is not the creator gets the sibling operations' 403; a creator
-        // whose grant was revoked fails the shared Registry-fact gate that
-        // the settlement re-verifies the same way.
+        // A stranger (no read grant) is invisible; a readable grantee below
+        // OPERATOR gets the sibling operations' 403; any OPERATOR is
+        // admitted, owner or not; an owner whose role dropped to READER
+        // fails the role check, while the settlement still re-verifies the
+        // creator's grant set as before.
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
                 "a", 1, "stranger", "digest-stranger"))
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
-        fixture.grant(TENANT, WS, "colleague", true, true);
+        fixture.grant(TENANT, WS, "colleague", "READER");
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
                 "a", 1, "colleague", "digest-colleague"))
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.FORBIDDEN,
                                 "session_operation_forbidden"));
+        fixture.grant(TENANT, WS, "operator-colleague", "OPERATOR");
+        OperationAdmission admitted = begin(fixture, sessionId, "key",
+                "digest", "services/b", 1, "operator-colleague",
+                "digest-operator");
+        assertThat(admitted.replayed()).isFalse();
+        assertThat(admitted.operation().state()).isEqualTo("PENDING");
+        // Only the creator's row drops: the admitted operator still holds
+        // OPERATOR, so the refusal comes from the creator-keyed facts
+        // gate — the same conjunct the execution authority re-verifies.
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+                        + " 'READER' WHERE tenant_id = ? AND"
+                        + " workspace_id = ? AND actor_id = ?", TENANT, WS,
+                ACTOR.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertThatThrownBy(() -> begin(fixture, sessionId, "key-2",
+                "digest-2", "services/c", 1, "operator-colleague",
+                "digest-operator"))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertRefusal(error, HttpStatus.CONFLICT,
+                                "workspace_unavailable"));
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+                        + " 'OPERATOR' WHERE tenant_id = ? AND"
+                        + " workspace_id = ? AND actor_id = ?", TENANT, WS,
+                ACTOR.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         fixture.jdbc.update("UPDATE managed_workspace_access SET"
-                        + " can_create = FALSE WHERE tenant_id = ? AND"
+                        + " role = 'READER' WHERE tenant_id = ? AND"
                         + " workspace_id = ?", TENANT, WS);
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
                 "a", 1))
                 .isInstanceOfSatisfying(ApiException.class,
-                        error -> assertRefusal(error, HttpStatus.CONFLICT,
-                                "workspace_unavailable"));
+                        error -> assertRefusal(error, HttpStatus.FORBIDDEN,
+                                "session_operation_forbidden"));
     }
 
     // A revoked read grant must also close the replay path: the actor
@@ -258,8 +361,8 @@ class ManagedCwdChangeOperationTest {
         OperationAdmission admitted = begin(fixture, sessionId, "key",
                 "digest", "services/b", 1);
         assertThat(admitted.replayed()).isFalse();
-        fixture.jdbc.update("UPDATE managed_workspace_access SET"
-                + " can_read = FALSE WHERE tenant_id = ? AND"
+        fixture.jdbc.update("DELETE FROM managed_workspace_access"
+                + " WHERE tenant_id = ? AND"
                 + " workspace_id = ? AND actor_id = ?", TENANT, WS,
                 ACTOR.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
@@ -267,6 +370,38 @@ class ManagedCwdChangeOperationTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
+    }
+
+    // The replay is actor-scoped, so a role revoked after admission still
+    // resolves a retry to the caller's own operation: the mutable role
+    // refusal follows the replay lookup, never precedes it.
+    @Test
+    void aDemotedOperatorStillReplaysTheirAdmittedChange() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        fixture.grant(TENANT, WS, "operator-colleague", "OPERATOR");
+        OperationAdmission admitted = begin(fixture, sessionId, "key",
+                "digest", "services/b", 1, "operator-colleague",
+                "digest-operator");
+        assertThat(admitted.replayed()).isFalse();
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+                        + " 'READER' WHERE tenant_id = ? AND"
+                        + " workspace_id = ? AND actor_id = ?", TENANT, WS,
+                "operator-colleague".getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8));
+        OperationAdmission replay = begin(fixture, sessionId, "key",
+                "digest", "services/b", 1, "operator-colleague",
+                "digest-operator");
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.operation().operationId())
+                .isEqualTo(admitted.operation().operationId());
+        // A fresh key from the demoted actor still meets the role refusal.
+        assertThatThrownBy(() -> begin(fixture, sessionId, "key-2",
+                "digest-2", "services/c", 1, "operator-colleague",
+                "digest-operator"))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertRefusal(error, HttpStatus.FORBIDDEN,
+                                "session_operation_forbidden"));
     }
 
     // The idempotency contract outranks a later flag flip: a lost 202
@@ -497,13 +632,120 @@ class ManagedCwdChangeOperationTest {
         OperationRecord revokedClaim = claim(fixture, revokedId, revokedOp,
                 "owner");
         fixture.jdbc.update("UPDATE managed_workspace_access SET"
-                        + " can_create = FALSE WHERE tenant_id = ? AND"
+                        + " role = 'READER' WHERE tenant_id = ? AND"
                         + " workspace_id = ?", TENANT, WS);
         assertThat(settle(fixture,
                 revokedId, revokedOp, "owner",
                 revokedClaim.claimGeneration()).failureCode())
                 .isEqualTo("workspace_unavailable");
         assertFailed(fixture, revokedId, revokedOp, "workspace_unavailable");
+    }
+
+    // V56: settlement re-checks the persisted initiator — an operation
+    // admitted before only its initiator's demotion fails with the W2
+    // guard's own code, and the directory never moves; a demoted creator
+    // hits the creator-keyed rung for the same outcome.
+    @Test
+    void settlementFailsAnAdmittedChangeWhenOnlyTheInitiatorDropped() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        fixture.grant(TENANT, WS, "operator-colleague", "OPERATOR");
+        OperationAdmission admitted = begin(fixture, sessionId, "key",
+                "digest", "services/b", 1, "operator-colleague",
+                "digest-operator");
+        assertThat(admitted.replayed()).isFalse();
+        OperationRecord claimed = claim(fixture, sessionId,
+                admitted.operation().operationId(), "owner");
+        String kept = fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getCwdRelative();
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+                        + " 'READER' WHERE tenant_id = ? AND"
+                        + " workspace_id = ? AND actor_id = ?", TENANT, WS,
+                "operator-colleague".getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8));
+        // The arrange step must land, or the settle assertion below is
+        // satisfied without ever exercising the initiator rung.
+        assertThat(fixture.jdbc.queryForObject("SELECT role FROM"
+                        + " managed_workspace_access WHERE tenant_id = ? AND"
+                        + " workspace_id = ? AND actor_id = ?", String.class,
+                TENANT, WS, "operator-colleague".getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8)))
+                .isEqualTo("READER");
+        CwdChangeOutcome outcome = settle(fixture, sessionId,
+                claimed.operationId(), "owner", claimed.claimGeneration());
+        assertThat(outcome.completed()).isFalse();
+        assertThat(outcome.failureCode()).isEqualTo("workspace_unavailable");
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getCwdRelative()).isEqualTo(kept);
+    }
+
+    // Full revocation of the initiator's row fails the same way.
+    @Test
+    void settlementFailsAnAdmittedChangeWhenTheInitiatorsRowIsDeleted() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        fixture.grant(TENANT, WS, "operator-colleague", "OPERATOR");
+        OperationAdmission admitted = begin(fixture, sessionId, "key",
+                "digest", "services/b", 1, "operator-colleague",
+                "digest-operator");
+        OperationRecord claimed = claim(fixture, sessionId,
+                admitted.operation().operationId(), "owner");
+        String kept = fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getCwdRelative();
+        fixture.jdbc.update("DELETE FROM managed_workspace_access"
+                        + " WHERE tenant_id = ? AND workspace_id = ? AND"
+                        + " actor_id = ?", TENANT, WS,
+                "operator-colleague".getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8));
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_workspace_access WHERE tenant_id = ? AND"
+                        + " workspace_id = ? AND actor_id = ?", Integer.class,
+                TENANT, WS, "operator-colleague".getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8)))
+                .isZero();
+        CwdChangeOutcome outcome = settle(fixture, sessionId,
+                claimed.operationId(), "owner", claimed.claimGeneration());
+        assertThat(outcome.completed()).isFalse();
+        assertThat(outcome.failureCode()).isEqualTo("workspace_unavailable");
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getCwdRelative()).isEqualTo(kept);
+    }
+
+    // An out-of-enum stored role — reachable only by an out-of-band write
+    // past V53's CHECK — settles the change fail-closed under the
+    // vocabulary filter, instead of a valueOf IllegalArgumentException the
+    // recovery would keep retrying.
+    @Test
+    void settlementFailsClosedWhenTheInitiatorsStoredRoleIsOutOfEnum() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        fixture.grant(TENANT, WS, "operator-colleague", "OPERATOR");
+        OperationAdmission admitted = begin(fixture, sessionId, "key",
+                "digest", "services/b", 1, "operator-colleague",
+                "digest-operator");
+        OperationRecord claimed = claim(fixture, sessionId,
+                admitted.operation().operationId(), "owner");
+        String kept = fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getCwdRelative();
+        fixture.jdbc.update("ALTER TABLE managed_workspace_access"
+                + " DROP CONSTRAINT managed_workspace_access_role");
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+                        + " 'BROKEN' WHERE tenant_id = ? AND"
+                        + " workspace_id = ? AND actor_id = ?", TENANT, WS,
+                "operator-colleague".getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8));
+        assertThat(fixture.jdbc.queryForObject("SELECT role FROM"
+                        + " managed_workspace_access WHERE tenant_id = ? AND"
+                        + " workspace_id = ? AND actor_id = ?", String.class,
+                TENANT, WS, "operator-colleague".getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8)))
+                .isEqualTo("BROKEN");
+        CwdChangeOutcome outcome = settle(fixture, sessionId,
+                claimed.operationId(), "owner", claimed.claimGeneration());
+        assertThat(outcome.completed()).isFalse();
+        assertThat(outcome.failureCode()).isEqualTo("workspace_unavailable");
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getCwdRelative()).isEqualTo(kept);
     }
 
     @Test
@@ -584,7 +826,8 @@ class ManagedCwdChangeOperationTest {
 
     // The refusal order is the design's post-precondition answer: a caller
     // outside the actor's scope never learns the state or the revision, and
-    // a readable non-creator sees the sibling 403 before the state checks.
+    // a readable actor below OPERATOR sees the sibling 403 before the state
+    // checks, while an admitted OPERATOR reaches the state checks.
     @Test
     void actorRefusalPrecedesTheStateAndRevisionChecks() {
         Fixture fixture = fixture(true);
@@ -597,12 +840,18 @@ class ManagedCwdChangeOperationTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
-        fixture.grant(TENANT, WS, "colleague", true, true);
+        fixture.grant(TENANT, WS, "colleague", "READER");
         assertThatThrownBy(() -> begin(fixture, archivedId, "key",
                 "digest", "a", 1, "colleague", "digest-colleague"))
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.FORBIDDEN,
                                 "session_operation_forbidden"));
+        fixture.grant(TENANT, WS, "operator-colleague", "OPERATOR");
+        assertThatThrownBy(() -> begin(fixture, archivedId, "key",
+                "digest", "a", 1, "operator-colleague", "digest-operator"))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertRefusal(error, HttpStatus.CONFLICT,
+                                "session_state_conflict"));
         String activeId = fixture.createBoundSession(TENANT, WS);
         assertThatThrownBy(() -> begin(fixture, activeId, "key", "digest",
                 "a", 7, "stranger", "digest-stranger"))
@@ -1382,7 +1631,7 @@ class ManagedCwdChangeOperationTest {
                                 + " DUPLICATE KEY UPDATE workspace_id ="
                                 + " workspace_id", tenant, workspaceId,
                                 STORAGE, workspaceId);
-                        grant(tenant, workspaceId, ACTOR, true, true);
+                        grant(tenant, workspaceId, ACTOR, "OPERATOR");
                         return store.insertWorkspaceSessionCommand(tenant,
                                 ACTOR, "create-" + UUID.randomUUID(),
                                 "create-digest", "qwen-code", null, null,
@@ -1393,13 +1642,13 @@ class ManagedCwdChangeOperationTest {
         }
 
         void grant(String tenant, String workspaceId, String actor,
-                boolean read, boolean create) {
+                String role) {
             jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                            + " workspace_id, actor_id, can_read,"
-                            + " can_create) VALUES (?, ?, ?, ?, ?)"
+                            + " workspace_id, actor_id, role)"
+                            + " VALUES (?, ?, ?, ?)"
                             + " ON DUPLICATE KEY UPDATE actor_id = actor_id",
                     tenant, workspaceId, actor.getBytes(java.nio.charset
-                            .StandardCharsets.UTF_8), read, create);
+                            .StandardCharsets.UTF_8), role);
         }
 
         void insertAction(String sessionId, String actionId,
@@ -1419,6 +1668,22 @@ class ManagedCwdChangeOperationTest {
                             + " updated_at) VALUES (?, ?, ?, ?, '[]',"
                             + " 'digest', ?, 0, 0)", TENANT, sessionId,
                     turnId, UUID.randomUUID().toString(), status);
+        }
+
+        void insertRuntimeOwner(String tenant, String sessionId,
+                RuntimeSessionRecord.State state) {
+            RuntimeScope scope = new RuntimeScope(tenant, WS, "1",
+                    "/workspace", "workspace-files", "session");
+            RuntimeSession session = new RuntimeSession(sessionId,
+                    UUID.randomUUID().toString(), "bootstrap", scope);
+            var repository = new JdbcRuntimeSessionRepository(jdbc.getDataSource());
+            RuntimeSessionRecord created = repository.findOrCreate(
+                    new RuntimeSessionRecord(session, "binding", 1,
+                            RuntimeSessionRecord.State.ACQUIRING, 0, clock.instant()));
+            if (state != RuntimeSessionRecord.State.ACQUIRING) {
+                assertThat(repository.compareAndSet(created,
+                        created.withState(state, clock.instant()))).isNotNull();
+            }
         }
 
         List<Map<String, Object>> events(String sessionId) {
@@ -1444,7 +1709,15 @@ class ManagedCwdChangeOperationTest {
 
         SessionLifecycleCoordinator coordinator(RuntimeWarmer warmer) {
             return new SessionLifecycleCoordinator(store, null, null,
-                    warmer, new AbstractExecutorService() {
+                    warmer, new ChildResultRelayStore(jdbc),
+                    new ObjectMapper(),
+                    new com.alibaba.qwen.code.managedagent.service.ChildLifecycleAdmissions(
+                            store,
+                            new com.alibaba.qwen.code.managedagent.service.RequestDigests(),
+                            warmer),
+                    org.mockito.Mockito.mock(
+                            org.springframework.beans.factory.ObjectProvider.class),
+                    new AbstractExecutorService() {
                         @Override
                         public void shutdown() {
                         }

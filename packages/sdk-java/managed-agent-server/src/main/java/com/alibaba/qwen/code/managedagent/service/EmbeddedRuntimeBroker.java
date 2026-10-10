@@ -118,7 +118,13 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             }
 
             @Override
-            public java.util.concurrent.CompletionStage<RuntimeScope> resolve(String sessionId) {
+            public CompletionStage<RuntimeScope> resolve(String sessionId) {
+                return resolve(sessionId, null);
+            }
+
+            @Override
+            public CompletionStage<RuntimeScope> resolve(String sessionId,
+                    com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
                 SessionRecord session = store.findSessionById(sessionId)
                         .orElse(null);
                 if (session == null) {
@@ -130,7 +136,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 }
                 if (session.workspace() != null) {
                     if (workspaces != null) {
-                        return CompletableFuture.completedFuture(workspaces.resolve(sessionId).scope());
+                        return CompletableFuture.completedFuture(workspaces.resolve(sessionId, authority).scope());
                     }
                     return CompletableFuture.failedFuture(
                             new RuntimeBrokerException(409,
@@ -261,6 +267,16 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         if (recovery != null) {
             recovery.scan();
         }
+    }
+
+    /**
+     * The owned Runtime Broker Service, exposed for the child result relay
+     * and the close cascade's binding probe at registration time. The
+     * closing lifecycle stays with this Broker alone — the wiring uses
+     * {@code destroyMethod = ""} so Spring never closes it twice.
+     */
+    public RuntimeBrokerService service() {
+        return service;
     }
 
     @Override

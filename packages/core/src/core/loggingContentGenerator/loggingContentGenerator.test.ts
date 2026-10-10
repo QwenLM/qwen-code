@@ -679,6 +679,52 @@ describe('LoggingContentGenerator', () => {
     await drain(stream); // so span finalization runs
   });
 
+  it('shares one execution identity across request and response with telemetry disabled', async () => {
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
+    await runContent(resolving(resp('shared-response')), 'same-prompt');
+    expect(loggedRequest().execution_id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(loggedResponse().execution_id).toBe(loggedRequest().execution_id);
+  });
+
+  it('keeps overlapping streams distinct even with identical prompt and response IDs', async () => {
+    const generator = makeGenerator({
+      stream: vi.fn().mockImplementation(async () =>
+        (async function* () {
+          yield resp('same-response');
+        })(),
+      ),
+    });
+    const first = await generator.generateContentStream(
+      helloRequest(),
+      'same-prompt',
+    );
+    const second = await generator.generateContentStream(
+      helloRequest(),
+      'same-prompt',
+    );
+    const ids = vi
+      .mocked(logApiRequest)
+      .mock.calls.map((call) => call[1].execution_id);
+    expect(ids[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(ids[1]).not.toBe(ids[0]);
+    await collect(second);
+    await collect(first);
+    expect(
+      vi.mocked(logApiResponse).mock.calls.map((call) => call[1].execution_id),
+    ).toEqual([ids[1], ids[0]]);
+  });
+
+  it('keeps the request identity on provider failure', async () => {
+    await expect(
+      runContent(
+        vi.fn().mockRejectedValue(new Error('provider failed')),
+        'failed-prompt',
+      ),
+    ).rejects.toThrow('provider failed');
+    expect(loggedError().execution_id).toBe(loggedRequest().execution_id);
+    expect(loggedError().execution_id).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
   it('skips context snapshot work when telemetry is disabled', async () => {
     vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
     await runContent(

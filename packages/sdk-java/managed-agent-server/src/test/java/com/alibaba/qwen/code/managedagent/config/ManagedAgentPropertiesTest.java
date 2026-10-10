@@ -194,4 +194,88 @@ class ManagedAgentPropertiesTest {
             assertThatThrownBy(properties::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class);
         }
     }
+
+    @Test
+    void automationTunablesBindFromTheShippedConfiguration() throws Exception {
+        var yaml = new org.springframework.boot.env.YamlPropertySourceLoader()
+                .load("application.yml",
+                        new org.springframework.core.io.ClassPathResource(
+                                "application.yml"));
+        // The flattened keys must exist: a renamed or dropped key binds
+        // nothing, and the Java defaults below would silently win.
+        assertThat(yaml).anySatisfy(source -> {
+            assertThat(source.containsProperty("qwen.managed-agent.automation"
+                    + ".enabled")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent.automation"
+                    + ".scan-delay")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent.automation"
+                    + ".lease")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent.automation"
+                    + ".late-tolerance")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent.automation"
+                    + ".lookback")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent.automation"
+                    + ".max-slots-per-tick")).isTrue();
+            assertThat(source.containsProperty("qwen.managed-agent.automation"
+                    + ".concurrency")).isTrue();
+        });
+        new ApplicationContextRunner()
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .withInitializer(ctx -> {
+                    java.util.Map<String, Object> ambient =
+                            new java.util.LinkedHashMap<>(System.getenv());
+                    ambient.keySet().removeIf(name -> name
+                            .startsWith("QWEN_MANAGED_AGENT_"));
+                    ctx.getEnvironment().getPropertySources().replace(
+                            "systemEnvironment",
+                            new org.springframework.core.env.MapPropertySource(
+                                    "systemEnvironment", ambient));
+                    yaml.forEach(ctx.getEnvironment().getPropertySources()
+                            ::addLast);
+                })
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    var automation = started
+                            .getBean(ManagedAgentProperties.class)
+                            .getAutomation();
+                    assertThat(automation.isEnabled()).isFalse();
+                    assertThat(automation.getScanDelay())
+                            .isEqualTo(java.time.Duration.ofSeconds(10));
+                    assertThat(automation.getLease())
+                            .isEqualTo(java.time.Duration.ofSeconds(60));
+                    assertThat(automation.getLateTolerance())
+                            .isEqualTo(java.time.Duration.ofMinutes(5));
+                    assertThat(automation.getLookback())
+                            .isEqualTo(java.time.Duration.ofHours(24));
+                    assertThat(automation.getMaxSlotsPerTick()).isEqualTo(1000);
+                    assertThat(automation.getConcurrency()).isEqualTo(4);
+                });
+    }
+
+    @Test
+    void automationTunablesRefuseNonPositiveValuesAtStartup() {
+        List<Consumer<ManagedAgentProperties>> invalid = List.of(
+                p -> p.getAutomation().setMaxSlotsPerTick(0),
+                p -> p.getAutomation().setConcurrency(0),
+                p -> p.getAutomation().setScanDelay(
+                        java.time.Duration.ZERO),
+                p -> p.getAutomation().setLease(java.time.Duration.ZERO),
+                p -> p.getAutomation().setLateTolerance(
+                        java.time.Duration.ZERO),
+                p -> p.getAutomation().setLookback(java.time.Duration.ZERO));
+        for (Consumer<ManagedAgentProperties> change : invalid) {
+            ManagedAgentProperties properties = new ManagedAgentProperties();
+            properties.getAutomation().setEnabled(true);
+            // The complete values bind cleanly: the offender alone throws.
+            assertThatCode(properties::validateWorkspaceFiles)
+                    .doesNotThrowAnyException();
+            change.accept(properties);
+            assertThatThrownBy(properties::validateWorkspaceFiles)
+                    .isInstanceOf(IllegalStateException.class);
+        }
+        // And automation OFF may carry any values untouched.
+        ManagedAgentProperties off = new ManagedAgentProperties();
+        off.getAutomation().setMaxSlotsPerTick(0);
+        assertThatCode(off::validateWorkspaceFiles).doesNotThrowAnyException();
+    }
 }
