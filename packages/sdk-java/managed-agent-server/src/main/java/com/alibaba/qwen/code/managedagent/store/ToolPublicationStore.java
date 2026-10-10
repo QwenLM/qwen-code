@@ -737,6 +737,26 @@ public final class ToolPublicationStore {
                 return ((JdbcToolExecutionRepository) executions).findByExecutionCallIdForUpdate(
                         target, text(b, "executionCallId"));
             });
+        } else if (bindings instanceof JdbcRuntimeBindingRepository nativeBindings
+                && executions instanceof JdbcToolExecutionRepository nativeExecutions) {
+            require(nativeBindings.usesDataSource(jdbc.getDataSource())
+                    && nativeExecutions.usesDataSource(jdbc.getDataSource())
+                    && transactionSource == jdbc.getDataSource(),
+                    "Local publication requires native repositories on the original DataSource");
+            String tenantId = runtime.getRequest().getScope().getTenantId();
+            Original locked = jdbc.execute((ConnectionCallback<Original>) connection -> {
+                var target = DataSourceUtils.getTargetConnection(connection);
+                require(DataSourceUtils.isConnectionTransactional(target, jdbc.getDataSource()),
+                        "Local publication requires the original transaction connection");
+                JdbcRuntimeBindingRepository.lockPlacementDomain(target, tenantId);
+                var originalBinding = nativeBindings.findByIdForUpdate(target, text(b, "runtimeBindingId"));
+                require(originalBinding != null, "Original Runtime binding is missing");
+                var originalExecution = nativeExecutions.findByExecutionCallIdForUpdate(
+                        target, text(b, "executionCallId"));
+                return new Original(originalBinding, originalExecution, null);
+            });
+            runtime = locked.runtime();
+            execution = locked.execution();
         } else {
             execution = executions.findByExecutionCallId(text(b, "executionCallId"));
         }

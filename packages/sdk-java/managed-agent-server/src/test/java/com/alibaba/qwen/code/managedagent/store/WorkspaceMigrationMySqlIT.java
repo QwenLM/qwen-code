@@ -64,7 +64,7 @@ class WorkspaceMigrationMySqlIT {
                 + " WHERE installed_rank > ? AND success = TRUE ORDER BY installed_rank",
                 String.class, lastRank)).containsExactly("48", "49", "50",
                 "51", "52", "53", "54", "55", "56", "57", "60", "62",
-                "64");
+                "64", "65");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Integer.class)).isZero();
     }

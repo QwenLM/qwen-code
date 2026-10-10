@@ -82,6 +82,21 @@ arguments.
 This module intentionally does not wire a Spring service or dispatch Tool
 calls.
 
+`JdbcRuntimeRetention` provides an explicit off-request-path JDBC sweep for
+retired generations. The embedding owns scheduling and supplies same-connection
+reference checks for its own tables. Each sweep bounds binding checks, child
+checks and total deletions; retain its returned cursor between ticks. It preserves
+operator-recovery records, active children, physical-stop evidence requirements,
+slots and admission fences. See [JDBC retention](../../../docs/design/runtime-broker-jdbc-retention.md)
+for eligibility and the managed-server opt-in configuration (disabled by default,
+30-day age, 100-row batches and one-minute delay). Standalone embeddings must
+also serialize new external references with the original binding lock.
+
+Enabling retention limits historical receipts and idempotent retries to the
+retained window. After records are removed, callers must not reuse expired
+Runtime Session identifiers or idempotency keys. A missing execution is not
+permission to replay it. No permanent execution-key tombstone is retained.
+
 Before upgrading an installation that already used the Broker, stop new
 admission and check for historical seeded failures:
 

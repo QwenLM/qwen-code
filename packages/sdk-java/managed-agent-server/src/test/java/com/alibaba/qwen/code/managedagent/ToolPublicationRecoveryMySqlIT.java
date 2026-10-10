@@ -67,6 +67,21 @@ class ToolPublicationRecoveryMySqlIT {
         fixture.activePhaseWithExpiredDeadlinePreventsReserveRenewAndDispatch();
     }
 
+    @Test
+    void localReservationWaitsForLifecyclePlacementBeforeLockingBrokerRows() throws Exception {
+        fixture.localReservationWaitsForLifecyclePlacementBeforeLockingBrokerRows();
+    }
+
+    @Test
+    void localReservationHoldsBothBrokerRowsUntilThePublicationCommits() throws Exception {
+        fixture.localReservationHoldsBothBrokerRowsUntilThePublicationCommits();
+    }
+
+    @Test
+    void localReservationRechecksBindingAfterWaitingForRetirement() throws Exception {
+        fixture.localReservationRechecksBindingAfterWaitingForRetirement();
+    }
+
     @AfterEach
     void removeTestSchema() {
         if (admin != null && schema != null) {

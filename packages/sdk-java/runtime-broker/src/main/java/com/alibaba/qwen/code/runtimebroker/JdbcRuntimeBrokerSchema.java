@@ -43,6 +43,8 @@ public final class JdbcRuntimeBrokerSchema {
             addColumn(statement, "qwen_tool_execution", "authorized_binding_version", "BIGINT");
             addIndex(statement, "qwen_runtime_binding", "qwen_runtime_storage_bindings_idx", "storage_id, binding_id");
             addIndex(statement, "qwen_runtime_session", "idx_runtime_session_id", "runtime_session_id");
+            addIndex(statement, "qwen_runtime_binding", "idx_runtime_binding_retention", "binding_state, last_active_at, binding_id");
+            addIndex(statement, "qwen_runtime_binding", "idx_runtime_binding_tenant_state", "tenant_id, binding_state");
         } catch (SQLException exception) {
             throw JdbcRepositorySupport.failure(exception);
         }

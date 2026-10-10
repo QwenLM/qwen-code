@@ -71,6 +71,24 @@ class RuntimeBrokerFlywaySchemaTest {
                 migrate(dataSource(), MigrationVersion.LATEST), "flyway");
     }
 
+    @Test
+    void retentionIndexesPreserveExistingTerminalReceiptsOnUpgrade() throws Exception {
+        DataSource source = migrate(dataSource(), MigrationVersion.fromVersion("56"));
+        JdbcRepositoryContract.writeLegacyRows(source, "retention-upgrade");
+        migrate(source, MigrationVersion.LATEST);
+        var execution = new JdbcToolExecutionRepository(source)
+                .findByIdempotencyKey("retention-upgrade-SETTLED-key");
+        assertThat(execution.getState()).isEqualTo(ToolExecutionRecord.State.SETTLED);
+        Map<String, TableShape> shape = describe(source);
+        assertThat(shape.get("qwen_runtime_binding").indexes()).contains(
+                "INDEX [binding_state, last_active_at, binding_id]", "INDEX [tenant_id, binding_state]");
+        assertThat(shape.get("managed_workspace_execution_lease").indexes())
+                .contains("INDEX [binding_id, runtime_generation]");
+        assertThat(shape.get("qwen_tool_publication").indexes()).contains("INDEX [execution_key]");
+        assertThat(shape.get("managed_workspace_csi_worker_ack").indexes())
+                .contains("INDEX [execution_call_id_hash]");
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"11", "13"})
     void migrationsPreserveRowsWrittenByOldBinaries(String version) throws SQLException {

@@ -762,6 +762,40 @@ when `sql_require_primary_key` is set: V12 fails before it changes anything, and
 Flyway records the failure. Unset the variable, run Flyway `repair`, and start
 the server again.
 
+### Terminal Runtime record retention
+
+Runtime JDBC retention is disabled by default. It removes old terminal
+executions, Sessions and bindings in bounded batches on a dedicated scheduler;
+it does not stop workers or delete Workspace files. Configure
+`qwen.managed-agent.runtime-broker.retention` with these environment variables:
+
+| Variable                                          | Default | Meaning                                                                             |
+| ------------------------------------------------- | ------- | ----------------------------------------------------------------------------------- |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_ENABLED`    | `false` | Enable cleanup when the Runtime Broker is also enabled                              |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_MAX_AGE`    | `30d`   | Minimum age of eligible terminal records; must be positive                          |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_BATCH_SIZE` | `100`   | Per-tick bound on scanned bindings, scanned children and total deleted rows; 1–1000 |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_SCAN_DELAY` | `1m`    | Positive delay between ticks, at least 1ms                                          |
+
+Recovery records, Workspace holders and CSI retirement keep their bindings.
+Child Session lineage also keeps a binding until its canonical parent child_run
+has a committed terminal projection; a missing projection remains protected.
+This lets cascade and relay repair a stopped child's original Runtime identity.
+Lineage and permanent relay classifications are never collected here.
+Publication and CSI ACK references keep the original execution and its parents,
+including already collected publications; unreferenced siblings may be removed.
+Nonterminal children, live operation/dispatch leases and managed bindings without
+stop evidence remain retained. Binding slots and generation counters, placement
+guards, harness drains and storage fences remain durable. Successful ticks log
+scanned, skipped and deleted counts and duration; failures retry on the next tick.
+
+Enabling retention makes historical receipts and idempotency guarantees finite.
+After cleanup, existing missing-record responses apply. Callers must not reuse
+expired Runtime Session IDs or idempotency keys. Deploy Flyway V65 and the code
+with cleanup disabled, upgrade every publication writer to the new locking
+protocol, then enable it. Disable retention before reverting to older writers;
+disabling prevents future cleanup but cannot restore deleted records. See the
+[retention design](../../../docs/design/runtime-broker-jdbc-retention.md).
+
 ### Private Workspace tool execution (W0c-3)
 
 The worker entry is the built CLI bundle; the server launches it with
