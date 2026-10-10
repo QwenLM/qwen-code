@@ -755,36 +755,64 @@ describe('tool response finalization', () => {
     expect((output as string).length).toBeLessThanOrEqual(100);
   });
 
-  it('only an explicit adaptive zero budget empties tool text and preserves user text', async () => {
-    const userText = 'Keep this instruction.';
-    const entries = [
-      entry('send', [
-        { text: userText },
-        fnResponse('shell', { output: 'output', error: 'error' }, 'send'),
-      ]),
-    ];
+  it.each([0, 12])(
+    'leaves tool diagnostics for compaction at a %s-character send budget',
+    async (budget) => {
+      const userText = 'Keep this instruction.';
+      const entries = [
+        entry('send', [
+          { text: userText },
+          fnResponse(
+            'shell',
+            { output: 'original output', error: 'FAILED_TOOL diagnostic' },
+            'send',
+          ),
+        ]),
+      ];
 
-    expect(enforceFunctionResponseBudget(entries, 0)).toBe(entries);
+      expect(enforceFunctionResponseBudget(entries, 0)).toBe(entries);
+      const result = await finalizeToolResponses(
+        config(200_000),
+        entries,
+        undefined,
+        false,
+        false,
+        budget,
+        false,
+      );
+      expect(result).toBe(entries);
+      expect(persist).not.toHaveBeenCalled();
+      expect(result[0].responseParts[0].text).toBe(userText);
+      expect(result[0].responseParts[1].functionResponse?.response).toEqual({
+        output: 'original output',
+        error: 'FAILED_TOOL diagnostic',
+      });
+    },
+  );
+
+  it('omits an artifact pointer when the full path cannot fit', async () => {
+    const artifact = `/tmp/${'anonymous-directory/'.repeat(12)}output.txt`;
     const result = await finalizeToolResponses(
       config(200_000),
-      entries,
+      [
+        entry(
+          'send',
+          [fnResponse('shell', { output: 'x'.repeat(1000) }, 'send')],
+          [artifact],
+        ),
+      ],
       undefined,
       false,
       false,
-      0,
+      220,
       false,
     );
-    expect(persist).toHaveBeenCalledWith(
-      'send',
-      'shell',
-      'output\n\nerror',
-      expect.anything(),
-    );
-    expect(result[0].responseParts[0].text).toBe(userText);
-    expect(result[0].responseParts[1].functionResponse?.response).toEqual({
-      output: '',
-      error: '',
-    });
+
+    expect(
+      result[0].responseParts[0].functionResponse?.response?.['output'],
+    ).toBe('Tool output truncated.');
+    expect(result[0].persistedOutputFiles).toEqual([artifact]);
+    expect(persist).not.toHaveBeenCalled();
   });
 
   it('the send guard preserves an enter_plan_mode lifecycle response', () => {

@@ -22,6 +22,7 @@ import {
 import { canonicalToolName, ToolNames } from './tool-names.js';
 
 const debugLogger = createDebugLogger('TOOL_RESPONSE_FINALIZER');
+const TOOL_OUTPUT_TRUNCATED_NOTICE = 'Tool output truncated.';
 
 export interface ToolResponseBudgetEntry {
   callId: string;
@@ -263,16 +264,19 @@ function fitText(
         : `Tool output truncated. Persisted tool-output artifacts:\n${persistedOutputFiles
             .map((file) => `- ${file}`)
             .join('\n')}`
-      : 'Tool output truncated.';
-  if (header.length >= maxChars) {
-    return sliceStartWithoutBrokenSurrogate(header, maxChars);
+      : TOOL_OUTPUT_TRUNCATED_NOTICE;
+  if (header.length > maxChars) {
+    return sliceStartWithoutBrokenSurrogate(
+      TOOL_OUTPUT_TRUNCATED_NOTICE,
+      maxChars,
+    );
   }
 
   const separator = '\n\n';
   const marker = '\n...\n';
   const previewBudget = maxChars - header.length - separator.length;
   if (previewBudget <= 0) {
-    return sliceStartWithoutBrokenSurrogate(header, maxChars);
+    return header;
   }
   if (previewBudget <= marker.length) {
     return `${header}${separator}${sliceStartWithoutBrokenSurrogate(
@@ -438,6 +442,20 @@ export async function finalizeToolResponses(
     slots.map((slot) => slot.text.length),
     budget,
   );
+  if (
+    budgetOverride !== undefined &&
+    slots.some(
+      (slot, index) =>
+        slot.text.length > allocations[index] &&
+        allocations[index] < TOOL_OUTPUT_TRUNCATED_NOTICE.length,
+    )
+  ) {
+    // Compaction owns headroom too small for a meaningful tool result.
+    observeUnchangedEntries();
+    if (shouldAssociateBoundary)
+      associateFinalizerEntries(entries, new Set(entries.keys()));
+    return entries;
+  }
   const entriesToPersist = new Set<number>();
   for (let index = 0; index < slots.length; index++) {
     if (slots[index].text.length > allocations[index]) {

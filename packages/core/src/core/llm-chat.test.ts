@@ -12110,12 +12110,15 @@ describe('LlmChat', async () => {
       ).toBeLessThan(27_852.8);
     });
 
-    it('submits empty preview text when positive headroom is less than one character', async () => {
+    it('leaves tool output for compaction when positive headroom is less than one character', async () => {
       mockGeneratorConfig({ contextWindowSize: 1_000_013 });
       await reportUsage(849_977);
       await sendDrain([result()], 'second');
-      expect(resultOutputs(1)).toEqual(['']);
-      expect(resultChars(1)).toBe(0);
+      expect(resultOutputs(1)).toEqual(['x'.repeat(20_000)]);
+      expect(
+        vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
+          ?.precomputedEffectiveTokens,
+      ).toBeGreaterThanOrEqual(850_011.05);
     });
 
     it.each([Number.POSITIVE_INFINITY, 0])(
