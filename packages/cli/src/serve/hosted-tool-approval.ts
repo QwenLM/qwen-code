@@ -227,11 +227,6 @@ function decisionBytes(
   );
 }
 
-/**
- * Whether a decided Action chose `allow` under the policy revision its options
- * recorded. Decision bytes are deterministic, so their recorded digest says
- * which option was chosen without reading them.
- */
 export function hostedActionDenied(
   action: ManagedSessionAction,
   policyRevision: string,
@@ -245,6 +240,11 @@ export function hostedActionDenied(
   );
 }
 
+/**
+ * Whether a decided Action chose `allow` under the policy revision its options
+ * recorded. Decision bytes are deterministic, so their recorded digest says
+ * which option was chosen without reading them.
+ */
 export function hostedActionAllowed(
   action: ManagedSessionAction,
   policyRevision: string,

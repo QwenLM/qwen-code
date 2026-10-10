@@ -417,7 +417,11 @@ export async function runHostedHarnessTextTurn(input: {
         prepared,
         continuationInFlight,
       ) => {
-        if (completeAttempt) await completeAttempt(finished, usage);
+        if (completeAttempt) {
+          const previous = completeAttempt;
+          completeAttempt = undefined;
+          await previous(finished, usage);
+        }
         const recoveryRef = await input.prepareModel?.(
           prepared,
           round,
@@ -433,6 +437,7 @@ export async function runHostedHarnessTextTurn(input: {
         finished = false;
         usage.length = 0;
       };
+      prepare.maxSnapshotBytes = 64 * 1024;
       const usage: unknown[] = [];
       try {
         const stream = preparedRecovery

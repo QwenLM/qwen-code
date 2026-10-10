@@ -29,7 +29,7 @@ G3 第 1–2 步让仍存活的 Java 控制面能够接纳替代 Hosted Harness�
 `settleCancelledHarnessTurn`、load 与 Action resolve 路由，
 `hosted-tool-approval.ts` 的 `resolveHostedAction`，
 `managed-harness-factory.ts` 的 `resolveDurableWait`，以及 Java
-`HarnessCoordinator` 的 `dispatchClaimed`。以上是基线事实，不是新的验收结果。
+`HarnessCoordinator` 的 `runClaimed`。以上是基线事实，不是新的验收结果。
 
 当前 `model.attempt: output_committed` 在 provider 流结束后、最终 assistant 消息
 持久写入前记录，因此不证明答案已经提交。新的模型调用也会把循环从第零轮开始；
@@ -452,3 +452,9 @@ pruning 都另行处理。
 [g3]: https://github.com/QwenLM/qwen-code/pull/13174
 [b2]: https://github.com/QwenLM/qwen-code/pull/13174#issuecomment-6030365600
 [g1fix]: https://github.com/QwenLM/qwen-code/pull/13188
+
+### 审阅修正
+
+本机取消立即触发 abort。若持久化追加失败，接口返回 503：当前进程停止，但取消尚未持久化，需要重试后才能依赖替代进程恢复。清理按请求的 Turn 区分其它 Turn 的债务，只有确认原 owner 释放后才清除持有租约标记。wake 输入 ID 使用与普通 acquire 相同的路径安全 Runtime 映射。暂时清理故障继续阻止新工作，直到 attachment 重试成功后解除清理阻塞。
+
+准备请求时，防御性克隆限定为 64 KiB；超限的借用视图由 Hosted publisher 同步序列化并拒绝保存，不予保留。恢复的 generation 配置只在其请求期间生效，历史恢复执行常规 registry 对账。Hosted 引用闭包校验在每个事务中共享一次引用 memo 与已验证资源缓存；引用元数据冲突检查和完整事务 census 仍保持生效。

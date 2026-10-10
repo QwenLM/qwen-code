@@ -58,4 +58,40 @@ class ManagedHostedRecoveryRecordsTest {
         assertThatThrownBy(() -> ManagedHostedRecoveryRecords.reference(ref, "hosted-model-request", "tenant", "workspace", "session",
                 id -> { throw new AssertionError("Unsupported ref reached storage"); })).isInstanceOf(RuntimeException.class);
     }
+
+    @Test
+    void acceptsCanonicalWakeRuntimeOwner() {
+        String prompt = "monitor:wake:run";
+        ObjectNode body = cleanup().put("promptId", prompt).put("fileHistoryTurnId", prompt)
+                .put("runtimeSessionId", "wake-" + ToolPublicationContract.sha256(prompt.getBytes(StandardCharsets.UTF_8)));
+        assertThatCode(() -> validate("hosted-turn-cleanup", body)).doesNotThrowAnyException();
+        assertThatThrownBy(() -> validate("hosted-turn-cleanup", body.put("runtimeSessionId", prompt)))
+                .isInstanceOf(RuntimeException.class);
+    }
+
+    @Test
+    void sharesClosureMemoAcrossRootsAndStillRejectsConflictingMetadata() {
+        byte[] bytes = "{}".getBytes(StandardCharsets.UTF_8);
+        var nested = new ManagedSessionStoreModels.StoredResource("shared", "managed-definition", 1,
+                bytes.length, "a".repeat(64), bytes);
+        var ref = json.createObjectNode().put("resourceId", "shared").put("kind", nested.kind())
+                .put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", nested.digest());
+        var seen = new java.util.HashMap<String, com.fasterxml.jackson.databind.JsonNode>();
+        var reads = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.function.Function<String, ManagedSessionStoreModels.StoredResource> reader = id -> {
+            reads.incrementAndGet();
+            return nested;
+        };
+        for (int i = 0; i < 12; i++) {
+            byte[] root = json.createObjectNode().put("v", 3).set("definitionRef", ref).toString().getBytes(StandardCharsets.UTF_8);
+            ManagedHostedRecoveryRecords.validateResource(new ManagedSessionStoreModels.StoredResource(
+                    "root-" + i, "managed-action-options", 1, root.length, "b".repeat(64), root),
+                    "tenant", "workspace", "session", reader, seen);
+        }
+        org.assertj.core.api.Assertions.assertThat(reads.get()).isEqualTo(1);
+        assertThatThrownBy(() -> ManagedHostedRecoveryRecords.reference(ref.deepCopy().put("digest", "c".repeat(64)),
+                "managed-definition", "tenant", "workspace", "session", reader, seen))
+                .isInstanceOf(RuntimeException.class);
+        org.assertj.core.api.Assertions.assertThat(reads.get()).isEqualTo(1);
+    }
 }

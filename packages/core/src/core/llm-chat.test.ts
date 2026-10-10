@@ -20,6 +20,7 @@ import {
   LlmRequestPreparationError,
   llmPreparedProviderPin,
   type LlmPreparedRequest,
+  type LlmPreparedRequestCallback,
   InvalidStreamError,
   approvedPlanRedactionText,
   redactApprovedPlansInHistory,
@@ -889,6 +890,30 @@ describe('LlmChat', async () => {
       expect(streamMock()).toHaveBeenCalledOnce();
     });
 
+    it('avoids snapshot copies above the capture budget while sending live', async () => {
+      streamMock().mockResolvedValue(
+        streamOf(stopResponse([{ text: 'done' }])),
+      );
+      let copiedDuringCapture = -1;
+      const clone = vi.spyOn(globalThis, 'structuredClone');
+      const callback: LlmPreparedRequestCallback = async (prepared) => {
+        copiedDuringCapture = clone.mock.calls.length;
+        expect(JSON.stringify(prepared).length).toBeGreaterThan(64 * 1024);
+      };
+      callback.maxSnapshotBytes = 64 * 1024;
+      const response = await chat.sendMessageStream(
+        'test-model',
+        { message: 'x'.repeat(100_000) },
+        'large-prompt',
+        undefined,
+        { onPreparedRequest: callback },
+      );
+      clone.mockClear();
+      await drain(response);
+      expect(copiedDuringCapture).toBe(0);
+      expect(streamMock()).toHaveBeenCalledOnce();
+    });
+
     it('does not send, retry or fall back after a failed durability barrier', async () => {
       const callback = vi
         .fn()
@@ -939,6 +964,7 @@ describe('LlmChat', async () => {
         providerPin: llmPreparedProviderPin(routeConfig),
         promptTokensForClamp: 15,
       };
+      const originalConfig = chat['generationConfig'];
       const compression = vi.spyOn(chat, 'tryCompress');
       streamMock().mockResolvedValue(
         streamOf(stopResponse([{ text: 'recovered' }])),
@@ -952,6 +978,7 @@ describe('LlmChat', async () => {
           prepared,
         ),
       );
+      expect(chat['generationConfig']).toBe(originalConfig);
       expect(compression).not.toHaveBeenCalled();
       expect(streamMock().mock.calls[0][0]).toMatchObject(saved.request);
       expect(prepared.mock.calls[0][0]).toMatchObject(saved);
@@ -973,6 +1000,14 @@ describe('LlmChat', async () => {
       expect(llmPreparedProviderPin({ ...base, apiKey: 'first' })).toBe(
         llmPreparedProviderPin({ ...base, apiKey: 'second' }),
       );
+      for (const changed of [
+        { customHeaders: { 'X-Route': 'other' } },
+        { proxy: 'http://other-proxy.test' },
+      ]) {
+        expect(llmPreparedProviderPin({ ...base, ...changed })).not.toBe(
+          llmPreparedProviderPin(base),
+        );
+      }
       expect(llmPreparedProviderPin(base)).not.toBe(
         llmPreparedProviderPin({
           ...base,

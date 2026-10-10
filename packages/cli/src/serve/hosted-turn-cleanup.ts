@@ -15,6 +15,7 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   HostedWorkspaceBroker,
+  hostedRuntimeSessionId,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
 import { readHostedFileHistory } from './hosted-file-history.js';
@@ -130,7 +131,8 @@ async function readDescriptor(
   );
   if (
     Object.keys(body).length !== 8 ||
-    body['runtimeSessionId'] !== body['promptId'] ||
+    body['runtimeSessionId'] !==
+      hostedRuntimeSessionId(body['promptId'] as string) ||
     body['fileHistoryTurnId'] !== body['promptId']
   )
     throw new Error('Invalid cleanup owner.');
@@ -160,22 +162,25 @@ export async function reconcileHostedTurnCleanup(
   session: ManagedSession,
   options: HostedWorkspaceBrokerOptions,
   promptId?: string,
-): Promise<void> {
+): Promise<Map<string, 'owed' | 'confirmed'>> {
   const events = session.authority.eventsInSequenceRange(
     1,
     session.authority.committedSequence,
   );
   const latest = new Map<string, (typeof events)[number]>();
+  const states = new Map<string, 'owed' | 'confirmed'>();
   for (const event of events)
     if (event.kind === 'hosted.cleanup')
       latest.set(event.payload['cleanupId'] as string, event);
   for (const [cleanupId, event] of latest) {
-    if (event.payload['state'] !== 'owed') continue;
     const descriptor = await readDescriptor(
       session,
       event.payload['descriptorRef'],
     );
     if (promptId && descriptor.promptId !== promptId) continue;
+    const state = event.payload['state'] as 'owed' | 'confirmed';
+    states.set(descriptor.promptId, state);
+    if (state !== 'owed') continue;
     if (
       !events.some(
         (item) =>
@@ -208,5 +213,7 @@ export async function reconcileHostedTurnCleanup(
       ),
       'confirmed',
     );
+    states.set(descriptor.promptId, 'confirmed');
   }
+  return states;
 }

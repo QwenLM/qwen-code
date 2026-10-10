@@ -23,6 +23,8 @@ import {
   readHostedActionOptions,
 } from './hosted-tool-approval.js';
 
+import { hostedRuntimeSessionId } from './hosted-workspace-broker.js';
+
 const NATIVE_TOOLS = new Set(['read_file', 'write_file', 'edit', 'glob']);
 
 export interface HostedNativePlannedCall {
@@ -109,7 +111,7 @@ export async function readHostedApprovalContinuation(
     plan.approvalOrdinal >= plan.calls.length ||
     !plan.runtime ||
     Object.keys(plan.runtime).length !== 4 ||
-    plan.runtime.runtimeSessionId !== promptId ||
+    plan.runtime.runtimeSessionId !== hostedRuntimeSessionId(promptId) ||
     !/^[1-9][0-9]{0,18}$/u.test(plan.runtime.generation) ||
     !/^[1-9][0-9]{0,18}$/u.test(plan.runtime.workspaceGeneration) ||
     BigInt(plan.runtime.generation) > 2n ** 63n - 1n ||
@@ -208,7 +210,7 @@ export async function readHostedApprovalContinuation(
     };
     if (
       saved.harnessSessionId !== header.sessionKey.sessionId ||
-      saved.runtimeSessionId !== promptId ||
+      saved.runtimeSessionId !== hostedRuntimeSessionId(promptId) ||
       typeof saved.payloadJson !== 'string' ||
       item.requestDigest !==
         `sha256:${createHash('sha256').update(saved.payloadJson).digest('hex')}`
@@ -326,6 +328,7 @@ export async function findHostedApprovalContinuation(
       batch.payload['planRef'] as unknown as ManagedSessionDurableRef,
       promptId,
     );
+  const examined = new Set<string>();
   for (const event of [...events].reverse()) {
     if (
       event.kind !== 'action.changed' ||
@@ -335,7 +338,8 @@ export async function findHostedApprovalContinuation(
     const action = session.authority.action(
       event.payload['requestId'] as string,
     );
-    if (!action) continue;
+    if (!action || examined.has(action.requestId)) continue;
+    examined.add(action.requestId);
     const options = await readHostedActionOptions(session, action);
     if (
       options.turnId !== promptId ||

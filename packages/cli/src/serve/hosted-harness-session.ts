@@ -2305,6 +2305,7 @@ async function startHostedRecoveredTurn(
           Math.max(0, deadline - Date.now()),
         )
       : undefined;
+  timer?.unref();
   if (typeof deadline === 'number' && deadline <= Date.now())
     abort.abort(HOSTED_TURN_DEADLINE);
   if (
@@ -2475,7 +2476,7 @@ async function executeHostedTurn(
         item.actionId && authority.action(item.actionId)?.state === 'cancelled',
     );
     if (abort.signal.aborted || expired || cancelled) {
-      if (!(await parkNeedsNoRuntimeSettlement(session, session.managed)))
+      if (!(await parkNeedsNoRuntimeSettlement(session.managed)))
         throw new HostedToolRecoveryRequiredError(
           'Original cancellation still owes Runtime outcomes.',
         );
@@ -3308,9 +3309,7 @@ export function registerHostedHarnessSessionRoutes(
         }
         recovery = outcome.turn.report;
         if (outcome.turn.acquiredRuntime)
-          resident.runtimeLeaseHeld =
-            outcome.turn.report.executions[0]?.runtimeSessionId ??
-            outcome.turn.promptId;
+          resident.runtimeLeaseHeld = outcome.turn.promptId;
       } catch (cause) {
         writeStderrLineSafe(
           `qwen serve: Hosted Harness recovery re-answer of session ${sessionId} failed: ${String(cause)}`,
@@ -3396,8 +3395,8 @@ export function registerHostedHarnessSessionRoutes(
               promptId: parked,
               brokerOptions,
               passive: true,
-              onPassiveRuntimeAcquired: (runtimeSessionId) => {
-                resident.runtimeLeaseHeld = runtimeSessionId;
+              onPassiveRuntimeAcquired: () => {
+                resident.runtimeLeaseHeld = parked;
               },
             });
             if (outcome.kind === 'recovered') {
@@ -3924,6 +3923,15 @@ export function registerHostedHarnessSessionRoutes(
                 // record is durable: a release persisted earlier would
                 // wedge the retry on runtime_session_not_acquirable.
                 if (brokerOptions && hasHostedCleanupDebt(session.managed)) {
+                  if (
+                    runtime.broker &&
+                    !(await releaseHeldRuntime(
+                      session,
+                      brokerOptions,
+                      turn.turnId,
+                    ))
+                  )
+                    return 'busy';
                   await retryHostedCleanup(session, brokerOptions);
                 } else {
                   await runtime.broker?.release().catch((cause: unknown) => {
@@ -4386,8 +4394,8 @@ export function registerHostedHarnessSessionRoutes(
               promptId: unsettled,
               brokerOptions,
               passive: body?.['passiveManagedRuntimeRecovery'] === true,
-              onPassiveRuntimeAcquired: (runtimeSessionId) => {
-                session.runtimeLeaseHeld = runtimeSessionId;
+              onPassiveRuntimeAcquired: () => {
+                session.runtimeLeaseHeld = unsettled;
               },
             });
             if (outcome.kind === 'inapplicable') {
@@ -4438,9 +4446,7 @@ export function registerHostedHarnessSessionRoutes(
             } else if (outcome.kind === 'recovered') {
               recovery = outcome.turn.report;
               if (outcome.turn.acquiredRuntime)
-                session.runtimeLeaseHeld =
-                  outcome.turn.report.executions[0]?.runtimeSessionId ??
-                  outcome.turn.promptId;
+                session.runtimeLeaseHeld = outcome.turn.promptId;
             }
             // inapplicable: nothing a takeover owes this payload — the load
             // continues as the plain attach it was before G3, so a requested
@@ -5605,13 +5611,33 @@ export function registerHostedHarnessSessionRoutes(
     session: HostedSession,
     sessionId: string,
   ): void => {
-    const runtimeSessionId = session.runtimeLeaseHeld;
-    if (runtimeSessionId === undefined || refusedAdoptions.has(sessionId))
-      return;
+    const promptId = session.runtimeLeaseHeld;
+    if (promptId === undefined || refusedAdoptions.has(sessionId)) return;
+    const runtimeSessionId = hostedRuntimeSessionId(promptId);
     refusedAdoptions.set(sessionId, runtimeSessionId);
     writeStderrLineSafe(
       `qwen serve: Hosted Harness takeover of session ${sessionId} adopted Runtime Session ${runtimeSessionId} but refuses the load: the lease stays owed until this session loads successfully or retires.`,
     );
+  };
+
+  const releaseHeldRuntime = async (
+    session: HostedSession,
+    options: HostedWorkspaceBrokerOptions,
+    promptId: string,
+  ): Promise<boolean> => {
+    const states = await reconcileHostedTurnCleanup(
+      session.managed,
+      options,
+      promptId,
+    );
+    if (states.get(promptId) === 'owed') return false;
+    if (!states.has(promptId))
+      await new HostedWorkspaceBroker(
+        options,
+        session.managed.authority.sessionHeader.sessionKey,
+        hostedRuntimeSessionId(promptId),
+      ).release();
+    return true;
   };
 
   // A recovery load may hold the Runtime Session. On the cancellation
@@ -5624,16 +5650,9 @@ export function registerHostedHarnessSessionRoutes(
   const releaseRecoveredRuntime = (session: HostedSession): void => {
     const promptId = session.runtimeLeaseHeld;
     if (promptId === undefined || !brokerOptions) return;
-    const release = hasHostedCleanupDebt(session.managed)
-      ? reconcileHostedTurnCleanup(session.managed, brokerOptions, promptId)
-      : new HostedWorkspaceBroker(
-          brokerOptions,
-          session.managed.authority.sessionHeader.sessionKey,
-          hostedRuntimeSessionId(promptId),
-        ).release();
-    void release.then(
-      () => {
-        if (session.runtimeLeaseHeld === promptId)
+    void releaseHeldRuntime(session, brokerOptions, promptId).then(
+      (confirmed) => {
+        if (confirmed && session.runtimeLeaseHeld === promptId)
           session.runtimeLeaseHeld = undefined;
       },
       (cause: unknown) => {
@@ -5650,27 +5669,16 @@ export function registerHostedHarnessSessionRoutes(
   const releaseLeaseNow = async (session: HostedSession): Promise<void> => {
     const promptId = session.runtimeLeaseHeld;
     if (promptId === undefined || !brokerOptions) return;
-    const release = hasHostedCleanupDebt(session.managed)
-      ? reconcileHostedTurnCleanup(
-          session.managed,
-          { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
-          promptId,
-        )
-      : new HostedWorkspaceBroker(
-          brokerOptions,
-          session.managed.authority.sessionHeader.sessionKey,
-          hostedRuntimeSessionId(promptId),
-        ).release();
-    await release
-      .then(() => {
-        if (session.runtimeLeaseHeld === promptId)
-          session.runtimeLeaseHeld = undefined;
-      })
-      .catch((cause: unknown) => {
-        writeStderrLineSafe(
-          `qwen serve: Hosted Harness release of recovered Runtime ${promptId} failed: ${String(cause)}`,
-        );
-      });
+    await releaseHeldRuntime(
+      session,
+      { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
+      promptId,
+    ).then((confirmed) => {
+      if (!confirmed)
+        throw new Error('Original Runtime cleanup is still owed.');
+      if (session.runtimeLeaseHeld === promptId)
+        session.runtimeLeaseHeld = undefined;
+    });
   };
 
   /**
@@ -6858,6 +6866,7 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 409, 'hosted_turn_recovery_required');
     if (session.active) {
       const active = session.active;
+      active.abort.abort();
       const promptId = active.promptId;
       const authority = session.managed.authority;
       const commandId = `hosted-cancel:${promptId}`;
@@ -6888,7 +6897,6 @@ export function registerHostedHarnessSessionRoutes(
       } catch {
         return error(res, 503, 'hosted_cancel_commit_failed');
       }
-      active.abort.abort();
     }
     res.sendStatus(204);
   });

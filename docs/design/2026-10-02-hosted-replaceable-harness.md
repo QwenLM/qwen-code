@@ -2,8 +2,9 @@
 
 [English](2026-10-02-hosted-replaceable-harness.md) | [简体中文](2026-10-02-hosted-replaceable-harness.zh-CN.md)
 
-Status: Steps 1 and 2 implemented in this PR (D1-D9); D10's Step 3 rows are
-named follow-ups. Issue tracker: #12952 (Stage G). Code references are to
+Status: Steps 1 and 2 are implemented (D1-D9). Step 3's bounded native-file
+approval and main-model slices are implemented on this branch; the broader
+acceptance matrix remains open, as recorded in the [Step 3 design](2026-10-09-hosted-g3-step3-recovery.md). Issue tracker: #12952 (Stage G). Code references are to
 `main` @ `728c13de21` unless a decision notes a later refinement. This
 design answers Q2 and Q3 of #12952 following the proposal in its comments,
 and corrects one mechanism description from that proposal (see "Current
@@ -515,7 +516,7 @@ happen.
   `hosted_harness_protocol_error` — instead of failing every Session open
   with `managed_session_open_failed`.
 
-### D10 — Step 3 stays a named follow-up, minus its cheap row
+### D10 — Step 3 bounded slices are implemented; the wider matrix remains open
 
 D4 already delivers the proposal table's first row (submission attempted,
 never admitted → re-submitted after withdrawal). The remaining rows — model

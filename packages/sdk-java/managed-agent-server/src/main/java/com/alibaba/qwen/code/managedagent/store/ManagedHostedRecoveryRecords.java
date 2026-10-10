@@ -43,6 +43,12 @@ public final class ManagedHostedRecoveryRecords {
 
     public static void validateResource(StoredResource stored, String tenant,
             String workspace, String session, Function<String, StoredResource> resources) {
+        validateResource(stored, tenant, workspace, session, resources, new HashMap<>());
+    }
+
+    public static void validateResource(StoredResource stored, String tenant,
+            String workspace, String session, Function<String, StoredResource> resources,
+            Map<String, JsonNode> seen) {
         if (!KINDS.contains(stored.kind()) && !"managed-action-options".equals(stored.kind())) {
             return;
         }
@@ -54,7 +60,6 @@ public final class ManagedHostedRecoveryRecords {
         if (KINDS.contains(stored.kind())) {
             validateBody(stored.kind(), body, tenant, workspace, session);
         }
-        var seen = new HashMap<String, JsonNode>();
         for (JsonNode ref : references(body)) {
             ManagedExtensionRecords.durableRef(ref, "Hosted nested reference");
             closure(ref, tenant, workspace, session, resources, seen);
@@ -64,20 +69,26 @@ public final class ManagedHostedRecoveryRecords {
     public static void validateEvent(String kind, JsonNode payload,
             String tenant, String workspace, String session,
             Function<String, StoredResource> resources) {
+        validateEvent(kind, payload, tenant, workspace, session, resources, new HashMap<>());
+    }
+
+    public static void validateEvent(String kind, JsonNode payload,
+            String tenant, String workspace, String session,
+            Function<String, StoredResource> resources, Map<String, JsonNode> seen) {
         try {
             if ("hosted.batch.planned".equals(kind)) {
                 ManagedExtensionRecords.closed(payload, Set.of("batchId", "planRevision", "planRef"), "batch plan");
                 ManagedExtensionRecords.id(payload.get("batchId"), "batchId");
                 ManagedExtensionRecords.count(payload.get("planRevision"), 1,
                         ManagedSessionStoreModels.MAX_SAFE_COUNTER, "planRevision");
-                reference(payload.get("planRef"), "hosted-approval-continuation", tenant, workspace, session, resources);
+                reference(payload.get("planRef"), "hosted-approval-continuation", tenant, workspace, session, resources, seen);
             } else if ("hosted.cleanup".equals(kind)) {
                 ManagedExtensionRecords.closed(payload, Set.of("cleanupId", "descriptorRef", "state"), "cleanup");
                 ManagedExtensionRecords.id(payload.get("cleanupId"), "cleanupId");
                 ManagedExtensionRecords.oneOf(payload.get("state"), List.of("owed", "confirmed"), "cleanup state");
-                reference(payload.get("descriptorRef"), "hosted-turn-cleanup", tenant, workspace, session, resources);
+                reference(payload.get("descriptorRef"), "hosted-turn-cleanup", tenant, workspace, session, resources, seen);
             } else if ("model.attempt".equals(kind) && payload.has("recoveryRef")) {
-                reference(payload.get("recoveryRef"), "hosted-model-request", tenant, workspace, session, resources);
+                reference(payload.get("recoveryRef"), "hosted-model-request", tenant, workspace, session, resources, seen);
             } else if ("message.retracted".equals(kind)) {
                 int fields = 0;
                 for (String field : List.of("sourceBootId", "sourceEventEpoch", "throughSequence")) {
@@ -104,10 +115,16 @@ public final class ManagedHostedRecoveryRecords {
     public static void reference(JsonNode ref, String expectedKind,
             String tenant, String workspace, String session,
             Function<String, StoredResource> resources) {
+        reference(ref, expectedKind, tenant, workspace, session, resources, new HashMap<>());
+    }
+
+    public static void reference(JsonNode ref, String expectedKind,
+            String tenant, String workspace, String session,
+            Function<String, StoredResource> resources, Map<String, JsonNode> seen) {
         ManagedExtensionRecords.durableRef(ref, "Hosted recovery reference");
         require(ref.path("schemaVersion").asInt() == 1, "Unsupported Hosted recovery reference version.");
         require(expectedKind.equals(ref.path("kind").asText()), "Hosted recovery reference kind conflicts.");
-        closure(ref, tenant, workspace, session, resources, new HashMap<>());
+        closure(ref, tenant, workspace, session, resources, seen);
     }
 
     private static void closure(JsonNode node, String tenant, String workspace,
@@ -154,6 +171,11 @@ public final class ManagedHostedRecoveryRecords {
         }
     }
 
+    private static String runtimeSessionId(String promptId) {
+        return promptId.matches("[A-Za-z0-9._-]{1,512}") && !".".equals(promptId) && !promptId.contains("..")
+                ? promptId : "wake-" + ToolPublicationContract.sha256(promptId.getBytes(StandardCharsets.UTF_8));
+    }
+
     private static List<JsonNode> references(JsonNode body) {
         var refs = new java.util.ArrayList<JsonNode>();
         for (String field : List.of("definitionRef", "rootSnapshotRef", "assistantRef", "inputRef", "continuationRef")) {
@@ -184,9 +206,8 @@ public final class ManagedHostedRecoveryRecords {
             ManagedExtensionRecords.closed(body, Set.of("v", "sessionKey", "promptId", "runtimeSessionId",
                     "bindingId", "generation", "workspaceGeneration", "fileHistoryTurnId"), "cleanup descriptor");
             ManagedExtensionRecords.id(body.get("bindingId"), "bindingId");
-            for (String field : List.of("runtimeSessionId", "fileHistoryTurnId")) {
-                require(body.get("promptId").equals(body.get(field)), "Cleanup owner conflicts.");
-            }
+            require(runtimeSessionId(body.get("promptId").asText()).equals(body.path("runtimeSessionId").asText())
+                    && body.get("promptId").equals(body.get("fileHistoryTurnId")), "Cleanup owner conflicts.");
             generation(body.get("generation"));
             generation(body.get("workspaceGeneration"));
             return;
@@ -236,7 +257,7 @@ public final class ManagedHostedRecoveryRecords {
             ManagedExtensionRecords.oneOf(body.get("stage"), List.of("approval", "final"), "stage");
             JsonNode runtime = body.get("runtime");
             ManagedExtensionRecords.closed(runtime, Set.of("runtimeSessionId", "bindingId", "generation", "workspaceGeneration"), "native Runtime");
-            require(body.get("promptId").equals(runtime.get("runtimeSessionId")), "Native Runtime owner conflicts.");
+            require(runtimeSessionId(body.get("promptId").asText()).equals(runtime.path("runtimeSessionId").asText()), "Native Runtime owner conflicts.");
             ManagedExtensionRecords.id(runtime.get("bindingId"), "bindingId");
             generation(runtime.get("generation"));
             generation(runtime.get("workspaceGeneration"));

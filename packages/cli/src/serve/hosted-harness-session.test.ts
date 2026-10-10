@@ -1203,6 +1203,59 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
+  it('aborts an active Turn and returns 503 when durable cancellation fails', async () => {
+    const { server, authorize } = await hookApp();
+    let signal!: AbortSignal;
+    let finish!: () => void;
+    state.model.mockImplementationOnce(
+      (input) =>
+        new Promise((resolve) => {
+          signal = input.signal;
+          finish = () => resolve({ text: '', model: 'test-model' });
+        }),
+    );
+    const prompt = [
+      { type: 'text', text: 'cancel while Store is unavailable' },
+    ];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .send({ prompt, promptId: PROMPT_ID, payloadDigest })
+      .expect(202);
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalledOnce());
+    const original =
+      LocalManagedSessionAuthority.prototype.appendExecutionEvent;
+    const append = vi
+      .spyOn(LocalManagedSessionAuthority.prototype, 'appendExecutionEvent')
+      .mockImplementation(function (
+        this: LocalManagedSessionAuthority,
+        ...args
+      ) {
+        if (args[0].operation === 'requestCancel')
+          return Promise.reject(new Error('Store unavailable'));
+        return Reflect.apply(original, this, args);
+      });
+    try {
+      const response = await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/cancel`),
+      );
+      expect(response.status).toBe(503);
+      expect(response.body.code).toBe('hosted_cancel_commit_failed');
+      expect(signal.aborted).toBe(true);
+    } finally {
+      append.mockRestore();
+      finish();
+    }
+    await vi.waitFor(async () => {
+      const status = await authorize(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      );
+      expect(status.body.hasActivePrompt).toBe(false);
+    });
+    await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/detach`),
+    ).expect(204);
+  });
+
   it.each([
     new TypeError('network timeout'),
     new ManagedSessionStoreHttpError(

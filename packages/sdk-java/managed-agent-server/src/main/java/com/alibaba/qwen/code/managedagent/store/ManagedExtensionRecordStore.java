@@ -328,7 +328,6 @@ public class ManagedExtensionRecordStore {
                                 + " is not its domain's reserved " + domain
                                 + ":<n> id.");
             }
-            ManagedHostedRecoveryRecords.validateEvent(kind, payload, tenantId, workspaceId, sessionId, resources);
             if ("activation.changed".equals(kind)) {
                 lastActivation = payload;
             }

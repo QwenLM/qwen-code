@@ -33,6 +33,7 @@ import java.sql.Timestamp;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
@@ -536,16 +537,20 @@ public class ManagedSessionStore {
         for (var resource : request.resources() == null ? List.<CommitResource>of() : request.resources()) {
             declaredResources.add(resource.resourceId());
         }
+        var resourceCache = new HashMap<String, StoredResource>();
+        var hostedReferences = new HashMap<String, JsonNode>();
+        java.util.function.Function<String, StoredResource> reader = resourceId -> resourceCache.computeIfAbsent(resourceId,
+                id -> storedResource(scopeKey, tenantId, request.workspaceId(), sessionId, id));
         java.util.function.Function<String, StoredResource> closureReader = resourceId -> {
             if (!declaredResources.contains(resourceId)) {
                 throw invalid("Hosted nested reference is absent from the transaction census.");
             }
-            return storedResource(scopeKey, tenantId, request.workspaceId(), sessionId, resourceId);
+            return reader.apply(resourceId);
         };
         for (var resource : request.resources() == null ? List.<CommitResource>of() : request.resources()) {
             if (ManagedHostedRecoveryRecords.KINDS.contains(resource.kind()) || "managed-action-options".equals(resource.kind())) {
                 ManagedHostedRecoveryRecords.validateResource(closureReader.apply(resource.resourceId()), tenantId,
-                        request.workspaceId(), sessionId, closureReader);
+                        request.workspaceId(), sessionId, closureReader, hostedReferences);
             }
         }
         for (String line : new String(validated.recordBytes(), StandardCharsets.UTF_8).split("\n")) {
@@ -553,11 +558,11 @@ public class ManagedSessionStore {
             if (record != null && record.has("managedSession")) {
                 JsonNode event = record.get("managedSession");
                 ManagedHostedRecoveryRecords.validateEvent(event.path("kind").asText(), event.path("payload"), tenantId,
-                        request.workspaceId(), sessionId, closureReader);
+                        request.workspaceId(), sessionId, closureReader, hostedReferences);
             }
         }
         if (authority != null && extensionRecords.hasNewLifecycleDispatch(tenantId, sessionId, validated.recordBytes(),
-                resourceId -> storedResource(scopeKey, tenantId, request.workspaceId(), sessionId, resourceId))) {
+                reader)) {
             if (lifecycleExecution == null || lifecycleSessions == null) {
                 throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
             }
@@ -575,13 +580,11 @@ public class ManagedSessionStore {
         }
         if (authority == null && lifecycleProtocolFenced(tenantId, sessionId)) {
             extensionRecords.requireLifecycleSettlement(tenantId, sessionId, validated.recordBytes(),
-                    resourceId -> storedResource(scopeKey, tenantId, request.workspaceId(), sessionId, resourceId));
+                    reader);
         }
         var applied = extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
                 request.firstSequence(), request.eventCount(),
-                validated.recordBytes(), resourceId -> storedResource(
-                        scopeKey, tenantId, request.workspaceId(), sessionId,
-                        resourceId));
+                validated.recordBytes(), reader);
         var receiptEvents = applied.receipts();
         if (actions != null) {
             actions.apply(
@@ -589,13 +592,7 @@ public class ManagedSessionStore {
                     request.workspaceId(),
                     sessionId, request.firstSequence(), request.eventCount(),
                     validated.recordBytes(),
-                    resourceId ->
-                            storedResource(
-                                    scopeKey,
-                                    tenantId,
-                                    request.workspaceId(),
-                                    sessionId,
-                                    resourceId));
+                    reader, hostedReferences);
         }
         jdbc.update("INSERT INTO qwen_managed_session_journal_tx"
                         + " (tenant_id, workspace_id, session_id,"

@@ -14,7 +14,10 @@ import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-ru
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import type { LlmPreparedRequest } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import type { Part } from '@google/genai';
-import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import {
+  hostedRuntimeSessionId,
+  HostedWorkspaceBroker,
+} from './hosted-workspace-broker.js';
 import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import { HostedApprovalWaiters } from './hosted-tool-approval.js';
 import {
@@ -40,7 +43,7 @@ afterEach(async () => {
   );
 });
 
-async function fixture() {
+async function fixture(promptId: string = randomUUID()) {
   const root = await mkdtemp(path.join(tmpdir(), 'hosted-recovery-'));
   directories.push(root);
   const sessionKey = {
@@ -48,7 +51,6 @@ async function fixture() {
     workspaceId: 'workspace',
     sessionId: randomUUID(),
   };
-  const promptId = randomUUID();
   const resources = LocalManagedSessionResourceStore.create({
     runtimeBaseDir: root,
     sessionKey,
@@ -117,7 +119,11 @@ async function fixture() {
       },
     });
   const brokerOptions = { baseUrl: 'http://127.0.0.1:1', token: 'fixture' };
-  const broker = new HostedWorkspaceBroker(brokerOptions, sessionKey, promptId);
+  const broker = new HostedWorkspaceBroker(
+    brokerOptions,
+    sessionKey,
+    hostedRuntimeSessionId(promptId),
+  );
   broker.runtime = {
     bindingId: 'original-binding',
     generation: '7',
@@ -132,6 +138,93 @@ async function fixture() {
     reopen: () => openManagedSession({ ...options, workerId: 'replacement' }),
   };
 }
+
+it.each(['ordinary-prompt', 'monitor:wake:run'])(
+  'reports scoped cleanup confirmation for %s',
+  async (promptId) => {
+    const f = await fixture(promptId);
+    try {
+      await oweHostedTurnCleanup(f.session, f.promptId, f.broker);
+      const release = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'release')
+        .mockResolvedValue();
+      expect(
+        await reconcileHostedTurnCleanup(
+          f.session,
+          f.brokerOptions,
+          'other-prompt',
+        ),
+      ).toEqual(new Map());
+      expect(
+        await reconcileHostedTurnCleanup(
+          f.session,
+          f.brokerOptions,
+          f.promptId,
+        ),
+      ).toEqual(new Map([[f.promptId, 'owed']]));
+      expect(release).not.toHaveBeenCalled();
+      await f.terminal();
+      expect(
+        await reconcileHostedTurnCleanup(
+          f.session,
+          f.brokerOptions,
+          f.promptId,
+        ),
+      ).toEqual(new Map([[f.promptId, 'confirmed']]));
+      expect(release).toHaveBeenCalledOnce();
+      await reconcileHostedTurnCleanup(f.session, f.brokerOptions, f.promptId);
+      expect(release).toHaveBeenCalledOnce();
+    } finally {
+      await f.session.close();
+    }
+  },
+);
+
+it.each([undefined, 'already loaded'])(
+  'refreshes saved-batch context only when missing (%s)',
+  async (context) => {
+    const f = await fixture();
+    try {
+      vi.spyOn(f.broker, 'acquire').mockResolvedValue();
+      const fetchWorkspaceContext = vi.fn().mockResolvedValue(undefined);
+      const receiver = {
+        session: f.session,
+        broker: f.broker,
+        warmed: Promise.resolve(),
+        promptId: f.promptId,
+        declarations: vi.fn().mockResolvedValue([]),
+        executeNative: vi.fn().mockResolvedValue([]),
+        fetchWorkspaceContext,
+        context: { read: () => context, write: vi.fn() },
+      };
+      await Reflect.apply(
+        HostedWorkspaceToolTurn.prototype.resumeSavedNativeBatch,
+        receiver,
+        [
+          {
+            plan: {
+              promptId: f.promptId,
+              calls: [],
+              runtime: { runtimeSessionId: f.promptId, ...f.broker.runtime },
+              round: 1,
+              model: 'fixture',
+            },
+            inputs: [],
+            parts: [],
+          },
+          0,
+          new AbortController().signal,
+        ],
+      );
+      expect(fetchWorkspaceContext).toHaveBeenCalledTimes(
+        context === undefined ? 1 : 0,
+      );
+      expect(receiver.declarations).toHaveBeenCalledOnce();
+    } finally {
+      await f.session.close();
+    }
+  },
+);
 
 it('retains terminal cleanup debt across a failed release and a cold replacement', async () => {
   const f = await fixture();

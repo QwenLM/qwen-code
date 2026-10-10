@@ -12,7 +12,7 @@ import type {
   RawFileHistoryOperation,
   HostedFileHistoryState,
 } from './hosted-file-history-protocol.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type {
@@ -705,4 +705,19 @@ export class HostedWorkspaceBroker {
       throw new Error('Runtime Broker response identity changed.');
     return parsed;
   }
+}
+
+/**
+ * The Broker admits only path-safe Runtime Session ids, while a wake
+ * turn's id is an input id (`arun_…:input`, `<monitor>:notify:<n>`):
+ * such an id is mapped to a stable path-safe digest instead of being
+ * refused at acquire. The mapped form is path-safe itself, so layering
+ * this over an id that was already mapped stays idempotent.
+ */
+export function hostedRuntimeSessionId(promptId: string): string {
+  return /^[A-Za-z0-9._-]{1,512}$/.test(promptId) &&
+    promptId !== '.' &&
+    !promptId.includes('..')
+    ? promptId
+    : `wake-${createHash('sha256').update(promptId).digest('hex')}`;
 }

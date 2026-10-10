@@ -2,8 +2,9 @@
 
 [English](2026-10-02-hosted-replaceable-harness.md) | [简体中文](2026-10-02-hosted-replaceable-harness.zh-CN.md)
 
-状态：Step 1 与 Step 2 已在本 PR 实现（D1-D9）；D10 的 Step 3 各行是
-点名的后续。跟踪 issue：#12952（Stage G）。代码引用以 `main` @
+状态：Step 1 与 Step 2 已实现（D1-D9）。Step 3 的限定原生文件审批与
+主模型切片已在当前分支实现；更广的验收矩阵仍未完成，详见
+[Step 3 设计](2026-10-09-hosted-g3-step3-recovery.zh-CN.md)。跟踪 issue：#12952（Stage G）。代码引用以 `main` @
 `728c13de21` 为准，除非某个决策注明了更晚的修正。本设计按 issue 评论
 中的提案回答了 #12952 的 Q2 与 Q3，并修正了该提案中一处机制描述
 （见「现状」第 1 条）。
@@ -433,7 +434,7 @@ darwin 是一个未被验证的预期，而不是等待首个不可能发生的�
   `hosted_harness_protocol_error`——而不是让每个 Session 的
   open 都以 `managed_session_open_failed` 失败。
 
-### D10 —— Step 3 保留为点名后续，去掉其中便宜的一行
+### D10 —— Step 3 限定切片已实现，更广的验收矩阵仍开放
 
 D4 已经交付提案表格的第一行（尝试过提交但从未准入 → 撤回后重新
 提交）。其余各行——带半截文本回撤的模型轮重发（`before_model`；机制

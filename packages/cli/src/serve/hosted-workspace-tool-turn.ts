@@ -76,6 +76,7 @@ import {
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
   HostedWorkspaceBroker,
+  hostedRuntimeSessionId,
   HostedWorkspaceBrokerRejection,
   isHostedFileHistoryRefusal,
   type HostedWorkspaceBrokerOptions,
@@ -513,20 +514,7 @@ function physicalToolStatus(
   return response?.['error'] ? 'error' : 'success';
 }
 
-/**
- * The Broker admits only path-safe Runtime Session ids, while a wake
- * turn's id is an input id (`arun_…:input`, `<monitor>:notify:<n>`):
- * such an id is mapped to a stable path-safe digest instead of being
- * refused at acquire. The mapped form is path-safe itself, so layering
- * this over an id that was already mapped stays idempotent.
- */
-export function hostedRuntimeSessionId(promptId: string): string {
-  return /^[A-Za-z0-9._-]{1,512}$/.test(promptId) &&
-    promptId !== '.' &&
-    !promptId.includes('..')
-    ? promptId
-    : `wake-${createHash('sha256').update(promptId).digest('hex')}`;
-}
+export { hostedRuntimeSessionId } from './hosted-workspace-broker.js';
 
 export class HostedToolRecoveryRequiredError extends Error {
   constructor(cause: unknown) {
@@ -675,6 +663,7 @@ interface HostedPreparedRequest {
   monitoring: boolean;
   agent: boolean;
   agentBackground: boolean;
+  team: boolean;
 }
 
 export class HostedWorkspaceToolTurn {
@@ -1053,7 +1042,11 @@ export class HostedWorkspaceToolTurn {
         try {
           if (this.hooks && !this.mcp) await this.hooks.acquire();
           else {
-            if (!this.mcp && !isHostedWorkspaceShellProfile(this.profile))
+            if (
+              !this.cleanupOwed &&
+              !this.mcp &&
+              !isHostedWorkspaceShellProfile(this.profile)
+            )
               await oweHostedTurnCleanup(
                 this.session,
                 this.promptId,
@@ -1462,6 +1455,8 @@ export class HostedWorkspaceToolTurn {
           plan.runtime.workspaceGeneration
       )
         throw new Error('Original Workspace generation changed.');
+      if (this.context?.read() === undefined)
+        await this.fetchWorkspaceContext(signal);
       const declarations = await this.declarations(signal);
       const requests: HostedPreparedRequest[] = [];
       for (const [ordinal, item] of plan.calls.entries()) {
@@ -1495,6 +1490,7 @@ export class HostedWorkspaceToolTurn {
           monitoring: false,
           agent: false,
           agentBackground: true,
+          team: false,
         });
       }
       this.logicalRound = plan.round;

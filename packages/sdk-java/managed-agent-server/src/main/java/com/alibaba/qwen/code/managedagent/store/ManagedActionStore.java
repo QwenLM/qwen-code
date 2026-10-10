@@ -145,6 +145,11 @@ public class ManagedActionStore {
             int eventCount,
             byte[] bytes,
             Function<String, StoredResource> resources) {
+        apply(tenantId, workspaceId, sessionId, firstSequence, eventCount, bytes, resources, new java.util.HashMap<>());
+    }
+
+    void apply(String tenantId, String workspaceId, String sessionId, long firstSequence,
+            int eventCount, byte[] bytes, Function<String, StoredResource> resources, Map<String, JsonNode> hostedReferences) {
         int index = -1;
         for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
             index++;
@@ -264,7 +269,7 @@ public class ManagedActionStore {
                 resource(options.path("inputRef"), "managed-tool-input", resources);
             }
             if (options.path("v").asLong() == 3) {
-                ManagedHostedRecoveryRecords.reference(options.path("continuationRef"), "hosted-approval-continuation", tenantId, workspaceId, sessionId, resources);
+                ManagedHostedRecoveryRecords.reference(options.path("continuationRef"), "hosted-approval-continuation", tenantId, workspaceId, sessionId, resources, hostedReferences);
             }
             Action previous = find(tenantId, sessionId, id).orElse(null);
             require(

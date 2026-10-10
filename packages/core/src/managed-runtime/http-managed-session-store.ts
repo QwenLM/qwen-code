@@ -1780,9 +1780,6 @@ export function collectNestedResourceRefs(
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||
     ref.kind === 'managed-action-options' ||
-    ref.kind === 'hosted-approval-continuation' ||
-    ref.kind === 'hosted-model-request' ||
-    ref.kind === 'hosted-turn-cleanup' ||
     ref.kind === 'managed-hook-plan' ||
     ref.kind === 'managed-hook-message-chunks'
   ) {

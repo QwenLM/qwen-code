@@ -29,7 +29,7 @@ Source anchors: `hosted-runtime-recovery.ts` (`recoverHostedRuntimeTurn`),
 `hosted-harness-session.ts` (`executeHostedTurn`, `settleCancelledHarnessTurn`,
 the load and Action resolve routes), `hosted-tool-approval.ts`
 (`resolveHostedAction`), `managed-harness-factory.ts` (`resolveDurableWait`),
-and Java `HarnessCoordinator` (`dispatchClaimed`). These are baseline facts,
+and Java `HarnessCoordinator` (`runClaimed`). These are baseline facts,
 not new acceptance results.
 
 `model.attempt: output_committed` currently records a finished provider stream
@@ -549,3 +549,9 @@ cross-host stop/ownership proof and production event pruning remain separate.
 [g3]: https://github.com/QwenLM/qwen-code/pull/13174
 [b2]: https://github.com/QwenLM/qwen-code/pull/13174#issuecomment-6030365600
 [g1fix]: https://github.com/QwenLM/qwen-code/pull/13188
+
+### Review corrections
+
+A local cancel aborts immediately. If its durable append fails, the route returns 503: the current process stops, but the cancellation is not durable and must be retried before relying on replacement recovery. Cleanup tracks the requested Turn separately from other Turns' debt and clears a held lease only after its original owner is confirmed released. Wake input IDs retain the same path-safe Runtime mapping as ordinary acquisition. Transient cleanup failures continue to fence new work until a successful attachment retry clears the cleanup block.
+
+Prepared-request capture bounds defensive cloning at 64 KiB; oversized borrowed views are synchronously serialized and rejected by the Hosted publisher rather than retained. Recovered generation configuration lasts only for its request, while history restoration runs the usual registry reconciliation. Hosted closure validation shares one reference memo and one verified-resource cache per transaction; reference metadata conflicts and the complete transaction census remain enforced.

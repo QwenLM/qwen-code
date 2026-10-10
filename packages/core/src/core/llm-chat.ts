@@ -604,10 +604,13 @@ export interface LlmPreparedRequest {
   providerPin: string;
   promptTokensForClamp: number;
 }
-export type LlmPreparedRequestCallback = (
+export type LlmPreparedRequestCallback = ((
   prepared: LlmPreparedRequest,
   continuationInFlight?: boolean,
-) => Promise<void>;
+) => Promise<void>) & {
+  /** Over-budget requests are borrowed views and must not be retained. */
+  maxSnapshotBytes?: number;
+};
 export class LlmRequestPreparationError extends Error {
   constructor(cause: unknown) {
     super('Model request durability preparation failed.', { cause });
@@ -619,6 +622,8 @@ export function llmPreparedProviderPin(
   const fields = [
     'model',
     'baseUrl',
+    'customHeaders',
+    'proxy',
     'vertexai',
     'authType',
     'samplingParams',
@@ -637,13 +642,8 @@ export function llmPreparedProviderPin(
     'forceGlobalCacheScope',
     'cacheRetention',
     'cacheRetentionByBlock',
-  ];
-  const pin = Object.fromEntries(
-    fields.map((key) => [
-      key,
-      (config as unknown as Record<string, unknown> | undefined)?.[key],
-    ]),
-  );
+  ] satisfies Array<keyof ContentGeneratorConfig>;
+  const pin = Object.fromEntries(fields.map((key) => [key, config?.[key]]));
   const stable = (value: unknown): unknown =>
     Array.isArray(value)
       ? value.map(stable)
@@ -3187,6 +3187,9 @@ export class LlmChat {
       cgConfigForThresholds?.contextWindowSize ?? DEFAULT_TOKEN_LIMIT;
     let promptTokensForClamp = 0;
 
+    const previousGenerationConfig = options?.preparedRequest
+      ? this.generationConfig
+      : undefined;
     let currentUserContent: Content | undefined;
     try {
       if (options?.preparedRequest) {
@@ -3200,8 +3203,10 @@ export class LlmChat {
             )
         )
           throw new LlmRequestPreparationError('Saved model route changed.');
-        this.history = structuredClone(saved.history);
-        this.setCompletedToolCallIds(saved.completedToolCallIds);
+        this.setHistory(
+          structuredClone(saved.history),
+          saved.completedToolCallIds,
+        );
         this.generationConfig = structuredClone(saved.request.config);
         requestContents = structuredClone(saved.request.contents);
         currentUserContent = this.history.at(-1);
@@ -3602,6 +3607,8 @@ export class LlmChat {
           manualPlanExitNoticeVersion,
         );
       }
+      if (previousGenerationConfig)
+        this.generationConfig = previousGenerationConfig;
       streamDoneResolver!();
       throw error;
     }
@@ -5310,6 +5317,8 @@ export class LlmChat {
         if (successfulRecoveries > 0) {
           self.coalesceRecoveryPairs(successfulRecoveries);
         }
+        if (previousGenerationConfig)
+          self.generationConfig = previousGenerationConfig;
         sleepInhibitorHandle.release();
         streamDoneResolver!();
         // Flush any deferred partial-tool_use record. Covers both the
@@ -5386,19 +5395,20 @@ export class LlmChat {
         ...config
       } = request.config ?? {};
       try {
+        const prepared: LlmPreparedRequest = {
+          request: { model, contents: requestContents, config },
+          history: this.history,
+          completedToolCallIds: [...this.completedToolCallIds],
+          routeSelector: `${actualConfig?.authType ?? ''}:${model}`,
+          providerPin: llmPreparedProviderPin(actualConfig),
+          promptTokensForClamp,
+        };
+        const overBudget =
+          onPreparedRequest.maxSnapshotBytes !== undefined &&
+          Buffer.byteLength(JSON.stringify(prepared)) >
+            onPreparedRequest.maxSnapshotBytes;
         await onPreparedRequest(
-          {
-            request: {
-              model,
-              contents: structuredClone(requestContents),
-              config: structuredClone(config),
-            },
-            history: structuredClone(this.history),
-            completedToolCallIds: [...this.completedToolCallIds],
-            routeSelector: `${actualConfig?.authType ?? ''}:${model}`,
-            providerPin: llmPreparedProviderPin(actualConfig),
-            promptTokensForClamp,
-          },
+          overBudget ? prepared : structuredClone(prepared),
           continuationInFlight || transportContinuationPrefix !== undefined,
         );
       } catch (cause) {
