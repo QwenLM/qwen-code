@@ -661,6 +661,20 @@ describe('stripSystemReminderBlocks', () => {
       ),
     ).toBe('what is <system-reminder>?  hello');
   });
+
+  it('preserves stray closing tag followed by unclosed open tag (#12961)', () => {
+    expect(
+      stripSystemReminderBlocks('a </system-reminder> b <system-reminder> c'),
+    ).toBe('a </system-reminder> b <system-reminder> c');
+  });
+
+  it('scans large inputs with unclosed tags in linear time', () => {
+    const unclosedRepeated = `${'<system-reminder>'.repeat(10000)}trailing`;
+    const start = performance.now();
+    expect(stripSystemReminderBlocks(unclosedRepeated)).toBe(unclosedRepeated);
+    const elapsed = performance.now() - start;
+    expect(elapsed).toBeLessThan(100);
+  });
 });
 
 describe('formatDateForContext', () => {

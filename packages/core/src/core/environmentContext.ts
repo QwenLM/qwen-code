@@ -761,10 +761,16 @@ export function stripSystemReminderBlocks(text: string): string {
   const intervals: Array<[number, number]> = [];
   let lastOpen = -1;
   let cursor = 0;
+  let nextOpen = text.indexOf(SYSTEM_REMINDER_OPEN, 0);
+  let nextClose = text.indexOf(SYSTEM_REMINDER_CLOSE, 0);
 
   while (cursor < text.length) {
-    const nextOpen = text.indexOf(SYSTEM_REMINDER_OPEN, cursor);
-    const nextClose = text.indexOf(SYSTEM_REMINDER_CLOSE, cursor);
+    if (nextOpen !== -1 && nextOpen < cursor) {
+      nextOpen = text.indexOf(SYSTEM_REMINDER_OPEN, cursor);
+    }
+    if (nextClose !== -1 && nextClose < cursor) {
+      nextClose = text.indexOf(SYSTEM_REMINDER_CLOSE, cursor);
+    }
 
     if (nextOpen === -1 && nextClose === -1) {
       break;
