@@ -1005,10 +1005,10 @@ export function convertToFunctionResponse(
   let rawSize: ReturnType<typeof measureToolOutput> | undefined;
   try {
     if (producerResult) {
-      rawSize =
-        producerResult.rawOutputSize === null
-          ? undefined
-          : (producerResult.rawOutputSize ?? processed);
+      // An undeclared raw size is unknown, not equal to the processed body:
+      // a producer that pre-bounds its own output (grep, ripGrep) would
+      // otherwise be reported as raw == injected with truncated: false.
+      rawSize = producerResult.rawOutputSize ?? undefined;
     }
   } catch {
     // Optional observation metadata must not change a tool's outcome.
@@ -6148,7 +6148,9 @@ export class CoreToolScheduler {
         replacement = false,
       ) => {
         const rawSize =
-          replacement || producerToolResult?.rawOutputSize === null
+          replacement ||
+          producerToolResult?.rawOutputSize === null ||
+          producerToolResult?.error !== undefined
             ? undefined
             : (producerToolResult?.rawOutputSize ??
               measureToolOutput(

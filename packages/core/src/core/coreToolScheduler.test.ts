@@ -7170,7 +7170,7 @@ describe('convertToFunctionResponse', () => {
     expect(getToolOutputProvenance(restored)?.rawSize).toBeUndefined();
   });
 
-  it('uses configured media tokens for native producer fallback on ACP/speculation conversion', () => {
+  it('leaves raw size unknown when the producer does not declare one', () => {
     const content = [{ inlineData: { mimeType: 'image/png', data: 'BASE64' } }];
     const cfg = {
       getChatCompression: () => ({ imageTokenEstimate: 800 }),
@@ -7182,12 +7182,12 @@ describe('convertToFunctionResponse', () => {
       {},
       cfg,
     );
-    expect(getToolOutputProvenance(part)?.rawSize).toEqual({
-      chars: 0,
-      estimatedTokens: 800,
-    });
+    // An undeclared raw size is unknown: the processed body must not be
+    // shipped as the pre-reduction raw size, or a pre-bounding producer
+    // (grep, ripGrep) would report raw == injected with truncated: false.
+    expect(getToolOutputProvenance(part)?.rawSize).toBeUndefined();
     expect(measureToolOutput([part], cfg).estimatedTokens).toBe(816);
-    expect(getToolOutputProvenance(part)?.truncated).toBe(false);
+    expect(getToolOutputProvenance(part)?.truncated).toBeUndefined();
   });
 
   const toolName = 'testTool';
