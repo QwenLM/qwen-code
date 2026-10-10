@@ -20,6 +20,8 @@ public class ManagedAgentProperties {
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
     private final Auth auth = new Auth();
     private final InternalServer internalServer = new InternalServer();
+    private final Automation automation = new Automation();
+    private final Channels channels = new Channels();
     private String agentRevision = "1";
     private String trustedActorHeader = "";
 
@@ -33,6 +35,14 @@ public class ManagedAgentProperties {
 
     public InternalServer getInternalServer() {
         return internalServer;
+    }
+
+    public Automation getAutomation() {
+        return automation;
+    }
+
+    public Channels getChannels() {
+        return channels;
     }
 
     public SessionStore getSessionStore() {
@@ -97,6 +107,64 @@ public class ManagedAgentProperties {
                             + " a supported Harness, Session Store and Session-isolated"
                             + " local-process Broker with Workspace mounts");
         }
+        if (automation.isEnabled()) {
+            // A non-positive value fails at tick time, nearly silently:
+            // 0 slots per tick stops every scheduled fire behind one
+            // warn line, and 0 concurrency refuses every allow slot.
+            if (automation.getMaxSlotsPerTick() < 1) {
+                throw new IllegalStateException(
+                        "Automation max-slots-per-tick must be a positive count.");
+            }
+            if (automation.getConcurrency() < 1) {
+                throw new IllegalStateException(
+                        "Automation concurrency must be a positive count.");
+            }
+            if (!(automation.getScanDelay().toMillis() > 0)
+                    || !(automation.getLease().toMillis() > 0)
+                    || !(automation.getLateTolerance().toMillis() > 0)
+                    || !(automation.getLookback().toMillis() > 0)) {
+                throw new IllegalStateException(
+                        "Automation scan-delay, lease, late-tolerance and lookback must be positive durations.");
+            }
+        }
+        // The child Workspace capability (#13753 I1) runs Git in this
+        // control plane against an administrator mount, so it needs the
+        // local-process Broker that mounts the storage here.
+        if (runtimeBroker.isChildWorkspacesEnabled()) {
+            if (!runtimeBroker.isEnabled()
+                    || !"local-process".equals(runtimeBroker.getProvisioner())
+                    || !"session".equals(runtimeBroker.getIsolationClass())
+                    || runtimeBroker.getWorkspaceMounts().isEmpty()) {
+                throw new IllegalStateException("Child Workspaces require a Session-isolated"
+                        + " local-process Broker with Workspace mounts");
+            }
+            // A suffix-less number binds as milliseconds: refuse it here,
+            // naming the key, rather than time out every Git command.
+            Duration gitTimeout = runtimeBroker.getChildWorkspaceGitTimeout();
+            if (gitTimeout == null || gitTimeout.compareTo(Duration.ofSeconds(1)) < 0
+                    || gitTimeout.compareTo(Duration.ofHours(1)) > 0) {
+                throw new IllegalStateException("child-workspace-git-timeout must be between 1s and 1h");
+            }
+            if (!childWorkspacesSupportedOn(System.getProperty("os.name", ""))) {
+                throw new IllegalStateException("Child Workspaces are not supported on Windows");
+            }
+            // The steps name the files Git reports: a JVM whose file names
+            // are not UTF-8 (a C or POSIX locale) cannot spell most of them.
+            if (!utf8FileNames(System.getProperty("sun.jnu.encoding", ""))) {
+                throw new IllegalStateException("Child Workspaces need UTF-8 file names; run the server"
+                        + " under a UTF-8 locale (sun.jnu.encoding is "
+                        + System.getProperty("sun.jnu.encoding") + ")");
+            }
+        }
+    }
+
+    static boolean utf8FileNames(String encoding) {
+        return "UTF-8".equalsIgnoreCase(encoding) || "UTF8".equalsIgnoreCase(encoding);
+    }
+
+    /** Child Workspaces run their Git steps on POSIX hosts only. */
+    static boolean childWorkspacesSupportedOn(String osName) {
+        return !osName.toLowerCase(Locale.ROOT).startsWith("windows");
     }
 
     public static class Harness {
@@ -493,6 +561,7 @@ public class ManagedAgentProperties {
         private Duration batchInterval = Duration.ofMillis(75);
         private int batchMaxEvents = 64;
         private int batchMaxBytes = 65536;
+        private boolean replayFloorEnabled;
 
         public Duration getPollInterval() {
             return pollInterval;
@@ -554,6 +623,19 @@ public class ManagedAgentProperties {
         public void setBatchMaxBytes(int batchMaxBytes) {
             this.batchMaxBytes = batchMaxBytes;
         }
+
+        /**
+         * Whether the scheduled pass raises each Session's replay floor as
+         * far as its Snapshot proves safe. Disabled by default; events are
+         * never deleted here either way.
+         */
+        public boolean isReplayFloorEnabled() {
+            return replayFloorEnabled;
+        }
+
+        public void setReplayFloorEnabled(boolean replayFloorEnabled) {
+            this.replayFloorEnabled = replayFloorEnabled;
+        }
     }
 
     public static class RuntimeBroker {
@@ -597,6 +679,9 @@ public class ManagedAgentProperties {
         private String staticLeaseId = "standalone-lease";
         private long staticEpoch = 1;
         private Map<String, String> environment = new LinkedHashMap<>();
+        private boolean childWorkspacesEnabled;
+        private String childWorkspaceGit = "git";
+        private Duration childWorkspaceGitTimeout = Duration.ofMinutes(2);
 
         public boolean isEnabled() {
             return enabled;
@@ -723,6 +808,30 @@ public class ManagedAgentProperties {
 
         public boolean isVerifiedWorkspaceRecoveryEnabled() {
             return verifiedWorkspaceRecoveryEnabled;
+        }
+
+        public boolean isChildWorkspacesEnabled() {
+            return childWorkspacesEnabled;
+        }
+
+        public void setChildWorkspacesEnabled(boolean childWorkspacesEnabled) {
+            this.childWorkspacesEnabled = childWorkspacesEnabled;
+        }
+
+        public String getChildWorkspaceGit() {
+            return childWorkspaceGit;
+        }
+
+        public void setChildWorkspaceGit(String childWorkspaceGit) {
+            this.childWorkspaceGit = childWorkspaceGit;
+        }
+
+        public Duration getChildWorkspaceGitTimeout() {
+            return childWorkspaceGitTimeout;
+        }
+
+        public void setChildWorkspaceGitTimeout(Duration childWorkspaceGitTimeout) {
+            this.childWorkspaceGitTimeout = childWorkspaceGitTimeout;
         }
 
         public void setVerifiedWorkspaceRecoveryEnabled(boolean verifiedWorkspaceRecoveryEnabled) {
@@ -900,6 +1009,104 @@ public class ManagedAgentProperties {
 
         public void setEnvironment(Map<String, String> environment) {
             this.environment = environment;
+        }
+    }
+
+    /** H6b/H6c: the automation scanner, its lease and the slot window. */
+    public static class Automation {
+        private boolean enabled;
+        private Duration scanDelay = Duration.ofSeconds(10);
+        private Duration lease = Duration.ofSeconds(60);
+        private Duration lateTolerance = Duration.ofMinutes(5);
+        private Duration lookback = Duration.ofHours(24);
+        private int maxSlotsPerTick = 1000;
+        private int concurrency = 4;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public Duration getScanDelay() {
+            return scanDelay;
+        }
+
+        public void setScanDelay(Duration scanDelay) {
+            this.scanDelay = scanDelay;
+        }
+
+        public Duration getLease() {
+            return lease;
+        }
+
+        public void setLease(Duration lease) {
+            this.lease = lease;
+        }
+
+        public Duration getLateTolerance() {
+            return lateTolerance;
+        }
+
+        public void setLateTolerance(Duration lateTolerance) {
+            this.lateTolerance = lateTolerance;
+        }
+
+        public Duration getLookback() {
+            return lookback;
+        }
+
+        public void setLookback(Duration lookback) {
+            this.lookback = lookback;
+        }
+
+        public int getMaxSlotsPerTick() {
+            return maxSlotsPerTick;
+        }
+
+        public void setMaxSlotsPerTick(int maxSlotsPerTick) {
+            this.maxSlotsPerTick = maxSlotsPerTick;
+        }
+
+        public int getConcurrency() {
+            return concurrency;
+        }
+
+        public void setConcurrency(int concurrency) {
+            this.concurrency = concurrency;
+        }
+    }
+
+    /** H5b/H5c: the trusted channel adapter surface and its claim lease. */
+    public static class Channels {
+        private boolean enabled;
+        private Duration claimLease = Duration.ofMinutes(10);
+        private Duration scanDelay = Duration.ofSeconds(30);
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public Duration getClaimLease() {
+            return claimLease;
+        }
+
+        public void setClaimLease(Duration claimLease) {
+            this.claimLease = claimLease;
+        }
+
+        public Duration getScanDelay() {
+            return scanDelay;
+        }
+
+        public void setScanDelay(Duration scanDelay) {
+            this.scanDelay = scanDelay;
         }
     }
 }
