@@ -194,6 +194,12 @@ test('keeps two returned agent results in one user turn with the final answer vi
 
   await expect(page.locator('[data-web-shell-user-row]')).toHaveCount(1);
   const markers = page.locator('[data-background-turn-start]');
+  const expand = page.getByRole('button', {
+    name: 'Expand steps',
+    exact: true,
+  });
+  await expect(expand).toBeVisible();
+  await expand.click();
   await expect(markers).toHaveCount(2);
   await expect(markers.nth(0)).toContainText('Rendering investigation');
   await expect(markers.nth(1)).toContainText('Ownership investigation');
@@ -223,9 +229,18 @@ test('keeps two returned agent results in one user turn with the final answer vi
   await expect(page.getByText(intermediateAnswer, { exact: true })).toHaveCount(
     0,
   );
-  await expect(markers).toHaveCount(2);
+  await expect(markers).toHaveCount(0);
   await page.screenshot({
     path: testInfo.outputPath('two-agents-collapsed.png'),
+    animations: 'disabled',
+    fullPage: true,
+  });
+  await expand.click();
+  await expect(markers).toHaveCount(2);
+  await expect(page.getByText(finalAnswer, { exact: true })).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath('two-agents-expanded.png'),
+    animations: 'disabled',
     fullPage: true,
   });
 
