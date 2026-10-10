@@ -5522,7 +5522,7 @@ export function registerHostedHarnessSessionRoutes(
         const message = cause instanceof Error ? cause.message : String(cause);
         // H4d-b: not yet, never a conflict — the relay watches again.
         if (cause instanceof ChildMessagesPendingError) {
-          return error(res, 409, 'child_messages_pending', message);
+          return error(res, 409, 'child_messages_pending', undefined, message);
         }
         if (cause instanceof ManagedSessionConflictError) {
           return error(
@@ -5629,7 +5629,13 @@ export function registerHostedHarnessSessionRoutes(
         writeStderrLineSafe(
           `qwen serve: Hosted message turns of session ${req.params['id']} could not be stopped: ${String(cause)}`,
         );
-        return error(res, 503, 'session_message_failed', String(cause));
+        return error(
+          res,
+          503,
+          'session_message_failed',
+          undefined,
+          String(cause),
+        );
       }
       res.status(202).json({ operationId, state: 'settled' });
       return;
@@ -5713,7 +5719,7 @@ export function registerHostedHarnessSessionRoutes(
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       if (cause instanceof SessionMessageNotReadyError) {
-        return error(res, 409, 'session_message_not_ready', message);
+        return error(res, 409, 'session_message_not_ready', undefined, message);
       }
       // A store that faltered or stopped writing is not the target's
       // verdict on the message: the relay retries it, never rejects.
@@ -5725,18 +5731,18 @@ export function registerHostedHarnessSessionRoutes(
         writeStderrLineSafe(
           `qwen serve: Hosted message operation ${kind} of session ${req.params['id']} failed in its store: ${message}`,
         );
-        return error(res, 503, 'session_message_failed', message);
+        return error(res, 503, 'session_message_failed', undefined, message);
       }
       if (cause instanceof ManagedSessionConflictError) {
-        return error(res, 409, 'session_message_conflict', message);
+        return error(res, 409, 'session_message_conflict', undefined, message);
       }
       if (cause instanceof ManagedSessionRecordError) {
-        return error(res, 409, 'session_message_record', message);
+        return error(res, 409, 'session_message_record', undefined, message);
       }
       writeStderrLineSafe(
         `qwen serve: Hosted message operation ${kind} of session ${req.params['id']} failed: ${message}`,
       );
-      return error(res, 503, 'session_message_failed', message);
+      return error(res, 503, 'session_message_failed', undefined, message);
     }
     res.status(202).json({
       operationId,
