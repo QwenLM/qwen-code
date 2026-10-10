@@ -408,7 +408,19 @@ export class HostedHookSession {
    * never carry `agent_id`, so an agent-scoped Hook never counts here.
    */
   get hasMountableToolResultHooks(): boolean {
-    const usedOnce = new Set(this.executions().map((entry) => entry.onceKey));
+    // Only settled executions are spent: an unsettled once-Hook is what
+    // executeHook re-drives on a restored Session, and re-driving it takes
+    // the Session-owned mount. dispatch keeps its own broader set.
+    const usedOnce = new Set(
+      this.executions()
+        .filter(
+          (entry) =>
+            entry.run.state !== 'recovery_blocked' &&
+            (entry.resultRef !== null ||
+              entry.run.execution === 'not_started_proven'),
+        )
+        .map((entry) => entry.onceKey),
+    );
     return (
       this.catalog?.hooks.some(
         (hook) =>

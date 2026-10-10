@@ -1450,6 +1450,66 @@ it.each([false, true])(
   },
 );
 
+// Sibling of the row above with the once-Hook left *unsettled*: that is the
+// record `executeHook` re-drives on a restored Session, and re-driving it
+// takes the Session-owned mount, so the child must still be refused.
+it('refuses a child while a once Hook is committed but unsettled', async () => {
+  const original = await restoredHooks({
+    eventName: HookEventName.PostToolUse,
+    config: { type: 'command' },
+    onceKey: 'result-once',
+    async: true,
+  });
+  const catalog = original.getCatalog()!;
+  // 'hook-execute' admits then stays running; 'hook-status' never answers, so
+  // the execution is committed as dispatch_started and never settles.
+  const unsettled = new Promise<never>(() => {});
+  broker.hookControl.mockImplementation((operation) => {
+    if (operation.kind === 'hook-catalog')
+      return Promise.resolve({
+        operationId: operation.operationId,
+        state: 'settled',
+        catalog,
+      });
+    if (operation.kind === 'hook-execute')
+      return Promise.resolve({
+        operationId: operation.operationId,
+        state: 'running',
+      });
+    return unsettled;
+  });
+  await original.fire(
+    HookEventName.PostToolUse,
+    'seed-once',
+    { tool_name: 'agent', tool_use_id: 'seed-once' },
+    new AbortController().signal,
+  );
+  const hooks = new HostedHookSession(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    catalog,
+  );
+  const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+  await hooks.ensureReady();
+  expect(hooks.mountHeld).toBe(false);
+  expect(hooks.hasUnsettledExecutions).toBe(true);
+  expect(hooks.hasMountableToolResultHooks).toBe(true);
+  const result = await executeAgent(
+    turn,
+    call({
+      description: 'audit',
+      prompt: 'review',
+      run_in_background: true,
+    }),
+  );
+  expect(JSON.stringify(result)).toContain(mountRefusal);
+  expect(children.record('prompt:call-1')).toBeUndefined();
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+  await turn.finish();
+});
+
 it.each(
   admissionControls.flatMap((descriptor) =>
     [false, true].map((background) => ({ descriptor, background })),
