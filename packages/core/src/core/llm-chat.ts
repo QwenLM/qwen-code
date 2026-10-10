@@ -133,6 +133,8 @@ import {
 import {
   getStartupContextLength,
   isSystemReminderContent,
+  SYSTEM_REMINDER_CLOSE,
+  SYSTEM_REMINDER_OPEN,
 } from './environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
 import {
@@ -1704,6 +1706,13 @@ const PROTOCOL_TAG_PREFIXES = [
   '</analysis',
   '<summary',
   '</summary',
+  // Harness-style tool-result scaffolding that some models emit as raw XML
+  // before their real reply (#10797 Shape A): a fake `<file_path>` /
+  // `<action>` block closed by a dangling `</tool_result>`. qwen-code never
+  // generates these tags itself, so a response opening with one is a leak.
+  '<file_path',
+  '<action',
+  '</tool_result',
 ] as const;
 const LEAKED_TOOL_CALL_TAGS = /[}\]]\s*<\/parameter>\s*<\/function>/iy;
 
@@ -1803,6 +1812,192 @@ class LeadingProtocolTagLeakDetector {
 
   get blockingOutput(): boolean {
     return this.state !== 'clean';
+  }
+}
+
+/**
+ * Cap on how many bytes an unresolved echo candidate may buffer before the
+ * filter gives up and releases it verbatim (fail-open). Real reminder echoes
+ * are a few hundred bytes; the cap only guards against a pathological
+ * unterminated candidate starving the visible stream.
+ */
+const SYSTEM_REMINDER_ECHO_MAX_BUFFER = 16_000;
+
+/**
+ * Only bodies already injected into this conversation identify an echo.
+ * Markdown wrappers are removed with a matched echo, never used as evidence
+ * that an arbitrary code example is internal context.
+ */
+class SystemReminderEchoFilter {
+  private buffer = '';
+  private skipLineBreak = false;
+  private readonly bodies: string[];
+
+  constructor(history: Content[]) {
+    const bodies = new Set<string>();
+    for (const entry of history) {
+      if (entry.role !== 'user') continue;
+      for (const part of entry.parts ?? []) {
+        if (!isSystemReminderContent({ ...entry, parts: [part] })) continue;
+        const text = part.text!.trimEnd();
+        const body = text
+          .slice(SYSTEM_REMINDER_OPEN.length, -SYSTEM_REMINDER_CLOSE.length)
+          .trim();
+        if (body && body.length < SYSTEM_REMINDER_ECHO_MAX_BUFFER) {
+          bodies.add(body);
+        }
+      }
+    }
+    this.bodies = [...bodies];
+  }
+
+  accept(text: string): string {
+    if (this.bodies.length === 0) return text;
+    this.buffer += text;
+    return this.drain();
+  }
+
+  get pending(): boolean {
+    return this.buffer !== '';
+  }
+
+  finish(): string {
+    return this.drain(true);
+  }
+
+  private static partialTagLength(text: string, tag: string): number {
+    for (
+      let length = Math.min(text.length, tag.length - 1);
+      length > 0;
+      length--
+    ) {
+      if (tag.startsWith(text.slice(-length).toLowerCase())) return length;
+    }
+    return 0;
+  }
+
+  private static wrapper(prefix: string): RegExpMatchArray | null {
+    return prefix.match(
+      /(?:^|\n)[ \t]*(`{3,}|~{3,})[^\r\n`~]*\r?\n[ \t]*$|(?:^|\n)[ \t]*(`+)[ \t]*$/,
+    );
+  }
+
+  private drain(final = false): string {
+    let output = '';
+    while (this.buffer) {
+      if (this.skipLineBreak) {
+        if (!final && this.buffer === '\r') break;
+        if (this.buffer.startsWith('\r\n')) this.buffer = this.buffer.slice(2);
+        else if (this.buffer.startsWith('\n'))
+          this.buffer = this.buffer.slice(1);
+        this.skipLineBreak = false;
+      }
+      const open = this.buffer.search(/<system-reminder>/i);
+      if (open === -1) {
+        const partial = SystemReminderEchoFilter.partialTagLength(
+          this.buffer,
+          SYSTEM_REMINDER_OPEN,
+        );
+        const prefix = partial ? this.buffer.slice(0, -partial) : this.buffer;
+        const wrapper = SystemReminderEchoFilter.wrapper(prefix);
+        const trailingWrapper = prefix.match(
+          /(?:^|\n)[ \t]*(?:`+[^\r\n`]*|~{3,}[^\r\n~]*)$/,
+        );
+        const held = wrapper ?? trailingWrapper;
+        const start = held
+          ? held.index! + (held[0].startsWith('\n') ? 1 : 0)
+          : this.buffer.length - partial;
+        if (
+          final ||
+          this.buffer.length - start > SYSTEM_REMINDER_ECHO_MAX_BUFFER
+        ) {
+          output += this.buffer;
+          this.buffer = '';
+        } else {
+          output += this.buffer.slice(0, start);
+          this.buffer = this.buffer.slice(start);
+        }
+        break;
+      }
+
+      const prefix = this.buffer.slice(0, open);
+      const wrapper = SystemReminderEchoFilter.wrapper(prefix);
+      const start = wrapper
+        ? wrapper.index! + (wrapper[0].startsWith('\n') ? 1 : 0)
+        : open;
+      output += this.buffer.slice(0, start);
+      this.buffer = this.buffer.slice(start);
+      const bodyStart = open - start + SYSTEM_REMINDER_OPEN.length;
+      const closeOffset = this.buffer
+        .slice(bodyStart)
+        .search(/<\/system-reminder>/i);
+      const close = closeOffset === -1 ? -1 : bodyStart + closeOffset;
+      if (close === -1) {
+        const partial = SystemReminderEchoFilter.partialTagLength(
+          this.buffer.slice(bodyStart),
+          SYSTEM_REMINDER_CLOSE,
+        );
+        const body = this.buffer
+          .slice(bodyStart, this.buffer.length - partial)
+          .trimStart();
+        const possible = this.bodies.some(
+          (known) =>
+            known.startsWith(body) ||
+            (body.startsWith(known) && !body.slice(known.length).trim()),
+        );
+        if (
+          possible &&
+          !final &&
+          this.buffer.length <= SYSTEM_REMINDER_ECHO_MAX_BUFFER
+        )
+          break;
+        output += this.buffer.slice(0, bodyStart);
+        this.buffer = this.buffer.slice(bodyStart);
+        continue;
+      }
+
+      const body = this.buffer.slice(bodyStart, close).trim();
+      const after = close + SYSTEM_REMINDER_CLOSE.length;
+      if (!this.bodies.includes(body)) {
+        output += this.buffer.slice(0, after);
+        this.buffer = this.buffer.slice(after);
+        continue;
+      }
+
+      let end = after;
+      if (wrapper) {
+        const ticks = wrapper[1] ?? wrapper[2];
+        const fenced = wrapper[1] !== undefined;
+        const tail = this.buffer.slice(after);
+        const gap = (fenced ? /^[ \t]*\r?\n?[ \t]*/ : /^[ \t]*/).exec(tail)![0];
+        let count = 0;
+        while (tail[gap.length + count] === ticks[0]) count++;
+        if (count >= ticks.length && (fenced || count === ticks.length)) {
+          if (
+            !final &&
+            gap.length + count === tail.length &&
+            this.buffer.length <= SYSTEM_REMINDER_ECHO_MAX_BUFFER
+          )
+            break;
+          end += gap.length + count;
+        } else if (
+          !final &&
+          this.buffer.length <= SYSTEM_REMINDER_ECHO_MAX_BUFFER &&
+          /^[ \t\r\n`~]*$/.test(tail)
+        ) {
+          break;
+        } else {
+          output += this.buffer.slice(
+            0,
+            bodyStart - SYSTEM_REMINDER_OPEN.length,
+          );
+        }
+      }
+      this.buffer = this.buffer.slice(end);
+      this.skipLineBreak = true;
+    }
+    if (final) this.skipLineBreak = false;
+    return output;
   }
 }
 
@@ -5978,6 +6173,44 @@ export class LlmChat {
       return released;
     };
     let protocolTextWasSuppressed = false;
+    // #10797 Shape B: strips known injected <system-reminder> echoes from
+    // user-visible text. Strip-only (never retries), so mid-stream holds do
+    // not need the whole-chunk atomicity that a leak-retry requires.
+    const systemReminderEchoFilter = new SystemReminderEchoFilter(this.history);
+    let textReleasedThroughDetectors = false;
+    const isVisibleProtocolText = (
+      part: Part,
+    ): part is Part & { text: string } =>
+      typeof part.text === 'string' && !part.thought;
+    const releaseEchoParts = (parts: Part[]): Part[] => {
+      const released: Part[] = [];
+      for (const part of parts) {
+        if (isValidNonThoughtTextPart(part)) {
+          const text = systemReminderEchoFilter.accept(part.text!);
+          if (text) {
+            released.push({ ...part, text });
+          } else {
+            const { text: _text, ...metadata } = part;
+            if (Object.keys(metadata).length > 0) released.push(metadata);
+          }
+        } else {
+          if (!part.thought || part.functionCall || part.thoughtSignature) {
+            // Buffered text belongs before this part, including an indivisible
+            // signed part. Never move it across a tool call or signature.
+            const tail = systemReminderEchoFilter.finish();
+            if (tail) released.push({ text: tail });
+          }
+          released.push(part);
+        }
+      }
+      return released;
+    };
+    const finishEchoFilterAndTakePending = (): Part[] => {
+      const released = releaseEchoParts(takePendingProtocolParts());
+      const tail = systemReminderEchoFilter.finish();
+      if (tail) released.push({ text: tail });
+      return released;
+    };
     const currentUserTurn = this.history[this.history.length - 1];
     const isToolResultContinuation =
       currentUserTurn?.role === 'user' &&
@@ -6032,7 +6265,7 @@ export class LlmChat {
             if (protocolTagDetector.leaked) {
               pendingProtocolParts = [];
             } else {
-              const parts = takePendingProtocolParts();
+              const parts = finishEchoFilterAndTakePending();
               if (parts.length > 0) {
                 content = {
                   ...content,
@@ -6053,24 +6286,23 @@ export class LlmChat {
               ) {
                 continue;
               }
-              if (typeof part.text !== 'string' || part.thought) {
+              if (!isVisibleProtocolText(part)) {
                 if (
                   pendingProtocolParts.length > 0 ||
                   protocolTagDetector.leaked
                 ) {
                   pendingProtocolParts.push(part);
                 } else {
-                  outputParts.push(part);
+                  outputParts.push(...releaseEchoParts([part]));
                 }
                 continue;
               }
               const text = protocolTagDetector.accept(part.text);
-              if (text) {
-                if (pendingProtocolParts.length > 0) {
-                  outputParts.push(...takePendingProtocolParts(), part);
-                } else {
-                  outputParts.push({ ...part, text });
-                }
+              if (text || !protocolTagDetector.blockingOutput) {
+                textReleasedThroughDetectors = true;
+                outputParts.push(
+                  ...releaseEchoParts([...takePendingProtocolParts(), part]),
+                );
                 continue;
               }
               pendingProtocolParts.push(...outputParts.splice(0), part);
@@ -6082,7 +6314,7 @@ export class LlmChat {
               if (protocolTagDetector.leaked) {
                 pendingProtocolParts = [];
               } else {
-                content.parts.push(...takePendingProtocolParts());
+                content.parts.push(...finishEchoFilterAndTakePending());
               }
             }
             content.parts = normalizeModelToolCallIds(
@@ -6217,6 +6449,23 @@ export class LlmChat {
       }
     } catch (e) {
       streamError = e;
+      if (textReleasedThroughDetectors && !abortSignal?.aborted) {
+        const parts = normalizeModelToolCallIds(
+          finishEchoFilterAndTakePending(),
+          usedToolCallIds,
+          rawToolCallIdsInCurrentTurn,
+          reservedToolCallIds,
+        );
+        if (parts.length > 0) {
+          hasToolCall ||= parts.some((part) => part.functionCall);
+          allModelParts.push(...parts);
+          const chunk = {
+            candidates: [{ content: { role: 'model', parts } }],
+          } as GenerateContentResponse;
+          syncFunctionCallsField(chunk, parts);
+          yield chunk;
+        }
+      }
     } finally {
       // Cancellation can close the generator at a yield, skipping everything
       // after this finally. Keep the delivered partial in both history and JSONL.
@@ -6266,7 +6515,7 @@ export class LlmChat {
     let pendingProtocolChunk: GenerateContentResponse | undefined;
     if (
       streamError === null &&
-      pendingProtocolParts.length > 0 &&
+      (pendingProtocolParts.length > 0 || systemReminderEchoFilter.pending) &&
       (hasToolCall ||
         pendingProtocolParts.some((part) => part.functionCall !== undefined))
     ) {
@@ -6275,7 +6524,7 @@ export class LlmChat {
         pendingProtocolParts = [];
       } else {
         const parts = normalizeModelToolCallIds(
-          takePendingProtocolParts(),
+          finishEchoFilterAndTakePending(),
           usedToolCallIds,
           rawToolCallIdsInCurrentTurn,
           reservedToolCallIds,
