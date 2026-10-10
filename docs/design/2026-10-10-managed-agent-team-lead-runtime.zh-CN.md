@@ -2,7 +2,7 @@
 
 [English](2026-10-10-managed-agent-team-lead-runtime.md) | [简体中文](2026-10-10-managed-agent-team-lead-runtime.zh-CN.md)
 
-状态:提议中。本文档在实现开始之前固定决策;其中描述的内容尚未实现。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 **H4e** 的第一个运行时切片,即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段,由 [#13745](https://github.com/QwenLM/qwen-code/issues/13745) 跟踪。它建立在 H4b([child Session 运行时](2026-10-07-managed-child-session-runtime.zh-CN.md),#13550)与 H4e-a([团队记录契约](2026-10-10-managed-agent-teams.zh-CN.md),#13811)之上,首次生产后者的四个团队记录体与 lead Session 规则。
+状态:除启用外已在本变更中实现。已落地:lead 的团队写入漏斗、Hosted 路径上的五个团队工具与 Agent 工具的 `name`、`<teammate>` 标签、`task_list` 的预批准与输入预览,以及重开白名单。`team_state` 与 `team_task` 仍不开放提交,因此目前没有 Session 声明团队工具。尚待完成:在真实 Hosted 环境上完成实机验收之后启用(决策 10)。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 **H4e** 的第一个运行时切片,即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段,由 [#13745](https://github.com/QwenLM/qwen-code/issues/13745) 跟踪。它建立在 H4b([child Session 运行时](2026-10-07-managed-child-session-runtime.zh-CN.md),#13550)与 H4e-a([团队记录契约](2026-10-10-managed-agent-teams.zh-CN.md),#13811)之上,首次生产后者的四个团队记录体与 lead Session 规则。
 
 ## 问题与范围
 
@@ -83,17 +83,17 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
 - **只读、换类型或换模型的成员**,它们需要把定义字段应用到执行(D8b/D8c)。
 - **任何公共契约变更。** 不改路由、OpenAPI 或 Flyway;公共团队资源属于 #13785。
 
-## 受影响的文件(计划)
+## 受影响的文件
 
-- `packages/core/src/managed-runtime/managed-team-operations.ts`(新增):团队开启、加入、`closing` 与 `deleted`、任务修订的记录体构造函数,以及派生的阻塞状态与名册视图。
-- `packages/core/src/managed-runtime/managed-session-records.ts`:在本切片最后一步把 `team_state` 与 `team_task` 加入启用列表。
+- `packages/core/src/managed-runtime/managed-team-operations.ts`(新增):团队开启、加入、`closing` 与 `deleted`、任务修订的记录体构造函数,以及派生的阻塞状态。
+- `packages/core/src/managed-runtime/managed-session-records.ts`:在本切片最后一步把 `team_state` 与 `team_task` 加入启用列表,这一步不在本变更中。
 - `packages/cli/src/serve/`:
-  - `hosted-workspace-tool-turn.ts`:五个工具的声明与 Agent 工具的 `name`、它们的准入与批次规则,以及在 Broker acquire 与 Runtime 预留之外的执行分支。
-  - `hosted-team-session.ts`(新增):位于 `hosted-child-agent-session.ts` 旁的团队写入漏斗,遵循 H3 的漏斗纪律:单一串行写入链、确定性命令 id 与 `trusted_entry`,并在每次写入前执行决策 11 的已提交命令查询。
+  - `hosted-workspace-tool-turn.ts`:声明门禁、Agent 工具的 `name` 及其准入与批次规则、在 Broker acquire 与 Runtime 预留之外的执行分支,以及输入预览列表。
+  - `hosted-team-session.ts`(新增):五个工具的声明及其参数形状,以及位于 `hosted-child-agent-session.ts` 旁的团队写入漏斗:团队与任务板规则、名册视图与提交,遵循 H3 的漏斗纪律:单一串行写入链、确定性命令 id 与 `trusted_entry`,并在每次写入前执行决策 11 的已提交命令查询。
   - `hosted-child-agent-session.ts`:通知中的 `<teammate>` 标签。
   - `hosted-harness-session.ts`:漏斗接线与重开白名单。
-  - `hosted-tool-approval.ts`:`task_list` 预批准,以及预览列表。
-- `packages/sdk-java/managed-agent-server`:`ManagedActionService.PREVIEW_TOOLS`,以及一个协调器测试,证明带开启团队的 lead 关闭会取消其成员且不写任何团队记录。
+  - `hosted-tool-approval.ts`:`task_list` 预批准。
+- `packages/sdk-java/managed-agent-server`:`ManagedActionService.PREVIEW_TOOLS`,一个协调器测试,证明带开启团队的 lead 关闭会取消其成员且不写任何团队记录,以及一个生命周期门禁测试,确保关闭声明下团队记录仍被拒绝。
 - 各文件旁的测试,以及 `.qwen/e2e-tests/` 中的 E2E 计划。
 
 ## 验证计划

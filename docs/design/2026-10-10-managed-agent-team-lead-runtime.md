@@ -2,7 +2,7 @@
 
 [English](2026-10-10-managed-agent-team-lead-runtime.md) | [简体中文](2026-10-10-managed-agent-team-lead-runtime.zh-CN.md)
 
-Status: proposed. This document pins the decisions before implementation begins; nothing it describes is implemented yet. This is the first runtime slice of **H4e** of [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380), tracked by [#13745](https://github.com/QwenLM/qwen-code/issues/13745). It builds on H4b ([child Session runtime](2026-10-07-managed-child-session-runtime.md), #13550) and H4e-a ([team record contract](2026-10-10-managed-agent-teams.md), #13811), whose four team bodies and lead-Session rules it produces for the first time.
+Status: implemented in this change, except the enablement. Landed: the lead's team funnel, the five team tools and the Agent tool's `name` on the Hosted path, the `<teammate>` label, `task_list`'s pre-approval and the input previews, and the reopen whitelist. `team_state` and `team_task` stay disabled for submission, so no Session declares a team tool yet. Still to do: the enablement after a physical acceptance pass on a real Hosted stack (decision 10). This is the first runtime slice of **H4e** of [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380), tracked by [#13745](https://github.com/QwenLM/qwen-code/issues/13745). It builds on H4b ([child Session runtime](2026-10-07-managed-child-session-runtime.md), #13550) and H4e-a ([team record contract](2026-10-10-managed-agent-teams.md), #13811), whose four team bodies and lead-Session rules it produces for the first time.
 
 ## Problem and scope
 
@@ -83,17 +83,17 @@ A lead close at any step after 1 runs the H4b cascade over the member's run (dec
 - **Read-only, retyped or differently modeled members**, which need definition fields applied to execution (D8b/D8c).
 - **Any public contract change.** No route, OpenAPI or Flyway change; a public team resource belongs with #13785.
 
-## Files affected (planned)
+## Files affected
 
-- `packages/core/src/managed-runtime/managed-team-operations.ts` (new): body builders for the team opening, a join, `closing` and `deleted`, and task revisions, plus the derived blocked state and the roster view.
-- `packages/core/src/managed-runtime/managed-session-records.ts`: `team_state` and `team_task` join the enabled list in the slice's last step.
+- `packages/core/src/managed-runtime/managed-team-operations.ts` (new): body builders for the team opening, a join, `closing` and `deleted`, and task revisions, plus the derived blocked state.
+- `packages/core/src/managed-runtime/managed-session-records.ts`: `team_state` and `team_task` join the enabled list in the slice's last step, which is not part of this change.
 - `packages/cli/src/serve/`:
-  - `hosted-workspace-tool-turn.ts`: the five tool declarations and the Agent tool's `name`, their admission and batch rules, and their execute branches outside Broker acquire and Runtime reservation.
-  - `hosted-team-session.ts` (new): the team funnel beside `hosted-child-agent-session.ts`, following H3's funnel discipline: one serial write chain, deterministic command ids and `trusted_entry`, plus the committed-command lookup of decision 11 before every write.
+  - `hosted-workspace-tool-turn.ts`: the declaration gate, the Agent tool's `name` with its admission and batch rules, the execute branches outside Broker acquire and Runtime reservation, and the input preview list.
+  - `hosted-team-session.ts` (new): the five tool declarations and their argument shapes, and the team funnel beside `hosted-child-agent-session.ts`: the team and board rules, the roster view and the commits, following H3's funnel discipline: one serial write chain, deterministic command ids and `trusted_entry`, plus the committed-command lookup of decision 11 before every write.
   - `hosted-child-agent-session.ts`: the `<teammate>` label in the notification.
   - `hosted-harness-session.ts`: the funnel wiring and the reopen whitelist.
-  - `hosted-tool-approval.ts`: `task_list` pre-approved, and the preview list.
-- `packages/sdk-java/managed-agent-server`: `ManagedActionService.PREVIEW_TOOLS`, and a coordinator test proving that a lead close with an open team cancels its members and writes no team record.
+  - `hosted-tool-approval.ts`: `task_list` pre-approved.
+- `packages/sdk-java/managed-agent-server`: `ManagedActionService.PREVIEW_TOOLS`, a coordinator test proving that a lead close with an open team cancels its members and writes no team record, and a lifecycle-gate test that keeps team records refused under a close claim.
 - Tests beside each file, and the E2E plan in `.qwen/e2e-tests/`.
 
 ## Validation plan
