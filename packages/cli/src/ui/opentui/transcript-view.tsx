@@ -206,6 +206,31 @@ function sameWindow(a: TranscriptWindow, b: TranscriptWindow): boolean {
   );
 }
 
+/** The model's own item identity, and the one `findToolIndex` uses: a subagent
+ *  call mints a tool card and a task card from one call id, so `id` alone is
+ *  not unique among live items and two of them would share one height slot. */
+function itemKey(item: LiveHistoryItem): string {
+  return `${item.kind}:${item.id}`;
+}
+
+interface MountedNode {
+  item: LiveHistoryItem;
+  node: Renderable;
+}
+
+/** The rows Yoga laid out, or `undefined` for a node not laid out yet.
+ *  `Renderable.height` is clamped to at least one row, so reading it back would
+ *  charge a row to an item that paints nothing — which `renderNothing` and a
+ *  hidden goal card both are. Reading Yoga instead is what ink's own
+ *  virtualized list does (`VirtualizedList.tsx`, `getComputedHeight()`). */
+function laidOutRows(node: Renderable): number | undefined {
+  if (!(node.height > 0)) return undefined;
+  const { yogaNode } = node as unknown as {
+    yogaNode: { getComputedHeight(): number };
+  };
+  return yogaNode.getComputedHeight();
+}
+
 /**
  * Row-budgeted windowing: only the items near the viewport are mounted, and
  * spacers stand in for the rest so the scroll geometry still spans the whole
@@ -227,12 +252,24 @@ function useTranscriptWindow(
 ) {
   const renderer = useRenderer();
   const rootRef = useRef<Renderable | null>(null);
-  /** Measured rows per item id, kept after the item scrolls out of the window
-   *  so an estimate is never re-applied to something already measured. A resize
-   *  does not clear it: the mounted items are re-measured on the next frame, and
-   *  dropping the whole table would renumber every row offset underneath a
-   *  scroll position that is itself counted in rows. */
+  /** Measured rows per item identity, kept after the item scrolls out of the
+   *  window so an estimate is never re-applied to something already measured. A
+   *  resize does not clear it: the mounted items are re-measured on the next
+   *  frame, and dropping the whole table would renumber every row offset
+   *  underneath a scroll position that is itself counted in rows. */
   const heightsRef = useRef(new Map<string, number>());
+  /** The laid-out node per mounted item identity, written by the item's own ref
+   *  callback and dropped when it unmounts. Measuring through this rather than
+   *  through the root's child list keeps the JSX child order out of the
+   *  arithmetic — the spacers and the error boundary already have to sit
+   *  exactly where they do for that order to name an item. */
+  const nodesRef = useRef(new Map<string, MountedNode>());
+  /** Rows the table charged each item an upward window move pulled in above the
+   *  viewport, keyed by identity and dropped once the item is measured. Keyed by
+   *  identity rather than index because `task-end` splices the task card out by
+   *  index, shifting every index above it. The top spacer is short by whatever
+   *  these turn out to cost. */
+  const enteredRef = useRef(new Map<string, number>());
   const offsetsRef = useRef<number[]>([0]);
   const itemsRef = useRef(items);
   const mountedRef = useRef<TranscriptWindow>({
@@ -255,7 +292,7 @@ function useTranscriptWindow(
     return itemOffsets(
       items.map(
         (item, index) =>
-          measured.get(item.id) ??
+          measured.get(itemKey(item)) ??
           (index === 0 ? ESTIMATED_FIRST_ITEM_ROWS : ESTIMATED_ITEM_ROWS),
       ),
     );
@@ -266,12 +303,33 @@ function useTranscriptWindow(
 
   itemsRef.current = items;
   offsetsRef.current = offsets;
+
   const win = computeTranscriptWindow({
     itemCount: items.length,
     offsets,
     scrollTop: scrollRef.current.top,
     viewportRows: scrollRef.current.rows || availableTerminalHeight,
   });
+  // Recorded here rather than in the frame handler: the render body is what
+  // mounts a window, so it is also what can say which items the move pulled in
+  // above the viewport.
+  const pulledIn = enteredRef.current;
+  const painted = mountedRef.current;
+  if (win.end > painted.start && win.start < painted.end) {
+    // These were spacer rows charged at whatever the table said, which for an
+    // item that was never mounted is the estimate. What they turn out to cost
+    // is settled on the frame that measures them.
+    for (let index = win.start; index < painted.start; index++) {
+      const key = itemKey(items[index]);
+      if (!pulledIn.has(key)) {
+        pulledIn.set(key, (offsets[index + 1] ?? 0) - (offsets[index] ?? 0));
+      }
+    }
+  } else {
+    // A jump lands somewhere the painted state says nothing about, so there is
+    // no reading position to carry over and nothing left to settle.
+    pulledIn.clear();
+  }
   mountedRef.current = win;
 
   useEffect(() => {
@@ -294,6 +352,9 @@ function useTranscriptWindow(
         Math.round(host.scrollTop) - Math.round(root.y - host.content.y);
       const rows = Math.max(1, Math.round(host.viewport.height));
       scrollRef.current = { top, rows };
+      // Compared against the painted window rather than adopted here: the
+      // render body is what mounts a window, so it is also what records which
+      // items the move pulled in.
       const next = computeTranscriptWindow({
         itemCount: itemsRef.current.length,
         offsets: offsetsRef.current,
@@ -310,40 +371,69 @@ function useTranscriptWindow(
     };
 
     const onFrame = () => {
-      const found = locate();
-      if (!found) return;
-      const { root, host } = found;
-      if (bar !== host.verticalScrollBar) {
-        bar?.off('change', onScroll);
-        bar = host.verticalScrollBar;
-        bar.on('change', onScroll);
+      const root = rootRef.current;
+      if (!root) return;
+
+      const measured = heightsRef.current;
+      const entered = enteredRef.current;
+      let revised = false;
+      let owed = 0;
+      for (const { item, node } of nodesRef.current.values()) {
+        const laidOut = laidOutRows(node);
+        if (laidOut === undefined) continue;
+        const key = itemKey(item);
+        const rows = Math.round(laidOut) + itemMarginTop(item.kind);
+        const known = measured.get(key);
+        if (known === rows) continue;
+        measured.set(key, rows);
+        revised = true;
+        const charged = entered.get(key);
+        if (known === undefined && charged !== undefined) {
+          entered.delete(key);
+          // The spacer rows this item replaced, minus the rows it paints.
+          owed += charged - rows;
+        }
       }
 
-      const mounted = mountedRef.current;
-      const measured = heightsRef.current;
-      // Children are [top spacer, ...mounted items, bottom spacer].
-      const children = root.getChildren();
-      let revised = false;
-      for (let slot = 1; slot + 1 < children.length; slot++) {
-        const item = itemsRef.current[mounted.start + slot - 1];
-        const node = children[slot];
-        if (!item || !node || !(node.height > 0)) continue;
-        const rows = Math.round(node.height) + itemMarginTop(item.kind);
-        if (measured.get(item.id) === rows) continue;
-        measured.set(item.id, rows);
-        revised = true;
+      // Measuring needs only the root; the settlement and the window sync need
+      // a host. Splitting them is what lets the session preview — which mounts
+      // outside the shell's scrollbox, so `findScrollHost` never matches —
+      // record real heights instead of staying sized from estimates for its
+      // whole life.
+      const found = locate();
+      let changed = revised;
+      if (found) {
+        const { host } = found;
+        if (bar !== host.verticalScrollBar) {
+          bar?.off('change', onScroll);
+          bar = host.verticalScrollBar;
+          bar.on('change', onScroll);
+        }
+        if (owed !== 0) {
+          // Measuring an item that was already mounted owes nothing: it is
+          // painted at the height just read, and both spacers come from offsets
+          // a change inside the window leaves alone. An item the window pulled
+          // in above the viewport is different — the spacer rows it replaced
+          // were charged at the estimate, which is the only number that exists
+          // before it is laid out, so the table under it shrank by the
+          // difference and the reader is now that many rows away from the
+          // content they were on. Settling it into the scroll position is what
+          // makes a three-row wheel tick travel three rows over one-row turns
+          // instead of one. See Decision 5.
+          const rows = Math.max(1, Math.round(host.viewport.height));
+          const tail = Math.max(0, host.scrollHeight - rows);
+          const from = Math.round(host.scrollTop);
+          const to = Math.max(0, from - owed);
+          // The setter recomputes `_hasManualScroll` from wherever the write
+          // lands, and a position one row off the tail takes the shell's bottom
+          // pin off for the rest of the session — that was R1-4. Settle only
+          // where the reader's own scrolling has already gone, and never onto
+          // the tail, so the write cannot change what the pin is doing.
+          if (from < tail && to < tail) host.scrollTop = to;
+        }
+        changed = syncWindow(found.root, host) || changed;
       }
-      // No scroll correction is owed for a measurement, and writing one is what
-      // breaks the shell's bottom pin. Every item this loop can see is mounted,
-      // so it is already painted at the height just read, and both spacers come
-      // from offsets a change inside `[start, end)` leaves alone: `topPad` sums
-      // only the items before the window, and `bottomPad`'s two terms move by
-      // the same amount. The painted layout does not move, so the compensation
-      // is zero — and the sticky-aware setter would read a nonzero one as the
-      // user scrolling away from the tail. See Decision 5.
-      if (syncWindow(root, host) || revised) {
-        setRevision((value) => value + 1);
-      }
+      if (changed) setRevision((value) => value + 1);
     };
 
     renderer.on('frame', onFrame);
@@ -353,7 +443,7 @@ function useTranscriptWindow(
     };
   }, [renderer]);
 
-  return { rootRef, win };
+  return { rootRef, nodesRef, win };
 }
 
 export function OpenTuiTranscriptView({
@@ -376,7 +466,7 @@ export function OpenTuiTranscriptView({
       !item.done &&
       item.id === awaitingCallId,
   )?.id;
-  const { rootRef, win } = useTranscriptWindow(
+  const { rootRef, nodesRef, win } = useTranscriptWindow(
     items,
     availableTerminalHeight,
     initialAnchor,
@@ -391,31 +481,41 @@ export function OpenTuiTranscriptView({
       }}
     >
       <box height={win.topPad} flexShrink={0} />
-      {items.slice(win.start, win.end).map((item) => (
-        <box
-          key={item.id}
-          flexDirection="column"
-          marginTop={itemMarginTop(item.kind)}
-        >
-          <OpenTuiErrorBoundary
-            fallback={renderNothing}
-            onError={(error, info) => logItemFailure(error, item, info)}
+      {items.slice(win.start, win.end).map((item) => {
+        const key = itemKey(item);
+        return (
+          <box
+            key={key}
+            flexDirection="column"
+            marginTop={itemMarginTop(item.kind)}
+            ref={(el) => {
+              if (el) {
+                nodesRef.current.set(key, { item, node: el as Renderable });
+              } else {
+                nodesRef.current.delete(key);
+              }
+            }}
           >
-            <TranscriptItem
-              item={item}
-              maxRows={maxRows}
-              terminalHeight={availableTerminalHeight}
-              width={availableWidth}
-              thoughtsExpanded={thoughtsExpanded}
-              showToolCallArgs={showToolCallArgs}
-              showTimestamps={showTimestamps}
-              showToolCallDetails={showToolCallDetails}
-              mouseTracking={mouseTracking}
-              awaitingApproval={item.id === awaitingId}
-            />
-          </OpenTuiErrorBoundary>
-        </box>
-      ))}
+            <OpenTuiErrorBoundary
+              fallback={renderNothing}
+              onError={(error, info) => logItemFailure(error, item, info)}
+            >
+              <TranscriptItem
+                item={item}
+                maxRows={maxRows}
+                terminalHeight={availableTerminalHeight}
+                width={availableWidth}
+                thoughtsExpanded={thoughtsExpanded}
+                showToolCallArgs={showToolCallArgs}
+                showTimestamps={showTimestamps}
+                showToolCallDetails={showToolCallDetails}
+                mouseTracking={mouseTracking}
+                awaitingApproval={item.id === awaitingId}
+              />
+            </OpenTuiErrorBoundary>
+          </box>
+        );
+      })}
       <box height={win.bottomPad} flexShrink={0} />
     </box>
   );

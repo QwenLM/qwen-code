@@ -61,22 +61,47 @@ buffers. `OVERSCAN_ROWS = 24` — one screen of slack on each side — means a
 wheel tick never shows a gap before the next window lands.
 
 The window lives inside the scrollbox the app shell already renders, so
-`stickyScroll`, the scrollbar, drag-select and the shell's focus policy are all
-untouched, and the shell's own scroll wiring did not change. Spacers keep the
-scroll geometry spanning the whole transcript, so the scrollbar thumb and the
-maximum scroll offset still describe the entire session.
+`stickyScroll`, the scrollbar and the shell's focus policy are all untouched,
+and the shell's own scroll wiring did not change. Spacers keep the scroll
+geometry spanning the whole transcript, so the scrollbar thumb and the maximum
+scroll offset still describe the entire session.
+
+Drag-select is the exception, and only across a window boundary. Holding a drag
+near the scrollbox edge auto-scrolls; the window move that follows unmounts the
+renderable the live selection anchor holds, and `Renderable.destroy()` never
+clears the renderer's selection, so the anchor silently re-targets onto rows the
+drag never covered and stays wrong after mouse-up. Before this change no
+transcript item was ever unmounted by scrolling, so the anchor could not
+disappear mid-drag. The harm is a wrong painted selection that the next click
+clears, and nothing in this CLI reads the renderer's selection — copy-on-select
+is an ink-side path — so it is recorded in Follow-ups rather than guarded here.
 
 The window is computed during render, not in an effect: a streaming turn
 appends to `items` and re-renders, and computing in an effect would leave the
 newest rows unmounted for one frame.
 
-## Decision 2 — estimates mirror ink's, measurements are per item id and survive unmount
+## Decision 2 — estimates mirror ink's, measurements are per item identity and survive unmount
 
 Unmeasured items are estimated at ink's values (`ESTIMATED_FIRST_ITEM_ROWS = 10`
 for index 0, `ESTIMATED_ITEM_ROWS = 3` after), so the scrollbar and the spacer
 arithmetic start from the same model ink uses. Each mounted item's real height
-is then read from its node (`height + itemMarginTop`, the margin the item box
-declares) and stored in a `Map` keyed by item id.
+is then read from its own node and stored in a `Map` keyed by `(kind, id)` — the
+pair `findToolIndex` already discriminates on, and the pair it has to be, since
+one subagent call puts a `tool` card and a `task` card carrying the same call id
+in the transcript at once. Keying on `id` alone let the two overwrite one slot
+every frame, which kept the table permanently unsettled — every frame re-rendered
+the transcript and re-ran the O(session) prefix sum — and donated whichever card
+wrote last its height to the other. The key must not carry a positional index
+either: `task-end` splices the task card out by index, shifting every index above
+it.
+
+The rows recorded are Yoga's computed height plus `itemMarginTop` (the margin the
+item box declares), not the node's reported `height`. `updateFromLayout()` stores
+`Math.max(layout.height, 1)`, so a box that paints nothing — `renderNothing`, a
+hidden goal card — reports one row while Yoga computes zero, and since the table
+is never cleared that phantom row is permanent. The reported height is still read
+first, as a guard: a node before its first layout pass reports `0`, which is the
+only way to tell "not laid out yet" from "laid out empty".
 
 The map is deliberately kept after an item scrolls out of the window — an
 estimate must never be re-applied to something already measured, or the spacers
@@ -124,12 +149,12 @@ inside the scrollable area. The scroll host itself is found by walking `parent`
 from the transcript root and duck-typing on `scrollTop`/`content`/`viewport`,
 which keeps the shell's tree shape private to the shell.
 
-## Decision 5 — a measurement never moves the scroll position
+## Decision 5 — measuring a mounted item moves nothing; measuring one the window just pulled in settles the scroll position
 
-Replacing an estimate with a measurement changes the offsets below it, which
-looks like it should slide the rows the user is reading. It does not, and the
-correction an earlier revision of this change wrote here was wrong in both
-direction and effect.
+Replacing an estimate with a measurement changes the offsets below it, which for
+an item that was already on screen changes nothing visually. The correction an
+earlier revision of this change wrote there was wrong in both direction and
+effect.
 
 Every item the measuring loop can see is mounted, and a mounted item is already
 painted at the height just read from it. Both spacers come from offsets that a
@@ -139,11 +164,25 @@ where correcting an item inside the window moves `total` and `offsets[end]` by
 the same amount. The painted layout therefore does not move when the table
 catches up with it, and the compensation owed is exactly zero.
 
-Writing a nonzero one was worse than a no-op. It went through the sticky-aware
-`scrollTop` setter, which recomputes `_hasManualScroll` from the position it
-lands on, so a correction that left the view one row above the tail took the
-shell's bottom pin off for the rest of the session. Ordinary one-row turns
-produce corrections of that size.
+A window move is the other case, and it does owe one. When `start` decreases, the
+items coming in above the viewport were standing in for `topPad` spacer rows
+charged at `ESTIMATED_ITEM_ROWS`, and the frame that measures them shrinks the
+table above the reader by the difference. The painted content slides up by that
+many rows while the scroll position stays where it was, so a six-row wheel tick
+over two-row turns travelled two rows. The hook now records the identity of each
+item an upward window move pulled in, along with the rows the table charged it,
+and the frame that first measures one subtracts what it turned out to cost from
+`scrollTop`. Identities, not indices, for the reason Decision 2 gives.
+
+That write goes through the sticky-aware setter, which recomputes
+`_hasManualScroll` from wherever it lands — the failure the unconditional
+correction above had, leaving the view one row above the tail and taking the
+shell's bottom pin off for the rest of the session. So it is guarded: it fires
+only when the position before and the position after are both strictly above the
+tail. The reader's own scrolling has already taken the pin off in that case, so
+the settlement cannot change what the pin is doing. At the tail, where the pin is
+live, nothing is written and nothing is owed: the items entering are below the
+reader, not above.
 
 ## Decision 6 — the item cap keeps the top of the viewport
 
@@ -171,10 +210,13 @@ mode itself was the reason it was silent. Each mounted item is now wrapped in
 failure blanks one item and leaves the banner, the composer, the footer and the
 exit path alive; the error goes to the `OPEN_TUI_TRANSCRIPT` debug logger.
 
-The boundary sits inside the item's `<box>`, not around it: a boundary that
-replaced the box would remove a child and break the
-`[topPad, ...items, bottomPad]` index mapping the measurement pass relies on.
-The fallback is `null` rather than the boundary's default message on purpose.
+The boundary sits inside the item's `<box>`, not around it. Measurement no longer
+depends on that placement — each item box registers its own node under its own
+identity through a ref callback, so nothing recovers an item from its position
+among the root's children, and a sibling added to the root later (a "N new
+turns" pill, a loading row) cannot shift it. Keeping the boundary inside the box
+still means a failed item paints zero rows rather than two. The fallback is `null`
+rather than the boundary's default message on purpose.
 The default renders `text`, which needs a fresh `TextBuffer` — the very resource
 that just ran out — so it can fail again inside the handler whose whole job is
 to survive the failure; upstream escalates exactly this way, its fallback being
@@ -191,24 +233,61 @@ Unit tests:
   transcript, the fits-in-viewport case, the scroll clamp, overscan on both
   sides, an item straddling the bottom edge, spacer arithmetic for mixed
   heights, and the cap.
-- `transcript-view.test.tsx` gained two regression tests over a 2000-item
-  session: the default view mounts the tail and not the head, the top-anchored
-  pane mounts the head and not the tail, and both stay under 400 elements. Both
-  were mutation-proved — replacing the slice with `items.slice(0)` fails them.
+- `transcript-view.test.tsx` gained three host-less windowing tests over a
+  2000-item session: the default view mounts the tail and not the head, the
+  top-anchored pane mounts the head and not the tail, and both stay under 400
+  elements. Replacing the slice with `items.slice(0)` fails them. A fourth pins
+  that a host-less pane still measures real heights on a frame, and goes red
+  when the host lookup is moved back ahead of the measuring loop.
 - The same file gained a scroll-host harness for the frame-driven half, which
   jsdom cannot otherwise reach: it installs both the host the view walks up to
   and the laid-out tree it reads back onto the DOM nodes the JSX mock produces.
-  Four tests run against it and each was mutation-proved against the defect it
-  pins — re-adding the scroll-position correction moves the reading position 72
-  rows, dropping the scroll-bar subscription leaves an absolute jump on the
-  turns it jumped away from, re-adding the width-change clear remounts 25 items
-  where 9 were on screen, and seeding the viewport rows once at mount leaves a
-  host-less pane sized for the old terminal after a resize. A fifth pins that
-  unmount drops both subscriptions.
-- The whole `src/ui/opentui` suite passes (1703 tests over 84 files). The
-  session picker's preview pane mounts the transcript view, so its
-  `@opentui/react` mock gained the `useRenderer` export the windowing hook
-  reads; without it the five Space-to-preview tests throw.
+  The host's `content.y` carries the scroll translation against a non-zero
+  static `root.y`, so neither operand of Decision 4's offset is zero and neither
+  is the other; dropping `- host.content.y` fails three tests. Spacers forward
+  their `height` prop as `data-height` so a test can read them, and the JSX mock
+  counts elements so a test can tell a re-render from no re-render.
+- Ten tests run against that harness. Each fails under at least one of the
+  mutants below, and the picker test below has one of its own; the tree is
+  restored byte-identical after every run.
+  - charging the height delta of an item that was already measured — the
+    correction Decision 5 removes — → `records real heights without moving the
+scroll position`, `travels the whole distance over turns shorter than the
+estimate`
+  - settling the scroll position for an item that was already mounted, rather
+    than only for one the window just pulled in → `travels the whole distance
+over turns shorter than the estimate`
+  - not settling it at all → `travels the whole distance over turns shorter than
+the estimate`
+  - keying the height table on `item.id` → `keeps a separate height slot for two
+live items sharing one id`
+  - attributing a measured height to the neighbouring item → all eleven tests
+    that read a measured height: the ten on this harness plus `measures real
+heights in a host-less pane`
+  - reading the clamped reported height instead of Yoga's → `reaches the tail
+past turns that paint no rows of their own`
+  - sizing the window from the height prop instead of the host viewport → `sizes
+the window from the host viewport, not the height prop`
+  - dropping `fallback={renderNothing}` → `paints nothing for a turn that throws
+and keeps the rest`
+  - bumping `revision` unconditionally → the shared-id test again, through its
+    render count
+  - dropping the scroll-bar subscription → `answers a scrollbar jump without
+waiting for a frame`, `sizes the window from the host viewport, not the height
+prop`, `drops the frame and scroll-bar subscriptions on unmount`
+  - dropping `- host.content.y` from Decision 4's offset, or ignoring the height
+    table in the offsets memo → three and five of the above respectively
+- No mutant targets `keeps the reading position across a resize` specifically —
+  only the neighbour-key one above reaches it, and that one breaks everything
+  that reads a measured height. The width-change clear of the height table it was
+  written against is gone, and the hook no longer sees the width at all. It stays
+  as a behavioural pin on Decision 2's "a resize does not clear the table", not as
+  a mutation proof.
+- `session-picker.test.tsx` gained one test: a 40-record preview mounts the head
+  and not the tail. Removing `initialAnchor="top"` fails it and nothing else.
+  Its `@opentui/react` mock also gained the `useRenderer` export the windowing
+  hook reads; without it the five Space-to-preview tests throw.
+- The whole `src/ui/opentui` suite passes (1712 tests over 84 files).
 
 Real machine (opentui leg under Bun, 100x32 pty, `--resume` of the reported
 session, before/after built from the same tree with only this change applied):
@@ -231,6 +310,20 @@ four styled captures carry three distinct digests, with `00-bottom` and
 
 ## Follow-ups
 
+- Drag-select across a window boundary is broken, as Decision 1 records: the
+  auto-scroll a held drag triggers moves the window, the move unmounts the
+  renderable the selection anchor holds, and `Renderable.destroy()` does not
+  clear the renderer's selection, so the anchor re-targets onto rows the drag
+  never covered. The fix is to make the hook selection-aware — suppress the
+  eviction, or clear the selection, while `renderer.getSelection()?.isDragging`
+  — and it is deferred because nothing in this CLI reads the renderer's
+  selection: copy-on-select is an ink-side path, and the wrong selection is
+  painted only, transient, and cleared by the next click. It becomes a
+  correctness bug the moment a copy-on-selection binding is wired to the
+  OpenTUI renderer. No jsdom test can reach it, so the acceptance leg is a real
+  machine: drag in the transcript, hold past the bottom edge until auto-scroll
+  has moved the window more than `OVERSCAN_ROWS`, release, and check the copied
+  text is the dragged range.
 - Decision 8 compensates for a bundle-level defect at the transcript item, and
   the same escalation is still live for every other subtree. `esbuild.config.js`
   defines `process.env.NODE_ENV` as `'production'`, so `react/jsx-dev-runtime`

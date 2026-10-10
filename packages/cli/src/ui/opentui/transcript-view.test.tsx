@@ -26,6 +26,10 @@ vi.mock('@opentui/core', () => ({
 }));
 
 const mocks = vi.hoisted(() => {
+  /** How many opentui elements the JSX runtime has been asked for. A frame that
+   *  measures nothing new must leave this alone — a re-render is the observable
+   *  cost of a spurious one. */
+  let rendered = 0;
   // The components carry the @opentui/react JSX import source; map its
   // primitive elements to DOM nodes so @testing-library/react can mount them.
   async function buildJsxRuntime() {
@@ -35,6 +39,7 @@ const mocks = vi.hoisted(() => {
       props: { children?: unknown; key?: React.Key } | null,
       key?: React.Key,
     ) => {
+      rendered++;
       const config = key === undefined ? props : { ...props, key };
       const children = (config?.children ?? null) as React.ReactNode;
       if (type === 'box' || type === 'text' || type === 'span') {
@@ -48,8 +53,10 @@ const mocks = vi.hoisted(() => {
         if (source['flexDirection'] !== undefined) {
           dom['data-direction'] = source['flexDirection'];
         }
-        if (source['width'] !== undefined) {
-          dom['data-width'] = String(source['width']);
+        for (const name of ['width', 'height']) {
+          if (source[name] !== undefined) {
+            dom[`data-${name}`] = String(source[name]);
+          }
         }
         if (source['ref'] !== undefined) {
           // The transcript's windowing hangs off the root element it is handed
@@ -94,7 +101,13 @@ const mocks = vi.hoisted(() => {
   }
 
   const renderer = createFakeRenderer();
-  return { buildJsxRuntime, renderer };
+  return {
+    buildJsxRuntime,
+    renderer,
+    renders: () => rendered,
+    countRender: () => void rendered++,
+    resetRenders: () => void (rendered = 0),
+  };
 });
 
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
@@ -108,6 +121,7 @@ import { OpenTuiTranscriptView } from './transcript-view.js';
 import { C } from './theme.js';
 import type {
   LiveAssistantItem,
+  LiveHistoryItem,
   LiveThinkingItem,
   LiveToolItem,
 } from './live-session-model.js';
@@ -856,6 +870,37 @@ describe('OpenTuiTranscriptView windowing', () => {
     );
     expect(mountedCount(view.container)).toBeGreaterThan(at24);
   });
+
+  it('measures real heights in a host-less pane', () => {
+    // The session preview mounts outside the shell's scrollbox, so there is no
+    // host to sync a window from — but the turns it does mount are laid out,
+    // and a frame that skipped measuring them would leave the pane sized from
+    // estimates for its whole life.
+    const view = render(
+      <OpenTuiTranscriptView
+        items={longSession}
+        availableTerminalHeight={24}
+        initialAnchor="top"
+      />,
+    );
+    const mountedCount = () =>
+      [...(view.container.textContent ?? '').matchAll(/TURN_\d+/g)].length;
+    const atEstimate = mountedCount();
+    act(() => {
+      const root = view.container.firstElementChild as Element;
+      for (const el of root.children) {
+        // A one-row turn: Yoga computes the margin row alone, and the reported
+        // height is clamped to 1 whether or not anything was laid out.
+        Object.defineProperty(el, 'height', { value: 1, configurable: true });
+        Object.defineProperty(el, 'yogaNode', {
+          value: { getComputedHeight: () => 0 },
+          configurable: true,
+        });
+      }
+      mocks.renderer.emit('frame');
+    });
+    expect(mountedCount()).toBeGreaterThan(atEstimate);
+  });
 });
 
 /**
@@ -876,25 +921,58 @@ describe('OpenTuiTranscriptView scroll host', () => {
   }));
 
   function mountHosted(opts: {
+    /** Rows each turn's box is laid out at. `0` means laid out empty: Yoga
+     *  computes 0 while the reported height is clamped to 1. */
     rows: number[];
+    items?: readonly LiveHistoryItem[];
     viewportRows?: number;
+    /** The height prop, deliberately separate from the host's own viewport. */
+    propRows?: number;
     width?: number;
   }) {
     let width = opts.width ?? 100;
     const rows = opts.rows;
+    const items = opts.items ?? session;
     const viewportRows = opts.viewportRows ?? 24;
+    const propRows = opts.propRows ?? viewportRows;
     const view = render(
       <OpenTuiTranscriptView
-        items={session}
+        items={items}
         availableWidth={width}
-        availableTerminalHeight={viewportRows}
+        availableTerminalHeight={propRows}
       />,
     );
 
     const changed = new Set<() => void>();
+    /** The transcript sits two rows into a scroll content whose absolute `y`
+     *  carries the scroll translation, so neither operand of the offset the
+     *  view subtracts is zero and neither is the other. */
+    const CONTENT_BASE = 5;
+    const TRANSCRIPT_OFFSET = 2;
+    /** The rows a direct child of the transcript root paints: a spacer reports
+     *  its `height` prop, an item box reports what Yoga laid out plus a margin
+     *  row. The margin is modelled as one row for every turn; a `tool` or
+     *  `task` card carries none, so `scrollHeight` over-counts those by one.
+     *  Only the sticky guard reads it, and only against the tail. */
+    const paintedRows = (el: Element) => {
+      if (el.hasAttribute('data-height')) {
+        return Number(el.getAttribute('data-height'));
+      }
+      const turn = /TURN_(\d+)/.exec(el.textContent ?? '');
+      return turn ? (rows[Number(turn[1])] ?? 0) + 1 : 0;
+    };
     const host = {
       scrollTop: 0,
-      content: { y: 0 },
+      get content() {
+        return { y: CONTENT_BASE - host.scrollTop };
+      },
+      get scrollHeight() {
+        const root = view.container.firstElementChild as Element;
+        if (!root) return 0;
+        let total = TRANSCRIPT_OFFSET;
+        for (const el of root.children) total += paintedRows(el);
+        return total;
+      },
       viewport: { height: viewportRows },
       verticalScrollBar: {
         on: (_event: string, fn: () => void) => void changed.add(fn),
@@ -903,26 +981,39 @@ describe('OpenTuiTranscriptView scroll host', () => {
     };
 
     const install = () => {
+      const root = view.container.firstElementChild as Element;
+      /** The turn an item box stands for, or -1 for chrome the view does not
+       *  measure: the root carries every turn, a spacer carries none. */
+      const turnOf = (el: Element) => {
+        if (el === root || el.parentElement !== root) return -1;
+        const turn = /TURN_(\d+)/.exec(el.textContent ?? '');
+        return turn ? Number(turn[1]) : -1;
+      };
       const walk = (el: Element, parent: unknown) => {
         Object.defineProperty(el, 'parent', {
           value: parent,
           configurable: true,
         });
-        Object.defineProperty(el, 'y', { value: 0, configurable: true });
-        Object.defineProperty(el, 'height', {
-          get: () => {
-            const turn = /TURN_(\d+)/.exec(el.textContent ?? '');
-            return turn ? rows[Number(turn[1])] : 0;
-          },
+        Object.defineProperty(el, 'y', {
+          get: () =>
+            el === root ? CONTENT_BASE - host.scrollTop + TRANSCRIPT_OFFSET : 0,
           configurable: true,
         });
-        Object.defineProperty(el, 'getChildren', {
-          value: () => [...el.children],
+        const turn = turnOf(el);
+        const laidOut = turn < 0 ? 0 : (rows[turn] ?? 0);
+        // `Renderable.height` is clamped to at least one row, so a box laid out
+        // empty still reports 1 while Yoga's own computed height stays 0.
+        Object.defineProperty(el, 'height', {
+          get: () => (turn < 0 ? 0 : Math.max(laidOut, 1)),
+          configurable: true,
+        });
+        Object.defineProperty(el, 'yogaNode', {
+          value: { getComputedHeight: () => laidOut },
           configurable: true,
         });
         for (const child of el.children) walk(child, el);
       };
-      walk(view.container.firstElementChild as Element, host);
+      walk(root, host);
     };
     install();
 
@@ -956,14 +1047,22 @@ describe('OpenTuiTranscriptView scroll host', () => {
           width = next;
           view.rerender(
             <OpenTuiTranscriptView
-              items={session}
+              items={items}
               availableWidth={width}
-              availableTerminalHeight={viewportRows}
+              availableTerminalHeight={propRows}
             />,
           );
           install();
         }),
       mounted,
+      /** The top and bottom spacer heights the window is padding with. */
+      spacers: () => {
+        const root = view.container.firstElementChild as Element;
+        const kids = [...root.children];
+        const at = (el: Element | undefined) =>
+          el ? Number(el.getAttribute('data-height') ?? -1) : -1;
+        return { top: at(kids[0]), bottom: at(kids.at(-1)) };
+      },
       unmount: () => act(() => view.unmount()),
     };
   }
@@ -972,8 +1071,14 @@ describe('OpenTuiTranscriptView scroll host', () => {
     const rows = Array.from({ length: 2000 }, () => 3);
     const view = mountHosted({ rows });
     view.host.scrollTop = 3000;
+    // Two frames: the first mounts the window the new position asks for, the
+    // second measures it. Without the second there is no recorded height for
+    // the turns below to contradict, and the frame under test measures them for
+    // the first time instead of revising them.
     view.frame();
-    expect(view.host.scrollTop).toBe(3000);
+    view.frame();
+    const settled = view.host.scrollTop;
+    expect(settled).toBe(3000);
 
     // Every mounted turn turns out taller than measured. The correction this
     // used to write through the sticky-aware `scrollTop` setter is not owed:
@@ -1021,6 +1126,151 @@ describe('OpenTuiTranscriptView scroll host', () => {
     // a hundred.
     view.setWidth(60);
     expect(view.mounted()).toEqual(before);
+  });
+
+  it('travels the whole distance over turns shorter than the estimate', () => {
+    const rows = Array.from({ length: 2000 }, () => 1);
+    const view = mountHosted({ rows });
+    view.frame();
+    view.jump(3000);
+    view.frame();
+    view.frame();
+    const before = Number(view.mounted()[0]);
+
+    // Six rows up over turns that cost two rows each, so three more come into
+    // view. The turns the move pulls in above the viewport were sized from the
+    // estimate, so the frame that measures them shrinks the table under the
+    // reader; without settling that into the scroll position the window lands
+    // back down and the tick travels less than it was told to.
+    view.jump(view.host.scrollTop - 6);
+    view.frame();
+    view.frame();
+    expect(before - Number(view.mounted()[0])).toBe(3);
+  });
+
+  it('keeps a separate height slot for two live items sharing one id', () => {
+    // One subagent call mints a tool card and a task card from the same call
+    // id, and the model tells them apart only by kind.
+    const shared = 'call1';
+    const items: LiveHistoryItem[] = [
+      toolItem({ id: shared, tool: 'task', description: 'TURN_0000' }),
+      {
+        kind: 'task',
+        id: shared,
+        name: 'TURN_0001',
+        description: '',
+        progress: [],
+      },
+      ...Array.from({ length: 1998 }, (_, index) => ({
+        kind: 'user' as const,
+        id: `u${index + 2}`,
+        text: `TURN_${String(index + 2).padStart(4, '0')}`,
+      })),
+    ];
+    const rows = Array.from({ length: 2000 }, () => 3);
+    rows[0] = 2;
+    rows[1] = 4;
+    const view = mountHosted({ items, rows });
+    view.frame();
+    view.frame();
+
+    // One shared slot would see the other card's height every frame, so the
+    // table would never settle and every frame would re-render the transcript.
+    mocks.resetRenders();
+    view.frame();
+    expect(mocks.renders()).toBe(0);
+
+    // Scrolled just past both, the spacer above the window is their two heights
+    // and nothing else: 2 + 4, not the task card's 4 charged twice.
+    view.jump(32);
+    view.frame();
+    expect(view.mounted()[0]).toBe('0002');
+    expect(view.spacers().top).toBe(6);
+  });
+
+  it('reaches the tail past turns that paint no rows of their own', () => {
+    const rows = Array.from({ length: 2000 }, () => 3);
+    // `renderNothing` and a hidden goal card both leave a childless box: Yoga
+    // computes 0 rows while `Renderable.height` reports a clamped 1.
+    for (let index = 1970; index < 2000; index++) rows[index] = 0;
+    const view = mountHosted({ rows });
+    view.frame();
+    for (let pass = 0; pass < 6; pass++) {
+      view.jump(view.host.scrollHeight - 24);
+      view.frame();
+    }
+    expect(view.mounted().at(-1)).toBe('1999');
+    expect(view.spacers().bottom).toBe(0);
+  });
+
+  it('sizes the window from the host viewport, not the height prop', () => {
+    const rows = Array.from({ length: 2000 }, () => 3);
+    const view = mountHosted({ rows, viewportRows: 12, propRows: 24 });
+    view.frame();
+    view.jump(4000);
+    view.frame();
+    // Twelve rows of viewport plus the overscan on each side, at four rows a
+    // turn — not the twenty-four the prop would have bought, which reaches
+    // three turns further.
+    expect(view.mounted()[0]).toBe('1322');
+    expect(view.mounted().at(-1)).toBe('1337');
+  });
+
+  it("sizes the top spacer from each turn's own height", () => {
+    const items = Array.from({ length: 40 }, (_, index) => ({
+      kind: 'user' as const,
+      id: `u${index}`,
+      text: `TURN_${String(index).padStart(4, '0')}`,
+    }));
+    const rows = Array.from({ length: 40 }, (_, index) =>
+      index === 20 ? 50 : 5,
+    );
+    const view = mountHosted({ items, rows });
+    view.frame();
+
+    // Walk down in steps short enough that every turn is measured on the way,
+    // then hold the spacer to the sum of the turns' own heights.
+    for (let top = 0; top <= 240; top += 12) {
+      view.jump(top);
+      view.frame();
+    }
+    const start = Number(view.mounted()[0]);
+    expect(start).toBeGreaterThan(20);
+    const expected = rows
+      .slice(0, start)
+      .reduce((sum, laidOut) => sum + laidOut + 1, 0);
+    expect(view.spacers().top).toBe(expected);
+  });
+
+  it('paints nothing for a turn that throws and keeps the rest', () => {
+    const items: LiveHistoryItem[] = Array.from({ length: 40 }, (_, index) =>
+      index === 7
+        ? ({
+            kind: 'task',
+            id: 'boom',
+            name: 'TURN_0007',
+            description: '',
+            progress: undefined,
+          } as unknown as LiveHistoryItem)
+        : {
+            kind: 'user' as const,
+            id: `u${index}`,
+            text: `TURN_${String(index).padStart(4, '0')}`,
+          },
+    );
+    const rows = Array.from({ length: 40 }, () => 5);
+    rows[7] = 0;
+    const view = mountHosted({ items, rows });
+    view.frame();
+    expect(view.mounted()).toContain('0006');
+    expect(view.mounted()).toContain('0008');
+    expect(view.mounted()).not.toContain('0007');
+    // The boundary's own fallback draws two `text` elements, which is two more
+    // native buffers in the transcript that ran out of them. `renderNothing`
+    // is what keeps a failed turn at zero.
+    expect(view.container.textContent).not.toContain(
+      'Something went wrong while rendering',
+    );
   });
 
   it('drops the frame and scroll-bar subscriptions on unmount', () => {
