@@ -222,9 +222,13 @@ describe('OverlayFs', () => {
       await writeFile(await overlay.redirectWrite(blocked), 'blocked edit');
       await writeFile(await overlay.redirectWrite(writable), 'applied edit');
 
-      await expect(overlay.applyToReal()).rejects.toThrow(
+      const error = await overlay.applyToReal().catch((err: unknown) => err);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(
         `Could not apply 1 of 2 file(s) to disk: ${blocked}`,
       );
+      expect((error as { applied?: string[] }).applied).toEqual([writable]);
+      expect((error as { failed?: string[] }).failed).toEqual([blocked]);
 
       // The file that could be copied is on disk with the edit in it.
       expect(await readFile(writable, 'utf-8')).toBe('applied edit');

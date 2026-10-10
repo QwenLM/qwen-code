@@ -385,7 +385,13 @@ describe('AppContainer State Management', () => {
     const cause = Object.assign(new Error('directory is blocked'), {
       code: 'EEXIST',
     });
-    const failure = new Error('Could not apply 1 of 1 file(s)', { cause });
+    const failure = Object.assign(
+      new Error('Could not apply 1 of 2 file(s)', { cause }),
+      {
+        applied: ['/workspace/test.ts'],
+        failed: ['/workspace/blocked.ts'],
+      },
+    );
     const spec = {
       id: 'spec-1',
       status: 'completed',
@@ -490,6 +496,7 @@ describe('AppContainer State Management', () => {
     expect(event).toMatchObject({
       outcome: 'failed',
       turns_used: 1,
+      files_written: 1,
       tool_use_count: 1,
       had_pipelined_suggestion: false,
     });

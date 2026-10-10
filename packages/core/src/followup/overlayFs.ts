@@ -144,10 +144,13 @@ export class OverlayFs {
       // registered: an entry with no overlay file behind it was skipped above, so
       // counting it here would report "1 of 2" next to a single path.
       const attempted = applied.length + failed.length;
-      throw new Error(
+      const applyError = new Error(
         `Could not apply ${failed.length} of ${attempted} file(s) to disk: ${failed.join(', ')}`,
         { cause: firstError },
-      );
+      ) as Error & { applied: string[]; failed: string[] };
+      applyError.applied = applied;
+      applyError.failed = failed;
+      throw applyError;
     }
 
     return applied;

@@ -3390,13 +3390,20 @@ export const AppContainer = (props: AppContainerProps) => {
             // Falling back to a normal submit hides the reason the accept failed.
             // The overlay carries the underlying cause (EACCES from ENOSPC from
             // ENOTDIR), so record it rather than dropping it on the floor.
+            const appliedFiles =
+              err &&
+              typeof err === 'object' &&
+              'applied' in err &&
+              Array.isArray((err as { applied?: unknown }).applied)
+                ? (err as { applied: string[] }).applied
+                : [];
             logSpeculation(
               config,
               new SpeculationEvent({
                 outcome: 'failed',
                 turns_used: spec.messages.filter((m) => m.role === 'model')
                   .length,
-                files_written: 0,
+                files_written: appliedFiles.length,
                 tool_use_count: spec.toolUseCount,
                 duration_ms: Date.now() - spec.startTime,
                 boundary_type: spec.boundary?.type,
@@ -3409,6 +3416,15 @@ export const AppContainer = (props: AppContainerProps) => {
               'Cause:',
               err instanceof Error ? err.cause : undefined,
             );
+            if (appliedFiles.length > 0) {
+              historyManager.addItem(
+                {
+                  type: MessageType.WARNING,
+                  text: `Speculative execution applied ${appliedFiles.length} file(s) before failing: ${appliedFiles.join(', ')}. Resubmitting normally.`,
+                },
+                Date.now(),
+              );
+            }
             // Fallback: submit normally
             addMessage(submittedValue, false, submittedPrompt, shellModeActive);
           });
