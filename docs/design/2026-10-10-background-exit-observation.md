@@ -37,7 +37,9 @@ physical owner):
 
 The observation is fire-and-forget like the scan's reconcile arm: the acquire
 does not wait on it, and a failed observation surfaces nowhere but the row
-staying non-terminal.
+staying non-terminal. It also runs unfenced — it never holds the Session's
+`activeControls`, so a release whose own sweep just proved termination is
+never refused `runtime_session_busy` for an outstanding observation.
 
 ## Design decisions
 

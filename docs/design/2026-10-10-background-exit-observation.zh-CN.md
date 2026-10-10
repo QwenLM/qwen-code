@@ -16,7 +16,7 @@
 - 回答 `exited` 时，按该证据结算该行（`settleBackgroundProcess` 已有的映射：exit code 0 → `success`，其余 → `error`)。
 - 任何其它回答、或查询失败，该行保持非终止并继续持有——wedge 语义不变：不能被证明的结果永远不变成被声称的终结。
 
-观测与扫描的 reconcile 臂一样是 fire-and-forget：获取不等待它，观测失败的唯一表现是该行保持非终止。
+观测与扫描的 reconcile 臂一样是 fire-and-forget：获取不等待它，观测失败的唯一表现是该行保持非终止。观测且不占栅栏——它从不持有 Session 的 `activeControls`，因此一次自身已证明终结的 release 绝不会因一个未完成的观测而被拒 `runtime_session_busy`。
 
 ## 设计决定
 
