@@ -6,7 +6,7 @@
 
 import os from 'node:os';
 import { constants, type Stats } from 'node:fs';
-import { open, type FileHandle } from 'node:fs/promises';
+import { open, stat, type FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import { globSync } from 'glob';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
@@ -386,11 +386,24 @@ export class StandardFileSystemService implements FileSystemService {
     ) {
       return operation({ kind: 'path', path: request.path });
     }
+    // Classify before open. Opening a fifo, tty, or device is the side
+    // effect (rendezvous, controlling terminal, HUPCL), and st_size 0 is
+    // not an empty extent for procfs/sysfs. Pathname admission here is
+    // not a retry after a failed descriptor owner.
+    let admission: Stats;
+    try {
+      admission = await stat(request.path);
+    } catch (error) {
+      throw new FileReadOpenError(error);
+    }
+    if (!admission.isFile() || admission.size === 0) {
+      return operation({ kind: 'path', path: request.path });
+    }
     let fileHandle: FileHandle;
     try {
       fileHandle = await open(
         request.path,
-        constants.O_RDONLY | constants.O_NONBLOCK,
+        constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY,
       );
     } catch (error) {
       throw new FileReadOpenError(error);
@@ -401,6 +414,9 @@ export class StandardFileSystemService implements FileSystemService {
         stats = await fileHandle.stat();
       } catch (error) {
         throw new FileReadOpenError(error);
+      }
+      if (!stats.isFile() || stats.size === 0) {
+        return await operation({ kind: 'path', path: request.path });
       }
       return await operation({ kind: 'descriptor', fileHandle, stats });
     } finally {

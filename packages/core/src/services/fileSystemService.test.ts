@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { constants } from 'node:fs';
 import fs from 'node:fs/promises';
 import {
   StandardFileSystemService,
@@ -123,6 +124,12 @@ describe('StandardFileSystemService', () => {
   };
 
   describe('withReadFile', () => {
+    const regularStats = (size: number) =>
+      ({
+        size,
+        isFile: () => true,
+      }) as import('node:fs').Stats;
+
     it.each([
       ['win32', 'inline'],
       ['freebsd', 'inline'],
@@ -142,17 +149,43 @@ describe('StandardFileSystemService', () => {
           kind: 'path',
           path: '/input',
         });
+        expect(fs.stat).not.toHaveBeenCalled();
+        expect(fs.open).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      ['non-regular', { size: 0, isFile: () => false }],
+      ['zero-length regular', { size: 0, isFile: () => true }],
+    ] as const)(
+      'keeps a %s linux inline read on the pathname source',
+      async (_label, stats) => {
+        vi.mocked(fs.stat).mockResolvedValue(
+          stats as unknown as import('node:fs').Stats,
+        );
+        const operation = vi.fn(async () => 'result');
+        expect(
+          await fileSystem.withReadFile(
+            { path: '/input', mediaDelivery: 'inline' },
+            operation,
+          ),
+        ).toBe('result');
+        expect(operation).toHaveBeenCalledWith({
+          kind: 'path',
+          path: '/input',
+        });
         expect(fs.open).not.toHaveBeenCalled();
       },
     );
 
     it('retains and closes once after the entire callback', async () => {
-      const stats = { size: 4 } as import('node:fs').Stats;
+      const stats = regularStats(4);
       const close = vi.fn(async () => undefined);
       const handle = {
         stat: vi.fn(async () => stats),
         close,
       } as unknown as import('node:fs/promises').FileHandle;
+      vi.mocked(fs.stat).mockResolvedValue(stats);
       vi.mocked(fs.open).mockResolvedValue(handle);
       let release!: () => void;
       const pending = new Promise<void>((resolve) => {
@@ -180,6 +213,32 @@ describe('StandardFileSystemService', () => {
       }
       expect(await running).toBe('complete');
       expect(close).toHaveBeenCalledTimes(1);
+      expect(fs.open).toHaveBeenCalledWith(
+        '/input',
+        constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY,
+      );
+    });
+
+    it('returns to the pathname source when the opened inode has no extent', async () => {
+      vi.mocked(fs.stat).mockResolvedValue(regularStats(4));
+      const close = vi.fn(async () => undefined);
+      const handle = {
+        stat: vi.fn(async () => ({ size: 0, isFile: () => true })),
+        close,
+      } as unknown as import('node:fs/promises').FileHandle;
+      vi.mocked(fs.open).mockResolvedValue(handle);
+      const operation = vi.fn(async () => 'result');
+      expect(
+        await fileSystem.withReadFile(
+          { path: '/input', mediaDelivery: 'inline' },
+          operation,
+        ),
+      ).toBe('result');
+      expect(operation).toHaveBeenCalledWith({
+        kind: 'path',
+        path: '/input',
+      });
+      expect(close).toHaveBeenCalledTimes(1);
     });
 
     it.each(['stat', 'callback', 'close'])(
@@ -189,7 +248,7 @@ describe('StandardFileSystemService', () => {
         const stat =
           stage === 'stat'
             ? vi.fn().mockRejectedValue(failure)
-            : vi.fn(async () => ({ size: 4 }));
+            : vi.fn(async () => regularStats(4));
         const close =
           stage === 'close'
             ? vi.fn().mockRejectedValue(failure)
@@ -198,6 +257,7 @@ describe('StandardFileSystemService', () => {
           stat,
           close,
         } as unknown as import('node:fs/promises').FileHandle;
+        vi.mocked(fs.stat).mockResolvedValue(regularStats(4));
         vi.mocked(fs.open).mockResolvedValue(handle);
         const operation = vi.fn(async () => {
           if (stage === 'callback') throw failure;
