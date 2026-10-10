@@ -1493,6 +1493,21 @@ export class MemoryManager {
         this.extractCadence.delete(sessionId);
         return false;
       }
+      // `/cd` mutates that same live Config in place too
+      // (`relocateWorkingDirectory`), and the fork's conversation comes from
+      // the session's cache-safe capture, not from this snapshot's history:
+      // running a snapshot earned in project A after the session moved to B
+      // would read B's turns against A's memory and write A's memory from
+      // them. The session-id guard above cannot see a relocation, so check
+      // the root the same way.
+      const liveProjectRoot = pending.config?.getProjectRoot?.();
+      if (
+        liveProjectRoot !== undefined &&
+        liveProjectRoot !== pending.projectRoot
+      ) {
+        this.extractCadence.delete(sessionId);
+        return false;
+      }
       // A newer run for this session completed while the slot was held, so it
       // already covered the snapshot. Replaying it would fork over content
       // that was extracted and persist the cursor backwards, which the next

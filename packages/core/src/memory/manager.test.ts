@@ -2360,6 +2360,38 @@ describe('MemoryManager', () => {
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
     });
 
+    it('drops the pending run once the session relocated to another root', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      let projectRoot = tmp.projectRoot;
+      const config = {
+        getSessionId: () => 'sess',
+        getProjectRoot: () => projectRoot,
+      } as unknown as Config;
+      const liveTurn = (length: number) =>
+        mgr.scheduleExtract({
+          ...extractParams(tmp.projectRoot, 'sess', turns(length), config),
+          belowCompactionWarn: true,
+        });
+
+      await liveTurn(2);
+      expect((await liveTurn(4)).skippedReason).toBe('cadence');
+
+      // `/cd` relocated the live Config this snapshot points at. The fork's
+      // conversation comes from the session's cache-safe capture, not from
+      // the snapshot's history, so replaying it would read the new project's
+      // turns against the old project's memory and write into the old
+      // project's memory from them.
+      projectRoot = path.join(tmp.tempDir, 'relocated');
+      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(false);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+
+      // The relocated session's snapshot is dropped, not kept for a retry no
+      // boundary will ever ask for.
+      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+    });
+
     it('drops a snapshot a newer run for the session already covered', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
       const mgr = new MemoryManager();
