@@ -311,12 +311,7 @@ describe('ToolApproval accessibility', () => {
     );
   });
 
-  it('omits oversized edit diffs at the approval boundary', () => {
-    // The approval card renders synchronously into an [role=alertdialog], so
-    // an outsized edit would freeze the panel and drown the accessible
-    // description — surface a short notice instead. The transcript
-    // completed-edit path stays coarse but visible; the cap belongs to the
-    // approval boundary, not to buildUnifiedDiff itself.
+  it('shows compact edits in long files at the approval boundary', () => {
     const bigOld = 'line\n'.repeat(2_000);
     const bigNew = 'line\n'.repeat(2_000) + 'extra';
     const adapted = extractPendingPermission([
@@ -359,15 +354,13 @@ describe('ToolApproval accessibility', () => {
         </WebShellCustomizationProvider>,
       ),
     );
-    expect(container!.textContent).toContain(
-      'Diff omitted because it is too large to display safely.',
-    );
-    expect(container!.textContent).not.toContain('line\nline\nline\nline');
+    expect(container!.textContent).toContain('@@ -1998,3 +1998,4 @@');
+    expect(container!.textContent).toContain('extra');
+    expect(container!.textContent).not.toContain('Diff omitted');
   });
 
   it('omits edit diffs that exceed the character budget while staying under the line budget', () => {
-    // The sibling test above uses many short lines, so it only ever trips
-    // `tooManyLines`. The char gate decides on its own for any edit with
+    // The char gate decides on its own for any edit with
     // ≤1000 total lines and >100_000 total chars — 400 long lines per side is
     // 800 lines but ~119k chars, and also lands on n*m = 160_000, i.e. under
     // MAX_DIFF_PRODUCT, so nothing else would have stopped the LCS table.

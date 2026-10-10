@@ -66,6 +66,8 @@ export function buildContextBoundedDiff(
   oldText: string,
   newText: string,
 ): string {
+  const omitted = ' Diff omitted because it is too large to display safely.';
+  if (oldText.length + newText.length > 100_000) return omitted;
   const oldLines = splitLines(oldText);
   const newLines = splitLines(newText);
   const context = 3;
@@ -77,7 +79,11 @@ export function buildContextBoundedDiff(
   ) {
     prefix++;
   }
-  if (prefix === oldLines.length && prefix === newLines.length) return '';
+  if (prefix === oldLines.length && prefix === newLines.length) {
+    return oldText === newText
+      ? ''
+      : `\\ Trailing newline ${newText.endsWith('\n') ? 'added' : 'removed'} at end of file.`;
+  }
   let suffix = 0;
   while (
     suffix < oldLines.length - prefix &&
@@ -89,6 +95,13 @@ export function buildContextBoundedDiff(
   }
   const start = Math.max(0, prefix - context);
   const skippedSuffix = Math.max(0, suffix - context);
+  if (
+    (oldLines.length - skippedSuffix - start) *
+      (newLines.length - skippedSuffix - start) >
+    MAX_DIFF_PRODUCT
+  ) {
+    return omitted;
+  }
   const rows = buildUnifiedDiff(
     oldLines
       .slice(start, oldLines.length - skippedSuffix)
@@ -125,6 +138,9 @@ export function buildContextBoundedDiff(
       `@@ -${oldCount ? oldLine : oldLine - 1},${oldCount} +${newCount ? newLine : newLine - 1},${newCount} @@`,
       ...hunk,
     );
+    if (result.length > 1_000 || result.join('\n').length > 100_000) {
+      return omitted;
+    }
     oldLine += oldCount;
     newLine += newCount;
     cursor = range.end;

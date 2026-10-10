@@ -6,6 +6,43 @@ import {
 } from './unifiedDiff';
 
 describe('buildContextBoundedDiff', () => {
+  it('reports distant edits that exceed the trimmed LCS budget without a coarse hunk', () => {
+    const oldLines = Array.from({ length: 2_000 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[1] = 'first change';
+    newLines[1_998] = 'last change';
+    const diff = buildContextBoundedDiff(
+      oldLines.join('\n'),
+      newLines.join('\n'),
+    );
+    expect(diff).toContain('Diff omitted because it is too large');
+    expect(diff).not.toContain('@@');
+    expect(parseUnifiedDiff(diff)).toMatchObject({
+      additions: 0,
+      deletions: 0,
+    });
+    expect(diff.split('\n')).toHaveLength(1);
+  });
+
+  it('limits rendered rows for a large insertion with no LCS product', () => {
+    const diff = buildContextBoundedDiff('', 'line\n'.repeat(2_000));
+    expect(diff).toContain('Diff omitted because it is too large');
+    expect(diff).not.toContain('@@');
+  });
+
+  it.each([
+    ['#!/bin/sh\nexit 0\n', '#!/bin/sh\nexit 0', 'removed'],
+    ['#!/bin/sh\nexit 0', '#!/bin/sh\nexit 0\n', 'added'],
+  ])('shows a trailing-newline-only change', (oldText, newText, action) => {
+    const diff = buildContextBoundedDiff(oldText, newText);
+    expect(diff).toContain(`Trailing newline ${action}`);
+    expect(parseUnifiedDiff(diff)).toMatchObject({
+      additions: 0,
+      deletions: 0,
+      lines: [{ type: 'header' }],
+    });
+  });
+
   it('shows a middle edit with three context lines and original line numbers', () => {
     const oldLines = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`);
     const newLines = [...oldLines];

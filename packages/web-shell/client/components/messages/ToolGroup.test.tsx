@@ -2829,9 +2829,63 @@ describe('tool output logic', () => {
       expect(diff).not.toContain('line 200');
       expect(diff.split('\n')).toHaveLength(9);
     }
-    expect(
-      extractDiff(makeTool({ toolName: 'edit', status: 'completed', content })),
-    ).toBe(buildUnifiedDiff(oldLines.join('\n'), newLines.join('\n')));
+    for (const status of ['completed', 'failed'] as const) {
+      const diff = extractDiff(makeTool({ toolName: 'edit', status, content }));
+      expect(diff).toBe(
+        buildUnifiedDiff(oldLines.join('\n'), newLines.join('\n')),
+      );
+      expect(diff.split('\n')).toHaveLength(201);
+    }
+  });
+
+  it('bounds pending args previews and preserves completed previews and supplied patches', () => {
+    const oldLines = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[99] = 'updated line 100';
+    for (const args of [
+      { oldText: oldLines.join('\n'), newText: newLines.join('\n') },
+      { old_string: oldLines.join('\n'), new_string: newLines.join('\n') },
+    ]) {
+      for (const status of ['pending', 'in_progress'] as const) {
+        const diff = extractDiff(makeTool({ toolName: 'edit', status, args }));
+        expect(diff).toContain('@@ -97,7 +97,7 @@');
+        expect(diff).toContain('-line 100\n+updated line 100');
+        expect(diff.split('\n')).toHaveLength(9);
+        expect(
+          extractDiff(
+            makeTool({
+              toolName: 'edit',
+              status,
+              args: { ...args, patch: 'supplied patch' },
+            }),
+          ),
+        ).toBe('supplied patch');
+      }
+      expect(
+        extractDiff(makeTool({ toolName: 'edit', status: 'completed', args })),
+      ).toBe(buildUnifiedDiff(oldLines.join('\n'), newLines.join('\n')));
+      expect(
+        extractDiff(makeTool({ toolName: 'edit', status: 'failed', args })),
+      ).toBe('');
+    }
+  });
+
+  it('omits oversized pending args previews instead of fabricating a whole-file rewrite', () => {
+    const oldLines = Array.from({ length: 2_000 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[1] = 'first change';
+    newLines[1_998] = 'last change';
+    for (const status of ['pending', 'in_progress'] as const) {
+      const diff = extractDiff(
+        makeTool({
+          toolName: 'edit',
+          status,
+          args: { oldText: oldLines.join('\n'), newText: newLines.join('\n') },
+        }),
+      );
+      expect(diff).toContain('Diff omitted because it is too large');
+      expect(diff).not.toContain('@@');
+    }
   });
 
   it('uses a typed file-diff preview without raw output', () => {

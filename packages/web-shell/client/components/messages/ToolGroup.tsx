@@ -202,7 +202,11 @@ export function extractDiff(tool: ACPToolCall): string {
     typeof previewNewText === 'string' ||
     typeof previewOldText === 'string'
   ) {
-    return buildUnifiedDiff(
+    const buildDiff =
+      tool.status === 'pending' || tool.status === 'in_progress'
+        ? buildContextBoundedDiff
+        : buildUnifiedDiff;
+    return buildDiff(
       typeof previewOldText === 'string' ? previewOldText : '',
       typeof previewNewText === 'string' ? previewNewText : '',
     );
