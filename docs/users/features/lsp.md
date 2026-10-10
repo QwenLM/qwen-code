@@ -52,8 +52,12 @@ You can configure language servers using a `.lsp.json` file in your project root
     "extensionToLanguage": {
       ".ts": "typescript",
       ".tsx": "typescriptreact",
+      ".mts": "typescript",
+      ".cts": "typescript",
       ".js": "javascript",
-      ".jsx": "javascriptreact"
+      ".jsx": "javascriptreact",
+      ".mjs": "javascript",
+      ".cjs": "javascript"
     }
   }
 }
@@ -110,20 +114,34 @@ Example:
 
 #### Optional Fields
 
-| Option                  | Type     | Default   | Description                                             |
-| ----------------------- | -------- | --------- | ------------------------------------------------------- |
-| `args`                  | string[] | `[]`      | Command line arguments                                  |
-| `transport`             | string   | `"stdio"` | Transport type: `stdio`, `tcp`, or `socket`             |
-| `env`                   | object   | -         | Environment variables                                   |
-| `initializationOptions` | object   | -         | LSP initialization options                              |
-| `settings`              | object   | -         | Server settings via `workspace/didChangeConfiguration`  |
-| `extensionToLanguage`   | object   | -         | Maps file extensions to language identifiers            |
-| `workspaceFolder`       | string   | -         | Override workspace folder (must be within project root) |
-| `startupTimeout`        | number   | `10000`   | Startup timeout in milliseconds                         |
-| `shutdownTimeout`       | number   | `5000`    | Shutdown timeout in milliseconds                        |
-| `restartOnCrash`        | boolean  | `false`   | Auto-restart on crash                                   |
-| `maxRestarts`           | number   | `3`       | Maximum restart attempts                                |
-| `trustRequired`         | boolean  | `true`    | Require trusted workspace                               |
+| Option                  | Type     | Default   | Description                                                                                                                                                                                 |
+| ----------------------- | -------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `args`                  | string[] | `[]`      | Command line arguments                                                                                                                                                                      |
+| `transport`             | string   | `"stdio"` | Transport type: `stdio`, `tcp`, or `socket`                                                                                                                                                 |
+| `env`                   | object   | -         | Environment variables                                                                                                                                                                       |
+| `initializationOptions` | object   | -         | LSP initialization options                                                                                                                                                                  |
+| `settings`              | object   | -         | Server settings via `workspace/didChangeConfiguration`                                                                                                                                      |
+| `extensionToLanguage`   | object   | -         | Maps extensions to language identifiers. A non-empty map is the complete routed extension set and disables built-in inference; include every extension the server should receive.           |
+| `workspaceFolder`       | string   | -         | Initialization root and automatic routing scope (must be within project root). Subroot servers only receive files beneath that root; project-root servers cover every registered directory. |
+| `startupTimeout`        | number   | `10000`   | Startup timeout in milliseconds                                                                                                                                                             |
+| `shutdownTimeout`       | number   | `5000`    | Shutdown timeout in milliseconds                                                                                                                                                            |
+| `restartOnCrash`        | boolean  | `false`   | Auto-restart on crash                                                                                                                                                                       |
+| `maxRestarts`           | number   | `3`       | Maximum restart attempts                                                                                                                                                                    |
+| `trustRequired`         | boolean  | `true`    | Require trusted workspace                                                                                                                                                                   |
+
+### Server Routing and Workspace Scope
+
+File queries only use ready servers applicable to the document. Without an explicit extension map, known LSP language identifiers use built-in extension sets. TypeScript includes JavaScript and `.mts`/`.cts`/`.mjs`/`.cjs` files. Only when `extensionToLanguage` is absent or empty do unknown configured language identifiers and all extensionless filenames (including recognized dotfiles such as `.prettierrc`) retain legacy dispatch after workspace/root checks; known languages still reject unknown non-empty extensions and unrelated file types. For strict routing of custom languages, configure `extensionToLanguage`.
+
+A non-empty `extensionToLanguage` replaces, rather than extends, the built-in extension set. Adding only `.c` therefore excludes `.cpp`, `.h`, and every other omitted extension. List every extension you need. Keys are extensions (a leading dot is optional), not filenames: extensionless names such as `Gemfile` or `Makefile` cannot be expressed as keys and are not routed by a non-empty map. A map whose extensions match no files disables all routing for that server. Remove the map to restore legacy extensionless dispatch. A `cpp` configuration without a map recognizes C for `clangd`, `clangd.exe`, and numeric versions such as `clangd-18` or `clangd-19.1`; arbitrary wrappers are not assumed to support C.
+
+A server rooted at the project root can receive files from every current workspace directory, including directories added with `/directory add`. A server with a subdirectory `workspaceFolder` (or extension-provided `rootUri`) only receives files beneath that resolved root, even when other directories are registered. Warmup follows the same server-root rule. Removed directories are not read or re-delivered by tracked-document sweeps or reload replay. File queries recheck scope across warmup, indexing, retries, and pending requests; losing scope reports an error instead of stale contents or a clean-file result. After re-adding a directory, file queries and tracked workspace sweeps complete any outstanding document close before fresh delivery on the same connection. A hierarchy token rejected after observed scope loss remains stale even if the directory returns with identical contents; prepare call hierarchy again.
+
+The optional `serverName` tool parameter selects the runtime name shown by `/lsp`—normally the configured command, not the language key. It bypasses automatic language and server-root selection, but never the registered workspace boundary. An unknown or unready explicit server produces an error, not a clean-file result, including workspace symbol and diagnostic queries. Queries with no ready servers also fail rather than claiming the workspace is clean. File operations accept only resolvable `file:` URIs, not virtual or network documents. Equivalent file URI spellings share one canonical document identity and lifecycle; symlink alias paths are preserved while their physical targets are checked freshly.
+
+Workspace diagnostic and symbol searches omit file locations outside the current workspace directories, including revoked buffers, and disclose this filtering even when no results remain. Virtual result URIs remain visible but cannot be queried with file operations. Definitions, implementations, references, and document symbols may point into system headers or dependency directories outside the workspace. These locations are marked `outside workspace` and cannot be followed by another file query until the user adds an appropriate directory with `/directory add`. Results never authorize outside-workspace access automatically. Symlinks are checked against their current physical targets. Scope notes follow call hierarchy and code action JSON and name each URI that cannot be queried; they do not alter the JSON. Signed hierarchy items use canonical file URI spellings. Each kind of advice appears in full once per response, with short scope tags on subsequent locations. Non-file URIs are marked as unsupported, not as paths that `/directory add` can fix.
+
+Workspace searches use a `max(1000, limit)` result-scan budget across all selected servers, counting omitted, malformed, and duplicate entries too. Workspace diagnostics refund that charge for accepted reports with a valid empty `items` array; these clean reports, including duplicates, still count toward a separate `max(100000, limit)` total-report budget. Symbol scans are unchanged. Searches return normally once the requested result count is reached. If either budget is exhausted and another entry remains, the query reports a scan-limit error rather than returning incomplete results as an empty or clean workspace. Narrow symbol queries or select a server with `serverName`; for diagnostics, increase `limit` above the exhausted budget shown in the error, or select a server. Scope checks are reused only within one synchronous server-response filter and refreshed on later responses and requests.
 
 ### TCP/Socket Transport
 
@@ -262,7 +280,7 @@ Parameters:
 
 #### File Diagnostics
 
-Get diagnostic messages (errors, warnings) for a file.
+Get diagnostic messages (errors, warnings) for a file. The client advertises pull-diagnostic support and requests a current report. Unsupported requests, transport failures, and invalid reports are shown as `LSP diagnostics failed`, not as a clean file. Push-only diagnostic servers without pull support are not supported by this operation. Empty-string diagnostic messages are retained alongside other diagnostics. A successful `null` result is accepted as empty for compatibility; missing or malformed reports and RPC errors still fail.
 
 ```
 Operation: diagnostics
@@ -272,7 +290,7 @@ Parameters:
 
 #### Workspace Diagnostics
 
-Get all diagnostic messages across the workspace.
+Get all diagnostic messages across the workspace. Servers must support `workspace/diagnostic`; document pull support alone is not sufficient. A request failure is shown as `LSP workspace diagnostics failed`, not as an empty workspace. Diagnostics already returned by another server do not hide that failure. A successful `null` workspace response is valid and empty; it does not erase diagnostics from other servers.
 
 ```
 Operation: workspaceDiagnostics
@@ -358,6 +376,12 @@ You can override trust requirements for specific servers in their configuration:
 2. **File not saved**: Save your file for the server to pick up changes
 3. **Wrong language**: Check if the correct server is running for your language
 4. **Check the process**: Run `ps aux | grep <server-name>` to verify the server is actually running
+5. **`No ready LSP server matches document <uri>`**: No in-scope ready server claims the file's extension. Check the language identifier and the complete `extensionToLanguage` map; omitted extensions are not inferred when the map is non-empty.
+6. **`outside the current workspace directories`**: The document's physical path is not currently registered. Add an appropriate directory with `/directory add` before querying it. This also applies to external navigation targets and explicit `serverName` selections.
+7. **`outside every ready LSP server's workspaceFolder`**: The document is inside the workspace but outside every ready server's routing root, or those roots cannot be resolved. Check `workspaceFolder` and debug logs. Project-root servers cover all registered directories; subroot servers do not.
+8. **`No LSP servers are configured` / `No LSP servers are ready`**: Configure `.lsp.json`, check startup and trust, and inspect `/lsp`.
+9. **`LSP server <name> is not configured` / `not ready`**: Use the exact runtime name from `/lsp`; a language key such as `cpp` is not the runtime name when the command is `clangd`.
+10. **`Cannot resolve LSP document <uri>`**: Check that the file URI is valid and its ancestors are accessible, without symlink cycles or non-directory components. Valid in-scope missing files still report their normal read errors.
 
 ### Debugging
 

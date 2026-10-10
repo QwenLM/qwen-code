@@ -25,6 +25,22 @@ const createHandle = (overrides: Partial<LspServerHandle>): LspServerHandle =>
   }) as LspServerHandle;
 
 describe('NativeLspClient', () => {
+  it.each([undefined, 'srv'])(
+    'passes workspace-symbol server selection %s through to the service',
+    async (serverName) => {
+      const symbols: [] = [];
+      const workspaceSymbols = vi.fn().mockResolvedValue(symbols);
+      const service = { workspaceSymbols } as unknown as NativeLspService;
+      const client = new NativeLspClient(service);
+      expect(await client.workspaceSymbols('q', 10, serverName)).toBe(symbols);
+      expect(workspaceSymbols).toHaveBeenCalledExactlyOnceWith(
+        'q',
+        10,
+        serverName,
+      );
+    },
+  );
+
   it('returns status details from the current server handles', () => {
     const service = {
       getStatus: vi.fn().mockReturnValue(

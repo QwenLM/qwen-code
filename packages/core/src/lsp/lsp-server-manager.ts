@@ -9,6 +9,7 @@ import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as path from 'path';
+import * as fs from 'node:fs';
 import { pathToFileURL } from 'url';
 import { globSync } from 'glob';
 import { LspConnectionFactory } from './LspConnectionFactory.js';
@@ -34,6 +35,13 @@ import type {
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { lspServerConfigHash } from './configHash.js';
+import {
+  getLspServerExtensions,
+  getLspWorkspaceRoots,
+  isLspDocumentApplicable,
+} from './file-routing.js';
+import { isSubpaths } from '../utils/paths.js';
+import { resolveWorkspacePath } from '../utils/workspaceContext.js';
 
 const debugLogger = createDebugLogger('LSP');
 const SECURITY_SENSITIVE_ENV_KEYS = new Set([
@@ -282,8 +290,11 @@ export class LspServerManager {
       return;
     }
     const connection = handle.connection;
-    const tsFile = this.findFirstTypescriptFile();
+    const tsFile = this.findFirstTypescriptFile(handle);
     if (!tsFile) {
+      debugLogger.info(
+        `TypeScript server ${handle.config.name} warm-up skipped: no usable applicable file`,
+      );
       return;
     }
     // A failed forced attempt must stay retryable instead of latching warm. Kept
@@ -292,13 +303,17 @@ export class LspServerManager {
     if (force) handle.warmedUp = false;
 
     const uri = pathToFileURL(tsFile).toString();
-    const languageId = tsFile.endsWith('.tsx')
-      ? 'typescriptreact'
-      : tsFile.endsWith('.jsx')
-        ? 'javascriptreact'
-        : tsFile.endsWith('.js')
-          ? 'javascript'
-          : 'typescript';
+    const extension = path.extname(tsFile).slice(1).toLowerCase();
+    const languageId =
+      handle.config.extensionToLanguage?.[extension] ??
+      handle.config.extensionToLanguage?.[`.${extension}`] ??
+      (extension === 'tsx'
+        ? 'typescriptreact'
+        : extension === 'jsx'
+          ? 'javascriptreact'
+          : ['js', 'mjs', 'cjs'].includes(extension)
+            ? 'javascript'
+            : 'typescript');
     try {
       const sent = synchronizeDocument(uri, languageId);
       const { change, openClose } = resolveTextDocumentSync(
@@ -1177,6 +1192,10 @@ export class LspServerManager {
           references: { dynamicRegistration: false },
           documentSymbol: { dynamicRegistration: false },
           codeAction: { dynamicRegistration: false },
+          diagnostic: {
+            dynamicRegistration: false,
+            relatedDocumentSupport: false,
+          },
         },
         workspace: {
           workspaceFolders: true,
@@ -1353,8 +1372,17 @@ export class LspServerManager {
   /**
    * Find a representative TypeScript/JavaScript file to warm up tsserver.
    */
-  private findFirstTypescriptFile(): string | undefined {
-    const patterns = ['**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx'];
+  private findFirstTypescriptFile(handle: LspServerHandle): string | undefined {
+    const tsExtensions = getLspServerExtensions({
+      ...handle.config,
+      extensionToLanguage: undefined,
+      languages: ['typescript'],
+    });
+    const extensions = tsExtensions.filter((ext) =>
+      isLspDocumentApplicable(handle.config, `warmup.${ext}`),
+    );
+    if (extensions.length === 0) return undefined;
+    const pattern = `**/*.${extensions.length === 1 ? extensions[0] : `{${extensions.join(',')}}`}`;
     const excludePatterns = [
       '**/node_modules/**',
       '**/.git/**',
@@ -1362,24 +1390,39 @@ export class LspServerManager {
       '**/build/**',
     ];
 
-    for (const root of this.workspaceContext.getDirectories()) {
-      for (const pattern of patterns) {
+    const roots = getLspWorkspaceRoots(
+      handle.config,
+      resolveWorkspacePath(this.workspaceRoot),
+      this.workspaceContext.getDirectories(),
+    );
+    for (const root of roots) {
+      let matches: string[];
+      try {
+        matches = globSync(pattern, {
+          cwd: root,
+          ignore: excludePatterns,
+          absolute: true,
+          nodir: true,
+        });
+      } catch {
+        // ignore glob errors
+        continue;
+      }
+      matches.sort(
+        (a, b) =>
+          extensions.indexOf(path.extname(a).slice(1).toLowerCase()) -
+          extensions.indexOf(path.extname(b).slice(1).toLowerCase()),
+      );
+      for (const file of matches) {
+        if (this.fileDiscoveryService.shouldIgnoreFile(file)) continue;
+        let resolved: string;
         try {
-          const matches = globSync(pattern, {
-            cwd: root,
-            ignore: excludePatterns,
-            absolute: true,
-            nodir: true,
-          });
-          for (const file of matches) {
-            if (this.fileDiscoveryService.shouldIgnoreFile(file)) {
-              continue;
-            }
-            return file;
-          }
-        } catch (_error) {
-          // ignore glob errors
+          resolved = resolveWorkspacePath(file);
+          fs.accessSync(file, fs.constants.R_OK);
+        } catch {
+          continue;
         }
+        if (isSubpaths(roots, resolved)) return file;
       }
     }
 

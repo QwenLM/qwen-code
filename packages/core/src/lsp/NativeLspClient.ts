@@ -96,8 +96,9 @@ export class NativeLspClient implements LspClient {
   workspaceSymbols(
     query: string,
     limit?: number,
+    serverName?: string,
   ): Promise<LspSymbolInformation[]> {
-    return this.service.workspaceSymbols(query, limit);
+    return this.service.workspaceSymbols(query, limit, serverName);
   }
 
   /**

@@ -9,7 +9,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
-import { unescapePath } from '../utils/paths.js';
+import { isSubpaths, unescapePath } from '../utils/paths.js';
+import { resolveWorkspacePath } from '../utils/workspaceContext.js';
 import type { Config } from '../config/config.js';
 import type {
   LspCallHierarchyIncomingCall,
@@ -111,7 +112,14 @@ const ITEM_REQUIRED_OPERATIONS = new Set<LspOperation>([
 /** Operations that require filePath and range for code actions. */
 const RANGE_REQUIRED_OPERATIONS = new Set<LspOperation>(['codeActions']);
 
+const WORKSPACE_SCOPE_NOTE =
+  'Workspace queries use current directories; out-of-scope file results are omitted.';
+
 class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
+  private scopeDirectories: readonly string[] | undefined;
+  private scopeSuffixes = new Map<string, string>();
+  private scopeAdviceShown = new Set<string>();
+
   constructor(
     private readonly config: Config,
     params: LspToolParams,
@@ -145,6 +153,9 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
+    this.scopeDirectories = undefined;
+    this.scopeSuffixes.clear();
+    this.scopeAdviceShown.clear();
     const client = this.config.getLspClient();
     if (!client || !this.config.isLspEnabled()) {
       const message = `LSP ${this.getOperationLabel()} is unavailable (LSP disabled or not initialized).`;
@@ -400,7 +411,11 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
     const query = this.params.query ?? '';
     let symbols: LspSymbolInformation[] = [];
     try {
-      symbols = await client.workspaceSymbols(query, limit);
+      symbols = await client.workspaceSymbols(
+        query,
+        limit,
+        this.params.serverName,
+      );
     } catch (error) {
       const message = `LSP workspace symbol search failed: ${
         (error as Error)?.message || String(error)
@@ -409,7 +424,7 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
     }
 
     if (!symbols.length) {
-      const message = `No symbols found for query "${query}".`;
+      const message = `No symbols found for query "${query}". ${WORKSPACE_SCOPE_NOTE}`;
       return { llmContent: message, returnDisplay: message };
     }
 
@@ -473,8 +488,8 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       : [...lines];
 
     return {
-      llmContent: llmParts.join('\n'),
-      returnDisplay: displayParts.join('\n'),
+      llmContent: [...llmParts, WORKSPACE_SCOPE_NOTE].join('\n'),
+      returnDisplay: [...displayParts, WORKSPACE_SCOPE_NOTE].join('\n'),
     };
   }
 
@@ -696,7 +711,7 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
     }
 
     if (!fileDiagnostics.length) {
-      const message = 'No diagnostics found in the workspace.';
+      const message = `No diagnostics found in the current workspace directories. ${WORKSPACE_SCOPE_NOTE}`;
       return { llmContent: message, returnDisplay: message };
     }
 
@@ -709,7 +724,9 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       const serverSuffix = fileDiag.serverName
         ? ` [${fileDiag.serverName}]`
         : '';
-      lines.push(`\n${fileLabel}${serverSuffix}:`);
+      lines.push(
+        `\n${fileLabel}${serverSuffix}${this.formatScopeSuffix(fileDiag.uri)}:`,
+      );
 
       for (const diag of fileDiag.diagnostics) {
         const severity = diag.severity
@@ -724,8 +741,8 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
 
     const heading = `Workspace diagnostics (${totalIssues} issues in ${fileDiagnostics.length} files):`;
     return {
-      llmContent: [heading, ...lines].join('\n'),
-      returnDisplay: lines.join('\n'),
+      llmContent: [heading, ...lines, WORKSPACE_SCOPE_NOTE].join('\n'),
+      returnDisplay: [...lines, WORKSPACE_SCOPE_NOTE].join('\n'),
     };
   }
 
@@ -835,10 +852,10 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       uri,
       range: { start: position, end: position },
     };
-    const description = this.formatLocationWithServer(
-      { ...location, serverName: this.params.serverName },
-      workspaceRoot,
-    );
+    const serverSuffix = this.params.serverName
+      ? ` [${this.params.serverName}]`
+      : '';
+    const description = `${this.formatUriForDisplay(uri, workspaceRoot)}:${this.formatPosition(position)}${serverSuffix}`;
     return {
       location,
       description,
@@ -863,34 +880,25 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
     workspaceRoot: string,
   ): string {
     const start = location.range.start;
-    let filePath = location.uri;
-
-    if (filePath.startsWith('file://')) {
-      filePath = fileURLToPath(filePath);
-      filePath = path.relative(workspaceRoot, filePath) || '.';
-    }
+    const filePath = this.formatUriForDisplay(location.uri, workspaceRoot);
+    const scopeSuffix = this.formatScopeSuffix(location.uri);
 
     const serverSuffix =
       location.serverName && location.serverName !== ''
         ? ` [${location.serverName}]`
         : '';
 
-    return `${filePath}:${(start.line ?? 0) + 1}:${(start.character ?? 0) + 1}${serverSuffix}`;
+    return `${filePath}:${(start.line ?? 0) + 1}:${(start.character ?? 0) + 1}${serverSuffix}${scopeSuffix}`;
   }
 
   private formatLocationWithoutServer(
     location: LspLocation,
     workspaceRoot: string,
   ): string {
-    const { uri, range } = location;
-    let filePath = uri;
-    if (uri.startsWith('file://')) {
-      filePath = fileURLToPath(uri);
-      filePath = path.relative(workspaceRoot, filePath) || '.';
-    }
-    const line = (range.start.line ?? 0) + 1;
-    const character = (range.start.character ?? 0) + 1;
-    return `${filePath}:${line}:${character}`;
+    return this.formatLocationWithServer(
+      { uri: location.uri, range: location.range },
+      workspaceRoot,
+    );
   }
 
   private formatCallHierarchyItemLine(
@@ -931,8 +939,12 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
 
   private formatUriForDisplay(uri: string, workspaceRoot: string): string {
     let filePath = uri;
-    if (uri.startsWith('file://')) {
-      filePath = fileURLToPath(uri);
+    if (/^file:/i.test(uri)) {
+      try {
+        filePath = fileURLToPath(uri);
+      } catch {
+        return uri;
+      }
     }
     if (path.isAbsolute(filePath)) {
       return path.relative(workspaceRoot, filePath) || '.';
@@ -940,8 +952,70 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
     return filePath;
   }
 
+  private scopeSuffixForUri(uri: string): string {
+    const cached = this.scopeSuffixes.get(uri);
+    if (cached !== undefined) return cached;
+    let suffix = '';
+    if (!/^file:/i.test(uri)) {
+      suffix = ' [non-file URI; cannot query with file operations]';
+    } else {
+      try {
+        this.scopeDirectories ??= this.config
+          .getWorkspaceContext()
+          .getDirectories();
+        if (
+          !isSubpaths(
+            this.scopeDirectories,
+            resolveWorkspacePath(fileURLToPath(uri)),
+          )
+        ) {
+          suffix =
+            ' [outside workspace; add its directory with /directory add before file queries]';
+        }
+      } catch {
+        suffix = ' [unresolvable file; cannot query]';
+      }
+    }
+    this.scopeSuffixes.set(uri, suffix);
+    return suffix;
+  }
+
+  private formatScopeSuffix(uri: string): string {
+    const suffix = this.scopeSuffixForUri(uri);
+    if (!suffix) return '';
+    if (this.scopeAdviceShown.has(suffix)) {
+      return `${suffix.split(';')[0]}]`;
+    }
+    this.scopeAdviceShown.add(suffix);
+    return suffix;
+  }
+
   private formatJsonSection(label: string, data: unknown): string {
-    return `\n\n${label}:\n${JSON.stringify(data, null, 2)}`;
+    const uris = new Set<string>();
+    const inspect = (value: unknown): void => {
+      if (!value || typeof value !== 'object') return;
+      for (const [key, child] of Object.entries(value)) {
+        if (/^[a-z][a-z\d+.-]*:/i.test(key)) {
+          uris.add(key);
+        }
+        if (
+          ['uri', 'oldUri', 'newUri'].includes(key) &&
+          typeof child === 'string'
+        ) {
+          uris.add(child);
+        } else {
+          inspect(child);
+        }
+      }
+    };
+    inspect(data);
+    const advice = [...uris]
+      .map((uri) => {
+        const suffix = this.formatScopeSuffix(uri);
+        return suffix ? `\nNote: ${uri}${suffix}` : '';
+      })
+      .join('');
+    return `\n\n${label}:\n${JSON.stringify(data, null, 2)}${advice}`;
   }
 
   private describeCallHierarchyItemShort(): string {
@@ -954,14 +1028,8 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
 
   private describeCallHierarchyItemFull(item: LspCallHierarchyItem): string {
     const workspaceRoot = this.config.getProjectRoot();
-    const location = this.formatLocationWithServer(
-      {
-        uri: item.uri,
-        range: item.selectionRange,
-        serverName: item.serverName,
-      },
-      workspaceRoot,
-    );
+    const serverSuffix = item.serverName ? ` [${item.serverName}]` : '';
+    const location = `${this.formatUriForDisplay(item.uri, workspaceRoot)}:${this.formatPosition(item.selectionRange.start)}${serverSuffix}`;
     return `${item.name} at ${location}`;
   }
 

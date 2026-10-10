@@ -53,26 +53,17 @@ import * as fs from 'node:fs';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { isSubpaths } from '../utils/paths.js';
+import {
+  getLspServerExtensions,
+  getLspWorkspaceRoots,
+  isLspDocumentApplicable,
+} from './file-routing.js';
+import { resolveWorkspacePath } from '../utils/workspaceContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { globSync } from 'glob';
 
 const debugLogger = createDebugLogger('LSP');
-
-/**
- * Mapping from LSP language identifiers to file extensions, only for cases
- * where the language ID does NOT match the file extension directly.
- * Languages whose ID is already a valid extension (e.g. "cpp", "java", "go")
- * are handled by the fallback in getWorkspaceSymbolExtensions().
- */
-const LANGUAGE_ID_TO_EXTENSIONS: Record<string, string[]> = {
-  typescript: ['ts', 'tsx'],
-  typescriptreact: ['tsx'],
-  javascript: ['js', 'jsx'],
-  javascriptreact: ['jsx'],
-  python: ['py'],
-  csharp: ['cs'],
-  ruby: ['rb'],
-};
 
 const DEFAULT_EXCLUDE_PATTERNS = [
   '**/node_modules/**',
@@ -80,6 +71,20 @@ const DEFAULT_EXCLUDE_PATTERNS = [
   '**/dist/**',
   '**/build/**',
 ];
+
+const MIN_WORKSPACE_RESULT_SCAN_LIMIT = 1000;
+const MIN_WORKSPACE_DIAGNOSTIC_REPORT_SCAN_LIMIT = 100000;
+
+class WorkspaceResultScanLimitError extends Error {
+  constructor(
+    limit: number,
+    advice = 'narrow the query or select a server with serverName',
+  ) {
+    super(`LSP workspace result scan limit (${limit}) exceeded; ${advice}`);
+  }
+}
+
+class LspDocumentScopeError extends Error {}
 
 class StaleCallHierarchyItemError extends Error {
   constructor(uri?: string) {
@@ -124,6 +129,10 @@ export class NativeLspService {
   private workspaceSymbolFiles = new WeakMap<LspConnectionInterface, string>();
   private snapshotDigests = new WeakMap<DocumentSnapshot, string>();
   private callHierarchySecrets = new WeakMap<LspConnectionInterface, Buffer>();
+  private callHierarchyGenerations = new WeakMap<
+    LspConnectionInterface,
+    Map<string, number>
+  >();
   private lastConnections = new Map<string, LspConnectionInterface>();
   // URIs to re-deliver after a connection swap or synchronization failure.
   // openedDocuments selects didOpen/didChange and is wiped on connection changes; this
@@ -338,11 +347,14 @@ export class NativeLspService {
     }
   }
 
-  /** The tracked set for one server: delivered documents and durable replay obligations. */
+  /** Delivered documents, replay obligations and unfinished closes. */
   private trackedUrisFor(serverName: string): Set<string> {
     return new Set([
       ...(this.openedDocuments.get(serverName)?.keys() ?? []),
       ...(this.replayUris.get(serverName) ?? []),
+      ...[...(this.documentLifecycles.get(serverName) ?? [])].flatMap(
+        ([uri, lifecycle]) => (lifecycle.pendingClose ? [uri] : []),
+      ),
     ]);
   }
 
@@ -352,12 +364,8 @@ export class NativeLspService {
    * new connection never received. Callers keep lastConnections bookkeeping themselves.
    */
   private parkTrackedUris(serverName: string): void {
-    const prior = this.openedDocuments.get(serverName);
-    if (prior && prior.size > 0) {
-      const durable = this.replayUris.get(serverName) ?? new Set<string>();
-      for (const tracked of prior.keys()) durable.add(tracked);
-      this.replayUris.set(serverName, durable);
-    }
+    const durable = this.trackedUrisFor(serverName);
+    if (durable.size > 0) this.replayUris.set(serverName, durable);
     this.openedDocuments.delete(serverName);
     this.documentLifecycles.delete(serverName);
   }
@@ -401,8 +409,8 @@ export class NativeLspService {
       for (const uri of documents) {
         this.throwIfReinitializeAborted(signal);
         try {
-          openedAny =
-            this.synchronizeDocument(name, handle, uri).sent || openedAny;
+          const synchronized = this.synchronizeDocument(name, handle, uri);
+          openedAny = synchronized.sent || openedAny;
         } catch (error) {
           debugLogger.warn(
             `Failed to replay document ${uri} for LSP server ${name}:`,
@@ -522,17 +530,30 @@ export class NativeLspService {
     };
   }
 
+  private canonicalDocumentUri(uri: string): string {
+    if (!/^file:/i.test(uri)) return uri;
+    try {
+      return pathToFileURL(fileURLToPath(uri)).toString();
+    } catch {
+      // Preserve malformed input for the existing scope refusal.
+      return uri;
+    }
+  }
+
   /**
    * Get ready server handles filtered by optional server name.
    * Each handle is guaranteed to have a valid connection.
    *
-   * @param serverName - Optional server name to filter by
+   * @param serverName - Explicit override of language and server root, not workspace containment
+   * @param uri - Document URI for automatic file-scoped routing
    * @returns Array of [serverName, handle] tuples with active connections
    */
   private getReadyHandles(
     serverName?: string,
+    uri?: string,
   ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
-    return Array.from(this.serverManager.getHandles().entries()).filter(
+    const configured = this.serverManager.getHandles();
+    const handles = Array.from(configured.entries()).filter(
       (
         entry,
       ): entry is [
@@ -543,6 +564,148 @@ export class NativeLspService {
         entry[1].connection !== undefined &&
         (!serverName || entry[0] === serverName),
     );
+    if (!uri) return handles;
+
+    const directories = /^file:/i.test(uri)
+      ? this.workspaceContext.getDirectories()
+      : [];
+    const resolvedFilePath = /^file:/i.test(uri)
+      ? this.resolveWorkspaceDocument(uri, directories)
+      : undefined;
+    this.assertServersAvailable(handles.length, serverName);
+    if (!resolvedFilePath) {
+      throw new Error(
+        `LSP document ${uri} is not a file URI; only file: documents can be queried`,
+      );
+    }
+    if (serverName) return handles;
+
+    const primaryRoot = resolveWorkspacePath(this.workspaceRoot);
+    const scoped = handles.filter(([, handle]) => {
+      const roots = getLspWorkspaceRoots(
+        handle.config,
+        primaryRoot,
+        directories,
+      );
+      return roots === directories || isSubpaths(roots, resolvedFilePath);
+    });
+    if (scoped.length === 0) {
+      const message = `Document ${uri} is outside every ready LSP server's workspaceFolder or its root is unusable; retry with serverName to bypass the workspaceFolder filter (not workspace containment)`;
+      debugLogger.warn(message);
+      throw new Error(message);
+    }
+    const applicable = scoped.filter(([, handle]) =>
+      isLspDocumentApplicable(handle.config, fileURLToPath(uri)),
+    );
+    if (applicable.length === 0) {
+      const message = `No ready LSP server matches document ${uri}; check extensionToLanguage and the configured languages`;
+      debugLogger.warn(message);
+      throw new Error(message);
+    }
+    return applicable;
+  }
+
+  private assertServersAvailable(count: number, serverName?: string): void {
+    if (count > 0) return;
+    const configured = this.serverManager.getHandles();
+    const message = serverName
+      ? `LSP server ${serverName} is ${configured.has(serverName) ? 'not ready' : 'not configured'}; check /lsp`
+      : configured.size === 0
+        ? 'No LSP servers are configured; configure .lsp.json and check /lsp'
+        : 'No LSP servers are ready; check /lsp';
+    debugLogger.warn(message);
+    throw new Error(message);
+  }
+
+  private isCurrentWorkspaceDocument(
+    uri: string,
+    directories: readonly string[],
+    cache: Map<string, boolean>,
+  ): boolean {
+    if (typeof uri !== 'string' || path.isAbsolute(uri)) return false;
+    const cached = cache.get(uri);
+    if (cached !== undefined) return cached;
+    let current = false;
+    try {
+      const url = new URL(uri);
+      current =
+        url.protocol !== 'file:' ||
+        isSubpaths(directories, resolveWorkspacePath(fileURLToPath(url)));
+    } catch {
+      current = false;
+    }
+    cache.set(uri, current);
+    if (!current) this.deferWorkspaceDocument(uri);
+    return current;
+  }
+
+  private deferWorkspaceDocument(uri: string, cause?: unknown): void {
+    uri = this.canonicalDocumentUri(uri);
+    for (const connection of new Set(this.lastConnections.values())) {
+      const generations = this.callHierarchyGenerations.get(connection);
+      const generation = generations?.get(uri);
+      if (generations && generation !== undefined) {
+        generations.set(uri, generation + 1);
+      }
+    }
+    // Losing scope does not close the peer's buffer; defer closure until scope returns.
+    for (const [serverName, documents] of this.openedDocuments) {
+      const previous = documents.get(uri);
+      if (previous) {
+        this.documentLifecycles.get(serverName)?.set(uri, {
+          version: previous.version,
+          pendingClose: {
+            error: new Error('Document must be closed before reopening', {
+              cause,
+            }),
+          },
+        });
+        documents.delete(uri);
+      }
+    }
+  }
+
+  private resolveWorkspaceDocument(
+    uri: string,
+    directories: readonly string[],
+  ): string {
+    let resolved: string;
+    try {
+      resolved = resolveWorkspacePath(fileURLToPath(uri));
+    } catch (error) {
+      const message = `Cannot resolve LSP document ${uri} inside the current workspace directories`;
+      debugLogger.warn(message, error);
+      const refusal = new LspDocumentScopeError(message, { cause: error });
+      this.deferWorkspaceDocument(uri, refusal);
+      throw refusal;
+    }
+    if (!isSubpaths(directories, resolved)) {
+      const message = `${uri} is outside the current workspace directories; add a directory with /directory add before querying`;
+      debugLogger.warn(message);
+      const refusal = new LspDocumentScopeError(message);
+      this.deferWorkspaceDocument(uri, refusal);
+      throw refusal;
+    }
+    return resolved;
+  }
+
+  private async requestDocument(
+    connection: LspConnectionInterface,
+    method: string,
+    params: { textDocument: { uri: string }; [key: string]: unknown },
+  ): Promise<unknown> {
+    this.resolveWorkspaceDocument(
+      params.textDocument.uri,
+      this.workspaceContext.getDirectories(),
+    );
+    try {
+      return await connection.request(method, params);
+    } finally {
+      this.resolveWorkspaceDocument(
+        params.textDocument.uri,
+        this.workspaceContext.getDirectories(),
+      );
+    }
   }
 
   /** Synchronize disk text before a query; only a new didOpen needs warmup delay. */
@@ -551,11 +714,16 @@ export class NativeLspService {
     handle: LspServerHandle & { connection: LspConnectionInterface },
     uri: string,
   ): Promise<boolean> {
-    const { opened: justOpened } = this.synchronizeDocument(
+    const { opened: justOpened, deferred } = this.synchronizeDocument(
       serverName,
       handle,
       uri,
     );
+    if (deferred) {
+      throw new LspDocumentScopeError(
+        `Cannot synchronize LSP document ${uri} inside the current workspace directories`,
+      );
+    }
     if (justOpened) {
       // Preserve the indexing delay for servers that cannot answer immediately.
       await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
@@ -569,9 +737,18 @@ export class NativeLspService {
     uri: string,
     languageId?: string,
     force = false,
-  ): { sent: boolean; opened: boolean } {
-    if (!uri.startsWith('file://')) {
+  ): { sent: boolean; opened: boolean; deferred?: boolean } {
+    uri = this.canonicalDocumentUri(uri);
+    if (!/^file:/i.test(uri)) {
       return { sent: false, opened: false };
+    }
+    try {
+      this.resolveWorkspaceDocument(
+        uri,
+        this.workspaceContext.getDirectories(),
+      );
+    } catch {
+      return { sent: false, opened: false, deferred: true };
     }
     if (
       !handle.connection ||
@@ -761,14 +938,16 @@ export class NativeLspService {
     if (
       this.lastConnections.get(serverName) === handle.connection &&
       openedForServer &&
-      openedForServer.size > 0
+      [...openedForServer.keys()].some((uri) =>
+        this.isUsableWorkspaceSymbolFile(fileURLToPath(uri), handle),
+      )
     ) {
       return true;
     }
 
     const connection = handle.connection;
     let filePath = this.workspaceSymbolFiles.get(connection);
-    if (filePath && !this.isUsableWorkspaceSymbolFile(filePath)) {
+    if (filePath && !this.isUsableWorkspaceSymbolFile(filePath, handle)) {
       this.workspaceSymbolFiles.delete(connection);
       filePath = undefined;
     }
@@ -779,7 +958,7 @@ export class NativeLspService {
     try {
       // Even disk-reading servers need a readable discovery candidate, but
       // ordinary queries need not read text that cannot be delivered.
-      if (!this.isUsableWorkspaceSymbolFile(filePath)) {
+      if (!this.isUsableWorkspaceSymbolFile(filePath, handle)) {
         throw new Error(
           'Workspace symbol warmup candidate is no longer usable.',
         );
@@ -806,21 +985,26 @@ export class NativeLspService {
     return handle.connection === connection;
   }
 
-  private isUsableWorkspaceSymbolFile(filePath: string): boolean {
+  private isUsableWorkspaceSymbolFile(
+    filePath: string,
+    handle: LspServerHandle,
+  ): boolean {
     try {
       if (!fs.statSync(filePath).isFile()) return false;
       fs.accessSync(filePath, fs.constants.R_OK);
+      // Removing a directory does not replace the connection, so cached candidates
+      // must be revalidated against current workspace and server roots.
+      return isSubpaths(
+        getLspWorkspaceRoots(
+          handle.config,
+          resolveWorkspacePath(this.workspaceRoot),
+          this.workspaceContext.getDirectories(),
+        ),
+        resolveWorkspacePath(filePath),
+      );
     } catch {
       return false;
     }
-    // A cached candidate must still live under a current workspace root: removing
-    // a directory at runtime does not replace the connection, so without this the
-    // stale entry would re-open a file inside a root the user just revoked.
-    return this.workspaceContext
-      .getDirectories()
-      .some((root) =>
-        filePath.startsWith(root.endsWith(path.sep) ? root : root + path.sep),
-      );
   }
 
   /**
@@ -841,7 +1025,11 @@ export class NativeLspService {
     const extGlob =
       extensions.length === 1 ? extensions[0]! : `{${extensions.join(',')}}`;
     const pattern = `**/*.${extGlob}`;
-    const roots = this.workspaceContext.getDirectories();
+    const roots = getLspWorkspaceRoots(
+      handle.config,
+      resolveWorkspacePath(this.workspaceRoot),
+      this.workspaceContext.getDirectories(),
+    );
 
     for (const root of roots) {
       try {
@@ -856,6 +1044,15 @@ export class NativeLspService {
         });
         for (const match of matches) {
           if (this.fileDiscoveryService.shouldIgnoreFile(match)) {
+            continue;
+          }
+          if (!this.isUsableWorkspaceSymbolFile(match, handle)) {
+            debugLogger.warn(
+              `LSP workspace symbol warmup skipped for ${match}:`,
+              new Error(
+                'Workspace symbol warmup candidate is no longer usable.',
+              ),
+            );
             continue;
           }
           return match;
@@ -876,36 +1073,7 @@ export class NativeLspService {
    *      back to treating the language ID itself as a file extension
    */
   private getWorkspaceSymbolExtensions(handle: LspServerHandle): string[] {
-    const extensions = new Set<string>();
-
-    // Prefer explicit extension-to-language mapping from server config
-    const extMapping = handle.config.extensionToLanguage;
-    if (extMapping) {
-      for (const key of Object.keys(extMapping)) {
-        const normalized = key.startsWith('.') ? key.slice(1) : key;
-        if (normalized) {
-          extensions.add(normalized.toLowerCase());
-        }
-      }
-    }
-
-    // Fall back to deriving extensions from language identifiers
-    if (extensions.size === 0) {
-      for (const language of handle.config.languages) {
-        const mapped = LANGUAGE_ID_TO_EXTENSIONS[language];
-        if (mapped) {
-          for (const ext of mapped) {
-            extensions.add(ext);
-          }
-        } else {
-          // For languages like "cpp", "java", "go", "rust" etc.,
-          // the language ID itself is a valid file extension
-          extensions.add(language.toLowerCase());
-        }
-      }
-    }
-
-    return Array.from(extensions);
+    return getLspServerExtensions(handle.config);
   }
 
   /**
@@ -979,15 +1147,15 @@ export class NativeLspService {
   async workspaceSymbols(
     query: string,
     limit = 50,
+    selectedServer?: string,
   ): Promise<LspSymbolInformation[]> {
+    const handles = this.getReadyHandles(selectedServer);
+    this.assertServersAvailable(handles.length, selectedServer);
     const results: LspSymbolInformation[] = [];
+    const scanLimit = Math.max(MIN_WORKSPACE_RESULT_SCAN_LIMIT, limit);
+    let scanned = 0;
 
-    for (const [serverName, handle] of Array.from(
-      this.serverManager.getHandles(),
-    )) {
-      if (handle.status !== 'READY' || !handle.connection) {
-        continue;
-      }
+    for (const [serverName, handle] of handles) {
       try {
         await this.warmupAndTrack(serverName, handle);
         const warmedUp = this.serverManager.isTypescriptServer(handle)
@@ -1019,12 +1187,24 @@ export class NativeLspService {
         if (!Array.isArray(response)) {
           continue;
         }
+        const directories = this.workspaceContext.getDirectories();
+        const scopeCache = new Map<string, boolean>();
         for (const item of response) {
+          if (++scanned > scanLimit) {
+            throw new WorkspaceResultScanLimitError(scanLimit);
+          }
           const symbol = this.normalizer.normalizeSymbolResult(
             item,
             serverName,
           );
-          if (symbol) {
+          if (
+            symbol &&
+            this.isCurrentWorkspaceDocument(
+              symbol.location.uri,
+              directories,
+              scopeCache,
+            )
+          ) {
             results.push(symbol);
           }
           if (results.length >= limit) {
@@ -1032,6 +1212,7 @@ export class NativeLspService {
           }
         }
       } catch (error) {
+        if (error instanceof WorkspaceResultScanLimitError) throw error;
         debugLogger.warn(
           `LSP workspace/symbol failed for ${serverName}:`,
           error,
@@ -1050,7 +1231,8 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspDefinition[]> {
-    const handles = this.getReadyHandles(serverName);
+    location = { ...location, uri: this.canonicalDocumentUri(location.uri) };
+    const handles = this.getReadyHandles(serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1065,7 +1247,8 @@ export class NativeLspService {
           location.uri,
         );
 
-        let response = await handle.connection.request(
+        let response = await this.requestDocument(
+          handle.connection,
           'textDocument/definition',
           requestParams,
         );
@@ -1075,7 +1258,8 @@ export class NativeLspService {
           this.shouldRetryAfterOpen(justOpened, handle)
         ) {
           await this.delay(DEFAULT_LSP_DOCUMENT_RETRY_DELAY_MS);
-          response = await handle.connection.request(
+          response = await this.requestDocument(
+            handle.connection,
             'textDocument/definition',
             requestParams,
           );
@@ -1100,6 +1284,7 @@ export class NativeLspService {
           return definitions.slice(0, limit);
         }
       } catch (error) {
+        if (error instanceof LspDocumentScopeError) throw error;
         debugLogger.warn(
           `LSP textDocument/definition failed for ${name}:`,
           error,
@@ -1119,7 +1304,8 @@ export class NativeLspService {
     includeDeclaration = false,
     limit = 200,
   ): Promise<LspReference[]> {
-    const handles = this.getReadyHandles(serverName);
+    location = { ...location, uri: this.canonicalDocumentUri(location.uri) };
+    const handles = this.getReadyHandles(serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1135,7 +1321,8 @@ export class NativeLspService {
           location.uri,
         );
 
-        let response = await handle.connection.request(
+        let response = await this.requestDocument(
+          handle.connection,
           'textDocument/references',
           requestParams,
         );
@@ -1145,7 +1332,8 @@ export class NativeLspService {
           this.shouldRetryAfterOpen(justOpened, handle)
         ) {
           await this.delay(DEFAULT_LSP_DOCUMENT_RETRY_DELAY_MS);
-          response = await handle.connection.request(
+          response = await this.requestDocument(
+            handle.connection,
             'textDocument/references',
             requestParams,
           );
@@ -1168,6 +1356,7 @@ export class NativeLspService {
           return refs.slice(0, limit);
         }
       } catch (error) {
+        if (error instanceof LspDocumentScopeError) throw error;
         debugLogger.warn(
           `LSP textDocument/references failed for ${name}:`,
           error,
@@ -1185,7 +1374,8 @@ export class NativeLspService {
     location: LspLocation,
     serverName?: string,
   ): Promise<LspHoverResult | null> {
-    const handles = this.getReadyHandles(serverName);
+    location = { ...location, uri: this.canonicalDocumentUri(location.uri) };
+    const handles = this.getReadyHandles(serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1200,7 +1390,8 @@ export class NativeLspService {
           location.uri,
         );
 
-        let response = await handle.connection.request(
+        let response = await this.requestDocument(
+          handle.connection,
           'textDocument/hover',
           requestParams,
         );
@@ -1210,7 +1401,8 @@ export class NativeLspService {
           this.shouldRetryAfterOpen(justOpened, handle)
         ) {
           await this.delay(DEFAULT_LSP_DOCUMENT_RETRY_DELAY_MS);
-          response = await handle.connection.request(
+          response = await this.requestDocument(
+            handle.connection,
             'textDocument/hover',
             requestParams,
           );
@@ -1221,6 +1413,7 @@ export class NativeLspService {
           return normalized;
         }
       } catch (error) {
+        if (error instanceof LspDocumentScopeError) throw error;
         debugLogger.warn(`LSP textDocument/hover failed for ${name}:`, error);
       }
     }
@@ -1236,7 +1429,8 @@ export class NativeLspService {
     serverName?: string,
     limit = 200,
   ): Promise<LspSymbolInformation[]> {
-    const handles = this.getReadyHandles(serverName);
+    uri = this.canonicalDocumentUri(uri);
+    const handles = this.getReadyHandles(serverName, uri);
     const requestParams = { textDocument: { uri } };
 
     for (const [name, handle] of handles) {
@@ -1248,7 +1442,8 @@ export class NativeLspService {
           uri,
         );
 
-        let response = await handle.connection.request(
+        let response = await this.requestDocument(
+          handle.connection,
           'textDocument/documentSymbol',
           requestParams,
         );
@@ -1258,7 +1453,8 @@ export class NativeLspService {
           this.shouldRetryAfterOpen(justOpened, handle)
         ) {
           await this.delay(DEFAULT_LSP_DOCUMENT_RETRY_DELAY_MS);
-          response = await handle.connection.request(
+          response = await this.requestDocument(
+            handle.connection,
             'textDocument/documentSymbol',
             requestParams,
           );
@@ -1298,6 +1494,7 @@ export class NativeLspService {
           return symbols.slice(0, limit);
         }
       } catch (error) {
+        if (error instanceof LspDocumentScopeError) throw error;
         debugLogger.warn(
           `LSP textDocument/documentSymbol failed for ${name}:`,
           error,
@@ -1316,7 +1513,8 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspDefinition[]> {
-    const handles = this.getReadyHandles(serverName);
+    location = { ...location, uri: this.canonicalDocumentUri(location.uri) };
+    const handles = this.getReadyHandles(serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1331,7 +1529,8 @@ export class NativeLspService {
           location.uri,
         );
 
-        let response = await handle.connection.request(
+        let response = await this.requestDocument(
+          handle.connection,
           'textDocument/implementation',
           requestParams,
         );
@@ -1341,7 +1540,8 @@ export class NativeLspService {
           this.shouldRetryAfterOpen(justOpened, handle)
         ) {
           await this.delay(DEFAULT_LSP_DOCUMENT_RETRY_DELAY_MS);
-          response = await handle.connection.request(
+          response = await this.requestDocument(
+            handle.connection,
             'textDocument/implementation',
             requestParams,
           );
@@ -1369,6 +1569,7 @@ export class NativeLspService {
           return implementations.slice(0, limit);
         }
       } catch (error) {
+        if (error instanceof LspDocumentScopeError) throw error;
         debugLogger.warn(
           `LSP textDocument/implementation failed for ${name}:`,
           error,
@@ -1398,6 +1599,10 @@ export class NativeLspService {
     assertActive();
     const readText = (target: string): string | undefined => {
       try {
+        this.resolveWorkspaceDocument(
+          target,
+          this.workspaceContext.getDirectories(),
+        );
         return fs.readFileSync(fileURLToPath(target), 'utf-8');
       } catch {
         return undefined;
@@ -1410,7 +1615,7 @@ export class NativeLspService {
     );
     // Observations are shared only within one synchronous checkpoint/batch.
     const observations = new Map<string, string | undefined>();
-    if (!snapshots.has(uri) && uri.startsWith('file://')) {
+    if (!snapshots.has(uri) && /^file:/i.test(uri)) {
       const text = readText(uri);
       observations.set(uri, text);
       if (text !== undefined)
@@ -1421,6 +1626,16 @@ export class NativeLspService {
               ? (this.documentLifecycles.get(name)?.get(uri)?.version ?? 0)
               : 0,
         });
+    }
+    const generations =
+      this.callHierarchyGenerations.get(connection) ??
+      new Map<string, number>();
+    this.callHierarchyGenerations.set(connection, generations);
+    const snapshotGenerations = new Map<string, number>();
+    for (const target of snapshots.keys()) {
+      const generation = generations.get(target) ?? 0;
+      generations.set(target, generation);
+      snapshotGenerations.set(target, generation);
     }
     const isFresh = (target: string): boolean => {
       assertActive();
@@ -1437,6 +1652,7 @@ export class NativeLspService {
       if (!observations.has(target)) observations.set(target, readText(target));
       return (
         !lifecycle?.pendingClose &&
+        generations.get(target) === snapshotGenerations.get(target) &&
         (current?.version ?? lifecycle?.version ?? 0) === snapshot.version &&
         (!current || current.text === snapshot.text) &&
         // A previously delivered snapshot must still be open, not just identical on disk.
@@ -1449,7 +1665,7 @@ export class NativeLspService {
       // Name the root file so a cross-file item whose own file was delivered then
       // closed guides the model to re-prepare there, instead of a generic stale
       // error that only re-syncs the original root and reproduces the same item.
-      if (uri.startsWith('file://') && !isFresh(uri))
+      if (/^file:/i.test(uri) && !isFresh(uri))
         throw new StaleCallHierarchyItemError(uri);
     };
     assertRoot();
@@ -1465,7 +1681,7 @@ export class NativeLspService {
       },
       sign: (item) => {
         assertActive();
-        if (!item.uri.startsWith('file://')) return undefined;
+        if (!/^file:/i.test(item.uri)) return undefined;
         if (!isFresh(item.uri)) {
           if (item.uri === uri) throw new StaleCallHierarchyItemError();
           return undefined;
@@ -1482,7 +1698,11 @@ export class NativeLspService {
               sortJsonValue([
                 name,
                 this.normalizer.toCallHierarchyItemParams(item),
-                { digest, version: snapshot.version },
+                {
+                  digest,
+                  version: snapshot.version,
+                  generation: snapshotGenerations.get(item.uri),
+                },
               ]),
             ),
           )
@@ -1495,7 +1715,7 @@ export class NativeLspService {
     item: LspCallHierarchyItem,
     revision: CallHierarchyRevision,
   ): void {
-    if (!item.uri.startsWith('file://')) {
+    if (!/^file:/i.test(item.uri)) {
       throw new Error(
         `Call hierarchy item ${item.uri} has no verifiable disk snapshot and cannot be traversed; prepare call hierarchy at a file location instead.`,
       );
@@ -1516,7 +1736,8 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspCallHierarchyItem[]> {
-    const handles = this.getReadyHandles(serverName);
+    location = { ...location, uri: this.canonicalDocumentUri(location.uri) };
+    const handles = this.getReadyHandles(serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1527,7 +1748,7 @@ export class NativeLspService {
       let revision: CallHierarchyRevision | undefined;
       try {
         let originalText: string | undefined;
-        if (location.uri.startsWith('file://')) {
+        if (/^file:/i.test(location.uri)) {
           try {
             originalText = fs.readFileSync(
               fileURLToPath(location.uri),
@@ -1550,6 +1771,10 @@ export class NativeLspService {
           if (originalText !== undefined) {
             let current: string;
             try {
+              this.resolveWorkspaceDocument(
+                location.uri,
+                this.workspaceContext.getDirectories(),
+              );
               current = fs.readFileSync(fileURLToPath(location.uri), 'utf-8');
             } catch {
               throw new StaleCallHierarchyItemError();
@@ -1599,7 +1824,10 @@ export class NativeLspService {
               candidate,
               name,
             );
-            if (item) items.push(item);
+            if (item) {
+              item.uri = this.canonicalDocumentUri(item.uri);
+              items.push(item);
+            }
             if (items.length >= limit) break;
           }
           return items.slice(0, limit);
@@ -1609,7 +1837,12 @@ export class NativeLspService {
         if (items.length > 0) return items;
       } catch (error) {
         revision?.checkpoint();
-        if (error instanceof StaleCallHierarchyItemError) throw error;
+        if (
+          error instanceof StaleCallHierarchyItemError ||
+          error instanceof LspDocumentScopeError
+        ) {
+          throw error;
+        }
         debugLogger.warn(
           `LSP textDocument/prepareCallHierarchy failed for ${name}:`,
           error,
@@ -1628,8 +1861,10 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspCallHierarchyIncomingCall[]> {
+    item = { ...item, uri: this.canonicalDocumentUri(item.uri) };
     const targetServer = serverName ?? item.serverName;
     const handles = this.getReadyHandles(targetServer);
+    this.assertServersAvailable(handles.length, targetServer);
     if (handles.length !== 1) throw new StaleCallHierarchyItemError();
 
     for (const [name, handle] of handles) {
@@ -1658,6 +1893,9 @@ export class NativeLspService {
         for (const call of response) {
           const normalized = this.normalizer.normalizeIncomingCall(call, name);
           if (normalized) {
+            normalized.from.uri = this.canonicalDocumentUri(
+              normalized.from.uri,
+            );
             normalized.from.documentRevision = revision.sign(normalized.from);
             calls.push(normalized);
             if (calls.length >= limit) {
@@ -1690,8 +1928,10 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspCallHierarchyOutgoingCall[]> {
+    item = { ...item, uri: this.canonicalDocumentUri(item.uri) };
     const targetServer = serverName ?? item.serverName;
     const handles = this.getReadyHandles(targetServer);
+    this.assertServersAvailable(handles.length, targetServer);
     if (handles.length !== 1) throw new StaleCallHierarchyItemError();
 
     for (const [name, handle] of handles) {
@@ -1720,6 +1960,7 @@ export class NativeLspService {
         for (const call of response) {
           const normalized = this.normalizer.normalizeOutgoingCall(call, name);
           if (normalized) {
+            normalized.to.uri = this.canonicalDocumentUri(normalized.to.uri);
             normalized.to.documentRevision = revision.sign(normalized.to);
             calls.push(normalized);
             if (calls.length >= limit) {
@@ -1751,7 +1992,8 @@ export class NativeLspService {
     uri: string,
     serverName?: string,
   ): Promise<LspDiagnostic[]> {
-    const handles = this.getReadyHandles(serverName);
+    uri = this.canonicalDocumentUri(uri);
+    const handles = this.getReadyHandles(serverName, uri);
     const allDiagnostics: LspDiagnostic[] = [];
 
     for (const [name, handle] of handles) {
@@ -1761,34 +2003,35 @@ export class NativeLspService {
 
       try {
         // Request pull diagnostics if the server supports it
-        const response = await handle.connection.request(
+        const response = await this.requestDocument(
+          handle.connection,
           'textDocument/diagnostic',
           {
             textDocument: { uri },
           },
         );
 
-        if (response && typeof response === 'object') {
-          const responseObj = response as Record<string, unknown>;
-          const items = responseObj['items'];
-          if (Array.isArray(items)) {
-            for (const item of items) {
-              const normalized = this.normalizer.normalizeDiagnostic(
-                item,
-                name,
-              );
-              if (normalized) {
-                allDiagnostics.push(normalized);
-              }
-            }
+        const items =
+          response === null
+            ? []
+            : response && typeof response === 'object'
+              ? (response as Record<string, unknown>)['items']
+              : undefined;
+        if (!Array.isArray(items)) {
+          throw new Error('Invalid diagnostic report: expected an items array');
+        }
+        for (const item of items) {
+          const normalized = this.normalizer.normalizeDiagnostic(item, name);
+          if (!normalized) {
+            throw new Error('Invalid diagnostic report: malformed diagnostic');
           }
+          allDiagnostics.push(normalized);
         }
       } catch (error) {
-        // Fall back to cached diagnostics from publishDiagnostics notifications
-        // This is handled by the notification handler if implemented
-        debugLogger.warn(
-          `LSP textDocument/diagnostic failed for ${name}:`,
-          error,
+        if (error instanceof LspDocumentScopeError) throw error;
+        throw new Error(
+          `LSP textDocument/diagnostic failed for ${name}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
         );
       }
     }
@@ -1804,7 +2047,15 @@ export class NativeLspService {
     limit = 100,
   ): Promise<LspFileDiagnostics[]> {
     const handles = this.getReadyHandles(serverName);
+    this.assertServersAvailable(handles.length, serverName);
     const results: LspFileDiagnostics[] = [];
+    const scanLimit = Math.max(MIN_WORKSPACE_RESULT_SCAN_LIMIT, limit);
+    const reportScanLimit = Math.max(
+      MIN_WORKSPACE_DIAGNOSTIC_REPORT_SCAN_LIMIT,
+      limit,
+    );
+    let scanned = 0;
+    let reportsScanned = 0;
 
     for (const [name, handle] of handles) {
       const connection = handle.connection;
@@ -1826,20 +2077,6 @@ export class NativeLspService {
         this.parkTrackedUris(name);
         this.lastConnections.set(name, connection);
       }
-      for (const [uri, lifecycle] of this.documentLifecycles.get(name) ?? []) {
-        if (lifecycle.pendingClose) {
-          try {
-            this.closeUnsynchronizableDocument(name, handle, uri);
-          } catch (error) {
-            // Name the close that is actually holding the document shut; rethrowing
-            // the retained read error reports a stale ENOENT for a file now present.
-            throw new Error(
-              `LSP server ${name} still cannot close ${uri}; refusing to reopen it (${(error as Error).message})`,
-              { cause: error },
-            );
-          }
-        }
-      }
       let openedAny = false;
       let syncError: unknown;
       for (const uri of trackedUris) {
@@ -1849,9 +2086,9 @@ export class NativeLspService {
         // The shared helper bounds consecutive read failures; a URI whose send
         // threw stays parked for the next sweep.
         try {
-          openedAny =
-            this.synchronizeDocument(name, handle, uri).opened || openedAny;
-          this.replayUris.get(name)?.delete(uri);
+          const synchronized = this.synchronizeDocument(name, handle, uri);
+          openedAny = synchronized.opened || openedAny;
+          if (!synchronized.deferred) this.replayUris.get(name)?.delete(uri);
         } catch (error) {
           syncError ??= error;
         }
@@ -1876,26 +2113,73 @@ export class NativeLspService {
           },
         );
 
-        if (response && typeof response === 'object') {
-          const responseObj = response as Record<string, unknown>;
-          const items = responseObj['items'];
-          if (Array.isArray(items)) {
-            for (const item of items) {
-              if (results.length >= limit) {
-                break;
-              }
-              const normalized = this.normalizer.normalizeFileDiagnostics(
-                item,
-                name,
-              );
-              if (normalized && normalized.diagnostics.length > 0) {
-                results.push(normalized);
-              }
-            }
+        const items =
+          response === null
+            ? []
+            : response && typeof response === 'object'
+              ? (response as Record<string, unknown>)['items']
+              : undefined;
+        if (!Array.isArray(items)) {
+          throw new Error('Invalid diagnostic report: expected an items array');
+        }
+        const directories = this.workspaceContext.getDirectories();
+        const scopeCache = new Map<string, boolean>();
+        for (const item of items) {
+          if (results.length >= limit) {
+            break;
+          }
+          scanned++;
+          reportsScanned++;
+          if (scanned > scanLimit || reportsScanned > reportScanLimit) {
+            const exhaustedLimit =
+              scanned > scanLimit ? scanLimit : reportScanLimit;
+            throw new WorkspaceResultScanLimitError(
+              exhaustedLimit,
+              `increase limit above ${exhaustedLimit} or select a server with serverName`,
+            );
+          }
+          const report =
+            item && typeof item === 'object'
+              ? (item as Record<string, unknown>)
+              : undefined;
+          const uri = report?.['uri'];
+          if (
+            typeof uri !== 'string' ||
+            !this.isCurrentWorkspaceDocument(uri, directories, scopeCache)
+          ) {
+            continue;
+          }
+          const fileItems = report?.['items'];
+          if (!Array.isArray(fileItems)) {
+            throw new Error(
+              `Invalid diagnostic report for ${uri}: expected an items array`,
+            );
+          }
+          const normalized = this.normalizer.normalizeFileDiagnostics(
+            item,
+            name,
+          );
+          if (
+            !normalized ||
+            normalized.diagnostics.length !== fileItems.length
+          ) {
+            throw new Error(
+              `Invalid diagnostic report for ${uri}: malformed diagnostic`,
+            );
+          }
+          if (normalized.diagnostics.length > 0) {
+            results.push(normalized);
+          } else {
+            // Valid clean reports consume only the larger total-report budget.
+            scanned--;
           }
         }
       } catch (error) {
-        debugLogger.warn(`LSP workspace/diagnostic failed for ${name}:`, error);
+        if (error instanceof WorkspaceResultScanLimitError) throw error;
+        throw new Error(
+          `LSP workspace/diagnostic failed for ${name}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
       }
 
       if (results.length >= limit) {
@@ -1916,7 +2200,8 @@ export class NativeLspService {
     serverName?: string,
     limit = 20,
   ): Promise<LspCodeAction[]> {
-    const handles = this.getReadyHandles(serverName);
+    uri = this.canonicalDocumentUri(uri);
+    const handles = this.getReadyHandles(serverName, uri);
 
     for (const [name, handle] of handles) {
       try {
@@ -1928,7 +2213,8 @@ export class NativeLspService {
           this.normalizer.denormalizeDiagnostic(d),
         );
 
-        const response = await handle.connection.request(
+        const response = await this.requestDocument(
+          handle.connection,
           'textDocument/codeAction',
           {
             textDocument: { uri },
@@ -1963,6 +2249,7 @@ export class NativeLspService {
           return actions.slice(0, limit);
         }
       } catch (error) {
+        if (error instanceof LspDocumentScopeError) throw error;
         debugLogger.warn(
           `LSP textDocument/codeAction failed for ${name}:`,
           error,
@@ -2012,11 +2299,16 @@ export class NativeLspService {
     uri: string,
     edits: LspTextEdit[],
   ): Promise<void> {
-    let filePath = uri.startsWith('file://') ? fileURLToPath(uri) : uri;
+    let filePath = /^file:/i.test(uri) ? fileURLToPath(uri) : uri;
     if (!path.isAbsolute(filePath)) {
       filePath = path.resolve(this.workspaceRoot, filePath);
     }
-    if (!this.workspaceContext.isPathWithinWorkspace(filePath)) {
+    if (
+      !isSubpaths(
+        this.workspaceContext.getDirectories(),
+        resolveWorkspacePath(filePath),
+      )
+    ) {
       throw new Error(`Refusing to apply edits outside workspace: ${filePath}`);
     }
 
