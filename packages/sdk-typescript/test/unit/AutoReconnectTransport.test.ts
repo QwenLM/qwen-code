@@ -50,6 +50,16 @@ function createMockTransport(
   return base;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -213,6 +223,7 @@ describe('AutoReconnectTransport', () => {
       expect(factory).toHaveBeenCalledWith('acp-ws');
 
       transport.dispose();
+      expect(newTransport.dispose).toHaveBeenCalledTimes(1);
     });
 
     it('falls back to REST when factory fails', async () => {
@@ -288,6 +299,159 @@ describe('AutoReconnectTransport', () => {
   // ---- dispose() --------------------------------------------------------
 
   describe('dispose()', () => {
+    describe.each(['fetch', 'subscription'] as const)(
+      '%s reconnect',
+      (operation) => {
+        it.each(['resolves', 'rejects'] as const)(
+          'stays closed when the pending factory %s after disposal',
+          async (outcome) => {
+            const entered = deferred<void>();
+            const pendingFactory = deferred<DaemonTransport>();
+            const replacement = createMockTransport({ type: 'acp-ws' });
+            const initial = createMockTransport({
+              type: 'acp-http',
+              fetch: vi.fn(async () => {
+                throw new DaemonTransportClosedError();
+              }),
+              subscribeEvents: vi.fn(async function* () {
+                throw new DaemonTransportClosedError();
+              }),
+            });
+            const restFetch = vi.fn(async () => new Response('unexpected'));
+            const transport = new AutoReconnectTransport({
+              baseUrl: 'http://d',
+              initial,
+              fetch: restFetch,
+              factory: () => {
+                entered.resolve();
+                return pendingFactory.promise;
+              },
+            });
+            const pending =
+              operation === 'fetch'
+                ? transport.fetch('http://d/health', {})
+                : transport.subscribeEvents('s1').next();
+            const rejected = expect(pending).rejects.toThrow(
+              DaemonTransportClosedError,
+            );
+
+            await entered.promise;
+            transport.dispose();
+            if (outcome === 'resolves') {
+              pendingFactory.resolve(replacement);
+            } else {
+              pendingFactory.reject(new Error('factory failed'));
+            }
+            await rejected;
+            transport.dispose();
+
+            expect(transport.connected).toBe(false);
+            expect(transport.type).toBe('acp-http');
+            expect(replacement.dispose).toHaveBeenCalledTimes(
+              outcome === 'resolves' ? 1 : 0,
+            );
+            expect(replacement.fetch).not.toHaveBeenCalled();
+            expect(replacement.subscribeEvents).not.toHaveBeenCalled();
+            expect(restFetch).not.toHaveBeenCalled();
+          },
+        );
+
+        it('does not retry if disposed after the replacement is installed', async () => {
+          const entered = deferred<void>();
+          const pendingFactory = deferred<DaemonTransport>();
+          const replacement = createMockTransport({ type: 'acp-ws' });
+          const initial = createMockTransport({
+            type: 'acp-http',
+            fetch: vi.fn(async () => {
+              throw new DaemonTransportClosedError();
+            }),
+            subscribeEvents: vi.fn(async function* () {
+              throw new DaemonTransportClosedError();
+            }),
+          });
+          const transport = new AutoReconnectTransport({
+            baseUrl: 'http://d',
+            initial,
+            factory: () => {
+              entered.resolve();
+              return pendingFactory.promise;
+            },
+          });
+          const pending =
+            operation === 'fetch'
+              ? transport.fetch('http://d/health', {})
+              : transport.subscribeEvents('s1').next();
+          const rejected = expect(pending).rejects.toThrow(
+            DaemonTransportClosedError,
+          );
+
+          await entered.promise;
+          pendingFactory.resolve(replacement);
+          let typeAtDisposal: DaemonTransportType | undefined;
+          const disposed = new Promise<void>((resolve) => {
+            queueMicrotask(() => {
+              typeAtDisposal = transport.type;
+              transport.dispose();
+              resolve();
+            });
+          });
+          await disposed;
+          await rejected;
+          transport.dispose();
+
+          expect(typeAtDisposal).toBe('acp-ws');
+          expect(replacement.dispose).toHaveBeenCalledTimes(1);
+          expect(replacement.fetch).not.toHaveBeenCalled();
+          expect(replacement.subscribeEvents).not.toHaveBeenCalled();
+        });
+      },
+    );
+
+    it('rejects all reconnect waiters and releases a late replacement once', async () => {
+      const entered = deferred<void>();
+      const pendingFactory = deferred<DaemonTransport>();
+      const replacement = createMockTransport();
+      const initial = createMockTransport({
+        fetch: vi.fn(async () => {
+          throw new DaemonTransportClosedError();
+        }),
+        subscribeEvents: vi.fn(async function* () {
+          throw new DaemonTransportClosedError();
+        }),
+      });
+      const factory = vi.fn(() => {
+        entered.resolve();
+        return pendingFactory.promise;
+      });
+      const transport = new AutoReconnectTransport({
+        baseUrl: 'http://d',
+        initial,
+        factory,
+      });
+      const settled = Promise.allSettled([
+        transport.fetch('http://d/health', {}),
+        transport.fetch('http://d/status', {}),
+        transport.subscribeEvents('s1').next(),
+      ]);
+
+      await entered.promise;
+      transport.dispose();
+      pendingFactory.resolve(replacement);
+      const results = await settled;
+      transport.dispose();
+
+      expect(factory).toHaveBeenCalledTimes(1);
+      for (const result of results) {
+        expect(result.status).toBe('rejected');
+        if (result.status === 'rejected') {
+          expect(result.reason).toBeInstanceOf(DaemonTransportClosedError);
+        }
+      }
+      expect(replacement.dispose).toHaveBeenCalledTimes(1);
+      expect(replacement.fetch).not.toHaveBeenCalled();
+      expect(replacement.subscribeEvents).not.toHaveBeenCalled();
+    });
+
     it('disposes inner transport', () => {
       const inner = createMockTransport();
       const transport = new AutoReconnectTransport({
