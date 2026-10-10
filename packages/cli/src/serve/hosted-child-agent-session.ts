@@ -12,7 +12,10 @@ import type {
   ChildCompletion,
   ChildSessionRun,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
-import { parseChildRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
+import {
+  isChildSessionRun,
+  parseChildRun,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import type { ChildAcceptance } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-acceptance-record.js';
 import { parseChildAcceptance } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-acceptance-record.js';
 import type {
@@ -240,7 +243,7 @@ export class HostedChildAgentSession {
       .map((entry) => parseChildRun(entry.record))
       .filter(
         (record): record is ChildSessionRun =>
-          record.kind !== 'shell' && record.ownerScopeId === ownerScopeId,
+          isChildSessionRun(record) && record.ownerScopeId === ownerScopeId,
       );
   }
 

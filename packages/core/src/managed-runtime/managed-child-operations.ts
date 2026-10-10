@@ -8,6 +8,7 @@ import {
   type ChildAgentRun,
   type ChildAgentStopReason,
   type ChildCompletion,
+  type ChildSessionRun,
   type ChildWorkspaceMode,
 } from './managed-child-run-record.js';
 import type { ChildAcceptance } from './managed-child-acceptance-record.js';
@@ -239,6 +240,42 @@ export function childLaunchBody(params: {
       runtime: null,
       delivery: Object.freeze({ target: 'session', state: 'planned' }),
     }),
+  });
+}
+
+/**
+ * `continueChildRun` (H4d): the launch intent of a new run that continues a
+ * completed one. It keeps the predecessor's kind, scope, tree, workspace and
+ * definition — the commit-time rules refuse anything else — and carries its
+ * own launch input, the continuation's first prompt. A completed predecessor
+ * was dispatched, so it carries its definition pin. The producer still owes
+ * the launch admission (closing, quotas) before it commits.
+ */
+export function childContinuationBody(
+  predecessor: ChildSessionRun,
+  params: {
+    readonly childRunId: string;
+    readonly completion: ChildCompletion;
+    readonly inputRef: ManagedSessionDurableRef;
+    readonly executionCallId: string;
+  },
+): ChildSessionRun {
+  const launch = childLaunchBody({
+    childRunId: params.childRunId,
+    ownerScopeId: predecessor.ownerScopeId,
+    rootSessionId: predecessor.rootSessionId,
+    completion: params.completion,
+    inputRef: params.inputRef,
+    workingDirectory: predecessor.workingDirectory,
+    executionCallId: params.executionCallId,
+    definition: predecessor.run.definition!,
+  });
+  return Object.freeze({
+    ...launch,
+    kind: predecessor.kind,
+    depth: predecessor.depth,
+    workspaceMode: predecessor.workspaceMode,
+    predecessorChildRunId: predecessor.childRunId,
   });
 }
 

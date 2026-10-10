@@ -935,3 +935,7 @@ Root 独立核对342项封存 artifact、当前 source/product/dependency/class 
 Root 独立解码全部57表、原输出和结果字节，再核对288项封存 artifact、4279项保留 input pin 和332项原 parent artifact。44次登记 PID/group 探测全部缺席、11端口关闭、专属临时目录缺席，专属 MySQL database/user/server 清理并 shutdown exit0 后才解除 source/product 窗口。删除的临时副本保留清理前哈希及原 dependency bridge，删除后无法重新核哈希。两个 Agent 产物内完整 Broker 和 SDK 字节均与 standalone 产物相同。
 
 本轮只接受有界本地消费前 C8 断点，仍有 MockMvc transport、合成 Kubernetes/attestation、确定性 SSE 和 Darwin mount 适配限制。不证明 provider 作者身份、穷尽媒体覆盖、完整 Node 依赖启动前闭包、后续消费/结算断点、剩余故障谓词、生产 isolation 竞争、物理退役/复用、公开选择、Linux/云资格、原生独立批准、维护者批准或完整 K2。
+
+### 7.15 与已发布 automation 和 child Workspace migration 合并后的最终交付
+
+本次交付还合入 main `1f4484d34aec85eeba4a3fcf0937efe97cb5362c`，其发布 H6b/H6c automation ledger V57 与 child Workspace capability V60，跳过 V58/V59。merge-tree 预演在修复前复现已发布 automation 与未发布 CSI request pin 的 V57 冲突。已发布 V1–V60 字节全部保持，只将三个仍未发布的 CSI 文件顺延为 request V61、activation V62、native authorization V63，SQL 字节/顺序不变；完整序列止于 V63。同一合并把 H6b/H6c 基于 journal 的未应答 prompt 排除带入共享 Hosted turn runner，普通与 tool-profile turn 都从模型 history 过滤已定落的 error/cancelled prompt；recovered Runtime turn 路径保留其既有过滤。合并后须在新推送提交运行检查，不能把此前验收转移到新 head；更早未发布编号仍需独立明确迁移方案。

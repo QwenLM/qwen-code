@@ -134,6 +134,34 @@ export function createHostedChatRecord(
   };
 }
 
+/**
+ * The prompts whose turns settled without an answer (`error` or
+ * `cancelled`). Turn results are `turn.settled` journal events, not
+ * projected messages, so they never reach any record-based exclusion in
+ * the model runner: the history is filtered against the journal here —
+ * what ended without an answer is over, and its instruction never merges
+ * into a later turn the way a crashing text turn's naked user record
+ * otherwise would.
+ */
+export function unansweredPrompts(session: HostedTurnSession): Set<string> {
+  const authority = session.managed.authority;
+  const prompts = new Set<string>();
+  for (const event of authority.eventsInSequenceRange(
+    1,
+    authority.committedSequence,
+  )) {
+    if (
+      event.kind === 'turn.settled' &&
+      (event.payload['outcome'] === 'error' ||
+        event.payload['outcome'] === 'cancelled')
+    ) {
+      const turnId = event.payload['turnId'];
+      if (typeof turnId === 'string') prompts.add(turnId);
+    }
+  }
+  return prompts;
+}
+
 export async function runHostedHarnessTurn({
   session,
   sessionId,
@@ -165,14 +193,23 @@ export async function runHostedHarnessTurn({
             .filter((event) => event.kind === 'turn.settled')
             .map((event) => event.payload['turnId']),
         );
-        const history =
+        const unanswered = unansweredPrompts(session);
+        const history = (
           historyMode === 'settled'
             ? projected.filter(
                 (entry) =>
                   settledPrompts.has(entry.daemonPromptId) ||
                   (resumeFromToolResults && entry.daemonPromptId === promptId),
               )
-            : projected;
+            : projected
+        ).filter(
+          (entry) =>
+            !(
+              entry.type === 'user' &&
+              entry.daemonPromptId !== undefined &&
+              unanswered.has(entry.daemonPromptId)
+            ),
+        );
         let parentUuid = projected.at(-1)?.uuid ?? null;
         if (!resumeFromToolResults) {
           const user = createHostedChatRecord(

@@ -2863,7 +2863,14 @@ export class McpClientManager {
         const timeoutMs = this.discoveryTimeoutFor(serverConfig);
         let timeoutId: NodeJS.Timeout | undefined;
         await Promise.race([
-          client.connect(),
+          // A lazily spawned server must also be discovered: `connect()`
+          // alone leaves it CONNECTED with zero registered tools (#13796).
+          // Discovery runs INSIDE the race so `tools/list` shares the
+          // connect's bounded budget instead of its own unbounded default.
+          (async () => {
+            await client.connect();
+            await client.discover(this.cliConfig);
+          })(),
           new Promise<never>((_, reject) => {
             timeoutId = setTimeout(() => {
               reject(

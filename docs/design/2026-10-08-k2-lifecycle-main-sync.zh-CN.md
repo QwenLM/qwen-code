@@ -87,6 +87,8 @@ V58 的升级序列。更早未发布编号的数据库仍需独立明确迁移�
 
 最终交付还合入 main `5b1c701400c949a6e943909db6fcbcb2273dc721`，包含已发布的 operation actor-key migration V56，并在 bound Session 上同时校验 caller role 与原 creator execution facts。源码 inventory 检查在修复前复现 V56 冲突。已发布 V1–V56 字节全部保持，只将三个仍未发布的 CSI 文件顺延为 request V57、activation V58、native authorization V59，SQL 字节/顺序不变。升级测试覆盖已发布 V56、仅 request 的 V57、仅 activation 的 V58；完整序列止于 V59。私有创建保留 creator/owner key 与 request pin，child/close/delete 门禁保持关闭。合并后须在新推送提交运行检查，不能把原进程断点验收转移到新 head；更早未发布编号仍需独立明确迁移方案。
 
+本次交付还合入 main `1f4484d34aec85eeba4a3fcf0937efe97cb5362c`，其发布 H6b/H6c automation ledger V57 与 child Workspace capability V60，跳过 V58/V59。merge-tree 预演在修复前复现已发布 automation 与未发布 CSI request pin 的 V57 冲突。已发布 V1–V60 字节全部保持，只将三个仍未发布的 CSI 文件顺延为 request V61、activation V62、native authorization V63，SQL 字节/顺序不变；完整序列止于 V63。同一合并把 H6b/H6c 基于 journal 的未应答 prompt 排除带入共享 Hosted turn runner，普通与 tool-profile turn 都从模型 history 过滤已定落的 error/cancelled prompt；recovered Runtime turn 路径保留其既有过滤。更早未发布编号仍需独立明确迁移方案。
+
 Root Session 创建同时用 main 的同一原始 actor 字节写 creator 与 owner key，
 私有构造时另写 CSI request pin。当前 CSI fixture 使用 main 的
 OPERATOR/READER role 语义；历史 migration fixture 保留旧 schema 字段。

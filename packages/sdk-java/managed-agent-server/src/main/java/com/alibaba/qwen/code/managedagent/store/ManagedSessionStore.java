@@ -1732,7 +1732,7 @@ public class ManagedSessionStore {
         return sha256(writerToken.getBytes(StandardCharsets.UTF_8));
     }
 
-    static String sessionScopeKey(String tenantId, String sessionId) {
+    public static String sessionScopeKey(String tenantId, String sessionId) {
         return sha256((tenantId + "\u0000" + sessionId)
                 .getBytes(StandardCharsets.UTF_8));
     }

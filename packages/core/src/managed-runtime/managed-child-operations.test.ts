@@ -24,6 +24,7 @@ import {
   childAcceptanceConsumedBody,
   childAttachBody,
   childCancelBody,
+  childContinuationBody,
   childDeliveryBody,
   childDispatchBody,
   childFailBody,
@@ -400,6 +401,63 @@ describe('managed child operations (H4b)', () => {
         terminalReceiptRef: RECEIPT,
       });
       expect(accepting.parentExecutionCallId).toBe('call-1');
+    });
+  });
+
+  describe('continueChildRun (H4d)', () => {
+    it('opens a new run that keeps the predecessor identities', () => {
+      const completed = chain(
+        (previous) =>
+          childDispatchBody(previous, {
+            dispatchId: 'dispatch-1',
+            runtime: BINDING,
+          }),
+        (previous) =>
+          childAttachBody(previous, { childSessionId: 'session-child' }),
+        (previous) =>
+          childSettleCompletedBody(previous, {
+            resultRef: RESULT,
+            terminalReceiptRef: RECEIPT,
+          }),
+      ).at(-1)!;
+      const next = ref('managed-input', 'input-2');
+      const continuation = childContinuationBody(completed, {
+        childRunId: 'run-2',
+        completion: 'tool',
+        inputRef: next,
+        executionCallId: 'call-2',
+      });
+      expect(isChildRunStart(continuation)).toBe(true);
+      expect(continuation).toEqual({
+        ...launch(),
+        childRunId: 'run-2',
+        completion: 'tool',
+        inputRef: next,
+        predecessorChildRunId: 'run-1',
+        run: { ...launch().run, executionCallId: 'call-2' },
+      });
+      expect(Object.isFrozen(continuation)).toBe(true);
+      // The kind, depth and isolation follow the predecessor, never the
+      // launch defaults.
+      const nested = childContinuationBody(
+        {
+          ...completed,
+          kind: 'workflow',
+          depth: 2,
+          workspaceMode: 'snapshot',
+        },
+        {
+          childRunId: 'run-2',
+          completion: 'sent',
+          inputRef: next,
+          executionCallId: 'call-2',
+        },
+      );
+      expect(nested).toMatchObject({
+        kind: 'workflow',
+        depth: 2,
+        workspaceMode: 'snapshot',
+      });
     });
   });
 });
