@@ -8225,6 +8225,29 @@ describe('LlmChat', async () => {
         expectLastText('the full answer');
       });
 
+      it('replays rather than continues when only an empty part was delivered', async () => {
+        vi.useFakeTimers();
+        // An empty `{}` part carries no content, so it must not mark the
+        // attempt as having yielded content: the replay gate agrees with
+        // hasAbandonedNonTextPart and hasNonTextContent, which both ignore it.
+        mockStreamsOnce(
+          cutAfter([modelChunk([{}])]),
+          streamOf(textChunk('the full answer', 'STOP')),
+        );
+        const events = await sendTimed('prompt-transport-empty-part');
+        expectStreamCalls(2);
+        expect(hasText(requestContentsOfCall(1), RESUME_INSTRUCTION)).toBe(
+          false,
+        );
+        expect(
+          events.filter(
+            (event) =>
+              event.type === StreamEventType.RETRY && !event.isContinuation,
+          ),
+        ).toHaveLength(1);
+        expectLastText('the full answer');
+      });
+
       it('replays rather than continues when the delivered text was blank', async () => {
         vi.useFakeTimers();
         const events = await cutThenFinish(

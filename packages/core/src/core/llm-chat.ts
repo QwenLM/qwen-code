@@ -214,7 +214,9 @@ function hasNonThoughtCandidateParts(
 ): boolean {
   return Boolean(
     response.candidates?.some((candidate) =>
-      candidate.content?.parts?.some((part) => !part.thought),
+      candidate.content?.parts?.some(
+        (part) => !part.thought && Object.keys(part).length > 0,
+      ),
     ),
   );
 }
