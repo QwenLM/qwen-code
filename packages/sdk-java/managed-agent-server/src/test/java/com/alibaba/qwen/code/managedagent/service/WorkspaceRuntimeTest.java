@@ -850,6 +850,32 @@ class WorkspaceRuntimeTest {
             RuntimeBindingRepository bindings) {
     }
 
+    @Test
+    void childWorkspaceMaintenanceAndToolTurnsExcludeEachOther() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        RuntimeSessionRecord turn = holder(session, UUID.randomUUID().toString());
+        String maintenance = UUID.randomUUID().toString().replace("-", "");
+        jdbc.update("INSERT INTO qwen_managed_child_workspace (tenant_id, parent_session_id, child_run_id,"
+                + " child_workspace_id, workspace_id, workspace_generation, storage_id, parent_cwd_relative,"
+                + " state, claim_generation, claimed_until, created_at, updated_at) VALUES (?, ?, 'run', ?,"
+                + " 'workspace', 1, 'storage', '.', 'preparing', 3, ?, 0, 0)", session.tenantId(), session.sessionId(),
+                maintenance, Long.MAX_VALUE);
+
+        authority.holdForMaintenance(session.workspace(), maintenance, 3);
+        assertBusy(() -> authority.claim(session.workspace(), turn));
+        assertBusy(() -> authority.assertHeld(session.workspace(), turn));
+        authority.releaseMaintenance(session.workspace(), maintenance, 3);
+
+        authority.claim(session.workspace(), turn);
+        assertBusy(() -> authority.holdForMaintenance(session.workspace(), maintenance, 3));
+        authority.release(session.workspace(), turn);
+        authority.holdForMaintenance(session.workspace(), maintenance, 3);
+        assertThat(jdbc.queryForList("SELECT maintenance_id FROM managed_workspace_execution_lease"
+                + " WHERE maintenance_id = ? AND holder_key IS NOT NULL", String.class, maintenance))
+                .containsExactly(maintenance);
+        authority.releaseMaintenance(session.workspace(), maintenance, 3);
+    }
+
     private JdbcRuntimeBindingRepository bindings() {
         return new JdbcRuntimeBindingRepository(dataSource, new AesGcmSecretProtector("test-key", new byte[32]));
     }

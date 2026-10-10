@@ -625,8 +625,8 @@ describe('boot-v3 original-worker ACK ownership', () => {
       const nativeListen = Server.prototype.listen;
       const listen = vi
         .spyOn(Server.prototype, 'listen')
-        .mockImplementation(function (this: Server) {
-          return Reflect.apply(nativeListen, this, [0, '127.0.0.1']);
+        .mockImplementation(function (this: Server, ...args: unknown[]) {
+          return Reflect.apply(nativeListen, this, [0, ...args.slice(1)]);
         });
       try {
         const worker = await startManagedRuntimeAttestationWorker(

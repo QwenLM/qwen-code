@@ -102,4 +102,4 @@ Legacy 子 Agent 是进程内的：Agent 工具、默认后台的顶层子 Agent
 1. **前台结果的边界。** 前台 child 的结果在父 Session 的工具结果中返回；该结果是否也必须按 O 系列切片规则转存为 Artifact、还是可以经工具结果存储内联传递，由 H4b 决定。
 2. **消费事务的分组。** `consumed` 修订是在 `turn.settled` 事务中提交还是在之后的事务中提交，由 H4b 固定。
 3. **重建成本。** H0c 未决问题 1（无界链回放）同样适用于有大量接受修订的长运行 child；在 H4c 大规模开放取消之前，可能需要带检查点的任务视图。
-4. **detach 后 child 的 owner。** 被 detach 的 child 换成什么持久 owner（租户级保留策略，或 root Session authority）留给 H4c；关闭路径只强制要求存在这样一个 owner。
+4. **detach 后 child 的 owner。** 被 detach 的 child 换成什么持久 owner（租户级保留策略，或 root Session authority）留给 [H4a 地图](2026-10-06-managed-child-agent-runtime.zh-CN.md)中的 Detach 后续工作，因为 H4c 已重新划定范围（见上文“范围已裁定”），而 [H4e-a 设计](2026-10-10-managed-agent-teams.zh-CN.md)把 detach 留在 H4e 之外；关闭路径只强制要求存在这样一个 owner。
