@@ -150,6 +150,13 @@ export class QwenSessionUpdateHandler {
       }
 
       case 'tool_call_update': {
+        if (
+          update._meta?.['toolLifecycle'] !== undefined &&
+          !('status' in update) &&
+          !('content' in update)
+        ) {
+          break;
+        }
         if (this.callbacks.onToolCall && 'toolCallId' in update) {
           const meta = update._meta as SessionUpdateMeta | undefined;
           const timestamp =
@@ -263,6 +270,7 @@ export class QwenSessionUpdateHandler {
     }
 
     const raw = meta.usage as Record<string, unknown> | null | undefined;
+    if (!raw && meta.durationMs == null) return;
     const usage = raw
       ? {
           // SDK field names

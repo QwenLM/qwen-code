@@ -28,6 +28,7 @@ import type {
   Part,
 } from '@google/genai';
 import {
+  createToolLifecycle,
   type Config,
   type ContentGeneratorConfig,
   type LlmChat,
@@ -307,7 +308,10 @@ import {
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
-import { createAgentRecordTranscriptUpdate } from '@qwen-code/acp-bridge/transcriptReplay';
+import {
+  createAgentRecordTranscriptUpdate,
+  createTranscriptExecutionLifecycleUpdate,
+} from '@qwen-code/acp-bridge/transcriptReplay';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   SERVE_CONTROL_EXT_METHODS,
@@ -2320,6 +2324,9 @@ export class Session implements SessionContext {
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
   private unsubscribeApprovalModeChange?: () => void;
+  private unsubscribeRequestLifecycle?: () => void;
+  private requestLifecycleSessionId: string;
+  private readonly requestLifecycleExecutions = new Set<string>();
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
@@ -2468,6 +2475,7 @@ export class Session implements SessionContext {
     ) => boolean = () => false,
   ) {
     this.sessionId = id;
+    this.requestLifecycleSessionId = id;
     // Config releases the restore projection after this Session is created.
     this.restoredHistoryGaps = config.getSessionRestoreRuntime?.()?.historyGaps;
     this.workflowHistory = [...workflowHistory];
@@ -2534,6 +2542,31 @@ export class Session implements SessionContext {
     this.planEmitter = new PlanEmitter(this);
     this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
+    this.unsubscribeRequestLifecycle = this.config.onRequestLifecycle?.(
+      (event) => {
+        if (this.disposed) return;
+        const key = JSON.stringify([
+          event.sessionId,
+          event.subagentId ?? null,
+          event.executionId,
+        ]);
+        if (
+          event.sessionId !== this.requestLifecycleSessionId &&
+          !(event.phase === 'ended' && this.requestLifecycleExecutions.has(key))
+        )
+          return;
+        if (event.phase === 'started') {
+          this.requestLifecycleExecutions.add(key);
+        } else {
+          this.requestLifecycleExecutions.delete(key);
+        }
+        void this.sendUpdate(
+          createTranscriptExecutionLifecycleUpdate(event),
+        ).catch((error) =>
+          debugLogger.warn('Failed to send request lifecycle:', error),
+        );
+      },
+    );
 
     this.unsubscribeApprovalModeChange = this.config.onApprovalModeChange?.(
       (mode, prePlanMode) => {
@@ -2637,6 +2670,7 @@ export class Session implements SessionContext {
    */
   rebindGoalRuntimeForNewSession(): void {
     if (this.disposed || this.closing) return;
+    this.requestLifecycleSessionId = this.config.getSessionId();
     this.goalRuntimeUnsubscribe?.();
     this.goalRuntimeUnsubscribe = undefined;
     this.goalHostUnbind?.();
@@ -4645,6 +4679,9 @@ export class Session implements SessionContext {
     this.clearActiveTodoPlanRevision();
     this.unsubscribeApprovalModeChange?.();
     this.unsubscribeApprovalModeChange = undefined;
+    this.unsubscribeRequestLifecycle?.();
+    this.unsubscribeRequestLifecycle = undefined;
+    this.requestLifecycleExecutions.clear();
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
     this.resolveCloseGate?.();
@@ -8455,6 +8492,10 @@ export class Session implements SessionContext {
         `Failed to emit Todo Stop Guard status: ${this.#formatError(error)}`,
       );
     }
+  }
+
+  isDisposed(): boolean {
+    return this.disposed;
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
@@ -12977,6 +13018,18 @@ export class Session implements SessionContext {
         },
       };
       const error = new Error(message);
+      const skippedLifecycle =
+        toolName === ToolNames.TODO_WRITE
+          ? undefined
+          : createToolLifecycle(this.config, callId, toolName);
+      const lifecycle = skippedLifecycle?.finish('error', 'not_started');
+      if (lifecycle) {
+        void this.toolCallEmitter
+          .emitLifecycle(lifecycle)
+          .catch((error) =>
+            debugLogger.debug('Failed to emit skipped tool lifecycle', error),
+          );
+      }
       try {
         queueToolResultRecord(fc, {
           callId,
@@ -13723,6 +13776,38 @@ export class Session implements SessionContext {
       executionStartedAt === undefined
         ? undefined
         : Math.round(performance.now() - executionStartedAt);
+    let lifecycleExecutionDurationMs: number | undefined;
+    let lifecycleExecuted = false;
+    let lifecycleSettled = false;
+    let lifecycleActualStatus: ToolExecutionStatus = 'not_started';
+    let lifecycleTerminalOutcome: 'success' | 'error' | 'cancelled' | undefined;
+    const toolLifecycle =
+      modelFacingToolName === ToolNames.TODO_WRITE
+        ? undefined
+        : createToolLifecycle(this.config, callId, modelFacingToolName);
+    const publishToolLifecycle = (
+      event: ReturnType<NonNullable<typeof toolLifecycle>['start']>,
+    ) => {
+      if (!event || this.disposed) return;
+      void this.toolCallEmitter
+        .emitLifecycle(event)
+        .catch((error) =>
+          debugLogger.debug('Failed to emit tool lifecycle', error),
+        );
+    };
+    const finishToolLifecycle = (
+      outcome: 'success' | 'error' | 'cancelled',
+    ) => {
+      lifecycleTerminalOutcome = outcome;
+      if (lifecycleExecuted && !lifecycleSettled) return;
+      publishToolLifecycle(
+        toolLifecycle?.finish(
+          outcome,
+          lifecycleActualStatus,
+          lifecycleExecutionDurationMs,
+        ),
+      );
+    };
     let producerObserved = false;
     let terminalStatus: 'success' | 'error' | 'cancelled' | undefined;
     // Released when the call ends, however it ends, as the core scheduler does.
@@ -13892,6 +13977,7 @@ export class Session implements SessionContext {
     ) => {
       executionStatus = opts.executionStatus;
       terminalStatus = opts.status;
+      finishToolLifecycle(opts.status);
       spanError = opts.status === 'error' ? error.message : undefined;
       cleanupAgentToolResources();
       const errorParts = errorResponse(
@@ -15842,12 +15928,54 @@ export class Session implements SessionContext {
             executeAttempted = true;
             executionStartedAt = performance.now();
             try {
-              const execute = () =>
-                invocation.execute(
-                  activeToolAbortSignal,
-                  onToolProgress,
-                  this.config.getShellExecutionConfig(),
+              const execute = () => {
+                lifecycleExecuted = true;
+                executionStartedAt = performance.now();
+                publishToolLifecycle(
+                  toolLifecycle?.start(Date.now(), toolName),
                 );
+                const settle = (
+                  result?: ToolResult,
+                  error?: unknown,
+                  threw = false,
+                ) => {
+                  lifecycleExecutionDurationMs = elapsedExecutionMs();
+                  lifecycleSettled = true;
+                  const timeout =
+                    result?.error?.type === ToolErrorType.EXECUTION_TIMEOUT ||
+                    (error as { errorType?: ToolErrorType } | undefined)
+                      ?.errorType === ToolErrorType.EXECUTION_TIMEOUT;
+                  lifecycleActualStatus =
+                    activeToolAbortSignal.aborted && !timeout
+                      ? 'cancelled'
+                      : threw || result?.error
+                        ? 'error'
+                        : 'success';
+                  if (lifecycleTerminalOutcome)
+                    finishToolLifecycle(lifecycleTerminalOutcome);
+                };
+                try {
+                  return invocation
+                    .execute(
+                      activeToolAbortSignal,
+                      onToolProgress,
+                      this.config.getShellExecutionConfig(),
+                    )
+                    .then(
+                      (result) => {
+                        settle(result);
+                        return result;
+                      },
+                      (error: unknown) => {
+                        settle(undefined, error, true);
+                        throw error;
+                      },
+                    );
+                } catch (error) {
+                  settle(undefined, error, true);
+                  throw error;
+                }
+              };
               if (toolName !== ToolNames.EXEC) {
                 if (codeModeContext) {
                   let cancelExecution: (() => void) | undefined;
@@ -16402,6 +16530,7 @@ export class Session implements SessionContext {
             );
           }
           terminalStatus = status;
+          finishToolLifecycle(status);
           const succeeded = status === 'success';
           const responseError =
             status === 'error' && toolResult.error
