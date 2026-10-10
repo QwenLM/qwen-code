@@ -3,12 +3,15 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /** One bounded page per tick; storage deletion never holds a database transaction. */
@@ -46,6 +49,10 @@ public final class ToolPublicationCollector {
         if (!properties.getToolPublication().isGcEnabled()) {
             return false;
         }
+        if (TransactionSynchronizationManager.isActualTransactionActive()
+                || TransactionSynchronizationManager.hasResource(jdbc.getDataSource())) {
+            throw new IllegalStateException("Tool output collection requires a fresh transaction boundary");
+        }
         Claim claim = claim();
         if (claim == null) {
             return false;
@@ -67,7 +74,7 @@ public final class ToolPublicationCollector {
                     objects.deleteIfPresent(object.key());
                 }
             }
-            boolean confirmed = Boolean.TRUE.equals(transactions.execute(status -> confirm(claim, page)));
+            boolean confirmed = Boolean.TRUE.equals(transactions.execute(status -> confirm(claim, page, status)));
             if (!confirmed) {
                 defer(claim);
             }
@@ -83,34 +90,53 @@ public final class ToolPublicationCollector {
     }
 
     private boolean renew(Claim claim) {
-        long now = ToolPublicationRetentionStore.now(jdbc);
-        return jdbc.update("UPDATE qwen_tool_publication SET gc_claim_until = ? WHERE scope_key = ?"
+        return Boolean.TRUE.equals(transactions.execute(status -> {
+            var row = lockLegacyPublication(claim.scope(), claim.publication(), status);
+            if (!matchesClaim(row, claim)) {
+                status.setRollbackOnly();
+                return false;
+            }
+            long now = ToolPublicationRetentionStore.now(jdbc);
+            return jdbc.update("UPDATE qwen_tool_publication SET gc_claim_until = ? WHERE scope_key = ?"
                         + " AND publication_id = ? AND retention_state = 'DELETING' AND gc_owner = ?"
                         + " AND gc_generation = ? AND gc_claim_until > ?",
                 now + CLAIM_MILLIS, claim.scope(), claim.publication(), owner, claim.generation(), now) == 1;
+        }));
     }
 
     private void defer(Claim claim) {
-        jdbc.update("UPDATE qwen_tool_publication SET gc_owner = NULL, gc_claim_until = 0, gc_next_at = ?,"
+        transactions.executeWithoutResult(status -> {
+            var row = lockLegacyPublication(claim.scope(), claim.publication(), status);
+            if (!matchesClaim(row, claim)) {
+                status.setRollbackOnly();
+                return;
+            }
+            jdbc.update("UPDATE qwen_tool_publication SET gc_owner = NULL, gc_claim_until = 0, gc_next_at = ?,"
                         + " gc_blocker = 'collection_retry' WHERE scope_key = ? AND publication_id = ?"
                         + " AND retention_state = 'DELETING' AND gc_owner = ? AND gc_generation = ?",
-                ToolPublicationRetentionStore.now(jdbc) + CLAIM_MILLIS,
-                claim.scope(), claim.publication(), owner, claim.generation());
+                    ToolPublicationRetentionStore.now(jdbc) + CLAIM_MILLIS,
+                    claim.scope(), claim.publication(), owner, claim.generation());
+        });
     }
 
     private Claim claim() {
         long time = ToolPublicationRetentionStore.now(jdbc);
-        var candidates = jdbc.queryForList("SELECT scope_key, publication_id, tenant_id, session_id FROM"
-                        + " qwen_tool_publication WHERE (retention_state = 'RETIRING' AND gc_next_at <= ?)"
-                        + " OR (retention_state = 'DELETING' AND gc_next_at <= ? AND (gc_owner = ? OR gc_claim_until <= ?))"
-                        + " ORDER BY gc_next_at, scope_key, publication_id LIMIT 32", time, time, owner, time);
+        var candidates = jdbc.queryForList("SELECT p.scope_key, p.publication_id FROM qwen_tool_publication p"
+                        + " WHERE ((p.retention_state = 'RETIRING' AND p.gc_next_at <= ?)"
+                        + " OR (p.retention_state = 'DELETING' AND p.gc_next_at <= ?"
+                        + " AND (p.gc_owner = ? OR p.gc_claim_until <= ?)))"
+                        + " AND NOT EXISTS (SELECT 1 FROM managed_agent_session s WHERE s.tenant_id = p.tenant_id"
+                        + " AND s.session_id = p.session_id AND s.csi_guard = TRUE)"
+                        + " ORDER BY p.gc_next_at, p.scope_key, p.publication_id LIMIT 32", time, time, owner, time);
         for (var candidate : candidates) {
             Claim claim = transactions.execute(status -> {
-                String tenant = (String) candidate.get("tenant_id");
-                String session = (String) candidate.get("session_id");
-                ToolPublicationRetentionStore.lockSession(jdbc, tenant, session);
-                var row = jdbc.queryForMap("SELECT * FROM qwen_tool_publication WHERE scope_key = ?"
-                        + " AND publication_id = ? FOR UPDATE", candidate.get("scope_key"), candidate.get("publication_id"));
+                var row = lockLegacyPublication((String) candidate.get("scope_key"),
+                        (String) candidate.get("publication_id"), status);
+                if (row == null) {
+                    return null;
+                }
+                String tenant = (String) row.get("tenant_id");
+                String session = (String) row.get("session_id");
                 long now = ToolPublicationRetentionStore.now(jdbc);
                 if ("RETIRING".equals(row.get("retention_state"))) {
                     if (ToolPublicationRetentionStore.number(row, "gc_next_at") > now) {
@@ -155,13 +181,45 @@ public final class ToolPublicationCollector {
         return null;
     }
 
-    private boolean confirm(Claim claim, List<ObjectKey> page) {
-        ToolPublicationRetentionStore.lockSession(jdbc, claim.tenant(), claim.session());
-        var row = jdbc.queryForMap("SELECT * FROM qwen_tool_publication WHERE scope_key = ?"
-                + " AND publication_id = ? FOR UPDATE", claim.scope(), claim.publication());
-        if (!"DELETING".equals(row.get("retention_state")) || !owner.equals(row.get("gc_owner"))
-                || ToolPublicationRetentionStore.number(row, "gc_generation") != claim.generation()
-                || ToolPublicationRetentionStore.number(row, "gc_claim_until") <= ToolPublicationRetentionStore.now(jdbc)
+    private Map<String, Object> lockLegacyPublication(String scope, String publication, TransactionStatus status) {
+        var targets = jdbc.queryForList("SELECT tenant_id, session_id FROM qwen_tool_publication"
+                + " WHERE scope_key = ? AND publication_id = ?", scope, publication);
+        if (targets.isEmpty()) {
+            return null;
+        }
+        String tenant = (String) targets.getFirst().get("tenant_id");
+        String session = (String) targets.getFirst().get("session_id");
+        ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
+        if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
+            status.setRollbackOnly();
+            return null;
+        }
+        jdbc.queryForList("SELECT state FROM qwen_managed_session_journal_head"
+                + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", tenant, session);
+        var rows = jdbc.queryForList("SELECT * FROM qwen_tool_publication WHERE scope_key = ?"
+                + " AND publication_id = ? FOR UPDATE", scope, publication);
+        if (rows.size() != 1 || !tenant.equals(rows.getFirst().get("tenant_id"))
+                || !session.equals(rows.getFirst().get("session_id"))) {
+            status.setRollbackOnly();
+            return null;
+        }
+        return rows.getFirst();
+    }
+
+    private boolean matchesClaim(Map<String, Object> row, Claim claim) {
+        return row != null && claim.tenant().equals(row.get("tenant_id"))
+                && claim.session().equals(row.get("session_id")) && "DELETING".equals(row.get("retention_state"))
+                && owner.equals(row.get("gc_owner"))
+                && ToolPublicationRetentionStore.number(row, "gc_generation") == claim.generation();
+    }
+
+    private boolean confirm(Claim claim, List<ObjectKey> page, TransactionStatus status) {
+        var row = lockLegacyPublication(claim.scope(), claim.publication(), status);
+        if (!matchesClaim(row, claim)) {
+            status.setRollbackOnly();
+            return false;
+        }
+        if (ToolPublicationRetentionStore.number(row, "gc_claim_until") <= ToolPublicationRetentionStore.now(jdbc)
                 || !claim.cursor().equals(row.get("gc_cursor"))) {
             return false;
         }

@@ -109,11 +109,11 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         jdbc.update("UPDATE qwen_tool_publication SET gc_next_at = 1 WHERE scope_key = ?", scope);
         var evaluations = new java.util.concurrent.atomic.AtomicInteger();
         var template = new org.springframework.jdbc.core.JdbcTemplate(jdbc.getDataSource()) {
-            @Override public java.util.Map<String, Object> queryForMap(String sql, Object... args) {
-                var row = super.queryForMap(sql, args);
-                if (sql.startsWith("SELECT * FROM qwen_tool_publication")
-                        && "RETIRING".equals(row.get("retention_state"))) { evaluations.incrementAndGet(); }
-                return row;
+            @Override public List<java.util.Map<String, Object>> queryForList(String sql, Object... args) {
+                var rows = super.queryForList(sql, args);
+                if (sql.startsWith("SELECT * FROM qwen_tool_publication") && rows.size() == 1
+                        && "RETIRING".equals(rows.getFirst().get("retention_state"))) { evaluations.incrementAndGet(); }
+                return rows;
             }
         };
         var objects = new DeletingObjects();
@@ -673,5 +673,135 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         assertThat(held()).isEqualTo(3000);
         assertThat(jdbc.queryForObject("SELECT gc_blocker FROM qwen_tool_publication WHERE scope_key = ?",
                 String.class, scope)).isEqualTo("legacy_write_evidence_missing");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"csi-files-retirement/1", "full"})
+    void privateBacklogIsFrozenBeforePagingAndDoesNotStarveOrdinaryCollection(String profile) {
+        String privateSession = "private-session";
+        insertPrivateSession(privateSession, profile);
+        for (int index = 0; index < 40; index++) {
+            String publication = "private-" + index;
+            String privateScope = addPublication(publication, privateSession);
+            jdbc.update("UPDATE qwen_tool_publication SET retention_state = ?, gc_next_at = 0,"
+                            + " gc_owner = 'old-owner', gc_claim_until = 0 WHERE scope_key = ? AND publication_id = ?",
+                    index % 2 == 0 ? "RETIRING" : "DELETING", privateScope, publication);
+            jdbc.update("INSERT INTO qwen_tool_publication_object (scope_key, publication_id, slot_key, resource_id,"
+                            + " resource_kind, byte_length, sha256, object_key, state, operation_id, created_at)"
+                            + " VALUES (?, ?, 'one', ?, 'managed-tool-result-content', 1, ?, ?,"
+                            + " 'VERIFIED', 'op', CURRENT_TIMESTAMP(6))",
+                    privateScope, publication, publication, scope, "private/" + publication);
+        }
+        var before = jdbc.queryForList("SELECT * FROM qwen_tool_publication WHERE session_id = ? ORDER BY publication_id",
+                privateSession);
+        addObject("one", "ordinary/one", null);
+        retire();
+        jdbc.update("UPDATE qwen_tool_publication SET gc_next_at = 1 WHERE scope_key = ?", scope);
+        var objects = new DeletingObjects();
+        assertThat(collector(objects).runOnce()).isTrue();
+        assertThat(objects.deleted).containsExactly("ordinary/one");
+        assertThat(jdbc.queryForList("SELECT * FROM qwen_tool_publication WHERE session_id = ? ORDER BY publication_id",
+                privateSession)).usingRecursiveComparison().isEqualTo(before);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"renew", "defer", "confirm"})
+    void existingPrivateClaimsRefuseEveryMutationUsingTheStoredTarget(String stage) throws Exception {
+        insertPrivateSession(session, "full");
+        exerciseRefusedClaim(stage, "forged-tenant", "forged-session");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"renew", "defer", "confirm"})
+    void ordinaryClaimTupleMismatchRefusesWithoutWriting(String stage) throws Exception {
+        exerciseRefusedClaim(stage, tenant, "wrong-session");
+    }
+
+    private void exerciseRefusedClaim(String stage, String claimedTenant, String claimedSession) throws Exception {
+        addObject("one", "exact/one", new byte[] {9});
+        var objects = new DeletingObjects();
+        var gc = collector(objects);
+        var ownerField = ToolPublicationCollector.class.getDeclaredField("owner");
+        ownerField.setAccessible(true);
+        jdbc.update("UPDATE qwen_tool_publication SET retention_state = 'DELETING', gc_owner = ?,"
+                        + " gc_generation = 3, gc_claim_until = ? WHERE scope_key = ?",
+                ownerField.get(gc), ToolPublicationRetentionStore.now(jdbc) + 60000, scope);
+        var before = jdbc.queryForList("SELECT * FROM qwen_tool_publication WHERE scope_key = ?", scope);
+        var objectBefore = jdbc.queryForList("SELECT * FROM qwen_tool_publication_object WHERE scope_key = ?", scope);
+        var claimType = Class.forName(ToolPublicationCollector.class.getName() + "$Claim");
+        var constructor = claimType.getDeclaredConstructor(String.class, String.class, String.class, String.class,
+                long.class, String.class);
+        constructor.setAccessible(true);
+        var claim = constructor.newInstance(scope, "pub-1", claimedTenant, claimedSession, 3L, "");
+        if ("confirm".equals(stage)) {
+            var method = ToolPublicationCollector.class.getDeclaredMethod(stage, claimType, List.class,
+                    org.springframework.transaction.TransactionStatus.class);
+            method.setAccessible(true);
+            Object confirmed = tx.execute(status -> {
+                try { return method.invoke(gc, claim, List.of(), status); }
+                catch (ReflectiveOperationException error) { throw new IllegalStateException(error); }
+            });
+            assertThat(confirmed).isEqualTo(false);
+        } else {
+            var method = ToolPublicationCollector.class.getDeclaredMethod(stage, claimType);
+            method.setAccessible(true);
+            assertThat(method.invoke(gc, claim)).isEqualTo("renew".equals(stage) ? false : null);
+        }
+        assertThat(jdbc.queryForList("SELECT * FROM qwen_tool_publication WHERE scope_key = ?", scope))
+                .usingRecursiveComparison().isEqualTo(before);
+        assertThat(jdbc.queryForList("SELECT * FROM qwen_tool_publication_object WHERE scope_key = ?", scope))
+                .usingRecursiveComparison().isEqualTo(objectBefore);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_tenant", Long.class)).isZero();
+        assertThat(objects.deleted).isEmpty();
+    }
+
+    @Test
+    void enabledCollectionRefusesAmbientTransactionAndBoundConnectionBeforeClaim() {
+        addObject("one", "exact/one", null);
+        retire();
+        var before = jdbc.queryForList("SELECT * FROM qwen_tool_publication WHERE scope_key = ?", scope);
+        var objects = new DeletingObjects();
+        var gc = collector(objects);
+        tx.executeWithoutResult(status -> {
+            assertThatThrownBy(gc::runOnce).isInstanceOf(IllegalStateException.class).hasMessageContaining("fresh");
+            assertThat(collector(jdbc, objects, false).runOnce()).isFalse();
+        });
+        var holder = new org.springframework.jdbc.datasource.ConnectionHolder(
+                org.springframework.jdbc.datasource.DataSourceUtils.getConnection(jdbc.getDataSource()));
+        TransactionSynchronizationManager.bindResource(jdbc.getDataSource(), holder);
+        try {
+            assertThatThrownBy(gc::runOnce).isInstanceOf(IllegalStateException.class).hasMessageContaining("fresh");
+        } finally {
+            TransactionSynchronizationManager.unbindResource(jdbc.getDataSource());
+            org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(holder.getConnection(), jdbc.getDataSource());
+        }
+        assertThat(objects.deleted).isEmpty();
+        assertThat(jdbc.queryForList("SELECT * FROM qwen_tool_publication WHERE scope_key = ?", scope))
+                .usingRecursiveComparison().isEqualTo(before);
+    }
+
+    private void insertPrivateSession(String sessionId, String profile) {
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, tool_profile,"
+                        + " runtime_request_key, created_at, updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', ?, ?, 0, 0)",
+                tenant, sessionId, profile, "full".equals(profile) ? "a".repeat(64) : null);
+    }
+
+    @Test
+    void privateTargetDiscoveredByAnOldPageRefusesClaimAndRollsBackTenantUpsert() {
+        jdbc.update("UPDATE qwen_tool_publication SET retention_state = 'RETIRING' WHERE scope_key = ?", scope);
+        var template = new org.springframework.jdbc.core.JdbcTemplate(jdbc.getDataSource()) {
+            @Override public List<java.util.Map<String, Object>> queryForList(String sql, Object... args) {
+                var rows = super.queryForList(sql, args);
+                if (sql.startsWith("SELECT p.scope_key")) { insertPrivateSession(session, "csi-files-retirement/1"); }
+                return rows;
+            }
+        };
+        var before = jdbc.queryForList("SELECT * FROM qwen_tool_publication WHERE scope_key = ?", scope);
+        var objects = new DeletingObjects();
+        assertThat(collector(template, objects, true).runOnce()).isFalse();
+        assertThat(jdbc.queryForList("SELECT * FROM qwen_tool_publication WHERE scope_key = ?", scope))
+                .usingRecursiveComparison().isEqualTo(before);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_tenant", Long.class)).isZero();
+        assertThat(objects.deleted).isEmpty();
     }
 }

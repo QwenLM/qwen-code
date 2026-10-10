@@ -2050,6 +2050,58 @@ class ToolPublicationStoreTest {
         assertThat(((Number) expired.get("admission_held_bytes")).longValue()).isZero();
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"csi-files-retirement/1", "full"})
+    void ordinaryReserveExpiresOrdinaryHistoryAndPreservesAnotherPrivateSession(String profile) {
+        ObjectNode second = addSecondExecution();
+        reserve();
+        seedPrivateExpiredPublication(profile);
+        jdbc.update("UPDATE qwen_tool_publication SET expires_at = 1 WHERE publication_id = 'pub-1'");
+        var privateBefore = jdbc.queryForMap("SELECT * FROM qwen_tool_publication WHERE publication_id = 'private-publication'");
+        store = newStore(2 * ALLOCATION, 2);
+        ObjectNode next = request("reserve");
+        next.set("binding", second);
+        assertThat(store.apply(next, WRITER_TOKEN, PUBLICATION_TOKEN).path("state").asText()).isEqualTo("OPEN");
+        assertThat(jdbc.queryForObject("SELECT state FROM qwen_tool_publication WHERE publication_id = 'pub-1'", String.class))
+                .isEqualTo("FENCED");
+        assertThat(jdbc.queryForObject("SELECT capture_held_bytes + producer_held_bytes + admission_held_bytes"
+                + " FROM qwen_tool_publication WHERE publication_id = 'pub-1'", Long.class)).isZero();
+        assertThat(jdbc.queryForMap("SELECT * FROM qwen_tool_publication WHERE publication_id = 'private-publication'"))
+                .usingRecursiveComparison().isEqualTo(privateBefore);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"bytes", "captures"})
+    void expiredPrivateHeldCapacityAndCaptureSlotsRemainCharged(String capacity) {
+        ObjectNode second = addSecondExecution();
+        reserve();
+        seedPrivateExpiredPublication("full");
+        jdbc.update("UPDATE qwen_tool_publication SET expires_at = 1 WHERE publication_id = 'pub-1'");
+        var before = jdbc.queryForList("SELECT * FROM qwen_tool_publication ORDER BY publication_id");
+        store = newStore("bytes".equals(capacity) ? ALLOCATION : 3 * ALLOCATION,
+                "captures".equals(capacity) ? 1 : 4);
+        ObjectNode next = request("reserve");
+        next.set("binding", second);
+        assertThatThrownBy(() -> store.apply(next, WRITER_TOKEN, PUBLICATION_TOKEN)).hasMessageContaining("capacity exhausted");
+        assertThat(jdbc.queryForList("SELECT * FROM qwen_tool_publication ORDER BY publication_id"))
+                .usingRecursiveComparison().isEqualTo(before);
+    }
+
+    private void seedPrivateExpiredPublication(String profile) {
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, tool_profile,"
+                        + " runtime_request_key, created_at, updated_at) VALUES ('tenant-1', 'private-session',"
+                        + " 'qwen-code', 'ACTIVE', ?, ?, 0, 0)", profile, "full".equals(profile) ? "a".repeat(64) : null);
+        jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+                        + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
+                        + " expires_at, capture_bytes, producer_bytes, admission_bytes, capture_held_bytes,"
+                        + " producer_held_bytes, admission_held_bytes, write_evidence)"
+                        + " SELECT ?, tenant_key, tenant_id, workspace_id, 'private-session', 'private-publication',"
+                        + " ?, 'private-capture', binding_json, binding_digest, token_hash, 'OPEN', 1, capture_bytes,"
+                        + " producer_bytes, admission_bytes, capture_held_bytes, producer_held_bytes, admission_held_bytes,"
+                        + " write_evidence FROM qwen_tool_publication WHERE publication_id = 'pub-1'",
+                digest("private-scope"), digest("private-execution"));
+    }
+
     @Test
     void replacementWriterMayFenceButCannotRenewOriginalPublication() {
         reserve();
