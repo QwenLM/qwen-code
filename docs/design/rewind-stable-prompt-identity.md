@@ -26,9 +26,8 @@ its model-facing prompt.
 - Return `-1` when the id is missing or duplicated on either side rather than
   guessing with positional alignment.
 - Name the cause of that refusal. An identified turn in the retained region
-  that does not resolve — for example after a retry, which re-sends the prompt
-  unmarked — reports that it no longer matches the model history, not that it
-  was compressed.
+  that does not resolve reports that it no longer matches the model history,
+  not that it was compressed.
 - Recover a legacy turn's rewind identity from its source record, or refuse it;
   do not align independently counted histories.
 
@@ -102,7 +101,9 @@ snapshot/model association still permits rewind without a recording write.
 Without snapshots, the model's retained turn ordinals cannot safely
 identify the recorder's complete-branch ordinals, so ACP conversation rewind
 refuses rather than guessing. Only the initial ordinary
-prompt send acquires its prompt identity; tool/automatic continuations do not.
+prompt send acquires its prompt identity; retry and interrupted-prompt resend
+reuse the sole identity of the entries actually stripped from history, while
+tool/automatic continuations do not acquire one.
 Unavailable or ambiguous associations refuse before changing conversation,
 files, or recording. Snapshot-list eligibility follows the same resolver.
 ACP history rollback carries each entry's `rewindId` through JSON and removes
