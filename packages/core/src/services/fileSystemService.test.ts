@@ -155,8 +155,8 @@ describe('StandardFileSystemService', () => {
     );
 
     it.each([
-      ['non-regular', { size: 0, isFile: () => false }],
-      ['zero-length regular', { size: 0, isFile: () => true }],
+      ['non-regular', { size: 0, isFile: (): boolean => false }],
+      ['zero-length regular', { size: 0, isFile: (): boolean => true }],
     ] as const)(
       'keeps a %s linux inline read on the pathname source',
       async (_label, stats) => {
