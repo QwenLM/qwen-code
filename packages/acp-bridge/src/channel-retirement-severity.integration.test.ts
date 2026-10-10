@@ -181,7 +181,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
       expect(exits).toEqual([
         {
           line: expect.stringContaining(
-            `channel exited (code=0, signal=none, transport=ndjson_unexpected_eof, ${tornDown} session(s) torn down)`,
+            `channel exited (code=0, signal=none, transport=ndjson_unexpected_eof, ${tornDown} session(s) torn down, ${tornDown} associated at exit)`,
           ),
           level: expectedLevel,
         },

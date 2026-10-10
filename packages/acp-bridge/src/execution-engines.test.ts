@@ -1306,7 +1306,7 @@ describe('ACP Bridge execution engines', () => {
       ),
     ).toEqual([
       [
-        'qwen serve: channel exited (code=none, signal=none, transport=ok, 0 session(s) torn down)',
+        'qwen serve: channel exited (code=none, signal=none, transport=ok, 0 session(s) torn down, 0 associated at exit)',
         'warn',
       ],
     ]);

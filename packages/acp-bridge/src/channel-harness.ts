@@ -140,7 +140,6 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     context: string,
   ): Promise<void> {
     if (ci.isDying) return;
-    ci.retiringAfterWorkspaceTimeout = true;
     if (hasNoSessionWork(ci)) {
       await killChannelWithLog(ci, context);
       return;

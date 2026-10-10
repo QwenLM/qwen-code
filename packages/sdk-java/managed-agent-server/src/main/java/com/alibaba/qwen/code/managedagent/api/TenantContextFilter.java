@@ -13,7 +13,6 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
-import org.springframework.web.util.UrlPathHelper;
 
 @Component
 public class TenantContextFilter extends OncePerRequestFilter {
@@ -23,6 +22,8 @@ public class TenantContextFilter extends OncePerRequestFilter {
             "/internal/managed-session-store/v1/";
     private static final String TOOL_PUBLICATION_PREFIX =
             "/internal/managed-tool-publications/v1/";
+    private static final String MANAGED_CHANNELS_PREFIX =
+            "/internal/managed-channels/v1/";
     private static final Pattern TENANT_PATTERN = Pattern.compile(
             "^[A-Za-z0-9._:-]{1,128}$");
     private final ObjectMapper objectMapper;
@@ -33,25 +34,21 @@ public class TenantContextFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        String path = UrlPathHelper.defaultInstance
-                .getPathWithinApplication(request);
-        // The bare collection route (POST /v1/agents) has no trailing slash,
-        // so the prefix alone would let it skip the tenant scope.
-        return !path.equals("/v1/agents")
-                && !path.startsWith("/v1/agents/")
-                && !path.startsWith("/api/agent/web-shell/v1/")
+        String path = PublicSurface.pathWithinApplication(request);
+        return !PublicSurface.covers(path)
                 && !path.startsWith(MANAGED_SESSION_STORE_PREFIX)
-                && !path.startsWith(TOOL_PUBLICATION_PREFIX);
+                && !path.startsWith(TOOL_PUBLICATION_PREFIX)
+                && !path.startsWith(MANAGED_CHANNELS_PREFIX);
     }
 
     @Override
     protected void doFilterInternal(HttpServletRequest request,
             HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
-        String path = UrlPathHelper.defaultInstance
-                .getPathWithinApplication(request);
+        String path = PublicSurface.pathWithinApplication(request);
         if (path.startsWith(MANAGED_SESSION_STORE_PREFIX)
                 || path.startsWith(TOOL_PUBLICATION_PREFIX)
+                || path.startsWith(MANAGED_CHANNELS_PREFIX)
                 || path.startsWith("/v1/agents/workspaces")
                 || path.startsWith("/api/agent/web-shell/v1/workspaces/")) {
             response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");

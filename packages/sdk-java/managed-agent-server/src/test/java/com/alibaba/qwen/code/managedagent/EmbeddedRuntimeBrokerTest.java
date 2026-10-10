@@ -124,7 +124,7 @@ class EmbeddedRuntimeBrokerTest {
         when(store.findSessionById(SESSION_ID)).thenReturn(Optional.of(
                 new SessionRecord("tenant-a", SESSION_ID, "qwen-code",
                         null, null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null,
-                        0, binding)));
+                        0, binding, "yolo", "hosted-workspace-files/1")));
         try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
             assertThatThrownBy(() -> broker.warm(SESSION_ID)
                     .toCompletableFuture().join())
@@ -198,6 +198,129 @@ class EmbeddedRuntimeBrokerTest {
         assertThatThrownBy(() -> broker.warm(SESSION_ID))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("closed");
+    }
+
+    @Test
+    void refusesANonLoopbackListenAddressWithoutTheOptIn() throws Exception {
+        ManagedAgentProperties properties = properties();
+        properties.getRuntimeBroker().setHost("0.0.0.0");
+
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
+                properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("could not start")
+                .cause()
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("non-loopback");
+    }
+
+    @Test
+    void refusesAV3ResultWindowBelowThePollFloor() throws Exception {
+        // An absent value binds as null and a suffix-less one as
+        // milliseconds; every shape below the floor must be refused here
+        // rather than degrade each v3 execution later.
+        for (java.time.Duration window : new java.time.Duration[] {
+                null, java.time.Duration.ZERO, java.time.Duration.ofMillis(-1),
+                java.time.Duration.ofMillis(999)}) {
+            ManagedAgentProperties properties = properties();
+            properties.getRuntimeBroker().setV3ResultWindow(window);
+
+            assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
+                    properties))
+                    .as("window %s", window)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("v3 result window");
+        }
+    }
+
+    @Test
+    void allowNonLoopbackLetsTheBrokerBindAWildcardAddress()
+            throws Exception {
+        ManagedAgentProperties properties = properties();
+        properties.getRuntimeBroker().setHost("0.0.0.0");
+        properties.getRuntimeBroker().setAllowNonLoopback(true);
+
+        try (EmbeddedRuntimeBroker broker = broker(
+                mock(ManagedAgentStore.class), properties)) {
+            assertThat(broker.getBaseUri()).isNotNull();
+            assertThat(broker.getBaseUri().getScheme()).isEqualTo("http");
+        }
+    }
+
+    @Test
+    void childWorkspacesAreOffByDefaultAndNeedWorkspaceMounts() throws Exception {
+        try (EmbeddedRuntimeBroker broker = broker(mock(ManagedAgentStore.class), properties())) {
+            assertThat(broker.childWorkspaces()).isNull();
+        }
+        ManagedAgentProperties enabled = properties();
+        enabled.getRuntimeBroker().setChildWorkspacesEnabled(true);
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class), enabled))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Child Workspaces require Workspace mounts");
+    }
+
+    @Test
+    @org.junit.jupiter.api.condition.DisabledOnOs(org.junit.jupiter.api.condition.OS.WINDOWS)
+    void childWorkspaceProviderAnswersTheVerifiedMountAndRefusesAMissingGit(
+            @org.junit.jupiter.api.io.TempDir Path temp) throws Exception {
+        Path storage = java.nio.file.Files.createDirectory(temp.toRealPath().resolve("storage"));
+        ManagedAgentProperties properties = mountedProperties(storage);
+        properties.getRuntimeBroker().setStateDirectory(temp.toRealPath().resolve("state").toString());
+        properties.getRuntimeBroker().setChildWorkspaceGit("qwen-no-such-git");
+        assertThatThrownBy(() -> mountedBroker(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("need Git");
+        properties.getRuntimeBroker().setChildWorkspaceGit("git");
+        var probe = new com.alibaba.qwen.code.managedagent.service.ChildWorktreeGit("git",
+                java.time.Duration.ofSeconds(30));
+        try {
+            probe.requireSupportedVersion();
+        } catch (IllegalStateException error) {
+            org.junit.jupiter.api.Assumptions.assumeTrue(false, error.getMessage());
+        } finally {
+            probe.close();
+        }
+        try (EmbeddedRuntimeBroker broker = mountedBroker(properties)) {
+            var provider = broker.childWorkspaces();
+            assertThat(provider).isNotNull();
+            ContextBinding binding = new ContextBinding("tenant", "workspace", 1, "storage", ".", "config", 1);
+            assertThat(provider.storageRoot(binding)).isEqualTo(storage);
+            assertThatThrownBy(() -> provider.storageRoot(new ContextBinding("tenant", "workspace", 1,
+                    "other", ".", "config", 1)))
+                    .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+            // A mount replaced after boot is not the administrator's mount.
+            Path elsewhere = java.nio.file.Files.createDirectory(temp.toRealPath().resolve("elsewhere"));
+            java.nio.file.Files.delete(storage);
+            java.nio.file.Files.createSymbolicLink(storage, elsewhere);
+            assertThatThrownBy(() -> provider.storageRoot(binding))
+                    .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+        }
+    }
+
+    private static ManagedAgentProperties mountedProperties(Path storage) throws Exception {
+        ManagedAgentProperties properties = properties();
+        var config = properties.getRuntimeBroker();
+        config.setProvisioner("local-process");
+        config.setIsolationClass("session");
+        config.setWorkspaceId("");
+        config.setDurableLocalProcess(false);
+        config.setNodeExecutable("node");
+        config.setWorkerEntry("worker.js");
+        config.setCliEntry("cli.js");
+        config.setWorkspaceMounts(java.util.List.of(new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
+                "tenant", "storage", storage.toString())));
+        config.setChildWorkspacesEnabled(true);
+        return properties;
+    }
+
+    private static EmbeddedRuntimeBroker mountedBroker(ManagedAgentProperties properties) {
+        return new EmbeddedRuntimeBroker(mock(ManagedAgentStore.class), properties,
+                new InMemoryRuntimeBindingRepository(),
+                new InMemoryRuntimeSessionRepository(),
+                new InMemoryToolExecutionRepository(),
+                mock(com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore.class));
     }
 
     private static ManagedAgentProperties properties() throws Exception {

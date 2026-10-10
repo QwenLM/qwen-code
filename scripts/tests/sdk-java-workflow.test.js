@@ -2,6 +2,8 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
+import { LOCATIONS } from '../flyway-migration-utils.js';
+import { CONTRACT_DOCUMENT } from '../contract-version-utils.js';
 
 const workflow = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
 const job = (name) => {
@@ -152,6 +154,288 @@ describe('SDK Java Flyway migration version guard', () => {
       expect(yml.on[event].paths).toContain(
         'scripts/check-flyway-migrations.js',
       );
+      expect(yml.on[event].paths).toContain(
+        'scripts/flyway-migration-utils.js',
+      );
+      // The contract version guard of #13804 rides the same lane.
+      expect(yml.on[event].paths).toContain(
+        'scripts/check-contract-version.js',
+      );
+      expect(yml.on[event].paths).toContain(
+        'scripts/contract-version-utils.js',
+      );
     }
   });
+});
+
+// #13804: the OpenAPI document's info.version must strictly advance past
+// the base ref's whenever the document changed. Consumers key capability
+// detection on it, and a regressed or stalled number breaks nothing at
+// runtime to be caught by — both modes were seen in flight on 2026-10-09.
+// The check rides the same lane as the Flyway guard: a second job would
+// spend another pool checkout on a five-second scan.
+describe('SDK Java contract version guard', () => {
+  it('runs the advance check on every pull request in the Flyway lane', () => {
+    const parsed = parse(workflow).jobs['flyway-migrations'];
+    const names = parsed.steps.map((s) => s.name);
+    const index = names.indexOf('Check the API contract version advances');
+    expect(index).toBeGreaterThan(names.indexOf('Checkout'));
+    const step = parsed.steps[index];
+    // A push has no base ref to compare against; the races that remain
+    // after a pull request's check are the re-check workflow's below.
+    expect(step.if).toBe("${{ github.event_name == 'pull_request' }}");
+    expect(step.env).toEqual({
+      BASE_REF: '${{ github.event.pull_request.base.ref }}',
+    });
+    // The default checkout is one commit deep, so the comparison copy comes
+    // from a depth-one fetch of the base branch's head — not of a stale
+    // merge base.
+    expect(step.run).toContain(
+      'git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"',
+    );
+    expect(step.run).toContain(CONTRACT_DOCUMENT);
+    expect(step.run).toContain('node scripts/check-contract-version.js');
+  });
+});
+
+// #13742: the guard above sees each PR merged with the main of the moment it
+// ran. This workflow re-checks every open PR whenever main gains a
+// migration, from the API's file lists, and marks each PR head with a status.
+describe('SDK Java Flyway re-check of open PRs', () => {
+  const recheck = parse(
+    readFileSync('.github/workflows/sdk-java-flyway-open-prs.yml', 'utf8'),
+  );
+  const job = recheck.jobs.recheck;
+  const moduleArgs = (run) =>
+    run.replace(/^node scripts\/check-flyway-[a-z-]+\.js /, '').split(' ');
+
+  it('runs after every push to main that changes a migration, and on a schedule', () => {
+    expect(Object.keys(recheck.on).sort()).toEqual([
+      'push',
+      'schedule',
+      'workflow_dispatch',
+    ]);
+    expect(recheck.on.schedule).toEqual([{ cron: '7,37 * * * *' }]);
+    expect(recheck.on.push.branches).toEqual(['main']);
+    // Every location the scripts scan, so a new one cannot go unwatched.
+    expect(recheck.on.push.paths).toEqual([
+      ...LOCATIONS.map(
+        (location) => `packages/sdk-java/*/${location.dir.join('/')}/**`,
+      ),
+      'scripts/check-flyway-open-prs.js',
+      'scripts/flyway-migration-utils.js',
+      '.github/workflows/sdk-java-flyway-open-prs.yml',
+    ]);
+    // A dispatch from another branch would run that branch's workflow.
+    expect(job.if).toBe(
+      "${{ github.repository == 'QwenLM/qwen-code' && github.ref == 'refs/heads/main' }}",
+    );
+  });
+
+  it('holds only the token scopes the status write needs', () => {
+    expect(recheck.permissions).toEqual({ contents: 'read' });
+    expect(job.permissions).toEqual({
+      contents: 'read',
+      'pull-requests': 'read',
+      statuses: 'write',
+    });
+    const checkout = job.steps.find((s) =>
+      String(s.uses ?? '').startsWith('actions/checkout'),
+    );
+    // main, not the triggering commit: a re-run must not write statuses
+    // computed against an older main over a newer run's.
+    expect(checkout.with).toEqual({
+      ref: 'main',
+      'persist-credentials': false,
+    });
+  });
+
+  it('lets a newer main queue behind a running re-check instead of cancelling it', () => {
+    // Keyed by ref: a skipped dispatch from another branch must not replace
+    // a pending main run.
+    expect(recheck.concurrency).toEqual({
+      group: 'sdk-java-flyway-open-prs-${{ github.ref }}',
+      'cancel-in-progress': false,
+    });
+  });
+
+  it('routes to the ECS pool behind the kill-switch', () => {
+    expect(job['runs-on']).toBe(
+      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-qwen"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
+    );
+  });
+
+  it('scans the same modules as the guard, each one level under packages/sdk-java', () => {
+    const guard = parse(workflow).jobs['flyway-migrations'].steps.find(
+      (s) => s.name === 'Check Flyway migration versions are unique',
+    ).run;
+    const run = job.steps.find((s) => s.name === 'Re-check open pull requests');
+    expect(run.run.startsWith('node scripts/check-flyway-open-prs.js ')).toBe(
+      true,
+    );
+    expect(run.env).toEqual({ GH_TOKEN: '${{ github.token }}' });
+    expect(moduleArgs(run.run)).toEqual(moduleArgs(guard));
+    // The push filter's `*` matches one path segment.
+    for (const module of moduleArgs(run.run)) {
+      expect(module).toMatch(/^packages\/sdk-java\/[^/]+$/);
+    }
+  });
+});
+
+// #13804: the advance check above sees each pull request against the base
+// branch of the moment it ran. This workflow re-checks every open PR when
+// main gains a contract change, from the API's file lists and the claiming
+// PRs' documents — no PR code is fetched or run — and marks each PR head
+// with the 'API contract version uniqueness (latest main)' status, the
+// #13770 shape for the version number instead of the migrations.
+describe('SDK Java contract re-check of open PRs', () => {
+  const recheck = parse(
+    readFileSync('.github/workflows/sdk-java-contract-open-prs.yml', 'utf8'),
+  );
+  const job = recheck.jobs.recheck;
+
+  it('runs after every push to main that changes the document, and on a schedule', () => {
+    expect(Object.keys(recheck.on).sort()).toEqual([
+      'push',
+      'schedule',
+      'workflow_dispatch',
+    ]);
+    expect(recheck.on.schedule).toEqual([{ cron: '13,43 * * * *' }]);
+    expect(recheck.on.push.branches).toEqual(['main']);
+    expect(recheck.on.push.paths).toEqual([
+      CONTRACT_DOCUMENT,
+      'scripts/check-contract-open-prs.js',
+      'scripts/contract-version-utils.js',
+      '.github/workflows/sdk-java-contract-open-prs.yml',
+    ]);
+    // A dispatch from another branch would run that branch's workflow.
+    expect(job.if).toBe(
+      "${{ github.repository == 'QwenLM/qwen-code' && github.ref == 'refs/heads/main' }}",
+    );
+  });
+
+  it('holds only the token scopes the status write needs', () => {
+    expect(recheck.permissions).toEqual({ contents: 'read' });
+    expect(job.permissions).toEqual({
+      contents: 'read',
+      'pull-requests': 'read',
+      statuses: 'write',
+    });
+    const checkout = job.steps.find((s) =>
+      String(s.uses ?? '').startsWith('actions/checkout'),
+    );
+    // main, not the triggering commit: a re-run must not write statuses
+    // computed against an older main over a newer run's.
+    expect(checkout.with).toEqual({
+      ref: 'main',
+      'persist-credentials': false,
+    });
+  });
+
+  it('lets a newer main queue behind a running re-check instead of cancelling it', () => {
+    // Keyed by ref: a skipped dispatch from another branch must not replace
+    // a pending main run.
+    expect(recheck.concurrency).toEqual({
+      group: 'sdk-java-contract-open-prs-${{ github.ref }}',
+      'cancel-in-progress': false,
+    });
+  });
+
+  it('routes to the ECS pool behind the kill-switch', () => {
+    expect(job['runs-on']).toBe(
+      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-qwen"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
+    );
+  });
+
+  it('re-checks from the one script, reading main from the checkout', () => {
+    const run = job.steps.find((s) => s.name === 'Re-check open pull requests');
+    expect(run.run).toBe('node scripts/check-contract-open-prs.js');
+    expect(run.env).toEqual({ GH_TOKEN: '${{ github.token }}' });
+  });
+});
+
+// #13506: the pool-routed legs inherited only the bare ownership restore
+// while ci.yml grew the rest of its pre-checkout hygiene across
+// recorded incidents — the safe.directory trust after #12648 and the
+// stale-.qwen sweep after the 33146730771 checkout poisoning. A leftover
+// review/autofix residue on a shared ECS host failed this workflow's
+// Checkout step on main. Pin every pool job to restore → sweep → checkout
+// and pin both step bodies byte-identical to the ci.yml copies so the two
+// files cannot drift apart (ci.yml's own copies are pinned the same way in
+// scripts/tests/review-worktree-cleanup-workflow.test.js).
+describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
+  const docs = {
+    'sdk-java.yml': parse(workflow),
+    'sdk-java-flyway-open-prs.yml': parse(
+      readFileSync('.github/workflows/sdk-java-flyway-open-prs.yml', 'utf8'),
+    ),
+    'sdk-java-contract-open-prs.yml': parse(
+      readFileSync('.github/workflows/sdk-java-contract-open-prs.yml', 'utf8'),
+    ),
+  };
+  const ci = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
+  const ciSteps = Object.values(ci.jobs).flatMap((job) => job.steps ?? []);
+  const ciSweep = ciSteps.find(
+    (s) => s.name === 'Clean stale .qwen before checkout',
+  )?.run;
+  const ciRestore = ciSteps.find(
+    (s) => s.name === 'Restore workspace ownership',
+  )?.run;
+  const poolJobs = [
+    ['sdk-java.yml', 'test'],
+    ['sdk-java.yml', 'flyway-migrations'],
+    ['sdk-java.yml', 'daemon-e2e'],
+    ['sdk-java-flyway-open-prs.yml', 'recheck'],
+    ['sdk-java-contract-open-prs.yml', 'recheck'],
+  ];
+
+  it.each(poolJobs)(
+    'restores ownership, sweeps stale .qwen, then checks out in %s %s',
+    (file, name) => {
+      const steps = docs[file].jobs[name].steps;
+      const names = steps.map((s) => s.name);
+      const restoreIdx = names.indexOf('Restore workspace ownership');
+      const sweepIdx = names.indexOf('Clean stale .qwen before checkout');
+      const checkoutIdx = steps.findIndex((s) =>
+        String(s.uses ?? '').includes('actions/checkout'),
+      );
+      expect(restoreIdx, name).toBeGreaterThanOrEqual(0);
+      expect(sweepIdx, name).toBeGreaterThan(restoreIdx);
+      expect(sweepIdx, name).toBeLessThan(checkoutIdx);
+      // The matrix legs on fresh hosted VMs never take this branch, and
+      // Windows would run it under pwsh — the recipe is bash.
+      expect(steps[sweepIdx].if).toBe(
+        "${{ runner.environment == 'self-hosted' }}",
+      );
+    },
+  );
+
+  it.each(poolJobs)(
+    'keeps the %s %s restore and sweep bodies byte-identical to ci.yml',
+    (file, name) => {
+      const steps = docs[file].jobs[name].steps;
+      const restore = steps.find(
+        (s) => s.name === 'Restore workspace ownership',
+      )?.run;
+      const sweep = steps.find(
+        (s) => s.name === 'Clean stale .qwen before checkout',
+      )?.run;
+      expect(ciRestore).toBeDefined();
+      expect(ciSweep).toBeDefined();
+      expect(restore, name).toBe(ciRestore);
+      expect(sweep, name).toBe(ciSweep);
+    },
+  );
+
+  it.each(poolJobs)(
+    'trusts the workspace as a git safe.directory in %s %s',
+    (file, name) => {
+      const restore = docs[file].jobs[name].steps.find(
+        (s) => s.name === 'Restore workspace ownership',
+      )?.run;
+      expect(restore).toContain(
+        'git config --global --add safe.directory "$GITHUB_WORKSPACE"',
+      );
+    },
+  );
 });

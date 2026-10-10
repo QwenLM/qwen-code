@@ -63,6 +63,7 @@ import {
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
 import { SYSTEM_REMINDER_OPEN } from './environmentContext.js';
+import { formatAgentMessageModelText } from '../agents/session-agents/envelope.js';
 import { SessionStartSource } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import {
@@ -2400,6 +2401,36 @@ describe('LlmChat', async () => {
       );
       expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledTimes(
         1,
+      );
+    });
+
+    it('sends the latest memory catalog without persisting it to history', async () => {
+      // The catalog part carries the volatile-boundary marker so the provider
+      // cache passes anchor their per-turn breakpoint before it.
+      const catalogPart = (text: string) => ({
+        text,
+        partMetadata: { 'qwen-code:reattach-boundary': true },
+      });
+      let catalog = 'first catalog';
+      mockConfig.getAutoMemoryContext = () => catalog;
+      mockStream(textStream('response'));
+      await sendDrain('first question', 'memory-tail-1');
+      expect(
+        (requestAt(0).contents as Content[]).at(-1)?.parts?.at(-1),
+      ).toEqual(catalogPart('first catalog'));
+      expect(JSON.stringify(chat.getHistory())).not.toContain('first catalog');
+      const firstHistory = chat.getHistory();
+      catalog = 'updated catalog';
+      mockStream(textStream('done'));
+      await sendDrain('second question', 'memory-tail-2');
+      const second = requestAt(1).contents as Content[];
+      expect(second.slice(0, firstHistory.length)).toEqual(firstHistory);
+      expect(second.at(-1)?.parts?.at(-1)).toEqual(
+        catalogPart('updated catalog'),
+      );
+      expect(JSON.stringify(second)).not.toContain('first catalog');
+      expect(JSON.stringify(chat.getHistory())).not.toContain(
+        'updated catalog',
       );
     });
 
@@ -8056,6 +8087,76 @@ describe('LlmChat', async () => {
           'prompt-transport-continuation-replaced-by-omni',
         );
       });
+
+      // A consumer that retracts delivered output (the Hosted Harness) takes a
+      // fresh replay, never a continuation: the replayed request replaces the
+      // retracted prefix instead of gluing a possible restart onto it
+      // (#13319).
+      it('replays a delivered-content cut when the consumer retracts delivered output', async () => {
+        vi.useFakeTimers();
+        mockStreamsOnce(
+          cutAfter([textChunk('MIDSTREAM_PARTIAL')]),
+          streamOf(textChunk('MIDSTREAM_RECOVERED_AFTER_RETRY', 'STOP')),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-replay',
+          undefined,
+          { retractDeliveredOutputOnRetry: true },
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+        const retries = eventsOfType(events, StreamEventType.RETRY);
+        expect(retries).toEqual([{ type: StreamEventType.RETRY }]);
+        expectStreamCalls(2);
+        // The replay re-sends the original request: no synthetic model/user
+        // turns carrying the delivered prefix or the resume instruction.
+        const replayed = requestContentsOfCall(1);
+        expect(hasText(replayed, 'MIDSTREAM_PARTIAL')).toBe(false);
+        expect(hasText(replayed, RESUME_INSTRUCTION)).toBe(false);
+        // The consumer sees both attempts' chunks; dropping the prefix on
+        // RETRY is what keeps the transcript clean. History keeps only the
+        // replay's answer: the failed attempt's partial turn is popped.
+        expect(deliveredText(events)).toBe(
+          'MIDSTREAM_PARTIALMIDSTREAM_RECOVERED_AFTER_RETRY',
+        );
+        expectLastText('MIDSTREAM_RECOVERED_AFTER_RETRY');
+        expectWarned('Transport stream retry scheduled', {
+          retryDecision: 'retry',
+        });
+      });
+
+      it('fails a delivered-content cut when the replay budget is spent, never continuing', async () => {
+        vi.useFakeTimers();
+        mockStreamsOnce(
+          cutAfter([textChunk('MIDSTREAM_PARTIAL')]),
+          cutAfter([textChunk('MIDSTREAM_PARTIAL')]),
+          cutAfter([textChunk('MIDSTREAM_PARTIAL')]),
+        );
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retract-exhausted',
+          undefined,
+          { retractDeliveredOutputOnRetry: true },
+        );
+        const collecting = drainCollecting(stream);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(35_000);
+        const { events, caughtError } = await collecting;
+        expect(caughtError).toBeDefined();
+        // Three attempts, two plain replays, and no continuation: the answer
+        // never asks the model to resume a prefix the caller retracted.
+        expectStreamCalls(3);
+        expect(
+          events.filter(
+            (event) =>
+              event.type === StreamEventType.RETRY &&
+              event.isContinuation === true,
+          ),
+        ).toHaveLength(0);
+        expect(eventsOfType(events, StreamEventType.RETRY)).toHaveLength(2);
+      });
     });
 
     it('falls back after yielding only tool preparation metadata', async () => {
@@ -9723,6 +9824,14 @@ describe('LlmChat', async () => {
 
     const reminder = (body: string) =>
       userText(`${SYSTEM_REMINDER_OPEN}\n${body}\n</system-reminder>`);
+    const AGENT_PAYLOAD = {
+      displayText: 'done',
+      author: { agentId: 'agent-1', name: 'claude-B' },
+      runId: 'run-1',
+      status: 'completed' as const,
+    };
+    const agentEnvelope = () =>
+      userText(formatAgentMessageModelText(AGENT_PAYLOAD));
 
     it.each<[string, Content[], Content[]]>([
       [
@@ -9751,6 +9860,25 @@ describe('LlmChat', async () => {
             {
               text: `${SYSTEM_REMINDER_OPEN}\nPlan mode is active.\n</system-reminder>`,
             },
+            { text: 'the actual user prompt' },
+          ),
+        ],
+        earlier(),
+      ],
+      // A resumed agent_message record is its own user entry; a later
+      // failed prompt must not take it along.
+      [
+        'preserves a trailing session agent envelope entry',
+        [...earlier(), agentEnvelope(), userText('failed prompt')],
+        [...earlier(), agentEnvelope()],
+      ],
+      [
+        'pops a failed prompt that carried a spliced agent envelope',
+        [
+          ...earlier(),
+          content(
+            'user',
+            { text: formatAgentMessageModelText(AGENT_PAYLOAD) },
             { text: 'the actual user prompt' },
           ),
         ],
@@ -12311,6 +12439,8 @@ describe('LlmChat', async () => {
   describe('XML tool call fallback integration', () => {
     const XML =
       '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
+    const TAUGHT_XML =
+      '<tool_call><function=read_file><parameter=file_path>a.ts</parameter></function></tool_call>';
 
     /**
      * Stream one STOP chunk of `parts` (or `chunks`) for `message` on
@@ -12424,6 +12554,35 @@ describe('LlmChat', async () => {
       // History holds the recovered functionCall parts, not raw XML.
       expect(parts.some((p) => p.functionCall)).toBe(true);
       expect(hasRawXml(parts)).toBe(false);
+    });
+
+    it('recovers a split taught-dialect call once and stores the call instead of XML (#10692)', async () => {
+      const { chunks, parts } = await runXml('taught-xml', [], {
+        chunks: [
+          textChunk(TAUGHT_XML.slice(0, 30)),
+          textChunk(TAUGHT_XML.slice(30), 'STOP'),
+        ],
+      });
+      const calls = chunks.flatMap((chunk) => chunk.functionCalls ?? []);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        name: 'read_file',
+        args: { file_path: 'a.ts' },
+      });
+      expect(parts).toEqual([{ functionCall: calls[0] }]);
+    });
+
+    it('keeps a native call authoritative when taught-dialect text is also present (#10692)', async () => {
+      const native = fnCall('read_file', { file_path: 'b.ts' }, 'native-call');
+      const { chunks, parts } = await runXml('native-with-taught-xml', [
+        { text: TAUGHT_XML },
+        native,
+      ]);
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([
+        native.functionCall,
+      ]);
+      expect(recoveredChunk(chunks)).toBeUndefined();
+      expect(parts.some((part) => part.text === TAUGHT_XML)).toBe(true);
     });
 
     it('preserves a preceding reasoning episode (text + signature) when XML tool call recovery fires on the same turn', async () => {
@@ -12637,33 +12796,36 @@ describe('LlmChat', async () => {
       expect(parts.some((p) => p.inlineData)).toBe(true);
     });
 
-    it('does not recover XML tool calls when the stream lacks a finish reason', async () => {
-      vi.useFakeTimers();
-      mockStream(streamOf(textChunk(XML))); // no finishReason
-      const stream = await chat.sendMessageStream(
-        'gemini-pro',
-        { message: 'read the file' },
-        'prompt-xml-fallback-no-finish',
-      );
+    it.each([XML, TAUGHT_XML])(
+      'does not recover XML without a finish reason: %s',
+      async (xml) => {
+        vi.useFakeTimers();
+        mockStream(streamOf(textChunk(xml))); // no finishReason
+        const stream = await chat.sendMessageStream(
+          'gemini-pro',
+          { message: 'read the file' },
+          'prompt-xml-fallback-no-finish',
+        );
 
-      // The recovery gate must not fire; stream validation throws
-      // NO_FINISH_REASON so the retry path handles the truncated stream.
-      const chunks: GenerateContentResponse[] = [];
-      const collecting = (async () => {
-        for await (const event of stream) {
-          if (event.type === StreamEventType.CHUNK) chunks.push(event.value);
-        }
-      })();
-      const resultPromise = (async () => {
-        await expect(collecting).rejects.toThrow('finish reason');
-      })();
-      await vi.advanceTimersByTimeAsync(0);
-      await vi.advanceTimersByTimeAsync(35_000);
-      await resultPromise;
+        // The recovery gate must not fire; stream validation throws
+        // NO_FINISH_REASON so the retry path handles the truncated stream.
+        const chunks: GenerateContentResponse[] = [];
+        const collecting = (async () => {
+          for await (const event of stream) {
+            if (event.type === StreamEventType.CHUNK) chunks.push(event.value);
+          }
+        })();
+        const resultPromise = (async () => {
+          await expect(collecting).rejects.toThrow('finish reason');
+        })();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(35_000);
+        await resultPromise;
 
-      // No synthetic tool-call chunk may be dispatched.
-      expect(recoveredChunk(chunks)).toBeUndefined();
-    });
+        // No synthetic tool-call chunk may be dispatched.
+        expect(recoveredChunk(chunks)).toBeUndefined();
+      },
+    );
     describe('issue #10380: HTTP 413 request-body overflow recovery', () => {
       // A reverse proxy can reject the serialized body (HTTP 413) below the
       // auto-compaction threshold; the send must recover via the same one-shot

@@ -22,8 +22,6 @@ export interface HarnessChannel {
   workspaceControlInFlight: number;
   /** A timed-out workspace operation will retire this channel after Sessions drain. */
   retireWhenSessionsDrain: boolean;
-  /** Diagnostic cause, separate from the scheduling flag above. */
-  retiringAfterWorkspaceTimeout?: boolean;
   /** Positive diagnostic evidence; generic kills and failure reaps leave this unset. */
   routineRetirementStarted?: boolean;
   /**

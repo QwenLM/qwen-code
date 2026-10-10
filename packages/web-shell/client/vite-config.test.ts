@@ -9,7 +9,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { preview } from 'vite';
+import { createServer, preview } from 'vite';
 import type { ConfigEnv, ProxyOptions, UserConfig } from 'vite';
 import viteConfig, {
   BRAND_ROUTE_PROXY,
@@ -28,6 +28,30 @@ function loadConfig(): UserConfig {
     isPreview: false,
   });
 }
+
+it('serves the settings page without claiming the settings source module', async ({
+  onTestFinished,
+}) => {
+  const server = await createServer({
+    ...loadConfig(),
+    configFile: false,
+    server: { host: '127.0.0.1', port: 0 },
+  });
+  onTestFinished(() => server.close());
+  await server.listen();
+  const baseUrl = server.resolvedUrls!.local[0];
+  for (const path of ['settings', 'settings?theme=dark', 'settings/']) {
+    const response = await fetch(`${baseUrl}${path}`, {
+      headers: { accept: 'text/html' },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/html');
+    expect(await response.text()).toContain('/main.tsx');
+  }
+  const source = await fetch(`${baseUrl}settings.ts`);
+  expect(source.status).toBe(200);
+  expect(source.headers.get('content-type')).toContain('javascript');
+});
 
 it.each([
   [undefined, false],
@@ -153,7 +177,11 @@ describe('Web Shell Java Managed Agent development proxy', () => {
 
     expect(managed).not.toBeTypeOf('string');
     expect(managed).toBeDefined();
-    expect((managed as ProxyOptions).target).toBe('http://127.0.0.1:8080');
+    // Compare against the same expression the config uses: the README's
+    // dual-path setup exports this variable for real development.
+    expect((managed as ProxyOptions).target).toBe(
+      process.env['QWEN_MANAGED_AGENT_JAVA_URL'] ?? 'http://127.0.0.1:8080',
+    );
     expect(MANAGED_AGENT_JAVA_ROUTE_PROXY).toBe('/api/agent/web-shell/v1');
     expect(MANAGED_AGENT_PUBLIC_ROUTE_PROXY).toBe('/v1/agents');
     expect(proxy?.[MANAGED_AGENT_PUBLIC_ROUTE_PROXY]).toBe(managed);
@@ -238,5 +266,23 @@ describe('Web Shell remote workspace development proxy', () => {
     expect(
       options?.bypass?.(request, {} as unknown as ServerResponse, options),
     ).toBeUndefined();
+  });
+});
+
+describe('Web Shell launcher-supplied open path', () => {
+  // scripts/managed-agent-dev.js hands the token-bearing open path through
+  // the environment instead of argv; server.open is where it lands.
+  it('opens the path QWEN_WEB_SHELL_OPEN_PATH carries', () => {
+    vi.stubEnv('QWEN_WEB_SHELL_OPEN_PATH', '/?managed=1&token=PROBETOKEN');
+    onTestFinished(() => vi.unstubAllEnvs());
+
+    expect(loadConfig().server?.open).toBe('/?managed=1&token=PROBETOKEN');
+  });
+
+  it('stays closed when no launcher set the variable', () => {
+    vi.stubEnv('QWEN_WEB_SHELL_OPEN_PATH', undefined);
+    onTestFinished(() => vi.unstubAllEnvs());
+
+    expect(loadConfig().server?.open).toBeUndefined();
   });
 });

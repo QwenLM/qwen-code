@@ -16282,75 +16282,6 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('strips a spoofed agent run and injects only the trusted one', async () => {
-      // The run frame decides which thread an agent's tools act on. A caller
-      // that could set this key could make one agent post under another's
-      // name, so it gets the same treatment as the delivery above.
-      const handle = makeChannel();
-      const bridge = makeBridge({ channelFactory: async () => handle.channel });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      const trusted = {
-        workspaceId: 'ws_1',
-        agentId: 'ag_alice',
-        runId: 'run_1',
-        threadId: 'th_1',
-        rootThreadId: 'th_1',
-        attempt: 1,
-        contextThroughSequence: 3,
-      };
-
-      await bridge.sendPrompt(
-        session.sessionId,
-        {
-          sessionId: session.sessionId,
-          prompt: [{ type: 'text', text: 'take a turn' }],
-          _meta: {
-            'qwen.daemon.agentRun': {
-              workspaceId: 'ws_1',
-              agentId: 'ag_mallory',
-              runId: 'run_forged',
-              threadId: 'th_victim',
-              rootThreadId: 'th_victim',
-              attempt: 1,
-            },
-          },
-        } as PromptRequest,
-        undefined,
-        { promptId: 'run_1', agentRun: trusted },
-      );
-
-      expect(
-        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.agentRun'],
-      ).toEqual(trusted);
-      await bridge.shutdown();
-    });
-
-    it('sends no agent run when the trusted context carries none', async () => {
-      // An ordinary session prompt must establish no frame at all: a person
-      // typing into an agent's session is not taking that agent's turn.
-      const handle = makeChannel();
-      const bridge = makeBridge({ channelFactory: async () => handle.channel });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-
-      await bridge.sendPrompt(
-        session.sessionId,
-        {
-          sessionId: session.sessionId,
-          prompt: [{ type: 'text', text: 'hello' }],
-          _meta: {
-            'qwen.daemon.agentRun': { agentId: 'ag_mallory', runId: 'r' },
-          },
-        } as PromptRequest,
-        undefined,
-        { promptId: 'p-1' },
-      );
-
-      expect(
-        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.agentRun'],
-      ).toBeUndefined();
-      await bridge.shutdown();
-    });
-
     it('forwards only explicitly declared submission text from trusted context', async () => {
       const handle = makeChannel();
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
@@ -17656,7 +17587,15 @@ describe('createAcpSessionBridge', () => {
       );
 
       expect(prompts[0]?.prompt).toEqual([
-        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+        {
+          type: 'image',
+          data: 'AQID',
+          mimeType: 'image/png',
+          _meta: {
+            'qwen.daemon.attachmentContext':
+              expect.stringContaining('"absolutePath":'),
+          },
+        },
       ]);
       expect(prompts[0]?._meta?.['qwen.daemon.attachmentReferences']).toEqual([
         reference,
@@ -17786,6 +17725,10 @@ describe('createAcpSessionBridge', () => {
       expect(prompts[0]?.prompt).toEqual([
         {
           type: 'resource',
+          _meta: {
+            'qwen.daemon.attachmentContext':
+              expect.stringContaining('"absolutePath":'),
+          },
           resource: {
             uri: 'attachment:///notes.txt',
             mimeType: 'text/plain',
@@ -17794,6 +17737,10 @@ describe('createAcpSessionBridge', () => {
         },
         {
           type: 'resource',
+          _meta: {
+            'qwen.daemon.attachmentContext':
+              expect.stringContaining('"absolutePath":'),
+          },
           resource: {
             uri: 'attachment:///report.pdf',
             mimeType: 'application/pdf',
@@ -18813,6 +18760,102 @@ describe('createAcpSessionBridge', () => {
         await bridge.shutdown();
       },
     );
+
+    it('answers the snapshot listing only after a rewind queued behind a branch has run', async () => {
+      const tracked = new Set<string>([
+        SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
+      ]);
+      const calls: string[] = [];
+      const branchGate = deferred<void>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (tracked.has(method)) calls.push(method);
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
+            await branchGate.promise;
+            return { newSessionId: 'branch-session', title: 'Branch' };
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+            return { targetTurnIndex: 1, filesChanged: [], filesFailed: [] };
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+            // What the agent lists once the rewind has truncated.
+            return {
+              snapshots: [{ promptId: 'session########0', turnIndex: 0 }],
+            };
+          }
+          return {};
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const branch = bridge.branchSession(session.sessionId, {});
+      const rewind = bridge.rewindSession(session.sessionId, {
+        promptId: 'session########1',
+      });
+      await vi.waitFor(() =>
+        expect(calls).toEqual([SERVE_CONTROL_EXT_METHODS.sessionBranch]),
+      );
+
+      // Asked while the rewind is still waiting its turn: no answer yet.
+      let listed: { snapshots: unknown[] } | undefined;
+      const listing = bridge
+        .getRewindSnapshots(session.sessionId)
+        .then((result) => {
+          listed = result;
+          return result;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(listed).toBeUndefined();
+      expect(calls).toEqual([SERVE_CONTROL_EXT_METHODS.sessionBranch]);
+
+      branchGate.resolve();
+      await branch;
+      await rewind;
+      await expect(listing).resolves.toEqual({
+        snapshots: [{ promptId: 'session########0', turnIndex: 0 }],
+      });
+      expect(calls).toEqual([
+        SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
+      ]);
+      await bridge.shutdown();
+    });
+
+    it('still answers the snapshot listing after an admitted rewind failed', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+            throw new Error('rewind blew up');
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+            return { snapshots: [] };
+          }
+          return {};
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.rewindSession(session.sessionId, {
+          promptId: 'session########1',
+        }),
+      ).rejects.toThrow();
+      await expect(
+        bridge.getRewindSnapshots(session.sessionId),
+      ).resolves.toEqual({ snapshots: [] });
+      await bridge.shutdown();
+    });
 
     it.each([
       {
@@ -24530,7 +24573,7 @@ describe('createAcpSessionBridge', () => {
       await iter[Symbol.asyncIterator]().next();
 
       expect(diagnostics).toContainEqual({
-        line: 'qwen serve: channel exited (code=none, signal=SIGKILL, transport=ok, 1 session(s) torn down)',
+        line: 'qwen serve: channel exited (code=none, signal=SIGKILL, transport=ok, 1 session(s) torn down, 1 associated at exit)',
         level: 'warn',
       });
       await bridge.shutdown();
@@ -24549,7 +24592,7 @@ describe('createAcpSessionBridge', () => {
 
       await vi.waitFor(() =>
         expect(diagnostics).toContainEqual({
-          line: 'qwen serve: channel exited (code=none, signal=none, transport=ok, 0 session(s) torn down)',
+          line: 'qwen serve: channel exited (code=none, signal=none, transport=ok, 0 session(s) torn down, 0 associated at exit)',
           level: 'info',
         }),
       );
@@ -24615,7 +24658,7 @@ describe('createAcpSessionBridge', () => {
         // The stderr breadcrumb must survive the throwing daemon.log sink.
         expect(stderr).toHaveBeenCalledWith(
           expect.stringContaining(
-            'qwen serve: channel exited (code=none, signal=SIGKILL, transport=ok, 1 session(s) torn down)',
+            'qwen serve: channel exited (code=none, signal=SIGKILL, transport=ok, 1 session(s) torn down, 1 associated at exit)',
           ),
         );
       } finally {
@@ -24656,7 +24699,9 @@ describe('createAcpSessionBridge', () => {
         expect((await secondEvents.next()).value?.type).toBe('session_died');
         expect(bridge.sessionCount).toBe(0);
         expect(stderr).toHaveBeenCalledWith(
-          expect.stringContaining('2 session(s) torn down'),
+          expect.stringContaining(
+            '2 session(s) torn down, 2 associated at exit',
+          ),
         );
       } finally {
         stderr.mockRestore();
@@ -24688,7 +24733,7 @@ describe('createAcpSessionBridge', () => {
       };
     }
 
-    it('counts only the sessions actually torn down when a failed restore is mid-cleanup', async () => {
+    it('distinguishes torn-down and associated sessions when a failed restore is mid-cleanup', async () => {
       // A restore that fails after its entry exists (here: the child rejects
       // the requested approval mode) leaves byId without the id while the
       // channel still lists it, until attachment cleanup ends.
@@ -24737,7 +24782,7 @@ describe('createAcpSessionBridge', () => {
           ),
         );
         expect(diagnostics).toContainEqual({
-          line: 'qwen serve: channel exited (code=none, signal=SIGKILL, transport=ok, 1 session(s) torn down)',
+          line: 'qwen serve: channel exited (code=none, signal=SIGKILL, transport=ok, 1 session(s) torn down, 2 associated at exit)',
           level: 'warn',
         });
         heldClose.resolve();
@@ -24846,7 +24891,7 @@ describe('createAcpSessionBridge', () => {
           diagnostics.filter((d) => d.line.includes('channel exited')),
         ).toEqual([
           {
-            line: 'qwen serve: channel exited (code=none, signal=none, transport=ok, 0 session(s) torn down)',
+            line: 'qwen serve: channel exited (code=none, signal=none, transport=ok, 0 session(s) torn down, 0 associated at exit)',
             level: 'warn',
           },
         ]);
@@ -24898,7 +24943,7 @@ describe('createAcpSessionBridge', () => {
           diagnostics.filter((d) => d.line.includes('channel exited')),
         ).toEqual([
           {
-            line: 'qwen serve: channel exited (code=none, signal=none, transport=ok, 0 session(s) torn down)',
+            line: 'qwen serve: channel exited (code=none, signal=none, transport=ok, 0 session(s) torn down, 0 associated at exit)',
             level: 'warn',
           },
         ]);
@@ -36644,7 +36689,7 @@ describe('preheat', () => {
         ),
       ).toEqual([
         [
-          'qwen serve: channel exited (code=none, signal=none, transport=ok, 0 session(s) torn down)',
+          'qwen serve: channel exited (code=none, signal=none, transport=ok, 0 session(s) torn down, 0 associated at exit)',
           'warn',
         ],
       ]);
@@ -36728,7 +36773,7 @@ describe('preheat', () => {
         ),
       ).toEqual([
         [
-          'qwen serve: channel exited (code=none, signal=none, transport=ok, 0 session(s) torn down)',
+          'qwen serve: channel exited (code=none, signal=none, transport=ok, 0 session(s) torn down, 0 associated at exit)',
           'warn',
         ],
       ]);
@@ -38301,6 +38346,54 @@ describe('createAcpSessionBridge — background notifications', () => {
   });
 });
 
+describe('createAcpSessionBridge — session agent records', () => {
+  const request = {
+    kind: 'agent_message' as const,
+    recordKey: 'run-1:result',
+    modelText: '<agent_message from="claude-B">done</agent_message>',
+    payload: {
+      displayText: 'done',
+      author: { agentId: 'agent-1', name: 'claude-B' },
+      runId: 'run-1',
+      status: 'completed' as const,
+    },
+  };
+
+  it('forwards the record to the live session and returns its id', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionExternalRecord
+          ? { sessionId: params['sessionId'], recordId: 'rec-1', created: true }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.appendExternalRecord(session.sessionId, request),
+    ).resolves.toEqual({
+      sessionId: session.sessionId,
+      recordId: 'rec-1',
+      created: true,
+    });
+    expect(handle.agent.extMethodCalls).toContainEqual({
+      method: SERVE_CONTROL_EXT_METHODS.sessionExternalRecord,
+      params: { sessionId: session.sessionId, ...request },
+    });
+    await bridge.shutdown();
+  });
+
+  it('rejects a record for an unknown session', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    await expect(
+      bridge.appendExternalRecord('missing', request),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+    await bridge.shutdown();
+  });
+});
+
 /**
  * `enqueueMidTurnMessage` backs the web-shell mid-turn drain: the browser
  * pushes a message typed during a turn, the ACP child drains it via
@@ -39381,7 +39474,15 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         type: 'text',
         text: 'two images\n[Attachment is no longer available]',
       },
-      { type: 'image', data: 'AQI=', mimeType: 'image/png' },
+      {
+        type: 'image',
+        data: 'AQI=',
+        mimeType: 'image/png',
+        _meta: {
+          'qwen.daemon.attachmentContext':
+            expect.stringContaining('"absolutePath":'),
+        },
+      },
     ]);
     releases[1]!();
     await vi.waitFor(() =>
@@ -39461,7 +39562,15 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         type: 'text',
         text: 'm2\n[Attachment is no longer available]',
       },
-      { type: 'image', data: 'AQI=', mimeType: 'image/png' },
+      {
+        type: 'image',
+        data: 'AQI=',
+        mimeType: 'image/png',
+        _meta: {
+          'qwen.daemon.attachmentContext':
+            expect.stringContaining('"absolutePath":'),
+        },
+      },
     ]);
     releases[2]!();
     await vi.waitFor(() =>
