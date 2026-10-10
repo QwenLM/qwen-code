@@ -14,6 +14,9 @@ import org.springframework.stereotype.Repository;
  */
 @Repository
 public class SessionMessageRelayStore {
+    /** The failed steps after which the relay gives an entry up. */
+    public static final int MAX_ATTEMPTS = 64;
+
     /** One outbox entry the delivery-pending index surfaced. */
     public record PendingMessage(String tenantId, String senderSessionId,
             String messageId, String deliveryState, String recordResourceId) {

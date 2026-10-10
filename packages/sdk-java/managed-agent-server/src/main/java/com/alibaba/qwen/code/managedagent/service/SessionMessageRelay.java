@@ -39,7 +39,8 @@ public class SessionMessageRelay {
     private static final Logger LOG = LoggerFactory
             .getLogger(SessionMessageRelay.class);
     private static final int SCAN_LIMIT = 50;
-    private static final int MAX_ATTEMPTS = 64;
+    private static final int MAX_ATTEMPTS =
+            SessionMessageRelayStore.MAX_ATTEMPTS;
     private static final long LEASE_MS = 30_000;
     /** The gap for a wait on the other side — an attach, a busy parent. */
     private static final long HEARTBEAT_MS = 5_000;

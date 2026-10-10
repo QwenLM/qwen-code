@@ -249,6 +249,28 @@ class SessionMessageRelayStoreTest {
                 .isEqualTo(new ChildResultRelayStore.EdgeMessages(2, 3,
                         List.of("msg_c:message")));
         assertThat(records.childOwesHandover(TENANT, child)).isTrue();
+        // An entry the message relay gave up on holds nothing, even when
+        // the give-up's own sender step never landed (a child that takes no
+        // further revision): past the bound, then classified.
+        store.claim(TENANT, child, "msg_e", "owner-a", 31_000, 1_000);
+        jdbc.update("UPDATE qwen_managed_session_message_relay SET attempts"
+                + " = ? WHERE sender_session_id = ? AND message_id = 'msg_e'",
+                SessionMessageRelayStore.MAX_ATTEMPTS - 1, child);
+        assertThat(records.childOwesHandover(TENANT, child)).isTrue();
+        jdbc.update("UPDATE qwen_managed_session_message_relay SET attempts"
+                + " = ? WHERE sender_session_id = ? AND message_id = 'msg_e'",
+                SessionMessageRelayStore.MAX_ATTEMPTS, child);
+        assertThat(records.childOwesHandover(TENANT, child)).isFalse();
+        assertThat(records.edgeMessages(TENANT, parent, "run-1", child)
+                .undelivered()).isEqualTo(1);
+        jdbc.update("UPDATE qwen_managed_session_message_relay SET attempts"
+                + " = 0, state = 'orphaned' WHERE sender_session_id = ?"
+                + " AND message_id = 'msg_e'", child);
+        assertThat(records.childOwesHandover(TENANT, child)).isFalse();
+        jdbc.update("UPDATE qwen_managed_session_message_relay SET state ="
+                + " 'relaying' WHERE sender_session_id = ?"
+                + " AND message_id = 'msg_e'", child);
+        assertThat(records.childOwesHandover(TENANT, child)).isTrue();
         // A closed child's outbox is orphaned and never moves again: it
         // holds neither the settlement nor the close.
         session(child, "CLOSED");

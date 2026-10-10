@@ -243,6 +243,24 @@ public class ChildResultRelayStore {
                     + " WHERE tenant_id = ? AND session_id = ?"
                     + " AND domain = 'session_message'";
 
+    // A child's own outbox entries still owing their handover, less those
+    // the message relay gave up on: a child that can take no further
+    // revision (a declined recovery) never lets the give-up's own sender
+    // step land, so its ledger row past the bound — or classified — is the
+    // only proof the entry will never move.
+    private static final String CHILD_OUTBOX_OWED_SQL =
+            "SELECT COUNT(*) FROM qwen_managed_session_extension_record r"
+                    + " LEFT JOIN qwen_managed_session_message_relay l"
+                    + " ON l.tenant_id = r.tenant_id"
+                    + " AND l.sender_session_id = r.session_id"
+                    + " AND l.message_id = r.record_id"
+                    + " WHERE r.tenant_id = ? AND r.session_id = ?"
+                    + " AND r.domain = 'session_message'"
+                    + " AND r.delivery_state IN ('planned', 'accepting')"
+                    + " AND (l.message_id IS NULL OR (l.state NOT IN"
+                    + " ('done', 'orphaned', 'unknown') AND l.attempts < "
+                    + SessionMessageRelayStore.MAX_ATTEMPTS + "))";
+
     /**
      * H4d-b: the messages on one parent–child edge. `undelivered` counts
      * those still owing their handover — the parent's to this run and every
@@ -275,30 +293,23 @@ public class ChildResultRelayStore {
                 received.add(body.path("inputId").textValue());
             }
         }
-        if ("ACTIVE".equals(sessionStatus(tenantId, childSessionId))) {
-            for (Map<String, Object> row : jdbc.queryForList(MESSAGES_SQL,
-                    tenantId, childSessionId)) {
-                if (owesHandover((String) row.get("delivery_state"))) {
-                    undelivered++;
-                }
-            }
-        }
+        undelivered += childOutboxOwed(tenantId, childSessionId);
         return new EdgeMessages(undelivered, toChild, List.copyOf(received));
     }
 
     /** Whether an active child still owes its parent a handover: its
-     * Session closes only after its own messages left. */
+     * Session closes only after its own messages left (or were given up). */
     public boolean childOwesHandover(String tenantId, String childSessionId) {
+        return childOutboxOwed(tenantId, childSessionId) > 0;
+    }
+
+    private int childOutboxOwed(String tenantId, String childSessionId) {
         if (!"ACTIVE".equals(sessionStatus(tenantId, childSessionId))) {
-            return false;
+            return 0;
         }
-        for (Map<String, Object> row : jdbc.queryForList(MESSAGES_SQL,
-                tenantId, childSessionId)) {
-            if (owesHandover((String) row.get("delivery_state"))) {
-                return true;
-            }
-        }
-        return false;
+        Integer owed = jdbc.queryForObject(CHILD_OUTBOX_OWED_SQL,
+                Integer.class, tenantId, childSessionId);
+        return owed == null ? 0 : owed;
     }
 
     /** Planned or being handed over: a receipt never reaches either. */
