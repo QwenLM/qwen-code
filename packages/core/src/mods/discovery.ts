@@ -83,7 +83,7 @@ export async function loadModSource(
   ) {
     return undefined;
   }
-  // Conversion preserves the original Claude manifest and its relative paths.
+  // Conversion preserves the effective Claude manifest and its relative paths.
   const claude = await readManifest(root, '.claude-plugin/plugin.json');
   const hooksPath =
     typeof qwen?.['hooks'] === 'string'
