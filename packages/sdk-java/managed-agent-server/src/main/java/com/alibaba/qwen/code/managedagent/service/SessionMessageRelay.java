@@ -255,6 +255,21 @@ public class SessionMessageRelay {
                         "target session closed before the receipt", now);
                 return;
             }
+            if ("to_child".equals(body.required("route").asText())) {
+                // A run that ended or is being stopped after the handover
+                // takes no receipt either: it would wake a child going away.
+                JsonNode run = records.childRunBody(row.tenantId(),
+                        row.senderSessionId(),
+                        body.required("childRunId").asText());
+                if (run != null && (ManagedExtensionRecords.isTerminalRunState(
+                        run.path("run").path("state").asText())
+                        || run.path("stopRequested").asBoolean(false))) {
+                    senderOperation(row, "rejected", Map.of());
+                    store.classify(row, owner, "done",
+                            "child run ended before the receipt", now);
+                    return;
+                }
+            }
             JsonNode contentRef = body.required("contentRef");
             byte[] content = records.readResourceBytes(row.tenantId(),
                     contentRef.required("resourceId").asText());

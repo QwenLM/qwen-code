@@ -21,6 +21,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -51,6 +52,10 @@ class ChildResultRelayTest {
 
     private static final class RecordingHarness implements HarnessConnector {
         final List<Map<String, Object>> operations = new CopyOnWriteArrayList<>();
+        /** Message operations, each with the Session it went to. */
+        final List<Map<String, Object>> messageOperations =
+                new CopyOnWriteArrayList<>();
+        volatile String refuseMessageCode;
         private boolean available = true;
         volatile String refuseKind;
         volatile String refuseRecord;
@@ -92,6 +97,17 @@ class ChildResultRelayTest {
         @Override
         public String closeSession(String tenantId, String sessionId) {
             return "boot";
+        }
+
+        @Override
+        public void runMessageOperation(String tenantId, String sessionId,
+                Map<String, Object> body) {
+            if (refuseMessageCode != null) {
+                throw refusal(refuseMessageCode);
+            }
+            Map<String, Object> recorded = new LinkedHashMap<>(body);
+            recorded.put("sessionId", sessionId);
+            messageOperations.add(recorded);
         }
 
         @Override
@@ -1643,6 +1659,200 @@ class ChildResultRelayTest {
                 .extracting(operation -> operation.get("kind"))
                 .containsExactly("commit_result", "accept");
         assertThat(row.get().state()).isEqualTo("delivering");
+    }
+
+    // H4d-b: a child whose task ended still works while a message turn
+    // runs or waits; the stop reaches that work before the run settles.
+    @Test
+    void aStopReachesTheChildsMessageTurnsBeforeItSettles() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "COMPLETED", now + 1, null, true, "epoch-1"));
+        holdsMessages();
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(1,
+                        Set.of("msg_1:message"), now,
+                        new ChildResultRelayStore.SettledTurn("turn-1",
+                                "completed", "hosted-harness", now)));
+        relay.scan();
+        assertThat(harness.messageOperations).hasSize(1);
+        assertThat(harness.messageOperations.getFirst())
+                .containsEntry("kind", "stop")
+                .containsEntry("sessionId", CHILD);
+        verify(sessions, never()).cancelChildTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString());
+        assertThat(harness.operations).isEmpty();
+        assertThat(row.get().state()).isEqualTo("watching");
+        // The message turn ended cancelled: the stop's end, never the
+        // task's earlier result.
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(0,
+                        Set.of("msg_1:message"), now,
+                        new ChildResultRelayStore.SettledTurn("msg_1:message",
+                                "cancelled", "session_message", now + 2)));
+        relay.scan();
+        assertThat(harness.messageOperations).hasSize(1);
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("close_scope");
+        assertThat(row.get().state()).isEqualTo("done");
+    }
+
+    // A running task and the message waiting behind it are both stopped.
+    @Test
+    void aStopCancelsTheTaskAndTheMessagesQueuedBehindIt() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "RUNNING", null, null, true, "epoch-1"));
+        holdsMessages();
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(1,
+                        Set.of("msg_1:message"), now, null));
+        relay.scan();
+        verify(sessions).cancelChildTurn(TENANT, PARENT, CHILD, RUN,
+                "turn-1");
+        assertThat(harness.messageOperations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("stop");
+        assertThat(harness.operations).isEmpty();
+        // The task is cancelled and nothing is owed: the run settles.
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "CANCELLED", now + 1, null, true, "epoch-1"));
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(0,
+                        Set.of("msg_1:message"), now,
+                        new ChildResultRelayStore.SettledTurn("turn-1",
+                                "cancelled", "hosted-harness", now + 1)));
+        relay.scan();
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("close_scope");
+    }
+
+    // The task is cancelled, but a message input is still owed: the run
+    // waits for it rather than settling over work still running.
+    @Test
+    void aCancelledTaskWaitsForItsOwedMessagesToStop() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "CANCELLED", now, null, true, "epoch-1"));
+        holdsMessages();
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(1,
+                        Set.of("msg_1:message"), now, null));
+        relay.scan();
+        assertThat(harness.messageOperations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("stop");
+        verify(childCloses, never()).admitChildClose(anyString(),
+                anyString(), anyString(), anyString());
+        assertThat(harness.operations).isEmpty();
+    }
+
+    // A child waiting on its recovery takes no stop yet: the heartbeat asks
+    // again without spending an attempt.
+    @Test
+    void aStopTheChildCannotTakeYetSpendsNoAttempt() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "COMPLETED", now, null, true, "epoch-1"));
+        holdsMessages();
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(1,
+                        Set.of("msg_1:message"), now, null));
+        harness.refuseMessageCode = "hosted_turn_recovery_required";
+        relay.scan();
+        assertThat(row.get().attempts()).isZero();
+        verify(store).scheduleRetry(any(RelayRow.class), anyString(),
+                anyLong(), anyLong(), anyLong());
+        assertThat(harness.operations).isEmpty();
+    }
+
+    // A message input no turn took within the bound holds the stop no
+    // longer than it would hold the settlement: the run settles cancelled.
+    @Test
+    void aStopStuckOnAMessageNoTurnTakesSettlesAtTheBound() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "COMPLETED", now - 40 * 60_000L, null, true,
+                "epoch-1"));
+        holdsMessages();
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(1,
+                        Set.of("msg_1:message"), now - 31 * 60_000L,
+                        new ChildResultRelayStore.SettledTurn("turn-1",
+                                "completed", "hosted-harness",
+                                now - 40 * 60_000L)));
+        relay.scan();
+        assertThat(harness.messageOperations).isEmpty();
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("close_scope");
+    }
+
+    // A message turn that completed before the stop is the child's natural
+    // end, delivered from its own journal turn.
+    @Test
+    void aMessageTurnThatCompletedBeforeTheStopIsDelivered() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "COMPLETED", now + 1, null, true, "epoch-1"));
+        holdsMessages();
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(0,
+                        Set.of("msg_1:message"), now,
+                        new ChildResultRelayStore.SettledTurn("msg_1:message",
+                                "completed", "session_message", now + 2)));
+        when(store.journalTurnText(TENANT, CHILD, "msg_1:message"))
+                .thenReturn("the updated answer");
+        relay.scan();
+        assertThat(harness.messageOperations).isEmpty();
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("commit_result", "accept");
+    }
+
+    // A message turn that failed on its own keeps child_failed, as a task
+    // Turn that failed on its own does.
+    @Test
+    void aMessageTurnThatFailedOnItsOwnStaysFailed() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "COMPLETED", now + 1, null, true, "epoch-1"));
+        holdsMessages();
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(0,
+                        Set.of("msg_1:message"), now,
+                        new ChildResultRelayStore.SettledTurn("msg_1:message",
+                                "error", "session_message", now + 2)));
+        relay.scan();
+        assertThat(harness.messageOperations).isEmpty();
+        assertThat(harness.operations.getFirst())
+                .containsEntry("kind", "fail")
+                .containsEntry("stopReason", "child_failed");
     }
 
     // The contract preserves a natural terminal outcome: a child whose

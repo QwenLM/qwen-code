@@ -276,6 +276,9 @@ interface HostedSession {
   /** H4d-b: message operations past the closing check, which a close waits
    * out before it cancels the pending inputs. */
   messageOperations?: Set<Promise<void>>;
+  /** H4f × H4d-b: the Session's run was stopped; no message input of it
+   * starts a turn any more. */
+  messagesStopped?: boolean;
   /** H4e-b1: the lead's team funnel, beside its child orchestrator. */
   teams?: HostedTeamSession;
   /** Depth of this Session in its child tree; absent or 0 is the root. */
@@ -870,6 +873,7 @@ export async function settleCrashedWakeTurnAftermath(params: {
       promptId: turnId,
       children: session.childAgents,
       teams: session.teams,
+      messages: session.messages,
     });
     // Consume the crashed input: until its turnId settles, every reload
     // re-classifies it as recovery and re-blocks the Session over the
@@ -1216,6 +1220,7 @@ async function settleCancelledHarnessTurn(
     promptId,
     children: session.childAgents,
     teams: session.teams,
+    messages: session.messages,
   });
   await managed.sink.write(
     record(session, sessionId, 'system', null, {
@@ -3323,6 +3328,11 @@ export function registerHostedHarnessSessionRoutes(
             wakeAftermathInFlight = false;
           }
         });
+        // H4f × H4d-b: a stopped run's message inputs never start a turn;
+        // the relay's stop settles them.
+        const stoppedMessage = (source: string | undefined) =>
+          session.messagesStopped === true &&
+          source === SESSION_MESSAGE_INPUT_SOURCE;
         session.monitorWake = new HostedMonitorWakeScheduler({
           next: async () => {
             // The whole committed prefix, not a bounded page: a notification
@@ -3333,8 +3343,9 @@ export function registerHostedHarnessSessionRoutes(
               authority.eventsInSequenceRange(1, authority.committedSequence),
             ).find(
               (input) =>
-                isWakeInputSource(input.source) ||
-                input.source === CHANNEL_INPUT_SOURCE,
+                (isWakeInputSource(input.source) ||
+                  input.source === CHANNEL_INPUT_SOURCE) &&
+                !stoppedMessage(input.source),
             );
             if (first === undefined) return undefined;
             if (first.source === CHANNEL_INPUT_SOURCE) {
@@ -3397,6 +3408,7 @@ export function registerHostedHarnessSessionRoutes(
                   brokerOptions,
                 ),
               busy: wakeBusy,
+              held: (turn) => stoppedMessage(turn.source),
               needsRecovery: monitorWakeNeedsRecovery,
               // F5/direction (a): channel turns interrupted mid-flight get
               // terminal settlement from their own funnel; monitor turns
@@ -3426,6 +3438,7 @@ export function registerHostedHarnessSessionRoutes(
                     consume: (childRunId) =>
                       session.childConsumption.add(childRunId),
                     teams: session.teams,
+                    messages: session.messages,
                   });
                 } catch (cause) {
                   // R6 P1: a durable decline freezes for the fleet, but a
@@ -3662,6 +3675,7 @@ export function registerHostedHarnessSessionRoutes(
             promptId: unsettled,
             children: session.childAgents,
             teams: session.teams,
+            messages: session.messages,
           });
         } catch (cause) {
           writeStderrLineSafe(
@@ -3980,6 +3994,7 @@ export function registerHostedHarnessSessionRoutes(
             promptId,
             children: session.childAgents,
             teams: session.teams,
+            messages: session.messages,
           });
         const projected = await managed.sink.project();
         const current = projected.filter(
@@ -5389,6 +5404,52 @@ export function registerHostedHarnessSessionRoutes(
     }
   });
 
+  /**
+   * H4f × H4d-b: a stopped run's child takes no more message work. From
+   * now on the wake pump starts none of its message inputs; a message turn
+   * in flight is aborted, and its own end settles its input cancelled.
+   * The waiting ones settle cancelled once no turn runs, holding the
+   * Session as a close does, so neither the pump nor a prompt starts in
+   * between. Idempotent: the relay repeats it until the journal shows no
+   * message input owed.
+   */
+  const stopSessionMessageTurns = async (
+    session: HostedSession,
+    sessionId: string,
+  ): Promise<void> => {
+    session.messagesStopped = true;
+    const active = session.active;
+    if (active !== undefined) {
+      const authority = session.managed.authority;
+      if (
+        authority
+          .eventsInSequenceRange(1, authority.committedSequence)
+          .some(
+            (event) =>
+              event.kind === 'input.accepted' &&
+              event.payload['turnId'] === active.promptId &&
+              event.payload['source'] === SESSION_MESSAGE_INPUT_SOURCE,
+          )
+      )
+        active.abort.abort();
+      return;
+    }
+    if (session.mcpBusy || session.hooksBusy || session.mcpRecovering) return;
+    session.mcpBusy = true;
+    try {
+      await settlePendingMonitorInputs({
+        authority: session.managed.authority,
+        sink: session.managed.sink,
+        sessionId,
+        cwd: session.cwd,
+        sources: [SESSION_MESSAGE_INPUT_SOURCE],
+        stopReason: 'stop_requested',
+      });
+    } finally {
+      session.mcpBusy = false;
+    }
+  };
+
   // One message verb onto the Session's journal, for the route below.
   const runMessageOperation = async (
     req: Request,
@@ -5400,9 +5461,24 @@ export function registerHostedHarnessSessionRoutes(
     const operationId = body?.['operationId'];
     const messageId = body?.['messageId'];
     const kind = body?.['kind'];
+    if (typeof operationId !== 'string' || !HOSTED_UUID.test(operationId)) {
+      return error(res, 400, 'invalid_message_operation');
+    }
+    if (kind === 'stop') {
+      // H4f: the Session's run is stopped, and its message turns stop with
+      // it (H4d-b decision 8 counts them as its work).
+      try {
+        await stopSessionMessageTurns(session, req.params['id']);
+      } catch (cause) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted message turns of session ${req.params['id']} could not be stopped: ${String(cause)}`,
+        );
+        return error(res, 503, 'session_message_failed', String(cause));
+      }
+      res.status(202).json({ operationId, state: 'settled' });
+      return;
+    }
     if (
-      typeof operationId !== 'string' ||
-      !HOSTED_UUID.test(operationId) ||
       typeof messageId !== 'string' ||
       messageId.length < 1 ||
       messageId.length > 320
@@ -5520,7 +5596,8 @@ export function registerHostedHarnessSessionRoutes(
    * and wake that carry the message. Every verb is replay-safe by the
    * funnel's derived command ids, so a redriven relay request never mints
    * a second input. A turn in flight is not a refusal: the input queues
-   * behind it in the journal.
+   * behind it in the journal. The child result relay's `stop` (H4f) is
+   * idempotent rather than replayed: it settles only what is still waiting.
    */
   app.post('/session/:id/messages/operations', async (req, res) => {
     const session = identity(req, sessions);
@@ -5971,6 +6048,7 @@ export function registerHostedHarnessSessionRoutes(
               cwd: session.cwd,
               gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
               children: session.childAgents,
+              messages: session.messages,
               signal: abort.signal,
               consume: (childRunId) => session.childConsumption.add(childRunId),
             });
@@ -5992,6 +6070,7 @@ export function registerHostedHarnessSessionRoutes(
             promptId,
             children: session.childAgents,
             teams: session.teams,
+            messages: session.messages,
           });
           if (answered > 0) {
             projected = await session.managed.sink.project();
@@ -6239,6 +6318,7 @@ export function registerHostedHarnessSessionRoutes(
             cwd: session.cwd,
             gapText: HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
             children: session.childAgents,
+            messages: session.messages,
             signal: cancelFillAbort.signal,
             consume: (childRunId) => session.childConsumption.add(childRunId),
           });
@@ -6268,6 +6348,7 @@ export function registerHostedHarnessSessionRoutes(
           promptId,
           children: session.childAgents,
           teams: session.teams,
+          messages: session.messages,
         });
         // Whatever shape the wait was in, its round is fully answered now:
         // the folds above landed (or the journaled proof they were never

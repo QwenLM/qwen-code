@@ -6,6 +6,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
@@ -65,6 +66,8 @@ public class ChildResultRelay {
      * without any activity in the child before it stops holding the
      * child's settlement (a blocked child would hold it forever). */
     private static final long MESSAGE_TURN_WAIT_MS = 30 * 60_000;
+    private static final Set<String> TERMINAL_TURNS =
+            Set.of("COMPLETED", "FAILED", "CANCELLED");
 
     private final ChildResultRelayStore relayStore;
     private final ManagedAgentService sessions;
@@ -273,7 +276,11 @@ public class ChildResultRelay {
      * completed Turn delivers its result, a failed one no cancel reached
      * settles {@code child_failed} — through the ordinary walk,
      * and the request stays recorded on the settled run. Returns false
-     * exactly then.
+     * exactly then. H4d-b: a child's message turns are its work too
+     * (decision 8) and never become API Turns, so its journal decides
+     * alongside the Turn: a message input still waiting or running is
+     * stopped through the child's message route first, and the newest
+     * settled turn, API or message, is the outcome.
      */
     private boolean stopChild(RelayRow row, long now) {
         String child = row.childSessionId() != null ? row.childSessionId()
@@ -291,19 +298,47 @@ public class ChildResultRelay {
         if (turn == null) {
             throw new RelayRetry("child Session has no Turn yet");
         }
+        ChildResultRelayStore.JournalTurns journal =
+                relayStore.hasSessionMessages(row.tenantId(), child)
+                        ? relayStore.journalTurns(row.tenantId(), child)
+                        : null;
+        boolean messagesOwed = journal != null
+                && journal.pendingMessageInputs() > 0;
+        ChildResultRelayStore.SettledTurn last = journal == null ? null
+                : journal.lastSettled();
         // A COMPLETED Turn, or a FAILED one no cancel ever reached, is the
         // child's own outcome and keeps its ordinary settlement. A Turn a
         // cancel took effect on (it entered CANCELLING) may still end
         // FAILED — a cancel landing mid-recovery fails the Turn — and that
         // end is the stop's: it settles cancelled like a CANCELLED one.
-        boolean stoppedHere = "FAILED".equals(turn.status())
+        String status = turn.status();
+        boolean stoppedHere = "FAILED".equals(status)
                 && relayStore.turnCancelRequested(row.tenantId(), child,
                         turn.turnId());
-        if ("COMPLETED".equals(turn.status())
-                || "FAILED".equals(turn.status()) && !stoppedHere) {
+        if (last != null && "session_message".equals(last.source())
+                && TERMINAL_TURNS.contains(status)) {
+            // A message turn settled after the task: its end is the
+            // child's, and only a cancelled one is the stop's.
+            status = "completed".equals(last.outcome()) ? "COMPLETED"
+                    : "cancelled".equals(last.outcome()) ? "CANCELLED"
+                            : "FAILED";
+            stoppedHere = false;
+        }
+        if (messagesOwed && TERMINAL_TURNS.contains(turn.status())
+                && now - journal.lastActivityAt() >= MESSAGE_TURN_WAIT_MS) {
+            // A message input no turn took within the bound (a blocked
+            // child) holds the stop no longer than it would hold the
+            // settlement (decision 8): the stop takes effect, and the
+            // child's close cancels what is left.
+            messagesOwed = false;
+            status = "CANCELLED";
+            stoppedHere = false;
+        }
+        if (!messagesOwed && ("COMPLETED".equals(status)
+                || "FAILED".equals(status) && !stoppedHere)) {
             return false;
         }
-        if (!"CANCELLED".equals(turn.status()) && !stoppedHere) {
+        if (messagesOwed || !"CANCELLED".equals(status) && !stoppedHere) {
             // Only an accepted or running Turn takes the cancel; one that
             // is already cancelling owns its outcome — look again on the
             // heartbeat rather than re-driving a command with no effect.
@@ -312,6 +347,27 @@ public class ChildResultRelay {
                 sessions.cancelChildTurn(row.tenantId(),
                         row.parentSessionId(), child, row.childRunId(),
                         turn.turnId());
+            }
+            if (messagesOwed) {
+                // The child's waiting message inputs settle cancelled and a
+                // message turn in flight is aborted; the journal shows when
+                // nothing is left, on a later heartbeat.
+                Map<String, Object> stop = new LinkedHashMap<>();
+                stop.put("operationId", UUID.randomUUID().toString());
+                stop.put("kind", "stop");
+                try {
+                    harness.runMessageOperation(row.tenantId(), child, stop);
+                } catch (DaemonHttpException error) {
+                    // A child that waits on its recovery or is closing takes
+                    // no stop yet: the heartbeat asks again, spending no
+                    // attempt, and the bound above ends the wait.
+                    if (!"hosted_turn_recovery_required"
+                            .equals(error.getErrorCode())
+                            && !"hosted_session_closing"
+                                    .equals(error.getErrorCode())) {
+                        throw error;
+                    }
+                }
             }
             relayStore.scheduleRetry(row, owner, now + HEARTBEAT_MS,
                     now + LEASE_MS, now);

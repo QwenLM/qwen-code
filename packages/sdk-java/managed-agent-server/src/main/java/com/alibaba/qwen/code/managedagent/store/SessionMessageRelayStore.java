@@ -5,7 +5,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 /**
- * H4d-b: the JDBC side of the session message relay — its V61 ledger plus
+ * H4d-b: the JDBC side of the session message relay — its V64 ledger plus
  * the reads its worker needs beyond the child result relay's: outbox
  * entries over the delivery-pending index, one record's committed delivery
  * state in either journal, and a child Session's recorded lineage. The

@@ -481,6 +481,19 @@ class SessionMessageRelayTest {
         assertThat(row.get().state()).isEqualTo("done");
     }
 
+    // A run stopped after the handover takes no receipt: it would wake a
+    // child going away.
+    @Test
+    void rejectsAHandedOverMessageWhoseRunIsBeingStopped() {
+        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "accepting",
+                "resource-message"));
+        body("to_child", PARENT, CHILD);
+        childRun("running", CHILD, true);
+        relay.scan();
+        assertThat(kinds()).containsExactly("rejected");
+        assertThat(row.get().state()).isEqualTo("done");
+    }
+
     // The receipt landed before the sender closed: delivered, not orphaned.
     @Test
     void finishesAReceivedMessageWhoseSenderClosedBeforeItsAcceptance() {

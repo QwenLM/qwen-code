@@ -486,6 +486,22 @@ export const HOSTED_SEND_MESSAGE_TO_CHILD_TOOL: FunctionDeclaration = {
   },
 };
 
+/** H4d-b: the answers of a committed send_message, which recovery repeats
+ * for a call an interrupted turn committed but never answered. */
+export const HOSTED_MESSAGE_TO_PARENT_TEXT =
+  "Message queued for delivery to the parent agent. It arrives as the parent's next input once its current turn ends.";
+
+export function hostedMessageToChildText(taskId: string): string {
+  return `Message queued for delivery to child agent ${taskId}. It arrives as the child's next input once its current turn ends. There is no inline reply: the child answers through its completion notification or a message to you. Do not relaunch the task while waiting.`;
+}
+
+export function hostedMessageContinuedText(
+  predecessorTaskId: string,
+  taskId: string,
+): string {
+  return `Child agent ${predecessorTaskId} had completed; continued it as ${taskId} with your message as its next instruction. Its result arrives as a durable notification input; either task id reaches the newest run.`;
+}
+
 /** H4d-b: a child Session's durable message to the parent that launched it. */
 export const HOSTED_SEND_MESSAGE_TO_PARENT_TOOL: FunctionDeclaration = {
   name: 'send_message',
@@ -3139,10 +3155,7 @@ export class HostedWorkspaceToolTurn {
         );
       }
       this.agentDispatched.add(request.call.callId);
-      return answer(
-        "Message queued for delivery to the parent agent. It arrives as the parent's next input once its current turn ends.",
-        false,
-      );
+      return answer(HOSTED_MESSAGE_TO_PARENT_TEXT, false);
     }
     const taskId = (request.call.args['task_id'] as string).trim();
     let route: Awaited<ReturnType<HostedChildAgentSession['sendToChild']>>;
@@ -3163,12 +3176,15 @@ export class HostedWorkspaceToolTurn {
     this.agentDispatched.add(request.call.callId);
     if (route.kind === 'message') {
       return answer(
-        `Message queued for delivery to child agent ${this.childAgents!.taskIdOf(route.childRunId)}. It arrives as the child's next input once its current turn ends. There is no inline reply: the child answers through its completion notification or a message to you. Do not relaunch the task while waiting.`,
+        hostedMessageToChildText(this.childAgents!.taskIdOf(route.childRunId)),
         false,
       );
     }
     return answer(
-      `Child agent ${this.childAgents!.taskIdOf(route.predecessorChildRunId)} had completed; continued it as ${this.childAgents!.taskIdOf(route.childRunId)} with your message as its next instruction. Its result arrives as a durable notification input; either task id reaches the newest run.`,
+      hostedMessageContinuedText(
+        this.childAgents!.taskIdOf(route.predecessorChildRunId),
+        this.childAgents!.taskIdOf(route.childRunId),
+      ),
       false,
     );
   }

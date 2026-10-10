@@ -5479,8 +5479,64 @@ describe('Hosted Harness no-tool session', () => {
         })
         .then((response) => response);
     };
-    return { server, receive };
+    return { server, receive, clientId: loaded.body.clientId as string };
   }
+
+  // H4f × H4d-b: a stopped run's message turns stop with it — the one in
+  // flight is aborted and the ones waiting behind it never run.
+  it('stops the message turn in flight and the messages waiting behind it', async () => {
+    const { server, receive, clientId } = await loadMessageParent();
+    let signal!: AbortSignal;
+    // An aborted model call rejects, as the provider's does.
+    state.model.mockImplementationOnce(
+      (input) =>
+        new Promise((_resolve, reject) => {
+          signal = input.signal;
+          signal.addEventListener(
+            'abort',
+            () => reject(new Error('The model call was aborted.')),
+            { once: true },
+          );
+        }),
+    );
+    expect((await receive('msg_running')).status).toBe(202);
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1));
+    expect((await receive('msg_waiting')).status).toBe(202);
+    const stop = () =>
+      headers(
+        supertest(server).post(`/session/${SESSION_ID}/messages/operations`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ operationId: randomUUID(), kind: 'stop' });
+    // A message turn in flight is aborted; the waiting one never starts.
+    expect((await stop()).status).toBe(202);
+    expect(signal.aborted).toBe(true);
+    const settledOf = async (turnId: string) =>
+      (await journalEvents()).find(
+        (event) =>
+          event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
+      )?.payload;
+    await vi.waitFor(
+      async () =>
+        expect((await settledOf('msg_running:message'))?.['outcome']).toBe(
+          'cancelled',
+        ),
+      { timeout: 10_000, interval: 50 },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(await settledOf('msg_waiting:message')).toBeUndefined();
+    // The relay's next stop, with no turn running, settles it.
+    expect((await stop()).status).toBe(202);
+    expect(await settledOf('msg_waiting:message')).toMatchObject({
+      outcome: 'cancelled',
+      stopReason: 'stop_requested',
+    });
+    expect(state.model).toHaveBeenCalledTimes(1);
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+  });
 
   it('refuses a message once the Session close began', async () => {
     const { server, receive } = await loadMessageParent();
