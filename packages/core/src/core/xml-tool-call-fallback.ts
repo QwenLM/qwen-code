@@ -91,6 +91,40 @@ function stripDelimitingNewlines(value: string): string {
   return result;
 }
 
+export function markdownFenceRanges(
+  text: string,
+  ignoredRanges: Array<[number, number]> = [],
+): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  let openFence: { delim: string; len: number; start: number } | null = null;
+  let lineStart = 0;
+  for (const line of text.split('\n')) {
+    const currentLineStart = lineStart;
+    const lineEnd = lineStart + line.length;
+    const insideIgnoredRange = ignoredRanges.some(
+      ([start, end]) => lineStart >= start && lineEnd <= end,
+    );
+    lineStart = lineEnd + 1;
+    if (insideIgnoredRange) continue;
+    const m = /^ {0,3}((`{3,})|~{3,})/.exec(line);
+    if (!m) continue;
+    const delim = m[2] ? '`' : '~';
+    const len = m[1].length;
+    if (openFence === null) {
+      openFence = { delim, len, start: currentLineStart };
+    } else if (
+      openFence.delim === delim &&
+      len >= openFence.len &&
+      line.slice(m[0].length).trim() === ''
+    ) {
+      ranges.push([openFence.start, lineEnd]);
+      openFence = null;
+    }
+  }
+  if (openFence !== null) ranges.push([openFence.start, text.length]);
+  return ranges;
+}
+
 /**
  * Returns true when `index` falls inside an unclosed fenced code block.
  * Tracks delimiter type and length so a fence is only closed by a run of

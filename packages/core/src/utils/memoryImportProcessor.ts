@@ -162,7 +162,7 @@ function isFileNotFoundError(err: unknown): boolean {
   );
 }
 
-function findCodeRegions(content: string): Array<[number, number]> {
+export function findCodeRegions(content: string): Array<[number, number]> {
   const regions: Array<[number, number]> = [];
   const tokens = marked.lexer(content);
   let offset = 0;

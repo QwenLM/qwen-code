@@ -195,6 +195,126 @@ describe('StreamJsonOutputAdapter', () => {
         expect(messageStartCall).toBeDefined();
       });
 
+      it('emits a retry boundary and starts a fresh message after non-continuation retry', () => {
+        adapter.processEvent({
+          type: LlmEventType.Content,
+          value: 'orphaned payload',
+        });
+        adapter.restartAttempt(false, []);
+        adapter.emitSystemMessage('retry', {
+          reason: 'retry',
+          discardedToolCalls: 0,
+          preserveText: false,
+        });
+        adapter.processEvent({
+          type: LlmEventType.Content,
+          value: 'clean response',
+        });
+        const finalMessage = adapter.finalizeAssistantMessage();
+
+        const messages = stdoutWriteSpy.mock.calls.map((call: unknown[]) =>
+          JSON.parse(call[0] as string),
+        );
+        expect(messages).toContainEqual(
+          expect.objectContaining({
+            type: 'system',
+            subtype: 'retry',
+            data: {
+              reason: 'retry',
+              discardedToolCalls: 0,
+              preserveText: false,
+            },
+          }),
+        );
+        expect(
+          messages.filter(
+            (message: { type?: string; event?: { type?: string } }) =>
+              message.type === 'stream_event' &&
+              message.event?.type === 'message_start',
+          ),
+        ).toHaveLength(2);
+        expect(
+          messages.filter(
+            (message: { type?: string; event?: { type?: string } }) =>
+              message.type === 'stream_event' &&
+              message.event?.type === 'message_stop',
+          ),
+        ).toHaveLength(2);
+
+        const retryIndex = messages.findIndex(
+          (message: { type?: string; subtype?: string }) =>
+            message.type === 'system' && message.subtype === 'retry',
+        );
+        const firstStopIndex = messages.findIndex(
+          (message: { type?: string; event?: { type?: string } }) =>
+            message.type === 'stream_event' &&
+            message.event?.type === 'message_stop',
+        );
+        const secondStartIndex = messages.findIndex(
+          (
+            message: {
+              type?: string;
+              event?: { type?: string; message?: { content?: unknown[] } };
+            },
+            index: number,
+          ) =>
+            index > retryIndex &&
+            message.type === 'stream_event' &&
+            message.event?.type === 'message_start',
+        );
+        expect(firstStopIndex).toBeGreaterThan(-1);
+        expect(firstStopIndex).toBeLessThan(retryIndex);
+        expect(secondStartIndex).toBeGreaterThan(retryIndex);
+
+        expect(finalMessage.message.content).toEqual([
+          { type: 'text', text: 'clean response' },
+        ]);
+      });
+
+      it('keeps the current stream message across continuation retry', () => {
+        adapter.processEvent({
+          type: LlmEventType.Content,
+          value: 'partial',
+        });
+        adapter.restartAttempt(true, []);
+        adapter.emitSystemMessage('retry', {
+          reason: 'retry',
+          discardedToolCalls: 0,
+          preserveText: true,
+        });
+        adapter.processEvent({
+          type: LlmEventType.Content,
+          value: ' continuation',
+        });
+
+        const messages = stdoutWriteSpy.mock.calls.map((call: unknown[]) =>
+          JSON.parse(call[0] as string),
+        );
+        expect(messages).toContainEqual(
+          expect.objectContaining({
+            type: 'system',
+            subtype: 'retry',
+            data: {
+              reason: 'retry',
+              discardedToolCalls: 0,
+              preserveText: true,
+            },
+          }),
+        );
+        expect(
+          messages.filter(
+            (message: { type?: string; event?: { type?: string } }) =>
+              message.type === 'stream_event' &&
+              message.event?.type === 'message_start',
+          ),
+        ).toHaveLength(1);
+
+        const finalMessage = adapter.finalizeAssistantMessage();
+        expect(finalMessage.message.content).toEqual([
+          { type: 'text', text: 'partial continuation' },
+        ]);
+      });
+
       it('should emit content_block_start for new blocks', () => {
         adapter.processEvent({
           type: LlmEventType.Content,

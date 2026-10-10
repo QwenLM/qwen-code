@@ -9687,6 +9687,406 @@ describe('LlmChat', async () => {
     expect(chat.getLastModelMessageText()).toBe(response);
   });
 
+  it('retries orphaned XML tool-call closing tags before persistence', async () => {
+    vi.useFakeTimers();
+    try {
+      const recordAssistantTurn = vi.fn();
+      const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(
+          streamOf(
+            stopResponse([{ text: 'Done.\n</parameter>\n</invoke>\n' }]),
+          ),
+        )
+        .mockResolvedValueOnce(
+          streamOf(stopResponse([{ text: 'Successful final response' }])),
+        );
+
+      const stream = await chatWithRecording.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-orphaned-xml-close-tags',
+      );
+      const events: StreamEvent[] = [];
+      const iterator = stream[Symbol.asyncIterator]();
+      for (;;) {
+        const next = iterator.next();
+        await vi.advanceTimersByTimeAsync(5_000);
+        const result = await next;
+        if (result.done) break;
+        events.push(result.value);
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+        true,
+      );
+      expect(chatWithRecording.getLastModelMessageText()).toBe(
+        'Successful final response',
+      );
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
+        { text: 'Successful final response' },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    {
+      name: 'quoted opener text',
+      leakedText:
+        JSON.stringify({ example: '<invoke>' }) + '\n</parameter>\n</invoke>\n',
+    },
+    {
+      name: 'unclosed opener prose',
+      leakedText:
+        'The example starts with <invoke but does not open a tool call.\n' +
+        '</parameter>\n</invoke>\n',
+    },
+    {
+      name: 'fenced opener text',
+      leakedText:
+        '```xml\n<invoke name="read_file">\n```\n\n</parameter>\n</invoke>\n',
+    },
+    {
+      name: 'stray backtick before a fenced block',
+      leakedText:
+        'stray ` before docs\n```text\ninside ` fence\n```\n\n</parameter>\n</invoke>\n',
+    },
+    {
+      name: 'inline code with an unmatched quote',
+      leakedText: 'Use `"inside code` here.\n</parameter>\n</invoke>\n',
+    },
+    {
+      name: 'ordinary prose with an unmatched quote',
+      leakedText: 'The display is 12" wide.\n</parameter>\n</invoke>\n',
+    },
+    {
+      name: 'balanced function example',
+      leakedText:
+        '<function=run_shell_command>\n' +
+        '<parameter name="command">ls</parameter>\n' +
+        '</function>\n\n</parameter>\n</function>\n',
+    },
+    {
+      name: 'self-closing invoke example',
+      leakedText: '<invoke name="read_file" />\n</parameter>\n</invoke>\n',
+    },
+    {
+      name: 'function dialect with a fence-like parameter',
+      leakedText:
+        '<function=write_file>\n' +
+        '<parameter name="content">```\ninside\n</parameter>\n' +
+        '</function>\n\n</parameter>\n</function>\n',
+    },
+  ])(
+    'retries orphaned XML tool-call closing tags after $name',
+    async ({ leakedText }) => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(streamOf(stopResponse([{ text: leakedText }])))
+          .mockResolvedValueOnce(
+            streamOf(stopResponse([{ text: 'Successful final response' }])),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-xml-open-tag-before-orphaned-close',
+        );
+        const events = await collectStreamWithFakeTimers(stream);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.some((event) => event.type === StreamEventType.RETRY),
+        ).toBe(true);
+        expect(chat.getLastModelMessageText()).toBe(
+          'Successful final response',
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('does not retry XML closing tags inside fenced code blocks', async () => {
+    const response = 'Example:\n```xml\n</parameter>\n</invoke>\n```\nDone.';
+    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValueOnce(
+      streamOf(stopResponse([{ text: response }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-fenced-xml-closing-tag-example',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(chat.getLastModelMessageText()).toBe(response);
+  });
+
+  it('retries closing tags in an indented paragraph continuation', async () => {
+    vi.useFakeTimers();
+    try {
+      mockStreamsOnce(
+        streamOf(
+          stopResponse([{ text: 'Explanation:\n    </parameter></invoke>' }]),
+        ),
+        streamOf(stopResponse([{ text: 'Clean answer' }])),
+      );
+      const events = await collectStreamWithFakeTimers(
+        await send('test', 'prompt-10700-regression'),
+      );
+      expectStreamCalls(2);
+      expect(eventsOfType(events, StreamEventType.RETRY)).toHaveLength(1);
+      expect(chat.getLastModelMessageText()).toBe('Clean answer');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves balanced mixed-case documentation tags', async () => {
+    const text =
+      'Example: <FUNCTION=read_file><parameter=path>fixture</parameter></function>';
+    mockStreamsOnce(streamOf(stopResponse([{ text }])));
+    await drain(await send('test', 'prompt-10700-regression'));
+    expectStreamCalls(1);
+    expect(chat.getLastModelMessageText()).toBe(text);
+  });
+
+  it('does not stall on a long truncated function opener', async () => {
+    const text = '<function=read_file' + ' '.repeat(60_000);
+    mockStreamsOnce(streamOf(stopResponse([{ text }])));
+    const started = performance.now();
+    await drain(await send('test', 'prompt-10700-regression'));
+    expect(performance.now() - started).toBeLessThan(500);
+    expectStreamCalls(1);
+  });
+
+  it('does not retry XML closing tags inside indented code blocks', async () => {
+    const response = 'Example:\n\n    </parameter>\n    </invoke>\nDone.';
+    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValueOnce(
+      streamOf(stopResponse([{ text: response }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-indented-xml-closing-tag-example',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(chat.getLastModelMessageText()).toBe(response);
+  });
+
+  it('does not retry fenced XML examples that contain line-initial fences', async () => {
+    const response = [
+      'Example:',
+      '```xml',
+      '<invoke name="write_file">',
+      '<parameter name="content">',
+      '```',
+      'inside',
+      '```',
+      '</parameter>',
+      '</invoke>',
+      '```',
+      'Done.',
+    ].join('\n');
+    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValueOnce(
+      streamOf(stopResponse([{ text: response }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-fenced-xml-example-with-fence-parameter',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(chat.getLastModelMessageText()).toBe(response);
+  });
+
+  it('recovers a real XML tool call after a fenced XML example with fences in a parameter', async () => {
+    const fencedExample = [
+      'Example:',
+      '```xml',
+      '<invoke name="write_file">',
+      '<parameter name="content">',
+      '```',
+      'inside',
+      '```',
+      '</parameter>',
+      '</invoke>',
+      '```',
+      '',
+    ].join('\n');
+    const emittedCall =
+      '<invoke name="read_file">\n' +
+      '<parameter name="path">a.ts</parameter>\n' +
+      '</invoke>\n';
+    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValueOnce(
+      streamOf(stopResponse([{ text: fencedExample + emittedCall }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-real-xml-after-fenced-example',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    const emittedParts = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+    expect(emittedParts.some((part) => part.functionCall)).toBe(true);
+    expect(
+      chat
+        .getHistory()
+        .at(-1)
+        ?.parts?.some((part) => part.functionCall),
+    ).toBe(true);
+  });
+
+  it('does not retry XML closing tags inside inline code spans', async () => {
+    const response = 'Use `</parameter></invoke>` to close that XML example.';
+    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValueOnce(
+      streamOf(stopResponse([{ text: response }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-inline-xml-closing-tag-example',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(chat.getLastModelMessageText()).toBe(response);
+  });
+
+  it('retries orphaned XML closing tags after a stray backtick in an earlier paragraph', async () => {
+    vi.useFakeTimers();
+    try {
+      const leakedText =
+        'This paragraph has a stray ` backtick.\n\n' +
+        '</parameter>\n</invoke>\n\n' +
+        'Later `inline` code is unrelated.';
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(streamOf(stopResponse([{ text: leakedText }])))
+        .mockResolvedValueOnce(
+          streamOf(stopResponse([{ text: 'Successful final response' }])),
+        );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-stray-backtick-before-orphaned-close',
+      );
+      const events = await collectStreamWithFakeTimers(stream);
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+        true,
+      );
+      expect(chat.getLastModelMessageText()).toBe('Successful final response');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not retry balanced XML tool-call closing tags in documentation', async () => {
+    const response =
+      'This is only documenting the wire format in prose so recovery should ' +
+      'not treat it as an emitted call. The complete shape is shown below for ' +
+      'readers and should not be retried.\n\n' +
+      '<example>\n<function=run_shell_command>\n' +
+      '<parameter name="command">ls</parameter>\n' +
+      '</function>\n</example>\n';
+    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValueOnce(
+      streamOf(stopResponse([{ text: response }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-balanced-xml-tool-call-example',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(chat.getLastModelMessageText()).toBe(response);
+  });
+
+  it('retries trailing XML closing tags after recovered tool calls', async () => {
+    vi.useFakeTimers();
+    try {
+      const leakedText =
+        '<invoke name="read_file">\n' +
+        '<parameter name="path">a.ts</parameter>\n' +
+        '</invoke>\n\n</parameter>\n</invoke>\n';
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockResolvedValueOnce(streamOf(stopResponse([{ text: leakedText }])))
+        .mockResolvedValueOnce(
+          streamOf(stopResponse([{ text: 'Successful final response' }])),
+        );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-recovered-tool-call-then-orphaned-close',
+      );
+      const events = await collectStreamWithFakeTimers(stream);
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+        true,
+      );
+      expect(chat.getLastModelMessageText()).toBe('Successful final response');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     [
       'retries leaked JSON before a structured tool call',
@@ -10705,6 +11105,169 @@ describe('LlmChat', async () => {
       expect(continuationOf(retries[0]!)).toBe(undefined);
       expect(continuationOf(retries[1]!)).toBe(true);
       expectStreamCalls(3);
+    });
+
+    it('does not retry XML closing tags split across output recovery', async () => {
+      const prefix =
+        '<invoke name="write_file">\n<parameter name="content">hello';
+      const remainder = ' world</parameter>\n</invoke>';
+      const streams = [
+        streamOf(modelChunk([{ text: prefix }], 'MAX_TOKENS')),
+        streamOf(modelChunk([{ text: remainder }], 'STOP')),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a file' },
+        'prompt-recovery-xml-tool-call-boundary',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(
+        events.filter((event) => event.type === StreamEventType.RETRY),
+      ).toHaveLength(1);
+      expect(chat.getLastModelMessageText()).toBe(prefix + remainder);
+    });
+
+    it('does not retry XML closing tags split across three output recovery segments', async () => {
+      const first = '<invoke name="write_file">\n';
+      const second = '<parameter name="content">hello';
+      const third = ' world</parameter>\n</invoke>';
+      const streams = [
+        streamOf(modelChunk([{ text: first }], 'MAX_TOKENS')),
+        streamOf(modelChunk([{ text: second }], 'MAX_TOKENS')),
+        streamOf(modelChunk([{ text: third }], 'STOP')),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a file' },
+        'prompt-recovery-xml-tool-call-three-segments',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        3,
+      );
+      expect(
+        events
+          .filter((event) => event.type === StreamEventType.RETRY)
+          .map(
+            (event) => (event as { isContinuation?: boolean }).isContinuation,
+          ),
+      ).toEqual([true, true]);
+      expect(chat.getLastModelMessageText()).toBe(first + second + third);
+    });
+
+    it('recovers a continuation XML tool call after the prefix ends inside inline code', async () => {
+      const prefix = 'The example starts `but is cut';
+      const continuation =
+        '\n<invoke name="read_file">\n' +
+        '<parameter name="path">a.ts</parameter>\n' +
+        '</invoke>\n' +
+        '` later text';
+      const streams = [
+        streamOf(modelChunk([{ text: prefix }], 'MAX_TOKENS')),
+        streamOf(modelChunk([{ text: continuation }], 'STOP')),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'read a file' },
+        'prompt-recovery-inline-prefix-real-tool-call',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(
+        events.filter((event) => event.type === StreamEventType.RETRY),
+      ).toHaveLength(1);
+      const emittedParts = events
+        .filter((event) => event.type === StreamEventType.CHUNK)
+        .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+      expect(emittedParts.some((part) => part.functionCall)).toBe(true);
+      expect(mockLogContentRetry).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ error_type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it('retries a continuation leak after a prefix cut inside a JSON string without yielding leaked text', async () => {
+      vi.useFakeTimers();
+      try {
+        const prefix = '{"args":"unterminated';
+        const leaked = '\n</parameter>\n</function>\n';
+        const clean = ' clean continuation';
+        const streams = [
+          streamOf(modelChunk([{ text: prefix }], 'MAX_TOKENS')),
+          streamOf(modelChunk([{ text: leaked }], 'STOP')),
+          streamOf(modelChunk([{ text: clean }], 'STOP')),
+        ];
+        let callIndex = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streams[callIndex++]!);
+
+        const stream = await chat.sendMessageStream(
+          'gemini-3-pro',
+          { message: 'write JSON' },
+          'prompt-recovery-json-string-prefix-orphaned-close',
+        );
+        const events = await collectStreamWithFakeTimers(stream);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(3);
+        expect(
+          events
+            .filter((event) => event.type === StreamEventType.RETRY)
+            .map(
+              (event) => (event as { isContinuation?: boolean }).isContinuation,
+            ),
+        ).toEqual([true, true]);
+        const emittedText = events
+          .filter((event) => event.type === StreamEventType.CHUNK)
+          .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? [])
+          .map((part) => part.text ?? '')
+          .join('');
+        const historyText =
+          chat
+            .getHistory()
+            .at(-1)
+            ?.parts?.map((part) => part.text ?? '')
+            .join('') ?? '';
+        expect(emittedText).toBe(prefix + clean);
+        expect(historyText).toBe(emittedText);
+        expect(emittedText).not.toContain('</parameter>');
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('retries protocol-tag leaks during max-tokens escalation', async () => {

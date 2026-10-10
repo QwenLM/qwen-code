@@ -645,6 +645,7 @@ export abstract class BaseJsonOutputAdapter {
       }
       return;
     }
+    this.lastAssistantMessage = null;
     this.startAssistantMessageInternal(this.mainAgentMessageState);
   }
 
