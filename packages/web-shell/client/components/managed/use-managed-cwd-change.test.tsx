@@ -174,7 +174,10 @@ describe('useManagedCwdChange', () => {
     expect(current.blocked).toBe(false);
   });
 
-  it('retains a lost-ACK intent when replay is refused after permission revocation', async () => {
+  it('releases a lost-ACK intent when confirm replay is refused after permission revocation', async () => {
+    // The store's actor-scoped replay lookup runs before the role gate, so
+    // a 403 on replay proves the original submit was never recorded: the
+    // intent is released with the real refusal instead of parking forever.
     vi.mocked(provider.cwdChange!.submit)
       .mockRejectedValueOnce(new Error('lost ACK'))
       .mockRejectedValueOnce(
@@ -188,14 +191,37 @@ describe('useManagedCwdChange', () => {
     await act(async () => {
       await current.submit('B', 1);
     });
+    expect(current.blocked).toBe(true);
     await act(async () => {
       await current.confirm();
     });
+    expect(current.blocked).toBe(false);
+    expect(current.errorCode).toBe('session_operation_forbidden');
+    expect(sessionStorage.length).toBe(0);
+  });
+
+  it('releases a lost-ACK intent when confirm replay meets a revision conflict', async () => {
+    vi.mocked(provider.cwdChange!.submit)
+      .mockRejectedValueOnce(new TypeError('lost ACK'))
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(
+          409,
+          'context_revision_conflict',
+          'conflict',
+        ),
+      );
+    await render();
+    await act(async () => {
+      await current.submit('B', 1);
+    });
     expect(current.blocked).toBe(true);
-    expect(current.errorCode).toBe('unconfirmed_forbidden');
-    expect(
-      sessionStorage.getItem('qwen-managed-cwd:tenant:actor:s1'),
-    ).toContain('idempotencyKey');
+    await act(async () => {
+      await current.confirm();
+    });
+    expect(current.blocked).toBe(false);
+    expect(current.errorCode).toBe('context_revision_conflict');
+    expect(sessionStorage.length).toBe(0);
+    expect(refresh).toHaveBeenCalled();
   });
 
   it('ignores a delayed operation response after selecting another Session', async () => {

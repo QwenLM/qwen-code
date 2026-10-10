@@ -90,11 +90,7 @@ export function useManagedCwdChange(
   const refreshRef = useRef(refreshSummary);
   refreshRef.current = refreshSummary;
 
-  async function run(
-    intent: CwdIntent,
-    replay: boolean,
-    initialSubmission = false,
-  ) {
+  async function run(intent: CwdIntent, replay: boolean) {
     const owner = lifetime.current;
     const api = provider.cwdChange;
     if (!owner || owner.signal.aborted || running.current || !api) return;
@@ -185,13 +181,18 @@ export function useManagedCwdChange(
       }
     } catch (failure) {
       if (owner.signal.aborted) return;
+      // A replay is answered by the store's actor-scoped idempotency lookup
+      // before any role, revision or busy gate, so a refusal from behind
+      // that lookup proves the original submit was never recorded — the
+      // intent must be released with the real code, not parked as
+      // unconfirmed forever. 401 (actor_required) and the canRead 404 run
+      // before the lookup and prove nothing; 408/429 are transient.
       const definitive =
-        initialSubmission &&
         !accepted &&
         failure instanceof JavaManagedAgentHttpError &&
         failure.status >= 400 &&
         failure.status < 500 &&
-        ![408, 429].includes(failure.status);
+        ![401, 404, 408, 429].includes(failure.status);
       if (definitive) {
         update(undefined, failure.code);
         if (failure.code === 'context_revision_conflict') {
@@ -266,7 +267,7 @@ export function useManagedCwdChange(
     }
     pendingRef.current = intent;
     setState((value) => ({ ...value, pending: intent, target: cwdRelative }));
-    return run(intent, true, true);
+    return run(intent, true);
   }
 
   async function confirm() {
