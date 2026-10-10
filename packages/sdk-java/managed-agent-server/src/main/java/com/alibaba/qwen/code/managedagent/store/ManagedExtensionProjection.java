@@ -79,7 +79,12 @@ public final class ManagedExtensionProjection {
                     ManagedExtensionRecords::requireAutomationRunRecord,
                     body -> body.get("automationRunId").textValue(),
                     ManagedExtensionRecords::isAutomationRunStart,
-                    ManagedExtensionRecords::isAutomationRunSuccessor)));
+                    ManagedExtensionRecords::isAutomationRunSuccessor)),
+            entry("session_message", new Body(record -> null,
+                    ManagedSessionMessageRecords::requireMessage,
+                    body -> body.get("messageId").textValue(),
+                    ManagedSessionMessageRecords::isMessageStart,
+                    ManagedSessionMessageRecords::isMessageSuccessor)));
     public static final List<String> TASK_STATES = List.of("pending",
             "running", "waiting", "completed", "failed", "cancelled",
             "degraded", "recovery_blocked");
