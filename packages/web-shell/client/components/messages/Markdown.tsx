@@ -478,8 +478,8 @@ function MermaidBlock({ code }: { code: string }) {
 
   if (error) {
     return (
-      <div className={styles.codeBlock}>
-        <div className={styles.codeBlockHeader}>
+      <div className={styles.codeBlock} data-selection-code-language="mermaid">
+        <div className={styles.codeBlockHeader} data-selection-copy-ignore>
           <span className={styles.codeBlockLang}>
             {t('mermaid.errorLabel')}
           </span>
@@ -492,8 +492,8 @@ function MermaidBlock({ code }: { code: string }) {
   }
 
   return (
-    <div className={styles.codeBlock}>
-      <div className={styles.codeBlockHeader}>
+    <div className={styles.codeBlock} data-selection-code-language="mermaid">
+      <div className={styles.codeBlockHeader} data-selection-copy-ignore>
         <span className={styles.codeBlockLang}>{t('mermaid.label')}</span>
         <span className={styles.mermaidActions}>
           {viewMode === 'diagram' && (
@@ -676,8 +676,8 @@ function CodeBlock({
   }
 
   return (
-    <div className={styles.codeBlock}>
-      <div className={styles.codeBlockHeader}>
+    <div className={styles.codeBlock} data-selection-code-language={lang}>
+      <div className={styles.codeBlockHeader} data-selection-copy-ignore>
         <span className={styles.codeBlockLang}>{label}</span>
         <button className={styles.codeBlockCopy} onClick={handleCopy}>
           {copied ? t('code.copied') : t('code.copy')}
