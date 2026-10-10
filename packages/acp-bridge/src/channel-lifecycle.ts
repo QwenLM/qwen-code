@@ -22,6 +22,8 @@ export interface HarnessChannel {
   workspaceControlInFlight: number;
   /** A timed-out workspace operation will retire this channel after Sessions drain. */
   retireWhenSessionsDrain: boolean;
+  /** Positive diagnostic evidence; generic kills and failure reaps leave this unset. */
+  routineRetirementStarted?: boolean;
   /**
    * Set when an empty channel should be reaped after overlapping
    * session/workspace-control work drains.
