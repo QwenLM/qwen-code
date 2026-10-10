@@ -88,7 +88,7 @@ class AgentDefinitionCompilerTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource("""
+    @org.junit.jupiter.params.provider.CsvSource(textBlock = """
             '{"model":{"id":"qwen3"},"instructions":"","tools":[],"permission_policy":{}}', model
             '{"model":{},"instructions":7,"tools":[],"permission_policy":{}}', instructions
             '{"model":{},"instructions":"","tools":[],"permission_policy":{"plan":true}}', permission_policy
@@ -112,7 +112,7 @@ class AgentDefinitionCompilerTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource("""
+    @org.junit.jupiter.params.provider.CsvSource(textBlock = """
             '[{"type":"hosted_profile","profile":"hosted-workspace-files/2"}]'
             '[{"type":"hosted_profile","profile":"hosted-workspace-shell/1"}]'
             '[{"type":"tool","name":"read_file"}]'

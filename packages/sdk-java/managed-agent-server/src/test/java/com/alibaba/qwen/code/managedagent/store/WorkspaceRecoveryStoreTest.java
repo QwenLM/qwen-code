@@ -165,6 +165,13 @@ class WorkspaceRecoveryStoreTest {
                         .sessionId());
         head(deleted);
         retireSession(deleted);
+        // The pinned Session carries non-empty agent instructions published
+        // through the production publisher; W1 must read them back.
+        head(pinned);
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET workspace_id = 'workspace-b'"
+                + " WHERE session_id = ?", pinned);
+        var instructions = new ManagedSessionStore(jdbc).publishAgentInstructions(
+                "tenant", "workspace-b", pinned, "Keep the agent instructions. 保留指令。");
         JsonNode sources = call(capture(), "sessions").path("sessions");
         assertThat(sources).hasSize(3);
         JsonNode pinnedSource = null;
@@ -192,8 +199,29 @@ class WorkspaceRecoveryStoreTest {
                 .isEqualTo("1");
         assertThat(builtinSource.path("agentDefinitionDigest").isNull())
                 .isTrue();
-        // Capture and verify still pass on the mixed storage.
+        // The recovery read of the PUBLISHED instructions resource must
+        // return the published bytes (resource_layout_unsupported before
+        // the reader accepted the kind).
         var capture = capture();
+        ObjectNode ref = object().put("resourceId", instructions.resourceId())
+                .put("kind", instructions.kind())
+                .put("schemaVersion", instructions.schemaVersion())
+                .put("byteLength", (int) instructions.byteLength())
+                .put("digest", instructions.digest());
+        ObjectNode read = object().put("sessionId", pinned);
+        read.set("ref", ref);
+        assertThat(capture.call("resource", read).path("bytesBase64").asText())
+                .isEqualTo(java.util.Base64.getEncoder().encodeToString(
+                        "Keep the agent instructions. 保留指令。"
+                                .getBytes(StandardCharsets.UTF_8)));
+        capture.call("enqueueRef", read);
+        assertThat(capture.call("nextRef", object().put("sessionId", pinned)).toString())
+                .isEqualTo(ref.toString());
+        capture.call("completeRef", read);
+        assertThat(capture.inspect().path("pendingReferences").asLong())
+                .isZero();
+
+        // Capture and verify still pass on the mixed storage.
         ObjectNode asset = object().put("key", "b".repeat(64));
         asset.set("metadata", object().put("type", "entry").put("path",
                 "workspace").put("entryType", "directory").put("mode", 493));
