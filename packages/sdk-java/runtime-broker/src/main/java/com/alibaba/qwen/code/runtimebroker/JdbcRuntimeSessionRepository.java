@@ -146,6 +146,37 @@ public final class JdbcRuntimeSessionRepository
     }
 
     @Override
+    public RuntimeSessionRecord findHistorical(String tenantId, String harnessSessionId, String runtimeSessionId) {
+        BrokerValues.requireId(tenantId, "tenantId");
+        BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        BrokerValues.requireId(runtimeSessionId, "runtimeSessionId");
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            List<RuntimeSessionRecord> matches = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement("SELECT " + SESSION_COLUMNS
+                    + " FROM qwen_runtime_session WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ?")) {
+                statement.setString(1, tenantId);
+                statement.setString(2, harnessSessionId);
+                statement.setString(3, runtimeSessionId);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        var record = mapSession(rows);
+                        if (tenantId.equals(record.getSession().getScope().getTenantId())
+                                && harnessSessionId.equals(record.getSession().getHarnessSessionId())
+                                && runtimeSessionId.equals(record.getRuntimeSessionId())) {
+                            matches.add(record);
+                            if (matches.size() > 1) {
+                                throw new RuntimeBrokerException(409, "runtime_session_ambiguous",
+                                        "Historical Runtime Session is ambiguous", false);
+                            }
+                        }
+                    }
+                }
+            }
+            return matches.isEmpty() ? null : matches.getFirst();
+        });
+    }
+
+    @Override
     public RuntimeSessionRecord compareAndSet(RuntimeSessionRecord expected,
             RuntimeSessionRecord replacement) {
         return JdbcRepositorySupport.transaction(dataSource,

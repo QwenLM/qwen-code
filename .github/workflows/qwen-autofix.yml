@@ -147,9 +147,10 @@ env:
   NON_BLOCKING_CHECKS: '["review-pr"]'
   # Failed-check annotation patterns that mean the INFRASTRUCTURE died, not the
   # code — a self-hosted runner losing the server, the disk filling, a runner
-  # shutdown, or a git fetch/clone dying mid-transfer.
+  # shutdown, a git fetch/clone dying mid-transfer, or the hosted pool never
+  # handing the job a runner (#13622: "repeatedly failed to be acquired").
   # Full rationale → qwen-autofix.md#af-076
-  INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed'
+  INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired'
   # Upper bound on review targets emitted per scan (fan-out defense-in-depth;
   # excess is logged and deferred to the next scan).
   # Full rationale → qwen-autofix.md#af-077

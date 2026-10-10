@@ -430,6 +430,52 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyLong());
     }
 
+    // The transient-window code clears under the daemon's own wake pump:
+    // a Turn whose wait already spent the whole budget on it survives a
+    // wake park behind the window refusal, exactly because the durable
+    // meaning stayed behind on the old code.
+    @Test
+    void transientRecoveryWindow409SurvivesASpentRetryBudget() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                null, 0, "RUNNING", false, 5);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenReturn(new Attachment("boot-new", null, 4L,
+                        "epoch-new"));
+        when(store.bindHarness(anyString(), anyString(), anyString(),
+                anyString(), anyString())).thenReturn(true);
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(claimed));
+        DaemonHttpException window = mock(DaemonHttpException.class);
+        when(window.getStatusCode()).thenReturn(409);
+        when(window.getErrorCode())
+                .thenReturn("hosted_turn_recovery_in_progress");
+        when(harness.submit(eq("tenant"), eq("session"), anyString(),
+                any(), anyString())).thenThrow(window);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
     // A codeless error body must never take the contains() NPE hostage:
     // getErrorCode() is null by contract, and the Turn meets the budget
     // instead of dying in a claim/NPE/release loop with no terminal state.

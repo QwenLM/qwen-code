@@ -94,6 +94,7 @@ vi.mock(
         resourceStore,
         toolResultResources: resourceStore,
         assertWritable: state.assertWritable,
+        authorizeOrdinary: async () => undefined,
         publication: {
           owner: async () => ({ writerId: BOOT_ID, writerGeneration: 1 }),
           request: (route: string, body: unknown, token?: string) =>
@@ -220,6 +221,11 @@ describe('issue #13328: a second concurrent Session on the same Workspace mount'
           if (holder === this.runtimeSessionId) holder = undefined;
         },
       );
+      // No real provider call inside the interleaving this test pins.
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'workspaceContext',
+      ).mockResolvedValue([]);
       // Pin the first Turn inside its execution lease until the second
       // Turn's acquisition has been refused — the two Turns genuinely run
       // concurrently on the one mount.

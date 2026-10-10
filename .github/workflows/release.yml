@@ -423,6 +423,9 @@ jobs:
           VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
           VITEST_RETRY: "${{ vars.QWEN_RELEASE_VITEST_RETRY || '2' }}"
           NO_COLOR: 'true'
+          # Same fleet predicate as ci.yml's unit lane (#10870): millisecond
+          # budgets measure the neighbours on this pool, not the code.
+          QWEN_SKIP_LATENCY_BUDGETS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
         run: '.release-workflow/.github/scripts/run-release-workspace-tests.sh "${{ matrix.shard }}"'
 
   quality_scripts:

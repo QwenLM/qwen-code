@@ -392,6 +392,31 @@ function convertToHistoryItems(
           items.push({ type: 'notification', text });
           break;
         }
+        // Session multi-agent records: `message` holds the model envelope,
+        // so restore the authored display text instead.
+        // TODO(multi-agent): the TUI has no authored-message item; an agent
+        // reply restores as a notification line prefixed with its name.
+        if (
+          record.subtype === 'agent_mention' ||
+          record.subtype === 'agent_message'
+        ) {
+          const payload = record.systemPayload as
+            | { displayText?: string; author?: { name?: string } }
+            | undefined;
+          const text = payload?.displayText;
+          if (text) {
+            if (record.subtype === 'agent_mention' && !payload?.author) {
+              items.push({ type: MessageType.USER, text, sentToModel: false });
+            } else {
+              const name = payload?.author?.name ?? record.agentName;
+              items.push({
+                type: 'notification',
+                text: name ? `${name}: ${text}` : text,
+              });
+            }
+          }
+          break;
+        }
         if (record.subtype === 'mid_turn_user_message') {
           const payload = record.systemPayload as
             | { displayText?: string; attachmentReferences?: unknown[] }
