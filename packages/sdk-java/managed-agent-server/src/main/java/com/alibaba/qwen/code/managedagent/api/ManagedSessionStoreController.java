@@ -114,7 +114,7 @@ public class ManagedSessionStoreController {
                 writerToken, request);
     }
 
-    @PostMapping("/transactions:commit")
+    @PostMapping({"/transactions:commit", "/transactions:commit-v2"})
     public CommitReceipt commit(TenantContext tenant,
             @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER)

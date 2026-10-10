@@ -31,6 +31,7 @@ import {
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
+import { LlmRequestPreparationError } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 
 // monitor_run is enabled by the H3 enablement slice; the close-side settle
 // rig commits a notification input ahead of it, like the funnel suite does.
@@ -533,6 +534,7 @@ describe('createMonitorWakeRunTurn', () => {
     ['tool', () => new HostedToolRecoveryRequiredError(new Error('parked'))],
     ['mcp', () => new HostedMcpRecoveryRequiredError()],
     ['hook', () => new HostedHookRecoveryRequiredError()],
+    ['model preparation', () => new LlmRequestPreparationError('store lost')],
   ])(
     'leaves a %s recovery-required input unsettled rather than consuming it',
     async (_kind, makeCause) => {

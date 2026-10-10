@@ -448,6 +448,11 @@ public interface AgentStateStore {
             String turnId, String owner, String eventEpoch,
             long fromSourceId, long retractionSourceId);
 
+    void retractHarnessTurnOutput(String tenantId, String sessionId,
+            String turnId, String owner, String eventEpoch,
+            long fromSourceId, long retractionSourceId, String sourceBootId,
+            String sourceEventEpoch, Long throughSourceId);
+
     void recordHarnessEvents(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
             List<HarnessEvent> events);

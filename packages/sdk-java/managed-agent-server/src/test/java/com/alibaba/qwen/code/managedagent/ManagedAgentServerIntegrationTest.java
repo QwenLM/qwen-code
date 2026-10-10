@@ -1673,6 +1673,102 @@ class ManagedAgentServerIntegrationTest {
                                 "event epoch changed"));
     }
 
+
+
+    @Test
+    void boundedRetractionRemovesFullyConsumedOriginalNamespace() {
+        assertBoundedRetractionAcrossAttachment(4, "consumed");
+    }
+
+    @Test
+    void boundedRetractionRemovesUnconsumedReplayNamespace() {
+        assertBoundedRetractionAcrossAttachment(2, "unconsumed");
+    }
+
+    @Test
+    void boundedRetractionRemovesSplitOriginalAndReplayNamespaces() {
+        assertBoundedRetractionAcrossAttachment(3, "split");
+    }
+
+    private void assertBoundedRetractionAcrossAttachment(int consumedThrough, String caseName) {
+        pauseRecoveryScanning();
+        String tenant = "tenant-bounded-" + caseName + "-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant, "CREATE_SESSION", "bounded-create",
+                "sha256:" + "4".repeat(64), "qwen-code", null, null, List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN", "bounded-turn",
+                "sha256:" + "5".repeat(64), session.sessionId(), List.of(), "sha256:" + "6".repeat(64));
+        String owner = "bounded-owner";
+        assertThat(store.claimTurn(tenant, session.sessionId(), turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        assertThat(store.bindHarness(tenant, session.sessionId(), turn.turnId(), owner, "boot_old")).isTrue();
+        store.markSubmissionAttempted(tenant, session.sessionId(), turn.turnId(), owner);
+        store.recordAdmission(tenant, session.sessionId(), turn.turnId(), owner, "epoch_old", 1);
+        java.util.ArrayList<HarnessEvent> old = new java.util.ArrayList<>();
+        old.add(new HarnessEvent(2, "boot_old:epoch_old:2", new ProjectedEvent("item.output_text.delta",
+                Map.of("text", "earlier-round"), false, null, null, null)));
+        for (int sequence = 3; sequence <= consumedThrough; sequence++) {
+            old.add(new HarnessEvent(sequence, "boot_old:epoch_old:" + sequence,
+                    new ProjectedEvent(sequence == 3 ? "item.output_text.delta" : "item.reasoning.delta",
+                            Map.of("text", "orphaned-" + sequence), false, null, null, null)));
+        }
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(), owner, "epoch_old", old);
+        assertThat(store.bindRecoveredHarness(tenant, session.sessionId(), turn.turnId(), owner, "boot_old", "boot_new")).isTrue();
+        store.recordRecoveryAdmission(tenant, session.sessionId(), turn.turnId(), owner,
+                "epoch_old", "epoch_old", "epoch_new", consumedThrough);
+        java.util.ArrayList<HarnessEvent> replay = new java.util.ArrayList<>();
+        for (int sequence = consumedThrough + 1; sequence <= 4; sequence++) {
+            replay.add(new HarnessEvent(sequence, "boot_new:epoch_new:" + sequence,
+                    new ProjectedEvent(sequence == 3 ? "item.output_text.delta" : "item.reasoning.delta",
+                            Map.of("text", "orphaned-" + sequence), false, null, null, null)));
+        }
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(), owner, "epoch_new", replay);
+        store.materializeNextBatch(tenant, session.sessionId(), 100);
+        long publicSequence = store.requireSession(tenant, session.sessionId()).lastSequence();
+        for (long[] invalid : List.of(new long[] {3, 5, 5}, new long[] {5, 4, 5}, new long[] {0, 4, 5})) {
+            assertThatThrownBy(() -> store.retractHarnessTurnOutput(tenant, session.sessionId(), turn.turnId(), owner,
+                    "epoch_new", invalid[0], invalid[2], "boot_old", "epoch_old", invalid[1]))
+                    .isInstanceOf(IllegalArgumentException.class);
+            assertThat(store.requireSession(tenant, session.sessionId()).lastSequence()).isEqualTo(publicSequence);
+            assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId())).get()
+                    .satisfies(record -> assertThat(record.harnessLastEventId()).isEqualTo(4));
+        }
+        store.retractHarnessTurnOutput(tenant, session.sessionId(), turn.turnId(), owner,
+                "epoch_new", 3, 5, "boot_old", "epoch_old", 4L);
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 100))
+                .filteredOn(event -> "boot_old:epoch_old:2".equals(event.sourceKey())).singleElement()
+                .satisfies(event -> assertThat(event.data()).containsEntry("text", "earlier-round"));
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 100))
+                .filteredOn(event -> ("item.output_text.delta".equals(event.type()) || "item.reasoning.delta".equals(event.type())) && event.sourceKey() != null &&
+                        (event.sourceKey().endsWith(":3") || event.sourceKey().endsWith(":4")))
+                .hasSize(2).allSatisfy(event -> {
+                    assertThat(event.data()).containsEntry("text", "");
+                    assertThat(event.itemId()).isNull();
+                    assertThat(event.contentPartId()).isNull();
+                });
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(), owner, "epoch_new",
+                List.of(new HarnessEvent(6, "boot_new:epoch_new:6", new ProjectedEvent("item.output_text.delta",
+                        Map.of("text", "replacement"), false, null, null, null))));
+        store.retractHarnessTurnOutput(tenant, session.sessionId(), turn.turnId(), owner,
+                "epoch_new", 3, 7, "boot_old", "epoch_old", 4L);
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 100))
+                .filteredOn(event -> "stream.reconciled".equals(event.type())).hasSize(1);
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 100))
+                .filteredOn(event -> "boot_new:epoch_new:6".equals(event.sourceKey())).singleElement()
+                .satisfies(event -> assertThat(event.data()).containsEntry("text", "replacement"));
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId())).get()
+                .satisfies(record -> assertThat(record.harnessLastEventId()).isEqualTo(7));
+        store.materializeNextBatch(tenant, session.sessionId(), 100);
+        assertThat(store.findSnapshot(tenant, session.sessionId())).isPresent();
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(), owner, "epoch_new",
+                List.of(new HarnessEvent(8, "boot_new:epoch_new:8", new ProjectedEvent("turn.completed",
+                        Map.of(), true, "COMPLETED", null, null))));
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 100))
+                .filteredOn(event -> "turn.completed".equals(event.type()) && turn.turnId().equals(event.turnId())).hasSize(1);
+        store.materializeNextBatch(tenant, session.sessionId(), 100);
+        assertThat(store.findSnapshot(tenant, session.sessionId())).get().satisfies(snapshot ->
+                assertThat(snapshot.coveredSequence()).isEqualTo(store.requireSession(tenant, session.sessionId()).lastSequence()));
+        assertEventsNameTheSnapshot(tenant, session.sessionId());
+    }
+
     @Test
     void doesNotPublishRolledBackEvents() throws Exception {
         String tenant = "tenant-rollback-" + UUID.randomUUID();
@@ -2060,4 +2156,61 @@ class ManagedAgentServerIntegrationTest {
         }
 
     }
+    @Test
+    void preAcquireCleanupUsesCurrentLifecycleAuthorityAndDoesNotAcquire() {
+        String tenant = "tenant-cleanup-authority-" + UUID.randomUUID();
+        String harnessSession = "harness-" + UUID.randomUUID();
+        String operation = "operation-" + UUID.randomUUID();
+        var scope = new com.alibaba.qwen.code.runtimebroker.RuntimeScope(tenant, "workspace", "1", "/workspace", "capability", "session");
+        var bindings = new com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository(jdbc.getDataSource(),
+                new com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository(jdbc.getDataSource());
+        var executions = new com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository(jdbc.getDataSource());
+        var provisioner = org.mockito.Mockito.mock(com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner.class,
+                org.mockito.Mockito.CALLS_REAL_METHODS);
+        var transport = org.mockito.Mockito.mock(com.alibaba.qwen.code.runtimebroker.RuntimeTransport.class);
+        var lease = new com.alibaba.qwen.code.runtimebroker.RuntimeLease("runtime", java.net.URI.create("http://127.0.0.1:4000"), "token", "lease", 1);
+        when(provisioner.provision(org.mockito.ArgumentMatchers.any(com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest.class)))
+                .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(lease));
+        java.util.function.Consumer<Throwable> admissionClosed = error -> {
+            Throwable cause = error;
+            while (cause.getCause() != null) cause = cause.getCause();
+            assertThat(cause).isInstanceOfSatisfying(RuntimeBrokerException.class,
+                    conflict -> assertThat(conflict.getCode()).isEqualTo("runtime_admission_closed"));
+        };
+        try (var broker = new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService(
+                ignored -> java.util.concurrent.CompletableFuture.completedFuture(scope), provisioner, transport,
+                bindings, sessions, executions, "cleanup-probe", Duration.ofMinutes(1), Duration.ofMinutes(1))) {
+            var binding = broker.warm(harnessSession).toCompletableFuture().join();
+            jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, tenant, harnessSession, operation);
+                return null;
+            });
+            jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_generation = 7, claim_lease_until = ? WHERE tenant_id = ? AND harness_session_id = ?",
+                    System.currentTimeMillis() + 60_000, tenant, harnessSession);
+            var authority = new com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority(operation, 7);
+            for (var invalid : java.util.Arrays.asList(null,
+                    new com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority(operation, 8),
+                    new com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority("wrong-operation", 7))) {
+                assertThatThrownBy(() -> broker.releaseOriginal(harnessSession, "runtime-a", binding.getBindingId(),
+                        binding.getGeneration(), invalid).toCompletableFuture().join()).satisfies(admissionClosed);
+                assertThat(sessions.findById(scope, "runtime-a")).isNull();
+            }
+            jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_lease_until = 0 WHERE tenant_id = ? AND harness_session_id = ?", tenant, harnessSession);
+            assertThatThrownBy(() -> broker.releaseOriginal(harnessSession, "runtime-a", binding.getBindingId(),
+                    binding.getGeneration(), authority).toCompletableFuture().join()).satisfies(admissionClosed);
+            assertThat(sessions.findById(scope, "runtime-a")).isNull();
+            jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_lease_until = ? WHERE tenant_id = ? AND harness_session_id = ?",
+                    System.currentTimeMillis() + 60_000, tenant, harnessSession);
+            assertThat(broker.releaseOriginal(harnessSession, "runtime-a", binding.getBindingId(), binding.getGeneration(), authority)
+                    .toCompletableFuture().join()).isTrue();
+            assertThat(sessions.findById(scope, "runtime-a").getState()).isEqualTo(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord.State.RELEASED);
+            assertThat(broker.releaseOriginal(harnessSession, "runtime-a", binding.getBindingId(), binding.getGeneration(), authority)
+                    .toCompletableFuture().join()).isTrue();
+            org.mockito.Mockito.verify(transport, org.mockito.Mockito.never()).acquire(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+            org.mockito.Mockito.verify(transport, org.mockito.Mockito.never()).release(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+            org.mockito.Mockito.verify(provisioner, org.mockito.Mockito.times(1)).provision(org.mockito.ArgumentMatchers.any(com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest.class));
+        }
+    }
+
 }

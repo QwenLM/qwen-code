@@ -12,7 +12,7 @@ import type {
   RawFileHistoryOperation,
   HostedFileHistoryState,
 } from './hosted-file-history-protocol.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type {
@@ -139,7 +139,8 @@ export class HostedWorkspaceBroker {
   }
 
   async warm(): Promise<void> {
-    await this.request('/runtimes:warm', {});
+    const response = await this.request('/runtimes:warm', {});
+    if (response['runtime'] !== undefined) this.readRuntime(response);
   }
 
   async authorizeLifecycle(): Promise<void> {
@@ -160,9 +161,14 @@ export class HostedWorkspaceBroker {
           }
         : {}),
     });
+    if (response['acquired'] !== true)
+      throw new Error('Runtime did not acquire the Session.');
+    this.readRuntime(response);
+  }
+
+  private readRuntime(response: Record<string, unknown>): void {
     const scope = object(response['scope']);
     if (
-      response['acquired'] !== true ||
       scope['tenantId'] !== this.key.tenantId ||
       scope['workspaceId'] !== this.key.workspaceId ||
       scope['capabilityDigest'] !== WORKSPACE_CAPABILITY_DIGEST
@@ -610,10 +616,18 @@ export class HostedWorkspaceBroker {
     }
   }
 
-  async release(): Promise<void> {
+  async release(expected?: {
+    bindingId: string;
+    generation: string;
+  }): Promise<void> {
     const response = await this.request(
       `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:release`,
-      {},
+      expected
+        ? {
+            cleanupBindingId: expected.bindingId,
+            cleanupGeneration: expected.generation,
+          }
+        : {},
     );
     if (response['released'] !== true)
       throw new Error('Runtime Session release is unconfirmed.');
@@ -691,4 +705,19 @@ export class HostedWorkspaceBroker {
       throw new Error('Runtime Broker response identity changed.');
     return parsed;
   }
+}
+
+/**
+ * The Broker admits only path-safe Runtime Session ids, while a wake
+ * turn's id is an input id (`arun_…:input`, `<monitor>:notify:<n>`):
+ * such an id is mapped to a stable path-safe digest instead of being
+ * refused at acquire. The mapped form is path-safe itself, so layering
+ * this over an id that was already mapped stays idempotent.
+ */
+export function hostedRuntimeSessionId(promptId: string): string {
+  return /^[A-Za-z0-9._-]{1,512}$/.test(promptId) &&
+    promptId !== '.' &&
+    !promptId.includes('..')
+    ? promptId
+    : `wake-${createHash('sha256').update(promptId).digest('hex')}`;
 }

@@ -45,6 +45,10 @@ export function createHostedHarnessContract(
     bootId: bootId.toLowerCase(),
     capabilityDigest,
     lifecycleProtocolVersion: 1,
+    features: Object.freeze([
+      'hosted_approval_resume_v1',
+      'hosted_model_round_recovery_v1',
+    ]),
   });
 }
 

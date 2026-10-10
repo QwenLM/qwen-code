@@ -451,7 +451,7 @@ class HostedWorkspaceToolTurnIT {
         List<Map<String, Object>> executions = jdbc.queryForList("SELECT execution_call_id, idempotency_key,"
                 + " runtime_session_id, dispatch_generation, execution_state, execution_status"
                 + " FROM qwen_tool_execution WHERE harness_session_id = ?", session.get("sessionId"));
-        assertThat(executions).as(fault + " reservations").hasSize(fault.equals("acquire") ? 0 : 1);
+        assertThat(executions).as(fault + " reservations").hasSize(List.of("acquire", "arguments").contains(fault) ? 0 : 1);
         for (Map<String, Object> execution : executions) {
             assertThat(execution.get("execution_call_id")).isEqualTo(report.path("executionCallId").asText());
             assertThat(execution.get("idempotency_key")).isEqualTo(report.path("idempotencyKey").asText());

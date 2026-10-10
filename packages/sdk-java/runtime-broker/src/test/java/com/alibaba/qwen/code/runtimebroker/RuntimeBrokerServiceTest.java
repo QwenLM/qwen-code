@@ -48,6 +48,20 @@ class RuntimeBrokerServiceTest {
             "capability", "session");
 
     @Test
+    void cleanupBeforeAcquireTombstonesTheOriginalOwnerWithoutAcquiringALease() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeBindingRecord binding = join(fixture.service.warm("harness-a"));
+            assertTrue(join(fixture.service.releaseOriginal("harness-a", "runtime-a", binding.getBindingId(), binding.getGeneration())));
+            assertTrue(join(fixture.service.releaseOriginal("harness-a", "runtime-a", binding.getBindingId(), binding.getGeneration())));
+            assertEquals(RuntimeSessionRecord.State.RELEASED, fixture.sessionRepository.findById(SESSION_SCOPE, "runtime-a").getState());
+            assertEquals(0, fixture.transport.acquireCalls.get());
+            assertEquals(0, fixture.transport.releaseCalls.get());
+            assertEquals("runtime_session_not_acquirable", failure(fixture.service.acquire("harness-a", "runtime-a", "bootstrap")).getCode());
+            assertEquals(0, fixture.transport.acquireCalls.get());
+        }
+    }
+
+    @Test
     void coldReleaseRejectsHistoricalAmbiguityWithAStableConflict() {
         var target = new RuntimeScope("tenant", "workspace", "generation", "/target",
                 "capability", "workspace");

@@ -181,13 +181,16 @@ public final class ToolPublicationStore {
         require(row.tenant().equals(text(key, "tenantId"))
                 && row.workspace().equals(text(key, "workspaceId"))
                 && row.session().equals(text(key, "sessionId")), "Publication scope conflicts");
-        var head = jdbc.queryForMap("SELECT workspace_id, state, writer_id, writer_generation,"
+        var head = jdbc.queryForMap("SELECT workspace_id, state, storage_version, writer_id, writer_generation,"
                         + " CASE WHEN writer_lease_until > CURRENT_TIMESTAMP(6) THEN 1 ELSE 0 END AS writer_live,"
                         + " recovery_status, activation_epoch, journal_revision,"
                         + " activation_id, activation_phase, activation_event_epoch, activation_expires_at,"
                         + " activation_head_revision"
                         + " FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
                 row.tenant(), row.session());
+        require(((Number) head.get("storage_version")).intValue() >= 1
+                && ((Number) head.get("storage_version")).intValue() <= ManagedSessionReaderVersion.SUPPORTED,
+                "Managed Session storage version is unsupported.");
         var current = jdbc.queryForMap("SELECT token_hash, state, expires_at, binding_digest, binding_json,"
                 + " tenant_id, workspace_id, session_id, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
                 + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ? FOR UPDATE",

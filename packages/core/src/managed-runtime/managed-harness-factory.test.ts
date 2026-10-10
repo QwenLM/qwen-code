@@ -545,7 +545,25 @@ describe('managed harness factory', () => {
     const handle = createManagedHarnessHandle(session);
     await handle.ensureRunnable();
     const refs = await waitRefs(session);
+    const beforeWait = session.authority.committedSequence;
     const boundary = await handle.commitDurableWait(waitCommit(refs));
+    const waitEvents = session.authority.eventsInSequenceRange(
+      beforeWait + 1,
+      session.authority.committedSequence,
+    );
+    expect(waitEvents.map((event) => event.kind)).toEqual([
+      'action.changed',
+      'checkpoint.committed',
+    ]);
+    const journal = await fs.readFile(workspace.transcriptPath, 'utf8');
+    const records = journal
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    const markers = records.filter(
+      (record) => record.subtype === 'managed_session_commit_v1',
+    );
+    expect(markers.at(-1).managedSession.eventCount).toBe(2);
     expect(boundary.kind).toBe('durable_wait');
     expect(session.authority.latestCheckpoint?.boundary).toBe(
       HARNESS_DURABLE_WAIT_BOUNDARY,

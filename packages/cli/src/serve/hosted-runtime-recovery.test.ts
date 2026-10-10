@@ -33,6 +33,7 @@ import {
 import { HARNESS_MODEL_START_PHASES } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import { hostedRuntimeSessionId } from './hosted-workspace-tool-turn.js';
+import { HOSTED_TOOL_APPROVAL_POLICY } from './hosted-tool-approval.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
 const SESSION_ID = '22222222-2222-4222-8222-222222222222';
@@ -496,7 +497,7 @@ describe('recoverHostedRuntimeTurn', () => {
         kind: 'execute',
         source: 'tool_call',
         optionsRef: await session.resources.publish(
-          'managed-approval',
+          'managed-action-options',
           Buffer.from(
             JSON.stringify({
               v: 1,
@@ -504,11 +505,14 @@ describe('recoverHostedRuntimeTurn', () => {
               turnId: PROMPT_ID,
               functionCallId: 'call-1',
               toolName: 'write_file',
-              policyRevision: 'pol-1',
+              policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
               inputRevision: 1,
               createdAt: expiresAt - 20_000,
               expiresAt,
-              options: [{ id: 'allow' }, { id: 'deny' }],
+              options: [
+                { id: 'allow', label: 'Allow once' },
+                { id: 'deny', label: 'Deny' },
+              ],
             }),
           ),
         ),

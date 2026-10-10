@@ -110,8 +110,13 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 requireProtocol(body);
                 JsonCodec.requiredString(body, "requestId", "warm request");
                 String sessionId = JsonCodec.requiredString(body, "harnessSessionId", "warm request");
-                complete(exchange, service.warm(sessionId, lifecycleAuthority(exchange)), ignored -> Map.of(
-                        "protocolVersion", 1, "harnessSessionId", sessionId, "ready", true));
+                complete(exchange, service.warm(sessionId, lifecycleAuthority(exchange)), record -> Map.of(
+                        "protocolVersion", 1, "harnessSessionId", sessionId, "ready", true,
+                        "scope", Map.of("tenantId", record.getRequest().getScope().getTenantId(),
+                                "workspaceId", record.getRequest().getScope().getWorkspaceId(),
+                                "workspaceGeneration", record.getRequest().getScope().getWorkspaceGeneration(),
+                                "capabilityDigest", record.getRequest().getScope().getCapabilityDigest()),
+                        "runtime", Map.of("bindingId", record.getBindingId(), "generation", Long.toString(record.getGeneration()))));
                 return;
             }
             if ("POST".equals(exchange.getRequestMethod()) && "/runtimes:authorize-lifecycle".equals(relative)) {
@@ -246,8 +251,12 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             JsonCodec.requiredString(body, "requestId", "release request");
             String harnessSessionId = JsonCodec.requiredString(body,
                     "harnessSessionId", "release request");
-            complete(exchange, service.release(harnessSessionId,
-                    runtimeSessionId), released -> envelope(harnessSessionId,
+            CompletionStage<Boolean> release = body.containsKey("cleanupBindingId")
+                    ? service.releaseOriginal(harnessSessionId, runtimeSessionId,
+                            JsonCodec.requiredString(body, "cleanupBindingId", "release request"),
+                            Long.parseLong(JsonCodec.requiredString(body, "cleanupGeneration", "release request")), lifecycleAuthority(exchange))
+                    : service.release(harnessSessionId, runtimeSessionId);
+            complete(exchange, release, released -> envelope(harnessSessionId,
                             runtimeSessionId, "released", released));
             return;
         }

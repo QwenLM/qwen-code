@@ -30,7 +30,12 @@ import {
   UnauthorizedError,
   toFriendlyError,
 } from '../utils/errors.js';
-import type { LlmChat } from './llm-chat.js';
+import {
+  LlmRequestPreparationError,
+  type LlmChat,
+  type LlmPreparedRequest,
+  type LlmPreparedRequestCallback,
+} from './llm-chat.js';
 import type { RetryInfo } from '../utils/rateLimit.js';
 import {
   getThoughtSummary,
@@ -707,6 +712,7 @@ export class Turn {
     goalContext?: GoalTurnPermit,
     private readonly promptIdentity?: string,
     private readonly retractDeliveredOutputOnRetry?: boolean,
+    private readonly onPreparedRequest?: LlmPreparedRequestCallback,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -715,6 +721,7 @@ export class Turn {
     model: string,
     req: PartListUnion,
     signal: AbortSignal,
+    prepared?: LlmPreparedRequest,
   ): AsyncGenerator<ServerLlmStreamEvent> {
     try {
       // Note: This assumes `sendMessageStream` yields events like
@@ -723,26 +730,37 @@ export class Turn {
       // `undefined`, as before either option existed.
       const sendOptions =
         this.promptIdentity !== undefined ||
-        this.retractDeliveredOutputOnRetry === true
+        this.retractDeliveredOutputOnRetry === true ||
+        this.onPreparedRequest !== undefined
           ? {
+              ...(this.onPreparedRequest
+                ? { onPreparedRequest: this.onPreparedRequest }
+                : {}),
               ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
               ...(this.retractDeliveredOutputOnRetry
                 ? { retractDeliveredOutputOnRetry: true }
                 : {}),
             }
           : undefined;
-      const responseStream = await this.chat.sendMessageStream(
-        model,
-        {
-          message: req,
-          config: {
-            abortSignal: signal,
-          },
-        },
-        this.prompt_id,
-        this.goalContext,
-        sendOptions,
-      );
+      const responseStream = prepared
+        ? await this.chat.sendPreparedMessageStream(
+            prepared,
+            this.prompt_id,
+            signal,
+            this.onPreparedRequest,
+          )
+        : await this.chat.sendMessageStream(
+            model,
+            {
+              message: req,
+              config: {
+                abortSignal: signal,
+              },
+            },
+            this.prompt_id,
+            this.goalContext,
+            sendOptions,
+          );
 
       for await (const streamEvent of responseStream) {
         if (signal?.aborted) {
@@ -869,6 +887,7 @@ export class Turn {
         }
       }
     } catch (e) {
+      if (e instanceof LlmRequestPreparationError) throw e;
       if (signal.aborted) {
         yield { type: LlmEventType.UserCancelled };
         // Regular cancellation error, fail gracefully.

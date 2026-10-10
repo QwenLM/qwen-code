@@ -95,7 +95,12 @@ public final class ManagedSessionStoreModels {
     public record WriterGrant(long writerGeneration, long leaseUntil,
             long journalRevision, long committedSequence,
             String lastCommitDigest, long activationEpoch,
-            boolean replayed) {
+            boolean replayed, int supportedStorageVersion) {
+        public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
+                long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed) {
+            this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
+                    activationEpoch, replayed, ManagedSessionReaderVersion.SUPPORTED);
+        }
     }
 
     public record SealReceipt(long writerGeneration, String state,
