@@ -5538,6 +5538,49 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(204);
   });
 
+  // H4f × H4d-b: the control plane can lose its attachment before a stop
+  // reaches the Session. Its load carries the stop, so the first pass the
+  // load kicks starts none of the waiting messages.
+  it("loads a stopped run's Session without starting its waiting message", async () => {
+    const content = Buffer.from('which branch should I use?');
+    await prewriteMessageSession(async ({ messages }) => {
+      await messages.receive({
+        messageId: 'msg_up',
+        route: 'to_parent',
+        childRunId: 'run-1',
+        senderSessionId: CHILD_SESSION_ID,
+        content,
+        contentDigest: createHash('sha256').update(content).digest('hex'),
+      });
+    });
+    mockBrokerBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store(), stopMessages: true });
+    expect(loaded.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(state.model).not.toHaveBeenCalled();
+    const stopped = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/messages/operations`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({ operationId: randomUUID(), kind: 'stop' });
+    expect(stopped.status).toBe(202);
+    expect(
+      (await journalEvents()).find(
+        (event) =>
+          event.kind === 'turn.settled' &&
+          event.payload['turnId'] === 'msg_up:message',
+      )?.payload,
+    ).toMatchObject({ outcome: 'cancelled', stopReason: 'stop_requested' });
+    expect(state.model).not.toHaveBeenCalled();
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+  });
+
   it('refuses a message once the Session close began', async () => {
     const { server, receive } = await loadMessageParent();
     let entered!: () => void;

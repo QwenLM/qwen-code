@@ -2621,6 +2621,11 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     const resident = sessions.get(sessionId);
+    // H4f × H4d-b: the load of a stopped run's child carries the stop, so
+    // its wake pump starts none of its message inputs, not even the first
+    // pass this load kicks before the stop itself arrives.
+    const stopMessages = body?.['stopMessages'] === true;
+    if (resident && stopMessages) resident.messagesStopped = true;
     const passiveRecovery = body?.['passiveManagedRuntimeRecovery'] === true;
     const driveRecovery = body?.['driveRuntimeRecovery'] === true;
     const takeoverFlags = passiveRecovery || driveRecovery;
@@ -3170,6 +3175,7 @@ export function registerHostedHarnessSessionRoutes(
               },
             }
           : {}),
+        ...(stopMessages ? { messagesStopped: true } : {}),
       };
       const savedLineage = object(definition?.['lineage']);
       if (

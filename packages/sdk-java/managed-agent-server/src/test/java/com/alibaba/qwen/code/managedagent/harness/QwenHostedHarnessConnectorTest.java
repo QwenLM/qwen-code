@@ -697,6 +697,60 @@ class QwenHostedHarnessConnectorTest {
                 .hasMessage("Hosted Workspace files are disabled");
     }
 
+    // H4f × H4d-b: a stopped run's message stop must never start the work
+    // it stops. A Session this process does not hold loads passively with
+    // its message inputs already stopped, under the cancellation grant,
+    // and a held one takes the stop directly.
+    @Test
+    void aMessageStopLoadsTheSessionWithItsMessagesAlreadyStopped() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        SessionRecord session = mock(SessionRecord.class);
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        when(session.tenantId()).thenReturn("tenant-a");
+        when(session.sessionId()).thenReturn(SESSION_ID);
+        when(session.harnessBootId()).thenReturn(BOOT_ID);
+        when(session.workspace()).thenReturn(new ContextBinding("tenant-a", "workspace", 1,
+                "storage", ".", "config", 1));
+        when(session.toolProfile()).thenReturn("hosted-workspace-shell/1");
+        when(client.loadSession(any(LoadHarnessSession.class))).thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn("default");
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        // A revoked grant refuses new work, never a stop.
+        doThrow(WorkspaceExecutionStore.unavailable()).when(execution).authorize(session);
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+        Map<String, Object> stop = Map.of(
+                "operationId", "66666666-6666-4666-8666-666666666666",
+                "kind", "stop");
+        connector.runMessageOperation("tenant-a", SESSION_ID, stop);
+
+        ArgumentCaptor<LoadHarnessSession> loads = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client, times(1)).loadSession(loads.capture());
+        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(
+                loads.getValue(), "toJson"))
+                .containsEntry("stopMessages", true)
+                .containsEntry("passiveManagedRuntimeRecovery", true)
+                .doesNotContainKey("driveRuntimeRecovery");
+        verify(execution).authorizeCancellation(session);
+        verify(execution, never()).authorize(session);
+        verify(client, times(1)).runMessageOperation(attached, stop);
+
+        // Held now: the next stop goes straight to the Session.
+        connector.runMessageOperation("tenant-a", SESSION_ID, stop);
+        verify(client, times(1)).loadSession(any(LoadHarnessSession.class));
+        verify(client, times(2)).runMessageOperation(attached, stop);
+    }
+
     @Test
     void channelOperationsReauthorizeTheWorkspaceLikeEveryNewWorkDispatch() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
