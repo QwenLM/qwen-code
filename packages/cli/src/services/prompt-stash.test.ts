@@ -34,7 +34,34 @@ describe('prompt stash', () => {
     const text = 'first line\n第二行 🚀';
 
     expect(savePromptStash(targetDir, text)).toBe(true);
-    expect(loadPromptStash(targetDir)).toBe(text);
+    expect(loadPromptStash(targetDir)).toEqual({ version: 2, text });
+  });
+
+  it('loads a version-1 stash written by an older build', () => {
+    // Back-compat: stashes already on disk predate the format bump and
+    // must keep loading, or every existing stash silently stops restoring.
+    const projectDir = new Storage(targetDir).getProjectDir();
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, 'prompt-stash.json'),
+      JSON.stringify({ version: 1, text: 'legacy draft' }),
+    );
+
+    expect(loadPromptStash(targetDir)).toEqual({
+      version: 1,
+      text: 'legacy draft',
+    });
+  });
+
+  it('rejects a stash with an unknown format version', () => {
+    const projectDir = new Storage(targetDir).getProjectDir();
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, 'prompt-stash.json'),
+      JSON.stringify({ version: 3, text: 'future draft' }),
+    );
+
+    expect(loadPromptStash(targetDir)).toBeNull();
   });
 
   it('clears a saved prompt', () => {
@@ -50,7 +77,7 @@ describe('prompt stash', () => {
     expect(savePromptStash(targetDir, 'saved draft')).toBe(true);
 
     expect(restorePromptStash(targetDir, '', onRestore)).toBe(true);
-    expect(onRestore).toHaveBeenCalledWith('saved draft');
+    expect(onRestore).toHaveBeenCalledWith('saved draft', 2);
 
     onRestore.mockClear();
     expect(restorePromptStash(targetDir, 'typing now', onRestore)).toBe(false);

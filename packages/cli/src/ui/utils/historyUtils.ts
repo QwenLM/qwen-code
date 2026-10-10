@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  SYSTEM_REMINDER_CLOSE,
+  SYSTEM_REMINDER_OPEN,
+} from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 
 /**
@@ -147,6 +151,249 @@ export function realUserPromptTexts(history: readonly HistoryItem[]): string[] {
         item.text.trim() !== '',
     )
     .map((item) => item.text);
+}
+
+/**
+ * One `<system-reminder>` envelope block scanned off the front of a text:
+ * the whole block (open tag through close tag), the whitespace separator
+ * between it and what follows, and the remaining text.
+ */
+export interface LeadingEnvelopeBlock {
+  block: string;
+  separator: string;
+  rest: string;
+}
+
+/**
+ * Scans one leading `<system-reminder>` envelope block, or returns null
+ * when `text` does not open with one. A close tag counts as ending an
+ * envelope only when it is followed by a blank line or the end of the
+ * text — the separator the injectors join envelopes with — so user text
+ * that merely mentions the tags (`<system-reminder> fix the
+ * </system-reminder> parser`) is never mistaken for an injected envelope
+ * and partly swallowed.
+ */
+export function scanLeadingEnvelopeBlock(
+  text: string,
+): LeadingEnvelopeBlock | null {
+  if (!text.startsWith(SYSTEM_REMINDER_OPEN)) return null;
+  const close = text.indexOf(
+    SYSTEM_REMINDER_CLOSE,
+    SYSTEM_REMINDER_OPEN.length,
+  );
+  if (close === -1) return null;
+  const blockEnd = close + SYSTEM_REMINDER_CLOSE.length;
+  const after = text.slice(blockEnd);
+  if (after !== '' && !after.startsWith('\n\n')) return null;
+  const rest = after.replace(/^\s+/, '');
+  return {
+    block: text.slice(0, blockEnd),
+    separator: after.slice(0, after.length - rest.length),
+    rest,
+  };
+}
+
+/**
+ * Removes the one-shot `<system-reminder>` envelopes the submit path prepends
+ * to the model text (recovered background agents, worktree restore, workflow
+ * steering — see AppContainer's `handleFinalSubmit`). They are model context,
+ * not something the user typed, so every surface that reads a user prompt back
+ * to them — the live transcript, the ↑-recall log, the cancel-restore buffer,
+ * and the history rebuilt on resume — must show the text without them.
+ *
+ * Leading-only on purpose: an envelope the user pasted into the middle of
+ * their own message stays visible, so a prompt is never partly hidden. An
+ * unterminated envelope — or a tag pair whose close is not followed by the
+ * injectors' blank-line separator — stops the scan and is left in place
+ * rather than swallowed. And when stripping would leave nothing — a prompt
+ * that IS only envelope(s), e.g. one the user pasted wholesale — the
+ * original text is returned unchanged, so no caller can strip a message out
+ * of existence.
+ */
+export function stripLeadingSystemReminders(text: string): string {
+  return splitLeadingSystemReminders(text).rest;
+}
+
+/**
+ * The strip split into its two halves: `rest` is the display text and
+ * `reminders` the exact prefix that was removed ('' when nothing was), so a
+ * restore path can re-arm the consumed envelopes for the next submit instead
+ * of losing them with the strip.
+ */
+export function splitLeadingSystemReminders(text: string): {
+  reminders: string;
+  rest: string;
+} {
+  let rest = text;
+  for (
+    let scanned = scanLeadingEnvelopeBlock(rest);
+    scanned !== null;
+    scanned = scanLeadingEnvelopeBlock(scanned.rest)
+  ) {
+    rest = scanned.rest;
+  }
+  if (rest === '' || rest === text) return { reminders: '', rest: text };
+  return { reminders: text.slice(0, text.length - rest.length), rest };
+}
+
+/**
+ * Prepends the armed reminder `envelopes` to `text`, skipping each block
+ * that `text`'s own leading envelope run already carries. The re-arm runs
+ * after the submit path's injectors, and the one injector that can re-fire
+ * (the un-latched workflow-steering notice) would otherwise stack a
+ * duplicate copy on every cancel/resubmit cycle. Comparison is per envelope
+ * block, so a partially re-fired prefix still re-arms the blocks that did
+ * not re-fire.
+ *
+ * Membership is over the whole leading block run, not just the first block:
+ * the re-arm accumulator (AppContainer's `rearmRestoredReminders`) passes
+ * the armed pile as `text`, and a pile led by block A must still recognize
+ * a re-armed copy of block B sitting behind it — a prefix-only test would
+ * append B again on every abort and grow the pile without bound. A block
+ * the user's own text quotes mid-string does NOT count: only the leading
+ * run is injector-shaped, so an armed block whose twin is user content
+ * further down still prepends.
+ */
+export function prependMissingSystemReminders(
+  envelopes: string,
+  text: string,
+): string {
+  const present = new Set<string>();
+  for (
+    let scanned = scanLeadingEnvelopeBlock(text);
+    scanned !== null;
+    scanned = scanLeadingEnvelopeBlock(scanned.rest)
+  ) {
+    present.add(scanned.block);
+  }
+  let missing = '';
+  for (
+    let scanned = scanLeadingEnvelopeBlock(envelopes);
+    scanned !== null;
+    scanned = scanLeadingEnvelopeBlock(scanned.rest)
+  ) {
+    if (!present.has(scanned.block)) {
+      missing += `${scanned.block}\n\n`;
+      // Dedupe against the output too: an `envelopes` pile carrying two
+      // byte-identical blocks (a stale armed copy ahead of a re-fired one)
+      // must prepend the block once, not stack both.
+      present.add(scanned.block);
+    }
+  }
+  return missing + text;
+}
+
+/**
+ * Removes exactly the `<system-reminder>` envelope blocks listed in
+ * `reminders` (the producer's own decomposition — see
+ * `aggregateUserMessages`) from `text`, first occurrence each, leaving every
+ * other block — including a user-authored one — in place. Provenance-driven
+ * counterpart to the leading-only shape strip: a mid-string injected
+ * envelope is dropped without touching identical-looking user content
+ * elsewhere in the text. Each removed block takes the separator the
+ * decomposition itself records after it — the exact inverse of the arming,
+ * whose accepted run includes the whitespace up to the (trimmed) projection.
+ * Re-deriving the separator from the text instead would break the adoption
+ * gate's byte-identity for any separator but a plain `\n\n`, and a greedy
+ * `\s+` run would eat display content past what was armed. When the text
+ * does not carry the recorded separator after the block, only the block is
+ * removed. When the listed blocks cover the whole text the original is
+ * returned unchanged — the twin of the leading split's envelope-only
+ * guard, so no caller can strip a message out of existence.
+ */
+export function omitSystemReminderBlocks(
+  text: string,
+  reminders: string,
+): string {
+  let result = text;
+  for (
+    let scanned = scanLeadingEnvelopeBlock(reminders);
+    scanned !== null;
+    scanned = scanLeadingEnvelopeBlock(scanned.rest)
+  ) {
+    const at = result.indexOf(scanned.block);
+    if (at === -1) continue;
+    const after = result.slice(at + scanned.block.length);
+    const consumed = after.startsWith(scanned.separator)
+      ? scanned.separator.length
+      : 0;
+    result = result.slice(0, at) + after.slice(consumed);
+  }
+  if (result === '') return text;
+  return result;
+}
+
+/**
+ * Whether a recorded user prompt's display text carries a leading
+ * `<system-reminder>` run that the record's own model-facing parts carry
+ * too. When the writer's provenance was available, `displayText` is the
+ * pre-injection typed text, so a leading run in it is user-authored
+ * content; when provenance was unavailable (a vim submit), an injected
+ * envelope lands in both fields and is indistinguishable from a pasted
+ * one — either way the parts carrying the same run mean the record cannot
+ * prove the run was injected, so the safe read-back keeps the text rather
+ * than deleting user content by shape. Only when the parts lack the run
+ * does the strip apply.
+ */
+export function hasUserAuthoredLeadingReminders(
+  displayText: string,
+  modelPartsText: string,
+): boolean {
+  const { reminders } = splitLeadingSystemReminders(displayText);
+  return reminders !== '' && modelPartsText.includes(reminders);
+}
+
+/**
+ * The positional counterpart to {@link hasUserAuthoredLeadingReminders} for
+ * the live producer-provenance sites, where the CLI itself prepended any
+ * injected envelope two frames earlier and the ambiguity the membership
+ * test tolerates does not exist. Injectors prepend, so the display text's
+ * leading envelope run is user-authored exactly when the model text's own
+ * leading run ENDS with it; the blocks ahead of it are the injected prefix.
+ * Returns that prefix — the empty string when nothing was injected ahead —
+ * or undefined when the runs do not line up and the submit proves nothing
+ * about the projection's leading run.
+ */
+export function splitInjectedLeadingReminders(
+  displayText: string,
+  modelText: string,
+): string | undefined {
+  const projectionRun = splitLeadingSystemReminders(displayText).reminders;
+  if (projectionRun === '') return undefined;
+  const modelRun = splitLeadingSystemReminders(modelText).reminders;
+  if (!modelRun.endsWith(projectionRun)) return undefined;
+  const injected = modelRun.slice(0, modelRun.length - projectionRun.length);
+  // The endsWith check alone can align the projection run on a non-block
+  // boundary — a model block whose body quotes an open tag ends with the
+  // user's run — leaving a "prefix" that is a bare open-tag fragment.
+  // A prefix that is not itself whole envelope blocks proves nothing
+  // about injection; report the runs as not lining up instead.
+  if (injected !== '' && !isOnlyLeadingSystemReminders(injected)) {
+    return undefined;
+  }
+  return injected;
+}
+
+/**
+ * Whether `text` consists solely of whole leading `<system-reminder>`
+ * envelopes (plus separating whitespace) — the shape of a prefix the submit
+ * path's injectors prepend. Gates producer-provenance adoption: a recovered
+ * prefix that is not pure envelopes (an attachment `@ref`, a queue
+ * aggregate's leading member) is display content, not a re-armable
+ * reminder. False for '' (an empty difference is not an injected prefix) and
+ * for unterminated envelopes (a truncated envelope is never armed).
+ */
+export function isOnlyLeadingSystemReminders(text: string): boolean {
+  if (text === '') return false;
+  let rest = text;
+  for (
+    let scanned = scanLeadingEnvelopeBlock(rest);
+    scanned !== null;
+    scanned = scanLeadingEnvelopeBlock(scanned.rest)
+  ) {
+    rest = scanned.rest;
+  }
+  return rest === '';
 }
 
 /**
