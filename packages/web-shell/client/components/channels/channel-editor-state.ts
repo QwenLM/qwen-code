@@ -138,6 +138,16 @@ function initialFieldValue(
   }
   if (field.kind === 'enum') {
     if (typeof value === 'string' && value) return value;
+    // A multiSession channel only supports scope 'user' (the store resolves it
+    // the same way when the field is absent). Pre-filling the plugin's
+    // non-user default here would submit that default verbatim and the store
+    // would reject every save of an existing multiSession instance.
+    if (
+      field.key === 'sessionScope' &&
+      instance?.config['multiSession'] === true
+    ) {
+      return 'user';
+    }
     if (instance) {
       if (field.key === 'privatePolicy')
         return configuredPrivatePolicy(instance);
