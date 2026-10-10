@@ -379,7 +379,7 @@ async function publishedBodies(
 }
 
 describe('managed session authority team records (H4e)', () => {
-  it('commits the enabled team domains and refuses the disabled ones, publishing nothing', async () => {
+  it('commits the enabled team domains and refuses the disabled ones without publishing them', async () => {
     enablement.teams = false;
     const harness = await createHarness();
     const refs = await publishRefs(harness);

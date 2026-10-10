@@ -159,7 +159,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'task_update',
     description:
-      'Update a board task: status, owner, subject, description, active form, metadata and dependencies. Set status to "deleted" to remove it. A task in progress needs an owner: "leader" or a member that is still running; a member that has finished can be newly set as the owner only of a completed task. Dependencies only grow, and a completed or deleted blocker stops blocking. Members are not told about the update.',
+      'Update a board task: status, owner, subject, description, active form, metadata and dependencies. Set status to "deleted" to remove it. A task in progress needs an owner: "leader" or a member that is still running; a member that has finished can be newly set as the owner only of a completed task, and a task whose owner has ended moves to another open status only with a new owner. Dependencies only grow, and a completed or deleted blocker stops blocking. Members are not told about the update.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -800,7 +800,7 @@ export class HostedTeamSession {
       status !== task.status &&
       status !== 'completed'
     )
-      this.assertOwner(team, task.owner, false);
+      this.assertOwner(team, task.owner, false, number);
     if (
       status === 'in_progress' &&
       (owner === undefined ? task.owner : owner) === null
@@ -922,6 +922,7 @@ export class HostedTeamSession {
     team: TeamState,
     owner: string,
     completing: boolean,
+    keptOn?: number,
   ): void {
     if (owner === MANAGED_TEAM_LEADER) return;
     const member = team.members.find((each) => each.name === owner);
@@ -931,6 +932,16 @@ export class HostedTeamSession {
       );
     const state = this.memberState(member.childRunId);
     if (state === 'running' || (state === 'completed' && completing)) return;
+    const ended =
+      state === 'completed'
+        ? 'has finished'
+        : state === 'cancelled'
+          ? 'was cancelled'
+          : `has ${state}`;
+    if (keptOn !== undefined)
+      throw new HostedTeamRefusal(
+        `Member "${owner}" ${ended} and cannot keep task #${keptOn} open. Set owner "" to unassign it, or assign "leader" or a running member.`,
+      );
     throw new HostedTeamRefusal(
       state === 'completed'
         ? `Member "${owner}" has finished, so it can own only a completed task. If it did this task's work, set status "completed" with this owner; otherwise assign "leader" or a running member.`

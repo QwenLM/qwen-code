@@ -429,6 +429,24 @@ describe('the board', () => {
         `prompt:assign-${taskId}`,
       );
     await settle('run-alice');
+    // Editing the open task keeps its ended owner; moving it to another
+    // open status does not.
+    expect(
+      await teams.run(
+        'task_update',
+        { taskId: '1', description: 'audit it again' },
+        'prompt:edit',
+      ),
+    ).toBe('Task #1 updated (status: in_progress, owner: alice).');
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '2', status: 'pending' },
+          'prompt:park',
+        ),
+      ),
+    ).toContain('cannot keep task #2 open');
     expect(
       await teams.run(
         'task_update',
@@ -521,7 +539,19 @@ describe('the board', () => {
             `prompt:reopen-${status}`,
           ),
         ),
-      ).toContain('Member "alice" has finished');
+      ).toBe(
+        'Member "alice" has finished and cannot keep task #1 open. Set owner "" to unassign it, or assign "leader" or a running member.',
+      );
+    // Naming the same owner again is still keeping it.
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '1', status: 'in_progress', owner: 'alice' },
+          'prompt:reopen-named',
+        ),
+      ),
+    ).toContain('cannot keep task #1 open');
     expect(
       await teams.run(
         'task_update',
