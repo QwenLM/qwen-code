@@ -7,7 +7,7 @@
 import type { CommandModule } from 'yargs';
 import type { ModValidationReport } from '@qwen-code/qwen-code-core/mods/mod-types.js';
 import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { ignoreBrokenPipe, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 interface ValidateModsArgs {
   path: string;
@@ -19,14 +19,21 @@ const safeText = stripAnsiAndControl;
 export function formatModReport(report: ModValidationReport): string {
   const lines = [
     `Mod: ${report.discovery}`,
-    `Static: ${report.static.status}${report.static.complete ? '' : ' (incomplete)'}`,
+    `Static: ${report.static.status}`,
     `Runtime: ${report.runtime}`,
     `Target: ${report.target}`,
   ];
   if (report.entry) lines.push(`Entry: ${safeText(report.entry)}`);
   for (const requirement of report.requirements) {
+    const location = requirement.file
+      ? ` ${safeText(requirement.file)}${requirement.line ? `:${requirement.line}:${requirement.column ?? 1}` : ''}`
+      : '';
+    const matcher =
+      requirement.matcher === undefined
+        ? ''
+        : ` matcher=${safeText(requirement.matcher)}`;
     lines.push(
-      `${requirement.kind}: ${safeText(requirement.name)} (${requirement.stage})`,
+      `${safeText(requirement.kind)}: ${safeText(requirement.name)} (${safeText(requirement.stage)})${location}${matcher}${requirement.hasCatch ? ' catch' : ''}`,
     );
   }
   for (const diagnostic of report.diagnostics) {
@@ -43,15 +50,26 @@ export function formatModReport(report: ModValidationReport): string {
 export async function handleValidateMods(
   args: ValidateModsArgs,
 ): Promise<void> {
+  ignoreBrokenPipe();
   const { validateMods } = await import(
     '@qwen-code/qwen-code-core/mods/mod-validation.js'
   );
   const report = await validateMods(args.path);
-  writeStdoutLine(args.json ? JSON.stringify(report) : formatModReport(report));
+  try {
+    writeStdoutLine(
+      args.json ? JSON.stringify(report) : formatModReport(report),
+    );
+  } catch (error) {
+    if (
+      !error ||
+      typeof error !== 'object' ||
+      !('code' in error) ||
+      error.code !== 'EPIPE'
+    )
+      throw error;
+  }
   process.exitCode =
-    report.static.status === 'invalid' ||
-    report.static.status === 'incomplete' ||
-    report.discovery === 'invalid'
+    report.static.status === 'invalid' || report.static.status === 'incomplete'
       ? 1
       : 0;
 }

@@ -198,6 +198,44 @@ describe('extensionToOutputString', () => {
     expect(output).not.toContain('private internal detail');
   });
 
+  it('omits declaration warnings and deduplicates error codes', () => {
+    const extension = createMockExtension({
+      mod: {
+        discovery: 'declared',
+        runtime: 'unavailable',
+        diagnostics: [
+          {
+            code: 'MOD_DEPENDENCY_DEFERRED',
+            severity: 'warning',
+            message: 'dependency detail',
+          },
+          {
+            code: 'MOD_USER_CONFIG_INVALID',
+            severity: 'error',
+            message: 'first option detail',
+          },
+          {
+            code: 'MOD_USER_CONFIG_INVALID',
+            severity: 'error',
+            message: 'second option detail',
+          },
+        ],
+      },
+    });
+    const output = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+    );
+    expect(
+      output
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.startsWith('Mod diagnostics:')),
+    ).toEqual(['Mod diagnostics: MOD_USER_CONFIG_INVALID']);
+    expect(output).not.toContain('detail');
+  });
+
   it.each(['declared', 'invalid'] as const)(
     'shows %s Mod status without claiming runtime support',
     (discovery) => {

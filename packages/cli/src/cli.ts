@@ -514,6 +514,7 @@ async function runValidateModsFastPath(argv: readonly string[]): Promise<void> {
     .command(validateModsCommand)
     .version(false)
     .help()
+    .alias('h', 'help')
     .strict()
     .demandCommand(1)
     .exitProcess(false)

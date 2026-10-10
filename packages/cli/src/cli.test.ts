@@ -66,6 +66,42 @@ vi.mock('./commands/extensions/validate-mods.js', () => ({
 }));
 
 describe('Mod validation bootstrap', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.exitCode = 0;
+  });
+  afterEach(() => {
+    process.exitCode = 0;
+  });
+  it.each([
+    ['extensions', 'validate-mods', '-h'],
+    ['extensions', 'validate-mods', '-h', '/tmp/plugin'],
+    ['-h', 'extensions', 'validate-mods', '/tmp/plugin'],
+    ['extensions', 'validate-mods', '--help'],
+  ])('prints help before validation or model startup: %s', async (...args) => {
+    await runCliEntry(args);
+    expect(process.exitCode).toBe(0);
+    expect(mocks.validateModsHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+  it('parses a value-taking global option before validation', async () => {
+    await runCliEntry([
+      '--proxy',
+      'http://localhost',
+      'extensions',
+      'validate-mods',
+      '/tmp/plugin',
+      '--json',
+    ]);
+    expect(mocks.validateModsHandler).toHaveBeenCalledOnce();
+    expect(mocks.validateModsHandler.mock.calls[0][0]).toMatchObject({
+      proxy: 'http://localhost',
+      path: '/tmp/plugin',
+      json: true,
+    });
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(0);
+  });
   it('routes explicit local validation before model/settings startup', async () => {
     vi.clearAllMocks();
     expect(

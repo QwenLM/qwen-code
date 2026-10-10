@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import { isBidiControlChar } from '../utils/terminalSafe.js';
 import {
   discoverMod,
   ModFileError,
@@ -23,8 +24,10 @@ const MAX_FILES = 128;
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_TOTAL_BYTES = 8 * MAX_FILE_BYTES;
 const MAX_DIAGNOSTICS = 100;
+const MAX_REQUIREMENTS = 4096;
 const BLOCK_SCOPES = new Set([
   'BlockStatement',
+  'TSModuleBlock',
   'StaticBlock',
   'CatchClause',
   'ForStatement',
@@ -54,8 +57,67 @@ const TS_EXPRESSION_WRAPPERS = new Set([
   'TSInstantiationExpression',
 ]);
 
+const STANDARD_GLOBALS = new Set([
+  'undefined',
+  'NaN',
+  'Infinity',
+  'Object',
+  'Array',
+  'String',
+  'Number',
+  'Boolean',
+  'BigInt',
+  'Symbol',
+  'Math',
+  'Date',
+  'JSON',
+  'Intl',
+  'RegExp',
+  'Map',
+  'Set',
+  'WeakMap',
+  'WeakSet',
+  'WeakRef',
+  'FinalizationRegistry',
+  'Promise',
+  'Error',
+  'TypeError',
+  'RangeError',
+  'SyntaxError',
+  'ReferenceError',
+  'URIError',
+  'EvalError',
+  'AggregateError',
+  'Reflect',
+  'console',
+  'parseInt',
+  'parseFloat',
+  'isNaN',
+  'isFinite',
+  'decodeURI',
+  'encodeURI',
+  'decodeURIComponent',
+  'encodeURIComponent',
+  'TextEncoder',
+  'TextDecoder',
+  'URL',
+  'URLSearchParams',
+  'AbortController',
+  'AbortSignal',
+  'Buffer',
+  'setTimeout',
+  'clearTimeout',
+  'setInterval',
+  'clearInterval',
+  'queueMicrotask',
+]);
+
 type Node = {
   type: string;
+  declare?: unknown;
+  parameter?: unknown;
+  label?: unknown;
+  imported?: unknown;
   [key: string]: unknown;
   name?: unknown;
   value?: unknown;
@@ -103,7 +165,19 @@ function node(value: unknown): Node | undefined {
 
 function children(value: Node): Node[] {
   return Object.entries(value).flatMap(([key, item]) => {
-    if (['loc', 'comments', 'tokens', 'errors'].includes(key)) return [];
+    if (
+      [
+        'loc',
+        'comments',
+        'tokens',
+        'errors',
+        'typeAnnotation',
+        'typeParameters',
+        'typeArguments',
+      ].includes(key) ||
+      key.endsWith('Comments')
+    )
+      return [];
     return Array.isArray(item)
       ? item.flatMap((entry) => node(entry) ?? [])
       : (node(item) ?? []);
@@ -152,10 +226,15 @@ function names(pattern: Node | undefined): string[] {
   if (pattern.type === 'AssignmentPattern') return names(node(pattern.left));
   if (pattern.type === 'RestElement') return names(node(pattern.argument));
   if (pattern.type === 'ObjectProperty') return names(node(pattern.value));
-  return children(pattern).flatMap((child) => names(child));
+  if (pattern.type === 'TSParameterProperty')
+    return names(node(pattern.parameter));
+  if (['ObjectPattern', 'ArrayPattern'].includes(pattern.type))
+    return children(pattern).flatMap((child) => names(child));
+  return [];
 }
 
 function bindLocals(value: Node, scope: Scope): void {
+  if (value.declare === true || value.type === 'TSModuleDeclaration') return;
   if (
     value.type === 'FunctionDeclaration' ||
     value.type === 'ClassDeclaration'
@@ -174,8 +253,9 @@ function bindLocals(value: Node, scope: Scope): void {
     const init = node(value.init);
     if (name && init && isFunction(init)) scope.functions.set(name, init);
   }
-  if (value.type === 'ImportDeclaration') {
+  if (value.type === 'ImportDeclaration' && value.importKind !== 'type') {
     for (const specifier of children(value)) {
+      if (specifier.importKind === 'type') continue;
       const name = identifier(specifier.local);
       if (name) scope.bindings.set(name, 'local');
     }
@@ -186,6 +266,7 @@ function bindLocals(value: Node, scope: Scope): void {
 }
 
 function bindVars(value: Node, scope: Scope): void {
+  if (value.declare === true || value.type === 'TSModuleDeclaration') return;
   if (
     isFunction(value) ||
     ['ClassDeclaration', 'ClassExpression'].includes(value.type)
@@ -271,7 +352,13 @@ function registerFunction(program: Node): Node | undefined {
 function safeText(value: string): string {
   return Array.from(value, (character) => {
     const code = character.charCodeAt(0);
-    return code < 32 || (code >= 127 && code <= 159) ? '?' : character;
+    return code < 32 ||
+      (code >= 127 && code <= 159) ||
+      isBidiControlChar(code) ||
+      code === 0x2028 ||
+      code === 0x2029
+      ? '?'
+      : character;
   }).join('');
 }
 
@@ -303,17 +390,27 @@ function literalMatcher(value: Node | undefined): string | undefined {
 
 export async function validateMods(root: string): Promise<ModValidationReport> {
   const descriptor = await discoverMod(root);
-  const diagnostics: ModDiagnostic[] = descriptor.diagnostics.map((item) => ({
-    ...item,
-    message: safeText(item.message),
-    ...(item.file ? { file: safeText(item.file) } : {}),
-  }));
+  const diagnostics: ModDiagnostic[] = descriptor.diagnostics
+    .slice(0, MAX_DIAGNOSTICS)
+    .map((item) => ({
+      ...item,
+      message: safeText(item.message),
+      ...(item.file ? { file: safeText(item.file) } : {}),
+    }));
   const requirements: ModRequirement[] = [];
   const files: string[] = [];
   let complete = !diagnostics.some((item) =>
     ['MOD_ANALYSIS_LIMIT', 'MOD_ANALYSIS_INCOMPLETE'].includes(item.code),
   );
   let diagnosticLimit = diagnostics.length >= MAX_DIAGNOSTICS;
+  if (diagnosticLimit) {
+    complete = false;
+    diagnostics[MAX_DIAGNOSTICS - 1] = {
+      code: 'MOD_ANALYSIS_LIMIT',
+      severity: 'error',
+      message: 'The diagnostic limit was reached.',
+    };
+  }
   let graphLimit = false;
   let totalBytes = 0;
   const visited = new Set<string>();
@@ -337,11 +434,7 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
       });
       return;
     }
-    if (
-      code === 'MOD_ANALYSIS_INCOMPLETE' ||
-      code === 'MOD_ANALYSIS_LIMIT' ||
-      code === 'MOD_PATH_CHANGED'
-    ) {
+    if (code === 'MOD_ANALYSIS_INCOMPLETE' || code === 'MOD_ANALYSIS_LIMIT') {
       complete = false;
     }
     diagnostics.push({
@@ -360,6 +453,20 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
     at: Node,
     extra: Partial<ModRequirement> = {},
   ): void {
+    if (
+      requirements.length >= MAX_REQUIREMENTS ||
+      name.length > 4096 ||
+      (extra.matcher?.length ?? 0) > 16384
+    ) {
+      graphLimit = true;
+      diagnostic(
+        'MOD_ANALYSIS_LIMIT',
+        'The capability report size limit was reached.',
+        file,
+        at,
+      );
+      return;
+    }
     const stage = capabilityStage(kind, name);
     requirements.push({
       kind,
@@ -388,21 +495,55 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
     };
     bindLocals(program, rootScope);
     bindVars(program, rootScope);
+    const isCall = (value: Node | undefined) =>
+      !!value &&
+      ['CallExpression', 'OptionalCallExpression'].includes(value.type);
     const isOnCall = (value: Node | undefined, scope: Scope) => {
-      const name =
-        value?.type === 'CallExpression' ? identifier(value.callee) : undefined;
+      const name = isCall(value)
+        ? identifier(runtimeExpression(value!.callee))
+        : undefined;
       return !!name && binding(scope, name) === 'on';
     };
+    const isCatchMember = (value: Node | undefined) =>
+      !!value &&
+      ['MemberExpression', 'OptionalMemberExpression'].includes(value.type) &&
+      !value.optional &&
+      !value.computed &&
+      identifier(value.property) === 'catch';
+    function isRegistration(value: Node | undefined, scope: Scope): boolean {
+      if (!isCall(value)) return false;
+      if (isOnCall(value, scope)) return true;
+      const callee = runtimeExpression(value!.callee);
+      return (
+        isCatchMember(callee) && isRegistration(node(callee!.object), scope)
+      );
+    }
     function walk(value: Node, current: Scope, parent?: Node): void {
-      if (diagnosticLimit) return;
+      if (diagnosticLimit || graphLimit || value.declare === true) return;
+      if (value.importKind === 'type' || value.exportKind === 'type') return;
+      if (TS_EXPRESSION_WRAPPERS.has(value.type)) {
+        const expression = runtimeExpression(value);
+        if (expression) walk(expression, current, parent);
+        return;
+      }
       if (value.type.startsWith('TS') && !RUNTIME_TS_NODES.has(value.type))
         return;
+      if (value.type === 'TSModuleDeclaration') {
+        diagnostic(
+          'MOD_ANALYSIS_INCOMPLETE',
+          'Runtime namespaces are outside the supported static syntax.',
+          file,
+          value,
+        );
+      }
       let scope = current;
       let bodyScope: Scope | undefined;
       if (
         isFunction(value) ||
         BLOCK_SCOPES.has(value.type) ||
-        ['ClassExpression', 'ClassDeclaration'].includes(value.type)
+        ['ClassExpression', 'ClassDeclaration', 'TSModuleDeclaration'].includes(
+          value.type,
+        )
       ) {
         scope = {
           parent: current,
@@ -418,14 +559,7 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
         if (BLOCK_SCOPES.has(value.type)) bindLocals(value, scope);
         if (value.type === 'StaticBlock') bindVars(value, scope);
         const params = (value.params as unknown[] | undefined) ?? [];
-        const catchMember =
-          parent?.type === 'CallExpression' ? node(parent.callee) : undefined;
-        const callbackParent =
-          isOnCall(parent, current) ||
-          (catchMember?.type === 'MemberExpression' &&
-            !catchMember.computed &&
-            identifier(catchMember.property) === 'catch' &&
-            isOnCall(node(catchMember.object), current));
+        const callbackParent = isRegistration(parent, current);
         params.forEach((param, index) => {
           for (const name of names(node(param))) {
             scope.bindings.set(
@@ -526,11 +660,12 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
         value.type === 'OptionalCallExpression' ||
         value.type === 'NewExpression'
       ) {
-        const callee = node(value.callee);
+        const callee = runtimeExpression(value.callee);
         const name = identifier(callee);
         if (
           callee?.type === 'Import' ||
-          ['require', 'eval', 'Function'].includes(name ?? '')
+          (['require', 'eval', 'Function'].includes(name ?? '') &&
+            !binding(scope, name!))
         ) {
           diagnostic(
             'MOD_IMPORT_UNSUPPORTED',
@@ -539,13 +674,13 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
             value,
           );
         }
-        if (name && binding(scope, name) === 'on') {
+        if (isCall(value) && name && binding(scope, name) === 'on') {
           const args = (value.arguments as unknown[] | undefined) ?? [];
-          const event = stringLiteral(args[0]);
-          const matcherNode = node(args[1]);
+          const event = stringLiteral(runtimeExpression(args[0]));
+          const matcherNode = runtimeExpression(args[1]);
           const hasMatcher = !!matcherNode && !isFunction(matcherNode);
           const matcher = hasMatcher ? literalMatcher(matcherNode) : undefined;
-          const callback = node(args[hasMatcher ? 2 : 1]);
+          const callback = runtimeExpression(args[hasMatcher ? 2 : 1]);
           if (!event || (hasMatcher && matcher === undefined)) {
             diagnostic(
               'MOD_ANALYSIS_INCOMPLETE',
@@ -555,7 +690,12 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
             );
           } else {
             const member =
-              parent?.type === 'MemberExpression' ? parent : undefined;
+              parent &&
+              ['MemberExpression', 'OptionalMemberExpression'].includes(
+                parent.type,
+              )
+                ? parent
+                : undefined;
             requirement('event', event, file, value, {
               ...(matcher ? { matcher } : {}),
               hasCatch:
@@ -572,15 +712,12 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
               value,
             );
           }
+        }
+        if (isRegistration(value, scope)) {
           if (
             parent &&
             parent.type !== 'ExpressionStatement' &&
-            !(
-              parent.type === 'MemberExpression' &&
-              !parent.computed &&
-              identifier(parent.property) === 'catch' &&
-              parent.object === value
-            )
+            !(isCatchMember(parent) && parent.object === value)
           ) {
             diagnostic(
               'MOD_ANALYSIS_INCOMPLETE',
@@ -589,20 +726,19 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
               value,
             );
           }
-        }
-        if (
-          callee?.type === 'MemberExpression' &&
-          !callee.computed &&
-          identifier(callee.property) === 'catch' &&
-          isOnCall(node(callee.object), scope) &&
-          !isFunction(node(((value.arguments as unknown[]) ?? [])[0]))
-        ) {
-          diagnostic(
-            'MOD_ANALYSIS_INCOMPLETE',
-            'A catch callback cannot be determined statically.',
-            file,
-            value,
-          );
+          if (
+            !isOnCall(value, scope) &&
+            !isFunction(
+              runtimeExpression(((value.arguments as unknown[]) ?? [])[0]),
+            )
+          ) {
+            diagnostic(
+              'MOD_ANALYSIS_INCOMPLETE',
+              'A catch callback cannot be determined statically.',
+              file,
+              value,
+            );
+          }
         }
         if (
           callee &&
@@ -640,6 +776,33 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
           }
         }
       }
+      if (
+        ['MemberExpression', 'OptionalMemberExpression'].includes(value.type)
+      ) {
+        const property = value.computed
+          ? stringLiteral(value.property)
+          : identifier(value.property);
+        const receiver = identifier(runtimeExpression(value.object));
+        if (
+          ['constructor', '__proto__'].includes(property ?? '') ||
+          (receiver &&
+            !binding(scope, receiver) &&
+            (receiver === 'Reflect' ||
+              (receiver === 'Object' &&
+                [
+                  'getPrototypeOf',
+                  'getOwnPropertyDescriptor',
+                  'getOwnPropertyDescriptors',
+                ].includes(property ?? ''))))
+        ) {
+          diagnostic(
+            'MOD_ANALYSIS_INCOMPLETE',
+            'Reflective property access is outside the supported static syntax.',
+            file,
+            value,
+          );
+        }
+      }
       if (value.type === 'JSXOpeningElement') {
         const element = node(value.name);
         if (
@@ -671,7 +834,14 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
             file,
             value,
           );
-        } else if (value.computed && property === undefined) {
+        } else if (
+          (value.computed && property === undefined) ||
+          (!(
+            parent?.type === 'AssignmentExpression' && parent.left === value
+          ) &&
+            (!STANDARD_GLOBALS.has(property ?? '') ||
+              ['Object', 'Reflect'].includes(property ?? '')))
+        ) {
           diagnostic(
             'MOD_ANALYSIS_INCOMPLETE',
             'A global property cannot be determined statically.',
@@ -691,14 +861,8 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
         )
       ) {
         if (
-          isOnCall(node(value.object), scope) &&
-          !(
-            value.type === 'MemberExpression' &&
-            !value.computed &&
-            identifier(value.property) === 'catch' &&
-            parent?.type === 'CallExpression' &&
-            parent.callee === value
-          )
+          isRegistration(node(value.object), scope) &&
+          !(isCatchMember(value) && isCall(parent) && parent!.callee === value)
         ) {
           diagnostic(
             'MOD_ANALYSIS_INCOMPLETE',
@@ -728,8 +892,8 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
               (part) =>
                 !part.computed && !part.optional && identifier(part.property),
             ) &&
-            parent?.type === 'CallExpression' &&
-            parent.callee === value
+            isCall(parent) &&
+            parent!.callee === value
           )
         ) {
           diagnostic(
@@ -746,19 +910,20 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
           parent &&
           isFunction(parent) &&
           ((parent.params as unknown[]) ?? []).includes(value);
-        const isDirectOnCall =
-          parent?.type === 'CallExpression' && parent.callee === value;
+        const isDirectOnCall = isCall(parent) && parent!.callee === value;
         const isMemberReceiver =
-          parent?.type === 'MemberExpression' && parent.object === value;
-        const helperName =
-          parent?.type === 'CallExpression'
-            ? identifier(parent.callee)
-            : undefined;
+          !!parent &&
+          ['MemberExpression', 'OptionalMemberExpression'].includes(
+            parent.type,
+          ) &&
+          parent.object === value;
+        const helperName = isCall(parent)
+          ? identifier(parent!.callee)
+          : undefined;
         const definition = helperName ? helper(scope, helperName) : undefined;
-        const argumentIndex =
-          parent?.type === 'CallExpression'
-            ? ((parent.arguments as unknown[]) ?? []).indexOf(value)
-            : -1;
+        const argumentIndex = isCall(parent)
+          ? ((parent!.arguments as unknown[]) ?? []).indexOf(value)
+          : -1;
         const isHelperArgument =
           argumentIndex >= 0 &&
           definition &&
@@ -772,12 +937,20 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
           ) &&
             parent.property === value &&
             !parent.computed) ||
-            (['ObjectProperty', 'ObjectMethod', 'ClassMethod'].includes(
-              parent.type,
-            ) &&
+            ([
+              'ObjectProperty',
+              'ObjectMethod',
+              'ClassMethod',
+              'ClassProperty',
+              'ClassPrivateProperty',
+            ].includes(parent.type) &&
               parent.key === value &&
               !parent.computed &&
-              !parent.shorthand));
+              !parent.shorthand) ||
+            (parent.type === 'PrivateName' && parent.id === value) ||
+            parent.label === value ||
+            (parent.type === 'ExportSpecifier' && parent.exported === value) ||
+            (parent.type === 'ImportSpecifier' && parent.imported === value));
         if (
           !isPropertyName &&
           !isParameter &&
@@ -792,6 +965,33 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
             file,
             value,
           );
+        }
+        if (
+          !isParameter &&
+          !isPropertyName &&
+          !role &&
+          !['require', 'eval', 'Function', 'module', 'exports'].includes(
+            value.name,
+          )
+        ) {
+          const directGlobal =
+            value.name === 'globalThis' &&
+            parent &&
+            ['MemberExpression', 'OptionalMemberExpression'].includes(
+              parent.type,
+            ) &&
+            runtimeExpression(parent.object) === value;
+          if (
+            (!directGlobal && !STANDARD_GLOBALS.has(value.name)) ||
+            (['Reflect', 'Object'].includes(value.name) && !isMemberReceiver)
+          ) {
+            diagnostic(
+              'MOD_ANALYSIS_INCOMPLETE',
+              'A free global reference cannot be determined statically.',
+              file,
+              value,
+            );
+          }
         }
         if (
           !isParameter &&
@@ -848,9 +1048,9 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
     if (requested.has(requestKey)) return;
     requested.add(requestKey);
     if (
-      (declaration && !relative.endsWith('.d.ts')) ||
+      (declaration && !SOURCE_EXTENSIONS.test(relative)) ||
       (!declaration &&
-        (!SOURCE_EXTENSIONS.test(relative) || relative.endsWith('.d.ts')))
+        (!SOURCE_EXTENSIONS.test(relative) || /\.d\.[cm]?ts$/.test(relative)))
     ) {
       diagnostic(
         'MOD_IMPORT_UNSUPPORTED',
@@ -862,7 +1062,7 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
     let source: { text: string; realPath: string };
     try {
       const resolved = await resolveModFile(descriptor.root, relative);
-      if (!declaration && resolved.realPath.endsWith('.d.ts')) {
+      if (!declaration && /\.d\.[cm]?ts$/.test(resolved.realPath)) {
         diagnostic(
           'MOD_IMPORT_UNSUPPORTED',
           'A declaration file cannot be used as a runtime module.',
@@ -870,7 +1070,10 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
         );
         return;
       }
-      if (visited.has(resolved.realPath)) return;
+      if (
+        visited.has(`${declaration ? 'types' : 'runtime'}:${resolved.realPath}`)
+      )
+        return;
       if (
         visited.size >= MAX_FILES ||
         BigInt(totalBytes) + resolved.stat.size > BigInt(MAX_TOTAL_BYTES)
@@ -887,12 +1090,15 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
     } catch (error) {
       diagnostic(
         error instanceof ModFileError ? error.code : 'MOD_PATH_MISSING',
-        'The module could not be safely read.',
+        error instanceof ModFileError
+          ? error.message
+          : 'The module could not be safely read.',
         diagnosticFile,
       );
       return;
     }
-    if (visited.has(source.realPath)) return;
+    const visitKey = `${declaration ? 'types' : 'runtime'}:${source.realPath}`;
+    if (visited.has(visitKey)) return;
     relative = path.posix.normalize(relative);
     if (
       visited.size >= MAX_FILES ||
@@ -906,9 +1112,9 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
       );
       return;
     }
-    visited.add(source.realPath);
+    visited.add(visitKey);
     totalBytes += Buffer.byteLength(source.text);
-    files.push(safeText(relative));
+    if (!files.includes(safeText(relative))) files.push(safeText(relative));
     let program: Node;
     let parse: typeof import('@babel/parser').parse;
     try {
@@ -966,10 +1172,14 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
     if (!declaration) {
       try {
         inspect(program, relative, register);
-      } catch {
+      } catch (error) {
         diagnostic(
-          'MOD_ANALYSIS_LIMIT',
-          'The source nesting exceeds static analysis capacity.',
+          error instanceof RangeError
+            ? 'MOD_ANALYSIS_LIMIT'
+            : 'MOD_ANALYSIS_INCOMPLETE',
+          error instanceof RangeError
+            ? 'The source nesting exceeds static analysis capacity.'
+            : 'The source could not be fully inspected.',
           relative,
         );
       }
@@ -993,8 +1203,12 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
           (statement.specifiers as Node[]).every(
             (item) => item.importKind === 'type',
           ));
-      if (typeOnly && specifier === 'claude-code') continue;
-      if (declaration && !specifier.startsWith('.')) {
+      if (
+        typeOnly &&
+        (specifier === 'claude-code' || specifier.startsWith('claude-code/'))
+      )
+        continue;
+      if ((declaration || typeOnly) && !specifier.startsWith('.')) {
         diagnostic(
           'MOD_TYPE_RESOLUTION_DEFERRED',
           'External declaration dependencies require later resolution.',
@@ -1016,20 +1230,18 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
         continue;
       }
       // readModFile owns lexical and realpath confinement; do not normalize away traversal here.
-      const destination = path.join(path.dirname(relative), specifier);
-      await scan(
-        destination,
-        false,
-        declaration || (typeOnly && specifier.endsWith('.d.ts')),
-        relative,
+      const destination = path.posix.join(
+        path.posix.dirname(relative),
+        specifier,
       );
+      await scan(destination, false, declaration || typeOnly, relative);
     }
   }
 
   if (descriptor.discovery === 'declared' && descriptor.entry) {
     await scan(descriptor.entry, true);
     const types = descriptor.types;
-    if (typeof types === 'string') await scan(types, false, true);
+    if (typeof types === 'string') await scan(types, false, true, types);
   }
   const locationOrder = (
     a: ModDiagnostic | ModRequirement,

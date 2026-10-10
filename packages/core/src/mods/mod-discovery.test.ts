@@ -189,6 +189,176 @@ describe('discoverMod', () => {
     );
   });
 
+  it.each(['hooks/hooks.json/', './hooks/../hooks/hooks.json/'])(
+    'recognizes canonical hooks by resolved location: %s',
+    async (hooks) => {
+      await write('hooks/hooks.json', { modules: ['entry.mjs'] });
+      await write('hooks/entry.mjs', 'export function register() {}');
+      for (const strict of [true, false]) {
+        expect(await discoverMod(root, { hooks }, { strict })).toMatchObject({
+          discovery: 'declared',
+          diagnostics: [],
+        });
+      }
+    },
+  );
+
+  it('reports a missing canonical file with a trailing separator once', async () => {
+    expect(
+      await discoverMod(root, { hooks: './hooks/hooks.json/' }),
+    ).toMatchObject({
+      discovery: 'invalid',
+      diagnostics: [
+        expect.objectContaining({ code: 'MOD_ANALYSIS_INCOMPLETE' }),
+      ],
+    });
+  });
+
+  it('does not exempt an absolute path naming the canonical file', async () => {
+    await write('hooks/hooks.json', { modules: ['entry.mjs'] });
+    await write('hooks/entry.mjs', 'export function register() {}');
+    expect(
+      await discoverMod(root, { hooks: path.join(root, 'hooks/hooks.json') }),
+    ).toMatchObject({
+      discovery: 'invalid',
+      diagnostics: [expect.objectContaining({ code: 'MOD_PATH_OUTSIDE' })],
+    });
+  });
+
+  it.each([
+    '/abs/entry.mjs',
+    'C:/plugins/entry.mjs',
+    'https://host/entry.mjs',
+    '..\\entry.mjs',
+  ])(
+    'keeps other declaration diagnostics after rejecting entry %s',
+    async (entry) => {
+      await write('hooks/hooks.json', { modules: [entry] });
+      const result = await discoverMod(root, {
+        userConfig: { broken: {} },
+        types: '/abs/self.d.ts',
+        dependencies: {},
+      });
+      expect(result.diagnostics.map((item) => item.code)).toEqual([
+        'MOD_PATH_OUTSIDE',
+        'MOD_USER_CONFIG_INVALID',
+        'MOD_TYPES_INVALID',
+        'MOD_DEPENDENCIES_INVALID',
+      ]);
+    },
+  );
+
+  it('locates a dangling Gemini manifest diagnostic in that manifest', async () => {
+    await fs.rm(path.join(root, 'qwen-extension.json'));
+    await fs.symlink('missing.json', path.join(root, 'gemini-extension.json'));
+    expect(await discoverMod(root)).toMatchObject({
+      discovery: 'invalid',
+      diagnostics: [expect.objectContaining({ file: 'gemini-extension.json' })],
+    });
+  });
+
+  it('locates an escaping Qoder manifest diagnostic in that manifest', async () => {
+    await fs.rm(path.join(root, 'qwen-extension.json'));
+    await fs.mkdir(path.join(root, '.qoder-plugin'));
+    await fs.symlink(os.tmpdir(), path.join(root, '.qoder-plugin/plugin.json'));
+    expect(await discoverMod(root)).toMatchObject({
+      discovery: 'invalid',
+      diagnostics: [
+        expect.objectContaining({
+          code: 'MOD_PATH_OUTSIDE',
+          file: '.qoder-plugin/plugin.json',
+        }),
+      ],
+    });
+  });
+
+  it('explains wrapped modules must be declared at the canonical top level', async () => {
+    await write('hooks/hooks.json', { hooks: { modules: ['entry.mjs'] } });
+    expect((await discoverMod(root)).diagnostics).toContainEqual({
+      code: 'MOD_UNSUPPORTED_LOCATION',
+      severity: 'error',
+      file: 'hooks/hooks.json',
+      message: 'modules must be declared at the top level of hooks/hooks.json.',
+    });
+  });
+
+  it('rejects top-level manifest modules without inspecting unrelated metadata', async () => {
+    expect(await discoverMod(root, { modules: ['entry.mjs'] })).toMatchObject({
+      discovery: 'invalid',
+      diagnostics: [
+        expect.objectContaining({
+          code: 'MOD_UNSUPPORTED_LOCATION',
+          file: 'qwen-extension.json',
+        }),
+      ],
+    });
+    expect(
+      await discoverMod(root, { metadata: { modules: ['entry.mjs'] } }),
+    ).toMatchObject({
+      discovery: 'absent',
+      diagnostics: [],
+    });
+  });
+
+  it.each([null, [], false, 'malformed JSON'])(
+    'does not invent a Mod from malformed classic canonical hooks %#',
+    async (hooks) => {
+      await write('hooks/hooks.json', hooks);
+      expect(
+        await discoverMod(root, undefined, { strict: false }),
+      ).toMatchObject({
+        discovery: 'absent',
+        diagnostics: [],
+      });
+      expect((await discoverMod(root)).discovery).toBe('invalid');
+    },
+  );
+
+  it('retains explicit invalid modules during ordinary discovery', async () => {
+    await write('hooks/hooks.json', { modules: [] });
+    expect(await discoverMod(root, undefined, { strict: false })).toMatchObject(
+      {
+        discovery: 'invalid',
+        diagnostics: [expect.objectContaining({ code: 'MOD_MODULES_INVALID' })],
+      },
+    );
+  });
+
+  it('bounds 129 custom declarations even when they contain no modules', async () => {
+    expect(
+      await discoverMod(root, {
+        hooks: Array.from({ length: 129 }, () => ({})),
+      }),
+    ).toMatchObject({
+      discovery: 'invalid',
+      diagnostics: [expect.objectContaining({ code: 'MOD_ANALYSIS_LIMIT' })],
+    });
+  });
+
+  it('retains misplaced modules when classic canonical hooks are malformed', async () => {
+    await write('hooks/hooks.json', 'malformed JSON');
+    expect(
+      await discoverMod(root, { modules: ['entry.mjs'] }, { strict: false }),
+    ).toMatchObject({
+      discovery: 'invalid',
+      diagnostics: [
+        expect.objectContaining({ code: 'MOD_UNSUPPORTED_LOCATION' }),
+      ],
+    });
+    await write('hooks/hooks.json', [{ modules: ['entry.mjs'] }]);
+    expect(await discoverMod(root, undefined, { strict: false })).toMatchObject(
+      {
+        discovery: 'invalid',
+        diagnostics: [
+          expect.objectContaining({
+            code: 'MOD_UNSUPPORTED_LOCATION',
+            file: 'hooks/hooks.json',
+          }),
+        ],
+      },
+    );
+  });
+
   it('does not invent a Mod from an unreadable legacy custom hooks path', async () => {
     expect(
       await discoverMod(
@@ -390,5 +560,51 @@ describe('readModFile', () => {
     await expect(readModFile(root, 'entry.mjs', 5)).rejects.toMatchObject({
       code: 'MOD_ANALYSIS_LIMIT',
     });
+  });
+
+  it('rejects a same-inode same-size rewrite between resolution and open', async () => {
+    await write('entry.mjs', 'original');
+    const target = path.join(root, 'entry.mjs');
+    const inode = (await fs.stat(target)).ino;
+    const open = fs.open.bind(fs);
+    let rewritten = false;
+    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      if (!rewritten) {
+        rewritten = true;
+        await fs.writeFile(target, 'changed!');
+        await fs.utimes(target, 2_000_000_000, 2_000_000_000);
+      }
+      return open(...args);
+    });
+    await expect(readModFile(root, 'entry.mjs', 16)).rejects.toMatchObject({
+      code: 'MOD_ANALYSIS_INCOMPLETE',
+    });
+    expect((await fs.stat(target)).ino).toBe(inode);
+  });
+
+  it('rejects a same-inode same-size rewrite during the read', async () => {
+    await write('entry.mjs', 'original');
+    const target = path.join(root, 'entry.mjs');
+    const inode = (await fs.stat(target)).ino;
+    const open = fs.open.bind(fs);
+    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await open(...args);
+      const read = handle.read.bind(handle);
+      let rewritten = false;
+      vi.spyOn(handle, 'read').mockImplementation(async (...readArgs) => {
+        const result = await read(...readArgs);
+        if (!rewritten) {
+          rewritten = true;
+          await fs.writeFile(target, 'changed!');
+          await fs.utimes(target, 2_000_000_000, 2_000_000_000);
+        }
+        return result;
+      });
+      return handle;
+    });
+    await expect(readModFile(root, 'entry.mjs', 16)).rejects.toMatchObject({
+      code: 'MOD_ANALYSIS_INCOMPLETE',
+    });
+    expect((await fs.stat(target)).ino).toBe(inode);
   });
 });

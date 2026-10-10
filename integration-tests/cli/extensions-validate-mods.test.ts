@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   mkdtempSync,
   mkdirSync,
@@ -36,16 +36,15 @@ function snapshot(dir: string): Record<string, string> {
   return files;
 }
 function run(args: string[]) {
-  return spawnSync(
-    process.execPath,
-    [cli, 'extensions', 'validate-mods', ...args],
-    {
-      cwd: root,
-      encoding: 'utf8',
-      timeout: 15000,
-      env: { ...process.env, QWEN_HOME: home, QWEN_RUNTIME_DIR: home },
-    },
-  );
+  return runCli(['extensions', 'validate-mods', ...args]);
+}
+function runCli(args: string[]) {
+  return spawnSync(process.execPath, [cli, ...args], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 15000,
+    env: { ...process.env, QWEN_HOME: home, QWEN_RUNTIME_DIR: home },
+  });
 }
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'qwen-mod-cli-'));
@@ -61,6 +60,119 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 describe('built CLI Mod validation', () => {
+  it.each([
+    ['extensions', 'validate-mods', '-h'],
+    ['extensions', 'validate-mods', '-h', 'plugin'],
+    ['-h', 'extensions', 'validate-mods', 'plugin'],
+    ['extensions', 'validate-mods', '--help'],
+  ])('prints help with no path reads or startup writes: %s', (...args) => {
+    const before = snapshot(root);
+    const result = runCli(args);
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('validate-mods <path>');
+    expect(result.stdout).toContain('--json');
+    expect(result.stderr).toBe('');
+    expect(snapshot(root)).toEqual(before);
+  });
+  it('accepts a value-taking global flag without model or settings startup', () => {
+    const before = snapshot(root);
+    const result = runCli([
+      '--proxy',
+      'http://127.0.0.1:1',
+      'extensions',
+      'validate-mods',
+      plugin,
+      '--json',
+    ]);
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      discovery: 'absent',
+      static: { status: 'not-checked', complete: true },
+      runtime: 'unavailable',
+    });
+    expect(snapshot(root)).toEqual(before);
+  });
+  it('renders text provenance, matchers, catch, and diagnostics without executing source', () => {
+    write('hooks/hooks.json', JSON.stringify({ modules: ['./register.mjs'] }));
+    write(
+      'hooks/register.mjs',
+      [
+        "import './helper.mjs';",
+        'while (true) {}',
+        'export function register(on) {',
+        "  on('tool.call', {tool:'Bash'}, ($,e,next) => $.fs.read('x')).catch(($,e,next) => next(e));",
+        "  on('tool.check', {tool:'Write'}, ($,e,next) => next(e));",
+        '  on(getEvent(), ($,e,next) => next(e));',
+        '}',
+      ].join('\n'),
+    );
+    write(
+      'hooks/helper.mjs',
+      'export function read($) { return $.clock.now(); }\n',
+    );
+    const before = snapshot(root);
+    const result = run([plugin]);
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toContain('Static: incomplete\n');
+    expect(result.stdout).not.toContain('incomplete (incomplete)');
+    expect(result.stdout).toContain('Runtime: unavailable');
+    expect(result.stdout).toMatch(
+      /api: clock\.now \(M5\) hooks\/helper\.mjs:1:\d+/,
+    );
+    expect(result.stdout).toContain(
+      'event: tool.call (M4) hooks/register.mjs:4:3 matcher={"tool":"Bash"} catch',
+    );
+    expect(result.stdout).toMatch(
+      /api: fs\.read \(M5\) hooks\/register\.mjs:4:\d+/,
+    );
+    expect(
+      result.stdout
+        .split('\n')
+        .find((line) => line.startsWith('event: tool.check')),
+    ).toBe(
+      'event: tool.check (M4) hooks/register.mjs:5:3 matcher={"tool":"Write"}',
+    );
+    expect(result.stdout).toContain(
+      'error MOD_ANALYSIS_INCOMPLETE hooks/register.mjs:6:6:',
+    );
+    expect(snapshot(root)).toEqual(before);
+  });
+  it('keeps a valid validation exit when its stdout reader closes', async () => {
+    write('hooks/hooks.json', JSON.stringify({ modules: ['./register.mjs'] }));
+    write(
+      'hooks/register.mjs',
+      'while (true) {} export function register(on) {}',
+    );
+    const before = snapshot(root);
+    const child = spawn(
+      process.execPath,
+      [cli, 'extensions', 'validate-mods', plugin, '--json'],
+      {
+        cwd: root,
+        env: { ...process.env, QWEN_HOME: home, QWEN_RUNTIME_DIR: home },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 15000,
+      },
+    );
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (data: string) => {
+      stderr += data;
+    });
+    const closed = new Promise<number | null>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (code) => resolve(code));
+    });
+    child.stdout.destroy();
+    expect(await closed).toBe(0);
+    expect(stderr).toBe('');
+    expect(snapshot(root)).toEqual(before);
+  });
   it('parses reachable source without executing loops, throws, or side effects and writes nothing', () => {
     write('hooks/hooks.json', JSON.stringify({ modules: ['./register.mjs'] }));
     write(

@@ -607,9 +607,25 @@ describe('validateMods', () => {
     );
     const report = await validateMods(root);
     expect(report.static.status).toBe('valid');
-    expect(
-      report.requirements.every((item) => item.stage === 'unclassified'),
-    ).toBe(true);
+    expect(report.requirements).toEqual([
+      expect.objectContaining({
+        kind: 'event',
+        name: 'future.event',
+        stage: 'unclassified',
+        hasCatch: false,
+      }),
+      expect.objectContaining({
+        kind: 'api',
+        name: 'future.method',
+        stage: 'unclassified',
+      }),
+    ]);
+    expect(report.runtime).toBe('unavailable');
+    expect(report.diagnostics).toHaveLength(2);
+    expect(report.diagnostics.map((item) => item.code)).toEqual([
+      'MOD_CAPABILITY_UNCLASSIFIED',
+      'MOD_CAPABILITY_UNCLASSIFIED',
+    ]);
     expect(
       report.diagnostics.every((item) => item.severity === 'warning'),
     ).toBe(true);
@@ -952,5 +968,325 @@ describe('validateMods', () => {
       status: 'incomplete',
       complete: false,
     });
+  });
+  it.each([
+    "on('tool.call', { /* constraints */ }, ($, e, next) => next());",
+    "function notify() {} const handlers = {}; handlers.notify = notify; on('tool.call', () => {});",
+    "on('tool.call' as string, { tool: 'Bash' } as const, (($) => $.fs.read('/x')) satisfies Function);",
+    "on?.('tool.call', (ctx) => ctx.fs.read('/x')).catch((ctx) => ctx.fs.write('/x', 'y'));",
+  ])('preserves supported literal syntax: %s', async (body) => {
+    await fs.writeFile(
+      path.join(root, 'hooks/hooks.json'),
+      JSON.stringify({ modules: ['./register.ts'] }),
+    );
+    await source(
+      `export function register(on) { ${body} }`,
+      'hooks/register.ts',
+    );
+    const result = await validateMods(root);
+    expect(result.static).toEqual({ status: 'valid', complete: true });
+    expect(result.requirements).toContainEqual(
+      expect.objectContaining({ kind: 'event', name: 'tool.call' }),
+    );
+  });
+
+  it.each([
+    'class Local { exports = {}; #require() {} #Function() {} }',
+    'const value = {}; export { value as module };',
+    'module: for (;;) { break module; }',
+    'declare global { const module: unknown; } module.exports = 1;',
+    'declare const exports: unknown; exports.helper = () => {};',
+    'const { a }: { eval: unknown } = { a: 1 }; const e = eval; e("x");',
+    'const { a }: { Function: unknown } = { a: 1 }; const F = Function; F("x");',
+  ])('separates nominal names and erased declarations: %s', async (text) => {
+    await fs.writeFile(
+      path.join(root, 'hooks/hooks.json'),
+      JSON.stringify({ modules: ['./register.ts'] }),
+    );
+    await source(
+      `${text} export function register(on) {}`,
+      'hooks/register.ts',
+    );
+    const result = await validateMods(root);
+    const forbidden = text.includes('declare') || text.includes('const {');
+    expect(result.static.status).toBe(forbidden ? 'invalid' : 'valid');
+    expect(
+      result.diagnostics.some((d) => d.code === 'MOD_IMPORT_UNSUPPORTED'),
+    ).toBe(forbidden);
+  });
+
+  it.each([
+    'const g = globalThis; g.eval("x");',
+    'global.eval("x");',
+    'window.eval("x");',
+    'const F = "".constructor.constructor; F("x");',
+    'const F = Reflect.get("", "constructor").constructor; F("x");',
+    'process.mainModule.require("node:child_process");',
+    'globalThis.process.mainModule.require("node:child_process");',
+    'const r = Reflect; r.get(globalThis, "eval")("x");',
+    'const o = Object; o.getOwnPropertyDescriptor(globalThis, "eval").value("x");',
+  ])(
+    'does not certify unresolved globals or reflective access: %s',
+    async (body) => {
+      await source(`export function register(on) { ${body} }`);
+      expect((await validateMods(root)).static).toEqual({
+        status: 'incomplete',
+        complete: false,
+      });
+    },
+  );
+
+  it('preserves a real imported Function binding', async () => {
+    await source('export function shim() {}', 'hooks/shim.mjs');
+    await source(
+      "import { shim as Function } from './shim.mjs'; export function register(on) { new Function('x'); }",
+    );
+    expect((await validateMods(root)).static).toEqual({
+      status: 'valid',
+      complete: true,
+    });
+  });
+
+  it('inventories every direct catch handler', async () => {
+    await source(
+      "export function register(on) { on('tool.call', () => {}).catch(() => {}).catch((ctx) => ctx.fs.write('/x','y')); }",
+    );
+    const result = await validateMods(root);
+    expect(result.static).toEqual({ status: 'valid', complete: true });
+    expect(result.requirements).toContainEqual(
+      expect.objectContaining({ kind: 'api', name: 'fs.write' }),
+    );
+  });
+
+  it('keeps aliased catch results incomplete', async () => {
+    await source(
+      "export function register(on) { const registration = on('tool.call', () => {}).catch(() => {}); registration.catch((ctx) => ctx.fs.read('/x')); }",
+    );
+    expect((await validateMods(root)).static).toEqual({
+      status: 'incomplete',
+      complete: false,
+    });
+  });
+
+  it('keeps erased imports separate from runtime imports of the same file', async () => {
+    await fs.writeFile(
+      path.join(root, 'hooks/hooks.json'),
+      JSON.stringify({ modules: ['./register.ts'] }),
+    );
+    await source(
+      "export type Context = {}; export function helper($) { $.process.run('x'); }",
+      'hooks/context.ts',
+    );
+    await source(
+      "import type { Context } from './context.ts'; export function register(on) {}",
+      'hooks/register.ts',
+    );
+    expect((await validateMods(root)).requirements).toEqual([]);
+    await source(
+      "import type { Context } from './context.ts'; import { helper } from './context.ts'; export function register(on) {}",
+      'hooks/register.ts',
+    );
+    expect((await validateMods(root)).requirements).toContainEqual(
+      expect.objectContaining({ kind: 'api', name: 'process.run' }),
+    );
+    await source(
+      "import type { State } from 'claude-code/state'; export function register(on) {}",
+      'hooks/register.ts',
+    );
+    expect((await validateMods(root)).static.status).toBe('valid');
+  });
+
+  it('keeps internal import spellings POSIX under a Windows path implementation', async () => {
+    await source("import './sibling.mjs'; export function register(on) {}");
+    await source('export const value = 1;', 'hooks/sibling.mjs');
+    const originalPosix = path.posix;
+    Object.defineProperty(path, 'posix', { value: { ...originalPosix } });
+    const originalJoin = path.join;
+    const originalDirname = path.dirname;
+    const join = vi
+      .spyOn(path, 'join')
+      .mockImplementation((...parts) =>
+        parts[0] === 'hooks'
+          ? path.win32.join(...parts)
+          : originalJoin(...parts),
+      );
+    const dirname = vi
+      .spyOn(path, 'dirname')
+      .mockImplementation((value) =>
+        value === 'hooks/register.mjs'
+          ? path.win32.dirname(value)
+          : originalDirname(value),
+      );
+    let result;
+    try {
+      result = await validateMods(root);
+    } finally {
+      join.mockRestore();
+      dirname.mockRestore();
+      Object.defineProperty(path, 'posix', { value: originalPosix });
+    }
+    expect(result.static).toEqual({ status: 'valid', complete: true });
+    expect(result.files).toEqual(['hooks/register.mjs', 'hooks/sibling.mjs']);
+  });
+  it.each([false, true])(
+    'reports absent modules without a runtime promise (%s)',
+    async (withHooks) => {
+      if (withHooks)
+        await fs.writeFile(path.join(root, 'hooks/hooks.json'), '{}');
+      else await fs.rm(path.join(root, 'hooks/hooks.json'));
+      const report = await validateMods(root);
+      expect(report).toMatchObject({
+        schemaVersion: 1,
+        target: 'claude-code@2.1.295',
+        discovery: 'absent',
+        static: { status: 'not-checked', complete: true },
+        runtime: 'unavailable',
+        files: [],
+        requirements: [],
+        diagnostics: [],
+      });
+    },
+  );
+
+  it('bounds repeated requirements and overlong literals honestly', async () => {
+    await source(
+      `export function register(on) { ${"on('session.start', () => {});".repeat(4097)} }`,
+    );
+    const report = await validateMods(root);
+    expect(report.static).toEqual({ status: 'incomplete', complete: false });
+    expect(report.requirements).toHaveLength(4096);
+    expect(report.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'MOD_ANALYSIS_LIMIT' }),
+    );
+    await source(
+      `export function register(on) { on('${'a'.repeat(4097)}', () => {}); }`,
+    );
+    const literal = await validateMods(root);
+    expect(literal.static).toEqual({ status: 'incomplete', complete: false });
+    expect(literal.requirements).toEqual([]);
+    expect(literal.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'MOD_ANALYSIS_LIMIT' }),
+    );
+  });
+
+  it('sanitizes bidi and line controls in capability names and matchers', async () => {
+    await source(
+      "export function register(on) { on('future\\u202e\\u2028', {tool: 'Bash\\u2066\\u2029'}, () => {}); }",
+    );
+    const report = await validateMods(root);
+    expect(report.requirements).toContainEqual(
+      expect.objectContaining({
+        name: 'future??',
+        matcher: '{"tool":"Bash??"}',
+      }),
+    );
+    expect(JSON.stringify(report)).not.toMatch(
+      /[\u202a-\u202e\u2066-\u2069\u2028\u2029]/u,
+    );
+  });
+
+  it.each(['mts', 'cts'])(
+    'never scans declaration .d.%s files as runtime source',
+    async (suffix) => {
+      await source('export const value = 1;', `hooks/context.d.${suffix}`);
+      await source(
+        `import './context.d.${suffix}'; export function register(on) {}`,
+      );
+      const runtime = await validateMods(root);
+      expect(runtime.static.status).toBe('invalid');
+      expect(runtime.diagnostics).toContainEqual(
+        expect.objectContaining({ code: 'MOD_IMPORT_UNSUPPORTED' }),
+      );
+      await fs.writeFile(
+        path.join(root, 'hooks/hooks.json'),
+        JSON.stringify({ modules: ['./register.ts'] }),
+      );
+      await source(
+        `import type { Value } from './context.d.${suffix}'; export function register(on) {}`,
+        'hooks/register.ts',
+      );
+      const erased = await validateMods(root);
+      expect(erased.static.status).toBe('valid');
+      expect(erased.requirements).toEqual([]);
+    },
+  );
+  it('marks a full discovery diagnostic budget incomplete', async () => {
+    await fs.writeFile(
+      path.join(root, 'qwen-extension.json'),
+      JSON.stringify({
+        name: 'mod-fixture',
+        version: '1.0.0',
+        userConfig: Object.fromEntries(
+          Array.from({ length: 100 }, (_, index) => [`option${index}`, null]),
+        ),
+      }),
+    );
+    await source('export function register(on) {}');
+    const report = await validateMods(root);
+    expect(report.static).toEqual({ status: 'incomplete', complete: false });
+    expect(report.diagnostics).toHaveLength(100);
+    expect(report.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'MOD_ANALYSIS_LIMIT' }),
+    );
+  });
+
+  it('does not mislabel an inspection failure as a nesting limit', async () => {
+    vi.doMock('@babel/parser', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('@babel/parser')>();
+      return {
+        ...actual,
+        parse: (...args: Parameters<typeof actual.parse>) => {
+          const parsed = actual.parse(...args);
+          const exported = parsed.program.body[0];
+          if (
+            exported.type === 'ExportNamedDeclaration' &&
+            exported.declaration?.type === 'FunctionDeclaration'
+          ) {
+            Object.defineProperty(exported.declaration, 'params', {
+              enumerable: true,
+              get() {
+                throw new TypeError('unsafe injected failure');
+              },
+            });
+          }
+          return parsed;
+        },
+      };
+    });
+    try {
+      await source('export function register(on) {}');
+      const report = await validateMods(root);
+      expect(report.static).toEqual({ status: 'incomplete', complete: false });
+      expect(report.diagnostics).toContainEqual(
+        expect.objectContaining({
+          code: 'MOD_ANALYSIS_INCOMPLETE',
+          message: 'The source could not be fully inspected.',
+        }),
+      );
+      expect(
+        report.diagnostics.some((item) => item.code === 'MOD_ANALYSIS_LIMIT'),
+      ).toBe(false);
+      expect(JSON.stringify(report)).not.toContain('unsafe injected failure');
+    } finally {
+      vi.doUnmock('@babel/parser');
+    }
+  });
+  it('preserves ordinary computed array and string data reads', async () => {
+    await source(`export function register(on) {
+      const values = ['a', 'b'];
+      const grid = [[1, 2]];
+      const index = 0;
+      const last = values[values.length - 1];
+      const nested = grid[index][index];
+      const match = last.match(/a/)?.[0];
+      const selected = values[Math.min(index, 1)];
+      on('tool.call', ($) => $.fs.read('x'));
+    }`);
+    const report = await validateMods(root);
+    expect(report.static).toEqual({ status: 'valid', complete: true });
+    expect(report.requirements.map((item) => item.name)).toEqual([
+      'tool.call',
+      'fs.read',
+    ]);
   });
 });

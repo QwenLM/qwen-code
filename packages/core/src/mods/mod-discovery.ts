@@ -287,6 +287,7 @@ export async function discoverMod(
           );
         manifest = qwen;
       } else {
+        diagnosticFile = 'gemini-extension.json';
         const gemini = await optionalJson(realRoot, 'gemini-extension.json');
         if (
           isModRecord(gemini) &&
@@ -295,6 +296,7 @@ export async function discoverMod(
         ) {
           return descriptor;
         }
+        diagnosticFile = '.qoder-plugin/plugin.json';
         try {
           await resolveModFile(realRoot, '.qoder-plugin/plugin.json');
           return descriptor;
@@ -333,15 +335,23 @@ export async function discoverMod(
         code: 'MOD_UNSUPPORTED_LOCATION',
         severity: 'error',
         file,
-        message: 'Mod modules are supported only in hooks/hooks.json.',
+        message:
+          'modules must be declared at the top level of hooks/hooks.json.',
       });
+    if (Object.hasOwn(manifest, 'modules')) unsupported(manifestFile);
+    const isCanonicalHooks = (value: string) =>
+      !path.isAbsolute(value) &&
+      !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value) &&
+      !value.includes('\\') &&
+      !hasModControlCharacters(value) &&
+      path.resolve(realRoot, value) === path.resolve(realRoot, HOOKS_FILE);
     const customHooks = Array.isArray(manifest['hooks'])
       ? manifest['hooks']
       : [manifest['hooks']];
     const unreadableHooks: unknown[] = [];
     for (const value of customHooks.slice(0, 128)) {
       if (typeof value === 'string') {
-        if (path.posix.normalize(value) === HOOKS_FILE) continue;
+        if (isCanonicalHooks(value)) continue;
         let parsed: unknown;
         try {
           parsed = await readJson(realRoot, value);
@@ -361,12 +371,24 @@ export async function discoverMod(
       });
     }
     diagnosticFile = HOOKS_FILE;
-    const hooks = await optionalJson(realRoot, HOOKS_FILE);
+    let hooks: unknown;
+    let canonicalReadFailed = false;
+    try {
+      hooks = await optionalJson(realRoot, HOOKS_FILE);
+    } catch (error) {
+      canonicalReadFailed = true;
+      if (options.strict !== false)
+        descriptor.diagnostics.push(diagnostic(error, HOOKS_FILE));
+    }
     if (hooks !== undefined && !isModRecord(hooks)) {
-      throw new ModFileError(
-        'MOD_MODULES_INVALID',
-        'The canonical hooks declaration must contain an object.',
-      );
+      if (options.strict !== false) {
+        descriptor.diagnostics.push({
+          code: 'MOD_MODULES_INVALID',
+          severity: 'error',
+          message: 'The canonical hooks declaration must contain an object.',
+          file: HOOKS_FILE,
+        });
+      } else if (hasModules(hooks)) unsupported(HOOKS_FILE);
     }
     if (isModRecord(hooks) && 'modules' in hooks) {
       descriptor.discovery = 'declared';
@@ -390,21 +412,21 @@ export async function discoverMod(
         });
       } else {
         const modulePath = modules[0];
-        if (
-          path.isAbsolute(modulePath) ||
-          /^[A-Za-z][A-Za-z0-9+.-]*:/.test(modulePath) ||
-          modulePath.includes('\\') ||
-          hasModControlCharacters(modulePath)
-        ) {
-          throw new ModFileError(
-            'MOD_PATH_OUTSIDE',
-            'A Mod entry must be relative to hooks/hooks.json.',
-          );
-        }
-        const relative = path.posix.normalize(
-          path.posix.join('hooks', modulePath),
-        );
         try {
+          if (
+            path.isAbsolute(modulePath) ||
+            /^[A-Za-z][A-Za-z0-9+.-]*:/.test(modulePath) ||
+            modulePath.includes('\\') ||
+            hasModControlCharacters(modulePath)
+          ) {
+            throw new ModFileError(
+              'MOD_PATH_OUTSIDE',
+              'A Mod entry must be relative to hooks/hooks.json.',
+            );
+          }
+          const relative = path.posix.normalize(
+            path.posix.join('hooks', modulePath),
+          );
           await resolveModFile(realRoot, relative);
           descriptor.entry = relative;
         } catch (error) {
@@ -437,11 +459,10 @@ export async function discoverMod(
         });
       }
       if (
+        !canonicalReadFailed &&
         hooks === undefined &&
         customHooks.some(
-          (value) =>
-            typeof value === 'string' &&
-            path.posix.normalize(value) === HOOKS_FILE,
+          (value) => typeof value === 'string' && isCanonicalHooks(value),
         )
       ) {
         descriptor.diagnostics.push({

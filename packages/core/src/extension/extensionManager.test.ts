@@ -3924,6 +3924,16 @@ describe('extension tests', () => {
     }
     const dirOf = (name: string) => path.join(userExtensionsDir, name);
 
+    it('keeps classic inline hooks when an unrelated default hook file is malformed', async () => {
+      const extensions = await loadHooks(
+        'classic-only',
+        { hooks: pre('classic', 'echo classic') },
+        { 'hooks/hooks.json': '{ invalid json' },
+      );
+      expectHook(extensions, 'PreToolUse', 'echo classic');
+      expect(extensions[0].mod).toBeUndefined();
+    });
+
     it('does not create classic hooks for a module-only file', async () => {
       const extensions = await loadHooks(
         'mod-only',
