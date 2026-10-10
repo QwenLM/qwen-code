@@ -410,6 +410,21 @@ function physicalToolStatus(
   return response?.['error'] ? 'error' : 'success';
 }
 
+/**
+ * The Broker admits only path-safe Runtime Session ids, while a wake
+ * turn's id is an input id (`arun_…:input`, `<monitor>:notify:<n>`):
+ * such an id is mapped to a stable path-safe digest instead of being
+ * refused at acquire. The mapped form is path-safe itself, so layering
+ * this over an id that was already mapped stays idempotent.
+ */
+export function hostedRuntimeSessionId(promptId: string): string {
+  return /^[A-Za-z0-9._-]{1,512}$/.test(promptId) &&
+    promptId !== '.' &&
+    !promptId.includes('..')
+    ? promptId
+    : `wake-${createHash('sha256').update(promptId).digest('hex')}`;
+}
+
 export class HostedToolRecoveryRequiredError extends Error {
   constructor(cause: unknown) {
     super(
@@ -518,7 +533,7 @@ export class HostedWorkspaceToolTurn {
       new HostedWorkspaceBroker(
         options,
         session.authority.sessionHeader.sessionKey,
-        promptId,
+        hostedRuntimeSessionId(promptId),
       );
     this.warmed = this.mcp ? this.mcp.ensureReady() : this.broker.warm();
     // Warmup runs alongside inference; a text-only answer need not wait for it.
@@ -1749,6 +1764,10 @@ export class HostedWorkspaceToolTurn {
                   request.argsDigest,
                   request.digest,
                   request.publicationId!,
+                  // The reserve persists this logical id as the
+                  // execution's turn id, exactly what the publisher's
+                  // register reference names on the checkpoint axis.
+                  this.promptId,
                 )
               : null;
           executionCallId =
@@ -1899,7 +1918,12 @@ export class HostedWorkspaceToolTurn {
           this.publisher!.register(
             {
               reference: {
-                sessionId: this.promptId,
+                // One pair, two axes: the mapped Broker Runtime Session
+                // on the execution axis (a wake turn's arun_…:input maps
+                // to wake-<sha256>), the logical prompt id on the
+                // checkpoint axis — the execution's own (runtimeSessionId,
+                // turnId) is exactly that pair.
+                sessionId: this.broker.runtimeSessionId,
                 promptId: this.promptId,
                 callId: request.runtimeCallId,
                 argsDigest: request.inputDigest!,
@@ -1918,7 +1942,10 @@ export class HostedWorkspaceToolTurn {
               },
             },
             request.call.callId,
-            this.promptId,
+            // The guard compares the register's reference identity, which
+            // is the Runtime identity above; the raw logical promptId only
+            // equals it for ids the mapping carries through unchanged.
+            this.broker.runtimeSessionId,
           );
         }
       }
@@ -1959,7 +1986,10 @@ export class HostedWorkspaceToolTurn {
             modelCallId: saved.modelCallId,
             runtimeBindingId: saved.runtimeBindingId,
             reference: {
-              sessionId: this.promptId,
+              // One pair, two axes, as at the publisher: the mapped
+              // Broker Runtime Session against the execution, the logical
+              // prompt id against the checkpoint's identity.
+              sessionId: this.broker.runtimeSessionId,
               promptId: this.promptId,
               callId: saved.runtimeCallId,
               argsDigest: saved.argsDigest,
@@ -2682,14 +2712,16 @@ export class HostedWorkspaceToolTurn {
     }
     // Quotas gate NEW children only: a re-driven batch names the same
     // run id, and `children.admit` answers that replay identically —
-    // counting the replayed child against `count_limit` would refuse
-    // the launch it is already running.
+    // counting the replayed child against `count_limit` or the launch
+    // budget would refuse the launch it is already running. Both counts
+    // read committed records only, so a refusal re-derives on replay.
     if (children.record(childRunId) === undefined) {
       const admission = childLaunchAdmission({
         workspaceMode: 'shared',
         sameDefinition: true,
         closing: authority.currentActivation?.phase !== 'active',
         activeInScope: children.activeChildRunsOf(key.sessionId).length,
+        launchedInScope: children.launchedChildRunsOf(key.sessionId).length,
         envelopeBytes,
       });
       if (!admission.admitted) {
