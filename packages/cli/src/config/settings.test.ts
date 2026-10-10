@@ -99,6 +99,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 // `os.homedir`, so the value is stable across the suite. Production callers
 // must keep going through `getUserSettingsPath()` to pick up `QWEN_HOME`
 // resolved from `~/.env` after module load.
+delete process.env['QWEN_HOME'];
+delete process.env['QWEN_RUNTIME_DIR'];
 const USER_SETTINGS_PATH = getUserSettingsPath();
 
 const MOCK_WORKSPACE_DIR = '/mock/workspace';
@@ -212,8 +214,14 @@ describe('Settings Loading and Merging', () => {
   let mockFsExistsSync: Mocked<typeof fs.existsSync>;
   let mockStripJsonComments: Mocked<typeof stripJsonComments>;
   let mockFsMkdirSync: Mocked<typeof fs.mkdirSync>;
+  let testQwenHome: string | undefined;
+  let testQwenRuntimeDir: string | undefined;
 
   beforeEach(() => {
+    testQwenHome = process.env['QWEN_HOME'];
+    testQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    delete process.env['QWEN_HOME'];
+    delete process.env['QWEN_RUNTIME_DIR'];
     vi.resetAllMocks();
 
     mockFsExistsSync = vi.mocked(fs.existsSync);
@@ -265,6 +273,16 @@ describe('Settings Loading and Merging', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    if (testQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = testQwenHome;
+    }
+    if (testQwenRuntimeDir === undefined) {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    } else {
+      process.env['QWEN_RUNTIME_DIR'] = testQwenRuntimeDir;
+    }
   });
 
   describe('loadSettings', () => {
