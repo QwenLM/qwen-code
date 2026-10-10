@@ -3601,6 +3601,27 @@ export function registerHostedHarnessSessionRoutes(
       // the Broker or settle anything. A bare load of a parked Session keeps
       // refusing with 409 so it never drives a Runtime by accident.
       const takeover = !lifecycle && !session.hooks && takeoverFlags;
+      // H4e-b1: a Hooks Session recovers only through this load (it never
+      // takes over), and the file-history gate below needs every call of
+      // the pending round answered. A committed team call or background
+      // launch the dead Harness never answered is answered from its
+      // records first, or the gate would refuse this Session on every
+      // load. A failed answer leaves the gate's retriable refusal.
+      if (session.hooks && !lifecycle && unsettled !== undefined) {
+        try {
+          await answerCommittedTurnCalls({
+            session: managed,
+            sessionId,
+            cwd,
+            promptId: unsettled,
+            children: session.childAgents,
+          });
+        } catch (cause) {
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${sessionId} could not answer the committed calls of ${unsettled}: ${String(cause)}`,
+          );
+        }
+      }
       const fileHistory = await readHostedFileHistory(managed);
       // H5/F5 follow-up: a channel turn interrupted inside a Write/Edit
       // owes the wake pump its recovery, but refusing here would kill that
