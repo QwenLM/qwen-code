@@ -671,6 +671,20 @@ export class HostedChildAgentSession {
           reason: `Child agent task ${headTask} ended (${head.run.state}: ${head.stopReason ?? 'unknown'}) and cannot receive messages; launch a new agent instead.`,
         };
       }
+      // H4e-b1: a team's roster names one run of its member, so a
+      // continuation would run off the roster, unlabeled and unseen by
+      // team_delete; continued members come with H4e-b2. Only a launch
+      // joins, so a member's run is never itself a continuation.
+      const member = hostedTeamMembership(
+        this.store.authority.extensionRecordsInDomain('team_state'),
+        head.childRunId,
+      );
+      if (member !== undefined) {
+        return {
+          kind: 'refused',
+          reason: `Child agent task ${headTask} ran as "${member.name}" of team "${member.teamName}" and has finished; a team member cannot be continued yet. Launch a new member with another name for more work.`,
+        };
+      }
       // A continuation is a launch: it owes the launch admission (H4d-a
       // decision 9), which neither the authority nor the store checks.
       const admission = childLaunchAdmission({

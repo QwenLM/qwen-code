@@ -14,6 +14,10 @@ import {
   type ChildSessionRun,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
+import {
+  managedExtensionRecordKey,
+  managedTaskId,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import type {
   CommittedExtensionOperation,
   ManagedSessionActor,
@@ -128,7 +132,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'task_create',
     description:
-      'Create a pending task on the team board. Members are not told about board changes; give a member its work in its launch prompt.',
+      'Create a pending task on the team board. Members are not told about board changes; give a member its work in its launch prompt, or send_message it by its task id while it runs.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -214,7 +218,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'task_list',
     description:
-      'List the team board, optionally filtered, followed by each member and the state of its run.',
+      'List the team board, optionally filtered, followed by each member with the state of its run (and why a failed or cancelled run ended) and the task id send_message takes.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -722,7 +726,7 @@ export class HostedTeamSession {
     const notice =
       notified !== undefined &&
       this.memberState(notified.childRunId) === 'running'
-        ? ` "${owner}" was not notified: members learn of board changes only once the team mailbox lands, so give a member its work in its launch prompt.`
+        ? ` "${owner}" was not notified: members learn of board changes only once the team mailbox lands, so give a member its work in its launch prompt, or send_message it by its task id while it runs.`
         : '';
     return (
       `Task #${number} updated (status: ${task.status}` +
@@ -893,10 +897,21 @@ export class HostedTeamSession {
       '',
       `--- Team "${team.name}" members ---`,
       ...(team.members.length > 0
-        ? team.members.map(
-            (member) =>
-              `${member.name}: ${this.memberState(member.childRunId)}`,
-          )
+        ? team.members.map((member) => {
+            // A failed or cancelled run says why, so the lead can tell a
+            // member the host never started (an isolated member whose
+            // Workspace was not prepared) from one that failed its work.
+            const state = this.memberState(member.childRunId);
+            const reason =
+              state === 'failed' || state === 'cancelled'
+                ? this.childRun(member.childRunId)?.stopReason
+                : undefined;
+            return (
+              `${member.name}: ${state}` +
+              (reason ? ` (${reason})` : '') +
+              ` — ${managedTaskId(managedExtensionRecordKey(this.key.sessionId, 'child_run', member.childRunId))}`
+            );
+          })
         : ['No members yet.']),
     ].join('\n');
   }

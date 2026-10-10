@@ -839,7 +839,16 @@ describe('the board', () => {
     await createTeam();
     await addMember('alice');
     await addMember('bob');
+    await addMember('carol');
+    await addMember('dave');
     await settle('run-bob');
+    await children.settleFailed('run-carol', {
+      stopReason: 'creation_failed',
+      reason: null,
+      started: false,
+    });
+    await children.requestStop('run-dave');
+    await children.settleCancelled('run-dave', { started: false });
     await teams.run(
       'task_create',
       { subject: 'audit', description: 'a' },
@@ -861,8 +870,12 @@ describe('the board', () => {
         '#2 [pending] — fix',
         '',
         '--- Team "review" members ---',
-        'alice: running',
-        'bob: completed',
+        `alice: running — ${children.taskIdOf('run-alice')}`,
+        `bob: completed — ${children.taskIdOf('run-bob')}`,
+        // A failed run says why; a member the host never started reads
+        // differently from one that failed its work.
+        `carol: failed (creation_failed) — ${children.taskIdOf('run-carol')}`,
+        `dave: cancelled (stop_requested) — ${children.taskIdOf('run-dave')}`,
       ].join('\n'),
     );
     expect(

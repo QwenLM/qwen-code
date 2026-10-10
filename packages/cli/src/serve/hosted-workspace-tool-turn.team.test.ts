@@ -33,6 +33,7 @@ import {
   type HostedTeamStore,
 } from './hosted-team-session.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import { HostedSessionMessageSession } from './hosted-session-message-session.js';
 import { settleInterruptedTurnRuntime } from './hosted-runtime-recovery.js';
 import {
   HOSTED_APPROVAL_OPTIONS,
@@ -114,6 +115,7 @@ function createTurn(
     hookEvents?: string[];
     funnel?: HostedTeamSession;
     childWorkspaces?: boolean;
+    messages?: boolean;
   } = {},
 ): HostedWorkspaceToolTurn {
   const hookEvents = options.hookEvents;
@@ -154,6 +156,16 @@ function createTurn(
         queueConsumption: () => undefined,
       },
       teams: options.funnel ?? teams,
+      ...(options.messages
+        ? {
+            messages: new HostedSessionMessageSession(
+              { authority: session.authority, resources: session.resources },
+              sessionKey,
+              children,
+              undefined,
+            ),
+          }
+        : {}),
       ...(hookEvents
         ? {
             hooks: {
@@ -600,6 +612,122 @@ it('labels a member result notification with its name', async () => {
     '<kind>child_agent</kind>\n<teammate>alice</teammate>',
   );
   expect(text).toContain('all clean');
+});
+
+// #13841: an isolated member's result names its merge outcome beside its
+// name, and its run, so team_delete, waits until the merge records one.
+it('labels an isolated member with its merge outcome and waits for its settle', async () => {
+  const turn = createTurn({ childWorkspaces: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [
+    member('alice', 'call-alice', { isolation: 'worktree' }),
+  ]);
+  const childRunId = 'prompt:call-alice';
+  await children.dispatchStarted(childRunId, {
+    dispatchId: 'dispatch-1',
+    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+  });
+  await children.attach(childRunId, 'session-child');
+  // The child's Turn has ended, but the relay still waits on the merge.
+  expect(
+    await execute(turn, [call('team_delete', {}, 'call-delete-early')]),
+  ).toContain('still has running members: alice');
+  const childWorkspaceId = 'a'.repeat(32);
+  await children.settleCompleted(childRunId, {
+    result: Buffer.from('all clean', 'utf8'),
+    receipt: Buffer.from(
+      JSON.stringify({
+        childSessionId: 'session-child',
+        turnId: 'turn-1',
+        status: 'completed',
+        completedAt: 1,
+        workspace: {
+          mode: 'worktree',
+          childWorkspaceId,
+          outcome: 'conflicted',
+          code: 'conflicted',
+          conflictPaths: ['src/a.ts'],
+          resultRef: `refs/qwen/child-workspaces/${childWorkspaceId}/result`,
+        },
+      }),
+      'utf8',
+    ),
+  });
+  await children.accept(childRunId, {
+    notification: { description: 'alice task' },
+  });
+  const input = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .findLast((event) => event.kind === 'input.accepted')!;
+  const text = JSON.parse(
+    (
+      await session.resources.read(
+        assertManagedSessionDurableRef(input.payload['contentRef'], 'input'),
+      )
+    ).toString('utf8'),
+  ).text as string;
+  expect(text).toContain('<teammate>alice</teammate>');
+  expect(text).toContain('<workspace>merge conflicted at');
+  expect(text).toContain('all clean');
+  expect(await execute(turn, [call('task_list', {}, 'call-list')])).toContain(
+    'alice: completed',
+  );
+  expect(
+    await execute(turn, [call('team_delete', {}, 'call-delete')]),
+  ).toContain('Team \\"review\\" deleted.');
+});
+
+// #13822 continues a finished child as a new run, which the roster would
+// not name: a member hears from the lead while it runs and is never
+// continued (H4e-b2).
+it('messages a running member and refuses to continue a finished one', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await execute(turn, [member('bob', 'call-bob')]);
+  const alice = children.taskIdOf('prompt:call-alice');
+  const bob = children.taskIdOf('prompt:call-bob');
+  expect(
+    await execute(turn, [
+      call(
+        'send_message',
+        { task_id: bob, message: 'also check the tests' },
+        'call-note',
+      ),
+    ]),
+  ).toContain('Message queued for delivery');
+  expect(
+    await execute(turn, [
+      call('send_message', { to: 'bob', message: 'hi' }, 'call-by-name'),
+    ]),
+  ).toContain('a team member is addressed by the task id task_list shows');
+  await children.dispatchStarted('prompt:call-alice', {
+    dispatchId: 'dispatch-1',
+    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+  });
+  await children.attach('prompt:call-alice', 'session-alice');
+  await children.settleCompleted('prompt:call-alice', {
+    result: Buffer.from('all clean', 'utf8'),
+    receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+  });
+  const refused = await execute(turn, [
+    call(
+      'send_message',
+      { task_id: alice, message: 'now fix them' },
+      'call-more',
+    ),
+  ]);
+  expect(refused).toContain(
+    'ran as \\"alice\\" of team \\"review\\" and has finished; a team member cannot be continued yet',
+  );
+  expect(children.record('prompt:call-more')).toBeUndefined();
+  const listing = await execute(turn, [call('task_list', {}, 'call-list')]);
+  expect(listing).toContain(`alice: completed — ${alice}`);
+  expect(listing).toContain(`bob: running — ${bob}`);
 });
 
 it('answers an interrupted turn by what each journal-only call committed', async () => {

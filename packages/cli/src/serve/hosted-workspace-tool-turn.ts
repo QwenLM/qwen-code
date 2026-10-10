@@ -1836,7 +1836,7 @@ export class HostedWorkspaceToolTurn {
             validationError =
               role === 'child'
                 ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A child Session messages only its parent: pass to "parent" and message.`
-                : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. This Session messages only the child agents it launched: pass task_id and message; teams and other Sessions belong to the legacy tool.`;
+                : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. This Session messages only the child agents it launched: pass task_id and message; ${this.teamsAdmitted() ? 'a team member is addressed by the task id task_list shows beside its name, and other Sessions belong' : 'teams and other Sessions belong'} to the legacy tool.`;
           } else if (role === 'child' && args['to'] !== 'parent') {
             validationError =
               'Hosted send_message from a child Session addresses only to "parent".';

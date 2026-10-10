@@ -24,6 +24,9 @@ the lead close cascade, on a real Hosted stack with `team_state` and
 - Evidence: every revision of `team_state`, `team_task`, `child_run` and
   `child_acceptance` read back from `qwen_managed_session_resource`, the
   relay ledger row, Session and Turn states, and the proxy's commit log.
+- The pass predates #13841 (child worktree isolation) and #13822 (Session
+  messages): an isolated member, a message to a running member and the
+  refused continuation of a finished one are covered by unit tests only.
 
 ## Baseline (domains disabled)
 
