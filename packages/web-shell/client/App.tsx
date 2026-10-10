@@ -237,6 +237,11 @@ import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { createTrajectoryPageLoader } from './trajectory/transcriptPageLoader';
 import { WorkspacesOverviewPanel } from './components/workspaces/WorkspacesOverviewPanel';
 import { WorkspaceLocation } from './components/workspaces/WorkspaceLocation';
+import {
+  useDaemonTargetOptional,
+  useInterceptHostLinks,
+} from './config/daemon-target';
+import { useFanoutOrigins, useHostFanout } from './config/host-fanout';
 import { SplitView } from './components/SplitView';
 import { ChevronLeftIcon, GaugeIcon, LayersIcon } from 'lucide-react';
 import type { PaneHeaderActionsRenderer } from './components/ChatPane';
@@ -272,6 +277,7 @@ import {
   getFileChangesByTurn,
   getScheduledTasksByTurn,
 } from './components/artifacts/turnOutputSelectors';
+import { artifactDisplayName } from './components/artifacts/artifactUtils';
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
 import { usePrefersReducedMotion } from './hooks/usePrefersReducedMotion';
 import {
@@ -355,6 +361,7 @@ import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShort
 import {
   isAgentCollaborationEnabledForWorkspace,
   workspaceLabel,
+  disambiguateWorkspaceLabels,
   workspaceLabelForCwd,
 } from './utils/workspace';
 import { loadReadyWorkspaceSkills } from './daemon/workspace/load-ready-skills';
@@ -3757,9 +3764,29 @@ export function App({
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
+  // Multi-daemon (#13727): saved hosts stay connected read-only alongside
+  // the provider that owns this App subtree; the picker and sidebar consume
+  // their live workspaces/sessions; embedded shells have no controller and
+  // fan out to nothing.
+  const daemonTarget = useDaemonTargetOptional();
+  // Same-origin links pointing at a connected host become in-app focus
+  // switches instead of document reloads (#13727).
+  useInterceptHostLinks();
+  const fanoutOrigins = useFanoutOrigins();
+  const { workspacesByOrigin, refreshAll: refreshAllHosts } =
+    useHostFanout(fanoutOrigins);
+  const focusedHostOrigin = useMemo(
+    () =>
+      new URL(
+        workspace.baseUrl || window.location.origin,
+        window.location.origin,
+      ).origin,
+    [workspace.baseUrl],
+  );
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
+
   const refreshWorkspaceCapabilities = workspace.refreshCapabilities;
   const refreshWorkspaceBrand = workspace.refreshBrand;
   const workspaces = useMemo(() => {
@@ -3858,17 +3885,37 @@ export function App({
         label: string;
         primary: boolean;
         trusted: boolean;
+        hostOrigin?: string;
       }>
     | undefined
   >(undefined);
   const nextComposerWorkspaces = !lockedWorkspaceCwd
-    ? ordinaryWorkspaces.map((entry) => ({
-        id: entry.id,
-        cwd: entry.cwd,
-        label: workspaceLabel(entry),
-        primary: entry.primary,
-        trusted: entry.trusted,
-      }))
+    ? [
+        ...ordinaryWorkspaces.map((entry) => ({
+          id: entry.id,
+          cwd: entry.cwd,
+          label: workspaceLabel(entry),
+          primary: entry.primary,
+          trusted: entry.trusted,
+          hostOrigin: focusedHostOrigin,
+        })),
+        // Fan-out hosts offer their own live workspaces in the same picker
+        // (#13727); composite ids keep a cwd that exists on two hosts one
+        // selectable option each — selection routes through the hosted
+        // callback with the option's hostOrigin.
+        ...fanoutOrigins.flatMap((origin) =>
+          (workspacesByOrigin.get(origin) ?? [])
+            .filter((entry) => entry.kind !== 'live')
+            .map((entry) => ({
+              id: `${origin}${entry.id}`,
+              cwd: entry.cwd,
+              label: workspaceLabel(entry),
+              primary: entry.primary,
+              trusted: entry.trusted,
+              hostOrigin: origin,
+            })),
+        ),
+      ]
     : undefined;
   const currentComposerWorkspaces = composerWorkspacesRef.current;
   if (
@@ -3881,11 +3928,14 @@ export function App({
         current.cwd !== next.cwd ||
         current.label !== next.label ||
         current.primary !== next.primary ||
-        current.trusted !== next.trusted
+        current.trusted !== next.trusted ||
+        current.hostOrigin !== next.hostOrigin
       );
     })
   ) {
-    composerWorkspacesRef.current = nextComposerWorkspaces;
+    composerWorkspacesRef.current = nextComposerWorkspaces
+      ? disambiguateWorkspaceLabels(nextComposerWorkspaces)
+      : undefined;
   }
   const composerWorkspaces = composerWorkspacesRef.current;
   const workspacesRef = useRef(ordinaryWorkspaces);
@@ -5584,7 +5634,7 @@ export function App({
         id: `artifact:${artifactId}`,
         kind: 'artifact',
         artifactId,
-        title: artifact?.title ?? 'Artifact',
+        title: artifact ? artifactDisplayName(artifact) : 'Artifact',
         ...(connection.workspaceCwd
           ? { workspaceCwd: connection.workspaceCwd }
           : {}),
@@ -14508,6 +14558,15 @@ export function App({
         );
         workspaceBrowseActiveRef.current = false;
         completeRemoteWorkspaceAdd();
+        const targetOrigin = workspaceAddSelectedLocation;
+        if (daemonTarget?.coversOrigin(targetOrigin)) {
+          // Multi-daemon (#13727): an already-connected host needs no
+          // navigation — focus it in-app and hand the new workspace's
+          // preselection to the remounted picker state.
+          daemonTarget.focusHost({ origin: targetOrigin });
+          refreshAllHosts();
+          return;
+        }
         // Navigate to the target daemon so the user lands on the new
         // workspace. Deliberately a plain switch, NOT
         // selectRemoteWorkspaceLocation(): that helper arms the
@@ -14515,17 +14574,20 @@ export function App({
         // daemon we just registered on would boot into a fresh, empty Add
         // Workspace dialog on top of the workspace the user already added.
         // The add is finished — there is no flow left to continue.
-        navigateToDaemon(
-          workspaceAddSelectedLocation,
-          getDaemonToken(workspaceAddSelectedLocation),
-        );
+        navigateToDaemon(targetOrigin, getDaemonToken(targetOrigin));
         return;
       }
       await handleAddWorkspace(cwd, persist, displayName);
       workspaceBrowseActiveRef.current = false;
       completeRemoteWorkspaceAdd();
     },
-    [handleAddWorkspace, workspace.baseUrl, workspaceAddSelectedLocation],
+    [
+      handleAddWorkspace,
+      workspace.baseUrl,
+      workspaceAddSelectedLocation,
+      daemonTarget,
+      refreshAllHosts,
+    ],
   );
 
   const closeAddWorkspaceDialog = useCallback(() => {
@@ -14633,6 +14695,28 @@ export function App({
       void switchWorkspace(cwd);
     },
     [switchWorkspace],
+  );
+  // A workspace picked on another connected host (#13727): focus that host
+  // in-app (no document reload), carrying the target cwd and any typed draft
+  // text so the remounted composer lands ready to submit there. Attachments
+  // cannot cross the provider remount and are dropped.
+  const handleSelectHostedWorkspace = useCallback(
+    (hostOrigin: string, cwd: string | undefined) => {
+      if (!daemonTarget || hostOrigin === focusedHostOrigin) {
+        handleSelectComposerWorkspace(cwd);
+        return;
+      }
+      daemonTarget.focusHostWithHandoff(
+        { origin: hostOrigin },
+        {
+          kind: 'create',
+          origin: hostOrigin,
+          workspaceCwd: cwd,
+          draftText: composerTextRef.current.trim() || undefined,
+        },
+      );
+    },
+    [daemonTarget, focusedHostOrigin, handleSelectComposerWorkspace],
   );
   const handleSelectComposerStandalone = useCallback(() => {
     if (connectionRef.current.sessionId) {
@@ -15123,6 +15207,62 @@ export function App({
         setStandaloneRetrySessionId(undefined);
       });
   }, [loadSidebarSession]);
+
+  // A session row opened from a fan-out host group (#13727): same in-app
+  // focus switch as the hosted composer pick, with an 'open' intent drained
+  // by the handoff effect below.
+  const handleOpenHostSession = useCallback(
+    (origin: string, sessionId: string, workspaceCwd?: string) => {
+      if (!daemonTarget) return;
+      if (origin === focusedHostOrigin) {
+        showChat();
+        void loadSidebarSession(sessionId, workspaceCwd);
+        return;
+      }
+      daemonTarget.focusHostWithHandoff(
+        { origin },
+        { kind: 'open', origin, sessionId, workspaceCwd },
+      );
+    },
+    [daemonTarget, focusedHostOrigin, loadSidebarSession, showChat],
+  );
+
+  // Drain the intent carried across a focused-host switch (#13727): fires
+  // once the NEW host's provider is connected; stale intents from an
+  // aborted switch (user moved to a third host meanwhile) are dropped.
+  const pendingHostHandoff = daemonTarget?.pendingHandoff;
+  useEffect(() => {
+    if (!daemonTarget || !pendingHostHandoff) return;
+    if (workspace.status !== 'connected') return;
+    if (pendingHostHandoff.origin !== daemonTarget.activeOrigin) {
+      daemonTarget.takePendingHandoff();
+      return;
+    }
+    const taken = daemonTarget.takePendingHandoff();
+    if (!taken) return;
+    if (taken.kind === 'open' && taken.sessionId) {
+      showChat();
+      void loadSidebarSession(taken.sessionId, taken.workspaceCwd);
+      return;
+    }
+    // 'create': preselect the picked workspace on this host and put any
+    // carried draft text back into the composer.
+    if (taken.draftText) {
+      handleComposerTextChange(taken.draftText);
+      editorRef.current?.insertText(taken.draftText);
+    }
+    if (taken.workspaceCwd) {
+      handleSelectComposerWorkspace(taken.workspaceCwd);
+    }
+  }, [
+    daemonTarget,
+    pendingHostHandoff,
+    workspace.status,
+    showChat,
+    loadSidebarSession,
+    handleComposerTextChange,
+    handleSelectComposerWorkspace,
+  ]);
 
   const handleCheckStandaloneRecovery = useCallback(async () => {
     const recovery = connectionRef.current.standaloneSession?.creationRecovery;
@@ -20586,6 +20726,7 @@ export function App({
                     showChat();
                     return loadSidebarSession(sessionId, workspaceCwd);
                   }}
+                  onOpenHostSession={handleOpenHostSession}
                   onLoadStandaloneSession={(sessionId) => {
                     setMainView('chat');
                     return loadSidebarSession(
@@ -20799,7 +20940,10 @@ export function App({
                     <ChatContextHeader
                       location={
                         workspaceHostsEnabled && mainView === 'chat' ? (
-                          <WorkspaceLocation cwd={connection.workspaceCwd} />
+                          <WorkspaceLocation
+                            cwd={connection.workspaceCwd}
+                            hostOrigin={focusedHostOrigin}
+                          />
                         ) : undefined
                       }
                       content={
@@ -22601,6 +22745,11 @@ export function App({
                           onSelectWorkspace={
                             composerWorkspaceSelectEnabled
                               ? handleSelectComposerWorkspace
+                              : undefined
+                          }
+                          onSelectHostedWorkspace={
+                            composerWorkspaceSelectEnabled
+                              ? handleSelectHostedWorkspace
                               : undefined
                           }
                           standaloneTargetSupported={

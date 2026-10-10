@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.33.0",
-    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle. v1.19 serves the task list and detail on both surfaces as partial (Stage H0c): the Session store projects them from the Stage H records the Session authority commits, a task.updated Session event announces each change of a task's view, and Session capabilities advertise tasks. Task events and cancel stay planned until a slice's tasks produce output and accept a cancel. v1.20 implements the Turn read model (Stage D5): the public Turn list and detail read a Session's Turns without their input, newest first by creation time in milliseconds and then Turn ID, with an opaque cursor; a deleted Session's Turns are not readable, and the durable admission fields of a Turn stay planned until D7. v1.21 declares on the task list, detail and event routes of both surfaces the 403 actor_scope_mismatch that the tenant filter answers on every /v1/agents/ and WebShell route, as the Session and Turn reads already do, and the shared Forbidden response names it; a caller that cannot read a task still gets 404. v1.22 adds deployment-opted-in creation with an initial Workspace file-tool Turn (G0) on the public and WebShell surfaces; the fixed server-owned profile does not enable later Workspace operations. v1.23 settles the planned task event and cancel semantics: a durable retention floor, committed-prefix publication, stable cursors, Artifact visibility before expiry, bounded backlog under archival failure, ordered idempotent cancellation and command outcomes. Clients tolerate unknown optional event fields across minor versions. Task events and cancel remain planned. v1.24 serves the read-only Session MCP catalog as partial (Stage H1), projecting display metadata and schemas from committed records without Runtime identities, credentials or production profile enablement. v1.25 implements permission Actions (Stage D6b) on both surfaces: list, get and respond, projected from the Session's action.changed records; a WebShell permission Action carries inputRevision, policyRevision, functionCallId, toolName and expiresAt, its option ids allow and deny are stable, a Turn has at most one requested approval at a time, and a response is a durable command operation carrying requestId. v1.26 declares the tenant filter's 403 actor_scope_mismatch on every covered public and WebShell route, including planned routes, and pins the refusal code in contract traffic. v1.27 adds O3 durable tool-result projection, artifact metadata, immutable range/streaming content and WebShell result reads. Artifact capability requires a configured O3 reader and a Workspace-bound Session; execution admission remains independent. v1.28 admits later Turns of a Workspace-bound Session for the Session's creator under the deployment's Workspace files opt-in, including cancel and rename; WebShell Session capabilities advertise the per-caller workspaceTurns flag. v1.29 implements the AgentDefinition routes (Stage D8a): create, get and update store tenant-scoped, immutable revisions with a content digest, and an unchanged update adds no revision. Sessions still pin qwen-code and the configured revision, and no definition field changes execution yet. v1.30 adds the qwenSignature security scheme for gateway-free deployments: in signed authentication mode the broker authenticates the X-Qwen-Tenant-Id and X-Qwen-Actor-Id header pair itself with an HMAC signature over method, path, query, tenant, actor, timestamp, body digest and Idempotency-Key, carried in X-Qwen-Signature and X-Qwen-Signature-Timestamp, and answers 401 authentication_required or invalid_signature, 400 invalid_request on a repeated Idempotency-Key header, and 413 payload_too_large beyond the signed-body limit; a Session now records its creator so approval responses are owned without a Workspace creation record; a Session with no recorded creator and no recorded create command answers approvals to any caller in its tenant. v1.31 serves the task events routes as partial (Stage H3): a bounded per-task event journal in SQL commits each task view change with its record revision, the durable retention floor survives an empty retained set under the Artifact visibility barrier, output cursors lift with the routes, and the cancel routes stay planned. v1.32 implements the W2 controlled same-Workspace cwd change on both surfaces: the creator changes the bound Session's relative directory under an idle, opt-in deployment through a durable operation with revision CAS and busy barriers; completion emits the session.context.changed Session event and bumps context_revision, while WorkspaceContext.state stays ready and its other values remain reserved for the read-model follow-up, and bound later-turn submission answers 409 session_context_busy while a context-changing operation is open (the cross-slice busy-barrier handshake; permission-action responses and pending mutation commands are excluded from that barrier, so they can never wedge Turn admission). v1.33 shapes the planned Stage H5 channel resources: a channel connection lists its route bindings, a channel lists its outbound deliveries with per-segment states and a stable cursor, and a delivery detail query is named as planned; all mutations stay Idempotency-Key based with 202 plus operation id."
+    "version": "1.40.0",
+    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle. v1.19 serves the task list and detail on both surfaces as partial (Stage H0c): the Session store projects them from the Stage H records the Session authority commits, a task.updated Session event announces each change of a task's view, and Session capabilities advertise tasks. Task events and cancel stay planned until a slice's tasks produce output and accept a cancel. v1.20 implements the Turn read model (Stage D5): the public Turn list and detail read a Session's Turns without their input, newest first by creation time in milliseconds and then Turn ID, with an opaque cursor; a deleted Session's Turns are not readable, and the durable admission fields of a Turn stay planned until D7. v1.21 declares on the task list, detail and event routes of both surfaces the 403 actor_scope_mismatch that the tenant filter answers on every /v1/agents/ and WebShell route, as the Session and Turn reads already do, and the shared Forbidden response names it; a caller that cannot read a task still gets 404. v1.22 adds deployment-opted-in creation with an initial Workspace file-tool Turn (G0) on the public and WebShell surfaces; the fixed server-owned profile does not enable later Workspace operations. v1.23 settles the planned task event and cancel semantics: a durable retention floor, committed-prefix publication, stable cursors, Artifact visibility before expiry, bounded backlog under archival failure, ordered idempotent cancellation and command outcomes. Clients tolerate unknown optional event fields across minor versions. Task events and cancel remain planned. v1.24 serves the read-only Session MCP catalog as partial (Stage H1), projecting display metadata and schemas from committed records without Runtime identities, credentials or production profile enablement. v1.25 implements permission Actions (Stage D6b) on both surfaces: list, get and respond, projected from the Session's action.changed records; a WebShell permission Action carries inputRevision, policyRevision, functionCallId, toolName and expiresAt, its option ids allow and deny are stable, a Turn has at most one requested approval at a time, and a response is a durable command operation carrying requestId. v1.26 declares the tenant filter's 403 actor_scope_mismatch on every covered public and WebShell route, including planned routes, and pins the refusal code in contract traffic. v1.27 adds O3 durable tool-result projection, artifact metadata, immutable range/streaming content and WebShell result reads. Artifact capability requires a configured O3 reader and a Workspace-bound Session; execution admission remains independent. v1.28 admits later Turns of a Workspace-bound Session for the Session's creator under the deployment's Workspace files opt-in, including cancel and rename; WebShell Session capabilities advertise the per-caller workspaceTurns flag. v1.29 implements the AgentDefinition routes (Stage D8a): create, get and update store tenant-scoped, immutable revisions with a content digest, and an unchanged update adds no revision. Sessions still pin qwen-code and the configured revision, and no definition field changes execution yet. v1.30 adds the qwenSignature security scheme for gateway-free deployments: in signed authentication mode the broker authenticates the X-Qwen-Tenant-Id and X-Qwen-Actor-Id header pair itself with an HMAC signature over method, path, query, tenant, actor, timestamp, body digest and Idempotency-Key, carried in X-Qwen-Signature and X-Qwen-Signature-Timestamp, and answers 401 authentication_required or invalid_signature, 400 invalid_request on a repeated Idempotency-Key header, and 413 payload_too_large beyond the signed-body limit; a Session now records its creator so approval responses are owned without a Workspace creation record; a Session with no recorded creator and no recorded create command answers approvals to any caller in its tenant. v1.31 serves the task events routes as partial (Stage H3): a bounded per-task event journal in SQL commits each task view change with its record revision, the durable retention floor survives an empty retained set under the Artifact visibility barrier, output cursors lift with the routes, and the cancel routes stay planned. v1.32 implements the W2 controlled same-Workspace cwd change on both surfaces: the creator changes the bound Session's relative directory under an idle, opt-in deployment through a durable operation with revision CAS and busy barriers; completion emits the session.context.changed Session event and bumps context_revision, while WorkspaceContext.state stays ready and its other values remain reserved for the read-model follow-up, and bound later-turn submission answers 409 session_context_busy while a context-changing operation is open (the cross-slice busy-barrier handshake; permission-action responses and pending mutation commands are excluded from that barrier, so they can never wedge Turn admission). v1.33 shapes the planned Stage H5 channel resources: a channel connection lists its route bindings, a channel lists its outbound deliveries with per-segment states and a stable cursor, and a delivery detail query is named as planned; all mutations stay Idempotency-Key based with 202 plus operation id. v1.35 serves the three channel resources as partial (Stage H5b/H5c): connections and their route bindings, and the delivery list and detail, are read over the registered connections, the committed ingress rows and the delivery ledger; the email reference adapter routes inbound events into bound Sessions and sends replies through the receipted outbox, where unknown is a terminal outcome that is never resent automatically and an explicit resend opens a new delivery id. v1.36 conditions replay-floor expiry on the Snapshot backing the floor (replay_floor_sequence <= snapshot_through_sequence), serves a below-floor cursor from the retained events while a stream reconciliation rebuilds the Snapshot, and adds the opt-in scheduled replay-floor pass. v1.37 enforces the Workspace actor roles on the bound-Session surface: grants are a single role column ordered reader < operator < owner; Turn submit, rename and cwd change now admit any caller holding OPERATOR, but only while the Session's creator-keyed execution facts hold — the Workspace registry still backs the binding and stays ACTIVE, and the actor recorded by the Workspace create command keeps OPERATOR or above, because the admitted work executes under the creator's grants; Turn cancel admits on the OPERATOR role and the Session's executable shape alone, because its delivery reuses the admitted attachment and re-checks no grants; Action respond admits any caller holding OPERATOR or the Session's recorded owner under no shape gate, with every bound response certifying the same creator-keyed execution facts at admission, so a second operator can unblock a Turn waiting on an approval while the creator still backs execution; close, archive, unarchive and delete admit the Session's recorded owner (the owner_actor_key column, with the pre-V40 creator fallback); the submitter family's readable-but-below-OPERATOR refusal normalizes from 409 workspace_unavailable to 403 session_operation_forbidden; and the WebShell workspaceTurns capability advertises the caller's OPERATOR role under the same creator-keyed facts rather than creator identity; a cwd change's settlement persistently re-checks both the recorded create-command actor and the V56-persisted initiator, so demoting either actor after admission fails the operation with workspace_unavailable. v1.38 serves the automation resources as partial (Stage H6b/H6c): a definition is created, revised, read and retired under its target Session, a manual run and the scanner's occurrences share one derived run identity, definitions and occurrences page separately, and every mutation takes an Idempotency-Key and answers 202 with the committed resource; the per_run target and the delivery policy stay refused until their slices land. v1.40 serves task cancel as partial (Stage H4f): the public and WebShell cancel routes admit a durable task_cancel operation in the A6 order, carrying task_id/taskId; the operation completes once the task's committed record holds the stop request, fails with task_already_settled when the run ended first, and parks as recovery_blocked (not an open operation) when delivery stays unproven; only child_agent tasks whose run has not ended advertise cancel, and only in an active Session; a Workspace-bound Session under a storage migration fence refuses a new cancel with 409 workspace_unavailable; the child is then stopped by its result relay and settles cancelled unless a natural completion or failure won; the WebShell cancel request gains a trace-only requestId."
   },
   "servers": [
     {
@@ -204,7 +204,7 @@
         "tags": ["Public Sessions"],
         "operationId": "createSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Workspace selection is persisted with the original actor-scoped creation receipt. With the deployment's G0 file admission opt-in, qwen-code Sessions in an authorized, preregistered Workspace may include initial input under the fixed preapproved file-tool profile. Public callers cannot select the profile. Otherwise Workspace creation must have empty input. The Session creator may submit later Turns and rename the Session under the same opt-in, while the creator currently holds Workspace read and create grants on a registry row whose state is ACTIVE and still carries the Workspace generation and storage identity the Session was bound to, and the Session is an active, undeleted qwen-code Session on the frozen execution profile. Cancelling only aborts work that is already running, so the creator may cancel a running Turn under the same opt-in while they can still read the Workspace, even after create authority is revoked, the registry row leaves ACTIVE or the Workspace is re-registered (a live cancel reuses the owner's resident Harness attachment; a cold connector cache passively re-attaches for a persisted cancellation after frozen identity checks, independently of current creation grants, registry state or mount readiness; new work still rechecks execution authority); Workspace close follows its separate close capability and lifecycle admission; archive and unarchive follow retention capabilities after reliable Workspace close; delete supports either L3 idle ACTIVE files Sessions or L2 CLOSED/ARCHIVED Sessions; controlled same-Workspace cwd changes ship through the durable cwd_change operations (v1.32). This surface has no per-caller capability flag for later Turns, so callers must handle a refused later Turn: 409 workspace_unavailable, or 404 session_not_found when the caller no longer holds Workspace read. Check replay before resolving defaults; a durable binding is not proof of Runtime readiness.",
+        "description": "Workspace selection is persisted with the original actor-scoped creation receipt. With the deployment's G0 file admission opt-in, qwen-code Sessions in an authorized, preregistered Workspace may include initial input under the fixed preapproved file-tool profile. Public callers cannot select the profile. Otherwise Workspace creation must have empty input. Any caller holding the OPERATOR role may submit later Turns and rename the Session under the same opt-in, while the Workspace registry row stays ACTIVE and still backs the binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is an active, undeleted qwen-code Session on the frozen execution profile; Workspace close follows its separate close capability and lifecycle admission; the same caller may cancel a running Turn (its delivery re-checks no grants); archive and unarchive follow their separate retention capabilities after reliable Workspace close; delete supports either L3 idle ACTIVE files Sessions or L2 CLOSED/ARCHIVED Sessions; controlled same-Workspace cwd changes ship through the durable cwd_change operations (v1.32). This surface has no per-caller capability flag for later Turns, so callers must handle a refused later Turn — 403 session_operation_forbidden below the role and 409 workspace_unavailable past it, or 404 session_not_found without Workspace read. Check replay before resolving defaults; a durable binding is not proof of Runtime readiness.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -398,7 +398,7 @@
         "tags": ["Public Sessions"],
         "operationId": "deleteSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Workspace-bound ACTIVE deletion supports idle hosted-workspace-files/1 Sessions when L3 lifecycle protocol and reliable Runtime stop are available. Only the creator with current read access may admit it; accepted, running, cancelling or approval-waiting Turns return 409 turn_active. Admission persists a lifecycle-only execution fence and a versioned actor-scoped operation. SessionEnd settles before SessionDelete; committed Hook results are verified in Session Store and saved before permanent draining, attachment cleanup and original worker stop. Unknown outcomes or missing original stop evidence remain recovery_blocked and are never replayed on a replacement worker. CLOSED/ARCHIVED deletion retains L2: completed reliable-close evidence is required and no Harness or Hook is invoked. Completion atomically commits retirement, tombstone, receipt and terminal event, retaining shared Workspace files and neighboring holders. Authorized same-actor/key replays return the original operation, including after deletion; readable non-creators return 403. Missing lifecycle capability or close evidence returns 409 workspace_unavailable.",
+        "description": "Unbound Sessions accept active, closed or archived state. Returns 409 turn_active while a Turn is active and session_operation_active while another lifecycle change is pending. The same key from the same actor returns the original operation, also after the Session was deleted. Workspace-bound ACTIVE deletion supports idle hosted-workspace-files/1 Sessions when L3 lifecycle protocol and reliable Runtime stop are available. Only the Session's recorded owner (owner_actor_key, with the pre-V40 creator fallback) with current read access may admit it; accepted, running, cancelling or approval-waiting Turns return 409 turn_active. Admission persists a lifecycle-only execution fence and a versioned actor-scoped operation. SessionEnd settles before SessionDelete; committed Hook results are verified in Session Store and saved before permanent draining, attachment cleanup and original worker stop. Unknown outcomes or missing original stop evidence remain recovery_blocked and are never replayed on a replacement worker. CLOSED/ARCHIVED deletion retains L2: completed reliable-close evidence is required and no Harness or Hook is invoked. Completion atomically commits retirement, tombstone, receipt and terminal event, retaining shared Workspace files and neighboring holders. Authorized same-actor/key replays return the original operation, including after deletion; a readable non-owner returns 403. Missing lifecycle capability or close evidence returns 409 workspace_unavailable.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -493,7 +493,7 @@
         "tags": ["Public Sessions"],
         "operationId": "getSessionEvents",
         "x-qwen-implementation-status": "implemented",
-        "description": "Returns JSON by default. Accept text/event-stream or stream=true to receive SSE. Last-Event-ID takes precedence over after. A cursor below replay_floor_sequence gets 409 cursor_expired as JSON; a stream instead sends one agent.session.resync_required frame and closes.",
+        "description": "Returns JSON by default. Accept text/event-stream or stream=true to receive SSE. Last-Event-ID takes precedence over after. A cursor below replay_floor_sequence gets 409 cursor_expired as JSON only while the Snapshot backs the floor (replay_floor_sequence <= snapshot_through_sequence); a stream reconciliation discards the Snapshot without lowering the floor, and during that rebuild such a cursor is served from the retained events. A stream sends one agent.session.resync_required frame and closes under the same condition.",
         "parameters": [
           {
             "$ref": "#/components/parameters/AfterSequence"
@@ -1160,7 +1160,7 @@
         "tags": ["WebShell"],
         "operationId": "webShellStreamEvents",
         "x-qwen-implementation-status": "implemented",
-        "description": "POST SSE consumed through fetch response.body. An afterSequence below the replay floor ends the stream with one agent.session.resync_required frame instead of a 409; reload the transcript and resume after its lastSequence.",
+        "description": "POST SSE consumed through fetch response.body. An afterSequence below the replay floor ends the stream with one agent.session.resync_required frame instead of a 409 only while the Snapshot backs the floor (replay_floor_sequence <= snapshot_through_sequence); a stream reconciliation discards the Snapshot without lowering the floor, and during that rebuild such a cursor is served from the retained events. On the resync frame, reload the transcript and resume after its lastSequence.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1209,7 +1209,7 @@
         "tags": ["WebShell"],
         "operationId": "webShellCreateSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns under the same opt-in with current read and create grants on the bound ACTIVE Workspace generation and storage. Cancellation of running work requires the creator’s read grant and the opt-in, even after create authority is revoked (a live cancel reuses the owner's resident Harness attachment; a cold connector cache passively re-attaches for a persisted cancellation after frozen identity checks, independently of current creation grants, registry state or mount readiness; new work still rechecks execution authority); Workspace close follows its separate close capability and lifecycle admission; archive and unarchive follow retention capabilities after reliable Workspace close; delete supports either L3 idle ACTIVE files Sessions or L2 CLOSED/ARCHIVED Sessions; controlled same-Workspace cwd changes ship through the durable cwd_change operations (v1.32). The per-caller workspaceTurns capability on this surface advertises current submit and rename admission; it does not gate cancellation. Freeze selection with the original idempotency key; admission does not prove physical directory readiness.",
+        "description": "Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. Any caller holding the OPERATOR role may submit later Turns and rename the Session under the same opt-in, while the Workspace registry row stays ACTIVE and still backs the binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is an active, undeleted qwen-code Session on the frozen execution profile; Workspace close follows its separate close capability and lifecycle admission; the same caller may cancel a running Turn (its delivery re-checks no grants); archive and unarchive follow their separate retention capabilities after reliable Workspace close; delete supports either L3 idle ACTIVE files Sessions or L2 CLOSED/ARCHIVED Sessions; controlled same-Workspace cwd changes ship through the durable cwd_change operations (v1.32). The per-caller workspaceTurns capability on this surface advertises the same submit/rename admission rule; it does not gate cancellation. Freeze selection with the original idempotency key; admission does not prove physical directory readiness.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1471,7 +1471,7 @@
         "tags": ["Public Sessions"],
         "operationId": "changeSessionCwd",
         "x-qwen-implementation-status": "implemented",
-        "description": "W2, implemented: same-workspace only. Requires the workspace files deployment opt-in and an idle, bound Session; replay precedes revision and busy checks. Errors in pipeline order: 400 invalid_request for a missing field, a missing Idempotency-Key or malformed body; 401 actor_required without a trusted actor, answered before the Idempotency-Key is checked and before any Session lookup; 400 invalid_idempotency_key for a malformed Idempotency-Key; 400 invalid_cwd for a lexical violation and 400 invalid_request for an expected_context_revision below 1; 404 session_not_found for an unknown Session id; 400 unsupported_feature for an unbound Session; 404 session_not_found for an unreadable Session and 403 session_operation_forbidden when a readable actor is not the creator; 409 idempotency_conflict when one key carries different content; 409 workspace_unavailable when execution is disabled; 404 session_not_found for a deleted Session; 409 session_state_conflict when the Session is no longer ACTIVE; 409 workspace_unavailable when the Registry facts moved; 409 context_revision_conflict on a revision mismatch; 409 session_context_busy while an input, Turn or operation is active or queued. Poll the operation or await session.context.changed; do not treat 202 as activation. A failed operation reports failure_code and never retries; the Session keeps its prior directory and revision.",
+        "description": "W2, implemented: same-workspace only. Requires the workspace files deployment opt-in and an idle, bound Session; replay precedes revision and busy checks. Errors in pipeline order: 400 invalid_request for a missing field, a missing Idempotency-Key or malformed body; 401 actor_required without a trusted actor, answered before the Idempotency-Key is checked and before any Session lookup; 400 invalid_idempotency_key for a malformed Idempotency-Key; 400 invalid_cwd for a lexical violation and 400 invalid_request for an expected_context_revision below 1; 404 session_not_found for an unknown Session id; 400 unsupported_feature for an unbound Session; 404 session_not_found for an unreadable Session; 409 idempotency_conflict when one key carries different content — a matching operation under the caller's own actor_digest replays first; 403 session_operation_forbidden when a readable actor's Workspace role is below OPERATOR; 409 workspace_unavailable when execution is disabled; 404 session_not_found for a deleted Session; 409 session_state_conflict when the Session is no longer ACTIVE; 409 workspace_unavailable when the Registry facts moved — the binding must still match the ACTIVE registry row and the actor recorded by the Workspace create command must keep OPERATOR or above, at admission as well as at settlement, where it re-checks the recorded actor's grants and the V56-persisted initiator's role the same way, so demoting either actor fails the operation with workspace_unavailable; 409 context_revision_conflict on a revision mismatch; 409 session_context_busy while an input, Turn or operation is active or queued. Poll the operation or await session.context.changed; do not treat 202 as activation. A failed operation reports failure_code and never retries; the Session keeps its prior directory and revision.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -1619,7 +1619,7 @@
         "tags": ["WebShell"],
         "operationId": "webShellChangeCwd",
         "x-qwen-implementation-status": "implemented",
-        "description": "W2, implemented: the camelCase twin of the public changeSessionCwd with the matched refusal order: 400 invalid_request for a missing or malformed field; 401 actor_required without a trusted actor; 400 invalid_idempotency_key for a malformed idempotencyKey — with two documented divergences: a key over 128 characters is refused during request validation with 400 invalid_request before the service's check, and a blank idempotencyKey is refused there too, while the public header answers 400 invalid_idempotency_key for both shapes; 400 invalid_cwd for a lexical violation and 400 invalid_request for an expectedContextRevision below 1; 404 session_not_found for an unknown Session id; 400 unsupported_feature for an unbound Session; 404 session_not_found for an unreadable Session and 403 session_operation_forbidden when a readable actor is not the creator; 409 idempotency_conflict when one key carries different content; 409 workspace_unavailable when execution is disabled; 404 session_not_found for a deleted Session — a completed change under the same key still replays instead; then 409 session_state_conflict, 409 workspace_unavailable from moved Registry facts, 409 context_revision_conflict and 409 session_context_busy exactly like the public surface. Poll the operation or await session.context.changed; do not treat 202 as activation.",
+        "description": "W2, implemented: the camelCase twin of the public changeSessionCwd with the matched refusal order: 400 invalid_request for a missing or malformed field; 401 actor_required without a trusted actor; 400 invalid_idempotency_key for a malformed idempotencyKey — with two documented divergences: a key over 128 characters is refused during request validation with 400 invalid_request before the service's check, and a blank idempotencyKey is refused there too, while the public header answers 400 invalid_idempotency_key for both shapes; 400 invalid_cwd for a lexical violation and 400 invalid_request for an expectedContextRevision below 1; 404 session_not_found for an unknown Session id; 400 unsupported_feature for an unbound Session; 404 session_not_found for an unreadable Session; 409 idempotency_conflict when one key carries different content, and a completed change under the same key always replays instead, before the role refusal; 403 session_operation_forbidden when a readable actor's Workspace role is below OPERATOR; 409 workspace_unavailable when execution is disabled; 404 session_not_found for a deleted Session; then 409 session_state_conflict, 409 workspace_unavailable from moved Registry facts (the recorded create-command actor's grant included, and the settlement re-checks the V56-persisted initiator the same way, so demoting either actor fails the operation, exactly like the public surface), 409 context_revision_conflict and 409 session_context_busy. Poll the operation or await session.context.changed; do not treat 202 as activation.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1755,7 +1755,7 @@
             "$ref": "#/components/parameters/ListLimit"
           }
         ],
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/actions/{actionId}": {
@@ -1799,7 +1799,7 @@
             "$ref": "#/components/responses/Forbidden"
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/actions/{actionId}/responses": {
@@ -1842,7 +1842,7 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or a Session created before the V40 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL. The tenant filter's 403 actor_scope_mismatch also applies on this route."
+            "description": "Responding requires the Session's recorded owner or a Workspace OPERATOR (action_forbidden). An unbound Session with no recorded creator and no recorded create command (anonymous open-mode creation, or an unbound Session created before the V40 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL; a bound Session with no recorded owner answers through the create-command actor recorded for it, or through the Workspace role arm. The tenant filter's 403 actor_scope_mismatch also applies on this route."
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
@@ -1863,7 +1863,7 @@
             }
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/close": {
@@ -1876,7 +1876,7 @@
         "tags": ["Public Sessions"],
         "operationId": "closeSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Accepts an active Session; 409 session_state_conflict otherwise. Supported hosted-workspace-files/1 Sessions may close when session_close is true. Only the creator with current read access may close a bound Session: unreadable returns 404, readable non-creator returns 403. Active, cancelling or approval-waiting Turns return 409 turn_active; another pending lifecycle operation returns session_operation_active. Unsupported Workspace close returns workspace_unavailable. The same actor and key replay the original operation. New L3 Workspace close operations run SessionEnd only, retain data, and finish after durable effects verification and original Runtime stop. SessionDelete is reserved for ACTIVE delete. Missing protocol support rejects new admission; previously admitted operations retain their saved protocol. Unknown outcomes remain recovery_blocked.",
+        "description": "Accepts an active Session; 409 session_state_conflict otherwise. Supported hosted-workspace-files/1 Sessions may close when session_close is true. Only the Session's recorded owner (owner_actor_key, with the pre-V40 creator fallback) with current read access may close a bound Session: unreadable returns 404, a readable non-owner returns 403. Active, cancelling or approval-waiting Turns return 409 turn_active; another pending lifecycle operation returns session_operation_active. Unsupported Workspace close returns workspace_unavailable. The same actor and key replay the original operation. New L3 Workspace close operations run SessionEnd only, retain data, and finish after durable effects verification and original Runtime stop. SessionDelete is reserved for ACTIVE delete. Missing protocol support rejects new admission; previously admitted operations retain their saved protocol. Unknown outcomes remain recovery_blocked.",
         "responses": {
           "202": {
             "description": "Close durably accepted. The Session stops accepting input and reads closing. A bound Session completes only after its permanent Runtime admission fence is stored, no valid journal writer or unsettled execution remains, all original Runtime Sessions and holders are released, and original worker stop proof is persisted; the Session then reads closed. Unknown original identities or executions report recovery_blocked with a stable failure_code and keep the Session closing. History, Artifacts and Workspace files are retained. 202 does not mean that tools have stopped.",
@@ -1921,7 +1921,7 @@
         "tags": ["Public Sessions"],
         "operationId": "archiveSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Accepts a closed Session; 409 session_state_conflict otherwise, session_operation_active while another lifecycle change is pending. Workspace-bound archive requires a closed Session with completed reliable-close evidence and the creator with current read access. It completes atomically during admission, preserves data and the permanent close fence, and calls neither Harness nor Runtime. A readable non-creator returns 403; missing close evidence returns 409 workspace_unavailable.",
+        "description": "Accepts a closed Session; 409 session_state_conflict otherwise, session_operation_active while another lifecycle change is pending. Workspace-bound archive requires a closed Session with completed reliable-close evidence and the Session's recorded owner with current read access. It completes atomically during admission, preserves data and the permanent close fence, and calls neither Harness nor Runtime. A readable non-owner returns 403; missing close evidence returns 409 workspace_unavailable.",
         "responses": {
           "202": {
             "description": "Archive requires a closed Session and retains history. Java is its only authority, so a new archive is complete when it is admitted.",
@@ -1966,7 +1966,7 @@
         "tags": ["Public Sessions"],
         "operationId": "unarchiveSession",
         "x-qwen-implementation-status": "partial",
-        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the creator with current read access (404 unreadable, 403 readable non-creator). Bound keys are tenant/Session/actor scoped. Replay returns the current visible Session without repeating the mutation; a deleted Session returns 404. The permanent close fence is preserved and no Harness or Runtime call is made.",
+        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the Session's recorded owner with current read access (404 unreadable, 403 readable non-owner). Bound keys are tenant/Session/actor scoped. Replay returns the current visible Session without repeating the mutation; a deleted Session returns 404. The permanent close fence is preserved and no Harness or Runtime call is made.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -2052,7 +2052,7 @@
             }
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/actions/get": {
@@ -2101,7 +2101,7 @@
             }
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/actions/respond": {
@@ -2136,7 +2136,7 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or a Session created before the V40 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL. The tenant filter's 403 actor_scope_mismatch also applies on this route."
+            "description": "Responding requires the Session's recorded owner or a Workspace OPERATOR (action_forbidden). An unbound Session with no recorded creator and no recorded create command (anonymous open-mode creation, or an unbound Session created before the V40 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL; a bound Session with no recorded owner answers through the create-command actor recorded for it, or through the Workspace role arm. The tenant filter's 403 actor_scope_mismatch also applies on this route."
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
@@ -2152,7 +2152,7 @@
             }
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/sessions/close": {
@@ -2200,7 +2200,7 @@
             }
           }
         },
-        "description": "Uses the same close admission, creator authorization and durable cleanup semantics as the public close route. sessionClose describes deployment support; it does not grant actor authorization. New L3 Workspace close operations run SessionEnd only, retain data, and finish after durable effects verification and original Runtime stop. SessionDelete is reserved for ACTIVE delete. Missing protocol support rejects new admission; previously admitted operations retain their saved protocol. Unknown outcomes remain recovery_blocked."
+        "description": "Uses the same close admission, owner authorization and durable cleanup semantics as the public close route. sessionClose describes deployment support; it does not grant actor authorization. New L3 Workspace close operations run SessionEnd only, retain data, and finish after durable effects verification and original Runtime stop. SessionDelete is reserved for ACTIVE delete. Missing protocol support rejects new admission; previously admitted operations retain their saved protocol. Unknown outcomes remain recovery_blocked."
       }
     },
     "/api/agent/web-shell/v1/sessions/archive": {
@@ -2248,7 +2248,7 @@
             }
           }
         },
-        "description": "Workspace-bound archive requires a closed Session with completed reliable-close evidence and the creator with current read access. It completes atomically during admission, preserves data and the permanent close fence, and calls neither Harness nor Runtime. A readable non-creator returns 403; missing close evidence returns 409 workspace_unavailable."
+        "description": "Workspace-bound archive requires a closed Session with completed reliable-close evidence and the Session's recorded owner with current read access. It completes atomically during admission, preserves data and the permanent close fence, and calls neither Harness nor Runtime. A readable non-owner returns 403; missing close evidence returns 409 workspace_unavailable."
       }
     },
     "/api/agent/web-shell/v1/sessions/delete": {
@@ -2296,7 +2296,7 @@
             }
           }
         },
-        "description": "Workspace-bound ACTIVE deletion supports idle hosted-workspace-files/1 Sessions when L3 lifecycle protocol and reliable Runtime stop are available. Only the creator with current read access may admit it; accepted, running, cancelling or approval-waiting Turns return 409 turn_active. Admission persists a lifecycle-only execution fence and a versioned actor-scoped operation. SessionEnd settles before SessionDelete; committed Hook results are verified in Session Store and saved before permanent draining, attachment cleanup and original worker stop. Unknown outcomes or missing original stop evidence remain recovery_blocked and are never replayed on a replacement worker. CLOSED/ARCHIVED deletion retains L2: completed reliable-close evidence is required and no Harness or Hook is invoked. Completion atomically commits retirement, tombstone, receipt and terminal event, retaining shared Workspace files and neighboring holders. Authorized same-actor/key replays return the original operation, including after deletion; readable non-creators return 403. Missing lifecycle capability or close evidence returns 409 workspace_unavailable."
+        "description": "Workspace-bound ACTIVE deletion supports idle hosted-workspace-files/1 Sessions when L3 lifecycle protocol and reliable Runtime stop are available. Only the Session's recorded owner (owner_actor_key, with the pre-V40 creator fallback) with current read access may admit it; accepted, running, cancelling or approval-waiting Turns return 409 turn_active. Admission persists a lifecycle-only execution fence and a versioned actor-scoped operation. SessionEnd settles before SessionDelete; committed Hook results are verified in Session Store and saved before permanent draining, attachment cleanup and original worker stop. Unknown outcomes or missing original stop evidence remain recovery_blocked and are never replayed on a replacement worker. CLOSED/ARCHIVED deletion retains L2: completed reliable-close evidence is required and no Harness or Hook is invoked. Completion atomically commits retirement, tombstone, receipt and terminal event, retaining shared Workspace files and neighboring holders. Authorized same-actor/key replays return the original operation, including after deletion; a readable non-owner returns 403. Missing lifecycle capability or close evidence returns 409 workspace_unavailable."
       }
     },
     "/api/agent/web-shell/v1/workspaces/get": {
@@ -2489,10 +2489,10 @@
       "post": {
         "tags": ["Public Sessions"],
         "operationId": "cancelSessionTask",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "responses": {
           "202": {
-            "description": "Java durably accepted the cancellation and owns delivery; 202 does not prove owner acceptance or physical stop. After the tenant/actor filter and request decoding, validate Idempotency-Key (missing: 400 invalid_request; malformed: 400 invalid_idempotency_key), then current access (404 for an unreadable Session/task, then 403 task_forbidden for a readable task the actor may not cancel), then idempotent replay. The domain is tenant/session/operation-kind/actor/key; the digest includes task_id and excludes trace-only request IDs. While the record is retained and access remains valid, the same key and digest returns the same operation with its latest durable state and replayed=true; another digest returns 409 idempotency_conflict. Only new requests check capabilities.tasks (400 unsupported_feature), then Session active state (409 session_not_active otherwise, including closing, closed, archived and deleting), then action_capabilities containing cancel (409 task_action_unavailable otherwise). Admission requires no other open operation on the Session: cancel operations share the durable operation table with the lifecycle commands, which admit one open operation per Session, so any open operation answers 409 session_operation_active and an open cancel blocks close, archive and delete the same way. Atomically recheck admission and create the operation, serializing with Session/task transitions; a concurrent same-key winner replays before new-request state checks. Different keys that each pass admission create different operations, although physical stop requests may be coalesced or repeated safely; each operation gets its own recorded outcome. completed means the task authority durably recorded cancellation and returned a receipt; failed proves it was not accepted and will not be delivered again, with failure_code; recovery_blocked means acceptance is unknown and requires reconciliation before any re-execution. Retryable delivery failures remain pending/running. task_cancel never has status cancelled because cancellation commands cannot be withdrawn. Only physical cancellation settlement makes the task cancelled; a natural terminal outcome is preserved and an unknown physical outcome makes the task recovery_blocked independently of operation acceptance. Capability or state changes do not invalidate replay, but missing/deleted resources or revoked access may still return 404/403.",
+            "description": "Java durably accepted the cancellation and owns delivery; 202 does not prove owner acceptance or physical stop. After the tenant/actor filter and request decoding, validate Idempotency-Key (missing: 400 invalid_request; malformed: 400 invalid_idempotency_key), then current access (404 for an unreadable Session/task, then 403 task_forbidden for a readable task the actor may not cancel), then idempotent replay. The domain is tenant/session/operation-kind/actor/key; the digest includes task_id and excludes trace-only request IDs. While the record is retained and access remains valid, the same key and digest returns the same operation with its latest durable state and replayed=true; another digest returns 409 idempotency_conflict. Only new requests check capabilities.tasks (400 unsupported_feature), then Session active state (409 session_not_active otherwise, including closing, closed, archived and deleting), then action_capabilities containing cancel (409 task_action_unavailable otherwise), then, for a Workspace-bound Session, no storage migration fence (409 workspace_unavailable otherwise, as the sibling bound admissions answer). Admission requires no other open operation on the Session: cancel operations share the durable operation table with the lifecycle commands, which admit one open operation per Session, so any open operation answers 409 session_operation_active and an open cancel blocks close, archive and delete the same way. Atomically recheck admission and create the operation, serializing with Session/task transitions; a concurrent same-key winner replays before new-request state checks. Different keys that each pass admission create different operations, although physical stop requests may be coalesced or repeated safely; each operation gets its own recorded outcome. completed means the task authority durably recorded cancellation and returned a receipt; failed proves it was not accepted and will not be delivered again, with failure_code; recovery_blocked means acceptance is unknown and requires reconciliation before any re-execution. Retryable delivery failures remain pending/running. task_cancel never has status cancelled because cancellation commands cannot be withdrawn. Only physical cancellation settlement makes the task cancelled; a natural terminal outcome is preserved and an unknown physical outcome makes the task recovery_blocked independently of operation acceptance. Capability or state changes do not invalidate replay, but missing/deleted resources or revoked access may still return 404/403.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2663,10 +2663,15 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "cancelWebShellTask",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "responses": {
           "202": {
-            "description": "Same authorized task cancellation semantics as the public API: key validation, current access, idempotent replay, then new-request capability, Session and task checks. Replay returns the same operation and latest durable state. 202 is durable admission, completed is authority acceptance, and neither proves physical stop. Admission requires no other open operation on the Session (409 session_operation_active), as on the lifecycle routes.",
+            "description": "Same authorized task cancellation semantics as the public API: key validation, current access, idempotent replay, then new-request capability, Session, task and storage-migration checks (409 workspace_unavailable under a migration fence). Replay returns the same operation and latest durable state. 202 is durable admission, completed is authority acceptance, and neither proves physical stop. Admission requires no other open operation on the Session (409 session_operation_active), as on the lifecycle routes. A requestId in the body becomes the response's X-Request-Id and stays out of the request digest.",
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2782,7 +2787,7 @@
       "get": {
         "tags": ["Public Resources"],
         "operationId": "listAgentChannels",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
             "description": "Channel connections of the tenant with their route bindings, newest first (created_at descending, then id descending), so a connection that changes state does not move between pages. Each entry's routes list its newest 100 route bindings, oldest first; a binding rotated past the bound stays persisted but is no longer discoverable from the connection. A route binding names the authenticated channel instance, account generation, platform event and semantic revision it committed; two platform events with identical text stay two bindings. Ordinary chat still uses the Session prompt and event APIs. 400 invalid_cursor on a malformed cursor, 400 invalid_limit when limit is outside 1 to 100.",
@@ -2827,7 +2832,7 @@
       "get": {
         "tags": ["Public Resources"],
         "operationId": "listAgentChannelDeliveries",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
             "description": "Outbound deliveries of the channel, newest first (created_at descending, then id descending), so a delivery whose state changes does not move between pages. Each delivery carries its stable segment identity and ordinal: a streaming card or segmented reply keeps one segmentId per card, only segments proven unsent are sent again, and an explicit resend creates a new deliveryId for its segment rather than rewriting an existing delivery. unknown means the connection dropped after sending without a provider query or idempotency key, so the platform may hold the segment; the user is warned about possible duplication before resending. 404 channel_not_found when the channel is absent or outside the caller's scope. 400 invalid_cursor on a malformed cursor, 400 invalid_limit when limit is outside 1 to 100.",
@@ -2863,13 +2868,240 @@
       "get": {
         "tags": ["Public Resources"],
         "operationId": "listAgentAutomations",
-        "x-qwen-implementation-status": "planned",
+        "description": "Automation definitions the caller can read, newest first (created_at descending, then id descending), so a definition whose revision moves does not move between pages. Each entry is the definition's current revision as its target Session committed it; occurrences page separately under /runs. 400 invalid_cursor on a malformed cursor, 400 invalid_limit when limit is outside 1 to 100.",
+        "x-qwen-implementation-status": "partial",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/ListLimit"
+          }
+        ],
         "responses": {
           "200": {
-            "description": "Planned name only: automation definitions; definitions and run history page separately. Stage H6 defines the response."
+            "description": "Definitions of the tenant the caller can read, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicAutomationList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "createAgentAutomation",
+        "description": "Creates a definition under its target Session, which the caller must have created: the prompt is published as a Session resource and definition revision 1 commits in the Session journal before the answer. The same Idempotency-Key with the same body replays the original definition; a different body answers 409 idempotency_conflict. Only the persistent target mode is admitted (409 automation_mode_disabled otherwise); a missing session_id or required field, a prompt over 64 KiB, or an invalid cron answers 400 invalid_automation; an unknown timezone answers 400 automation_timezone_unknown; a Session holds at most 32 live definitions (409 automation_count_limit). 409 automation_unavailable when the deployment has not enabled automation; 409 session_not_active when the target Session is not active; 409 automation_operation_conflict when the key's binding already exists.",
+        "x-qwen-implementation-status": "partial",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutomationDefinitionCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The committed definition.",
+            "headers": {
+              "X-Qwen-Idempotent-Replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicAutomation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/agent-automations/{automationId}": {
+      "parameters": [
+        {
+          "name": "automationId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      ],
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "getAgentAutomation",
+        "description": "The definition's current revision. 404 automation_not_found when it is absent or outside the caller's scope.",
+        "x-qwen-implementation-status": "partial",
+        "responses": {
+          "200": {
+            "description": "The current revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicAutomation"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "updateAgentAutomation",
+        "description": "Appends the next definition revision from the fields given; omitted fields keep their committed values and session_id and session_mode cannot change. Content whose digest equals the current revision appends nothing and answers it. The same Idempotency-Key and body replay the recorded answer. A retired definition answers 409 automation_retired. A disallowed session_id change, an oversized prompt, or an invalid cron answers 400 invalid_automation; an unknown timezone answers 400 automation_timezone_unknown. 409 automation_mode_disabled when the target mode is not admitted; 409 session_not_active when the target Session is not active; 409 automation_unavailable when the deployment has not enabled automation; 409 automation_operation_conflict when the key's binding already exists.",
+        "x-qwen-implementation-status": "partial",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutomationDefinitionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The committed revision.",
+            "headers": {
+              "X-Qwen-Idempotent-Replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicAutomation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "delete": {
+        "tags": ["Public Resources"],
+        "operationId": "retireAgentAutomation",
+        "description": "Retires the definition: its chain ends and freezes, no later occurrence fires, and committed runs keep their history. Idempotent under its Idempotency-Key and for an already retired definition. 409 automation_unavailable when the deployment has not enabled automation — a 503 of the same code means the Harness is unavailable and is retryable.",
+        "x-qwen-implementation-status": "partial",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The retired definition.",
+            "headers": {
+              "X-Qwen-Idempotent-Replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicAutomation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         }
       }
@@ -2890,16 +3122,84 @@
       "get": {
         "tags": ["Public Resources"],
         "operationId": "listAgentAutomationRuns",
-        "x-qwen-implementation-status": "planned",
+        "description": "Occurrences of the definition, newest first (created_at descending, then occurrence_key descending): fired occurrences with their run's task state, skipped occurrences with their reason (missed occurrences carry none), and a firing occurrence whose answer is not recorded yet. 404 automation_not_found when the definition is absent or outside the caller's scope. 400 invalid_cursor on a malformed cursor, 400 invalid_limit when limit is outside 1 to 100.",
+        "x-qwen-implementation-status": "partial",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/ListLimit"
+          }
+        ],
         "responses": {
           "200": {
-            "description": "Planned name only: runs of an automation, including manual runs. Stage H6 defines the response."
+            "description": "Occurrences of the definition, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicAutomationRunList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "runAgentAutomation",
+        "description": "Fires a manual run now: the Idempotency-Key is the occurrence (manual:<key>), so a retry answers the same run and never fires twice; the run id is derived from the definition and the occurrence. The overlap policy applies to a manual run as it does to a scheduled one, and a dropped run answers 409 automation_run_skipped with the reason. A disabled definition still runs manually; a retired one answers 409 automation_retired. While a scanner tick holds the definition's lease the answer is 409 automation_busy (retryable). 409 session_not_active when the target Session is not active; 409 automation_unavailable when the deployment has not enabled automation; 409 automation_operation_conflict when the key's binding already exists.",
+        "x-qwen-implementation-status": "partial",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The fired occurrence and its run.",
+            "headers": {
+              "X-Qwen-Idempotent-Replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicAutomationRun"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         }
       }
@@ -3366,7 +3666,7 @@
             }
           }
         },
-        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the creator with current read access (404 unreadable, 403 readable non-creator). Bound keys are tenant/Session/actor scoped. Replay returns the current visible Session without repeating the mutation; a deleted Session returns 404. The permanent close fence is preserved and no Harness or Runtime call is made."
+        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the Session's recorded owner with current read access (404 unreadable, 403 readable non-owner). Bound keys are tenant/Session/actor scoped. Replay returns the current visible Session without repeating the mutation; a deleted Session returns 404. The permanent close fence is preserved and no Harness or Runtime call is made."
       }
     },
     "/v1/agent-channels/{channelId}/deliveries/{deliveryId}": {
@@ -3395,7 +3695,7 @@
       "get": {
         "tags": ["Public Resources"],
         "operationId": "getAgentChannelDelivery",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
             "description": "One delivery of the channel, including provider_receipt once the provider returned one. The model turn's completion and the external delivery stay separate views: a delivered segment does not say the user saw it. 404 delivery_not_found covers deliveries outside the caller's scope.",
@@ -3433,7 +3733,7 @@
         "in": "header",
         "name": "X-Qwen-Actor-Id",
         "x-qwen-implementation-status": "planned",
-        "description": "Verified actor identity. In the gateway topology it is injected by the authenticated gateway together with tenant and browser-supplied headers are stripped. In signed mode (qwenSignature) the broker authenticates it as part of the signed header set. Resource ACLs are mandatory in either mode; Action responder eligibility resolves to the recorded Session creator and falls back to the tenant scope when neither a creator nor a create command was recorded. This header is not a browser credential."
+        "description": "Verified actor identity. In the gateway topology it is injected by the authenticated gateway together with tenant and browser-supplied headers are stripped. In signed mode (qwenSignature) the broker authenticates it as part of the signed header set. Resource ACLs are mandatory in either mode; Action responder eligibility resolves to the Session's recorded owner or a Workspace OPERATOR and falls back to the tenant scope when neither an owner nor a create command was recorded. This header is not a browser credential."
       },
       "qwenSignature": {
         "type": "apiKey",
@@ -4070,7 +4370,7 @@
             "format": "int64",
             "minimum": 0,
             "default": 0,
-            "description": "Events at or below this sequence may be pruned. A replay cursor below it has expired."
+            "description": "Events at or below this sequence may be pruned. A replay cursor below it has expired only while the Snapshot backs the floor (replay_floor_sequence <= snapshot_through_sequence); a stream reconciliation discards the Snapshot without lowering the floor, and during that rebuild such a cursor is still served from the retained events."
           },
           "snapshot_through_sequence": {
             "type": "integer",
@@ -4147,7 +4447,7 @@
           "session_close": {
             "type": "boolean",
             "default": false,
-            "description": "Deployment support for close independently of archive/delete; bound files Sessions require durable worker stop support. This is not actor authorization: admission also requires creator ownership and current read access."
+            "description": "Deployment support for close independently of archive/delete; bound files Sessions require durable worker stop support. This is not actor authorization: admission also requires Session ownership and current read access."
           },
           "session_archive": {
             "type": "boolean",
@@ -5093,7 +5393,7 @@
           "workspaceTurns": {
             "type": "boolean",
             "default": false,
-            "description": "True when the caller may submit later Turns of this Workspace-bound Session: the deployment enables Workspace files, the caller created the Session and currently holds Workspace read and create grants on a registry row whose state is ACTIVE and still carries the Workspace generation and storage identity the Session was bound to, and the Session is an active, undeleted qwen-code Session on the frozen execution profile. Cancelling only aborts work that is already running, so the creator may cancel a running Turn even when this is false, as long as they can still read the Workspace and the deployment still enables Workspace files. False for every other caller and for unbound Sessions, which do not use it."
+            "description": "True when the caller may submit later Turns of this Workspace-bound Session or rename it: the deployment enables Workspace files, the caller holds the OPERATOR role on a Workspace registry row whose state is ACTIVE and still backs the Session's binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is an active qwen-code Session on the frozen execution profile. Cancelling only aborts work already running, so an OPERATOR caller may cancel a running Turn even when this is false; the capability does not gate cancellation. False for every other caller and for unbound Sessions, which do not use it."
           },
           "tasks": {
             "type": "boolean"
@@ -5104,7 +5404,7 @@
           "sessionClose": {
             "type": "boolean",
             "default": false,
-            "description": "Deployment support for close independently of archive/delete. Admission also requires creator ownership and current read access for a bound Session."
+            "description": "Deployment support for close independently of archive/delete. Admission also requires Session ownership and current read access for a bound Session."
           },
           "sessionArchive": {
             "type": "boolean",
@@ -5535,7 +5835,7 @@
               },
               "workspace_binding": {
                 "type": "boolean",
-                "description": "Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; the Session creator may submit and cancel later Turns under the same opt-in, while close follows its separate capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close."
+                "description": "Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; callers holding the OPERATOR role may submit later Turns or rename under the same opt-in while the registry row stays ACTIVE and still backs the Session's binding and the actor recorded by the Workspace create command keeps OPERATOR or above, and may cancel a running Turn (its delivery re-checks no grants), while close follows its separate capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close."
               }
             },
             "x-qwen-implementation-status": "partial"
@@ -5781,7 +6081,7 @@
               },
               "workspaceBinding": {
                 "type": "boolean",
-                "description": "Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; the Session creator may submit and cancel later Turns under the same opt-in, while close follows its separate capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close."
+                "description": "Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; callers holding the OPERATOR role may submit later Turns or rename under the same opt-in while the registry row stays ACTIVE and still backs the Session's binding and the actor recorded by the Workspace create command keeps OPERATOR or above, and may cancel a running Turn (its delivery re-checks no grants), while close follows its separate capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close."
               }
             },
             "x-qwen-implementation-status": "partial"
@@ -6442,7 +6742,6 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "x-qwen-implementation-status": "planned",
             "description": "Task that a task_cancel operation targets."
           },
           "status": {
@@ -6473,7 +6772,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Workspace close recovery_blocked reports original resource identity or unsettled execution; the Session remains closing."
+            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Task cancel failures are task_already_settled (the run ended before the stop request was recorded), task_action_unavailable and task_not_found; a recovery_blocked task cancel reports task_cancel_unconfirmed. Workspace close recovery_blocked reports original resource identity or unsettled execution; the Session remains closing."
           },
           "replayed": {
             "type": "boolean"
@@ -6571,7 +6870,6 @@
             }
           },
           {
-            "x-qwen-implementation-status": "planned",
             "if": {
               "properties": {
                 "type": {
@@ -6828,7 +7126,6 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "x-qwen-implementation-status": "planned",
             "description": "Task that a task_cancel operation targets."
           },
           "status": {
@@ -6859,7 +7156,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Workspace close recovery_blocked reports original resource identity or unsettled execution; the Session remains closing."
+            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Task cancel failures are task_already_settled (the run ended before the stop request was recorded), task_action_unavailable and task_not_found; a recovery_blocked task cancel reports task_cancel_unconfirmed. Workspace close recovery_blocked reports original resource identity or unsettled execution; the Session remains closing."
           },
           "replayed": {
             "type": "boolean"
@@ -6957,7 +7254,6 @@
             }
           },
           {
-            "x-qwen-implementation-status": "planned",
             "if": {
               "properties": {
                 "type": {
@@ -7506,7 +7802,7 @@
         "type": "string",
         "enum": ["cancel", "send_input", "read_output"],
         "x-qwen-implementation-status": "partial",
-        "description": "Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task; whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist."
+        "description": "Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task (since 1.40, child_agent tasks in pending, running, waiting or degraded, in an active Session); whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist."
       },
       "PublicTask": {
         "type": "object",
@@ -8316,6 +8612,11 @@
         "additionalProperties": false,
         "required": ["sessionId", "taskId", "idempotencyKey"],
         "properties": {
+          "requestId": {
+            "type": ["string", "null"],
+            "maxLength": 128,
+            "description": "Trace correlation only; excluded from the request digest, so a retry with another requestId still replays. A header-safe value (1 to 128 visible ASCII characters) is echoed as X-Request-Id; any other value is replaced by a server-chosen id."
+          },
           "sessionId": {
             "type": "string",
             "format": "uuid"
@@ -8330,8 +8631,7 @@
             "minLength": 1,
             "maxLength": 128
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "TaskEventType": {
         "type": "string",
@@ -8732,12 +9032,12 @@
       "ChannelConnectionState": {
         "type": "string",
         "enum": ["connected", "disconnected"],
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "ChannelRouteState": {
         "type": "string",
         "enum": ["staged", "admitted"],
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "ChannelDeliveryState": {
         "type": "string",
@@ -8750,7 +9050,7 @@
           "rejected",
           "cancelled"
         ],
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "PublicChannelRoute": {
         "type": "object",
@@ -8833,7 +9133,7 @@
             "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
           }
         },
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "allOf": [
           {
             "if": {
@@ -8905,7 +9205,7 @@
             "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "PublicChannelList": {
         "type": "object",
@@ -8930,7 +9230,7 @@
             "maxLength": 512
           }
         },
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "allOf": [
           {
             "if": {
@@ -9011,7 +9311,7 @@
             "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "PublicChannelDeliveryList": {
         "type": "object",
@@ -9036,7 +9336,455 @@
             "maxLength": 512
           }
         },
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "has_more": {
+                  "const": true
+                }
+              },
+              "required": ["has_more"]
+            },
+            "then": {
+              "required": ["next_cursor"],
+              "properties": {
+                "next_cursor": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        ]
+      },
+      "AutomationSessionMode": {
+        "type": "string",
+        "enum": ["persistent", "per_run"],
+        "description": "per_run is registered and refused until the child Session slice carries it.",
+        "x-qwen-implementation-status": "partial"
+      },
+      "AutomationOverlapPolicy": {
+        "type": "string",
+        "enum": ["skip", "queue_one", "allow"],
+        "x-qwen-implementation-status": "partial"
+      },
+      "AutomationCatchUpPolicy": {
+        "type": "string",
+        "enum": ["none", "latest", "bounded"],
+        "x-qwen-implementation-status": "partial"
+      },
+      "AutomationState": {
+        "type": "string",
+        "enum": ["live", "retired"],
+        "x-qwen-implementation-status": "partial"
+      },
+      "AutomationRunTrigger": {
+        "type": "string",
+        "enum": ["scheduled", "manual", "catch_up"],
+        "x-qwen-implementation-status": "partial"
+      },
+      "AutomationRunOutcome": {
+        "type": "string",
+        "enum": ["firing", "fired", "skipped", "missed", "unknown"],
+        "description": "firing is a claimed occurrence whose Harness answer is not recorded yet and is re-driven with bounded backoff; fired committed a run; skipped and missed never did; unknown is a claim whose answer stayed unobtainable past the retry bound and is never re-driven.",
+        "x-qwen-implementation-status": "partial"
+      },
+      "AutomationDefinitionCreateRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AutomationDefinitionRequest"
+          },
+          {
+            "required": ["session_id", "goal", "cron", "timezone", "prompt"]
+          },
+          {
+            "if": {
+              "properties": {
+                "catch_up": {
+                  "const": "bounded"
+                }
+              },
+              "required": ["catch_up"]
+            },
+            "then": {
+              "required": ["catch_up_limit"]
+            }
+          }
+        ]
+      },
+      "AutomationDefinitionRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "The target Session; required on create. On update it must be absent or equal to the created Session — a different value is refused with 400 invalid_automation."
+          },
+          "goal": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "At most 4096 UTF-8 bytes (measured as bytes, not code points; control characters are refused)."
+          },
+          "cron": {
+            "type": "string",
+            "minLength": 9,
+            "maxLength": 400,
+            "description": "Five fields: minute hour day-of-month month day-of-week, digit, range, list and step atoms only."
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "An IANA zone name the deployment's tz database resolves."
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536,
+            "description": "At most 65536 UTF-8 bytes (measured as bytes); the final wrapped execution input must also fit the Session store's 65536-byte inline resource bound, so the effective prompt budget is tighter once escaping and framing are counted."
+          },
+          "session_mode": {
+            "$ref": "#/components/schemas/AutomationSessionMode"
+          },
+          "overlap": {
+            "$ref": "#/components/schemas/AutomationOverlapPolicy"
+          },
+          "catch_up": {
+            "$ref": "#/components/schemas/AutomationCatchUpPolicy"
+          },
+          "catch_up_limit": {
+            "type": ["integer", "null"],
+            "format": "int64",
+            "minimum": 1,
+            "description": "Set exactly for bounded catch-up: bounded requires one, any other policy clears it."
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "catch_up": {
+                  "const": "bounded"
+                }
+              },
+              "required": ["catch_up"]
+            },
+            "then": {
+              "properties": {
+                "catch_up_limit": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "catch_up": {
+                  "enum": ["none", "latest"]
+                }
+              },
+              "required": ["catch_up"]
+            },
+            "then": {
+              "properties": {
+                "catch_up_limit": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ],
+        "x-qwen-implementation-status": "partial"
+      },
+      "PublicAutomation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "object",
+          "session_id",
+          "definition_revision",
+          "digest",
+          "goal",
+          "cron",
+          "timezone",
+          "session_mode",
+          "overlap",
+          "catch_up",
+          "enabled",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "object": {
+            "const": "agent.automation"
+          },
+          "session_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "definition_revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "goal": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "cron": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "timezone": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "session_mode": {
+            "$ref": "#/components/schemas/AutomationSessionMode"
+          },
+          "overlap": {
+            "$ref": "#/components/schemas/AutomationOverlapPolicy"
+          },
+          "catch_up": {
+            "$ref": "#/components/schemas/AutomationCatchUpPolicy"
+          },
+          "catch_up_limit": {
+            "type": ["integer", "null"],
+            "format": "int64",
+            "minimum": 1
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "state": {
+            "$ref": "#/components/schemas/AutomationState"
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix epoch milliseconds."
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "catch_up": {
+                  "const": "bounded"
+                }
+              },
+              "required": ["catch_up"]
+            },
+            "then": {
+              "required": ["catch_up_limit"],
+              "properties": {
+                "catch_up_limit": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "catch_up": {
+                  "enum": ["none", "latest"]
+                }
+              },
+              "required": ["catch_up"]
+            },
+            "then": {
+              "properties": {
+                "catch_up_limit": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ],
+        "x-qwen-implementation-status": "partial"
+      },
+      "PublicAutomationList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["object", "data", "has_more"],
+        "properties": {
+          "object": {
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/PublicAutomation"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "type": ["string", "null"],
+            "maxLength": 512
+          }
+        },
+        "x-qwen-implementation-status": "partial",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "has_more": {
+                  "const": true
+                }
+              },
+              "required": ["has_more"]
+            },
+            "then": {
+              "required": ["next_cursor"],
+              "properties": {
+                "next_cursor": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        ]
+      },
+      "PublicAutomationRun": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "object",
+          "automation_id",
+          "session_id",
+          "occurrence_key",
+          "trigger",
+          "outcome",
+          "definition_revision",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "The derived run id (arun_ plus the digest of the definition and occurrence); the same for a fired, skipped or missed occurrence."
+          },
+          "object": {
+            "const": "agent.automation.run"
+          },
+          "automation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "session_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "occurrence_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "schedule:<canonical UTC slot> or manual:<Idempotency-Key>."
+          },
+          "slot": {
+            "type": ["string", "null"],
+            "description": "The canonical UTC slot instant of a scheduled occurrence; null for a manual run."
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/AutomationRunTrigger"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/AutomationRunOutcome"
+          },
+          "reason": {
+            "type": ["string", "null"],
+            "maxLength": 64,
+            "description": "overlap, count_limit, session_not_active, revision_stale or definition_retired for a skipped policy decision, answer_unobtainable for an unknown one; a definitive Harness refusal settles skipped carrying its own error code verbatim (invalid_automation_operation, automation_mode_disabled, automation_count_limit or automation_operation_conflict); absent otherwise."
+          },
+          "definition_revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TaskState"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The run's task state once the run committed; null until its record is visible."
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix epoch milliseconds."
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix epoch milliseconds."
+          }
+        },
+        "x-qwen-implementation-status": "partial"
+      },
+      "PublicAutomationRunList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["object", "data", "has_more"],
+        "properties": {
+          "object": {
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/PublicAutomationRun"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "type": ["string", "null"],
+            "maxLength": 512
+          }
+        },
+        "x-qwen-implementation-status": "partial",
         "allOf": [
           {
             "if": {

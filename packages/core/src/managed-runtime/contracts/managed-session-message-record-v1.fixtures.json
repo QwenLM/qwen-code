@@ -1,0 +1,1383 @@
+{
+  "contract": "managed-session-message-record/1",
+  "keys": [
+    "childRunId",
+    "contentDigest",
+    "contentRef",
+    "direction",
+    "inputId",
+    "messageId",
+    "route",
+    "run",
+    "senderSessionId",
+    "targetSessionId"
+  ],
+  "fixedKeys": [
+    "childRunId",
+    "contentDigest",
+    "contentRef",
+    "direction",
+    "messageId",
+    "route",
+    "senderSessionId"
+  ],
+  "templates": {
+    "outbound": {
+      "childRunId": "run-1",
+      "contentDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "contentRef": {
+        "resourceId": "message-1",
+        "kind": "managed-message-content",
+        "schemaVersion": 1,
+        "byteLength": 11,
+        "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "direction": "outbound",
+      "inputId": null,
+      "messageId": "message-1",
+      "route": "to_child",
+      "run": {
+        "state": "settled",
+        "reason": null,
+        "definition": null,
+        "executionCallId": "call-send-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": null,
+        "runtime": null,
+        "delivery": {
+          "target": "session",
+          "state": "planned"
+        }
+      },
+      "senderSessionId": "session-parent",
+      "targetSessionId": null
+    },
+    "inbound": {
+      "childRunId": "run-1",
+      "contentDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "contentRef": {
+        "resourceId": "message-copy-1",
+        "kind": "managed-message-content",
+        "schemaVersion": 1,
+        "byteLength": 11,
+        "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "direction": "inbound",
+      "inputId": "message-1:input",
+      "messageId": "message-1",
+      "route": "to_child",
+      "run": {
+        "state": "settled",
+        "reason": null,
+        "definition": null,
+        "executionCallId": null,
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": null,
+        "runtime": null,
+        "delivery": {
+          "target": "session",
+          "state": "accepted"
+        }
+      },
+      "senderSessionId": "session-parent",
+      "targetSessionId": "session-child"
+    }
+  },
+  "cases": [
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-start",
+      "patch": {},
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-to-parent",
+      "patch": {
+        "route": "to_parent"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-target-at-open",
+      "patch": {
+        "targetSessionId": "session-child"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-content-at-bound",
+      "patch": {
+        "contentRef": {
+          "byteLength": 65536
+        }
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-content-empty",
+      "patch": {
+        "contentRef": {
+          "byteLength": 0
+        }
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-accepting",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-accepted",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-child",
+        "inputId": "message-1:input"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-consumed",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        },
+        "targetSessionId": "session-child",
+        "inputId": "message-1:input"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-unknown",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "unknown"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-rejected",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "rejected"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-cancelled-unresolved",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-cancelled-resolved",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "extra-key",
+      "patch": {
+        "extra": "x"
+      },
+      "valid": false,
+      "start": false,
+      "error": "exactly"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "direction-unknown",
+      "patch": {
+        "direction": "sideways"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session message direction must be outbound or inbound"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "direction-not-text",
+      "patch": {
+        "direction": 1
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session message direction must be outbound or inbound"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "route-unknown",
+      "patch": {
+        "route": "to_peer"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session message route must be to_child or to_parent"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "run-with-definition",
+      "patch": {
+        "run": {
+          "definition": {
+            "definitionId": "agent-1",
+            "definitionRevision": 1,
+            "definitionDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session message run must be purely logical"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "run-with-dispatch",
+      "patch": {
+        "run": {
+          "dispatchId": "dispatch-1"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session message run must be purely logical"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "run-with-execution",
+      "patch": {
+        "run": {
+          "execution": "settled"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session message run must be purely logical"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "run-with-runtime",
+      "patch": {
+        "run": {
+          "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session message run must be purely logical"
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "run-with-effect",
+      "patch": {
+        "run": {
+          "effectId": "effect-1"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session message run must be purely logical"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "run-with-channel-delivery",
+      "patch": {
+        "run": {
+          "deliveryId": "delivery-1",
+          "delivery": {
+            "target": "channel",
+            "state": "planned"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session message run must be purely logical"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "run-admitted",
+      "patch": {
+        "run": {
+          "state": "admitted"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session message run must be settled"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "run-cancelled",
+      "patch": {
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session message run must be settled"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "run-without-delivery",
+      "patch": {
+        "run": {
+          "delivery": null
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session message delivery must be a session delivery"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "run-reason",
+      "patch": {
+        "run": {
+          "reason": "count_limit"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "run.reason does not fit the settled state"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "message-id-empty",
+      "patch": {
+        "messageId": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "messageId must be a non-empty string"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "child-run-id-empty",
+      "patch": {
+        "childRunId": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "childRunId must be a non-empty string"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "sender-not-text",
+      "patch": {
+        "senderSessionId": 7
+      },
+      "valid": false,
+      "start": false,
+      "error": "senderSessionId must be a non-empty string"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "target-not-text",
+      "patch": {
+        "targetSessionId": 7
+      },
+      "valid": false,
+      "start": false,
+      "error": "targetSessionId must be a non-empty string"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "input-empty",
+      "patch": {
+        "inputId": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "inputId must be a non-empty string"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "content-over-bound",
+      "patch": {
+        "contentRef": {
+          "byteLength": 65537
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session message content exceeds 65536 bytes"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "content-ref-digest-bad",
+      "patch": {
+        "contentRef": {
+          "digest": "xyz"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "contentRef.digest must be a lowercase SHA-256 hex digest"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "content-digest-uppercase",
+      "patch": {
+        "contentDigest": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+      },
+      "valid": false,
+      "start": false,
+      "error": "contentDigest must be a lowercase SHA-256 hex digest"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "content-digest-mismatch",
+      "patch": {
+        "contentDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session message contentDigest must name the content's digest"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-target-is-sender",
+      "patch": {
+        "targetSessionId": "session-parent"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session message cannot address its own sender"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-without-call",
+      "patch": {
+        "run": {
+          "executionCallId": null
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Outbound session message run must name its sending call"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-claimed-without-target",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Outbound session message must fix its target once its delivery is claimed"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-unknown-without-target",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "unknown"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Outbound session message must fix its target once its delivery is claimed"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-rejected-without-target",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "rejected"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Outbound session message must fix its target once its delivery is claimed"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-accepted-without-input",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Outbound session message names its target's input exactly once accepted"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-input-while-claimed",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-child",
+        "inputId": "message-1:input"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Outbound session message names its target's input exactly once accepted"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-input-while-planned",
+      "patch": {
+        "inputId": "message-1:input"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Outbound session message names its target's input exactly once accepted"
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-input-after-rejection",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "rejected"
+          }
+        },
+        "targetSessionId": "session-child",
+        "inputId": "message-1:input"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Outbound session message names its target's input exactly once accepted"
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-start",
+      "patch": {},
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-to-parent",
+      "patch": {
+        "route": "to_parent",
+        "senderSessionId": "session-child",
+        "targetSessionId": "session-parent"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-consumed",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-with-call",
+      "patch": {
+        "run": {
+          "executionCallId": "call-send-1"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Inbound session message run must name no call"
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-planned",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "planned"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Inbound session message delivery must be accepted or consumed"
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-accepting",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Inbound session message delivery must be accepted or consumed"
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-cancelled",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Inbound session message delivery must be accepted or consumed"
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-without-target",
+      "patch": {
+        "targetSessionId": null
+      },
+      "valid": false,
+      "start": false,
+      "error": "Inbound session message must name its target and its input"
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-without-input",
+      "patch": {
+        "inputId": null
+      },
+      "valid": false,
+      "start": false,
+      "error": "Inbound session message must name its target and its input"
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-target-is-sender",
+      "patch": {
+        "targetSessionId": "session-parent"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session message cannot address its own sender"
+    }
+  ],
+  "successors": [
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-claim",
+      "before": {},
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "valid": true
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-claim-keeps-open-target",
+      "before": {
+        "targetSessionId": "session-child"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "valid": true
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-claim-retargets-open-target",
+      "before": {
+        "targetSessionId": "session-child"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-other"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-retarget",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "unknown"
+          }
+        },
+        "targetSessionId": "session-other"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-accept",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-child",
+        "inputId": "message-1:input"
+      },
+      "valid": true
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-consume",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-child",
+        "inputId": "message-1:input"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        },
+        "targetSessionId": "session-child",
+        "inputId": "message-1:input"
+      },
+      "valid": true
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-input-changed",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-child",
+        "inputId": "message-1:input"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        },
+        "targetSessionId": "session-child",
+        "inputId": "message-2:input"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-cancel",
+      "before": {},
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-cancel-after-claim",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-skip-claim",
+      "before": {},
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-child",
+        "inputId": "message-1:input"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-claim-unknown",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "unknown"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "valid": true
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-unknown-accepted",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "unknown"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-child",
+        "inputId": "message-1:input"
+      },
+      "valid": true
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-unknown-rejected",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "unknown"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "rejected"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "valid": true
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-reject",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "rejected"
+          }
+        },
+        "targetSessionId": "session-child"
+      },
+      "valid": true
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-reject-after-accept",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-child",
+        "inputId": "message-1:input"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "rejected"
+          }
+        },
+        "targetSessionId": "session-child",
+        "inputId": "message-1:input"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-consumed-regress",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        },
+        "targetSessionId": "session-child",
+        "inputId": "message-1:input"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-child",
+        "inputId": "message-1:input"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-restated",
+      "before": {},
+      "after": {},
+      "valid": true
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-content-changed",
+      "before": {},
+      "after": {
+        "contentRef": {
+          "resourceId": "message-2",
+          "kind": "managed-message-content",
+          "schemaVersion": 1,
+          "byteLength": 11,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "contentDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-message-changed",
+      "before": {},
+      "after": {
+        "messageId": "message-2"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-edge-changed",
+      "before": {},
+      "after": {
+        "childRunId": "run-2"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-route-changed",
+      "before": {},
+      "after": {
+        "route": "to_parent"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-sender-changed",
+      "before": {},
+      "after": {
+        "senderSessionId": "session-other"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-call-changed",
+      "before": {},
+      "after": {
+        "run": {
+          "executionCallId": "call-2"
+        }
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "outbound",
+      "id": "outbound-turns-inbound",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-child",
+        "inputId": "message-1:input"
+      },
+      "after": {
+        "direction": "inbound",
+        "run": {
+          "executionCallId": null,
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-child",
+        "inputId": "message-1:input"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-consume",
+      "before": {},
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-restated",
+      "before": {},
+      "after": {},
+      "valid": true
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-consume-twice",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        }
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        }
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-regress",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        }
+      },
+      "after": {},
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-input-changed",
+      "before": {},
+      "after": {
+        "inputId": "message-2:input"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-target-changed",
+      "before": {},
+      "after": {
+        "targetSessionId": "session-other"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-content-changed",
+      "before": {},
+      "after": {
+        "contentRef": {
+          "resourceId": "message-copy-2",
+          "kind": "managed-message-content",
+          "schemaVersion": 1,
+          "byteLength": 11,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "contentDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_message",
+      "template": "inbound",
+      "id": "inbound-sender-changed",
+      "before": {},
+      "after": {
+        "senderSessionId": "session-other"
+      },
+      "valid": false
+    }
+  ]
+}

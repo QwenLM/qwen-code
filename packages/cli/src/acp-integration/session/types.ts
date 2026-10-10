@@ -67,6 +67,7 @@ export interface SessionEmitterContext extends SessionUpdateSender {
  */
 export interface SessionContext extends SessionEmitterContext {
   readonly config: Config;
+  isDisposed?(): boolean;
 }
 
 export function hasFullSessionContext(
