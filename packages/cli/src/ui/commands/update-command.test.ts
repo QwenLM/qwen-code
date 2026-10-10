@@ -6,6 +6,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 const checkForUpdatesDetailed = vi.fn();
 const relaunchForUpdate = vi.fn();
@@ -305,6 +306,30 @@ describe('updateCommand', () => {
     });
     expect(getInstallationInfo).toHaveBeenCalledWith('/repo', false);
     expect(performStandaloneUpdate).not.toHaveBeenCalled();
+  });
+
+  it('translates the standalone guidance line in the rendered /update output', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+      updateMessage: standaloneUpdateMessage,
+    });
+
+    await setLanguageAsync('zh');
+    try {
+      const result = await updateCommand.action!(
+        context('non_interactive', false),
+        '',
+      );
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: `Update available: 1.2.3\n检测到独立安装。请重新运行独立安装程序以更新：\n ${standaloneUpdateCommand}`,
+      });
+    } finally {
+      await setLanguageAsync('en');
+    }
   });
 
   it('returns deferred message when standalone update is not yet active', async () => {
