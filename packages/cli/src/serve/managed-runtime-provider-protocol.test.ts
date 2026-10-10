@@ -1260,6 +1260,33 @@ describe('managed-runtime-provider/1', () => {
       ).toEqual(execDetails);
     });
 
+    it('preserves pre-existing warnings when fitting an over-budget exec confirmation', () => {
+      const execDetails: {
+        type: string;
+        title: string;
+        command: string;
+        rootCommand: string;
+        warnings?: string[];
+      } = {
+        type: 'exec',
+        title: 'Run',
+        command: 'echo ' + 'x'.repeat(budget * 2),
+        rootCommand: 'echo',
+        warnings: ['Command contains command substitution: $(whoami)'],
+      };
+      fitManagedRuntimeProviderResult(confirmation, execDetails, budget);
+      expect(
+        Buffer.byteLength(JSON.stringify(execDetails), 'utf8'),
+      ).toBeLessThanOrEqual(budget);
+      expect(execDetails.warnings).toEqual([
+        'Command contains command substitution: $(whoami)',
+        expect.stringMatching(/truncat/),
+      ]);
+      expect(
+        parseManagedRuntimeProviderResult(confirmation, execDetails, session),
+      ).toEqual(execDetails);
+    });
+
     it('cuts bulk prompt in an info confirmation', () => {
       const infoDetails = {
         type: 'info',
