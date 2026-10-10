@@ -469,7 +469,7 @@ jobs:
   mysql-integration:
     name: 'Runtime Broker and Managed Agent MariaDB / Java 21'
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 15
+    timeout-minutes: 25
     services:
       mariadb:
         image: 'mariadb:10.11.18'

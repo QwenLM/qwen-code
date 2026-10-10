@@ -5,6 +5,8 @@ import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.t
 
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -21,6 +23,7 @@ import java.util.List;
 import java.util.Objects;
 import javax.sql.DataSource;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -162,20 +165,65 @@ public final class ToolPublicationStore {
     private ProducerBinding producerBindingLocked(String scope, String publicationId,
             String publicationToken, Access access) {
         String suppliedHash = ToolPublicationContract.tokenHash(publicationToken);
+        return producerBindingWithHashLocked(scope, publicationId, suppliedHash, null, access);
+    }
+
+    ProducerBinding producerVerificationBindingLocked(String scope, String publicationId,
+            String bindingDigest, String tokenHash) {
+        require(bindingDigest != null && tokenHash != null, "Accepted verification identity is missing");
+        // Completing an accepted claim. CLAIM still allows a settled CSI execution
+        // after retirement; PRODUCE would fail that claim permanently.
+        return producerBindingWithHashLocked(scope, publicationId, tokenHash, bindingDigest,
+                Access.CLAIM, true);
+    }
+
+    private ProducerBinding producerBindingWithHashLocked(String scope, String publicationId,
+            String suppliedHash, String expectedBindingDigest, Access access) {
+        return producerBindingWithHashLocked(scope, publicationId, suppliedHash,
+                expectedBindingDigest, access, false);
+    }
+
+    private ProducerBinding producerBindingWithHashLocked(String scope, String publicationId,
+            String suppliedHash, String expectedBindingDigest, Access access,
+            boolean deferActivationLapse) {
         Row row = publicationRow(scope, publicationId);
         JsonNode binding = ToolPublicationContract.parseBytes("binding",
                 row.binding().getBytes(StandardCharsets.UTF_8));
         require(ToolPublicationContract.bindingDigest(binding).equals(row.digest())
+                && (expectedBindingDigest == null || expectedBindingDigest.equals(row.digest()))
                 && equalHash(suppliedHash, row.tokenHash()) && "OPEN".equals(row.state()),
                 "Publication grant conflicts");
-        Original original = lockOriginal(binding);
+        Original original;
+        try {
+            original = lockOriginal(binding);
+        } catch (RuntimeException error) {
+            // Accepted tasks must leave the queue when their original CSI
+            // authority is gone; credential/SQL failures may recover elsewhere.
+            boolean missingRuntime = error instanceof IllegalStateException && error.getCause() == null
+                    && ("Runtime binding slot is unavailable".equals(error.getMessage())
+                    || "Original Runtime binding is unavailable".equals(error.getMessage()));
+            boolean fencedCsi = error instanceof RuntimeBrokerException broker
+                    && "workspace_csi_unavailable".equals(broker.getCode()) && !broker.isRetryable();
+            if (expectedBindingDigest != null && (missingRuntime || fencedCsi)) {
+                throw new ApiException(HttpStatus.CONFLICT, "managed_tool_publication_runtime_unavailable",
+                        "Original publication runtime is unavailable");
+            }
+            throw error;
+        }
         lockTenant(row.tenant());
         return producerBindingAfterParentLocked(scope, publicationId, suppliedHash, row,
-                binding, original, access);
+                binding, original, access, deferActivationLapse);
     }
 
     private ProducerBinding producerBindingAfterParentLocked(String scope, String publicationId,
             String suppliedHash, Row row, JsonNode binding, Original original, Access access) {
+        return producerBindingAfterParentLocked(scope, publicationId, suppliedHash, row,
+                binding, original, access, false);
+    }
+
+    private ProducerBinding producerBindingAfterParentLocked(String scope, String publicationId,
+            String suppliedHash, Row row, JsonNode binding, Original original, Access access,
+            boolean deferActivationLapse) {
         JsonNode key = binding.get("sessionKey");
         ToolPublicationRetentionStore.requireLive(jdbc, row.tenant(), row.session());
         require(row.tenant().equals(text(key, "tenantId"))
@@ -225,20 +273,31 @@ public final class ToolPublicationStore {
                     && text(binding, "activationId").equals(head.get("activation_id"))
                     && head.get("activation_event_epoch") instanceof Number epoch
                     && epoch.longValue() == binding.get("activationEpoch").longValue()
-                    && head.get("activation_expires_at") instanceof Number expires
-                    && expires.longValue() > nowEpoch, "Original activation is fenced");
-            activationUntil = ((Number) head.get("activation_expires_at")).longValue();
+                    && head.get("activation_expires_at") instanceof Number,
+                    "Original activation is fenced");
+            activationUntil = requireCurrentActivation(
+                    ((Number) head.get("activation_expires_at")).longValue(), nowEpoch,
+                    deferActivationLapse);
         } else {
             activationUntil = requireLegacyActivation(row.tenant(), row.session(), binding,
                     ((Number) head.get("journal_revision")).longValue(),
-                    nowEpoch, head);
+                    nowEpoch, head, deferActivationLapse);
         }
         nowEpoch = ToolPublicationRetentionStore.now(jdbc);
         Integer writerLive = jdbc.queryForObject("SELECT CASE WHEN writer_lease_until > CURRENT_TIMESTAMP(6)"
                 + " THEN 1 ELSE 0 END FROM qwen_managed_session_journal_head"
                 + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", Integer.class, row.tenant(), row.session());
-        require(writerLive != null && writerLive == 1 && activationUntil > nowEpoch,
-                "Original Session or activation expired");
+        if (writerLive == null || writerLive != 1) {
+            require(false, "Original Session or activation expired");
+        }
+        if (activationUntil <= nowEpoch) {
+            // Renewal keeps the activation id and epoch, so a lapsed horizon can
+            // recover. An expired writer lease is not renewable and stays above.
+            if (deferActivationLapse) {
+                throw new ActivationLapsedException();
+            }
+            require(false, "Original Session or activation expired");
+        }
         if (access != Access.SETTLE) {
             require(((Number) current.get("expires_at")).longValue() > nowEpoch, "Publication grant expired");
         }
@@ -253,7 +312,7 @@ public final class ToolPublicationStore {
      */
     private long requireLegacyActivation(String tenant, String session,
             JsonNode binding, long journalRevision, long nowEpoch,
-            java.util.Map<String, Object> head) {
+            java.util.Map<String, Object> head, boolean deferActivationLapse) {
         JsonNode found = null;
         for (long revision = journalRevision; revision > 0 && found == null; revision--) {
             // The locking head read can see a newer revision than this transaction's snapshot.
@@ -284,8 +343,8 @@ public final class ToolPublicationStore {
         require("active".equals(text(found, "phase"))
                 && text(binding, "activationId").equals(text(found, "activationId"))
                 && binding.get("activationEpoch").longValue() == found.path("epoch").asLong()
-                && expiresAt != null && expiresAt > nowEpoch,
-                "Original activation is fenced");
+                && expiresAt != null, "Original activation is fenced");
+        expiresAt = requireCurrentActivation(expiresAt, nowEpoch, deferActivationLapse);
         backfillActivation(tenant, session, text(found, "activationId"),
                 text(found, "phase"), found.path("epoch").asLong(),
                 expiresAt, journalRevision,
@@ -910,6 +969,22 @@ public final class ToolPublicationStore {
             grant.put("expiresAt", row.expiresAt());
         }
         return ToolPublicationContract.parse("grant", grant);
+    }
+
+    private static long requireCurrentActivation(Long expiresAt, long nowEpoch, boolean deferLapse) {
+        if (expiresAt == null || expiresAt <= nowEpoch) {
+            if (deferLapse && expiresAt != null) {
+                throw new ActivationLapsedException();
+            }
+            require(false, "Original activation is fenced");
+        }
+        return expiresAt;
+    }
+
+    private static final class ActivationLapsedException extends RuntimeException {
+        private ActivationLapsedException() {
+            super("Original activation expired");
+        }
     }
 
     private static String hash(String text) {

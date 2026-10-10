@@ -433,6 +433,8 @@ public class ManagedAgentProperties {
         private Long verificationBytesPerSecond;
         private Duration maxVerificationTimeout;
         private boolean gcEnabled;
+        private boolean asyncVerificationEnabled;
+        private int verificationConcurrency = 2;
         private Duration deletionGrace = Duration.ofHours(24);
         // Off by default: the head's activation columns are only trustworthy
         // once no pre-V36 binary can still commit. Enable after the fleet
@@ -440,6 +442,10 @@ public class ManagedAgentProperties {
         private boolean journalHeadAuthorization;
 
         public boolean isJournalHeadAuthorization() { return journalHeadAuthorization; }
+        public boolean isAsyncVerificationEnabled() { return asyncVerificationEnabled; }
+        public void setAsyncVerificationEnabled(boolean value) { asyncVerificationEnabled = value; }
+        public int getVerificationConcurrency() { return verificationConcurrency; }
+        public void setVerificationConcurrency(int value) { verificationConcurrency = value; }
         public void setJournalHeadAuthorization(boolean value) { journalHeadAuthorization = value; }
         public boolean isGcEnabled() { return gcEnabled; }
         public void setGcEnabled(boolean value) { gcEnabled = value; }

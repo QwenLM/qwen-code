@@ -25,6 +25,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarge
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -78,8 +79,8 @@ import org.springframework.transaction.support.TransactionTemplate;
  *       window, not per delivered event.</li>
  *   <li>listPublicSessions / listWebShellSessions assemble a page from a
  *       fixed number of grouped batch queries.</li>
- *   <li>Tool-publication authorization reads the activation state from the
- *       journal head when journal-head-authorization is enabled (the flag
+ *   <li>Tool-publication authorization and async heartbeats
+ *       read the activation state from the journal head when journal-head-authorization is enabled (the flag
  *       ships false), rescanning the journal only for pre-migration heads
  *       (and backfilling them).</li>
  * </ol>
@@ -1020,6 +1021,102 @@ class Issue13181QueryBudgetTest {
         journal.reserve();
         return new PublicationFixture(journal.sessions, journal.bindings,
                 journal.executions, journal.store);
+    }
+
+    @Test
+    void asynchronousVerificationHeartbeatsAndStatusAvoidJournalBodyReads() {
+        Fixture fixture = new Fixture();
+        PublicationFixture publication = publicationFixture(fixture);
+        byte[] bytes = new byte[] {1, 2, 3, 4};
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public void putIfAbsent(String key, byte[] input) {}
+
+            @Override
+            public InputStream open(String key) {
+                return open(key, () -> {});
+            }
+
+            @Override
+            public InputStream open(String key, Runnable guard) {
+                return new ByteArrayInputStream(bytes) {
+                    @Override
+                    public synchronized int read(byte[] buffer, int offset, int length) {
+                        try {
+                            Thread.sleep(120);
+                        } catch (InterruptedException error) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(error);
+                        }
+                        guard.run();
+                        return super.read(buffer, offset, Math.min(length, 1));
+                    }
+                };
+            }
+
+            @Override
+            public void requireUnversioned() {}
+        };
+        ToolPublicationDataStore data = new ToolPublicationDataStore(fixture.jdbc, fixture.manager,
+                publication.store(), publication.sessions(), bucket, Duration.ofSeconds(10), Duration.ofMillis(300),
+                new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
+        data.publishSegment(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-heartbeat",
+                "stdout", 0, bytes, null, true);
+        fixture.ledger.reset();
+        try (var verifier = new ToolPublicationVerifier(data, 1)) {
+            assertThat(verifier.runOnce()).isTrue();
+        }
+        long renewals = fixture.ledger.count("update qwen_tool_publication_operation set claim_until");
+        assertThat(renewals).isGreaterThanOrEqualTo(2);
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx")).isZero();
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_head", "for update"))
+                .isGreaterThanOrEqualTo(2 * (renewals + 1));
+        fixture.ledger.reset();
+        for (int i = 0; i < 12; i++) {
+            assertThat(data.operationStatus(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-heartbeat")
+                    .path("state").asText()).isEqualTo("SUCCEEDED");
+        }
+        assertThat(fixture.ledger.total()).isEqualTo(12);
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx")).isZero();
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_head")).isZero();
+    }
+
+    @Test
+    void frequentReadsDoNotRenewBeforeTheHeartbeatIntervalOrFetchInlineBytes() {
+        Fixture fixture = new Fixture();
+        PublicationFixture publication = publicationFixture(fixture);
+        byte[] bytes = new byte[1024];
+        var reads = new java.util.concurrent.atomic.AtomicInteger();
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override public void putIfAbsent(String key, byte[] input) {}
+            @Override public InputStream open(String key) { return open(key, () -> {}); }
+            @Override public InputStream open(String key, Runnable guard) {
+                return new ByteArrayInputStream(bytes) {
+                    @Override public synchronized int read(byte[] buffer, int offset, int length) {
+                        guard.run();
+                        reads.incrementAndGet();
+                        return super.read(buffer, offset, Math.min(length, 1));
+                    }
+                };
+            }
+            @Override public void requireUnversioned() {}
+        };
+        // A five-minute lease gives a 100-second interval, well beyond this bounded read.
+        ToolPublicationDataStore data = new ToolPublicationDataStore(fixture.jdbc, fixture.manager,
+                publication.store(), publication.sessions(), bucket, Duration.ofMinutes(10), Duration.ofMinutes(5),
+                new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
+        data.publishSegment(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-fast-read",
+                "stdout", 0, bytes, null, true);
+        fixture.ledger.reset();
+        try (var verifier = new ToolPublicationVerifier(data, 1)) {
+            assertThat(verifier.runOnce()).isTrue();
+        }
+        assertThat(data.operationStatus(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-fast-read")
+                .path("state").asText()).isEqualTo("SUCCEEDED");
+        assertThat(reads).hasValueGreaterThan(1000);
+        assertThat(fixture.ledger.count("update qwen_tool_publication_operation set claim_until")).isZero();
+        assertThat(fixture.ledger.count("select inline_bytes from qwen_tool_publication_object")).isZero();
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx")).isZero();
     }
 
     @Test
