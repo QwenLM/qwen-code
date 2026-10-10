@@ -210,7 +210,10 @@ async def test_transport_starts_windows_command_shim_on_path(
         await transport.close()
 
     assert messages == [
-        {"args": build_cli_arguments(QueryOptions(model="model name")), "path": cli_path}
+        {
+            "args": build_cli_arguments(QueryOptions(model="model name")),
+            "path": cli_path,
+        }
     ]
 
 
