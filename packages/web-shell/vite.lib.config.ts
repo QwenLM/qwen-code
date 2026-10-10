@@ -153,13 +153,14 @@ function injectCssModules(): Plugin {
 // The transcript renderer is inlined into every `/export html` document, under
 // a byte budget that web-templates enforces at build time. Strings for
 // surfaces the read-only transcript can never render have no business there:
-// the Live Voice dialog and setup card alone are ~200 entries. Matching on the
+// the Live Voice dialog and setup card alone are ~200 entries. The selection
+// menu is also interactive-only; keep its converter out of the entry. Matching on the
 // resolved id (not the specifier) keeps this working however the module is
 // imported. Vite's ids use forward slashes on every platform while
 // `path.resolve` returns backslashes on Windows, so both sides go through
 // `normalizePath`: compared raw, the stub would never apply there and the
 // Windows build would blow the budget this exists to protect.
-const TRANSCRIPT_DEAD_MESSAGES = new Map(
+const TRANSCRIPT_STUBS = new Map(
   [
     ['./client/live/messages.ts', './client/live/messages.transcript-stub.ts'],
     [
@@ -178,15 +179,19 @@ const TRANSCRIPT_DEAD_MESSAGES = new Map(
       './client/settings/messages.ts',
       './client/settings/messages.transcript-stub.ts',
     ],
+    [
+      './client/components/messages/SelectionCopyMenu.tsx',
+      './client/components/messages/SelectionCopyMenu.transcript-stub.tsx',
+    ],
   ].map(([module, stub]) => [
     normalizePath(resolve(__dirname, module)),
     normalizePath(resolve(__dirname, stub)),
   ]),
 );
 
-function stubTranscriptDeadMessages(): Plugin {
+function stubTranscriptModules(): Plugin {
   return {
-    name: 'web-shell-stub-transcript-dead-messages',
+    name: 'web-shell-stub-transcript-modules',
     enforce: 'pre',
     async resolveId(source, importer, options) {
       const resolved = await this.resolve(source, importer, {
@@ -194,7 +199,7 @@ function stubTranscriptDeadMessages(): Plugin {
         skipSelf: true,
       });
       return resolved
-        ? (TRANSCRIPT_DEAD_MESSAGES.get(normalizePath(resolved.id)) ?? null)
+        ? (TRANSCRIPT_STUBS.get(normalizePath(resolved.id)) ?? null)
         : null;
     },
   };
@@ -202,7 +207,7 @@ function stubTranscriptDeadMessages(): Plugin {
 
 export default defineConfig(({ mode }) => ({
   plugins: [
-    ...(mode === 'transcript' ? [stubTranscriptDeadMessages()] : []),
+    ...(mode === 'transcript' ? [stubTranscriptModules()] : []),
     react(),
     tailwindcss(),
     injectCssModules(),

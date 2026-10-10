@@ -2619,12 +2619,13 @@ export function EnhancedTable({
   const tableContent = (
     <div
       ref={setShell}
+      data-selection-copy-table
       className={`${styles.tableShell} ${densityClassName(density)} ${
         freezeFirstColumn ? styles.hasFrozenColumn : ''
       } ${isDragging ? styles.dragging : ''} ${fullscreen ? styles.fullscreenTable : ''}`}
     >
       <TooltipProvider delayDuration={300}>
-        <div className={styles.toolbar}>
+        <div className={styles.toolbar} data-selection-copy-ignore>
           <Tooltip>
             <TooltipTrigger asChild>
               <button
@@ -2845,6 +2846,7 @@ export function EnhancedTable({
           <thead>
             <tr>
               <th
+                data-selection-copy-ignore
                 className={`${styles.headerCell} ${styles.actionHeaderCell} ${
                   freezeFirstColumn ? styles.stickyActionHeaderCell : ''
                 }`}
@@ -2991,6 +2993,7 @@ export function EnhancedTable({
                 <Fragment key={row.key}>
                   <tr>
                     <td
+                      data-selection-copy-ignore
                       className={`${styles.cell} ${styles.actionCell} ${
                         freezeFirstColumn ? styles.stickyActionCell : ''
                       }`}
@@ -3068,6 +3071,7 @@ export function EnhancedTable({
                   {detailOpen && (
                     <tr id={detailId} className={styles.detailRow}>
                       <td
+                        data-selection-copy-ignore
                         className={styles.detailCell}
                         colSpan={
                           orderedVisibleColumnIndexes.length +
