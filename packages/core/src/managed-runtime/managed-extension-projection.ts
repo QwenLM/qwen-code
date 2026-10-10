@@ -67,6 +67,20 @@ import {
   isSessionMessageSuccessor,
   parseSessionMessage,
 } from './managed-session-message-record.js';
+import {
+  isTeamMessageStart,
+  isTeamMessageSuccessor,
+  isTeamPlanStart,
+  isTeamPlanSuccessor,
+  isTeamStateStart,
+  isTeamStateSuccessor,
+  isTeamTaskStart,
+  isTeamTaskSuccessor,
+  parseTeamMessage,
+  parseTeamPlan,
+  parseTeamState,
+  parseTeamTask,
+} from './managed-team-record.js';
 
 // H0c of #12827: how the Session authority keys, chains and projects the
 // Stage H records of managed-extension-record/1. The shared fixtures in
@@ -264,6 +278,42 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     },
     isStart: isSessionMessageStart,
     isSuccessor: isSessionMessageSuccessor,
+  }),
+  team_state: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseTeamState(value);
+      return { record, recordId: record.teamId, run: record.run };
+    },
+    isStart: isTeamStateStart,
+    isSuccessor: isTeamStateSuccessor,
+  }),
+  team_task: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseTeamTask(value);
+      return { record, recordId: record.taskId, run: record.run };
+    },
+    isStart: isTeamTaskStart,
+    isSuccessor: isTeamTaskSuccessor,
+  }),
+  team_message: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseTeamMessage(value);
+      return { record, recordId: record.messageId, run: record.run };
+    },
+    isStart: isTeamMessageStart,
+    isSuccessor: isTeamMessageSuccessor,
+  }),
+  team_plan: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseTeamPlan(value);
+      return { record, recordId: record.requestId, run: record.run };
+    },
+    isStart: isTeamPlanStart,
+    isSuccessor: isTeamPlanSuccessor,
   }),
 });
 
