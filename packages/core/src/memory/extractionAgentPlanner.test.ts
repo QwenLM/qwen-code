@@ -624,6 +624,20 @@ describe('runAutoMemoryExtractionByAgent', () => {
     ).rejects.toThrow('timeout');
   });
 
+  it('words the stop reason instead of passing the mode token through', async () => {
+    // The case above feeds a free-form reason, which passes through by
+    // design, so only this one fails if the conversion is reverted.
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'failed',
+      terminateReason: 'MAX_TURNS',
+      filesTouched: [],
+    });
+
+    await expect(
+      runAutoMemoryExtractionByAgent(mockConfig, '/tmp/project'),
+    ).rejects.toThrow('Agent stopped: maximum turns reached.');
+  });
+
   it('ignores non-memory file paths in filesTouched', async () => {
     const result = await extract([
       '/tmp/auto-memory/project/arch.md',
