@@ -124,6 +124,13 @@ const SUBMIT_RETRY_MS = 5_000;
 // bare status.
 const CHANNEL_NOT_FOUND = 'channel_not_found';
 
+// The 404 codes that are a per-message verdict on the submitted event —
+// the workspace the route binds to is gone under a live instance. Any
+// other 404 (an unmapped route while the adapter surface is down, a
+// proxy's synthesized envelope) says nothing about the mail, so it is
+// re-driven, never dropped on the bare status.
+const PER_MESSAGE_NOT_FOUND = new Set(['workspace_not_found']);
+
 /**
  * The control plane carries an attachment as one base64 string bounded at
  * 2,000,000 characters — 1,500,000 decoded bytes — so an upload beyond
@@ -656,16 +663,21 @@ export class ManagedEmailAdapter {
       }
       if (
         typeof status === 'number' &&
-        (status === 400 || status === 403 || status === 404 || status === 409)
+        (status === 400 ||
+          status === 403 ||
+          status === 409 ||
+          (status === 404 && PER_MESSAGE_NOT_FOUND.has(String(code))))
       ) {
         // A deterministic refusal (a failing body, a closed actor scope, a
         // dead route or generation, a route session or workspace gone
         // under a live instance): re-driving the identical event can
         // never converge, and a claim that outlives the pending limit
         // would stall the whole mailbox, so the event is dropped visibly
-        // instead. The instance-gone 404 never reaches here — the
-        // registration claim above already took it. Everything else — a
-        // lost answer, a reset listener — is re-driven.
+        // instead. A 404 drops only on a per-message code: the
+        // instance-gone one is the registration claim above, and an
+        // unrecognized one says nothing about the mail, so it falls
+        // through to the re-drive like a lost answer or a reset
+        // listener.
         this.log(
           `Managed email admission of ${event.platformEventId} was refused (${status}); the message is skipped.`,
         );

@@ -548,6 +548,32 @@ describe('managed email inbound', () => {
     expect(plane.registrations).toEqual([{ accountGeneration: 1 }]);
   });
 
+  it('re-drives an unrecognized 404 as a lost answer, never dropping the mail (R3-1)', async () => {
+    // A 404 whose code the contract never classified — an unmapped route
+    // answering not_found while the adapter surface is down, a proxy's
+    // synthesized envelope — is not a verdict on this message. Dropping
+    // on the bare status would destroy the mail: the claim takes the
+    // same bounded re-drive as a lost answer and converges once the
+    // route answers again.
+    const lines: string[] = [];
+    const adapter = make({}, { log: (line: string) => lines.push(line) });
+    await adapter.connect();
+    plane.submitErrors = [{ status: 404, code: 'not_found' }];
+    append(raw('held', 'held by an unknown 404'));
+    await adapter.tick();
+    expect(state(adapter).pending).toHaveLength(1);
+    expect(plane.events).toEqual([]);
+    const log = lines.join('\n');
+    expect(log).toContain('did not answer');
+    expect(log).not.toContain('the message is skipped');
+    // The route answers again: the next poll's re-drive converges.
+    await adapter.tick();
+    expect(state(adapter).pending).toEqual([]);
+    expect(plane.events.map((event) => event.text)).toEqual([
+      'held by an unknown 404',
+    ]);
+  });
+
   it('stops admitting new mail once a refusal resets registration, re-searching it next poll (R3-2)', async () => {
     // The admit loop owns the same dead-tick invariant resubmitPending
     // stops on: after a refusal, every later admit this tick is a
