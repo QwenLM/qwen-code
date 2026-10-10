@@ -4855,7 +4855,10 @@ export class Session implements SessionContext {
       ? (recorder?.getRewindTurnIndex(promptId) ?? -1)
       : -1;
 
-    if (apiTruncateIndex < 0 || (recorder && recordingTurnIndex < 0)) {
+    // `getRewindCutPoint` already returns -1 when the recorder cannot resolve
+    // this promptId, so a negative `recordingTurnIndex` never reaches here on
+    // its own.
+    if (apiTruncateIndex < 0) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot rewind to the requested turn. It may have been compressed or does not exist, or its model-history identity is missing or ambiguous.',
