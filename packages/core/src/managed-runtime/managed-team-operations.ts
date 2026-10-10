@@ -4,24 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ExtensionRunState } from './managed-extension-record.js';
-import {
-  MANAGED_TEAM_LIMITS,
-  parseTeamState,
-  parseTeamTask,
-  type TeamLifecycle,
-  type TeamState,
-  type TeamTask,
-  type TeamTaskStatus,
-} from './managed-team-record.js';
+import type { ExtensionRun } from './managed-extension-record.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
+import type {
+  TeamLifecycle,
+  TeamMember,
+  TeamState,
+  TeamTask,
+  TeamTaskStatus,
+} from './managed-team-record.js';
 
-// H4e-b1 of #12827: the bodies the lead's team funnel commits. Each builder
-// returns a parsed record, so a misuse fails here rather than at the
-// authority. See docs/design/2026-10-10-managed-agent-team-lead-runtime.md.
+// H4e-b1 of #12827: the pure construction side of the lead-side team
+// runtime — every team and board revision the team funnel
+// (packages/cli/src/serve/hosted-team-session.ts) commits, and the blocked
+// state a reader derives from a board. See
+// docs/design/2026-10-10-managed-agent-team-lead-runtime.md.
 
-function logicalRun(state: ExtensionRunState) {
-  return {
+function logicalRun(state: ExtensionRun['state']): ExtensionRun {
+  return Object.freeze({
     state,
     reason: null,
     definition: null,
@@ -32,190 +32,116 @@ function logicalRun(state: ExtensionRunState) {
     execution: null,
     runtime: null,
     delivery: null,
-  };
+  });
 }
 
-/**
- * The Legacy `sanitizeName` rule: lowercase, every character outside
- * `[a-z0-9-]` becomes a dash, dash runs collapse, edge dashes go.
- */
-export function sanitizeTeamName(raw: string): string {
-  return raw
-    .toLowerCase()
-    .replace(/[^a-z0-9-]/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '');
-}
-
-/** The opening of a team: active, with no members yet. */
+/** The opening of a team: active, led by this Session, with no members. */
 export function teamOpenBody(params: {
   readonly teamId: string;
   readonly name: string;
   readonly leadSessionId: string;
 }): TeamState {
-  return parseTeamState({
+  return Object.freeze({
     teamId: params.teamId,
     name: params.name,
     leadSessionId: params.leadSessionId,
     lifecycle: 'active',
     membershipRevision: 1,
-    members: [],
+    members: Object.freeze([]),
     run: logicalRun('admitted'),
   });
 }
 
-/** The next roster revision: one member appended. */
+/** One membership fact: the member appended to the roster. */
 export function teamJoinBody(
   previous: TeamState,
-  member: { readonly name: string; readonly childRunId: string },
+  member: TeamMember,
 ): TeamState {
-  return parseTeamState({
+  return Object.freeze({
     ...previous,
     membershipRevision: previous.membershipRevision + 1,
-    members: [
-      ...previous.members,
-      {
-        name: member.name,
-        childRunId: member.childRunId,
-        planModeRequired: false,
-      },
-    ],
+    members: Object.freeze([...previous.members, Object.freeze({ ...member })]),
   });
 }
 
-/** The member a child run joined as, in any of a lead's teams. */
-export function teamMemberOfRun(
-  teams: Iterable<TeamState>,
-  childRunId: string,
-): { readonly teamId: string; readonly name: string } | undefined {
-  for (const team of teams) {
-    const member = team.members.find((each) => each.childRunId === childRunId);
-    if (member !== undefined) return { teamId: team.teamId, name: member.name };
-  }
-  return undefined;
-}
-
-/** The next lifecycle step: `closing`, then `deleted`, which ends the run. */
+/** One lifecycle step; a deleted team's run is cancelled, which freezes it. */
 export function teamLifecycleBody(
   previous: TeamState,
   lifecycle: Exclude<TeamLifecycle, 'active'>,
 ): TeamState {
-  return parseTeamState({
+  return Object.freeze({
     ...previous,
     lifecycle,
     run: logicalRun(lifecycle === 'deleted' ? 'cancelled' : 'admitted'),
   });
 }
 
-/** A task's record id: unique in the journal, derived from its team. */
-export function teamTaskRecordId(teamId: string, number: number): string {
-  return `${teamId}#${number}`;
-}
-
-/** A new board task, `pending` and unowned. */
+/** The opening of a board task: pending, unowned and unblocked. */
 export function teamTaskOpenBody(params: {
   readonly teamId: string;
+  readonly taskId: string;
   readonly number: number;
   readonly subject: string;
   readonly descriptionRef: ManagedSessionDurableRef;
   readonly activeForm: string | null;
   readonly metadataRef: ManagedSessionDurableRef | null;
 }): TeamTask {
-  return parseTeamTask({
-    teamId: params.teamId,
-    taskId: teamTaskRecordId(params.teamId, params.number),
-    number: params.number,
-    subject: params.subject,
-    descriptionRef: params.descriptionRef,
-    activeForm: params.activeForm,
-    metadataRef: params.metadataRef,
+  return Object.freeze({
+    ...params,
     owner: null,
     status: 'pending',
-    blockedBy: [],
+    blockedBy: Object.freeze([]),
     run: logicalRun('admitted'),
   });
 }
 
-/** The changes one task_update makes to one task. Absent means unchanged. */
-export interface TeamTaskChange {
-  readonly subject?: string;
-  readonly descriptionRef?: ManagedSessionDurableRef;
-  readonly activeForm?: string | null;
-  readonly metadataRef?: ManagedSessionDurableRef | null;
-  readonly owner?: string | null;
-  readonly status?: TeamTaskStatus;
-  /** Appended in order, skipping any the task already names. */
-  readonly addBlockedBy?: readonly string[];
-}
-
-/** The next revision of a task under one change. */
-export function teamTaskReviseBody(
+/**
+ * The next revision of a task: the given fields replaced, the new blockers
+ * appended after the stored ones (an edge already stored is kept once),
+ * and a deletion ending the run.
+ */
+export function teamTaskRevisionBody(
   previous: TeamTask,
-  change: TeamTaskChange,
+  changes: {
+    readonly subject?: string;
+    readonly descriptionRef?: ManagedSessionDurableRef;
+    readonly activeForm?: string | null;
+    readonly metadataRef?: ManagedSessionDurableRef | null;
+    readonly owner?: string | null;
+    readonly status?: TeamTaskStatus;
+    readonly addBlockedBy?: readonly string[];
+  },
 ): TeamTask {
-  const status = change.status ?? previous.status;
-  const blockedBy = [...previous.blockedBy];
-  for (const blocker of change.addBlockedBy ?? []) {
-    if (!blockedBy.includes(blocker)) blockedBy.push(blocker);
-  }
-  return parseTeamTask({
+  const { addBlockedBy = [], ...fields } = changes;
+  const status = fields.status ?? previous.status;
+  return Object.freeze({
     ...previous,
-    subject: change.subject ?? previous.subject,
-    descriptionRef: change.descriptionRef ?? previous.descriptionRef,
-    activeForm:
-      change.activeForm === undefined ? previous.activeForm : change.activeForm,
-    metadataRef:
-      change.metadataRef === undefined
-        ? previous.metadataRef
-        : change.metadataRef,
-    owner: change.owner === undefined ? previous.owner : change.owner,
-    status,
-    blockedBy,
+    ...Object.fromEntries(
+      Object.entries(fields).filter(([, value]) => value !== undefined),
+    ),
+    blockedBy: Object.freeze([
+      ...previous.blockedBy,
+      ...addBlockedBy.filter(
+        (blocker, index) =>
+          !previous.blockedBy.includes(blocker) &&
+          addBlockedBy.indexOf(blocker) === index,
+      ),
+    ]),
     run: logicalRun(status === 'deleted' ? 'cancelled' : 'admitted'),
   });
 }
 
 /**
- * The blockers that still block a task: a completed or deleted blocker no
- * longer does, so completing one needs no write to its dependents.
+ * The blockers that still block `task`: a dependency is stored once and
+ * only grows, so whether it blocks is read from the blocker, which stops
+ * blocking once it is completed or deleted.
  */
-export function openTeamTaskBlockers(
+export function teamTaskOpenBlockers(
   task: TeamTask,
   tasks: ReadonlyMap<string, TeamTask>,
-): readonly TeamTask[] {
-  return task.blockedBy.flatMap((taskId) => {
-    const blocker = tasks.get(taskId);
-    return blocker === undefined ||
-      blocker.status === 'completed' ||
-      blocker.status === 'deleted'
-      ? []
-      : [blocker];
+): string[] {
+  return task.blockedBy.filter((blocker) => {
+    const status = tasks.get(blocker)?.status;
+    return status !== 'completed' && status !== 'deleted';
   });
 }
-
-/** Whether `from` reaches `to` along `blockedBy` edges. */
-export function teamTaskReaches(
-  from: string,
-  to: string,
-  blockedByOf: (taskId: string) => readonly string[],
-): boolean {
-  const pending = [from];
-  const seen = new Set<string>();
-  while (pending.length > 0) {
-    const next = pending.pop()!;
-    if (next === to) return true;
-    if (seen.has(next)) continue;
-    seen.add(next);
-    pending.push(...blockedByOf(next));
-  }
-  return false;
-}
-
-export const MANAGED_TEAM_TOOL_LIMITS = Object.freeze({
-  /** Legacy subject and active-form caps, in characters. */
-  maxSubjectChars: 200,
-  maxActiveFormChars: 200,
-  /** Legacy description cap, in characters. */
-  maxDescriptionChars: 10_000,
-  maxMetadataBytes: MANAGED_TEAM_LIMITS.maxMetadataBytes,
-} as const);

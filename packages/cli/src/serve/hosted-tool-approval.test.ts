@@ -71,18 +71,28 @@ describe('Hosted tool approval settings', () => {
     expect(
       hostedApprovalAsks({ mode: 'yolo', timeoutMs: 1_000 }, 'new_tool'),
     ).toBe(false);
-    // H4e-b1: the board read is pre-approved; every team write asks.
+  });
+
+  it('asks before every team write and never before reading the board', () => {
     for (const mode of ['default', 'auto-edit'] as const) {
-      expect(hostedApprovalAsks({ mode, timeoutMs: 1_000 }, 'task_list')).toBe(
-        false,
-      );
-      for (const tool of [
+      expect(
+        [
+          'team_create',
+          'team_delete',
+          'task_create',
+          'task_update',
+          'task_list',
+          'agent',
+        ].filter((tool) =>
+          hostedApprovalAsks({ mode, timeoutMs: 1_000 }, tool),
+        ),
+      ).toEqual([
         'team_create',
         'team_delete',
         'task_create',
         'task_update',
-      ])
-        expect(hostedApprovalAsks({ mode, timeoutMs: 1_000 }, tool)).toBe(true);
+        'agent',
+      ]);
     }
   });
 

@@ -16,25 +16,33 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { parseTeamState } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
-import { teamLifecycleBody } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-operations.js';
-import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
   HostedWorkspaceToolTurn,
   HOSTED_AGENT_TOOL,
-  HOSTED_AGENT_TOOL_FOR_TEAMS,
+  HOSTED_TEAM_AGENT_TOOL,
 } from './hosted-workspace-tool-turn.js';
-import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
-import type { HostedHookSession } from './hosted-hook-session.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
-import { HostedTeamSession } from './hosted-team-session.js';
-import { HOSTED_TEAM_TOOL_NAMES } from './hosted-team-tools.js';
+import {
+  HOSTED_TEAM_TOOLS,
+  HostedTeamSession,
+  type HostedTeamStore,
+} from './hosted-team-session.js';
+import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import { settleInterruptedTurnRuntime } from './hosted-runtime-recovery.js';
+import {
+  HOSTED_APPROVAL_OPTIONS,
+  HOSTED_TOOL_APPROVAL_POLICY,
+  HostedApprovalWaiters,
+  resolveHostedAction,
+} from './hosted-tool-approval.js';
 
-// H4e-b1: the two team domains are not enabled for submission yet. The
-// flag lifts exactly their domain gate, as the H4e-a suites do, so this
-// suite runs the lead's team runtime ahead of enablement.
-const enablement = vi.hoisted(() => ({ teams: true }));
+// H4e-b1: team_state and team_task stay disabled until the physical
+// acceptance pass, so the gate is lifted per test; with it closed the turn
+// keeps the H4b surface exactly.
+const enablement = vi.hoisted(() => ({ teamState: true, teamTask: true }));
 vi.mock(
   '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
   async (importOriginal) => {
@@ -48,46 +56,32 @@ vi.mock(
         domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
       ) => {
         if (
-          enablement.teams &&
-          (domain === 'team_state' || domain === 'team_task')
+          !(
+            (domain === 'team_state' && enablement.teamState) ||
+            (domain === 'team_task' && enablement.teamTask)
+          )
         )
-          return;
-        actual.assertManagedSessionDomainEnabled(domain);
+          actual.assertManagedSessionDomainEnabled(domain);
       },
     };
   },
 );
 
+// The team and agent paths never dispatch through the Broker, but the
+// turn's constructor warms it; acquire is watched to prove they never
+// take the Workspace mount.
 const broker = vi.hoisted(() => ({
-  fileHistory: vi.fn(),
-  warm: vi.fn().mockResolvedValue(undefined),
-  acquire: vi.fn().mockResolvedValue(undefined),
-  prepare: vi.fn(),
-  prepareV3: vi.fn(),
-  execute: vi.fn(),
-  executeV3: vi.fn(),
-  acknowledgeV3: vi.fn(),
-  cancel: vi.fn().mockResolvedValue(undefined),
-  release: vi.fn().mockResolvedValue(undefined),
-  registerPublisher: vi.fn().mockResolvedValue('1'),
-  acknowledge: vi.fn().mockResolvedValue(undefined),
+  warm: vi.fn(),
+  acquire: vi.fn(),
+  release: vi.fn(),
 }));
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
     readonly runtimeSessionId = 'prompt';
-    fileHistory = broker.fileHistory;
     warm = broker.warm;
     acquire = broker.acquire;
-    prepare = broker.prepare;
-    prepareV3 = broker.prepareV3;
-    execute = broker.execute;
-    executeV3 = broker.executeV3;
-    acknowledgeV3 = broker.acknowledgeV3;
-    cancel = broker.cancel;
     release = broker.release;
-    registerPublisher = broker.registerPublisher;
-    acknowledge = broker.acknowledge;
   },
 }));
 
@@ -96,10 +90,6 @@ let session: ManagedSession;
 let children: HostedChildAgentSession;
 let teams: HostedTeamSession;
 let sessionKey: { tenantId: string; workspaceId: string; sessionId: string };
-
-const messageFitsInline = vi.fn<
-  ConstructorParameters<typeof HostedWorkspaceToolTurn>[5]
->(() => true);
 
 function call(
   name: string,
@@ -115,7 +105,14 @@ function call(
   } as ToolCallRequestInfo;
 }
 
-function createTurn(depth = 0, hookEvents?: string[]): HostedWorkspaceToolTurn {
+function createTurn(
+  options: {
+    depth?: number;
+    hookEvents?: string[];
+    funnel?: HostedTeamSession;
+  } = {},
+): HostedWorkspaceToolTurn {
+  const hookEvents = options.hookEvents;
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
@@ -140,31 +137,24 @@ function createTurn(depth = 0, hookEvents?: string[]): HostedWorkspaceToolTurn {
       });
       return uuid;
     },
-    messageFitsInline,
+    () => true,
     undefined,
-    {
-      resources: session.resources,
-      assertWritable: async () => undefined,
-    },
+    { resources: session.resources, assertWritable: async () => undefined },
     undefined,
     {
       profile: 'hosted-workspace-shell/1',
       childAgents: {
         funnel: children,
-        depth,
+        depth: options.depth ?? 0,
         queueConsumption: () => undefined,
-        teams,
       },
+      teams: options.funnel ?? teams,
       ...(hookEvents
         ? {
             hooks: {
               broker: new (HostedWorkspaceBroker as unknown as new (
                 ...args: unknown[]
-              ) => HostedWorkspaceBroker)(
-                { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-                sessionKey,
-                'hook-owner',
-              ),
+              ) => HostedWorkspaceBroker)(),
               mountHeld: false,
               ensureReady: () => Promise.resolve(),
               acquire: () => Promise.resolve(),
@@ -176,18 +166,17 @@ function createTurn(depth = 0, hookEvents?: string[]): HostedWorkspaceToolTurn {
                 return Promise.resolve([]);
               },
               close: () => Promise.resolve(),
-            } as unknown as HostedHookSession,
+            } as unknown as import('./hosted-hook-session.js').HostedHookSession,
           }
         : {}),
     },
   );
 }
 
-/** Runs one batch and answers each call's result text, in call order. */
-async function run(
+async function execute(
+  turn: HostedWorkspaceToolTurn,
   calls: ToolCallRequestInfo[],
-  turn = createTurn(),
-): Promise<string[]> {
+): Promise<string> {
   const responses: Part[] = await turn.execute(
     calls,
     calls.map((each) => ({
@@ -196,76 +185,34 @@ async function run(
     'model',
     new AbortController().signal,
   );
-  return calls.map((each) =>
-    JSON.stringify(
-      responses.find((part) => part.functionResponse?.id === each.callId)
-        ?.functionResponse?.response,
-    ),
-  );
+  return JSON.stringify(responses);
 }
 
-async function one(
-  name: string,
-  args: Record<string, unknown>,
-  callId: string,
-): Promise<string> {
-  return (await run([call(name, args, callId)]))[0]!;
-}
-
-function team() {
-  return teams.openTeam();
-}
-
-async function createTeam(): Promise<void> {
-  expect(
-    await one('team_create', { team_name: 'Review Team!' }, 'team-1'),
-  ).toContain('Team \\"review-team\\" created.');
-}
-
-async function spawn(name: string, callId: string): Promise<string> {
-  return one(
+const member = (name: string, callId: string, extra = {}) =>
+  call(
     'agent',
-    { description: `work for ${name}`, prompt: 'do the work', name },
+    {
+      description: `${name} task`,
+      prompt: 'review the change',
+      name,
+      ...extra,
+    },
     callId,
   );
-}
 
-async function finishChild(
-  childRunId: string,
-  outcome: 'completed' | 'failed',
-): Promise<void> {
-  if (outcome === 'failed') {
-    await children.settleFailed(childRunId, {
-      stopReason: 'creation_failed',
-      reason: null,
-      started: false,
-    });
-    return;
-  }
-  await children.dispatchStarted(childRunId, {
-    dispatchId: `dispatch-${childRunId}`,
-    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
-  });
-  await children.attach(childRunId, randomUUID());
-  await children.settleCompleted(childRunId, {
-    result: Buffer.from('all clean', 'utf8'),
-    receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
-  });
+function roster() {
+  return session.authority
+    .extensionRecordsInDomain('team_state')
+    .flatMap((entry) => parseTeamState(entry.record).members);
 }
 
 beforeEach(async () => {
+  enablement.teamState = true;
+  enablement.teamTask = true;
   vi.resetAllMocks();
-  enablement.teams = true;
-  for (const method of [
-    broker.warm,
-    broker.acquire,
-    broker.cancel,
-    broker.release,
-    broker.acknowledge,
-  ])
-    method.mockResolvedValue(undefined);
-  broker.registerPublisher.mockResolvedValue('1');
-  messageFitsInline.mockReturnValue(true);
+  broker.warm.mockResolvedValue(undefined);
+  broker.acquire.mockResolvedValue(undefined);
+  broker.release.mockResolvedValue(undefined);
   root = await mkdtemp(path.join(tmpdir(), 'hosted-team-turn-'));
   sessionKey = {
     tenantId: 'tenant',
@@ -307,677 +254,460 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-it('declares the team tools and the agent name only while both team domains are enabled', async () => {
-  const declared = (
-    await createTurn().declarations(new AbortController().signal)
-  ).map((tool) => tool.name);
-  expect(declared).toEqual(expect.arrayContaining([...HOSTED_TEAM_TOOL_NAMES]));
+it('declares the team tools only beside the root Agent tool, behind both gates', async () => {
+  const signal = new AbortController().signal;
+  const names = async (turn: HostedWorkspaceToolTurn) =>
+    (await turn.declarations(signal)).map((tool) => tool.name);
+  const team = [
+    'team_create',
+    'team_delete',
+    'task_create',
+    'task_update',
+    'task_list',
+  ];
+  const tools = await createTurn().declarations(signal);
+  expect(tools).toContain(HOSTED_TEAM_AGENT_TOOL);
+  expect(tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(team));
+  expect(HOSTED_TEAM_TOOLS.map((tool) => tool.name)).toEqual(team);
   expect(
-    (await createTurn().declarations(new AbortController().signal)).find(
-      (tool) => tool.name === 'agent',
-    ),
-  ).toBe(HOSTED_AGENT_TOOL_FOR_TEAMS);
-  // A member's own Session sees neither.
-  const child = (
-    await createTurn(1).declarations(new AbortController().signal)
-  ).map((tool) => tool.name);
-  expect(child).not.toContain('team_create');
-  expect(child).not.toContain('agent');
-  enablement.teams = false;
-  const closed = await createTurn().declarations(new AbortController().signal);
-  expect(closed.map((tool) => tool.name)).not.toContain('team_create');
-  expect(closed.find((tool) => tool.name === 'agent')).toBe(HOSTED_AGENT_TOOL);
-  expect(await spawn('alice', 'call-1')).toContain(
-    'unsupported argument \\"name\\"',
+    (
+      HOSTED_TEAM_AGENT_TOOL.parametersJsonSchema as {
+        properties: Record<string, unknown>;
+      }
+    ).properties['name'],
+  ).toBeDefined();
+  // A child Session sees neither the Agent tool nor the team.
+  expect(await names(createTurn({ depth: 1 }))).not.toEqual(
+    expect.arrayContaining(['agent']),
   );
+  expect(
+    (await names(createTurn({ depth: 1 }))).some((name) =>
+      team.includes(name!),
+    ),
+  ).toBe(false);
+  // Each domain gates the team on its own.
+  for (const gate of ['teamState', 'teamTask'] as const) {
+    enablement.teamState = gate !== 'teamState';
+    enablement.teamTask = gate !== 'teamTask';
+    const closed = await createTurn().declarations(signal);
+    expect(closed).toContain(HOSTED_AGENT_TOOL);
+    expect(closed.some((tool) => team.includes(tool.name!))).toBe(false);
+  }
+});
+
+it('keeps refusing name while the team domains are disabled', async () => {
+  enablement.teamState = false;
+  enablement.teamTask = false;
+  const answer = await execute(createTurn(), [member('alice', 'call-1')]);
+  expect(answer).toContain('unsupported argument');
+  expect(answer).toContain('\\"name\\"');
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     0,
   );
 });
 
-it('creates one team, refuses a second, and answers a replayed create from its record', async () => {
-  await createTeam();
-  expect(team()).toMatchObject({
-    teamId: 'prompt:team-1',
-    name: 'review-team',
-    leadSessionId: sessionKey.sessionId,
-    lifecycle: 'active',
-    members: [],
-  });
-  expect(await one('team_create', { team_name: 'other' }, 'team-2')).toContain(
-    'A team is already active. Delete it before creating a new one.',
-  );
-  // The same call again: its committed command answers, nothing opens.
+it('creates a team and spawns a named member without the Workspace mount', async () => {
+  const turn = createTurn();
   expect(
-    await one('team_create', { team_name: 'Review Team!' }, 'team-1'),
-  ).toContain('created');
-  expect(session.authority.extensionRecordsInDomain('team_state')).toHaveLength(
-    1,
-  );
-  expect(await one('team_create', { team_name: '!!!' }, 'team-3')).toContain(
-    'Team name is required.',
-  );
-  // Team tools never take the Workspace mount.
-  expect(broker.acquire).not.toHaveBeenCalled();
-});
-
-it('spawns a named teammate as a background child that joins the roster', async () => {
-  await createTeam();
-  const answer = await spawn('Alice', 'call-2');
-  expect(answer).toContain('Teammate \\"alice\\" started in the background');
-  expect(children.record('prompt:call-2')).toMatchObject({
+    await execute(turn, [
+      call('team_create', { team_name: 'Review' }, 'call-team'),
+      call(
+        'task_create',
+        { subject: 'audit', description: 'audit it' },
+        'call-task',
+      ),
+    ]),
+  ).toContain('Task #1 created');
+  const answer = await execute(turn, [member('Alice', 'call-alice')]);
+  expect(answer).toContain('joined team \\"review\\" as \\"alice\\"');
+  expect(children.record('prompt:call-alice')).toMatchObject({
     completion: 'sent',
   });
-  expect(team()!.members).toEqual([
-    { name: 'alice', childRunId: 'prompt:call-2', planModeRequired: false },
+  expect(roster()).toEqual([
+    { name: 'alice', childRunId: 'prompt:call-alice', planModeRequired: false },
   ]);
-  expect(team()!.membershipRevision).toBe(2);
+  expect(await execute(turn, [call('task_list', {}, 'call-list')])).toContain(
+    'alice: running',
+  );
   expect(broker.acquire).not.toHaveBeenCalled();
 });
 
-it('refuses a teammate without a team, with a taken or reserved name, in the foreground, or beside a team change', async () => {
-  expect(await spawn('alice', 'call-1')).toContain(
-    'No active team. Create one with team_create first',
-  );
-  await createTeam();
-  expect(await spawn('leader', 'call-2')).toContain(
-    '\\"leader\\" is reserved for the team leader.',
-  );
-  expect(
-    await one(
+// A recovered foreground wait (#13708) answers every sibling it never
+// reached as an agent call that never ran, so a foreground child keeps
+// sharing its batch with agent calls only, team tools included.
+it('keeps team tools out of a foreground child batch', async () => {
+  const turn = createTurn();
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  const answer = await execute(turn, [
+    call('task_list', {}, 'call-list'),
+    call(
       'agent',
-      {
-        description: 'work',
-        prompt: 'do it',
-        name: 'alice',
-        run_in_background: false,
-      },
-      'call-3',
+      { description: 'audit', prompt: 'review', run_in_background: false },
+      'call-child',
     ),
-  ).toContain('cannot be false for a named teammate');
-  await spawn('alice', 'call-4');
-  expect(await spawn('alice', 'call-5')).toContain(
-    'A teammate named \\"alice\\" already exists in this team',
+  ]);
+  expect(answer).toContain('cannot share a batch with a non-agent tool');
+  expect(children.record('prompt:call-child')).toBeUndefined();
+});
+
+it('refuses a member without a team, committing nothing', async () => {
+  const answer = await execute(createTurn(), [member('alice', 'call-1')]);
+  expect(answer).toContain('Create one with team_create first');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
   );
-  const twins = await run([
-    call('agent', { description: 'a', prompt: 'p', name: 'bob' }, 'call-6'),
-    call('agent', { description: 'b', prompt: 'p', name: 'Bob' }, 'call-7'),
+});
+
+it('refuses a foreground member and the batch rules before anything runs', async () => {
+  const turn = createTurn();
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
   ]);
-  expect(twins[0]).toContain('Teammate names in one batch must be distinct');
-  const mixed = await run([
-    call('team_delete', {}, 'call-8'),
-    call('agent', { description: 'a', prompt: 'p', name: 'carol' }, 'call-9'),
-  ]);
-  expect(mixed[1]).toContain('cannot also create or delete the team');
-  // Only alice launched: every refusal committed nothing.
   expect(
-    session.authority
-      .extensionRecordsInDomain('child_run')
-      .map((entry) => (entry.record as { childRunId: string }).childRunId),
-  ).toEqual(['prompt:call-4']);
-  expect(team()!.members.map((member) => member.name)).toEqual(['alice']);
+    await execute(turn, [
+      member('alice', 'call-1', { run_in_background: false }),
+    ]),
+  ).toContain('always runs in the background');
+  expect(
+    await execute(turn, [member('alice', 'call-2'), member('ALICE', 'call-3')]),
+  ).toContain('Two launches in one batch name the member \\"alice\\"');
+  expect(
+    await execute(turn, [
+      call('team_delete', {}, 'call-4'),
+      member('bob', 'call-5'),
+    ]),
+  ).toContain('cannot launch in the same batch as team_create or team_delete');
+  expect(
+    await execute(turn, [
+      call(
+        'agent',
+        { description: 'audit', prompt: 'review', run_in_background: false },
+        'call-6',
+      ),
+      member('carol', 'call-7'),
+    ]),
+  ).toContain('cannot launch in the same batch as a foreground child agent');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+  expect(teams.openTeam()?.lifecycle).toBe('active');
 });
 
-it('finishes a join a crash interrupted, and leaves an ended run off the roster', async () => {
-  await createTeam();
-  const launch = (childRunId: string, name: string) =>
-    children.admit({
-      childRunId,
-      ownerScopeId: sessionKey.sessionId,
-      rootSessionId: sessionKey.sessionId,
-      completion: 'sent',
-      description: `work for ${name}`,
-      prompt: 'do the work',
-      definition: {
-        definitionId: 'hosted-agent/hosted-workspace-shell/1',
-        definitionRevision: 1,
-        definitionDigest: session.authority.sessionHeader.definitionRef.digest,
-      },
-      workingDirectory: '.',
-      executionCallId: childRunId,
-    });
-  // The launch committed, then the Session stopped before the join.
-  await launch('prompt:call-2', 'alice');
-  expect(team()!.members).toEqual([]);
-  expect(await spawn('alice', 'call-2')).toContain(
-    'Teammate \\"alice\\" started',
-  );
-  expect(team()!.members.map((member) => member.childRunId)).toEqual([
-    'prompt:call-2',
+it('replays a named launch into its one child and one roster entry', async () => {
+  await execute(createTurn(), [
+    call('team_create', { team_name: 'review' }, 'call-team'),
   ]);
-  // Replayed again, the join stays one and the answer stays the same.
-  expect(await spawn('alice', 'call-2')).toContain(
-    'Teammate \\"alice\\" started',
+  await execute(createTurn(), [member('alice', 'call-alice')]);
+  const replayed = await execute(createTurn(), [member('alice', 'call-alice')]);
+  expect(replayed).toContain('joined team \\"review\\" as \\"alice\\"');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    1,
   );
-  expect(team()!.membershipRevision).toBe(2);
-  // A run that ended before its join never joins, and its name stays free.
-  await launch('prompt:call-3', 'bob');
-  await finishChild('prompt:call-3', 'failed');
-  // It sends no notification, so its launch answers the failure.
-  expect(await spawn('bob', 'call-3')).toContain(
-    'Child agent run failed (creation_failed) before it could join the team as \\"bob\\"',
-  );
-  expect(team()!.members.map((member) => member.name)).toEqual(['alice']);
+  expect(roster()).toHaveLength(1);
 });
 
-it("labels a teammate's result notification with its name", async () => {
-  await createTeam();
-  await spawn('alice', 'call-2');
-  await finishChild('prompt:call-2', 'completed');
-  await children.accept('prompt:call-2', {
-    notification: { description: 'work for alice' },
+// No production path re-runs an executed call; this pins the funnel's own
+// replay safety for a batch that would be driven again.
+it('a re-driven named launch completes a join its first run lost', async () => {
+  await execute(createTurn(), [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  const crashing = new HostedTeamSession(
+    {
+      resources: session.resources,
+      authority: Object.create(session.authority, {
+        commitExtensionRecord: {
+          value: async (
+            ...args: Parameters<
+              HostedTeamStore['authority']['commitExtensionRecord']
+            >
+          ) => {
+            if (args[0].commandId.endsWith(':join'))
+              throw new Error('Harness stopped');
+            return session.authority.commitExtensionRecord(...args);
+          },
+        },
+      }),
+    },
+    sessionKey,
+  );
+  await expect(
+    execute(createTurn({ funnel: crashing }), [member('alice', 'call-alice')]),
+  ).rejects.toThrow();
+  expect(children.record('prompt:call-alice')).toBeDefined();
+  expect(roster()).toHaveLength(0);
+  expect(
+    await execute(createTurn(), [member('alice', 'call-alice')]),
+  ).toContain('joined team');
+  expect(roster()).toEqual([
+    expect.objectContaining({ name: 'alice', childRunId: 'prompt:call-alice' }),
+  ]);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    1,
+  );
+});
+
+it.each(['failed', 'finished'] as const)(
+  'answers a launch whose run %s before the join, leaving the name free',
+  async (outcome) => {
+    await execute(createTurn(), [
+      call('team_create', { team_name: 'review' }, 'call-team'),
+    ]);
+    // The relay ends the run in the window between launch and join.
+    const childRunId = 'prompt:call-alice';
+    const endFirst = new HostedTeamSession(
+      {
+        resources: session.resources,
+        authority: Object.create(session.authority, {
+          commitExtensionRecord: {
+            value: async (
+              ...args: Parameters<
+                HostedTeamStore['authority']['commitExtensionRecord']
+              >
+            ) => {
+              if (args[0].commandId.endsWith(':join')) {
+                if (outcome === 'failed') {
+                  await children.settleFailed(childRunId, {
+                    stopReason: 'creation_failed',
+                    reason: null,
+                    started: false,
+                  });
+                } else {
+                  await children.dispatchStarted(childRunId, {
+                    dispatchId: 'dispatch-1',
+                    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+                  });
+                  await children.attach(childRunId, 'session-child');
+                  await children.settleCompleted(childRunId, {
+                    result: Buffer.from('done', 'utf8'),
+                    receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+                  });
+                }
+              }
+              return session.authority.commitExtensionRecord(...args);
+            },
+          },
+        }),
+      },
+      sessionKey,
+    );
+    const answer = await execute(createTurn({ funnel: endFirst }), [
+      member('alice', 'call-alice'),
+    ]);
+    expect(answer).toContain('the name \\"alice\\" stays free');
+    if (outcome === 'failed') {
+      expect(answer).toContain(
+        'ended (failed, creation_failed) before it joined',
+      );
+      expect(answer).toContain('"error":');
+    } else {
+      expect(answer).toContain('finished before it joined');
+      expect(answer).toContain('arrives as an ordinary notification');
+      expect(answer).not.toContain('"error":');
+    }
+    expect(roster()).toHaveLength(0);
+  },
+);
+
+it('labels a member result notification with its name', async () => {
+  const turn = createTurn();
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  const childRunId = 'prompt:call-alice';
+  await children.dispatchStarted(childRunId, {
+    dispatchId: 'dispatch-1',
+    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+  });
+  await children.attach(childRunId, 'session-child');
+  await children.settleCompleted(childRunId, {
+    result: Buffer.from('all clean', 'utf8'),
+    receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+  });
+  await children.accept(childRunId, {
+    notification: { description: 'alice task' },
   });
   const input = session.authority
     .eventsInSequenceRange(1, session.authority.committedSequence)
-    .filter((event) => event.kind === 'input.accepted')
-    .at(-1)!;
-  const text = (
-    await session.resources.read(
-      input.payload['contentRef'] as unknown as ManagedSessionDurableRef,
-    )
-  ).toString('utf8');
-  expect(text).toContain('<teammate>alice</teammate>');
-  expect(text).toContain('Teammate \\"alice\\" finished');
+    .findLast((event) => event.kind === 'input.accepted')!;
+  const text = JSON.parse(
+    (
+      await session.resources.read(
+        assertManagedSessionDurableRef(input.payload['contentRef'], 'input'),
+      )
+    ).toString('utf8'),
+  ).text as string;
+  expect(text).toContain(
+    '<kind>child_agent</kind>\n<teammate>alice</teammate>',
+  );
+  expect(text).toContain('all clean');
 });
 
-it('keeps a board with numbers, owners, dependencies and the roster', async () => {
-  await createTeam();
-  await spawn('alice', 'call-2');
-  expect(
-    await one(
-      'task_create',
-      { subject: 'Audit', description: 'audit the diff' },
-      'call-3',
-    ),
-  ).toContain('Task #1 created: \\"Audit\\"');
-  expect(
-    await one(
-      'task_create',
-      { subject: 'Fix', description: 'fix it' },
-      'call-4',
-    ),
-  ).toContain('Task #2 created');
-  expect(
-    await one('task_update', { taskId: '#2', addBlockedBy: ['1'] }, 'call-5'),
-  ).toContain('Task #2 updated');
-  const list = await one('task_list', {}, 'call-6');
-  expect(list).toContain('#1 [pending] @unassigned — Audit');
-  expect(list).toContain('#2 [pending] @unassigned — Fix (blocked by #1)');
-  expect(list).toContain('- alice: running');
-  expect(
-    await one('task_update', { taskId: '1', status: 'in_progress' }, 'call-7'),
-  ).toContain('without an owner');
-  expect(
-    await one(
-      'task_update',
-      { taskId: '1', status: 'in_progress', owner: 'alice' },
-      'call-8',
-    ),
-  ).toContain('The teammate was not notified');
-  expect(
-    await one('task_update', { taskId: '1', owner: 'carol' }, 'call-9'),
-  ).toContain('no teammate by that name');
-  expect(
-    await one('task_update', { taskId: '1', addBlockedBy: ['2'] }, 'call-10'),
-  ).toContain('dependency cycle');
-  expect(
-    await one('task_update', { taskId: '1', addBlocks: ['1'] }, 'call-11'),
-  ).toContain('cannot block or be blocked by itself');
-  expect(await one('task_update', { taskId: '9' }, 'call-12')).toContain(
-    'Task #9 not found.',
-  );
-  await one('task_update', { taskId: '1', status: 'completed' }, 'call-13');
-  // A completed blocker no longer blocks, with no write to its dependent.
-  expect(await one('task_list', {}, 'call-14')).toContain(
-    '#2 [pending] @unassigned — Fix\\n',
-  );
-  await one(
-    'task_update',
-    { taskId: '2', metadata: { a: 1, b: 2 } },
-    'call-15',
-  );
-  await one('task_update', { taskId: '2', metadata: { a: null } }, 'call-16');
-  const second = teams.task('prompt:team-1#2')!;
-  expect(await teams.readJson(second.metadataRef!)).toEqual({ b: 2 });
-  expect(
-    await one('task_update', { taskId: '2', status: 'deleted' }, 'call-17'),
-  ).toContain('Task #2 deleted.');
-  // A number is never reused.
-  expect(
-    await one('task_create', { subject: 'Next', description: 'n' }, 'call-18'),
-  ).toContain('Task #3 created');
-  expect(broker.acquire).not.toHaveBeenCalled();
-});
-
-it('keeps an owner after its teammate ends, and refuses assigning an ended teammate', async () => {
-  await createTeam();
-  await spawn('alice', 'call-2');
-  await one('task_create', { subject: 'A', description: 'a' }, 'call-3');
-  await one('task_create', { subject: 'B', description: 'b' }, 'call-4');
-  await one(
-    'task_update',
-    { taskId: '1', status: 'in_progress', owner: 'alice' },
-    'call-5',
-  );
-  await finishChild('prompt:call-2', 'completed');
-  expect(
-    await one(
-      'task_update',
-      { taskId: '1', status: 'completed', owner: 'alice' },
-      'call-6',
-    ),
-  ).toContain('Task #1 updated (status: completed, owner: alice)');
-  expect(
-    await one('task_update', { taskId: '2', owner: 'alice' }, 'call-7'),
-  ).toContain("that teammate's run has ended");
-  expect(await one('task_list', {}, 'call-8')).toContain('- alice: completed');
-});
-
-it('answers a replayed task_create with the number it already took', async () => {
-  await createTeam();
-  await one('task_create', { subject: 'A', description: 'a' }, 'call-2');
-  await one('task_create', { subject: 'B', description: 'b' }, 'call-3');
-  expect(
-    await one('task_create', { subject: 'A', description: 'a' }, 'call-2'),
-  ).toContain('Task #1 created');
-  expect(teams.tasksOf(team()!.teamId)).toHaveLength(2);
-});
-
-it('finishes a task_update a crash interrupted, adding no edge twice', async () => {
-  await createTeam();
-  for (const [index, subject] of ['A', 'B', 'C'].entries())
-    await one(
-      'task_create',
-      { subject, description: subject },
-      `task-${index}`,
-    );
-  const ids = ['1', '2', '3'].map((each) => `prompt:team-1#${each}`);
-  // The first two steps of call-9 committed before the Session stopped.
-  await teams.updateTasks('prompt:call-9', [
-    { taskId: ids[0]!, change: {} },
-    { taskId: ids[1]!, change: { addBlockedBy: [ids[0]!] } },
-  ]);
-  expect(
-    await one('task_update', { taskId: '1', addBlocks: ['2', '3'] }, 'call-9'),
-  ).toContain('Task #1 updated');
-  expect(teams.task(ids[1]!)!.blockedBy).toEqual([ids[0]]);
-  expect(teams.task(ids[2]!)!.blockedBy).toEqual([ids[0]]);
-  const revisions = () =>
-    ids.map(
-      (each) => session.authority.extensionRecord('team_task', each)!.revision,
-    );
-  const before = revisions();
-  await one('task_update', { taskId: '1', addBlocks: ['2', '3'] }, 'call-9');
-  expect(revisions()).toEqual(before);
-});
-
-it('deletes a team only once no teammate runs, and replays the delete', async () => {
-  await createTeam();
-  await spawn('alice', 'call-2');
-  expect(await one('team_delete', {}, 'call-3')).toContain(
-    'still has running members: alice',
-  );
-  expect(team()!.lifecycle).toBe('active');
-  await finishChild('prompt:call-2', 'completed');
-  expect(await one('team_delete', {}, 'call-4')).toContain(
-    'Team \\"review-team\\" deleted.',
-  );
-  const record = () =>
-    session.authority.extensionRecord('team_state', 'prompt:team-1')!;
-  expect(parseTeamState(record().record).lifecycle).toBe('deleted');
-  const revision = record().revision;
-  expect(await one('team_delete', {}, 'call-4')).toContain('deleted.');
-  expect(record().revision).toBe(revision);
-  expect(await one('team_delete', {}, 'call-5')).toContain(
-    'No active team to delete.',
-  );
-  // With the old team deleted, a new one may open.
-  expect(await one('team_create', { team_name: 'next' }, 'call-6')).toContain(
-    'created',
-  );
-});
-
-it('refuses an edge to a task the board does not hold', async () => {
-  await createTeam();
-  await one('task_create', { subject: 'A', description: 'a' }, 'call-2');
-  expect(
-    await one('task_update', { taskId: '1', addBlockedBy: ['7'] }, 'call-3'),
-  ).toContain('referenced task(s) #7 not found.');
-  expect(
-    await one('task_update', { taskId: '1', addBlocks: ['8'] }, 'call-4'),
-  ).toContain('referenced task(s) #8 not found.');
-  expect(teams.task('prompt:team-1#1')!.blockedBy).toEqual([]);
-});
-
-it('replays a task_update whose content a replay would publish anew', async () => {
-  await createTeam();
-  await one('task_create', { subject: 'A', description: 'a' }, 'call-2');
-  const update = { taskId: '1', description: 'the full scope' };
-  expect(await one('task_update', update, 'call-3')).toContain(
-    'Task #1 updated',
-  );
-  const revision = () =>
-    session.authority.extensionRecord('team_task', 'prompt:team-1#1')!.revision;
-  const before = revision();
-  // The replay publishes the description again under a new reference;
-  // the committed command answers, and no revision is rebuilt from it.
-  expect(await one('task_update', update, 'call-3')).toContain(
-    'Task #1 updated',
-  );
-  expect(revision()).toBe(before);
-  expect(
-    await teams.readText(teams.task('prompt:team-1#1')!.descriptionRef),
-  ).toBe('the full scope');
-});
-
-it('refuses a cycle that runs through a deleted task, as the record rule does', async () => {
-  await createTeam();
-  for (const [index, subject] of ['A', 'B', 'D'].entries())
-    await one(
-      'task_create',
-      { subject, description: subject },
-      `task-${index}`,
-    );
-  // #3 waits on #2 and #1 waits on #3; then #3 is deleted, edges intact.
-  await one('task_update', { taskId: '3', addBlockedBy: ['2'] }, 'call-2');
-  await one('task_update', { taskId: '1', addBlockedBy: ['3'] }, 'call-3');
-  await one('task_update', { taskId: '3', status: 'deleted' }, 'call-4');
-  expect(
-    await one('task_update', { taskId: '2', addBlockedBy: ['1'] }, 'call-5'),
-  ).toContain('dependency cycle');
-  expect(teams.task('prompt:team-1#2')!.blockedBy).toEqual([]);
-});
-
-it('answers a launch whose run ended while it was joining, without blocking the turn', async () => {
-  await createTeam();
-  const commit = session.authority.commitExtensionRecord.bind(
-    session.authority,
-  );
-  let raced = false;
-  vi.spyOn(session.authority, 'commitExtensionRecord').mockImplementation(
-    async (command, body, actor) => {
-      // The relay's creation refusal lands between the join's check and
-      // its commit; the authority then refuses the join.
-      if (command.operation === 'joinTeam' && !raced) {
-        raced = true;
-        await finishChild('prompt:call-2', 'failed');
-      }
-      return commit(command, body, actor);
-    },
-  );
-  expect(await spawn('alice', 'call-2')).toContain(
-    'Child agent run failed (creation_failed) before it could join the team as \\"alice\\"',
-  );
-  expect(raced).toBe(true);
-  expect(team()!.members).toEqual([]);
-});
-
-it('treats a blank optional argument as not given, as Legacy does', async () => {
-  await createTeam();
-  // A blank name is an ordinary child, never a refused teammate.
-  const plain = await one(
-    'agent',
-    { description: 'work', prompt: 'do it', name: '' },
-    'call-2',
-  );
-  expect(plain).toContain('started in the background');
-  expect(plain).not.toContain('Teammate');
-  expect(team()!.members).toEqual([]);
-  expect(
-    await one(
-      'task_create',
-      { subject: 'A', description: 'a', activeForm: '', metadata: null },
-      'call-3',
-    ),
-  ).toContain('Task #1 created');
-  expect(teams.task('prompt:team-1#1')).toMatchObject({
-    activeForm: null,
-    metadataRef: null,
-  });
-  expect(
-    await one(
-      'task_update',
-      { taskId: '1', subject: '', status: '', metadata: null },
-      'call-4',
-    ),
-  ).toContain('Task #1 updated (status: pending)');
-  expect(teams.task('prompt:team-1#1')!.subject).toBe('A');
-  // A null owner is not given; `""` stays the unassign.
-  await one('task_update', { taskId: '1', owner: 'leader' }, 'call-4b');
-  expect(
-    await one('task_update', { taskId: '1', owner: null }, 'call-4c'),
-  ).toContain('owner: leader');
-  expect(
-    await one('task_update', { taskId: '1', owner: '' }, 'call-4d'),
-  ).not.toContain('owner:');
-  expect(
-    await one('task_list', { owner: '', blockedBy: ' ', status: '' }, 'call-5'),
-  ).toContain('#1 [pending] @unassigned — A');
-  // With teams on, `name` is no legacy argument any more.
-  const legacy = await one(
-    'agent',
-    { description: 'work', prompt: 'do it', model: 'fast' },
-    'call-6',
-  );
-  expect(legacy).toContain('unsupported argument \\"model\\"');
-  expect(legacy).not.toContain('isolation, name,');
-});
-
-it('filters task_list by open blockers only', async () => {
-  await createTeam();
-  await one('task_create', { subject: 'A', description: 'a' }, 'call-2');
-  await one('task_create', { subject: 'B', description: 'b' }, 'call-3');
-  await one('task_update', { taskId: '2', addBlockedBy: ['1'] }, 'call-4');
-  expect(await one('task_list', { blockedBy: '#1' }, 'call-5')).toContain(
-    '#2 [pending] @unassigned — B (blocked by #1)',
-  );
-  await one('task_update', { taskId: '1', status: 'completed' }, 'call-6');
-  expect(await one('task_list', { blockedBy: '1' }, 'call-7')).toContain(
-    'No tasks found.',
-  );
-});
-
-it('refuses a foreground child beside a team tool with the reason that applies', async () => {
-  await createTeam();
-  const answers = await run([
-    call('task_list', {}, 'call-2'),
-    call(
-      'agent',
-      { description: 'a', prompt: 'p', run_in_background: false },
-      'call-3',
-    ),
-  ]);
-  expect(answers[1]).toContain('cannot share a batch with a team tool');
-  expect(answers[1]).not.toContain('Workspace mount');
-});
-
-it('caps a task at 64 blockers in either direction', async () => {
-  await createTeam();
-  for (let number = 1; number <= 67; number++)
-    await one(
-      'task_create',
-      { subject: `T${number}`, description: 'd' },
-      `make-${number}`,
-    );
-  const sixtyFour = Array.from({ length: 64 }, (_, index) => `${index + 2}`);
-  expect(
-    await one('task_update', { taskId: '1', addBlockedBy: sixtyFour }, 'up-1'),
-  ).toContain('Task #1 updated');
-  expect(
-    await one('task_update', { taskId: '1', addBlockedBy: ['66'] }, 'up-2'),
-  ).toContain(
-    'task #1 would be blocked by more than 64 tasks (completed and deleted blockers stay on a task and count).',
-  );
-  expect(
-    await one('task_update', { taskId: '67', addBlocks: ['1'] }, 'up-3'),
-  ).toContain('task #1 would be blocked by more than 64 tasks');
-  expect(teams.task('prompt:team-1#1')!.blockedBy).toHaveLength(64);
-});
-
-it('keeps a team an interrupted delete left closing closed to new work', async () => {
-  await createTeam();
-  await one('task_create', { subject: 'A', description: 'a' }, 'call-2');
-  await session.authority.commitExtensionRecord(
+it('answers an interrupted turn by what each journal-only call committed', async () => {
+  // An earlier turn opened the team.
+  await teams.run('team_create', { team_name: 'review' }, 'earlier:call-team');
+  const authority = session.authority;
+  const harness = createManagedHarnessHandle(session);
+  await authority.submitInput(
     {
-      operation: 'closeTeam',
-      commandId: 'prompt:dead:closing',
+      operation: 'submitInput',
+      commandId: 'prompt',
       sessionKey,
-      contentDigest: 'a'.repeat(64),
+      contentDigest: 'd'.repeat(64),
     },
-    { domain: 'team_state', record: teamLifecycleBody(team()!, 'closing') },
-    { class: 'trusted_entry' },
-  );
-  expect(
-    await one('task_create', { subject: 'B', description: 'b' }, 'call-3'),
-  ).toContain('is being deleted and takes no new tasks');
-  expect(await spawn('alice', 'call-4')).toContain(
-    'is being deleted and takes no new members',
-  );
-  expect(await one('team_create', { team_name: 'next' }, 'call-5')).toContain(
-    'Team \\"review-team\\" is still being deleted',
-  );
-  expect(
-    await one('task_update', { taskId: '1', status: 'completed' }, 'call-6'),
-  ).toContain('Task #1 updated');
-  expect(await one('team_delete', {}, 'call-7')).toContain('deleted.');
-  expect(teams.team('prompt:team-1')!.lifecycle).toBe('deleted');
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    0,
-  );
-});
-
-it('admits at most ten teammates', async () => {
-  await createTeam();
-  for (let number = 1; number <= 10; number++) {
-    expect(await spawn(`m${number}`, `spawn-${number}`)).toContain('started');
-    await finishChild(`prompt:spawn-${number}`, 'completed');
-  }
-  expect(await spawn('m11', 'spawn-11')).toContain(
-    'Maximum number of teammates (10) reached.',
-  );
-  expect(team()!.members).toHaveLength(10);
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    10,
-  );
-});
-
-it('fires PostToolUse on a resumed team result that answered without an error', async () => {
-  await createTeam();
-  const firstEvents: string[] = [];
-  const created = call(
-    'task_create',
-    { subject: 'A', description: 'a' },
-    'call-2',
-  );
-  const saved = await createTurn(0, firstEvents).execute(
-    [created],
-    [
-      {
-        functionCall: { id: 'call-2', name: 'task_create', args: created.args },
-      },
-    ],
-    'model',
-    new AbortController().signal,
-  );
-  expect(firstEvents).toContain('PostToolUse');
-  // A reconstructed turn starts with an empty dispatch set: the committed
-  // command is the evidence that survives.
-  const recoveredEvents: string[] = [];
-  await createTurn(0, recoveredEvents).resumeHookResults(
-    saved,
-    'model',
-    new AbortController().signal,
-  );
-  expect(recoveredEvents).toContain('PostToolUse');
-  // A read commits nothing: its error-free answer is the evidence.
-  const listed = call('task_list', {}, 'call-3');
-  const listing = await createTurn(0, []).execute(
-    [listed],
-    [{ functionCall: { id: 'call-3', name: 'task_list', args: {} } }],
-    'model',
-    new AbortController().signal,
-  );
-  const listEvents: string[] = [];
-  await createTurn(0, listEvents).resumeHookResults(
-    listing,
-    'model',
-    new AbortController().signal,
-  );
-  expect(listEvents).toContain('PostToolUse');
-  // A refused call never ran, so its resume fires no PostToolUse.
-  const refused = await createTurn(0, []).execute(
-    [call('task_update', { taskId: '9' }, 'call-4')],
-    [
-      {
-        functionCall: {
-          id: 'call-4',
-          name: 'task_update',
-          args: { taskId: '9' },
-        },
-      },
-    ],
-    'model',
-    new AbortController().signal,
-  );
-  const refusedEvents: string[] = [];
-  await createTurn(0, refusedEvents).resumeHookResults(
-    refused,
-    'model',
-    new AbortController().signal,
-  );
-  expect(refusedEvents).not.toContain('PostToolUse');
-  expect(refusedEvents).not.toContain('PostToolUseFailure');
-});
-
-it('answers a replayed task delete as deleted', async () => {
-  await createTeam();
-  await one('task_create', { subject: 'A', description: 'a' }, 'call-2');
-  const remove = { taskId: '1', status: 'deleted' };
-  expect(await one('task_update', remove, 'call-3')).toContain(
-    'Task #1 deleted.',
-  );
-  expect(await one('task_update', remove, 'call-3')).toContain(
-    'Task #1 deleted.',
-  );
-  expect(await one('task_update', remove, 'call-4')).toContain(
-    'Task #1 not found.',
-  );
-});
-
-it('merges a metadata key named __proto__ as plain data', async () => {
-  await createTeam();
-  await one(
-    'task_create',
-    { subject: 'A', description: 'a', metadata: { a: 1 } },
-    'call-2',
-  );
-  await one(
-    'task_update',
-    { taskId: '1', metadata: JSON.parse('{"__proto__":{"x":1},"b":2}') },
-    'call-3',
-  );
-  const merged = await teams.readJson(
-    teams.task('prompt:team-1#1')!.metadataRef!,
-  );
-  expect(Object.keys(merged)).toEqual(['a', '__proto__', 'b']);
-  expect(Object.getPrototypeOf(merged)).toBe(Object.prototype);
-});
-
-it('answers a launch whose run was cancelled while it was joining with that end', async () => {
-  await createTeam();
-  const commit = session.authority.commitExtensionRecord.bind(
-    session.authority,
-  );
-  let raced = false;
-  vi.spyOn(session.authority, 'commitExtensionRecord').mockImplementation(
-    async (command, body, actor) => {
-      if (command.operation === 'joinTeam' && !raced) {
-        raced = true;
-        await children.settleCancelled('prompt:call-2', { started: false });
-      }
-      return commit(command, body, actor);
+    {
+      inputId: 'prompt',
+      turnId: 'prompt',
+      source: 'hosted-harness',
+      contentRef: await session.resources.publish(
+        'managed-input',
+        Buffer.from(JSON.stringify([{ type: 'text', text: 'staff the team' }])),
+      ),
+      admissionRef: await session.resources.publish(
+        'managed-admission',
+        Buffer.from('{}'),
+      ),
+      deadline: null,
+      wakeReason: 'input',
     },
   );
-  expect(await spawn('alice', 'call-2')).toContain('Child agent run cancelled');
-  expect(team()!.members).toEqual([]);
+  await harness.ensureRunnable();
+  const messageId = randomUUID();
+  const calls = [
+    call(
+      'task_create',
+      { subject: 'audit', description: 'audit it' },
+      'call-task',
+    ),
+    member('alice', 'call-alice'),
+    call('task_list', {}, 'call-list'),
+  ];
+  await session.sink.write({
+    uuid: messageId,
+    parentUuid: null,
+    sessionId: sessionKey.sessionId,
+    timestamp: new Date().toISOString(),
+    model: 'model',
+    type: 'assistant',
+    cwd: root,
+    version: 'test',
+    daemonPromptId: 'prompt',
+    message: {
+      role: 'model',
+      parts: calls.map((each) => ({
+        functionCall: { id: each.callId, name: each.name, args: each.args },
+      })),
+    },
+  });
+  // The batch was approved (which binds the Turn), then ran until the
+  // Harness died: the task and the member committed, no answer did.
+  const inputRef = await session.resources.publish(
+    'managed-tool-input',
+    Buffer.from('{}'),
+  );
+  const requestId = `tool_approval_${'a'.repeat(32)}`;
+  await harness.commitDurableWait(
+    {
+      requestId,
+      kind: 'permission',
+      source: 'tool_call',
+      optionsRef: await session.resources.publish(
+        'managed-action-options',
+        Buffer.from(
+          JSON.stringify({
+            v: 1,
+            requestId,
+            turnId: 'prompt',
+            functionCallId: 'call-task',
+            toolName: 'task_create',
+            policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+            inputRevision: 1,
+            createdAt: Date.now(),
+            expiresAt: Date.now() + 60_000,
+            options: HOSTED_APPROVAL_OPTIONS,
+          }),
+        ),
+      ),
+      inputRevision: '1',
+      invocationRef: inputRef,
+      attemptId: messageId,
+      routeRef: inputRef,
+    },
+    { turnId: 'prompt', promptId: 'prompt' },
+  );
+  expect(
+    await resolveHostedAction(session, new HostedApprovalWaiters(), requestId, {
+      optionId: 'allow',
+      inputRevision: authority.action(requestId)!.inputRevision,
+      policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+    }),
+  ).toMatchObject({ status: 200 });
+  await harness.resolveDurableWait();
+  await teams.run(
+    'task_create',
+    { subject: 'audit', description: 'audit it' },
+    'prompt:call-task',
+  );
+  const admitted = teams.admitMember('alice');
+  await children.admit({
+    childRunId: 'prompt:call-alice',
+    ownerScopeId: sessionKey.sessionId,
+    rootSessionId: sessionKey.sessionId,
+    completion: 'sent',
+    description: 'alice task',
+    prompt: 'review the change',
+    definition: {
+      definitionId: 'hosted-agent/hosted-workspace-shell/1',
+      definitionRevision: 1,
+      definitionDigest: authority.sessionHeader.definitionRef.digest,
+    },
+    workingDirectory: '.',
+    executionCallId: 'prompt:call-alice',
+  });
+  await teams.join({ ...admitted, childRunId: 'prompt:call-alice' });
+  await settleInterruptedTurnRuntime({
+    session,
+    sessionId: sessionKey.sessionId,
+    cwd: root,
+    promptId: 'prompt',
+    brokerOptions: undefined,
+    toolProfile: true,
+    children,
+    teams,
+  });
+  const answers = new Map(
+    (await session.sink.project())
+      .filter((entry) => entry.type === 'tool_result')
+      .flatMap((entry) => entry.message?.parts ?? [])
+      .map((part) => [
+        part.functionResponse?.id,
+        JSON.stringify(part.functionResponse?.response),
+      ]),
+  );
+  expect(answers.get('call-task')).toContain(
+    'committed its team change, in full or in part',
+  );
+  expect(answers.get('call-alice')).toContain('started in the background');
+  expect(answers.get('call-alice')).toContain(
+    'joined team \\"review\\" as \\"alice\\"',
+  );
+  expect(answers.get('call-list')).toContain('The tool call never ran');
+});
+
+it('fires PostToolUse for a team tool that ran, never for one it refused', async () => {
+  const events: string[] = [];
+  await execute(createTurn({ hookEvents: events }), [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  expect(events).toContain('PostToolUse');
+  events.length = 0;
+  await execute(createTurn({ hookEvents: events }), [
+    call('team_create', { team_name: 'other' }, 'call-other'),
+  ]);
+  expect(events).toContain('PreToolUse');
+  expect(events).not.toContain('PostToolUse');
+  expect(events).not.toContain('PostToolUseFailure');
 });

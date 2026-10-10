@@ -10,126 +10,141 @@ import {
   isTeamStateSuccessor,
   isTeamTaskStart,
   isTeamTaskSuccessor,
+  type TeamTask,
 } from './managed-team-record.js';
 import {
-  openTeamTaskBlockers,
-  sanitizeTeamName,
   teamJoinBody,
   teamLifecycleBody,
   teamOpenBody,
+  teamTaskOpenBlockers,
   teamTaskOpenBody,
-  teamTaskReaches,
-  teamTaskRecordId,
-  teamTaskReviseBody,
+  teamTaskRevisionBody,
 } from './managed-team-operations.js';
+import type { ManagedSessionDurableRef } from './managed-session-records.js';
 
-const REF = {
-  resourceId: 'description-1',
+const ref = (resourceId: string): ManagedSessionDurableRef => ({
+  resourceId,
   kind: 'managed-team-content',
   schemaVersion: 1,
-  byteLength: 5,
+  byteLength: 12,
   digest: 'a'.repeat(64),
-};
+});
 
-describe('managed team operations (H4e-b1)', () => {
-  it('sanitizes names with the Legacy rule', () => {
-    expect(sanitizeTeamName('Review Team!')).toBe('review-team');
-    expect(sanitizeTeamName('--a__b--')).toBe('a-b');
-    expect(sanitizeTeamName('!!!')).toBe('');
+function openTask(number: number): TeamTask {
+  return teamTaskOpenBody({
+    teamId: 'team-1',
+    taskId: `team-1#${number}`,
+    number,
+    subject: `Task ${number}`,
+    descriptionRef: ref(`description-${number}`),
+    activeForm: null,
+    metadataRef: null,
   });
+}
 
-  it('builds a team chain the record contract accepts step by step', () => {
+describe('team state bodies', () => {
+  it('opens, joins one member per step, closes and deletes lawfully', () => {
     const opened = teamOpenBody({
       teamId: 'team-1',
       name: 'review',
-      leadSessionId: 'session-lead',
+      leadSessionId: 'session-1',
     });
     expect(isTeamStateStart(opened)).toBe(true);
-    const joined = teamJoinBody(opened, { name: 'alice', childRunId: 'run-1' });
-    expect(joined).toMatchObject({
-      membershipRevision: 2,
-      members: [
-        { name: 'alice', childRunId: 'run-1', planModeRequired: false },
-      ],
+    const alice = teamJoinBody(opened, {
+      name: 'alice',
+      childRunId: 'run-1',
+      planModeRequired: false,
     });
-    const closing = teamLifecycleBody(joined, 'closing');
+    expect(alice).toMatchObject({
+      membershipRevision: 2,
+      members: [{ name: 'alice' }],
+    });
+    expect(isTeamStateSuccessor(opened, alice)).toBe(true);
+    const bob = teamJoinBody(alice, {
+      name: 'bob',
+      childRunId: 'run-2',
+      planModeRequired: false,
+    });
+    expect(isTeamStateSuccessor(alice, bob)).toBe(true);
+    const closing = teamLifecycleBody(bob, 'closing');
+    expect(closing.run.state).toBe('admitted');
+    expect(isTeamStateSuccessor(bob, closing)).toBe(true);
     const deleted = teamLifecycleBody(closing, 'deleted');
     expect(deleted.run.state).toBe('cancelled');
-    for (const [before, after] of [
-      [opened, joined],
-      [joined, closing],
-      [closing, deleted],
-    ])
-      expect(isTeamStateSuccessor(before, after)).toBe(true);
+    expect(isTeamStateSuccessor(closing, deleted)).toBe(true);
+    expect(isTeamStateSuccessor(bob, deleted)).toBe(false);
   });
+});
 
-  it('builds task revisions that keep edges once and freeze at deletion', () => {
-    const task = teamTaskOpenBody({
-      teamId: 'team-1',
-      number: 2,
-      subject: 'Fix',
-      descriptionRef: REF,
-      activeForm: null,
-      metadataRef: null,
-    });
-    expect(task.taskId).toBe(teamTaskRecordId('team-1', 2));
+describe('team task bodies', () => {
+  it('opens a pending task and revises only the given fields', () => {
+    const task = openTask(1);
     expect(isTeamTaskStart(task)).toBe(true);
-    const blocked = teamTaskReviseBody(task, {
-      addBlockedBy: ['team-1#1', 'team-1#1'],
+    expect(task).toMatchObject({
+      status: 'pending',
+      owner: null,
+      blockedBy: [],
     });
-    expect(blocked.blockedBy).toEqual(['team-1#1']);
-    // The same edge again is no change at all.
-    expect(teamTaskReviseBody(blocked, { addBlockedBy: ['team-1#1'] })).toEqual(
-      blocked,
-    );
-    const owned = teamTaskReviseBody(blocked, {
+    const started = teamTaskRevisionBody(task, {
+      status: 'in_progress',
+      owner: 'alice',
+      subject: undefined,
+    });
+    expect(started).toMatchObject({
+      subject: 'Task 1',
       status: 'in_progress',
       owner: 'alice',
     });
-    const deleted = teamTaskReviseBody(owned, { status: 'deleted' });
-    expect(deleted.run.state).toBe('cancelled');
-    for (const [before, after] of [
-      [task, blocked],
-      [blocked, owned],
-      [owned, deleted],
-    ])
-      expect(isTeamTaskSuccessor(before, after)).toBe(true);
-    expect(() => teamTaskReviseBody(task, { status: 'in_progress' })).toThrow(
-      'Team task in progress must have an owner',
+    expect(isTeamTaskSuccessor(task, started)).toBe(true);
+    const unassigned = teamTaskRevisionBody(started, {
+      status: 'pending',
+      owner: null,
+    });
+    expect(unassigned.owner).toBeNull();
+    expect(isTeamTaskSuccessor(started, unassigned)).toBe(true);
+  });
+
+  it('appends each new blocker once and keeps the stored ones first', () => {
+    const task = teamTaskRevisionBody(openTask(3), {
+      addBlockedBy: ['team-1#1'],
+    });
+    const next = teamTaskRevisionBody(task, {
+      addBlockedBy: ['team-1#2', 'team-1#1', 'team-1#2'],
+    });
+    expect(next.blockedBy).toEqual(['team-1#1', 'team-1#2']);
+    expect(isTeamTaskSuccessor(task, next)).toBe(true);
+    expect(teamTaskRevisionBody(next, { addBlockedBy: ['team-1#2'] })).toEqual(
+      next,
     );
   });
 
-  it('reads blocking from the blockers and finds a path along edges', () => {
-    const open = (number: number, status: 'pending' | 'completed') =>
-      teamTaskReviseBody(
-        teamTaskOpenBody({
-          teamId: 'team-1',
-          number,
-          subject: `T${number}`,
-          descriptionRef: REF,
-          activeForm: null,
-          metadataRef: null,
-        }),
-        status === 'completed' ? { status } : {},
-      );
-    const first = open(1, 'completed');
-    const second = open(2, 'pending');
-    const third = teamTaskReviseBody(open(3, 'pending'), {
-      addBlockedBy: [first.taskId, second.taskId],
-    });
-    const tasks = new Map(
-      [first, second, third].map((each) => [each.taskId, each]),
-    );
+  it('ends the run on deletion, which freezes the task', () => {
+    const task = openTask(1);
+    const deleted = teamTaskRevisionBody(task, { status: 'deleted' });
+    expect(deleted.run.state).toBe('cancelled');
+    expect(isTeamTaskSuccessor(task, deleted)).toBe(true);
     expect(
-      openTeamTaskBlockers(third, tasks).map((each) => each.number),
-    ).toEqual([2]);
-    const edges = new Map([[third.taskId, third.blockedBy]]);
-    const blockedByOf = (taskId: string) => edges.get(taskId) ?? [];
-    expect(teamTaskReaches(third.taskId, second.taskId, blockedByOf)).toBe(
-      true,
+      isTeamTaskSuccessor(
+        deleted,
+        teamTaskRevisionBody(deleted, { subject: 'Revived' }),
+      ),
+    ).toBe(false);
+  });
+
+  it('derives the open blockers from the blockers themselves', () => {
+    const first = openTask(1);
+    const second = openTask(2);
+    const third = openTask(3);
+    const blocked = teamTaskRevisionBody(openTask(4), {
+      addBlockedBy: [first.taskId, second.taskId, third.taskId],
+    });
+    const board = new Map(
+      [
+        teamTaskRevisionBody(first, { status: 'completed' }),
+        teamTaskRevisionBody(second, { status: 'deleted' }),
+        third,
+      ].map((task) => [task.taskId, task]),
     );
-    expect(teamTaskReaches(second.taskId, third.taskId, blockedByOf)).toBe(
-      false,
-    );
+    expect(teamTaskOpenBlockers(blocked, board)).toEqual([third.taskId]);
   });
 });
