@@ -8,6 +8,7 @@ import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcri
 import { isShellResultDisplay } from '@qwen-code/qwen-code-core/shellResult';
 import { randomUUID } from 'node:crypto';
 import type {
+  ChatCompressionRecordPayload,
   ChatRecord,
   Config,
   GoalStateRecordPayloadV2,
@@ -264,7 +265,7 @@ function extractTaskToolTokens(record: ChatRecord): number {
 /**
  * Calculate token statistics from ChatRecords.
  * Aggregates usageMetadata from assistant records and TaskTool executionSummary to get total token usage.
- * Uses the last assistant record that has both totalTokenCount and contextWindowSize for calculating context usage percent.
+ * Uses the last assistant record that has both a prompt size and contextWindowSize, or a later compression, for calculating context usage percent.
  */
 function calculateTokenStats(records: ChatRecord[]): {
   totalTokens: number;
@@ -272,10 +273,10 @@ function calculateTokenStats(records: ChatRecord[]): {
   contextWindowSize?: number;
 } {
   let totalTokens = 0;
-  // Track the last assistant record that has BOTH totalTokenCount and contextWindowSize
+  // Track the last assistant record that has BOTH a prompt size and contextWindowSize
   // to ensure the percentage calculation uses values from the same record
   let lastValidRecord: {
-    totalTokenCount: number;
+    contextTokenCount: number;
     contextWindowSize: number;
   } | null = null;
 
@@ -285,14 +286,37 @@ function calculateTokenStats(records: ChatRecord[]): {
       if (record.usageMetadata) {
         totalTokens += record.usageMetadata.totalTokenCount ?? 0;
       }
+      // Context usage is the prompt size, as in the footer and on resume. The
+      // total also counts this turn's output, which is not in the context yet.
+      // The recorder stores a prompt size the provider left out as 0, so fall
+      // back on any falsy value, and let no zero reading displace a real one.
+      const contextTokenCount =
+        record.usageMetadata?.promptTokenCount ||
+        record.usageMetadata?.totalTokenCount;
       // Only update lastValidRecord when BOTH values are present in the same record
-      if (
-        record.usageMetadata?.totalTokenCount !== undefined &&
-        record.contextWindowSize !== undefined
-      ) {
+      if (contextTokenCount && record.contextWindowSize !== undefined) {
         lastValidRecord = {
-          totalTokenCount: record.usageMetadata.totalTokenCount,
+          contextTokenCount,
           contextWindowSize: record.contextWindowSize,
+        };
+      }
+    }
+
+    // A compression shrinks the context until the next reply reports a new
+    // prompt size. Resume and the footer read its new size, so do the same,
+    // keeping the window of the reply before it.
+    if (
+      record.type === 'system' &&
+      record.subtype === 'chat_compression' &&
+      lastValidRecord
+    ) {
+      const info = (
+        record.systemPayload as ChatCompressionRecordPayload | undefined
+      )?.info;
+      if (typeof info?.newTokenCount === 'number') {
+        lastValidRecord = {
+          contextTokenCount: info.newTokenCount,
+          contextWindowSize: lastValidRecord.contextWindowSize,
         };
       }
     }
@@ -305,10 +329,10 @@ function calculateTokenStats(records: ChatRecord[]): {
   }
 
   // Use last valid record's values for context usage calculation
-  // This represents how much of the context window is being used by the total tokens
+  // This represents how much of the context window the last prompt filled
   if (lastValidRecord) {
     const percent =
-      (lastValidRecord.totalTokenCount / lastValidRecord.contextWindowSize) *
+      (lastValidRecord.contextTokenCount / lastValidRecord.contextWindowSize) *
       100;
     return {
       totalTokens,
