@@ -228,15 +228,25 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
   modelCalls++;
   const tools = body['tools'] as Array<{ function: { name: string } }>;
   // Since H4b, a depth-0 Shell-lane Session whose child kind gate is on
-  // advertises the Agent tool beside the Shell vocabulary, and since H4d-b
-  // the parent form of send_message beside it.
+  // advertises the Agent tool beside the Shell vocabulary, since H4d-b the
+  // parent form of send_message beside it, and since the H4e-b1 enablement
+  // the lead's team tools with them.
   assert.deepEqual(tools.map((tool) => tool.function.name).sort(), [
     ...(shellProfile ? ['agent'] : []),
     'edit',
     ...(shellProfile ? ['monitor'] : []),
     'read_file',
-    ...(shellProfile ? ['run_shell_command'] : []),
-    ...(shellProfile ? ['send_message'] : []),
+    ...(shellProfile
+      ? [
+          'run_shell_command',
+          'send_message',
+          'task_create',
+          'task_list',
+          'task_update',
+          'team_create',
+          'team_delete',
+        ]
+      : []),
     'write_file',
   ]);
   const messages = body['messages'] as Array<{

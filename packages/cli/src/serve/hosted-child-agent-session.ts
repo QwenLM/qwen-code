@@ -64,6 +64,7 @@ import {
   managedTaskId,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
+import { parseTeamState } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
 import { hostedTeamMembership } from './hosted-team-session.js';
 import {
   stripDisplayControlChars,
@@ -669,6 +670,25 @@ export class HostedChildAgentSession {
         return {
           kind: 'refused',
           reason: `Child agent task ${headTask} ended (${head.run.state}: ${head.stopReason ?? 'unknown'}) and cannot receive messages; launch a new agent instead.`,
+        };
+      }
+      // H4e-b1: an open team's roster names one run of its member, so a
+      // continuation would run off the roster, unlabeled and unseen by
+      // team_delete; continued members come with H4e-b2. Only a launch
+      // joins, so a member's run is never itself a continuation. Once its
+      // team is deleted, a former member continues as a plain child.
+      const member = hostedTeamMembership(
+        this.store.authority
+          .extensionRecordsInDomain('team_state')
+          .filter(
+            (entry) => parseTeamState(entry.record).lifecycle !== 'deleted',
+          ),
+        head.childRunId,
+      );
+      if (member !== undefined) {
+        return {
+          kind: 'refused',
+          reason: `Child agent task ${headTask} ran as "${member.name}" of team "${member.teamName}" and has finished; a member of an open team cannot be continued yet. Launch a new member with another name for more work, or continue it once the team is deleted.`,
         };
       }
       // A continuation is a launch: it owes the launch admission (H4d-a

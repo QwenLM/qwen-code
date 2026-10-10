@@ -2,7 +2,7 @@
 
 [English](2026-10-10-managed-agent-teams.md) | [简体中文](2026-10-10-managed-agent-teams.zh-CN.md)
 
-状态:已在本变更中实现。已落地:`managed-team_state`、`managed-team_task`、`managed-team_message` 与 `managed-team_plan` 四个记录体,在 TypeScript 与 Java 中均已登记并校验,并带有把每条团队记录绑定到其 lead Session 的提交时规则。四个 domain 均不开放提交。仍为设计:创建团队、拉起成员、中继 mailbox、裁决计划与关停成员的运行时(H4e-b,见"后续工作"),但其 lead 一侧的一半已由 [H4e-b1 设计](2026-10-10-managed-agent-team-lead-runtime.zh-CN.md)实现,团队 domain 仍保持禁用。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 **H4e** 切片中记录契约的那一半,即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段,由 [#13745](https://github.com/QwenLM/qwen-code/issues/13745) 跟踪。它承接 H4a([记录契约](2026-10-06-managed-child-agent-runtime.zh-CN.md),#13505)、H4b([child Session 运行时](2026-10-07-managed-child-session-runtime.zh-CN.md),#13550)、H4c([workflow kind](2026-10-09-managed-workflow-child-kind.zh-CN.md),#13754)与 H4d-a([Session 消息](2026-10-09-managed-session-messages.zh-CN.md),#13786)。下文"自动化设计"指 #12827 所固定提交上的 [automation、Channels 与 child 投递设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-automation.md) 第 5.1 节。
+状态:已在本变更中实现。已落地:`managed-team_state`、`managed-team_task`、`managed-team_message` 与 `managed-team_plan` 四个记录体,在 TypeScript 与 Java 中均已登记并校验,并带有把每条团队记录绑定到其 lead Session 的提交时规则。本变更未开放四个 domain 中任何一个的提交。仍为设计:中继 mailbox、裁决计划与关停成员的运行时(H4e-b2 与 H4e-b3,见"后续工作")。其 lead 一侧负责创建团队与拉起成员的一半,已由 [H4e-b1 设计](2026-10-10-managed-agent-team-lead-runtime.zh-CN.md)实现,并在其实机验收之后启用了 `team_state` 与 `team_task`;`team_message` 与 `team_plan` 保持关闭。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 **H4e** 切片中记录契约的那一半,即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段,由 [#13745](https://github.com/QwenLM/qwen-code/issues/13745) 跟踪。它承接 H4a([记录契约](2026-10-06-managed-child-agent-runtime.zh-CN.md),#13505)、H4b([child Session 运行时](2026-10-07-managed-child-session-runtime.zh-CN.md),#13550)、H4c([workflow kind](2026-10-09-managed-workflow-child-kind.zh-CN.md),#13754)与 H4d-a([Session 消息](2026-10-09-managed-session-messages.zh-CN.md),#13786)。下文"自动化设计"指 #12827 所固定提交上的 [automation、Channels 与 child 投递设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-automation.md) 第 5.1 节。
 
 ## 问题与范围
 
@@ -58,7 +58,7 @@ Issue #13745 提出了三项:E1(团队记录 domain)、E2(detach 到独立的持
 
    处于 closing 或已删除团队中的记录仍然可以提交其后续修订:在途消息仍会送达,待决的计划请求仍可撤回,任务仍可更新。只有新记录会被拒绝,因此处于 `closing` 的团队在收尾期间不再接收新工作。
 
-9. **四个 domain 保持禁用,且不投影 task。** 它们都不在 `MANAGED_SESSION_ENABLED_DOMAINS` 中,提交会在任何内容发布之前以"registered but not enabled"被拒绝。Java store 先于任何写入方校验全部四个 domain,遵循 H1 至 H4d-a 的 server 先行顺序。它们都不在 Java 生命周期门禁为处于 close 或 delete 认领下的 Session 所放行的 domain 列表中,closing 中的 lead 还能提交什么由 H4e-b 决定(开放问题 3)。团队任务是任务板条目,不是运行时 task,因此四者都登记为空 task kind,其 Java 行的 task 列为空。
+9. **四个 domain 保持禁用,且不投影 task。** 在本切片中它们都不在 `MANAGED_SESSION_ENABLED_DOMAINS` 中(H4e-b1 后来在其实机验收之后启用了 `team_state` 与 `team_task`),提交会在任何内容发布之前以"registered but not enabled"被拒绝。Java store 先于任何写入方校验全部四个 domain,遵循 H1 至 H4d-a 的 server 先行顺序。它们都不在 Java 生命周期门禁为处于 close 或 delete 认领下的 Session 所放行的 domain 列表中,closing 中的 lead 还能提交什么由 H4e-b 决定(开放问题 3)。团队任务是任务板条目,不是运行时 task,因此四者都登记为空 task kind,其 Java 行的 task 列为空。
 
 ## 记录
 
@@ -162,7 +162,7 @@ Issue #13745 提出了三项:E1(团队记录 domain)、E2(detach 到独立的持
 
 - **Fixture 一致性。** 共享用例与后继对在两种语言中回放,每个无效用例都写明两个校验器必须报告的子句。
 - **Authority。** 测试套件放开 domain 门禁来写入记录,测试门禁本身的用例除外:
-  - 真实的门禁拒绝四个 domain 中的每一个,且不发布任何内容。
+  - 在本切片中,真实的门禁拒绝四个 domain 中的每一个,且不发布任何内容。
   - 团队开启、逐个加入成员、进入 closing 并被删除。其任务、消息与计划请求的链各自走到终点,重新打开的日志会重建每条链。
   - 决策 8 的每条规则都以其指名的消息拒绝相应的违规。
 - **Java store。** 同样的链在 MySQL 模式的 H2 上提交,同样的规则以 `managed_session_extension_record_rejected` 拒绝,团队行不投影 task。
@@ -171,7 +171,7 @@ Issue #13745 提出了三项:E1(团队记录 domain)、E2(detach 到独立的持
 ## 验收标准
 
 - TypeScript 与 Java 对共享 fixture 中的团队记录与后继对给出完全相同的接受与拒绝,现有的每个契约语料都原样回放通过。
-- 四个 domain 不进入启用列表,并在任何内容发布之前被拒绝。
+- 在本切片中,四个 domain 不进入启用列表,并在任何内容发布之前被拒绝。
 - 在两种语言中,决策 8 的每条规则都拒绝相应的违规,合法的团队、任务、消息与计划请求都能提交并重建。
 - 不改动公共 API 与迁移,现有的 H1–H4d-a 测试套件全部保持通过。
 
