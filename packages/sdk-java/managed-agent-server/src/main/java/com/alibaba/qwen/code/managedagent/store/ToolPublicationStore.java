@@ -177,6 +177,7 @@ public final class ToolPublicationStore {
     private ProducerBinding producerBindingAfterParentLocked(String scope, String publicationId,
             String suppliedHash, Row row, JsonNode binding, Original original, Access access) {
         JsonNode key = binding.get("sessionKey");
+        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, row.tenant(), row.session());
         ToolPublicationRetentionStore.requireLive(jdbc, row.tenant(), row.session());
         require(row.tenant().equals(text(key, "tenantId"))
                 && row.workspace().equals(text(key, "workspaceId"))

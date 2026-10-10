@@ -325,6 +325,83 @@ class ToolPublicationStoreTest {
         return outcome;
     }
 
+    @ParameterizedTest
+    @CsvSource({"csi-files-retirement/1,resource", "full,resource",
+            "csi-files-retirement/1,segment", "full,segment",
+            "csi-files-retirement/1,prefix", "full,prefix",
+            "csi-files-retirement/1,seal", "full,seal",
+            "csi-files-retirement/1,finish", "full,finish",
+            "csi-files-retirement/1,dispatch", "full,dispatch"})
+    void privateHistoricalPublicationRefusesLegacyProduction(String profile, String operation) {
+        reserve();
+        // Unsupported saved legacy history is not native writer authority.
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, tool_profile,"
+                        + " runtime_request_key, created_at, updated_at) VALUES ('tenant-1', 'session-1',"
+                        + " 'qwen-code', 'ACTIVE', ?, ?, 0, 0)", profile, "full".equals(profile) ? "a".repeat(64) : null);
+        jdbc.update("DELETE FROM qwen_tool_publication_tenant");
+        var before = producerTables();
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) { throw new AssertionError("Unexpected object write"); }
+
+            @Override
+            public InputStream open(String key) { throw new AssertionError("Unexpected object read"); }
+
+            @Override
+            public void requireUnversioned() { }
+        };
+        var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
+                Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
+        JsonNode key = binding.get("sessionKey");
+        byte[] bytes = "original".getBytes(StandardCharsets.UTF_8);
+        assertThatThrownBy(() -> {
+            switch (operation) {
+                case "resource" -> data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
+                        "private-resource", "content:original", "managed-tool-result-content", bytes);
+                case "segment" -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+                        "private-segment", "stdout", 0, bytes, digest("original"));
+                case "prefix" -> data.prefix(key, "pub-1", PUBLICATION_TOKEN, "private-prefix", "stdout");
+                case "seal" -> data.seal(key, "pub-1", PUBLICATION_TOKEN,
+                        "private-seal", "stdout", 0, 0, digest(""));
+                case "finish" -> data.finish(key, "pub-1", PUBLICATION_TOKEN,
+                        "private-finish", blockedTerminal().toString().getBytes(StandardCharsets.UTF_8));
+                case "dispatch" -> store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
+                        "pub-1", PUBLICATION_TOKEN);
+                default -> throw new AssertionError("Unexpected test operation");
+            }
+        }).isInstanceOfSatisfying(ApiException.class, error -> {
+            assertThat(error.getStatus()).isEqualTo(org.springframework.http.HttpStatus.CONFLICT);
+            assertThat(error.getCode()).isEqualTo("csi_managed_mutation_unavailable");
+        });
+        assertThat(producerTables()).usingRecursiveComparison().isEqualTo(before);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"csi-files-retirement/1", "full"})
+    void producerExclusionUsesStoredTargetBeforeBindingScope(String profile) {
+        reserve();
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, tool_profile,"
+                        + " runtime_request_key, created_at, updated_at) VALUES ('tenant-1', 'private-target',"
+                        + " 'qwen-code', 'ACTIVE', ?, ?, 0, 0)", profile, "full".equals(profile) ? "a".repeat(64) : null);
+        jdbc.update("UPDATE qwen_tool_publication SET session_id = 'private-target' WHERE publication_id = 'pub-1'");
+        jdbc.update("DELETE FROM qwen_tool_publication_tenant");
+        var before = producerTables();
+        assertThatThrownBy(() -> store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
+                "pub-1", PUBLICATION_TOKEN)).isInstanceOfSatisfying(ApiException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("csi_managed_mutation_unavailable"));
+        assertThat(producerTables()).usingRecursiveComparison().isEqualTo(before);
+    }
+
+    private Map<String, List<Map<String, Object>>> producerTables() {
+        var result = new java.util.TreeMap<String, List<Map<String, Object>>>();
+        for (String table : List.of("qwen_tool_publication_tenant", "qwen_managed_session_journal_head",
+                "qwen_tool_publication", "qwen_tool_publication_object", "qwen_tool_publication_operation",
+                "qwen_tool_publication_seal")) {
+            result.put(table, jdbc.queryForList("SELECT * FROM " + table));
+        }
+        return result;
+    }
+
     @Test
     void finishPreservesTheSubmittedTerminalBytes() {
         reserve();

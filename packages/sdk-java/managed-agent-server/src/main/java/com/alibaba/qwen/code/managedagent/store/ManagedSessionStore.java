@@ -276,6 +276,7 @@ public class ManagedSessionStore {
         validateScope(tenant, workspace, session);
         requireCredential(tenant, workspace, session, token);
         var csiOriginal = lockCsiOriginal(tenant, session);
+        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenant, session);
         HeadRow head = requireHeadForUpdate(tenant, session);
         requireHeadScope(head, tenant, workspace, session);
         Timestamp now = databaseNow();

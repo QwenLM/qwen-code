@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.store;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
@@ -116,6 +117,22 @@ class WorkspaceCsiNativeActivationGate {
         token = nativeFixture.path("writerToken").textValue();
         transaction.execute(status -> journal.acquireWriter("tenant", sessionId, token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", writerId, 300_000L)));
+    }
+
+    @Test
+    void privateNativeWriterCannotAuthorizeLegacyPublicationMutation() throws Exception {
+        ready();
+        var before = allRows();
+        assertThatThrownBy(() -> transaction.execute(status -> journal.lockPublicationWriter(
+                "tenant", "workspace", sessionId, writerId, 1, token)))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(org.springframework.http.HttpStatus.CONFLICT);
+                    assertThat(error.getCode()).isEqualTo("csi_managed_mutation_unavailable");
+                });
+        assertThat(allRows()).isEqualTo(before);
+        assertThat(commit(0).replayed()).isTrue();
+        assertThat(commit(1).replayed()).isTrue();
+        assertThat(allRows()).isEqualTo(before);
     }
 
     @Test
@@ -354,7 +371,8 @@ class WorkspaceCsiNativeActivationGate {
             rows.put(table, jdbc.queryForList("SELECT * FROM \"" + table + "\"").stream()
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
-        assertThat(rows).hasSize(54).containsKey("qwen_managed_child_result_relay");
+        assertThat(rows).containsKeys("qwen_managed_child_result_relay", "managed_agent_session",
+                "qwen_managed_session_journal_head", "qwen_csi_resource_read");
         return rows;
     }
 
