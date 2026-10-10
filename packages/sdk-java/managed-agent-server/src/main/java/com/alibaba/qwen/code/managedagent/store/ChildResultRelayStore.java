@@ -38,7 +38,8 @@ public class ChildResultRelayStore {
             long updatedAt) {
     }
 
-    /** The child Session's latest Turn line, as the relay reads it —
+    /** A child Session's Turn line (its latest, or its first), as the
+     * relays read it —
      * with the G3 dispatch pair on board: a Turn whose admission never
      * landed (no submission mark, no harness epoch) is a pre-admission
      * failure, never proof that a Runtime binding ever existed. */
@@ -555,12 +556,24 @@ public class ChildResultRelayStore {
 
     /** The child Session's newest Turn, or null while none exists. */
     public TurnLine latestTurn(String tenantId, String sessionId) {
+        return turnLine(tenantId, sessionId, "DESC");
+    }
+
+    /** H4d-b: the child Session's first Turn — the task its launch created
+     * with it — or null while none exists. */
+    public TurnLine firstTurn(String tenantId, String sessionId) {
+        return turnLine(tenantId, sessionId, "ASC");
+    }
+
+    private TurnLine turnLine(String tenantId, String sessionId,
+            String order) {
         List<TurnLine> rows = jdbc.query(
                 "SELECT turn_id, status, completed_at, error_code,"
                         + " submission_attempted, harness_event_epoch"
                         + " FROM managed_agent_turn"
                         + " WHERE tenant_id = ? AND session_id = ?"
-                        + " ORDER BY created_at DESC, turn_id DESC LIMIT 1",
+                        + " ORDER BY created_at " + order + ", turn_id "
+                        + order + " LIMIT 1",
                 (result, row) -> new TurnLine(result.getString("turn_id"),
                         result.getString("status"),
                         (Long) result.getObject("completed_at"),

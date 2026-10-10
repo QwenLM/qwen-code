@@ -271,6 +271,9 @@ interface HostedSession {
   childAgents?: HostedChildAgentSession;
   /** H4d-b: the Session's messages along its lineage, beside its children. */
   messages?: HostedSessionMessageSession;
+  /** H4d-b: message operations past the closing check, which a close waits
+   * out before it cancels the pending inputs. */
+  messageOperations?: Set<Promise<void>>;
   /** H4e-b1: the lead's team funnel, beside its child orchestrator. */
   teams?: HostedTeamSession;
   /** Depth of this Session in its child tree; absent or 0 is the root. */
@@ -5323,22 +5326,13 @@ export function registerHostedHarnessSessionRoutes(
     }
   });
 
-  /**
-   * H4d-b: the control plane's message relay onto this Session's journal.
-   * A sender's outbox entry moves through its handover, its acceptance and
-   * its last step; a target commits the receipt together with the input
-   * and wake that carry the message. Every verb is replay-safe by the
-   * funnel's derived command ids, so a redriven relay request never mints
-   * a second input. A turn in flight is not a refusal: the input queues
-   * behind it in the journal.
-   */
-  app.post('/session/:id/messages/operations', async (req, res) => {
-    const session = identity(req, sessions);
-    if (!session) return error(res, 404, 'hosted_session_not_found');
-    if (!session.messages)
-      return error(res, 409, 'hosted_messages_unavailable');
-    if (session.blocked)
-      return error(res, 409, 'hosted_turn_recovery_required');
+  // One message verb onto the Session's journal, for the route below.
+  const runMessageOperation = async (
+    req: Request,
+    res: Response,
+    session: HostedSession,
+    messages: HostedSessionMessageSession,
+  ): Promise<void> => {
     const body = object(req.body);
     const operationId = body?.['operationId'];
     const messageId = body?.['messageId'];
@@ -5352,7 +5346,6 @@ export function registerHostedHarnessSessionRoutes(
     ) {
       return error(res, 400, 'invalid_message_operation');
     }
-    const messages = session.messages;
     let inputId: string | undefined;
     try {
       switch (kind) {
@@ -5455,6 +5448,36 @@ export function registerHostedHarnessSessionRoutes(
       state: 'settled',
       ...(inputId === undefined ? {} : { inputId }),
     });
+  };
+
+  /**
+   * H4d-b: the control plane's message relay onto this Session's journal.
+   * A sender's outbox entry moves through its handover, its acceptance and
+   * its last step; a target commits the receipt together with the input
+   * and wake that carry the message. Every verb is replay-safe by the
+   * funnel's derived command ids, so a redriven relay request never mints
+   * a second input. A turn in flight is not a refusal: the input queues
+   * behind it in the journal.
+   */
+  app.post('/session/:id/messages/operations', async (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.messages)
+      return error(res, 409, 'hosted_messages_unavailable');
+    if (session.blocked)
+      return error(res, 409, 'hosted_turn_recovery_required');
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    // The close waits out an operation that passed the check above, so a
+    // receipt never lands after its pass over the pending inputs.
+    const operation = runMessageOperation(req, res, session, session.messages);
+    const settled = operation.catch(() => undefined);
+    const operations = (session.messageOperations ??= new Set());
+    operations.add(settled);
+    try {
+      await operation;
+    } finally {
+      operations.delete(settled);
+    }
   });
 
   /**
@@ -6650,6 +6673,9 @@ export function registerHostedHarnessSessionRoutes(
       // No wake turn may start once the authorized Session is draining;
       // a rejected close leaves its scheduler available for later wakes.
       session.monitorWake?.close();
+      // A message operation admitted before the close began lands before
+      // the pending inputs are cancelled below; a later one is refused.
+      await Promise.all(session.messageOperations ?? []);
       if (req.method === 'DELETE' && session.hooks) {
         session.hooksBusy = true;
         try {

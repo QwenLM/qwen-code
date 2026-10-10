@@ -573,6 +573,11 @@ class ChildResultRelayStoreTest {
                 TENANT, session);
         assertThat(relayStore.latestTurn(TENANT, session).dispatched())
                 .isFalse();
+        // H4d-b: the first Turn stays the task the child was created with.
+        assertThat(relayStore.firstTurn(TENANT, session).turnId())
+                .isEqualTo("turn-1");
+        assertThat(relayStore.firstTurn(TENANT, UUID.randomUUID().toString()))
+                .isNull();
         jdbc.update("INSERT INTO managed_agent_item (tenant_id, session_id,"
                         + " item_id, turn_id, item_type, item_role,"
                         + " item_status, attributes_json, first_sequence,"

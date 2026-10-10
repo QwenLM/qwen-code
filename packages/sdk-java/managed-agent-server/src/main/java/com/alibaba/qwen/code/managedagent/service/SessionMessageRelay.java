@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.service;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
@@ -25,7 +26,9 @@ import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.Pending
  * delivery still needs work, fixes each one's target at the handover,
  * commits the receipt into the target together with the input and wake
  * that carry it, and advances the sender as the target accepts and then
- * consumes it. A message whose child run ended before the handover, or
+ * consumes it. A message to a child is held until the Harness admitted
+ * the child's task. A message whose child run ended before the handover,
+ * or whose task ended without an admission, or
  * whose target is gone, is cancelled or rejected on the sender; one whose
  * sender is closing or gone is `orphaned` here, since its own journal can
  * no longer take a revision; one that stays unproven past its bounded
@@ -47,6 +50,8 @@ public class SessionMessageRelay {
     /** The gap while a handed-over message waits to be read. */
     private static final long AWAIT_MS = 15_000;
     private static final long MAX_BACKOFF_MS = 300_000;
+    private static final Set<String> TERMINAL_TURNS =
+            Set.of("COMPLETED", "FAILED", "CANCELLED");
 
     private final SessionMessageRelayStore store;
     private final ChildResultRelayStore records;
@@ -190,6 +195,29 @@ public class SessionMessageRelay {
                 return;
             }
             target = child.textValue();
+            // The run attaches as soon as its Runtime binding exists, before
+            // the coordinator submits the child's task: a message received
+            // earlier would wake a turn without that task, and the task
+            // would then meet the busy Session. It is held until the Harness
+            // admitted the task, and cancelled when the task ended without
+            // an admission, since there is no task left for it to follow.
+            // The epoch is that admission's record (a submission attempted
+            // is not one); the one exception is a task cancelled while its
+            // admission was unproven, which adopts the attach's epoch, and
+            // a message then follows a task that is going away anyway.
+            ChildResultRelayStore.TurnLine task = records.firstTurn(
+                    row.tenantId(), target);
+            if (task == null || task.harnessEventEpoch() == null) {
+                if (task != null && TERMINAL_TURNS.contains(task.status())) {
+                    senderOperation(row, "cancelled", Map.of());
+                    store.classify(row, owner, "done",
+                            "child task ended before its admission", now);
+                    return;
+                }
+                store.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                        now + LEASE_MS, now);
+                return;
+            }
         } else {
             SessionMessageRelayStore.Lineage lineage = store.lineage(
                     row.tenantId(), row.senderSessionId());

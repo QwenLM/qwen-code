@@ -5351,6 +5351,141 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(204);
   });
 
+  // H4d-b: a parent with the attached run-1 loaded; `receive` posts one
+  // child message to it through the route.
+  async function loadMessageParent() {
+    await prewriteMessageSession(async () => undefined);
+    mockBrokerBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    const receive = (messageId: string) => {
+      const content = Buffer.from(`question ${messageId}`);
+      return headers(
+        supertest(server).post(`/session/${SESSION_ID}/messages/operations`),
+      )
+        .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+        .send({
+          operationId: randomUUID(),
+          messageId,
+          kind: 'receive',
+          route: 'to_parent',
+          childRunId: 'run-1',
+          senderSessionId: CHILD_SESSION_ID,
+          contentBase64: content.toString('base64'),
+          contentDigest: createHash('sha256').update(content).digest('hex'),
+        })
+        .then((response) => response);
+    };
+    return { server, receive };
+  }
+
+  it('refuses a message once the Session close began', async () => {
+    const { server, receive } = await loadMessageParent();
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = LocalJsonlManagedSessionJournalHandle.prototype.seal;
+    vi.spyOn(
+      LocalJsonlManagedSessionJournalHandle.prototype,
+      'seal',
+    ).mockImplementation(async function (
+      this: LocalJsonlManagedSessionJournalHandle,
+      commit,
+    ) {
+      entered();
+      await gate;
+      await original.call(this, commit);
+    });
+    const closing = headers(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    ).then((response) => response);
+    await started;
+    try {
+      // The close already cancelled the pending inputs: a receipt now
+      // would wait for a turn nothing runs.
+      const refused = await receive('msg_after_close');
+      expect(refused.status).toBe(409);
+      expect(refused.body.code).toBe('hosted_session_closing');
+    } finally {
+      release();
+    }
+    expect((await closing).status).toBe(204);
+    expect(
+      (await journalEvents()).some(
+        (event) =>
+          event.kind === 'input.accepted' &&
+          event.payload['inputId'] === 'msg_after_close:message',
+      ),
+    ).toBe(false);
+    expect(state.model).not.toHaveBeenCalled();
+  });
+
+  it('lets a message admitted before the close land before its pending inputs are cancelled', async () => {
+    const { server, receive } = await loadMessageParent();
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = HostedSessionMessageSession.prototype.receive;
+    vi.spyOn(
+      HostedSessionMessageSession.prototype,
+      'receive',
+    ).mockImplementation(async function (
+      this: HostedSessionMessageSession,
+      ...args: Parameters<HostedSessionMessageSession['receive']>
+    ) {
+      entered();
+      await gate;
+      return original.apply(this, args);
+    });
+    const receiving = receive('msg_in_flight');
+    await started;
+    let closed = false;
+    const closing = headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .then((response) => response)
+      .finally(() => {
+        closed = true;
+      });
+    // The close waits for the receipt that passed its check.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(closed).toBe(false);
+    release();
+    const received = await receiving;
+    expect(received.status).toBe(202);
+    expect(received.body.inputId).toBe('msg_in_flight:message');
+    expect((await closing).status).toBe(204);
+    // Its input is cancelled with the other pending inputs, never left
+    // waiting for a turn after the Session closed.
+    const events = await journalEvents();
+    expect(
+      events.some(
+        (event) =>
+          event.kind === 'input.accepted' &&
+          event.payload['inputId'] === 'msg_in_flight:message',
+      ),
+    ).toBe(true);
+    expect(
+      events.some(
+        (event) =>
+          event.kind === 'turn.settled' &&
+          event.payload['turnId'] === 'msg_in_flight:message',
+      ),
+    ).toBe(true);
+    expect(state.model).not.toHaveBeenCalled();
+  });
+
   // H4e-b1: the reopen verifier admits the lead's team roster and board, so
   // a Session that led a team reopens with its own committed history.
   it('reopens a Session whose journal carries its team and board', async () => {

@@ -178,6 +178,20 @@ class SessionMessageRelayTest {
                 .thenReturn(CONTENT);
         body("to_child", PARENT, null);
         childRun("running", CHILD);
+        task("RUNNING", "epoch-1");
+    }
+
+    /** The child Session's first Turn: its task, admitted once it has an
+     * epoch. */
+    private void task(String status, String epoch) {
+        task(status, epoch != null, epoch);
+    }
+
+    private void task(String status, boolean submissionAttempted,
+            String epoch) {
+        when(records.firstTurn(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.TurnLine("turn-1", status, null,
+                        null, submissionAttempted, epoch));
     }
 
     private void body(String route, String sender, String target) {
@@ -257,6 +271,58 @@ class SessionMessageRelayTest {
         assertThat(row.get().attempts()).isZero();
         verify(store).scheduleRetry(any(MessageRow.class), anyString(),
                 anyLong(), anyLong(), anyLong());
+    }
+
+    // The run attaches with its Runtime binding, before the coordinator
+    // submits the task: a message received then would run without it.
+    @Test
+    void holdsAMessageUntilItsChildsTaskIsAdmitted() {
+        when(records.firstTurn(TENANT, CHILD)).thenReturn(null);
+        relay.scan();
+        task("ACCEPTED", null);
+        relay.scan();
+        task("CANCELLING", null);
+        relay.scan();
+        // A submission attempted is not an admission: its reply may still
+        // be on the way, and the receipt would beat the task to the Session.
+        task("ACCEPTED", true, null);
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().attempts()).isZero();
+        verify(store, Mockito.times(4)).scheduleRetry(any(MessageRow.class),
+                anyString(), anyLong(), anyLong(), anyLong());
+        task("RUNNING", "epoch-1");
+        relay.scan();
+        assertThat(kinds()).containsExactly("handover", "receive",
+                "accepted");
+    }
+
+    @Test
+    void cancelsAMessageWhoseChildsTaskEndedUnadmitted() {
+        task("FAILED", true, null);
+        relay.scan();
+        assertThat(kinds()).containsExactly("cancelled");
+        assertThat(row.get().state()).isEqualTo("done");
+        assertThat(row.get().lastError())
+                .isEqualTo("child task ended before its admission");
+    }
+
+    @Test
+    void cancelsAMessageWhoseChildsTaskWasCancelledUnadmitted() {
+        task("CANCELLED", null);
+        relay.scan();
+        assertThat(kinds()).containsExactly("cancelled");
+        assertThat(row.get().state()).isEqualTo("done");
+    }
+
+    // The hold keys on the admission, not on the task still running: an
+    // admitted task that already ended takes the message as its next turn.
+    @Test
+    void handsAMessageToAChildWhoseAdmittedTaskEnded() {
+        task("FAILED", "epoch-1");
+        relay.scan();
+        assertThat(kinds()).containsExactly("handover", "receive",
+                "accepted");
     }
 
     @Test
