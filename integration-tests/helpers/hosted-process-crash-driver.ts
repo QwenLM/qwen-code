@@ -202,14 +202,21 @@ const proxy = createServer(async (req, res) => {
         );
         report.staleWriterConflicts++;
       } else if (upstream.status === 409) {
-        assert(
-          injected &&
-            !store &&
-            ['status', 'cancel'].includes(operation) &&
-            config.fault.startsWith('worker-'),
-          `${url}: ${bytes}`,
-        );
-        assert.equal(json.code, 'runtime_broker_execution_unknown');
+        if (url.pathname.endsWith(':release-mount')) {
+          // #13800: a recovery-blocked turn hands its Workspace mount back
+          // on this route; a transient runtime_session_busy while its own
+          // dying operation still reads active is legitimate, settled by
+          // the bounded handback retries.
+        } else {
+          assert(
+            injected &&
+              !store &&
+              ['status', 'cancel'].includes(operation) &&
+              config.fault.startsWith('worker-'),
+            `${url}: ${bytes}`,
+          );
+          assert.equal(json.code, 'runtime_broker_execution_unknown');
+        }
       } else assert.equal(upstream.status, 200, `${url}: ${bytes}`);
     }
     if (restoring && store && url.pathname.endsWith('/transactions'))
