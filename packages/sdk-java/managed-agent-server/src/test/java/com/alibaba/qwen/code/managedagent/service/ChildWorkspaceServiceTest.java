@@ -135,18 +135,31 @@ class ChildWorkspaceServiceTest {
         assertThat(bound.getCwdRelative()).isEqualTo(ready.childCwdRelative());
         assertThat(bound.getStorageId()).isEqualTo(parent.workspace().getStorageId());
         assertThat(bound.getWorkspaceId()).isEqualTo(parent.workspace().getWorkspaceId());
-        assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE),
-                "child_workspace_in_use");
+        // #13753 I2: the merge is recorded while the child runs and waits,
+        // at no cost, for its close; nothing touches the running worktree.
+        Row waiting = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
+        assertThat(waiting.state()).isEqualTo(ChildWorkspaceStore.READY);
+        assertThat(waiting.finishRequest()).isEqualTo(ChildWorkspaceStore.MERGE);
+        assertThat(waiting.attempts()).isZero();
+        assertThat(waiting.nextRetryAt()).isEqualTo(clock.get() + ChildWorkspaceService.CHILD_CLOSE_DELAY_MS);
+        assertThat(waiting.lastError()).isEqualTo("The child Session bound to this Workspace is not closed.");
+        assertThat(child).isDirectory();
+        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSING' WHERE session_id = ?", childSession);
+        clock.addAndGet(ChildWorkspaceService.CHILD_CLOSE_DELAY_MS);
+        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE).state())
+                .isEqualTo(ChildWorkspaceStore.READY);
 
         Files.writeString(child.resolve("f.txt"), "a\nb\nc\nd\nCHILD\n");
         Files.writeString(child.resolve("new.txt"), "new\n");
         Files.writeString(project.resolve("f.txt"), "PARENT\nb\nc\nd\ne\n");
         assertThat(project.resolve("new.txt")).doesNotExist();
         close(childSession);
+        clock.addAndGet(ChildWorkspaceService.CHILD_CLOSE_DELAY_MS);
         Row merged = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
 
         assertThat(merged.state()).isEqualTo(ChildWorkspaceStore.MERGED);
         assertThat(merged.outcomeCode()).isEqualTo("merged");
+        assertThat(merged.lastError()).isNull();
         assertThat(project.resolve("f.txt")).hasContent("PARENT\nb\nc\nd\nCHILD");
         assertThat(project.resolve("new.txt")).hasContent("new");
         assertThat(root.resolve(ChildWorktreeGit.childDirectory(ready.childWorkspaceId()))).doesNotExist();
@@ -289,12 +302,16 @@ class ChildWorkspaceServiceTest {
         Row owed = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
         assertThat(owed.state()).isEqualTo(ChildWorkspaceStore.READY);
         assertThat(owed.finishRequest()).isEqualTo(ChildWorkspaceStore.MERGE);
-        assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD),
-                "child_workspace_finishing");
+        // #13753 I2: a discard replaces a merge that has not started, and
+        // the merge it replaced can no longer come back.
+        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD)
+                .finishRequest()).isEqualTo(ChildWorkspaceStore.DISCARD);
+        assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE),
+                "child_workspace_conflict");
         warmer.provider = provider(root);
         service.scan();
         assertThat(service.find(parent.tenantId(), parent.sessionId(), "run-1").state())
-                .isEqualTo(ChildWorkspaceStore.MERGED);
+                .isEqualTo(ChildWorkspaceStore.DISCARDED);
 
         service.prepare(parent.tenantId(), parent.sessionId(), "run-2");
         Row discarded = service.finish(parent.tenantId(), parent.sessionId(), "run-2", ChildWorkspaceStore.DISCARD);
@@ -303,6 +320,59 @@ class ChildWorkspaceServiceTest {
                 "child_workspace_conflict");
         assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-3", ChildWorkspaceStore.MERGE),
                 "child_workspace_not_found");
+
+        // Once a merge started it runs to its end: a discard is refused.
+        service.prepare(parent.tenantId(), parent.sessionId(), "run-4");
+        for (String started : List.of(ChildWorkspaceStore.MERGING, ChildWorkspaceStore.APPLYING,
+                ChildWorkspaceStore.APPLIED)) {
+            jdbc.update("UPDATE qwen_managed_child_workspace SET state = ?, finish_request = 'merge'"
+                    + " WHERE tenant_id = ? AND child_run_id = 'run-4'", started, parent.tenantId());
+            assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-4",
+                    ChildWorkspaceStore.DISCARD), "child_workspace_finishing");
+        }
+    }
+
+    // The same race through the service: the discard lands while the step
+    // that leaves ready is deciding, and the merge it replaced never runs.
+    @Test
+    void aDiscardLandingAsTheMergeStartsWinsAtTheService() throws Exception {
+        var parent = createSession("project");
+        Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
+        Files.writeString(root.resolve(ready.childCwdRelative()).resolve("new.txt"), "child\n");
+        store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE, clock.get());
+        ChildWorkspaceStore racing = org.mockito.Mockito.spy(new ChildWorkspaceStore(jdbc,
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource())));
+        org.mockito.Mockito.doAnswer(call -> {
+            store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD,
+                    clock.get());
+            return call.callRealMethod();
+        }).when(racing).childSessionsClosed(org.mockito.ArgumentMatchers.any());
+        var worker = new ChildWorkspaceService(sessions, racing, leases, warmer, clock::get, "worker-race", 20);
+
+        Row finished = worker.drive(store.find(parent.tenantId(), parent.sessionId(), "run-1"));
+
+        assertThat(finished.state()).isEqualTo(ChildWorkspaceStore.DISCARDED);
+        assertThat(finished.outcomeCode()).isEqualTo("discarded");
+        assertThat(project.resolve("new.txt")).doesNotExist();
+        assertThat(finished.attempts()).isZero();
+    }
+
+    @Test
+    void aStartedFinishNeverRunsTheMergeADiscardReplaced() throws Exception {
+        var parent = createSession("project");
+        Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
+        store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE, clock.get());
+        Row claimed = store.claim(store.find(parent.tenantId(), parent.sessionId(), "run-1"), "worker",
+                clock.get(), 60_000);
+        // The discard lands between the claim and the start of the merge.
+        store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD, clock.get());
+        assertThat(store.startFinish(claimed, "worker", ChildWorkspaceStore.MERGING, ChildWorkspaceStore.MERGE,
+                clock.get())).isFalse();
+        assertThat(store.find(parent.tenantId(), parent.sessionId(), "run-1").state())
+                .isEqualTo(ChildWorkspaceStore.READY);
+        assertThat(store.startFinish(claimed, "worker", ChildWorkspaceStore.DISCARDING,
+                ChildWorkspaceStore.DISCARD, clock.get())).isTrue();
+        assertThat(ready.childWorkspaceId()).isNotNull();
     }
 
     @Test
@@ -649,6 +719,33 @@ class ChildWorkspaceServiceTest {
             Thread.currentThread().interrupt();
             throw new IllegalStateException(error);
         }
+    }
+
+    // #13753 I2: a result's receipt reports an ended merge, so a later
+    // discard that cannot finish must leave that outcome, its paths and its
+    // result alone, as I1 already did for `merged`.
+    @Test
+    void anEndedMergeKeepsItsOutcomeThroughADiscardThatCannotFinish() throws Exception {
+        var parent = createSession("project");
+        Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
+        Path child = root.resolve(ready.childCwdRelative());
+        Files.writeString(child.resolve("f.txt"), "CHILD\nb\nc\nd\ne\n");
+        Files.writeString(project.resolve("f.txt"), "PARENT\nb\nc\nd\ne\n");
+        Row conflicted = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
+        assertThat(conflicted.state()).isEqualTo(ChildWorkspaceStore.CONFLICTED);
+        Path container = root.resolve(ChildWorktreeGit.CONTAINER);
+        Files.createDirectories(container);
+        Path moved = temp.toRealPath().resolve("moved");
+        Files.move(container, moved);
+        Files.createSymbolicLink(container, moved);
+
+        Row blocked = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD);
+
+        assertThat(blocked.state()).isEqualTo(ChildWorkspaceStore.BLOCKED);
+        assertThat(blocked.outcomeCode()).isEqualTo("conflicted");
+        assertThat(blocked.conflictPaths()).containsExactly("f.txt");
+        assertThat(blocked.resultCommit()).isEqualTo(conflicted.resultCommit());
+        assertThat(blocked.lastError()).isNotNull();
     }
 
     @Test
