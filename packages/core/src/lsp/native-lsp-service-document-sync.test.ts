@@ -3632,6 +3632,21 @@ describe('NativeLspService disk document synchronization', () => {
       },
     );
 
+    it('keeps a clean answer for a non-file URI the tables cannot place', async () => {
+      // The non-`file:` half of the same gate: a `jdt://…` virtual document is
+      // never sent a `didOpen`, so its pass-through answer is surfaced on
+      // relevance alone. That is the residue recorded in
+      // docs/design/lsp-disk-document-sync.md — pinned here so a later change
+      // to the ownership rule cannot silently turn it into a refusal.
+      const virtualUri = 'jdt://contents/Foo.java?=%2Fsrc';
+      mockDiagnosticsResponses(connection);
+      await expect(run(service.diagnostics(virtualUri))).resolves.toEqual([]);
+      expect(connection.request).toHaveBeenCalledWith(
+        'textDocument/diagnostic',
+        expect.objectContaining({ textDocument: { uri: virtualUri } }),
+      );
+    });
+
     it('does not let a failed sibling veto a clean answer for a placeable extension', async () => {
       // `.go` is placeable through DIAGNOSTIC_LANGUAGE_IDS, so a downed python
       // server provably cannot own main.go and is excused from the veto list

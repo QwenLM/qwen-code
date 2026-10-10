@@ -96,7 +96,9 @@ incoming/outgoing 调用在预热前后及请求后进行验证。陈旧、缺�
   情形：`synchronizeDocument` 在发送任何 `didOpen` 之前就返回，服务器为其从未收到
   的文档作答；此处保留该直通而不是拒绝，因为拒绝会破坏那些为自身虚拟文档作答的
   服务器。因此它的空答案仅按相关性被呈现为干净——与本变更之前相同，属于合并基线
-  上既有的 fail-open 而非回归，且任何扫描都无法把它与真正的干净渲染区分开。是否
+  上既有的 fail-open 而非回归，且任何扫描都无法把它与真正的干净渲染区分开。该直通
+  行为与无法定位扩展名的情形在同一闸门处被钉住，避免后续的归属改动把它悄悄变成
+  拒绝。是否
   应改判为“无依据”是一个待裁决的问题，本变更不作结论。相关性判定会参照诊断表能定位的**全部**扩展名——语言 ID
   映射表、诊断专属别名表，以及 ID 即扩展名的身份映射集合——且 JS/TS 家族扩展是
   单向的：`typescript` 声明覆盖 JavaScript 一侧，而仅声明 `javascript` 的服务器
@@ -166,7 +168,8 @@ blame an irrelevant server whose pull resolved to nothing`）。归属拆分另�
 let a failed sibling veto a clean answer for a placeable extension`，且 `refuses an
 empty answer with no attributable owner from` 的 `pyright` 行会失去其覆盖性理由）；
 从干净答案闸门中去掉 attributable 项（`keeps a clean answer for an extension the
-tables cannot place`，三行全红）。工作区分支与归属表另增四项：工作区 catch 把
+tables cannot place`，三行全红，另加 `keeps a clean answer for a non-file URI the
+tables cannot place`）。工作区分支与归属表另增四项：工作区 catch 把
 `pullUnsupported` 重新并入 `failures`（`keeps a clean workspace report from the
 pull-capable of two servers`、`does not treat a lone -32601 workspace refusal as
 a failed pull`、`names a -32601 workspace refusal beside the failure that did

@@ -144,7 +144,9 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   diagnose their own virtual documents. Its empty answer is therefore surfaced
   as clean on relevance alone — as it was before this change, so it is a
   pre-existing fail-open on the merge base rather than a regression, and no
-  scan can distinguish it from a genuinely clean render. Whether such an answer
+  scan can distinguish it from a genuinely clean render. That kept pass-through
+  is pinned at the same gate as the unplaceable-extension case, so a later
+  ownership change cannot silently turn it into a refusal. Whether such an answer
   should instead be labelled unbacked is an open ruling, not something this
   change settles. Relevance is decided against every extension the diagnostics
   tables can place — the language-ID mapping, the diagnostics-local alias rows
@@ -244,7 +246,8 @@ split adds two more: reverting the `serverDeclaredIrrelevant` guard to
 answer for a placeable extension`, and the `pyright` row of `refuses an empty
 answer with no attributable owner from` loses its coverage reason); dropping
 the attributable term from the clean-answer gate (`keeps a clean answer for an
-extension the tables cannot place`, all three rows). The workspace leg and the
+extension the tables cannot place`, all three rows, and `keeps a clean answer
+for a non-file URI the tables cannot place`). The workspace leg and the
 attribution tables add four more: the workspace catch routes `pullUnsupported`
 back into `failures` (`keeps a clean workspace report from the pull-capable of
 two servers`, `does not treat a lone -32601 workspace refusal as a failed
