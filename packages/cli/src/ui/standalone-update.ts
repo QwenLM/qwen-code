@@ -17,6 +17,7 @@ import * as tar from 'tar';
 import type { ReadEntry } from 'tar';
 import semver from 'semver';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { extractZipArchive } from '@qwen-code/qwen-code-core/extension/zip-extraction.js';
 import { loadUndici } from '../utils/load-undici.js';
 import { verifySignature } from '../utils/standalone-update-verify.js';
 import { updateEventEmitter } from '../utils/updateEventEmitter.js';
@@ -58,10 +59,6 @@ function validateTarget(target: string): void {
 function archiveFilename(target: string): string {
   const ext = target.startsWith('win') ? 'zip' : 'tar.gz';
   return `qwen-code-${target}.${ext}`;
-}
-
-function escapePS(s: string): string {
-  return s.replace(/'/g, "''");
 }
 
 function resolveUpdateBaseUrl(): string | undefined {
@@ -389,29 +386,9 @@ async function extractArchive(
   fs.mkdirSync(destDir, { recursive: true });
 
   if (target.startsWith('win')) {
-    await new Promise<void>((resolve, reject) => {
-      const ps = spawn(
-        'powershell.exe',
-        [
-          '-NoProfile',
-          '-Command',
-          `Expand-Archive -Path '${escapePS(archivePath)}' -DestinationPath '${escapePS(destDir)}' -Force`,
-        ],
-        { stdio: 'ignore' },
-      );
-      ps.on('close', (code) =>
-        code === 0
-          ? resolve()
-          : reject(new Error(`Expand-Archive exited with code ${code}`)),
-      );
-      ps.on('error', reject);
-    });
-    const resolvedDest = fs.realpathSync(destDir);
-    // Windows Expand-Archive has no pre-extraction filter like tar.extract,
-    // so keep the full post-extraction traversal scan here. The Unix/tar path
-    // can limit its defense-in-depth scan to symlinks because isSafeTarEntry
-    // validates regular entry paths and rejects hardlinks before extraction.
-    validateExtractedPaths(resolvedDest);
+    // extractZipArchive rejects out-of-bound and symlink entries before
+    // writing them, so no post-extraction traversal scan is needed here.
+    await extractZipArchive(archivePath, destDir);
   } else {
     const resolvedDest = fs.realpathSync(destDir);
     await tar.extract({
@@ -420,6 +397,8 @@ async function extractArchive(
       preservePaths: false,
       filter: (p, entry) => isSafeTarEntry(p, entry, resolvedDest),
     });
+    // isSafeTarEntry already vets regular paths and rejects hardlinks, so
+    // only symlinks need the post-extraction scan.
     validateExtractedPaths(fs.realpathSync(destDir), { symlinksOnly: true });
   }
 }
