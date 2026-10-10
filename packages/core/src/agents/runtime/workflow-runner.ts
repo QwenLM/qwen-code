@@ -547,7 +547,7 @@ export class WorkflowRunner {
         toolUseId: options.toolUseId,
         ...(workflowName ? { workflowName } : {}),
         ...(sourceRef ? { sourceRef } : {}),
-        meta: null,
+        meta: scriptMeta,
         status: 'running',
         startTime: Date.now(),
         outputFile: '',
@@ -794,12 +794,7 @@ export class WorkflowRunner {
             resumeReplay,
             scheduler,
           });
-          if (entry) {
-            entry.meta = outcome.meta;
-            if (outcome.meta?.name && entry.description === runId) {
-              entry.description = outcome.meta.name;
-            }
-          }
+          if (entry) entry.meta = outcome.meta;
           registry?.setRecentLogs(runId, outcome.logs);
           // A held successful dispatch resolves its gate on abort, so a
           // run whose entry settled terminal mid-script — cancelled via
