@@ -149,26 +149,67 @@ public final class ToolPublicationContract {
                 StandardCharsets.UTF_8)), "Invalid payload encoding");
         JsonNode body = readJson(bytes);
         closed(body, Set.of("toolName", "input"));
-        require("run_shell_command".equals(text(body, "toolName"))
-                && body.get("input").isObject()
-                && !body.get("input").path("is_background").equals(JSON.getNodeFactory().booleanNode(true)),
-                "Only foreground Shell can publish");
+        require(body.get("input") != null && body.get("input").isObject(),
+                "Shell input is invalid");
         JsonNode input = body.get("input");
+        String toolName = text(body, "toolName");
+        // H3: the detached capture family publishes background Shell and
+        // Monitor payloads beside the foreground Shell; each family keeps its
+        // own closed input shape.
+        if ("run_shell_command".equals(toolName)) {
+            requireShellInput(input);
+        } else if ("monitor".equals(toolName)) {
+            requireMonitorInput(input);
+        } else {
+            require(false, "Only Shell and Monitor payloads can publish");
+        }
+        require(("sha256:" + sha256(bytes)).equals(text(binding, "requestDigest")),
+                "Original payload digest conflicts");
+        require(("sha256:" + sha256(canonicalText(canonical(input)).getBytes(StandardCharsets.UTF_8)))
+                .equals(text(binding.path("reference"), "argsDigest")),
+                "Canonical Shell input digest conflicts");
+    }
+
+    private static void requireShellInput(JsonNode input) {
         require(input.has("command") && input.get("command").isTextual()
                 && !input.get("command").textValue().isEmpty(), "Shell command is invalid");
         input.fieldNames().forEachRemaining(name -> require(
-                Set.of("command", "timeout", "description").contains(name), "Shell input field is invalid"));
+                Set.of("command", "timeout", "description", "is_background", "directory")
+                        .contains(name), "Shell input field is invalid"));
         require(!input.has("timeout") || input.get("timeout").isIntegralNumber()
                 && input.get("timeout").canConvertToInt()
                 && input.get("timeout").intValue() >= 1 && input.get("timeout").intValue() <= 600_000,
                 "Shell timeout is invalid");
         require(!input.has("description") || input.get("description").isTextual(),
                 "Shell description is invalid");
-        require(("sha256:" + sha256(bytes)).equals(text(binding, "requestDigest")),
-                "Original payload digest conflicts");
-        require(("sha256:" + sha256(canonicalText(canonical(input)).getBytes(StandardCharsets.UTF_8)))
-                .equals(text(binding.path("reference"), "argsDigest")),
-                "Canonical Shell input digest conflicts");
+        require(!input.has("is_background") || input.get("is_background").isBoolean(),
+                "Shell background flag is invalid");
+        require(!input.has("directory") || input.get("directory").isTextual()
+                && !input.get("directory").textValue().isEmpty(), "Shell directory is invalid");
+    }
+
+    private static void requireMonitorInput(JsonNode input) {
+        require(input.has("command") && input.get("command").isTextual()
+                && !input.get("command").textValue().isEmpty(), "Monitor command is invalid");
+        input.fieldNames().forEachRemaining(name -> require(
+                Set.of("command", "description", "max_events", "idle_timeout_ms", "directory",
+                        "is_monitor")
+                        .contains(name), "Monitor input field is invalid"));
+        require(!input.has("description") || input.get("description").isTextual(),
+                "Monitor description is invalid");
+        require(!input.has("is_monitor") || input.get("is_monitor").isBoolean(),
+                "Monitor marker is invalid");
+        require(!input.has("max_events") || input.get("max_events").isIntegralNumber()
+                && input.get("max_events").canConvertToInt()
+                && input.get("max_events").intValue() >= 1
+                && input.get("max_events").intValue() <= 10_000, "Monitor max_events is invalid");
+        require(!input.has("idle_timeout_ms") || input.get("idle_timeout_ms").isIntegralNumber()
+                && input.get("idle_timeout_ms").canConvertToInt()
+                && input.get("idle_timeout_ms").intValue() >= 1
+                && input.get("idle_timeout_ms").intValue() <= 600_000,
+                "Monitor idle timeout is invalid");
+        require(!input.has("directory") || input.get("directory").isTextual()
+                && !input.get("directory").textValue().isEmpty(), "Monitor directory is invalid");
     }
 
     public static String bindingDigest(JsonNode binding) {

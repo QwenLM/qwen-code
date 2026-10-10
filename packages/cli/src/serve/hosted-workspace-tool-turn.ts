@@ -1403,7 +1403,12 @@ export class HostedWorkspaceToolTurn {
           validationError,
           input,
           isShell,
-          inputDigest: isShell ? managedToolDigest(input) : undefined,
+          // H3: the publication evidence chain pins the canonical input
+          // digest for Monitor calls exactly like Shell calls.
+          inputDigest:
+            isShell || call.name === 'monitor'
+              ? managedToolDigest(input)
+              : undefined,
           mcp: mcpInput !== undefined,
           ...encoded,
           argsDigest: `sha256:${managedToolDigest(input)}`,
@@ -1926,7 +1931,14 @@ export class HostedWorkspaceToolTurn {
                 sessionId: this.broker.runtimeSessionId,
                 promptId: this.promptId,
                 callId: request.runtimeCallId,
-                argsDigest: request.inputDigest!,
+                // The worker replays the dispatch reference of the lane the
+                // request actually took: a v3 prepare stores and replays the
+                // prefixed argsDigest, while the legacy prepare's replay
+                // carries the bare input digest. Registration must name the
+                // same lane's value or the worker's prepare never matches it.
+                argsDigest: prepared
+                  ? request.argsDigest
+                  : request.inputDigest!,
               },
               capture: {
                 tenantId: authority.sessionHeader.sessionKey.tenantId,
