@@ -37,6 +37,16 @@ zed --install-extension qwen-code
 - Ask the agent to explain code, suggest improvements, or help with debugging
 - Use natural language to describe what you want to accomplish
 
+## Interactive questions
+
+ACP only models an approve/deny permission response, so Qwen Code projects an interactive question onto a permission request:
+
+- A **single question** becomes one selectable option per choice, followed by `Other…` and `Cancel`.
+- **Multiple questions** in one request cannot be rendered as a form by Zed; they are shown as text and are fully answerable only from the Qwen-compatible surfaces (VS Code companion, web shell, or channel cards).
+- `multiSelect` questions degrade to a single choice.
+
+A client that understands the Qwen `_meta.qwenQuestions` payload can opt out of the flat option list by advertising `clientCapabilities._meta['qwen.askUserQuestion'] = true` during `initialize`.
+
 ## Requirements
 
 - Zed Editor (latest version recommended)

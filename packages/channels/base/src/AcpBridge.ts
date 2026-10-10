@@ -211,7 +211,12 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       await withTimeout(
         this.connection.initialize({
           protocolVersion: PROTOCOL_VERSION,
-          clientCapabilities: {},
+          // The channel loop renders structured questions from
+          // `_meta.qwenQuestions` and answers through the private `answers`
+          // field, so it must keep the rich path instead of flat options.
+          clientCapabilities: {
+            _meta: { 'qwen.askUserQuestion': true },
+          },
           _meta: {
             [ACP_PRIVATE_PARENT_CAPABILITY_META_KEY]: privateParentCapability,
           },

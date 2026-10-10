@@ -60,7 +60,7 @@ export function createChannelInitializeRequest(
       [PRIVATE_PARENT_CAPABILITY_META_KEY]: privateParentCapability,
     },
     clientCapabilities: {
-      _meta: { 'qwen.goalProposals': true },
+      _meta: { 'qwen.goalProposals': true, 'qwen.askUserQuestion': true },
       fs: {
         readTextFile: delegateReadTextFileToClient,
         writeTextFile: true,

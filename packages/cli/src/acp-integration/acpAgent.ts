@@ -15549,6 +15549,13 @@ class QwenAgent implements Agent {
     ) {
       config.setGoalProposalHostSupported(true);
     }
+    // A host that understands the structured question payload keeps the rich
+    // `_meta.qwenQuestions` path; any other ACP client gets a flat per-choice
+    // option list (see `toPermissionOptions`). This is a wire-format
+    // capability, so it is honored on read-only Agent Hosts too.
+    if (this.clientCapabilities?._meta?.['qwen.askUserQuestion'] === true) {
+      config.setAskUserQuestionHostSupported(true);
+    }
     if (chatRecording !== false) {
       this.initializingConfigs.add(config);
     }

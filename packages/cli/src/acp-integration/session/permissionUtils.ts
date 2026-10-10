@@ -184,6 +184,25 @@ export function buildPermissionRequestContent(
     });
   }
 
+  // A conforming client is told to ignore `_meta`, so the questions must be
+  // readable in the standard content channel rather than only in the raw
+  // JSON payload. This is what a plain ACP host (e.g. Zed) renders. Nested
+  // sub-agent events may carry a partial question, so read defensively.
+  if (confirmation.type === 'ask_user_question') {
+    for (const question of confirmation.questions) {
+      const lines: string[] = [];
+      if (question.header) lines.push(question.header);
+      if (question.question) lines.push(question.question);
+      for (const option of question.options ?? []) {
+        lines.push(`• ${option.label} — ${option.description}`);
+      }
+      content.push({
+        type: 'content',
+        content: { type: 'text', text: lines.join('\n') },
+      });
+    }
+  }
+
   return content;
 }
 
@@ -227,9 +246,103 @@ export function requestPermissionWithAbort(
   });
 }
 
+/**
+ * ACP has no structured-choice primitive, so when the client does not
+ * understand `_meta.qwenQuestions` we flatten a single `ask_user_question`
+ * into one `PermissionOption` per choice. The option id encodes which
+ * question and choice it stands for; the label is recovered from the request.
+ */
+const ASK_USER_QUESTION_OPTION_PREFIX = 'ask:';
+const ASK_USER_QUESTION_OTHER_TOKEN = 'other';
+/**
+ * Answer recorded when the user picks the synthetic `Other…` choice. Free
+ * text cannot travel through a `PermissionOption`, so the model receives a
+ * parenthesised marker instead of a concrete answer.
+ */
+export const ASK_USER_QUESTION_OTHER_ANSWER = '(Other)';
+/**
+ * `_meta` key a client may use to return structured answers on the
+ * `RequestPermissionResponse`, as an alternative to the top-level `answers`
+ * sibling. `_meta` is a legal ACP response field, so an opt-in client can
+ * ride it without inventing a new tool response shape.
+ */
+export const ASK_USER_QUESTION_ANSWERS_META_KEY = 'qwenAnswers';
+
+interface ParsedAskUserQuestionOptionId {
+  readonly questionIndex: number;
+  /** Undefined for the synthetic `Other…` choice. */
+  readonly optionIndex?: number;
+}
+
+function encodeAskUserQuestionOptionId(
+  questionIndex: number,
+  choice: number | typeof ASK_USER_QUESTION_OTHER_TOKEN,
+): string {
+  return `${ASK_USER_QUESTION_OPTION_PREFIX}q${questionIndex}:${
+    choice === ASK_USER_QUESTION_OTHER_TOKEN ? choice : `o${choice}`
+  }`;
+}
+
+function parseAskUserQuestionOptionId(
+  optionId: unknown,
+): ParsedAskUserQuestionOptionId | undefined {
+  if (typeof optionId !== 'string') return undefined;
+  const match = /^ask:q(\d+):(?:o(\d+)|(other))$/.exec(optionId);
+  if (!match) return undefined;
+  return match[2] !== undefined
+    ? { questionIndex: Number(match[1]), optionIndex: Number(match[2]) }
+    : { questionIndex: Number(match[1]) };
+}
+
+/**
+ * Decides whether a confirmation can be projected onto a flat option list.
+ * One question is unambiguous; two or more would interleave choices from
+ * different questions in a single select, so those keep the generic pair.
+ */
+function canFlattenAskUserQuestion(
+  confirmation: ToolCallConfirmationDetails,
+): confirmation is Extract<
+  ToolCallConfirmationDetails,
+  { type: 'ask_user_question' }
+> {
+  return (
+    confirmation.type === 'ask_user_question' &&
+    confirmation.questions.length === 1
+  );
+}
+
+function buildAskUserQuestionOptions(
+  confirmation: Extract<
+    ToolCallConfirmationDetails,
+    { type: 'ask_user_question' }
+  >,
+): PermissionOption[] {
+  const question = confirmation.questions[0]!;
+  return [
+    ...(question.options ?? []).map<PermissionOption>(
+      (option, optionIndex) => ({
+        optionId: encodeAskUserQuestionOptionId(0, optionIndex),
+        name: option.label,
+        kind: 'allow_once',
+      }),
+    ),
+    {
+      optionId: encodeAskUserQuestionOptionId(0, ASK_USER_QUESTION_OTHER_TOKEN),
+      name: 'Other…',
+      kind: 'allow_once',
+    },
+    {
+      optionId: ToolConfirmationOutcome.Cancel,
+      name: 'Cancel',
+      kind: 'reject_once',
+    },
+  ];
+}
+
 export function resolvePermissionOutcome(
   response: RequestPermissionResponse,
   offeredOptions: readonly PermissionOption[],
+  allowEncodedOptionIds = false,
 ): ToolConfirmationOutcome {
   if (response.outcome.outcome === 'cancelled') {
     return ToolConfirmationOutcome.Cancel;
@@ -241,6 +354,9 @@ export function resolvePermissionOutcome(
       `Permission response selected unoffered option: ${optionId}`,
     );
   }
+  if (allowEncodedOptionIds && parseAskUserQuestionOptionId(optionId)) {
+    return ToolConfirmationOutcome.ProceedOnce;
+  }
   if (
     !Object.values(ToolConfirmationOutcome).includes(
       optionId as ToolConfirmationOutcome,
@@ -251,10 +367,35 @@ export function resolvePermissionOutcome(
   return optionId as ToolConfirmationOutcome;
 }
 
+/**
+ * Recovers the answer map for a flattened `ask_user_question` from the
+ * selected option id. Returns undefined for unencoded ids (a capable client
+ * answers through the private `answers` channel instead).
+ */
+export function resolveAskUserQuestionAnswers(
+  confirmation: ToolCallConfirmationDetails,
+  optionId: string | undefined,
+): Record<string, string> | undefined {
+  if (confirmation.type !== 'ask_user_question' || optionId === undefined) {
+    return undefined;
+  }
+  const parsed = parseAskUserQuestionOptionId(optionId);
+  if (!parsed) return undefined;
+  const question = confirmation.questions[parsed.questionIndex];
+  if (!question) return undefined;
+  const key = String(parsed.questionIndex);
+  if (parsed.optionIndex === undefined) {
+    return { [key]: ASK_USER_QUESTION_OTHER_ANSWER };
+  }
+  const option = question.options[parsed.optionIndex];
+  return option ? { [key]: option.label } : undefined;
+}
+
 export function toPermissionOptions(
   confirmation: ToolCallConfirmationDetails,
   forceHideAlwaysAllow = false,
   persistencePolicy?: PermissionPersistencePolicy,
+  flattenStructuredQuestions = false,
 ): PermissionOption[] {
   switch (confirmation.type) {
     case 'edit':
@@ -359,6 +500,12 @@ export function toPermissionOptions(
         },
       ];
     case 'ask_user_question':
+      if (
+        flattenStructuredQuestions &&
+        canFlattenAskUserQuestion(confirmation)
+      ) {
+        return buildAskUserQuestionOptions(confirmation);
+      }
       return [
         {
           optionId: ToolConfirmationOutcome.ProceedOnce,
