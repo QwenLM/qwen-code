@@ -322,6 +322,115 @@ public final class HostedHarnessClient implements AutoCloseable {
                 operation, "continuation");
     }
 
+    /**
+     * H6b/H6c: one automation operation onto the Session's journal (the
+     * control plane's verbs). The Hosted side commits through its funnel and
+     * answers 202 with the settled result; a non-2xx answer surfaces as a
+     * {@link DaemonHttpException} the caller translates, and anything
+     * ambiguous is an unknown outcome to retry, never to guess at.
+     */
+    public Map<String, Object> runAutomationOperation(HarnessSessionRef session,
+            Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/automations/operations";
+        HttpSupport.Response response = sendMutation(
+                sessionPath(ref.getHarnessSessionId())
+                        + "/automations/operations",
+                body, ref.getHarnessClientId(), operation);
+        DaemonClient.requireStatus(response, 202, operation);
+        try {
+            Map<String, Object> json = JsonSupport.parseObject(
+                    response.getBody(), "automation operation response");
+            String state = JsonSupport.requiredString(json, "state",
+                    "automation operation");
+            if (!"settled".equals(state)) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness did not settle the automation operation");
+            }
+            String operationId = JsonSupport.requiredString(json,
+                    "operationId", "automation operation");
+            if (!operationId.equals(body.get("operationId"))) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness settled a different automation operation");
+            }
+            return json;
+        } catch (DaemonProtocolException e) {
+            throw new MutationOutcomeUnknownException(operation, e);
+        }
+    }
+
+    /**
+     * H4b: one child operation onto the Session's journal (the control
+     * plane's verbs). The Hosted side commits through its funnel and
+     * answers 202 once settled; anything ambiguous is an unknown outcome
+     * for the caller to retry, never to guess at.
+     */
+    public void runChildOperation(HarnessSessionRef session,
+            Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/children/operations";
+        HttpSupport.Response response = sendMutation(
+                sessionPath(ref.getHarnessSessionId())
+                        + "/children/operations",
+                body, ref.getHarnessClientId(), operation);
+        try {
+            DaemonClient.requireStatus(response, 202, operation);
+            Map<String, Object> json = JsonSupport.parseObject(
+                    response.getBody(), "child operation response");
+            String state = JsonSupport.requiredString(json, "state",
+                    "child operation");
+            if (!"settled".equals(state)) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness did not settle the child operation");
+            }
+            String operationId = JsonSupport.requiredString(json,
+                    "operationId", "child operation");
+            if (!operationId.equals(body.get("operationId"))) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness settled a different child operation");
+            }
+        } catch (DaemonProtocolException e) {
+            throw new MutationOutcomeUnknownException(operation, e);
+        }
+    }
+
+    /**
+     * H5b/H5c: one channel operation onto the Session's journal (the control
+     * plane's verbs). The Hosted side commits through its funnel and answers
+     * 202 with the settled result; a non-2xx answer surfaces as a
+     * {@link DaemonHttpException} the caller translates, and anything
+     * ambiguous is an unknown outcome to retry, never to guess at.
+     */
+    public Map<String, Object> runChannelOperation(HarnessSessionRef session,
+            Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/channels/operations";
+        HttpSupport.Response response = sendMutation(
+                sessionPath(ref.getHarnessSessionId())
+                        + "/channels/operations",
+                body, ref.getHarnessClientId(), operation);
+        DaemonClient.requireStatus(response, 202, operation);
+        try {
+            Map<String, Object> json = JsonSupport.parseObject(
+                    response.getBody(), "channel operation response");
+            String state = JsonSupport.requiredString(json, "state",
+                    "channel operation");
+            if (!"settled".equals(state)) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness did not settle the channel operation");
+            }
+            String operationId = JsonSupport.requiredString(json,
+                    "operationId", "channel operation");
+            if (!operationId.equals(body.get("operationId"))) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness settled a different channel operation");
+            }
+            return json;
+        } catch (DaemonProtocolException e) {
+            throw new MutationOutcomeUnknownException(operation, e);
+        }
+    }
+
     public PromptReceipt cancelManagedRuntime(CancelManagedRuntime request) {
         if (request == null) {
             throw new IllegalArgumentException("request must not be null");
