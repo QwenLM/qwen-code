@@ -591,6 +591,52 @@ describe.runIf(process.platform !== 'win32')(
       expect(await owned.mount.resolve('.')).toBe(owned.root);
     });
 
+    it('refuses a child replaced before its descriptor open and restored after', async () => {
+      // The in-walk descriptor check is the only guard for this
+      // interleaving: the walk's lstat sees the original, open(2) gets the
+      // replacement, and the post-walk lstat sees the restored original.
+      const owned = await observationFixture();
+      await fs.mkdir(path.join(owned.root, 'a'));
+      let swapped = false;
+      const fixtureLstat = fs.lstat;
+      vi.spyOn(fs, 'lstat').mockImplementation(async (...args) => {
+        const stats = await fixtureLstat(...args);
+        if (
+          !swapped &&
+          typeof args[0] === 'string' &&
+          /^\/proc\/self\/fd\/\d+\/a$/.test(args[0])
+        ) {
+          swapped = true;
+          await fs.rename(
+            path.join(owned.root, 'a'),
+            path.join(owned.root, 'original-a'),
+          );
+          await fs.mkdir(path.join(owned.root, 'a'));
+        }
+        return stats;
+      });
+      const fixtureOpen = fs.open;
+      vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+        const handle = await fixtureOpen(...args);
+        if (
+          typeof args[0] === 'string' &&
+          /^\/proc\/self\/fd\/\d+\/a$/.test(args[0])
+        ) {
+          await fs.rmdir(path.join(owned.root, 'a'));
+          await fs.rename(
+            path.join(owned.root, 'original-a'),
+            path.join(owned.root, 'a'),
+          );
+        }
+        return handle;
+      });
+      expect(await owned.mount.resolve('a')).toBeUndefined();
+      expect(owned.handles.filter((handle) => handle.fd !== -1)).toEqual([
+        owned.rootHandle,
+      ]);
+      expect(owned.mount.isAvailable).toBe(true);
+    });
+
     it('joins other child closes and retains a failed close as a permanent blocker', async () => {
       const owned = await observationFixture();
       await fs.mkdir(path.join(owned.root, 'a', 'b'), { recursive: true });
