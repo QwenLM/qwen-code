@@ -21,13 +21,28 @@ import { pendingSessionInputs } from './hosted-wake-intake.js';
 // model-free on the close path. See
 // docs/design/2026-10-03-managed-shell-monitor-runtime.md.
 
-/** One pending monitor notification, ready to be delivered to its turn. */
+/** One pending notification, ready to be delivered to its turn. */
 export interface HostedMonitorWakeTurn {
   readonly turnId: string;
   readonly text: string;
+  /**
+   * The committed input's source (`monitor`, H6's `automation`, H5's
+   * `channel`, or H4b's `child_agent`): an automation run settles from
+   * its turn, and a child acceptance's evidence gets consumed after the
+   * turn settles, which a monitor notification never owes. It also lets
+   * a settle hook tell a channel turn apart.
+   */
+  readonly source?: string;
 }
 
 export type HostedMonitorWakeState = 'idle' | 'busy' | 'blocked';
+
+/**
+ * A durable-resource read that faulted after the Store's own retry: the
+ * committed input is still owed, so the pump retries the read on its
+ * cadence instead of parking the resident Session as terminally broken.
+ */
+export class MonitorWakeTransientReadError extends Error {}
 
 /**
  * Whether the wake turn's id already carries durable history. A previous
@@ -46,8 +61,10 @@ export function wakeHasPriorAttempt(
 export interface HostedMonitorWakeDeps {
   /**
    * The oldest pending monitor notification with its envelope text, or
-   * undefined when the Session owes none. Read failures must throw; the
-   * pump reports them through {@link failed}.
+   * undefined when the Session owes none. Read failures must throw; a
+   * durable resource fault throws as {@link MonitorWakeTransientReadError}
+   * and the pump retries it on its cadence, while anything else reports
+   * through {@link failed}.
    */
   next(): Promise<HostedMonitorWakeTurn | undefined>;
   /** Busy Sessions queue; blocked Sessions report their remainder. */
@@ -56,14 +73,32 @@ export interface HostedMonitorWakeDeps {
    * Runs the notification's text turn and settles the input's turnId, or
    * marks the owner blocked when the turn cannot settle. Returns 'busy'
    * when the owner took a turn synchronously between the pump's state
-   * check and this call — the pump retries; anything else must consume
-   * the input (the pump verifies the settle before taking the next one).
-   * The busy claim must be checked and taken synchronously at the top of
-   * the call so a prompt route admission cannot interleave.
+   * check and this call — the pump retries; 'held' when a durable owner
+   * (a pending approval) holds the wait — the pump re-derives on its slow
+   * cadence without blocking, leaving the resolve route usable and
+   * observing the final Action itself; anything else must consume the
+   * input (the pump verifies the settle before taking the next one).
+   * 'recovery' says the turn stopped in a way the journal cannot prove
+   * either way — its trackers settle it for cause, never re-run it. The
+   * busy claim must be checked and taken synchronously at the top of the
+   * call so a prompt route admission cannot interleave.
    */
-  runTurn(turn: HostedMonitorWakeTurn): Promise<'settled' | 'busy'>;
+  runTurn(
+    turn: HostedMonitorWakeTurn,
+  ): Promise<'settled' | 'busy' | 'recovery' | 'held' | 'settled_incomplete'>;
   /** A failure the pump itself cannot recover: the owner decides. */
   failed(cause: unknown): void;
+  /**
+   * A Session blocked on a crash whose settle could not finish — its
+   * parked Runtime executions, the wake session's lease, the consume
+   * write — re-arms forever with no other kick source. While present,
+   * each blocked pump pass lets the owner retry that settle once, before
+   * re-arming: the state is re-read after it, so a settle that landed
+   * lets this very pass run the inputs it freed. Must not throw; a
+   * failure leaves the state blocked and the retry falls to the next
+   * pass (or to a load, which runs the same settle from the journal).
+   */
+  recoverBlocked?(): Promise<void>;
 }
 
 export class HostedMonitorWakeScheduler {
@@ -75,6 +110,10 @@ export class HostedMonitorWakeScheduler {
   constructor(
     private readonly deps: HostedMonitorWakeDeps,
     private readonly retryMs = 500,
+    // A held wait's owner decides on a human timescale: re-derive on a slow
+    // cadence rather than the busy retry's, so the pump observes the final
+    // Action without hammering the Store behind an approval.
+    private readonly holdRetryMs = retryMs * 30,
   ) {}
 
   /**
@@ -92,7 +131,16 @@ export class HostedMonitorWakeScheduler {
     }
     this.inFlight = true;
     void this.pump()
-      .catch((cause: unknown) => this.deps.failed(cause))
+      .catch((cause: unknown) => {
+        this.deps.failed(cause);
+        // A pass that dies while its owner is blocked — a crash residue's
+        // settle meeting a transient fault — must not take the reminders
+        // with it: the blocked cycle re-arms itself, or only a reload
+        // would ever run the same settle again.
+        if (!this.closed && this.deps.state() === 'blocked') {
+          this.armRetry();
+        }
+      })
       .finally(() => {
         this.inFlight = false;
         if (this.pendingKick && !this.closed) {
@@ -118,30 +166,78 @@ export class HostedMonitorWakeScheduler {
       const state = this.deps.state();
       // A transiently blocked Session — an MCP or Hook operation in
       // flight, or an activation that has not come up yet — has no other
-      // kick source, so the reminder arms its own retry here too.
+      // kick source, so the reminder arms its own retry here too. A
+      // crash-blocked one gets its settle retried first: when it lands,
+      // this same pass runs what it freed instead of waiting a cycle.
       if (state === 'blocked') {
-        this.armRetry();
-        return;
+        if (this.deps.recoverBlocked === undefined) {
+          this.armRetry();
+          return;
+        }
+        await this.deps.recoverBlocked();
+        if (this.deps.state() === 'blocked') {
+          this.armRetry();
+          return;
+        }
       }
-      const next = await this.deps.next();
+      let next: HostedMonitorWakeTurn | undefined;
+      try {
+        next = await this.deps.next();
+      } catch (cause) {
+        // A faulting envelope read is owed the same retry cadence as a
+        // busy Session: the durable input stays pending, and everything
+        // the pump would have parked on heals without a detach.
+        if (cause instanceof MonitorWakeTransientReadError) {
+          this.armRetry();
+          return;
+        }
+        throw cause;
+      }
       if (next === undefined) return;
       if (state === 'busy' || this.deps.state() === 'busy') {
         this.armRetry();
         return;
       }
-      if ((await this.deps.runTurn(next)) === 'busy') {
+      const outcome = await this.deps.runTurn(next);
+      if (outcome === 'busy') {
         this.armRetry();
+        return;
+      }
+      // A held wait belongs to its durable owner (a pending approval): no
+      // busy retry and no settle-verify — but the durable Action decides
+      // in this process, so the pump re-derives on the slow cadence and
+      // settles the ended wait itself instead of waiting for a new input.
+      if (outcome === 'held') {
+        this.armRetry(this.holdRetryMs);
         return;
       }
       // runTurn must have consumed the input: re-reading the journal is
       // the only honest check, and consuming is what lets the next
       // notification's turn begin. When the owner's own settle path went
-      // blocked meanwhile, that accurate blocked is where this pump stops;
-      // anything else that leaves the input in place is a programming
-      // error and is thrown.
-      const again = await this.deps.next();
+      // blocked meanwhile — a crash residue its consume write could not
+      // finish — that accurate blocked is where this pump stops: it keeps
+      // its own reminder armed, so the settle is retried instead of
+      // waiting for a reload or another caller to kick. Anything else
+      // that leaves the input in place is a programming error and is
+      // thrown.
+      let again: HostedMonitorWakeTurn | undefined;
+      try {
+        again = await this.deps.next();
+      } catch (cause) {
+        // The settle-verify read walks the same durable path as the intake
+        // read: a transient fault there owes the retry cadence too, or the
+        // Session latches blocked behind a verified settle (R10 P2).
+        if (cause instanceof MonitorWakeTransientReadError) {
+          this.armRetry();
+          return;
+        }
+        throw cause;
+      }
       if (again?.turnId === next.turnId) {
-        if (this.deps.state() === 'blocked') return;
+        if (this.deps.state() === 'blocked') {
+          this.armRetry();
+          return;
+        }
         throw new Error(
           `Monitor wake turn ${next.turnId} did not consume its input.`,
         );
@@ -150,42 +246,51 @@ export class HostedMonitorWakeScheduler {
     }
   }
 
-  private armRetry(): void {
+  private armRetry(delayMs = this.retryMs): void {
     if (this.retry !== undefined) return;
     this.retry = setTimeout(() => {
       this.retry = undefined;
       this.kick();
-    }, this.retryMs);
+    }, delayMs);
     this.retry.unref();
   }
 }
 
 /**
- * The unadmittable path: a monitor notification that never ran a turn
- * settles cancelled without a model turn, under the turn-result record's
- * own idempotency key. Called on the close path so no wedged notification
- * parks the Session as `hosted_turn_recovery_required` at its next open.
- * A notification whose wake turn already started belongs to the recovery
- * fleet, never to a `cancelled` line on top of a turn that ran.
+ * The unadmittable path: a monitor or child-agent notification that never
+ * ran a turn settles cancelled without a model turn, under the turn-result
+ * record's own idempotency key. Called on the close path so no wedged
+ * notification parks the Session as `hosted_turn_recovery_required` at its
+ * next open. A notification whose wake turn already started belongs to the
+ * recovery fleet, never to a `cancelled` line on top of a turn that ran.
  */
 export async function settlePendingMonitorInputs(params: {
   readonly authority: LocalManagedSessionAuthority;
   readonly sink: ManagedSessionRecordSink;
   readonly sessionId: string;
   readonly cwd: string;
+  /** The notification sources to settle; H5 adds `channel` and H6 adds
+   * `automation` to the monitor family. */
+  readonly sources?: readonly string[];
 }): Promise<number> {
+  const sources = params.sources ?? ['monitor', 'child_agent'];
   // The whole committed prefix, not a bounded page: a notification input
   // lands late in the log, and `readEvents()` alone would stop at the
   // default page and leave the Session's owed inputs unsettled — which is
   // exactly the wedge this close-path settle exists to prevent.
   const authority = params.authority;
-  const attempted = await params.sink.project();
-  const pending = pendingSessionInputs(
+  const queued = pendingSessionInputs(
     authority.eventsInSequenceRange(1, authority.committedSequence),
-  ).filter(
-    (input) =>
-      input.source === 'monitor' &&
-      !wakeHasPriorAttempt(attempted, input.turnId),
+  ).filter((input) => sources.includes(input.source));
+  // A close over no such input pays no transcript projection at all: every
+  // close path induced by an attached Session would otherwise page the
+  // whole committed prefix.
+  if (queued.length === 0) {
+    return 0;
+  }
+  const attempted = await params.sink.project();
+  const pending = queued.filter(
+    (input) => !wakeHasPriorAttempt(attempted, input.turnId),
   );
   for (const input of pending) {
     const settle: ChatRecord = {

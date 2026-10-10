@@ -72,6 +72,7 @@ import { clearLoadedSkillTracking } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
+import { appendAutoMemoryContext } from '../memory/request-context.js';
 import { completedToolCallBoundary } from './turn-interruption.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { StructuredError } from './turn.js';
@@ -2589,7 +2590,10 @@ export class LlmChat {
         requestHistory.push({ role: 'user', parts: reattachParts });
       }
     }
-    return requestHistory;
+    return appendAutoMemoryContext(
+      requestHistory,
+      this.config.getAutoMemoryContext?.() ?? '',
+    );
   }
 
   private getRequestHistoryForRoute(

@@ -356,7 +356,9 @@ function buildManagedSessionRestoreProjection(
       const uiEvent = (
         record.systemPayload as UiTelemetryRecordPayload | undefined
       )?.uiEvent;
-      if (uiEvent) uiTelemetryEvents.push(uiEvent);
+      if (uiEvent && uiEvent['event.name'] !== 'request_lifecycle') {
+        uiTelemetryEvents.push(uiEvent as UiEvent);
+      }
     }
     if (record.subtype === 'attribution_snapshot') {
       const snapshot = (
@@ -3257,7 +3259,9 @@ export class SessionTranscriptReader {
         const uiEvent = (
           record.systemPayload as UiTelemetryRecordPayload | undefined
         )?.uiEvent;
-        if (uiEvent) uiTelemetryEvents.push(uiEvent);
+        if (uiEvent && uiEvent['event.name'] !== 'request_lifecycle') {
+          uiTelemetryEvents.push(uiEvent as UiEvent);
+        }
       }
       if (record.uuid === attributionUuid) {
         const snapshot = (

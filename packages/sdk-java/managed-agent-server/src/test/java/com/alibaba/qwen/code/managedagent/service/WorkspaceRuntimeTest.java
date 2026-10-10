@@ -323,7 +323,7 @@ class WorkspaceRuntimeTest {
         RuntimeProvisioner local = mock(RuntimeProvisioner.class);
         when(local.kind()).thenReturn("local-process");
         when(local.supportsStartupRecovery(any())).thenReturn(true);
-        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?",
+        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?",
                 session.tenantId());
         jdbc.update("UPDATE managed_agent_session SET status = 'DELETED', deleted_at = 2"
                 + " WHERE session_id = ?", session.sessionId());
@@ -347,8 +347,9 @@ class WorkspaceRuntimeTest {
                 .isEqualTo(ToolExecutionRecord.State.SETTLED);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_execution_lease"
                 + " WHERE binding_id = ?", Long.class, runtime.getBindingId())).isZero();
-        jdbc.update("UPDATE managed_workspace_access SET can_read = TRUE WHERE tenant_id = ?",
-                session.tenantId());
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                + " VALUES (?, 'workspace', ?, 'OPERATOR')",
+                session.tenantId(), "actor".getBytes(StandardCharsets.UTF_8));
         jdbc.update("UPDATE managed_agent_session SET status = 'ACTIVE', deleted_at = NULL"
                 + " WHERE session_id = ?", session.sessionId());
         RuntimeSessionRecord next = holder(session, "next");
@@ -380,11 +381,13 @@ class WorkspaceRuntimeTest {
     void refusesRevokedGrantsDeletedSessionsAndUnknownFrozenProfiles() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var resolver = resolver(session, temp.toRealPath());
-        jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE WHERE tenant_id = ?", session.tenantId());
+        jdbc.update("UPDATE managed_workspace_access SET role = 'READER' WHERE tenant_id = ?", session.tenantId());
         assertUnavailable(() -> resolver.resolve(session.sessionId()));
-        jdbc.update("UPDATE managed_workspace_access SET can_create = TRUE, can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?", session.tenantId());
         assertUnavailable(() -> resolver.resolve(session.sessionId()));
-        jdbc.update("UPDATE managed_workspace_access SET can_read = TRUE WHERE tenant_id = ?", session.tenantId());
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                + " VALUES (?, 'workspace', ?, 'OPERATOR')",
+                session.tenantId(), "actor".getBytes(StandardCharsets.UTF_8));
         jdbc.update("UPDATE managed_agent_session SET status = 'DELETED', deleted_at = 2 WHERE session_id = ?", session.sessionId());
         assertUnavailable(() -> resolver.resolve(session.sessionId()));
         jdbc.update("UPDATE managed_agent_session SET status = 'ACTIVE', deleted_at = NULL,"
@@ -416,7 +419,7 @@ class WorkspaceRuntimeTest {
         assertUnavailable(() -> checked.authorize(session));
         checked.authorizePassiveAttachment(session);
         verify(guard).verify(session.workspace());
-        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?", session.tenantId());
         assertUnavailable(() -> checked.authorizePassiveAttachment(session));
     }
 
@@ -534,7 +537,7 @@ class WorkspaceRuntimeTest {
         when(fixture.http().installContext(any(), any(), any(), any()))
                 .thenReturn(CompletableFuture.completedFuture(Map.of()));
         when(fixture.http().activateWorkspace(any(), any(), any(), eq(true))).thenAnswer(ignored -> {
-            jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+            jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?", session.tenantId());
             return CompletableFuture.completedFuture(null);
         });
         assertThatThrownBy(() -> fixture.transport().acquire(fixture.lease(), fixture.record().getSession())
@@ -656,7 +659,7 @@ class WorkspaceRuntimeTest {
                 .containsEntry("tenantId", session.tenantId()).containsEntry("bindingGeneration", "1")
                 .containsEntry("executionCallId", "execution");
         verify(fixture.http(), never()).execute(any(), any(), any());
-        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?", session.tenantId());
         assertUnavailable(() -> fixture.transport().installPublisher(fixture.lease(), runtimeSession, publisher));
         when(fixture.http().statusV3(any(), any(), any(), eq(0L))).thenReturn(CompletableFuture.completedFuture(response));
         when(fixture.http().cancelV3(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(response));
@@ -673,7 +676,7 @@ class WorkspaceRuntimeTest {
         var fixture = transport(session);
         var runtimeSession = fixture.record().getSession();
         authority.claim(session.workspace(), fixture.record());
-        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?", session.tenantId());
         assertThat(fixture.transport().execute(fixture.lease(), runtimeSession, Map.of()).toCompletableFuture().join())
                 .containsEntry("executionStatus", "not_started")
                 .containsEntry("error", Map.of("type", "workspace_unavailable",
@@ -704,7 +707,7 @@ class WorkspaceRuntimeTest {
         when(fixture.http().control(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(Map.of("state", "running")));
         assertThat(fixture.transport().control(fixture.lease(), runtimeSession, configure).toCompletableFuture().join())
                 .isEqualTo(Map.of("state", "running"));
-        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?", session.tenantId());
         for (String kind : List.of("mcp-configure", "mcp-discover")) {
             assertUnavailable(() -> fixture.transport().control(fixture.lease(), runtimeSession, mcpControl(session, kind)));
         }
@@ -730,7 +733,7 @@ class WorkspaceRuntimeTest {
                 checked, fixture.bindings(), new JdbcRuntimeSessionRepository(dataSource));
         assertUnavailable(() -> transport.control(fixture.lease(), runtimeSession, mcpControl(session, "mcp-configure")));
         verify(fixture.http(), never()).control(any(), any(), any());
-        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?", session.tenantId());
         String storageKey = digest(session.tenantId() + "\0" + session.workspace().getStorageId())
                 .substring("sha256:".length());
         var originalHolder = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease WHERE storage_key = ?", storageKey);
@@ -774,7 +777,7 @@ class WorkspaceRuntimeTest {
         when(fixture.http().control(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(Map.of("state", "running")));
         assertThat(fixture.transport().control(fixture.lease(), runtimeSession, configure).toCompletableFuture().join())
                 .isEqualTo(Map.of("state", "running"));
-        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?", session.tenantId());
         for (String kind : List.of("hook-execute", "hook-catalog")) {
             assertUnavailable(() -> fixture.transport().control(fixture.lease(), runtimeSession, hookControl(session, kind)));
         }
@@ -825,7 +828,7 @@ class WorkspaceRuntimeTest {
             verify(fixture.http()).control(fixture.lease(), runtimeSession, hook);
         }
         assertUnavailable(() -> fixture.transport().control(fixture.lease(), runtimeSession, mcpControl(session, "mcp-configure")));
-        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?", session.tenantId());
         assertUnavailable(() -> fixture.transport().control(fixture.lease(), runtimeSession, hookControl(session, "hook-execute")));
         fixture.transport().control(fixture.lease(), runtimeSession, hookControl(session, "hook-status")).toCompletableFuture().join();
         authority.assertHeld(session.workspace(), fixture.record());
@@ -849,7 +852,7 @@ class WorkspaceRuntimeTest {
         var fixture = transport(session);
         var runtimeSession = fixture.record().getSession();
         authority.claim(session.workspace(), fixture.record());
-        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?", session.tenantId());
         Map<String, Object> original = Map.of("callId", "original");
         when(fixture.http().statusV3(any(), any(), any(), eq(0L)))
                 .thenReturn(CompletableFuture.completedFuture(Map.of("state", "executing")));
@@ -883,7 +886,7 @@ class WorkspaceRuntimeTest {
         when(fixture.http().control(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(Map.of()));
         fixture.transport().control(fixture.lease(), runtimeSession, Map.of("kind", "manifest"))
                 .toCompletableFuture().join();
-        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?", session.tenantId());
         assertUnavailable(() -> fixture.transport().control(fixture.lease(), runtimeSession, Map.of("kind", "prepare")));
         verify(fixture.http(), never()).control(any(), any(), eq(Map.of("kind", "prepare")));
         fixture.transport().control(fixture.lease(), runtimeSession, Map.of("kind", "history"))
@@ -972,6 +975,32 @@ class WorkspaceRuntimeTest {
             RuntimeBindingRepository bindings) {
     }
 
+    @Test
+    void childWorkspaceMaintenanceAndToolTurnsExcludeEachOther() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        RuntimeSessionRecord turn = holder(session, UUID.randomUUID().toString());
+        String maintenance = UUID.randomUUID().toString().replace("-", "");
+        jdbc.update("INSERT INTO qwen_managed_child_workspace (tenant_id, parent_session_id, child_run_id,"
+                + " child_workspace_id, workspace_id, workspace_generation, storage_id, parent_cwd_relative,"
+                + " state, claim_generation, claimed_until, created_at, updated_at) VALUES (?, ?, 'run', ?,"
+                + " 'workspace', 1, 'storage', '.', 'preparing', 3, ?, 0, 0)", session.tenantId(), session.sessionId(),
+                maintenance, Long.MAX_VALUE);
+
+        authority.holdForMaintenance(session.workspace(), maintenance, 3);
+        assertBusy(() -> authority.claim(session.workspace(), turn));
+        assertBusy(() -> authority.assertHeld(session.workspace(), turn));
+        authority.releaseMaintenance(session.workspace(), maintenance, 3);
+
+        authority.claim(session.workspace(), turn);
+        assertBusy(() -> authority.holdForMaintenance(session.workspace(), maintenance, 3));
+        authority.release(session.workspace(), turn);
+        authority.holdForMaintenance(session.workspace(), maintenance, 3);
+        assertThat(jdbc.queryForList("SELECT maintenance_id FROM managed_workspace_execution_lease"
+                + " WHERE maintenance_id = ? AND holder_key IS NOT NULL", String.class, maintenance))
+                .containsExactly(maintenance);
+        authority.releaseMaintenance(session.workspace(), maintenance, 3);
+    }
+
     private JdbcRuntimeBindingRepository bindings() {
         return new JdbcRuntimeBindingRepository(dataSource, new AesGcmSecretProtector("test-key", new byte[32]));
     }
@@ -1010,8 +1039,8 @@ class WorkspaceRuntimeTest {
         jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
                 + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, ?,"
                 + " 'Workspace', ?, ?, 'ACTIVE')", tenant, storage, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                + " VALUES (?, 'workspace', ?, TRUE, TRUE)", tenant, "actor".getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
         var created = sessions.insertWorkspaceSessionCommand(tenant, "actor", "create", "sha256:" + "a".repeat(64),
                 "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", cwd));
         return sessions.findSessionById(created.sessionId()).orElseThrow();

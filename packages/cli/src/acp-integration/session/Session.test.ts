@@ -36,6 +36,7 @@ import type {
   Extension,
   LlmChat,
   ProviderModelConfig,
+  RequestLifecycleEvent,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -608,6 +609,7 @@ describe('Session', () => {
     get: ReturnType<typeof vi.fn>;
   };
   let mockToolRegistry: {
+    getAllToolNames: ReturnType<typeof vi.fn>;
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
     isDeferredAndHidden: ReturnType<typeof vi.fn>;
@@ -973,6 +975,7 @@ describe('Session', () => {
     };
 
     mockToolRegistry = {
+      getAllToolNames: vi.fn().mockReturnValue([]),
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
       isDeferredAndHidden: vi.fn().mockReturnValue(false),
@@ -2907,6 +2910,261 @@ describe('Session', () => {
       'wfap_cleared',
       core.ToolConfirmationOutcome.Cancel,
     );
+  });
+
+  describe('request lifecycle subscriptions', () => {
+    const started: RequestLifecycleEvent = {
+      v: 1,
+      kind: 'request',
+      executionId: 'request-1',
+      sessionId: 'test-session-id',
+      promptId: 'prompt-1',
+      model: 'model-1',
+      startedAt: 100,
+      phase: 'started',
+    };
+
+    function lifecycleConfig(base: Config) {
+      const listeners = new Set<(event: RequestLifecycleEvent) => void>();
+      const unsubscribe = vi.fn();
+      const config = {
+        ...base,
+        onRequestLifecycle: vi.fn(
+          (listener: (event: RequestLifecycleEvent) => void) => {
+            listeners.add(listener);
+            return () => {
+              unsubscribe();
+              listeners.delete(listener);
+            };
+          },
+        ),
+      } as unknown as Config;
+      return {
+        config,
+        listeners,
+        unsubscribe,
+        emit(event: RequestLifecycleEvent) {
+          for (const listener of listeners) listener(event);
+        },
+      };
+    }
+
+    it('routes only matching sessions on the subscribed config instance', async () => {
+      session.dispose();
+      const first = lifecycleConfig(mockConfig);
+      const other = lifecycleConfig(mockConfig);
+      session = new Session(
+        'test-session-id',
+        first.config,
+        mockClient,
+        mockSettings,
+      );
+      const secondClient = {
+        ...mockClient,
+        sessionUpdate: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AgentSideConnection;
+      const second = new Session(
+        'other-session',
+        first.config,
+        secondClient,
+        mockSettings,
+      );
+      const thirdClient = {
+        ...mockClient,
+        sessionUpdate: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AgentSideConnection;
+      const third = new Session(
+        'test-session-id',
+        other.config,
+        thirdClient,
+        mockSettings,
+      );
+      try {
+        vi.mocked(mockClient.sessionUpdate).mockClear();
+        first.emit(started);
+        await Promise.resolve();
+        expect(mockClient.sessionUpdate).toHaveBeenCalledOnce();
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: { executionLifecycle: started },
+          },
+        });
+        expect(secondClient.sessionUpdate).not.toHaveBeenCalled();
+        expect(thirdClient.sessionUpdate).not.toHaveBeenCalled();
+        first.emit({ ...started, sessionId: 'other-session' });
+        other.emit(started);
+        await Promise.resolve();
+        expect(mockClient.sessionUpdate).toHaveBeenCalledOnce();
+        expect(secondClient.sessionUpdate).toHaveBeenCalledOnce();
+        expect(thirdClient.sessionUpdate).toHaveBeenCalledOnce();
+      } finally {
+        second.dispose();
+        third.dispose();
+      }
+    });
+
+    it('retains the ACP identity while admitting rotated transcript owners and their late ends', async () => {
+      session.dispose();
+      const owner = lifecycleConfig(mockConfig);
+      session = new Session(
+        'test-session-id',
+        owner.config,
+        mockClient,
+        mockSettings,
+      );
+      const otherClient = {
+        ...mockClient,
+        sessionUpdate: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AgentSideConnection;
+      const otherSession = new Session(
+        'other-session',
+        owner.config,
+        otherClient,
+        mockSettings,
+      );
+      try {
+        vi.mocked(mockClient.sessionUpdate).mockClear();
+        owner.emit(started);
+        owner.config.getSessionId = vi.fn().mockReturnValue('rotated-session');
+        session.rebindGoalRuntimeForNewSession();
+        const rotated = { ...started, sessionId: 'rotated-session' };
+        owner.emit(rotated);
+        owner.config.getSessionId = vi.fn().mockReturnValue('next-session');
+        session.rebindGoalRuntimeForNewSession();
+        owner.emit({ ...started, executionId: 'unaccepted-old-start' });
+        owner.emit({
+          ...started,
+          phase: 'ended',
+          endedAt: 120,
+          durationMs: 20,
+          outcome: 'success',
+          subagentId: 'unaccepted-agent',
+        });
+        owner.emit({
+          ...started,
+          phase: 'ended',
+          endedAt: 120,
+          durationMs: 20,
+          outcome: 'success',
+        });
+        owner.emit({
+          ...rotated,
+          phase: 'ended',
+          endedAt: 120,
+          durationMs: 20,
+          outcome: 'success',
+        });
+        owner.emit({ ...started, sessionId: 'next-session' });
+        await Promise.resolve();
+        const calls = vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.map(([params]) => params);
+        expect(calls).toHaveLength(5);
+        expect(calls.map((params) => params.sessionId)).toEqual(
+          Array(5).fill('test-session-id'),
+        );
+        expect(
+          calls.map((params) => params.update._meta?.['executionLifecycle']),
+        ).toEqual([
+          started,
+          rotated,
+          {
+            ...started,
+            phase: 'ended',
+            endedAt: 120,
+            durationMs: 20,
+            outcome: 'success',
+          },
+          {
+            ...rotated,
+            phase: 'ended',
+            endedAt: 120,
+            durationMs: 20,
+            outcome: 'success',
+          },
+          { ...started, sessionId: 'next-session' },
+        ]);
+        expect(otherClient.sessionUpdate).not.toHaveBeenCalled();
+        owner.emit({ ...started, sessionId: 'other-session' });
+        await Promise.resolve();
+        expect(otherClient.sessionUpdate).toHaveBeenCalledOnce();
+        expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(5);
+      } finally {
+        otherSession.dispose();
+      }
+    });
+
+    it('retains every admitted late end beyond the SDK window and rejects repeated old ends', async () => {
+      session.dispose();
+      const owner = lifecycleConfig(mockConfig);
+      session = new Session(
+        'test-session-id',
+        owner.config,
+        mockClient,
+        mockSettings,
+      );
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      for (let i = 0; i < 257; i++)
+        owner.emit({ ...started, executionId: `request-${i}` });
+      owner.config.getSessionId = vi.fn().mockReturnValue('rotated-session');
+      session.rebindGoalRuntimeForNewSession();
+      const ended = {
+        ...started,
+        phase: 'ended' as const,
+        endedAt: 120,
+        durationMs: 20,
+        outcome: 'success' as const,
+      };
+      for (let i = 0; i < 257; i++)
+        owner.emit({ ...ended, executionId: `request-${i}` });
+      owner.emit({ ...ended, executionId: 'request-256' });
+      await Promise.resolve();
+      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(514);
+      expect(
+        vi.mocked(mockClient.sessionUpdate).mock.calls.at(-1)?.[0].update
+          ._meta?.['executionLifecycle'],
+      ).toEqual({ ...ended, executionId: 'request-256' });
+    });
+
+    it('delivers lifecycle output during reversible closing and suppresses disposed emissions', async () => {
+      session.dispose();
+      const owner = lifecycleConfig(mockConfig);
+      session = new Session(
+        'test-session-id',
+        owner.config,
+        mockClient,
+        mockSettings,
+      );
+      const lateListener = [...owner.listeners][0];
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      owner.emit(started);
+      const release = session.beginClose();
+      owner.emit({
+        ...started,
+        phase: 'ended',
+        endedAt: 120,
+        durationMs: 20,
+        outcome: 'success',
+      });
+      await Promise.resolve();
+      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(2);
+      release();
+      owner.emit({ ...started, executionId: 'request-2' });
+      await Promise.resolve();
+      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(3);
+      session.dispose();
+      expect(owner.unsubscribe).toHaveBeenCalledOnce();
+      expect(owner.listeners.size).toBe(0);
+      owner.emit(started);
+      lateListener?.(started);
+      await Promise.resolve();
+      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(3);
+      session.dispose();
+      expect(owner.unsubscribe).toHaveBeenCalledOnce();
+    });
   });
 
   it('forwards recording degradation and unsubscribes on dispose', async () => {

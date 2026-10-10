@@ -19,6 +19,7 @@ import {
 import {
   ManagedSessionStoreHttpError,
   ManagedSessionStoreTransportError,
+  collectNestedResourceRefs,
   createHttpManagedSessionStores,
   readOnlyManagedSessionSnapshot,
 } from './http-managed-session-store.js';
@@ -28,6 +29,7 @@ import {
   managedSessionEventsDigest,
   parseManagedSessionEvent,
 } from './managed-session-records.js';
+import { ManagedSessionCommitRejectedError } from './managed-session-storage.js';
 import type {
   ManagedSessionDurableRef,
   ManagedSessionKey,
@@ -2693,6 +2695,65 @@ describe('HTTP Managed Session store', () => {
     await session.close().catch(() => undefined);
   });
 
+  it.each([
+    // The verdict/mint gate (R24).
+    'child_run_lineage_minted',
+    // A session message the store's lineage refuses (H4d).
+    'session_message_lineage_refused',
+  ])(
+    'treats the %s refusal as rollbackable and commits the corrected retry',
+    async (code) => {
+      const server = new FakeManagedSessionStore();
+      const { stores, session } = await bootStoresAndSession(server);
+      const defaultImpl = server.fetch.getMockImplementation()!;
+      let armed = true;
+      let attempts = 0;
+      server.fetch.mockImplementation(async (input, init) => {
+        if (requestUrl(input).endsWith('/transactions:commit')) {
+          const body = JSON.parse(String(init?.body)) as Record<
+            string,
+            unknown
+          >;
+          if (body['operation'] === 'message.commit') {
+            attempts++;
+            if (armed) {
+              armed = false;
+              return jsonResponse(
+                {
+                  error: {
+                    code,
+                    message: 'the store refused the revision',
+                  },
+                },
+                409,
+              );
+            }
+          }
+        }
+        return defaultImpl(input, init);
+      });
+      const messageRef = await stores.resourceStore.publish(
+        'managed-message',
+        Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
+      );
+      // The refusal is a rollbackable non-commit, never the write failure
+      // that latches the authority's log shut behind it.
+      await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
+        ManagedSessionCommitRejectedError,
+      );
+      expect(session.authority.writesStopped).toBe(false);
+      // The corrected retry commits on the same resident authority.
+      await appendMessage(session, 2, messageRef);
+      expect(session.authority.writesStopped).toBe(false);
+      expect(attempts).toBe(2);
+      const landed = server.commits.filter(
+        (body) => body['operation'] === 'message.commit',
+      ).length;
+      expect(landed).toBe(1);
+      await session.close();
+    },
+  );
+
   it('surfaces a typed 409 for a resource missing server-side and keeps staged bytes for retry', async () => {
     const server = new FakeManagedSessionStore();
     const { stores, session } = await bootStoresAndSession(server);
@@ -3218,3 +3279,68 @@ function jsonResponse(body: unknown, status = 200): Response {
     },
   });
 }
+
+describe('collectNestedResourceRefs', () => {
+  function closureRef(kind: string, seed: string): ManagedSessionDurableRef {
+    const bytes = Buffer.from(seed, 'utf8');
+    return {
+      kind,
+      resourceId: crypto.randomUUID(),
+      schemaVersion: 1,
+      byteLength: bytes.byteLength,
+      digest: createHash('sha256').update(bytes).digest('hex'),
+    };
+  }
+
+  it('closes over attachment refs embedded in a managed-input envelope (R8 P1)', () => {
+    // The leak: the commit uploaded the envelope but never the attachment
+    // bytes it admits — a reopened reader found the envelope and 404'd on
+    // its attachments.
+    const envelopeRef = closureRef('managed-input', 'envelope');
+    const attachmentRef = closureRef('managed-channel-attachment', 'bytes-1');
+    const secondAttachmentRef = closureRef(
+      'managed-channel-attachment',
+      'bytes-2',
+    );
+    const envelope = Buffer.from(
+      JSON.stringify({
+        v: 1,
+        inputId: 'chin-a',
+        attachments: [
+          {
+            fileName: 'a.txt',
+            mimeType: 'text/plain',
+            byteLength: 7,
+            ref: attachmentRef,
+          },
+          {
+            fileName: 'b.png',
+            mimeType: 'image/png',
+            byteLength: 9,
+            digest: 'x'.repeat(64),
+            ref: secondAttachmentRef,
+          },
+          { fileName: 'huge.mov', omitted: 'too_large' },
+        ],
+      }),
+      'utf8',
+    );
+    const nested = collectNestedResourceRefs(envelopeRef, envelope);
+    expect(nested.map((ref) => ref.resourceId).sort()).toEqual(
+      [attachmentRef.resourceId, secondAttachmentRef.resourceId].sort(),
+    );
+    expect(
+      nested.every((ref) => ref.kind === 'managed-channel-attachment'),
+    ).toBe(true);
+  });
+
+  it('keeps a managed-input body it cannot represent out of the closure', () => {
+    const envelopeRef = closureRef('managed-input', 'plain-string-body');
+    expect(
+      collectNestedResourceRefs(
+        envelopeRef,
+        Buffer.from('{"text":"<task-notification />"}', 'utf8'),
+      ),
+    ).toEqual([]);
+  });
+});

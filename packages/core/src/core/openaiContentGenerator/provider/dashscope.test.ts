@@ -28,6 +28,8 @@ import {
   DEFAULT_MAX_RETRIES,
   DISABLED_REQUEST_TIMEOUT_MS,
 } from '../constants.js';
+import { trailingReattachPartCount } from '../../../services/image-payload-references.js';
+import { appendAutoMemoryContext } from '../../../memory/request-context.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 
@@ -1738,6 +1740,30 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(content?.[0]).toMatchObject(cachedText('Stable user text'));
       expect(content?.[1]).not.toHaveProperty('cache_control');
       expect(content?.[2]).not.toHaveProperty('cache_control');
+    });
+
+    it('places the conversation breakpoint before the request-only memory catalog', () => {
+      // Driven end to end through the real append + counter: the catalog part
+      // is regenerated per request and never stored, so anchoring on it writes
+      // an entry the next turn cannot read back (issue #11627's invariant).
+      const contents = appendAutoMemoryContext(
+        [{ role: 'user', parts: [{ text: 'what changed?' }] }],
+        'current memory catalog',
+      );
+      const result = streamed(
+        [
+          { role: 'system', content: 'System prompt' },
+          {
+            role: 'user',
+            content: [txt('what changed?'), txt('current memory catalog')],
+          },
+        ],
+        trailingReattachPartCount(contents),
+      );
+      const content = contentAt(result, 1);
+      expect(trailingReattachPartCount(contents)).toBe(1);
+      expect(content?.[0]).toMatchObject(cachedText('what changed?'));
+      expect(content?.[1]).not.toHaveProperty('cache_control');
     });
 
     it('walks back to the previous message when the whole last message is reattach', () => {
