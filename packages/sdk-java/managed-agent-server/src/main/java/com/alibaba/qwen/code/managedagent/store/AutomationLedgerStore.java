@@ -8,11 +8,14 @@ import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * H6b: the JDBC side of the automation runtime — the V57 ledgers (the
@@ -159,9 +162,13 @@ public class AutomationLedgerStore {
             + " AND o.outcome IN (?, ?)";
 
     private final JdbcTemplate jdbc;
+    private final TransactionTemplate commands;
 
     public AutomationLedgerStore(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+        this.commands = new TransactionTemplate(new DataSourceTransactionManager(
+                Objects.requireNonNull(jdbc.getDataSource())));
+        this.commands.setTimeout(10);
     }
 
     /**
@@ -705,13 +712,16 @@ public class AutomationLedgerStore {
      * lets a different request under the same key conflict instead of
      * repeating the side effect.
      */
-    public boolean claimCommand(CommandRow command, long now) {
-        return jdbc.update("INSERT IGNORE INTO qwen_managed_automation_command"
-                + " (tenant_id, idempotency_key, actor_id, request_digest,"
-                + " schedule_id, result_json, created_at)"
-                + " VALUES (?, ?, ?, ?, ?, '', ?)", command.tenantId(),
-                command.idempotencyKey(), command.actorId(),
-                command.requestDigest(), command.scheduleId(), now) == 1;
+    public boolean claimCommand(String sessionId, CommandRow command, long now) {
+        return Boolean.TRUE.equals(commands.execute(status -> {
+            ManagedLegacySessionGuard.requireLegacyMutation(jdbc, command.tenantId(), sessionId);
+            return jdbc.update("INSERT IGNORE INTO qwen_managed_automation_command"
+                    + " (tenant_id, idempotency_key, actor_id, request_digest,"
+                    + " schedule_id, result_json, created_at)"
+                    + " VALUES (?, ?, ?, ?, ?, '', ?)", command.tenantId(),
+                    command.idempotencyKey(), command.actorId(),
+                    command.requestDigest(), command.scheduleId(), now) == 1;
+        }));
     }
 
     /**

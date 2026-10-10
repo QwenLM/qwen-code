@@ -38,6 +38,9 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.UnexpectedRollbackException;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * H6b: the scanner and the service against the real ledger on H2 and the
@@ -165,6 +168,108 @@ class AutomationScannerTest {
                         Collectors.mapping(
                                 AutomationLedgerStore.OccurrenceRow::occurrenceKey,
                                 Collectors.toList())));
+    }
+
+    @Test
+    void privateProfileAndRetainedPinRefuseCreateBeforeClaimOrHarness() {
+        for (boolean privateProfile : List.of(true, false)) {
+            jdbc.update("UPDATE managed_agent_session SET tool_profile = ?,"
+                            + " runtime_request_key = ? WHERE tenant_id = ? AND session_id = ?",
+                    privateProfile ? "csi-files-retirement/1" : "hosted-workspace-files/1",
+                    privateProfile ? null : "a".repeat(64), tenant, sessionId);
+            String key = "private-create-" + UUID.randomUUID();
+            assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
+                    new AutomationDefinitionRequest(sessionId, "Goal", "0 2 * * *", "UTC",
+                            "Run it.", null, null, null, null, true)))
+                    .isInstanceOfSatisfying(ApiException.class, error -> {
+                        assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                        assertThat(error.getCode()).isEqualTo("csi_managed_mutation_unavailable");
+                    });
+            assertThat(ledger.findCommand(tenant, key)).isEmpty();
+            assertThat(ledger.countLive(tenant, sessionId)).isZero();
+            assertThat(fake.operations).isEmpty();
+        }
+    }
+
+    @Test
+    void existingPrivateScheduleRefusesUpdateAndRetireBeforeNewClaim() {
+        PublicAutomation automation = define("0 2 * * *", "allow", "none", null, true);
+        ScheduleRow original = ledger.findSchedule(tenant, automation.id()).orElseThrow();
+        int operations = fake.operations.size();
+        for (boolean privateProfile : List.of(true, false)) {
+            jdbc.update("UPDATE managed_agent_session SET tool_profile = ?,"
+                            + " runtime_request_key = ? WHERE tenant_id = ? AND session_id = ?",
+                    privateProfile ? "csi-files-retirement/1" : "hosted-workspace-files/1",
+                    privateProfile ? null : "b".repeat(64), tenant, sessionId);
+            String updateKey = "private-update-" + UUID.randomUUID();
+            String retireKey = "private-retire-" + UUID.randomUUID();
+            assertThatThrownBy(() -> service.update(tenant, ACTOR, automation.id(), updateKey,
+                    new AutomationDefinitionRequest(null, "Changed", "0 3 * * *", "UTC",
+                            "Run again.", null, null, null, null, true)))
+                    .isInstanceOfSatisfying(ApiException.class, error ->
+                            assertThat(error.getCode()).isEqualTo("csi_managed_mutation_unavailable"));
+            assertThatThrownBy(() -> service.retire(tenant, ACTOR, automation.id(), retireKey))
+                    .isInstanceOfSatisfying(ApiException.class, error ->
+                            assertThat(error.getCode()).isEqualTo("csi_managed_mutation_unavailable"));
+            assertThat(ledger.findCommand(tenant, updateKey)).isEmpty();
+            assertThat(ledger.findCommand(tenant, retireKey)).isEmpty();
+            assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow()).isEqualTo(original);
+            assertThat(fake.operations).hasSize(operations);
+        }
+    }
+
+    @Test
+    void inactivePrivateScheduleCannotUseLocalRetireFallback() {
+        PublicAutomation automation = define("0 2 * * *", "allow", "none", null, true);
+        ScheduleRow original = ledger.findSchedule(tenant, automation.id()).orElseThrow();
+        int operations = fake.operations.size();
+        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSED', runtime_request_key = ?"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                "c".repeat(64), tenant, sessionId);
+        String key = "inactive-private-" + UUID.randomUUID();
+        assertThatThrownBy(() -> service.retire(tenant, ACTOR, automation.id(), key))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("csi_managed_mutation_unavailable"));
+        assertThat(ledger.findCommand(tenant, key)).isEmpty();
+        assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow()).isEqualTo(original);
+        assertThat(fake.operations).hasSize(operations);
+    }
+
+    @Test
+    void ordinaryClaimParticipatesInAmbientRollbackAndRetainsIdempotency() {
+        var transaction = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
+        String key = "ambient-claim-" + UUID.randomUUID();
+        var command = new AutomationLedgerStore.CommandRow(tenant, key, ACTOR, "digest",
+                ManagedAutomationService.scheduleIdFor(tenant, key), "");
+        transaction.executeWithoutResult(status -> {
+            assertThat(ledger.claimCommand(sessionId, command, clock.get())).isTrue();
+            assertThat(ledger.findCommand(tenant, key)).contains(command);
+            status.setRollbackOnly();
+        });
+        assertThat(ledger.findCommand(tenant, key)).isEmpty();
+        assertThat(ledger.claimCommand(sessionId, command, clock.get())).isTrue();
+        assertThat(ledger.claimCommand(sessionId, command, clock.get())).isFalse();
+        assertThat(ledger.findCommand(tenant, key)).contains(command);
+    }
+
+    @Test
+    void caughtPrivateClaimRefusalMarksAmbientTransactionForRollback() {
+        var transaction = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
+        String key = "caught-private-" + UUID.randomUUID();
+        var command = new AutomationLedgerStore.CommandRow(tenant, key, ACTOR, "digest",
+                ManagedAutomationService.scheduleIdFor(tenant, key), "");
+        assertThatThrownBy(() -> transaction.executeWithoutResult(status -> {
+            jdbc.update("UPDATE managed_agent_session SET runtime_request_key = ?"
+                            + " WHERE tenant_id = ? AND session_id = ?",
+                    "d".repeat(64), tenant, sessionId);
+            assertThatThrownBy(() -> ledger.claimCommand(sessionId, command, clock.get()))
+                    .isInstanceOfSatisfying(ApiException.class, error ->
+                            assertThat(error.getCode()).isEqualTo("csi_managed_mutation_unavailable"));
+        })).isInstanceOf(UnexpectedRollbackException.class);
+        assertThat(ledger.findCommand(tenant, key)).isEmpty();
+        assertThat(jdbc.queryForObject("SELECT runtime_request_key FROM managed_agent_session"
+                + " WHERE tenant_id = ? AND session_id = ?", String.class, tenant, sessionId)).isNull();
+        assertThat(ledger.claimCommand(sessionId, command, clock.get())).isTrue();
     }
 
     @Test
@@ -1619,7 +1724,7 @@ class AutomationScannerTest {
                 key);
         // A foreign request's claim already holds the key mid-flight:
         // this one never reaches the Harness and mirrors nothing.
-        ledger.claimCommand(new AutomationLedgerStore.CommandRow(tenant, key,
+        ledger.claimCommand(sessionId, new AutomationLedgerStore.CommandRow(tenant, key,
                 ACTOR, "deadbeef", scheduleId, ""), clock.get());
         assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
                 new AutomationDefinitionRequest(sessionId, "Goal",
@@ -1640,7 +1745,7 @@ class AutomationScannerTest {
         String key = "claim-" + UUID.randomUUID();
         String scheduleId = ManagedAutomationService.scheduleIdFor(tenant,
                 key);
-        ledger.claimCommand(new AutomationLedgerStore.CommandRow(tenant, key,
+        ledger.claimCommand(sessionId, new AutomationLedgerStore.CommandRow(tenant, key,
                 ACTOR, "digest-c", scheduleId, ""), clock.get());
         assertThat(ledger.settleCommand(tenant, key, "digest-c", ACTOR,
                 "{\"id\":\"" + scheduleId + "\"}")).isTrue();
