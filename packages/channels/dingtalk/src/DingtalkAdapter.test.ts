@@ -8563,6 +8563,38 @@ describe('DingtalkChannel reply mentions', () => {
     expect(body).not.toHaveProperty('at');
   });
 
+  it('sends the synthetic knowledge-search fixture in multiple messages with intact citation URLs and tables', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const text = readFileSync(
+      new URL(
+        '../../base/src/fixtures/synthetic-knowledge-search.md',
+        import.meta.url,
+      ),
+      'utf8',
+    );
+    await channel.sendMessage('cid123', text);
+    const contents = fetchSpy.mock.calls.map(
+      ([, init]) =>
+        JSON.parse(String((init as RequestInit).body)).markdown.text as string,
+    );
+    expect(contents.length).toBeGreaterThan(1);
+    const urls = [...text.matchAll(/\[来源\]\((https:\/\/[^)]+)\)/gu)].map(
+      (match) => match[1]!,
+    );
+    expect(urls).toHaveLength(12);
+    for (const url of urls)
+      expect(contents.filter((chunk) => chunk.includes(url))).toHaveLength(1);
+    expect(contents.find((chunk) => chunk.includes('示例指标五'))).toContain(
+      '| 文档 | 内容摘要 |\n|---|---|',
+    );
+    for (const chunk of contents)
+      expect(chunk.length).toBeLessThanOrEqual(20_000);
+  });
+
   it('reserves the mention prefix within the first markdown chunk limit', async () => {
     const channel = createChannel({ atSender: true });
     seedWebhook(channel, 'cid123');
@@ -8604,7 +8636,7 @@ describe('DingtalkChannel reply mentions', () => {
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}', { status: 200 }));
-    const text = `\`\`\`\n${'a'.repeat(3800)}\n\`\`\``;
+    const text = `\`\`\`\n${'a'.repeat(40_000)}\n\`\`\``;
 
     getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
     await getResponseHook(channel)('cid123', text, 'session-1');
@@ -8615,6 +8647,7 @@ describe('DingtalkChannel reply mentions', () => {
         ? body.markdown.text.slice('@staff-1\n\n'.length)
         : body.markdown.text;
     });
+    expect(contents.length).toBeGreaterThan(1);
     expect(contents[0]).toMatch(/^```/u);
     expect(contents.at(-1)).toMatch(/```$/u);
     expect(contents.join('').replace(/[`\n]/gu, '')).toBe(
@@ -8623,7 +8656,7 @@ describe('DingtalkChannel reply mentions', () => {
     expect(
       fetchSpy.mock.calls.every(([, init]) => {
         const body = JSON.parse(String((init as RequestInit).body));
-        return body.markdown.text.length <= 3800;
+        return body.markdown.text.length <= 20_000;
       }),
     ).toBe(true);
   });
@@ -13908,6 +13941,36 @@ describe('DingtalkChannel proactive send', () => {
     expect(tokenCalls()).toHaveLength(1);
   });
 
+  it.each([
+    ['Chinese code', '```ts\n' + '中'.repeat(6000) + '\n```'],
+    ['escaped code', '```text\n' + '\\'.repeat(9000) + '\n```'],
+    [
+      'indivisible URL',
+      '[source](https://docs.example.com/' + 'a'.repeat(18_000) + ')',
+    ],
+  ])(
+    'keeps serialized proactive msgParam within 15000 bytes for %s',
+    async (_name, text) => {
+      const channel = proactive(createChannel());
+      const { sendCalls } = stubProactiveFetch();
+      await channel.pushProactive(groupTarget, text);
+      const sends = sendCalls();
+      expect(sends.length).toBeGreaterThan(1);
+      for (const call of sends) {
+        expect(
+          Buffer.byteLength(JSON.stringify(msgParamOf(call))),
+        ).toBeLessThanOrEqual(15_000);
+      }
+      if (text.startsWith('[source]')) {
+        expect(
+          sends.every((call) =>
+            msgParamOf(call).text.includes('original text follows in parts'),
+          ),
+        ).toBe(true);
+      }
+    },
+  );
+
   it('splits long proactive messages into continuation chunks', async () => {
     const channel = proactive(createChannel());
     const { sendCalls } = stubProactiveFetch();
@@ -13957,46 +14020,57 @@ describe('DingtalkChannel proactive send', () => {
     }
   });
 
-  it('sends completion after retrying a mid-plan partial delivery', async () => {
-    vi.useFakeTimers();
-    try {
-      const channel = createChannel({
-        outputMode: 'per_turn',
-        interactiveCards: undefined,
-      });
-      seedSessionTarget(channel, 'session-1', groupTarget);
-      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-      const { sendCalls } = stubProactiveFetch((sendCall) =>
-        sendCall === 1
-          ? new Response('flow controlled', { status: 429 })
-          : new Response('{}', { status: 200 }),
-      );
+  it.each([3790, 5000])(
+    'sends completion after retrying a %i-character partial delivery',
+    async (length) => {
+      vi.useFakeTimers();
+      try {
+        const channel = createChannel({
+          outputMode: 'per_turn',
+          interactiveCards: undefined,
+        });
+        seedSessionTarget(channel, 'session-1', groupTarget);
+        vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        const { sendCalls } = stubProactiveFetch((sendCall) =>
+          sendCall === 1
+            ? new Response('flow controlled', { status: 429 })
+            : new Response('{}', { status: 200 }),
+        );
 
-      await channel.dispatchBackgroundResponse('session-1', 'x'.repeat(5000), {
-        taskId: 'agent-1',
-        status: 'running',
-        kind: 'agent',
-        turnComplete: false,
-        label: 'Worker one',
-      });
-      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
-      expect(sendCalls()).toHaveLength(2);
+        await channel.dispatchBackgroundResponse(
+          'session-1',
+          'x'.repeat(length),
+          {
+            taskId: 'agent-1',
+            status: 'running',
+            kind: 'agent',
+            turnComplete: false,
+            label: 'Worker one',
+          },
+        );
+        await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+        expect(sendCalls()).toHaveLength(2);
 
-      await channel.dispatchBackgroundResponse('session-1', '', {
-        taskId: 'agent-1',
-        status: 'completed',
-        kind: 'agent',
-        turnComplete: true,
-        label: 'Worker one',
-      });
+        await channel.dispatchBackgroundResponse('session-1', '', {
+          taskId: 'agent-1',
+          status: 'completed',
+          kind: 'agent',
+          turnComplete: true,
+          label: 'Worker one',
+        });
 
-      const sends = sendCalls();
-      expect(sends).toHaveLength(4);
-      expect(msgParamOf(sends[3]!).text).toBe('✅ Background task completed');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+        const sends = sendCalls();
+        const texts = sends.map((call) => msgParamOf(call).text);
+        expect(texts).toHaveLength(4);
+        expect(texts.every((text) => text.length > 0)).toBe(true);
+        expect(texts.filter((text) => text === texts[0])).toHaveLength(1);
+        expect(texts[1]).toBe(texts[2]);
+        expect(texts.at(-1)).toBe('✅ Background task completed');
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
   it('stops at the first failed chunk', async () => {
     const channel = proactive(createChannel());
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);

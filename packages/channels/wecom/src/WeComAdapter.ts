@@ -10,6 +10,7 @@ import { isIP, type LookupFunction } from 'node:net';
 import { lookup } from 'node:dns/promises';
 import { WSClient, decryptFile } from '@wecom/aibot-node-sdk';
 import { ChannelBase, sanitizeLogText } from '@qwen-code/channel-base';
+import { splitMarkdown } from '@qwen-code/channel-base/markdown-chunks';
 import type {
   Attachment,
   ChannelAgentBridge,
@@ -80,6 +81,7 @@ const SENSITIVE_ERROR_FIELDS = new Set([
 const DEDUP_TTL_MS = 5 * 60 * 1000;
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 const MARKDOWN_CHUNK_BYTES = 3800;
+const MARKDOWN_MAX_CHUNK_BYTES = 20_000;
 const AUTHENTICATION_TIMEOUT_MS = 30_000;
 const KICK_RECONNECT_MAX_ATTEMPTS = 3;
 const KICK_RECONNECT_MAX_RETRY_CYCLES = 3;
@@ -1506,103 +1508,23 @@ function isWeComMediaType(value: string | undefined): value is WeComMediaType {
   );
 }
 
-function splitMarkdownChunks(text: string, prefix?: string): string[] {
+function splitMarkdownChunks(text: string, prefix = ''): string[] {
   if (!text) return [];
-
-  const contentLimit = MARKDOWN_CHUNK_BYTES - Buffer.byteLength(prefix ?? '');
+  const overhead = Buffer.byteLength(prefix, 'utf8');
+  const maxLength = MARKDOWN_MAX_CHUNK_BYTES - overhead;
+  const contentLimit = MARKDOWN_CHUNK_BYTES - overhead;
   if (contentLimit <= 0) {
     throw new Error('WeCom source label exceeds the markdown message limit.');
   }
-
-  const chunks: string[] = [];
-  let current = '';
-  let codeFence: FenceToken | undefined;
-  const fits = (value: string, nextCodeFence = codeFence): boolean =>
-    Buffer.byteLength(
-      nextCodeFence ? `${value}\n${nextCodeFence}` : value,
-      'utf8',
-    ) <= contentLimit;
-  const flush = (closeCode = true): void => {
-    if (!current) return;
-    chunks.push(closeCode && codeFence ? `${current}\n${codeFence}` : current);
-    current = closeCode && codeFence ? codeFence : '';
-  };
-
-  for (const line of text.split('\n')) {
-    const candidate = current ? `${current}\n${line}` : line;
-    const candidateCodeFence = toggleCodeFenceState(line, codeFence);
-    if (fits(candidate, candidateCodeFence)) {
-      current = candidate;
-      codeFence = candidateCodeFence;
-      continue;
-    }
-
-    flush();
-    const retried = current ? `${current}\n${line}` : line;
-    const retriedCodeFence = toggleCodeFenceState(line, codeFence);
-    if (fits(retried, retriedCodeFence)) {
-      current = retried;
-      codeFence = retriedCodeFence;
-      continue;
-    }
-
-    let needsLineBreak = Boolean(current);
-    for (let index = 0; index < line.length; ) {
-      const codePoint = line.codePointAt(index);
-      const token = line.startsWith('```', index)
-        ? '```'
-        : line.startsWith('~~~', index)
-          ? '~~~'
-          : codePoint === undefined
-            ? ''
-            : String.fromCodePoint(codePoint);
-      if (!token) break;
-      const nextCodeFence =
-        token === codeFence
-          ? undefined
-          : !codeFence && isFenceToken(token)
-            ? token
-            : codeFence;
-      const addition = needsLineBreak && current ? `\n${token}` : token;
-      const candidate = `${current}${addition}`;
-      if (!fits(candidate, nextCodeFence)) {
-        flush();
-        current = current ? `${current}\n${token}` : token;
-      } else {
-        current = candidate;
-      }
-      codeFence = nextCodeFence;
-      needsLineBreak = false;
-      index += token.length;
-    }
-  }
-
-  flush();
-  return prefix ? chunks.map((chunk) => `${prefix}${chunk}`) : chunks;
+  return splitMarkdown(text, {
+    targetLength: contentLimit,
+    maxLength,
+    unit: 'utf8',
+  }).map((chunk) => prefix + chunk);
 }
 
 function escapeWeComMarkdown(value: string): string {
   return value.replace(/([\\`*_{}[\]()#+\-.!|>])/gu, '\\$1');
-}
-
-function toggleCodeFenceState(
-  line: string,
-  codeFence: FenceToken | undefined,
-): FenceToken | undefined {
-  let nextCodeFence = codeFence;
-  for (const match of line.matchAll(/```|~~~/g)) {
-    const token = match[0] as FenceToken;
-    if (nextCodeFence === token) {
-      nextCodeFence = undefined;
-    } else if (!nextCodeFence) {
-      nextCodeFence = token;
-    }
-  }
-  return nextCodeFence;
-}
-
-function isFenceToken(token: string): token is FenceToken {
-  return token === '```' || token === '~~~';
 }
 
 async function readOutboundMedia(

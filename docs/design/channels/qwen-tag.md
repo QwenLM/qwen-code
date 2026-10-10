@@ -863,7 +863,7 @@ Group gating works: `GroupGate` uses `envelope.isMentioned`, set from `data.isIn
 
 #### Markdown / card rendering
 
-`markdown.ts` already does the platform normalization the proactive path reuses: markdown table passthrough, chunking at 3800 chars with fence balancing (`splitChunks()`; `CHUNK_LIMIT=3800`), and title extraction sliced to 20 chars with fallback `'Reply'` (`extractTitle()`). Reuse is **conditional** on the `sampleMarkdown` template accepting the same markdown subset and a body up to **~5000 chars** _(verified high — message-type doc)_; keep `CHUNK_LIMIT` ≤ that budget. Streaming interactive cards (the `TOPIC_CARD` path, `constants.d.ts:4`) — the analogue of Feishu's streaming card — are **out of scope** for the primary milestone; v1 proactive is markdown-message-based.
+The proactive path reuses Markdown normalization and title extraction. The current [Markdown message chunking contract](../markdown-message-chunks.md) / [中文](../markdown-message-chunks.zh-CN.md) targets 3800 UTF-16 units, preserves complete structures up to a 20,000-unit application ceiling, and separately checks proactive `msgParam` JSON against 15,000 UTF-8 bytes. The earlier ~5000-character message-type recommendation is not treated as a confirmed hard capacity for every endpoint. Real-client acceptance and rendering of larger messages remain pending. Streaming interactive cards are outside this chunking change.
 
 #### Feishu follow-up (concise)
 

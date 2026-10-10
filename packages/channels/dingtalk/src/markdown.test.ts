@@ -18,9 +18,9 @@ describe('DingTalk markdown utilities', () => {
     it.each([1, 4, 7])(
       'rejects code-fence limit %i when it cannot make progress',
       (chunkLimit) => {
-        expect(() => splitChunks('```\nabc\n```', chunkLimit)).toThrow(
-          RangeError,
-        );
+        expect(() =>
+          splitChunks('```\nabc\n```', chunkLimit, chunkLimit),
+        ).toThrow(RangeError);
       },
     );
 
@@ -75,7 +75,7 @@ describe('DingTalk markdown utilities', () => {
     });
 
     it('does not add fences for long plain text with inline backticks', () => {
-      const text = 'before ``` inline ``` ' + 'x'.repeat(5000);
+      const text = 'before ``` inline ``` ' + 'x'.repeat(21000);
       const chunks = splitChunks(text);
       expect(chunks.join('')).toBe(text);
       chunks.forEach((chunk) => {
@@ -84,7 +84,7 @@ describe('DingTalk markdown utilities', () => {
     });
 
     it('closes and reopens code fences across boundaries', () => {
-      const longCode = '```\n' + 'x\n'.repeat(2000) + '```';
+      const longCode = '```\n' + 'x\n'.repeat(11000) + '```';
       const chunks = splitChunks(longCode);
       expect(chunks.length).toBeGreaterThan(1);
       // First chunk should end with closing fence
@@ -96,7 +96,7 @@ describe('DingTalk markdown utilities', () => {
     });
 
     it('reopens code fences without inserting a blank line', () => {
-      const longCode = '```\n' + 'x\n'.repeat(2000) + '```';
+      const longCode = '```\n' + 'x\n'.repeat(11000) + '```';
       const chunks = splitChunks(longCode);
       expect(chunks.length).toBeGreaterThan(1);
       // The reopened fence must be followed by the code, not a blank line.
@@ -107,7 +107,7 @@ describe('DingTalk markdown utilities', () => {
     });
 
     it('splits a long code line while preserving fences', () => {
-      const longCode = '```\n' + 'x'.repeat(5000) + '\n```';
+      const longCode = '```\n' + 'x'.repeat(21000) + '\n```';
       const chunks = splitChunks(longCode);
       expect(chunks.length).toBeGreaterThan(1);
       expect(chunks[0]!.endsWith('\n```')).toBe(true);
@@ -118,7 +118,7 @@ describe('DingTalk markdown utilities', () => {
     });
 
     it('accounts for closing fence overhead when splitting code chunks', () => {
-      const longCode = '```\n' + 'x'.repeat(3793) + '\n```';
+      const longCode = '```\n' + 'x'.repeat(19993) + '\n```';
       const chunks = splitChunks(longCode);
       expect(chunks.length).toBeGreaterThan(1);
       chunks.forEach((chunk) => {
@@ -127,7 +127,7 @@ describe('DingTalk markdown utilities', () => {
     });
 
     it('keeps chunks within limit when a long code line ends with a fence', () => {
-      const longCode = '```\n' + 'x'.repeat(5000) + '```';
+      const longCode = '```\n' + 'x'.repeat(21000) + '```';
       const chunks = splitChunks(longCode);
       expect(chunks.length).toBeGreaterThan(1);
       chunks.forEach((chunk) => {
@@ -135,14 +135,17 @@ describe('DingTalk markdown utilities', () => {
       });
     });
 
-    it('keeps room for closing fences after a long opening fence line', () => {
-      const longCode = '```' + 'x'.repeat(3797) + '\ny\n```';
+    it('sends an oversized code language marker as plain text with a notice', () => {
+      const longCode = '```' + 'x'.repeat(20001) + '\ny\n```';
       const chunks = splitChunks(longCode);
       expect(chunks.length).toBeGreaterThan(1);
-      expect(chunks[0]!.endsWith('\n```')).toBe(true);
-      expect(chunks[1]!.startsWith('```\n')).toBe(true);
+      expect(
+        chunks.every((chunk) =>
+          chunk.includes('original text follows in parts'),
+        ),
+      ).toBe(true);
       chunks.forEach((chunk) => {
-        expect(chunk.length).toBeLessThanOrEqual(3800);
+        expect(chunk.length).toBeLessThanOrEqual(20_000);
       });
     });
 
@@ -152,7 +155,7 @@ describe('DingTalk markdown utilities', () => {
       const chunks = splitChunks(longCode);
       expect(chunks.join('')).toBe(longCode);
       expect(chunks[0]!.endsWith('\n`')).toBe(false);
-      expect(chunks[1]!.startsWith('\n```')).toBe(true);
+      expect(chunks[1]!.startsWith('```')).toBe(true);
       chunks.forEach((chunk) => {
         expect(chunk.length).toBeLessThanOrEqual(3800);
       });
@@ -191,6 +194,20 @@ describe('DingTalk markdown utilities', () => {
       const input = ['| A | B |', '| --- | --- |', '| 1 | 2 |'].join('\n');
       const result = normalizeDingTalkMarkdown(input);
       expect(result).toEqual([input]);
+    });
+
+    it('forwards a caller-reserved hard budget with a source prefix', () => {
+      const prefix = 'source\n\n';
+      const chunks = normalizeDingTalkMarkdown(
+        '[source](https://docs.example.com/' +
+          'x'.repeat(20_000 - '[source](https://docs.example.com/)'.length) +
+          ')',
+        3800 - prefix.length,
+        20_000 - prefix.length,
+      ).map((chunk) => prefix + chunk);
+      expect(chunks.length).toBeGreaterThan(1);
+      for (const chunk of chunks)
+        expect(chunk.length).toBeLessThanOrEqual(20_000);
     });
 
     it('passes through plain text', () => {

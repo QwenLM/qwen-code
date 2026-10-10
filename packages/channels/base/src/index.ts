@@ -176,3 +176,5 @@ export type {
 } from './types.js';
 export { matchMessageRoute } from './message-routes.js';
 export type { MatchedMessageRoute } from './message-routes.js';
+
+export type { MarkdownChunkOptions } from './markdown-chunks.js';

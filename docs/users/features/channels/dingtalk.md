@@ -233,7 +233,7 @@ The multi-line layout above is what the agent sees in a 1:1 chat. In a group the
 
 - **Authentication:** AppKey + AppSecret instead of a static bot token. The SDK manages access token refresh automatically.
 - **Connection:** WebSocket stream instead of polling — no public IP or webhook URL needed.
-- **Formatting:** Responses use DingTalk's markdown dialect. Markdown tables are passed through to the DingTalk client; long messages are split into chunks at ~3800 characters.
+- **Formatting:** Responses use DingTalk's markdown dialect. Markdown tables are passed through to the DingTalk client; long messages split near 3800 UTF-16 units at Markdown boundaries. Complete structures may exceed that target up to a 20,000-unit application ceiling; proactive messages also stay within a 15,000-byte serialized payload budget. Real-client acceptance of larger replies remains to be verified.
 - **Working indicator:** A 👀 emoji reaction is added to the user's message while processing, then removed when the response is sent.
 - **Media download:** Two-step process — a `downloadCode` from the message is exchanged for a temporary download URL via DingTalk's API.
 - **Groups:** DingTalk uses `isInAtList` for @mention detection instead of parsing message entities.

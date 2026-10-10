@@ -61,6 +61,13 @@ const SDK_IMPL_ROOT = {
 
 const FORBIDDEN_SOURCE_INPUTS = [
   {
+    label: 'Markdown chunk parser',
+    suffixes: [
+      'packages/channels/base/src/markdown-chunks.ts',
+      'packages/channels/base/dist/markdown-chunks.js',
+    ],
+  },
+  {
     label: 'Gemini runtime',
     suffixes: ['packages/cli/src/llm.tsx', 'packages/cli/dist/src/llm.js'],
   },

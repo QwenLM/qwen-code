@@ -40,3 +40,5 @@ packages/core/src/skills/bundled/browser-use/runtime/
 # next sync. eslint.config.js already ignores packages/mobile-mcp/** for the
 # same reason; .prettierignore had cua-driver but not its sibling.
 packages/mobile-mcp/
+# Keep the synthetic message byte-for-byte for splitting regression tests.
+packages/channels/base/src/fixtures/synthetic-knowledge-search.md
