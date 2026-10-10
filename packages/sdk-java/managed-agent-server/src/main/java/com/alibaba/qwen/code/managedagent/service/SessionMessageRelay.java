@@ -74,6 +74,12 @@ public class SessionMessageRelay {
     @Scheduled(scheduler = "messageRelayScheduler", fixedDelayString =
             "${qwen.managed-agent.message-relay.scan-delay:2s}")
     public void scan() {
+        // An instance without a Harness (a Session Store replica) leaves the
+        // ledger to one with it: a claim it cannot work only counts
+        // failures against the entry and delays its real worker.
+        if (!harness.isAvailable()) {
+            return;
+        }
         for (PendingMessage pending : store.findPendingMessages(owner,
                 clock.get(), SCAN_LIMIT)) {
             try {

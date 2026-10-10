@@ -58,10 +58,11 @@ class SessionMessageRelayTest {
         volatile String refuseKind;
         volatile String refuseCode;
         volatile String refuseSecondKind;
+        volatile boolean available = true;
 
         @Override
         public boolean isAvailable() {
-            return true;
+            return available;
         }
 
         @Override
@@ -235,6 +236,17 @@ class SessionMessageRelayTest {
                 .isEqualTo("msg_1:message");
         assertThat(row.get().state()).isEqualTo("delivered");
         assertThat(row.get().targetSessionId()).isEqualTo(CHILD);
+    }
+
+    @Test
+    void anInstanceWithoutAHarnessLeavesTheLedgerAlone() {
+        harness.available = false;
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        verify(store, never()).findPendingMessages(anyString(), anyLong(),
+                Mockito.anyInt());
+        verify(store, never()).claim(anyString(), anyString(), anyString(),
+                anyString(), anyLong(), anyLong());
     }
 
     @Test
