@@ -17,6 +17,10 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      '@qwen-code/channel-base/markdown-chunks': path.resolve(
+        __dirname,
+        '../base/src/markdown-chunks.ts',
+      ),
       // Resolve the in-repo channel-base to its live SOURCE so a package-local
       // test run (e.g. `cd packages/channels/dingtalk && vitest`) doesn't depend
       // on a prior `tsc --build` of base — its dist may be absent or stale during

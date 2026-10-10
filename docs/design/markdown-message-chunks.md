@@ -42,18 +42,17 @@ No URL shortening, metadata stripping or file upload is performed.
 
 ## Implementation
 
-`channel-base` exports `splitMarkdown(text, { targetLength, maxLength, unit })`.
+`channel-base/markdown-chunks` exports `splitMarkdown(text, { targetLength, maxLength, unit })`; the general barrel exports only its option type so daemon startup does not load the parser.
 `unified`, `remark-parse` and `remark-gfm` identify block and inline boundaries.
 Source offsets retain original syntax instead of serializing parsed URLs.
-Reference link definitions are repeated so references remain resolvable in each
-fragment, and their size is reserved. An impossible budget raises an error rather
-than emitting an over-budget message or looping indefinitely.
+Reference link definitions, including nested definitions, are repeated so references remain resolvable in each fragment. Large definitions reserve at most half the soft target; a derived hard budget too small for safe rendering falls back to the original document as plain-text code rather than throwing or producing one message per character. An invalid caller-supplied budget raises `RangeError` rather than emitting an over-budget message or looping indefinitely.
 
-Adapters subtract their prefix budgets before splitting, then add prefixes as
-before. DingTalk conservatively reserves the first-message mention on all content
+Short complete messages retain their exact source. Unfinished fences are still closed. Source separators and sentence-adjacent whitespace are retained; lists split near the target while retaining nesting, and quotes measure their markers on every line. Recursive container rendering stops after 16 levels and sends the remaining original source as labeled plain-text code.
+
+Adapters reject a prefix that exhausts the soft budget, subtract valid prefix budgets before splitting, then add prefixes as before. DingTalk conservatively reserves the first-message mention on all content
 fragments but emits it only on the first. Delivery loops, send order, media
 extraction, failure propagation and resumption from the first unsent chunk remain
-unchanged. Dependencies are declared directly in channel-base with a synchronized
+unchanged. DingTalk proactive delivery additionally checks the UTF-8 length of the actual JSON `msgParam` (including title, continuation title, escaped text and source prefix). Only chunks over 15,000 bytes are repacked with a smaller structure-aware budget until every serialized payload fits. This conservative cap also applies to proactive direct messages. Dependencies are declared directly in channel-base with a synchronized
 pnpm lockfile.
 
 ## Validation and acceptance
@@ -79,8 +78,9 @@ clean self-audits and code review. The E2E plan and local reports live in
 
 ## Platform validation and remaining risk
 
-Real DingTalk and WeCom test recipients are required to verify that messages above
-3800 are accepted and render correctly, including near the 20,000 maximum. Local
+The official [WeCom intelligent-bot WebSocket protocol](https://developer.work.weixin.qq.com/document/path/101463) permits 20,480 UTF-8 bytes for `aibot_send_msg` Markdown content. The 4,096-byte bound of legacy group Webhooks is a different API. The official [DingTalk proactive group API](https://open.dingtalk.com/document/orgapp/the-robot-sends-a-group-message) limits serialized `msgParam` to 15,000 bytes, which the adapter checks separately from the UTF-16 application budget. A numerical capacity for session Webhook replies and proactive direct messages has not been established here.
+
+Real test recipients are required to verify acceptance and rendering: DingTalk session replies above 3800 and near the 20,000-unit application maximum, WeCom content near 20,000 bytes, and DingTalk proactive JSON payloads near 15,000 bytes. Local
 payload capture and Markdown parsing cannot establish either platform result.
 Until this is performed, implementation and local verification must be reported
 separately from platform acceptance. Platform Markdown dialect differences and

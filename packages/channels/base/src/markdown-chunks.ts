@@ -1,4 +1,4 @@
-import type { RootContent, Nodes } from 'mdast';
+import type { RootContent, Nodes, Definition } from 'mdast';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
@@ -18,6 +18,15 @@ export function splitMarkdown(
   text: string,
   options: MarkdownChunkOptions,
 ): string[] {
+  return chunkMarkdown(text, options, 0);
+}
+
+function chunkMarkdown(
+  text: string,
+  options: MarkdownChunkOptions,
+  depth: number,
+  measure?: (value: string) => number,
+): string[] {
   const { targetLength, maxLength, unit } = options;
   if (
     !Number.isSafeInteger(targetLength) ||
@@ -27,10 +36,25 @@ export function splitMarkdown(
   ) {
     throw new RangeError('Invalid Markdown chunk budget');
   }
-  const size = (value: string) =>
-    unit === 'utf8' ? Buffer.byteLength(value, 'utf8') : value.length;
+  const size =
+    measure ??
+    ((value: string) =>
+      unit === 'utf8' ? Buffer.byteLength(value, 'utf8') : value.length);
+  if (size(text) <= targetLength && !/`{3}|~{3}/u.test(text)) return [text];
   const source = (node: Nodes) =>
     text.slice(node.position!.start.offset!, node.position!.end.offset!);
+  const closedFence = (raw: string) => {
+    const lines = raw.split('\n');
+    const opener = /^ {0,3}(`{3,}|~{3,})/u.exec(lines[0]!);
+    return (
+      !opener ||
+      (lines.length > 1 &&
+        new RegExp(
+          `^ {0,3}${opener[1]![0]}{${opener[1]!.length},}[ \\t]*\\r?$`,
+          'u',
+        ).test(lines.at(-1)!))
+    );
+  };
 
   function fitEnd(value: string, budget: number): number {
     let low = 0;
@@ -96,6 +120,22 @@ export function splitMarkdown(
         if (firstOnly && escapes % 2 && escapedPunctuation)
           end = end > 1 ? end - 1 : 2;
       }
+      if (firstOnly && end < value.length) {
+        const whitespace = /^\s+/u.exec(value.slice(end))?.[0].length ?? 0;
+        if (whitespace) {
+          if (size(value.slice(0, end + whitespace)) <= budget)
+            end += whitespace;
+          else {
+            let before = end;
+            while (before && /\s/u.test(value[before - 1]!)) before--;
+            if (before > 1)
+              end = fitEnd(
+                value.slice(0, before),
+                size(value.slice(0, before)) - 1,
+              );
+          }
+        }
+      }
       parts.push(value.slice(0, end));
       value = value.slice(end);
       if (firstOnly) break;
@@ -147,7 +187,7 @@ export function splitMarkdown(
     if (current || !parts.length) parts.push(current);
     return parts.map(
       (part) =>
-        `${notice}${opening}\n${part}${part.endsWith('\n') ? '' : '\n'}${closing}`,
+        `${notice}${opening}\n${part}${!notice && part.endsWith('\n') ? '' : '\n'}${closing}`,
     );
   }
 
@@ -163,16 +203,28 @@ export function splitMarkdown(
     );
   }
 
+  if (depth >= 16) return plainFallback(text, maxLength);
   const tree = parser.parse(text);
-  const definitions = tree.children.filter(
-    (node) => node.type === 'definition',
-  );
+  const definitions: Definition[] = [];
+  let unfinishedFence = false;
+  const collect = (node: Nodes) => {
+    if (node.type === 'definition') definitions.push(node);
+    if (node.type === 'code' && !closedFence(source(node)))
+      unfinishedFence = true;
+    if ('children' in node) node.children.forEach(collect);
+  };
+  collect(tree);
+  if (size(text) <= targetLength && !unfinishedFence) return [text];
   const suffix = definitions.length
     ? '\n\n' + definitions.map(source).join('\n')
     : '';
   const hard = maxLength - size(suffix);
-  const target = Math.min(hard, Math.max(1, targetLength - size(suffix)));
-  if (hard <= 0) return plainFallback(text, maxLength);
+  const target = Math.min(
+    hard,
+    targetLength - Math.min(size(suffix), Math.floor(targetLength / 2)),
+  );
+  if (suffix && hard < size(`${fallbackNotice}\`\`\`text\n\n\`\`\``) + 4)
+    return plainFallback(text, maxLength);
 
   function inlineParts(node: Nodes, soft: number, limit: number): string[] {
     if (!('children' in node)) return plainFallback(source(node), limit);
@@ -185,7 +237,16 @@ export function splitMarkdown(
     for (const child of node.children) {
       const raw = source(child);
       if (child.type !== 'text') {
-        if (current && size(current + raw) > soft) flush();
+        if (
+          current &&
+          size(current + raw) > soft &&
+          !(
+            size(raw) > soft &&
+            size(current) < soft / 2 &&
+            size(current + raw) <= limit
+          )
+        )
+          flush();
         if (size(raw) > limit) {
           flush();
           parts.push(...plainFallback(raw, limit));
@@ -193,6 +254,14 @@ export function splitMarkdown(
         continue;
       }
       let remaining = raw;
+      if (
+        size(current) > soft &&
+        size(raw) < soft / 2 &&
+        size(current + raw) <= limit
+      ) {
+        current += raw;
+        continue;
+      }
       while (remaining) {
         if (size(current) >= soft) flush();
         const budget = soft - size(current);
@@ -215,6 +284,12 @@ export function splitMarkdown(
         if (remaining) flush();
       }
     }
+    const end = node.children.at(-1)?.position?.end.offset;
+    if (end !== undefined) {
+      const tail = text.slice(end, node.position!.end.offset!);
+      if (size(current + tail) > limit) flush();
+      current += tail;
+    }
     flush();
     return parts;
   }
@@ -232,16 +307,12 @@ export function splitMarkdown(
       const normalized = `${opening}\n${node.value}\n${fence}`;
       if (size(normalized) <= limit) {
         // Preserve a closed source block verbatim; close unfinished fences.
-        const lines = raw.split('\n');
-        const opener = /^ {0,3}(`{3,}|~{3,})/u.exec(lines[0]!);
-        const last = lines.at(-1)!.trim();
-        const closed =
-          opener &&
-          lines.length > 1 &&
-          new RegExp(`^${opener[1]![0]}{${opener[1]!.length},}\\s*$`, 'u').test(
-            last,
-          );
-        return [closed && size(raw) <= limit ? raw : normalized];
+        const indented = node.position!.start.column > 1;
+        return [
+          closedFence(raw) && !indented && size(raw) <= limit
+            ? raw
+            : normalized,
+        ];
       }
       if (size(opening + '\n\n' + fence) >= limit)
         return plainFallback(raw, limit);
@@ -277,9 +348,15 @@ export function splitMarkdown(
       return inlineParts(node, soft, limit);
     }
     if (node.type === 'list') {
-      return node.children.flatMap((item) => {
+      return node.children.flatMap((item, index) => {
         const itemText = source(item);
-        if (size(itemText) <= limit) return [itemText];
+        const gap = index
+          ? text.slice(
+              node.children[index - 1]!.position!.end.offset!,
+              item.position!.start.offset!,
+            )
+          : '';
+        if (size(itemText) <= soft) return [gap + itemText];
         const marker = /^(\s*(?:[-+*]|\d+[.)])\s+)(?:\[[ xX]\]\s+)?/u.exec(
           itemText,
         )!;
@@ -288,31 +365,30 @@ export function splitMarkdown(
         const body = itemText
           .slice(prefix.length)
           .replace(new RegExp(`^ {1,${indent.length}}`, 'gm'), '');
-        // Reserve indentation for every line before repacking the item.
-        const pieces = splitMarkdown(body, {
-          ...options,
-          targetLength: Math.max(1, soft - size(prefix)),
-          maxLength: limit - size(prefix),
-        });
-        const wrapped = pieces.map(
-          (piece) => prefix + piece.replace(/\n/g, `\n${indent}`),
-        );
-        return wrapped.every((piece) => size(piece) <= limit)
-          ? wrapped
-          : plainFallback(itemText, limit);
+        const wrap = (piece: string) => {
+          const nested = /^(?:[-+*]|\d+[.)])\s/u.test(piece);
+          const head = nested ? `${prefix.trimEnd()}\n${indent}` : prefix;
+          return head + piece.replace(/\n/g, `\n${indent}`);
+        };
+        const pieces = chunkMarkdown(
+          body,
+          { ...options, targetLength: soft, maxLength: limit },
+          depth + 1,
+          (value) => (value ? size(wrap(value)) : 0),
+        ).map(wrap);
+        if (gap) pieces[0] = gap + pieces[0];
+        return pieces;
       });
     }
     if (node.type === 'blockquote') {
       const body = raw.replace(/^ {0,3}> ?/gm, '');
-      const pieces = splitMarkdown(body, {
-        ...options,
-        targetLength: Math.max(1, soft - 2),
-        maxLength: limit - 2,
-      });
-      return pieces.flatMap((piece) => {
-        const wrapped = piece.replace(/^/gm, '> ');
-        return size(wrapped) <= limit ? [wrapped] : plainFallback(piece, limit);
-      });
+      const wrap = (piece: string) => piece.replace(/^(?!$)/gm, '> ');
+      return chunkMarkdown(
+        body,
+        { ...options, targetLength: soft, maxLength: limit },
+        depth + 1,
+        (value) => (value ? size(wrap(value)) : 0),
+      ).map(wrap);
     }
     return size(raw) <= limit ? [raw] : plainFallback(raw, limit);
   }
@@ -325,23 +401,44 @@ export function splitMarkdown(
     current = '';
   };
   let previousEnd = 0;
+  let headingSeparator = '';
   for (const node of tree.children) {
     const separator = text.slice(previousEnd, node.position!.start.offset!);
     previousEnd = node.position!.end.offset!;
     if (node.type === 'definition') continue;
+    const raw = source(node);
+    const minimum = size(`${fallbackNotice}\`\`\`text\n\n\`\`\``) + 4;
     if (
       node.type === 'heading' &&
-      size(headings + source(node) + '\n\n') <= hard - 4
+      size(headings + separator + raw) <=
+        hard - Math.max(minimum, Math.floor(target / 2)) &&
+      (!headings || size(headings + separator + raw) <= target)
     ) {
-      headings += source(node) + '\n\n';
+      if (!headings) headingSeparator = separator;
+      headings += (headings ? separator : '') + raw;
       continue;
     }
-    const reserve = size(headings);
-    const pieces = splitBlock(
-      node,
-      reserve < target ? target - reserve : Math.min(target, hard - reserve),
+    const leading = headings ? headingSeparator : separator;
+    const head = headings ? headings + separator : '';
+    const reserve = size(head);
+    if ((head && reserve >= hard - minimum) || size(leading) > hard) {
+      flush();
+      chunks.push(...plainFallback(leading + head + raw + suffix, maxLength));
+      headings = '';
+      headingSeparator = '';
+      continue;
+    }
+    const available = target - size(current + leading + head);
+    const soft = Math.min(
       hard - reserve,
+      node.type === 'paragraph' &&
+        size(raw) > available &&
+        available > target / 2 &&
+        (size(raw) > target || (current && size(current) < target / 4))
+        ? available
+        : Math.max(1, target - Math.min(reserve, Math.floor(target / 2))),
     );
+    const pieces = splitBlock(node, soft, hard - reserve);
     for (const [index, piece] of pieces.entries()) {
       if (
         index > 0 &&
@@ -350,18 +447,51 @@ export function splitMarkdown(
       )
         flush();
       const joiner =
-        index === 0 ? separator : node.type === 'paragraph' ? '' : '\n\n';
-      const next = (index === 0 ? headings : '') + piece;
+        index === 0
+          ? leading
+          : node.type === 'paragraph' || node.type === 'list'
+            ? ''
+            : '\n\n';
+      let next = (index === 0 ? head : '') + piece;
       const combined = current ? `${current}${joiner}${next}` : next;
-      if (current && size(combined) > target) flush();
+      if (current && size(combined) > target) {
+        if (index === 0) {
+          if (size(current + joiner) <= target) current += joiner;
+          else next = joiner + next;
+        }
+        flush();
+      }
+      if (size(next) > hard) {
+        flush();
+        chunks.push(...plainFallback(next + suffix, maxLength));
+        continue;
+      }
       current = current ? `${current}${joiner}${next}` : next;
     }
     headings = '';
+    headingSeparator = '';
   }
   if (headings) {
-    flush();
-    current = headings.trimEnd();
+    const tail = current + headingSeparator + headings;
+    if (current && size(tail) > target) {
+      if (size(current + headingSeparator) <= hard) current += headingSeparator;
+      else headings = headingSeparator + headings;
+      flush();
+    }
+    current = current ? tail : headings;
+  }
+  if (!definitions.length && current) {
+    const tail = text.slice(previousEnd);
+    if (size(current + tail) <= hard) current += tail;
+    else {
+      flush();
+      chunks.push(...plainFallback(tail, maxLength));
+    }
   }
   flush();
-  return chunks.length ? chunks : [text];
+  return chunks.length
+    ? chunks
+    : size(text) <= maxLength
+      ? [text]
+      : plainFallback(text, maxLength);
 }

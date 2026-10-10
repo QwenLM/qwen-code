@@ -55,7 +55,11 @@ function checkBudget(chunks: string[], options = defaults) {
   }
 }
 
-it('uses only synthetic URLs, identifiers and citation metadata in the fixture', () => {
+function assertSyntheticFixture(fixture: string) {
+  expect(links(fixture)).toHaveLength(12);
+  expect(
+    [...fixture.matchAll(/https?:\/\/([^\s/]+)/gu)].map((match) => match[1]),
+  ).toEqual(Array(12).fill('docs.example.com'));
   for (const [index, link] of links(fixture).entries()) {
     const url = new URL(link);
     expect(url.origin).toBe('https://docs.example.com');
@@ -72,6 +76,20 @@ it('uses only synthetic URLs, identifiers and citation metadata in the fixture',
       `Example ${String(index + 1).padStart(2, '0')}`,
     );
     expect(metadata.summary).toMatch(/^Synthetic [测x]*$/u);
+  }
+}
+
+it('uses only synthetic URLs, identifiers and citation metadata in the fixture', () => {
+  assertSyntheticFixture(fixture);
+});
+
+it('rejects non-allowlisted URL hosts even inside code and reference definitions', () => {
+  for (const addition of [
+    '`https://private.invalid/path`',
+    '[ref]: https://private.invalid/path',
+    '<a href="https://private.invalid/path">link</a>',
+  ]) {
+    expect(() => assertSyntheticFixture(fixture + '\n\n' + addition)).toThrow();
   }
 });
 
@@ -108,13 +126,13 @@ describe.each(['utf16', 'utf8'] as const)('Markdown chunks (%s)', (unit) => {
   it('splits near the target even below the hard limit, on paragraph and section boundaries', () => {
     const a = 'a'.repeat(1800);
     const b = 'b'.repeat(2100);
-    expect(split(`${a}\n\n${b}`)).toEqual([a, b]);
+    expect(split(`${a}\n\n${b}`)).toEqual([a + '\n\n', b]);
     expect(split(`${a}\n\n## Heading\n\n${b}`)).toEqual([
-      a,
+      a + '\n\n',
       `## Heading\n\n${b}`,
     ]);
     const longSection = split(`## Heading\n\n${a}\n\n${b}`);
-    expect(longSection).toEqual([`## Heading\n\n${a}`, b]);
+    expect(longSection).toEqual([`## Heading\n\n${a}\n\n`, b]);
   });
 
   it('keeps headings with a first table that is larger than the target', () => {
@@ -227,6 +245,216 @@ describe.each(['utf16', 'utf8'] as const)('Markdown chunks (%s)', (unit) => {
     ).toBeGreaterThan(0);
     checkBudget(chunks, options);
   });
+
+  it('keeps indented paragraph continuations as prose without losing characters', () => {
+    for (const indent of ['    ', '          ', '\t']) {
+      const text =
+        'x'.repeat(3789) + 'ends.\n' + indent + 'tail words. '.repeat(40);
+      const chunks = split(text);
+      expect(chunks.join('')).toBe(text);
+      expect(parser.parse(chunks[1]!).children[0]!.type).toBe('paragraph');
+      checkBudget(chunks, options);
+    }
+  });
+
+  it('does not collapse the body budget for a large reference suffix', () => {
+    for (const length of [4000, 19_960]) {
+      const text =
+        'body '.repeat(600) +
+        '\n\n```js\nx\n```\n\n[ref]: https://docs.example.com/' +
+        'a'.repeat(length);
+      const chunks = split(text);
+      expect(chunks.length).toBeLessThan(50);
+      checkBudget(chunks, options);
+    }
+  });
+
+  it('repeats nested reference definitions in each fragment', () => {
+    const definition = '[ref]: https://docs.example.com/reference';
+    const text =
+      '> ' +
+      definition +
+      '\n\n' +
+      'a'.repeat(3500) +
+      ' [ref]\n\n' +
+      'b'.repeat(3500) +
+      ' [ref]';
+    const chunks = split(text);
+    for (const chunk of chunks) expect(chunk).toContain(definition);
+    expect(
+      chunks.flatMap(nodes).filter((node) => node.type === 'linkReference'),
+    ).toHaveLength(2);
+    checkBudget(chunks, options);
+  });
+
+  it('budgets definition-only documents including trailing blank lines', () => {
+    const text = '[ref]: https://docs.example.com/' + '\n'.repeat(20_000);
+    const chunks = split(text);
+    expect(chunks.flatMap(code).join('')).toBe(text);
+    checkBudget(chunks, options);
+  });
+
+  it('budgets oversized block separators without losing source text', () => {
+    for (const [gap, body] of [
+      [21_000, 4],
+      [19_000, 3000],
+    ]) {
+      const text = 'a'.repeat(4000) + '\n'.repeat(gap!) + 'x'.repeat(body!);
+      const chunks = split(text);
+      expect(
+        chunks
+          .map((chunk) =>
+            chunk.includes('original text follows in parts')
+              ? code(chunk).join('')
+              : chunk,
+          )
+          .join(''),
+      ).toBe(text);
+      checkBudget(chunks, options);
+    }
+  });
+
+  it('packs heading runs near the target without exhausting derived budgets', () => {
+    for (const count of [900, 1000]) {
+      const text =
+        Array.from({ length: count }, (_, i) => `# H${i} title padding`).join(
+          '\n',
+        ) + '\n\n```js\nx\n```';
+      const chunks = split(text);
+      expect(chunks.length).toBeGreaterThan(1);
+      expect(chunks.length).toBeLessThan(15);
+      checkBudget(chunks, options);
+    }
+  });
+
+  it('keeps the partial marker with the first long paragraph fragment', () => {
+    for (const length of [3789, 3790, 5000]) {
+      const text = '(partial)\n\n' + 'x'.repeat(length);
+      const chunks = split(text);
+      expect(chunks).toHaveLength(length === 3789 ? 1 : 2);
+      expect(chunks[0]).toMatch(/^\(partial\)\n\nx/u);
+      expect(chunks.join('')).toBe(text);
+      for (const chunk of chunks)
+        expect(Buffer.byteLength(chunk)).toBeLessThanOrEqual(3800);
+    }
+  });
+
+  it('retains tight list separators and the nesting of oversized items', () => {
+    const tight = Array.from(
+      { length: 80 },
+      (_, i) => `- item${i} ${'x'.repeat(85)}`,
+    ).join('\n');
+    expect(split(tight).join('')).toBe(tight);
+    for (const text of [
+      '- ' + 'a'.repeat(10_000),
+      '- top\n' +
+        Array.from(
+          { length: 700 },
+          (_, i) => `    - sub${i} ${'x'.repeat(30)}`,
+        ).join('\n'),
+    ]) {
+      const chunks = split(text);
+      expect(chunks.length).toBeGreaterThan(1);
+      for (const chunk of chunks) {
+        expect(chunk).not.toMatch(
+          /^(?:[-+*]|\d+[.)])[ \t]+(?:[-+*]|\d+[.)])[ \t]/u,
+        );
+        expect(Buffer.byteLength(chunk)).toBeLessThanOrEqual(3800);
+      }
+      checkBudget(chunks, options);
+    }
+  });
+
+  it('counts quote markers per line and bounds deeply nested quotes', () => {
+    const chunks = split('> x\n'.repeat(1800));
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(Buffer.byteLength(chunk)).toBeLessThanOrEqual(3800);
+      expect(chunk).not.toMatch(/> $/u);
+    }
+    const deep = split('> '.repeat(32) + 'x'.repeat(4000));
+    expect(
+      deep.some((chunk) => chunk.includes('original text follows in parts')),
+    ).toBe(true);
+    checkBudget(deep, options);
+  });
+
+  it('splits code near the target and retains oversized row headers in fallback text', () => {
+    const chunks = split('```ts\n' + 'x\n'.repeat(15_000) + '```');
+    for (const chunk of chunks)
+      expect(Buffer.byteLength(chunk)).toBeLessThanOrEqual(3800);
+    const header = '| Name | Value |\n| --- | --- |';
+    const row = '| row | ' + 'x'.repeat(25_000) + ' |';
+    const fallback = split(header + '\n' + row);
+    expect(fallback.flatMap(code).join('')).toBe(header + '\n' + row);
+    expect(fallback[0]).toContain(header);
+    checkBudget(fallback, options);
+  });
+});
+
+it('preserves short messages and their original block separators', () => {
+  for (const text of [
+    'Summary:\n\n    the deploy failed\n    retry later\n',
+    'Summary of the deploy.\n\nRollout Plan\n---\nStep one runs first.',
+    '<div align="center">banner</div>\n\n## Details\nBody text.',
+    '\n\nshort\r\nmessage\n',
+    '# One\n\nshort\n\n# Two',
+  ])
+    expect(splitMarkdown(text, defaults)).toEqual([text]);
+  expect(
+    splitMarkdown('a'.repeat(3700) + '\n\n## Tail', defaults),
+  ).toHaveLength(1);
+  expect(
+    splitMarkdown('a'.repeat(3795) + '\n\n## Tail', defaults),
+  ).toHaveLength(2);
+});
+
+it('keeps indented fenced code content intact when splitting is needed', () => {
+  const text = 'intro '.repeat(700) + '\n\n   ```js\n   let a = 1;\n   ```';
+  expect(splitMarkdown(text, defaults).flatMap(code)).toEqual(code(text));
+});
+
+it('retains heading boundaries in long documents that cannot take the short path', () => {
+  for (const tail of [
+    'Summary.\n\nRollout Plan\n---\nStep one.',
+    '<div>banner</div>\n\n## Details\nBody text.',
+  ]) {
+    const text = 'x'.repeat(4000) + '\n\n' + tail;
+    const chunks = splitMarkdown(text, defaults);
+    const types = chunks.flatMap((chunk) =>
+      parser.parse(chunk).children.map((node) => node.type),
+    );
+    expect(types.slice(-3)).toEqual(
+      tail.startsWith('<div>')
+        ? ['html', 'heading', 'paragraph']
+        : ['paragraph', 'heading', 'paragraph'],
+    );
+    expect(chunks.join('')).toBe(text);
+  }
+});
+
+it('keeps short prose around a large inline element in the same message', () => {
+  const text =
+    'see [doc](https://docs.example.com/' + 'x'.repeat(6000) + ') now';
+  expect(splitMarkdown(text, defaults)).toEqual([text]);
+});
+
+it('rejects invalid caller-supplied budgets', () => {
+  for (const options of [
+    { ...defaults, targetLength: 0 },
+    { ...defaults, maxLength: 3799 },
+    { ...defaults, targetLength: 1.5 },
+  ])
+    expect(() => splitMarkdown('text', options)).toThrow(
+      'Invalid Markdown chunk budget',
+    );
+});
+
+it('prefers sentence boundaries close to the target', () => {
+  const text = 'Sentence ends. '.repeat(1500);
+  const chunks = splitMarkdown(text, defaults);
+  expect(chunks.join('')).toBe(text);
+  for (const chunk of chunks.slice(0, -1)) expect(chunk).toMatch(/\. $/u);
 });
 
 it('honors the exact soft and hard boundaries', () => {
@@ -315,7 +543,7 @@ it('keeps plain-text fallback fences separate from surrounding paragraph text', 
   const chunks = splitMarkdown(`before ${element} after`, defaults);
   expect(chunks[0]).toBe('before ');
   expect(chunks.at(-1)).toBe(' after');
-  expect(chunks.flatMap(code).join('\n')).toBe(element);
+  expect(chunks.flatMap(code).join('')).toBe(element);
   checkBudget(chunks);
 });
 

@@ -177,5 +177,4 @@ export type {
 export { matchMessageRoute } from './message-routes.js';
 export type { MatchedMessageRoute } from './message-routes.js';
 
-export { splitMarkdown } from './markdown-chunks.js';
 export type { MarkdownChunkOptions } from './markdown-chunks.js';

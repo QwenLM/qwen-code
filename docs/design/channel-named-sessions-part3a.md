@@ -765,8 +765,7 @@ implementation requires one of those, stop and revisit the design.
 - Telegram: response and proactive paths prefix every HTML chunk, keep it
   valid and within 4096 characters, and retain the label across code blocks,
   links, nested tags, and plain fallback.
-- WeCom: every Markdown chunk is prefixed and within 3800 UTF-8 bytes; code
-  fences, response and proactive paths, and media-only results retain the label.
+- WeCom: every Markdown chunk is prefixed and normally targets 3800 UTF-8 bytes; complete structures can reach the 20,000-byte application ceiling (below the intelligent-bot WebSocket API limit of 20,480). Code fences, response and proactive paths, and media-only results retain the label. See [Markdown message chunking](markdown-message-chunks.md) / [中文](markdown-message-chunks.zh-CN.md) for the current contract and platform acceptance status.
 - GitHub, DWS, GitLab, Weixin, and plugin example: custom/inherited final,
   progressive, thread, and media paths render once at the correct boundary.
 - DWS named proactive IM delivery still suppresses raw `[NO_REPLY]` before the

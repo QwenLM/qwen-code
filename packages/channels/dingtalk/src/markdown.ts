@@ -1,4 +1,4 @@
-import { splitMarkdown } from '@qwen-code/channel-base';
+import { splitMarkdown } from '@qwen-code/channel-base/markdown-chunks';
 
 export const DINGTALK_CHUNK_LIMIT = 3800;
 export const DINGTALK_MAX_CHUNK_LENGTH = 20_000;

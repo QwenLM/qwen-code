@@ -9,11 +9,8 @@ import { Buffer } from 'node:buffer';
 import { isIP, type LookupFunction } from 'node:net';
 import { lookup } from 'node:dns/promises';
 import { WSClient, decryptFile } from '@wecom/aibot-node-sdk';
-import {
-  ChannelBase,
-  sanitizeLogText,
-  splitMarkdown,
-} from '@qwen-code/channel-base';
+import { ChannelBase, sanitizeLogText } from '@qwen-code/channel-base';
+import { splitMarkdown } from '@qwen-code/channel-base/markdown-chunks';
 import type {
   Attachment,
   ChannelAgentBridge,
@@ -1515,11 +1512,12 @@ function splitMarkdownChunks(text: string, prefix = ''): string[] {
   if (!text) return [];
   const overhead = Buffer.byteLength(prefix, 'utf8');
   const maxLength = MARKDOWN_MAX_CHUNK_BYTES - overhead;
-  if (maxLength <= 0) {
+  const contentLimit = MARKDOWN_CHUNK_BYTES - overhead;
+  if (contentLimit <= 0) {
     throw new Error('WeCom source label exceeds the markdown message limit.');
   }
   return splitMarkdown(text, {
-    targetLength: Math.max(1, MARKDOWN_CHUNK_BYTES - overhead),
+    targetLength: contentLimit,
     maxLength,
     unit: 'utf8',
   }).map((chunk) => prefix + chunk);

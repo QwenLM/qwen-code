@@ -113,7 +113,7 @@ describe('DingTalk markdown utilities', () => {
       expect(chunks[0]!.endsWith('\n```')).toBe(true);
       expect(chunks[1]!.startsWith('```\nx')).toBe(true);
       chunks.forEach((chunk) => {
-        expect(chunk.length).toBeLessThanOrEqual(20_000);
+        expect(chunk.length).toBeLessThanOrEqual(3800);
       });
     });
 
@@ -122,7 +122,7 @@ describe('DingTalk markdown utilities', () => {
       const chunks = splitChunks(longCode);
       expect(chunks.length).toBeGreaterThan(1);
       chunks.forEach((chunk) => {
-        expect(chunk.length).toBeLessThanOrEqual(20_000);
+        expect(chunk.length).toBeLessThanOrEqual(3800);
       });
     });
 
@@ -131,7 +131,7 @@ describe('DingTalk markdown utilities', () => {
       const chunks = splitChunks(longCode);
       expect(chunks.length).toBeGreaterThan(1);
       chunks.forEach((chunk) => {
-        expect(chunk.length).toBeLessThanOrEqual(20_000);
+        expect(chunk.length).toBeLessThanOrEqual(3800);
       });
     });
 
@@ -153,7 +153,7 @@ describe('DingTalk markdown utilities', () => {
       const longCode =
         'a'.repeat(3794) + '\n```' + 'x'.repeat(100) + '\ny\n```';
       const chunks = splitChunks(longCode);
-      expect(chunks.join('\n')).toBe(longCode);
+      expect(chunks.join('')).toBe(longCode);
       expect(chunks[0]!.endsWith('\n`')).toBe(false);
       expect(chunks[1]!.startsWith('```')).toBe(true);
       chunks.forEach((chunk) => {
@@ -194,6 +194,20 @@ describe('DingTalk markdown utilities', () => {
       const input = ['| A | B |', '| --- | --- |', '| 1 | 2 |'].join('\n');
       const result = normalizeDingTalkMarkdown(input);
       expect(result).toEqual([input]);
+    });
+
+    it('forwards a caller-reserved hard budget with a source prefix', () => {
+      const prefix = 'source\n\n';
+      const chunks = normalizeDingTalkMarkdown(
+        '[source](https://docs.example.com/' +
+          'x'.repeat(20_000 - '[source](https://docs.example.com/)'.length) +
+          ')',
+        3800 - prefix.length,
+        20_000 - prefix.length,
+      ).map((chunk) => prefix + chunk);
+      expect(chunks.length).toBeGreaterThan(1);
+      for (const chunk of chunks)
+        expect(chunk.length).toBeLessThanOrEqual(20_000);
     });
 
     it('passes through plain text', () => {

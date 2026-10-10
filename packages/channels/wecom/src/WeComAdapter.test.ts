@@ -4234,19 +4234,28 @@ describe('WeComChannel', () => {
     }
   });
 
-  it('splits long markdown responses without array-copying the remaining line', async () => {
-    const arrayFrom = vi.spyOn(Array, 'from');
+  it('keeps quote markers inside the soft byte budget', async () => {
     const channel = new WeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();
+    const client = lastClient();
+    await channel.sendMessage('chat-1', '> x\n'.repeat(1800));
+    expect(client.sendMessage.mock.calls.length).toBeGreaterThan(1);
+    for (const call of client.sendMessage.mock.calls) {
+      const message = call[1] as { markdown: { content: string } };
+      expect(Buffer.byteLength(message.markdown.content)).toBeLessThanOrEqual(
+        3800,
+      );
+      expect(message.markdown.content).not.toMatch(/> $/u);
+    }
+  });
 
-    await channel.sendMessage('chat-1', 'a'.repeat(3900));
-
-    expect(
-      arrayFrom.mock.calls.some(
-        ([value]) => typeof value === 'string' && value.length > 100,
-      ),
-    ).toBe(false);
-    arrayFrom.mockRestore();
+  it('rejects a source prefix that exhausts the normal message budget', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    await expect(
+      channel.sendAttributed('chat-1', 'x'.repeat(5000), 's'.repeat(3800)),
+    ).rejects.toThrow('source label exceeds');
+    expect(lastClient().sendMessage).not.toHaveBeenCalled();
   });
 
   it('keeps fenced code blocks balanced across markdown chunks', async () => {
@@ -4263,10 +4272,10 @@ describe('WeComChannel', () => {
     });
     expect(chunks.length).toBeGreaterThan(1);
     for (const chunk of chunks) {
-      expect(Buffer.byteLength(chunk, 'utf8')).toBeLessThanOrEqual(20_000);
+      expect(Buffer.byteLength(chunk, 'utf8')).toBeLessThanOrEqual(3800);
       expect((chunk.match(/```/g) ?? []).length % 2).toBe(0);
     }
-    expect(chunks[0]).toBe('intro');
+    expect(chunks[0]).toBe('intro\n');
     expect(chunks[1]).toMatch(/^```ts\n/);
     expect(chunks[1]).toMatch(/\n```$/);
     expect(chunks[1]).toMatch(/^```/);

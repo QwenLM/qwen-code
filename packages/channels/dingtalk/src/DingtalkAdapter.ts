@@ -1685,9 +1685,9 @@ export class DingtalkChannel extends ChannelBase {
         ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n`
         : '';
     const overhead = mentionPrefix.length + sourcePrefix.length;
-    const contentLimit = Math.max(1, DINGTALK_CHUNK_LIMIT - overhead);
+    const contentLimit = DINGTALK_CHUNK_LIMIT - overhead;
     const maxLength = DINGTALK_MAX_CHUNK_LENGTH - overhead;
-    if (maxLength <= 0) {
+    if (contentLimit <= 0) {
       throw new Error('DingTalk source label exceeds the message limit.');
     }
     const chunks = normalizeDingTalkMarkdown(
@@ -1887,20 +1887,44 @@ export class DingtalkChannel extends ChannelBase {
     const sourcePrefix = sourceLabel
       ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n`
       : '';
-    const contentLimit = Math.max(
-      1,
-      DINGTALK_CHUNK_LIMIT - sourcePrefix.length,
-    );
+    const contentLimit = DINGTALK_CHUNK_LIMIT - sourcePrefix.length;
     const maxLength = DINGTALK_MAX_CHUNK_LENGTH - sourcePrefix.length;
-    if (maxLength <= 0) {
+    if (contentLimit <= 0) {
       throw new Error('DingTalk source label exceeds the message limit.');
+    }
+    const title = extractTitle(outgoingText);
+    const fits = (chunk: string) =>
+      Buffer.byteLength(
+        JSON.stringify({
+          title: `${title} (cont.)`,
+          text: sourcePrefix + chunk,
+        }),
+        'utf8',
+      ) <= 15_000;
+    if (!fits('')) {
+      throw new Error(
+        'DingTalk source label exceeds the proactive payload limit.',
+      );
     }
     const chunks = normalizeDingTalkMarkdown(
       outgoingText,
       contentLimit,
       maxLength,
-    ).map((chunk) => `${sourcePrefix}${chunk}`);
-    return { title: extractTitle(outgoingText), chunks, nextChunk: 0 };
+    ).flatMap((chunk) => {
+      let budget = maxLength;
+      let pieces = [chunk];
+      // OpenAPI limits the serialized msgParam, not UTF-16 text length.
+      while (!pieces.every(fits)) {
+        budget = Math.floor(budget / 2);
+        pieces = normalizeDingTalkMarkdown(
+          chunk,
+          Math.min(contentLimit, budget),
+          budget,
+        );
+      }
+      return pieces.map((piece) => sourcePrefix + piece);
+    });
+    return { title, chunks, nextChunk: 0 };
   }
 
   private async deliverProactiveText(
