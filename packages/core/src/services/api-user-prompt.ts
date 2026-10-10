@@ -196,19 +196,21 @@ export function isApiUserPrompt(
  * user prompts than requested, e.g. the target turn was absorbed by chat
  * compression.
  *
- * Two CLI-side walks are not yet delegated here and are near-twins of this
- * one, so a change to the walk semantics below — `includeCompressed`, a new
- * structural entry kind to skip, the -1 convention — has to be re-applied to
- * both or ink/OpenTUI rewind computes a different boundary than ACP for the
+ * One CLI-side walk is not yet delegated here and is a near-twin of this one,
+ * so a change to the walk semantics below — `includeCompressed`, a new
+ * structural entry kind to skip, the -1 convention — has to be re-applied
+ * there too or OpenTUI rewind computes a different boundary than ACP for the
  * same history:
  *
- * - `computeApiTruncationIndex` (`ui/utils/historyMapping.ts`) walks UI items
- *   alongside the API history, so it cannot call this directly.
  * - `rewindApiCutPoint` (`ui/opentui/session-rewind-model.ts`) is 1-based and
  *   returns -1 for `occurrence <= 0`, where this function is 0-based and
  *   returns `startIndex` for `turnIndex <= 0`. They agree on the first turn
  *   only because nothing sits between the startup prelude and the first user
  *   prompt today.
+ *
+ * The Ink path no longer mirrors the walk: `computeApiTruncationIndex`
+ * (`ui/utils/historyMapping.ts`) resolves the target turn's entry through
+ * `findApiHistoryPromptIndex`.
  */
 export function findApiRewindCutPoint(
   apiHistory: Content[],
