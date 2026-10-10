@@ -199,43 +199,49 @@ export async function startManagedRuntimeAttestationWorker(
   const csiMount = csiBoot
     ? new ManagedCsiMount(csiBoot.context.mountRoot, csiBoot.storage.diskSerial)
     : undefined;
-  if (csiBoot && csiMount) {
-    await csiMount.observe();
-    registerManagedCsiAttestationRoute(app, csiBoot, csiMount);
-  }
   let executor: ManagedToolExecutor;
-  if (boot.version === 2) {
-    executor = registerManagedContextRoutes(
-      app,
-      boot,
-      capturePublisher,
-      remotePublishers,
-      csiMount,
-    );
-  } else {
-    registerManagedRuntimeAttestationRoute(app, boot);
-    // A Managed session's host names one ledger per worker incarnation and
-    // sweeps it if the worker dies; a worker that cannot keep it must not
-    // answer a Shell, so a failure here fails the boot.
-    const ledger = managedRuntimeLedgerFromEnvironment(boot.runtimeIncarnation);
-    ledger?.watch();
-    executor = ManagedToolExecutor.forWorkspace(
-      boot.workspaceCwd,
-      boot.runtimeInstanceId,
-      { ledger },
-    );
-    registerManagedRuntimeToolRoutes(app, boot, executor);
-    const mount = new ManagedContextMount(boot.workspaceCwd);
-    registerManagedRuntimeProviderRoute(app, boot, executor, async () => {
-      const directory = await mount.resolve('');
-      return directory === undefined
-        ? undefined
-        : { directory, workspaceRoot: directory, preapproved: false };
-    });
-  }
-  if (csiBoot) {
-    registerManagedCsiDrainRoute(app, csiBoot, executor);
-    registerManagedCsiAckRoute(app, csiBoot, executor);
+  try {
+    if (csiBoot && csiMount) {
+      await csiMount.observe();
+      registerManagedCsiAttestationRoute(app, csiBoot, csiMount);
+    }
+    if (boot.version === 2) {
+      executor = registerManagedContextRoutes(
+        app,
+        boot,
+        capturePublisher,
+        remotePublishers,
+        csiMount,
+      );
+    } else {
+      registerManagedRuntimeAttestationRoute(app, boot);
+      // A Managed session's host names one ledger per worker incarnation and
+      // sweeps it if the worker dies; a worker that cannot keep it must not
+      // answer a Shell, so a failure here fails the boot.
+      const ledger = managedRuntimeLedgerFromEnvironment(
+        boot.runtimeIncarnation,
+      );
+      ledger?.watch();
+      executor = ManagedToolExecutor.forWorkspace(
+        boot.workspaceCwd,
+        boot.runtimeInstanceId,
+        { ledger },
+      );
+      registerManagedRuntimeToolRoutes(app, boot, executor);
+      const mount = new ManagedContextMount(boot.workspaceCwd);
+      registerManagedRuntimeProviderRoute(app, boot, executor, async () => {
+        const directory = await mount.resolve('');
+        return directory === undefined
+          ? undefined
+          : { directory, workspaceRoot: directory, preapproved: false };
+      });
+    }
+    if (csiBoot) {
+      registerManagedCsiDrainRoute(app, csiBoot, executor);
+      registerManagedCsiAckRoute(app, csiBoot, executor);
+    }
+  } catch (error) {
+    return closeCsiMountAfterError(csiMount, error);
   }
   const server = createServer(
     ownedManagedRuntimeRouteGate(
@@ -278,27 +284,34 @@ export async function startManagedRuntimeAttestationWorker(
   server.requestTimeout = 5_000;
   server.keepAliveTimeout = 1_000;
 
-  await new Promise<void>((resolve, reject) => {
-    const onError = (error: Error) => {
-      server.off('listening', onListening);
-      reject(error);
-    };
-    const onListening = () => {
-      server.off('error', onError);
-      resolve();
-    };
-    server.once('error', onError);
-    server.once('listening', onListening);
-    server.listen(
-      containerMode ? 43190 : 0,
-      containerMode ? '0.0.0.0' : '127.0.0.1',
-    );
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => {
+        server.off('listening', onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        server.off('error', onError);
+        resolve();
+      };
+      server.once('error', onError);
+      server.once('listening', onListening);
+      server.listen(
+        containerMode ? 43190 : 0,
+        containerMode ? '0.0.0.0' : '127.0.0.1',
+      );
+    });
+  } catch (error) {
+    return closeCsiMountAfterError(csiMount, error);
+  }
 
   const address = server.address() as AddressInfo | null;
   if (!address) {
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    throw new Error('Managed Runtime worker listener is unavailable.');
+    return closeCsiMountAfterError(
+      csiMount,
+      new Error('Managed Runtime worker listener is unavailable.'),
+    );
   }
   const ready =
     boot.version === 2
@@ -317,16 +330,56 @@ export async function startManagedRuntimeAttestationWorker(
   return {
     ready,
     close: () => {
-      closing ??= executor.close().then(
-        () =>
+      closing ??= (async () => {
+        const errors: unknown[] = [];
+        try {
+          await executor.close();
+        } catch (error) {
+          errors.push(error);
+        }
+        const cleanup = await Promise.allSettled([
           new Promise<void>((resolve, reject) => {
             server.close((error) => (error ? reject(error) : resolve()));
             server.closeAllConnections();
           }),
-      );
+          csiMount?.close(),
+        ]);
+        errors.push(
+          ...cleanup.flatMap((result) =>
+            result.status === 'rejected' ? [result.reason] : [],
+          ),
+        );
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1)
+          throw new AggregateError(
+            errors,
+            errors[0] instanceof Error
+              ? errors[0].message
+              : 'Managed Runtime worker shutdown failed.',
+            { cause: errors[0] },
+          );
+      })();
       return closing;
     },
   };
+}
+
+async function closeCsiMountAfterError(
+  mount: ManagedCsiMount | undefined,
+  error: unknown,
+): Promise<never> {
+  try {
+    await mount?.close();
+  } catch (cleanupError) {
+    throw new AggregateError(
+      [error, cleanupError],
+      error instanceof Error
+        ? error.message
+        : 'Managed Runtime worker startup failed.',
+      { cause: error },
+    );
+  }
+  throw error;
 }
 
 export async function readManagedRuntimeContainerBoot(

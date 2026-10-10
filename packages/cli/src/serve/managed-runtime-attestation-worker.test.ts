@@ -598,6 +598,158 @@ const csiAckFixture = JSON.parse(
   request: ManagedCsiAckRequest;
 };
 
+describe('CSI root descriptor ownership in worker startup', () => {
+  function setup() {
+    const boot = parseManagedCsiBoot(csiAckFixture.boot);
+    vi.stubEnv('QWEN_POD_UID', csiAckFixture.expectedPod.uid);
+    vi.stubEnv('QWEN_POD_NAMESPACE', csiAckFixture.expectedPod.namespace);
+    vi.stubEnv('QWEN_NODE_NAME', csiAckFixture.expectedPod.nodeName);
+    const observe = vi
+      .spyOn(ManagedCsiMount.prototype, 'observe')
+      .mockResolvedValue({
+        mountId: '1',
+        device: '259:8',
+        source: '/dev/nvme0n1',
+        diskSerial: boot.storage.diskSerial,
+        rootDevice: '66312',
+        rootInode: '2',
+      });
+    const close = vi.spyOn(ManagedCsiMount.prototype, 'close');
+    onTestFinished(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    });
+    return { boot, observe, close };
+  }
+
+  it('closes the mount owner when Pod route registration refuses startup', async () => {
+    const { boot, observe, close } = setup();
+    vi.stubEnv('QWEN_NODE_NAME', 'not/a/node');
+    const listen = vi.spyOn(Server.prototype, 'listen');
+    await expect(
+      startManagedRuntimeAttestationWorker(boot, undefined, undefined, true),
+    ).rejects.toThrow();
+    expect(observe).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(listen).not.toHaveBeenCalled();
+  });
+
+  it('closes the mount owner on listener failure', async () => {
+    const { boot, close } = setup();
+    vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
+      this: Server,
+    ) {
+      queueMicrotask(() => this.emit('error', new Error('listener failed')));
+      return this;
+    });
+    await expect(
+      startManagedRuntimeAttestationWorker(boot, undefined, undefined, true),
+    ).rejects.toThrow('listener failed');
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['registration', 'listen', 'address'])(
+    'retains the %s error and a simultaneous mount cleanup failure',
+    async (stage) => {
+      const { boot, close } = setup();
+      const cleanup = new Error('mount cleanup failed');
+      close.mockRejectedValue(cleanup);
+      let primary: string;
+      if (stage === 'registration') {
+        primary = 'Managed CSI Pod identity is unavailable.';
+        vi.stubEnv('QWEN_NODE_NAME', 'not/a/node');
+      } else if (stage === 'listen') {
+        primary = 'listener failed';
+        vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
+          this: Server,
+        ) {
+          queueMicrotask(() => this.emit('error', new Error(primary)));
+          return this;
+        });
+      } else {
+        primary = 'Managed Runtime worker listener is unavailable.';
+        vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
+          this: Server,
+        ) {
+          queueMicrotask(() => this.emit('listening'));
+          return this;
+        });
+      }
+      await expect(
+        startManagedRuntimeAttestationWorker(boot, undefined, undefined, true),
+      ).rejects.toMatchObject({
+        message: primary,
+        cause: expect.objectContaining({ message: primary }),
+        errors: [expect.objectContaining({ message: primary }), cleanup],
+      });
+      expect(close).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('closes the listener and mount even when executor shutdown fails', async () => {
+    const { boot, close } = setup();
+    const nativeListen = Server.prototype.listen;
+    vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
+      this: Server,
+    ) {
+      return Reflect.apply(nativeListen, this, [0, '127.0.0.1']);
+    });
+    const worker = await startManagedRuntimeAttestationWorker(
+      boot,
+      undefined,
+      undefined,
+      true,
+    );
+    vi.spyOn(ManagedToolExecutor.prototype, 'close').mockRejectedValue(
+      new Error('executor close failed'),
+    );
+    await expect(worker.close()).rejects.toThrow('executor close failed');
+    expect(close).toHaveBeenCalledTimes(1);
+    const url = new URL(worker.ready.url);
+    expect(await connects(url.hostname, Number(url.port))).toBe(false);
+  });
+
+  it('retains executor, listener and mount failures after attempting every shutdown', async () => {
+    const { boot, close } = setup();
+    const nativeListen = Server.prototype.listen;
+    vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
+      this: Server,
+    ) {
+      return Reflect.apply(nativeListen, this, [0, '127.0.0.1']);
+    });
+    const worker = await startManagedRuntimeAttestationWorker(
+      boot,
+      undefined,
+      undefined,
+      true,
+    );
+    const executorFailure = new Error('executor close failed');
+    const listenerFailure = new Error('listener close failed');
+    const mountFailure = new Error('mount close failed');
+    vi.spyOn(ManagedToolExecutor.prototype, 'close').mockRejectedValue(
+      executorFailure,
+    );
+    const nativeClose = Server.prototype.close;
+    vi.spyOn(Server.prototype, 'close').mockImplementation(function (
+      this: Server,
+      callback?: (error?: Error) => void,
+    ) {
+      return nativeClose.call(this, () => callback?.(listenerFailure));
+    });
+    close.mockRejectedValue(mountFailure);
+    const closing = worker.close();
+    expect(worker.close()).toBe(closing);
+    await expect(closing).rejects.toMatchObject({
+      message: executorFailure.message,
+      cause: executorFailure,
+      errors: [executorFailure, listenerFailure, mountFailure],
+    });
+    expect(close).toHaveBeenCalledTimes(1);
+    const url = new URL(worker.ready.url);
+    expect(await connects(url.hostname, Number(url.port))).toBe(false);
+  });
+});
+
 describe('boot-v3 original-worker ACK ownership', () => {
   it.each([false, true])(
     'registers the owned ACK route in the actual boot-v3 startup (capture profile: %s)',

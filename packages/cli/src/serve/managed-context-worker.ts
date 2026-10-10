@@ -433,7 +433,8 @@ export function registerManagedContextRoutes(
       // no private area, so its targets stay subject to sibling ownership.
       const ownEstate =
         contains(ownDirectory, realPath) &&
-        (root === undefined || ownDirectory !== root);
+        root !== undefined &&
+        ownDirectory !== root;
       for (const [otherId, binding] of installations.bindings()) {
         if (otherId === sessionId) continue;
         const directory = await siblingDirectory(mount, binding.cwdRelative);
