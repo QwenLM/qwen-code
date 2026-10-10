@@ -89,42 +89,28 @@ export class ContextState {
 /**
  * Replaces `${...}` placeholders in a template string with values from a context.
  *
- * This function identifies all placeholders in the format `${key}`, validates that
- * each key exists in the provided `ContextState`, and then performs the substitution.
+ * Only placeholders whose key exists in the provided `ContextState` are
+ * substituted; every other `${identifier}` is left in the string verbatim.
+ * Templates here are arbitrary markdown, so a subagent definition body that
+ * documents a shell or JS template literal (for example `${baseUrl}` inside a
+ * code fence) carries sequences that are text, not context keys.
  *
  * @param template The template string containing placeholders.
  * @param context The `ContextState` object providing placeholder values.
- * @returns The populated string with all placeholders replaced.
- * @throws {Error} if any placeholder key is not found in the context.
+ * @returns The string with every known placeholder replaced and every unknown
+ *     one preserved as literal text.
  */
 export function templateString(
   template: string,
   context: ContextState,
 ): string {
   const placeholderRegex = /\$\{([a-zA-Z_]\w*)\}/g;
-
-  // First, find all unique keys required by the template.
-  const requiredKeys = new Set(
-    Array.from(template.matchAll(placeholderRegex), (match) => match[1]),
-  );
-
-  // Check if all required keys exist in the context.
   const contextKeys = new Set(context.get_keys());
-  const missingKeys = Array.from(requiredKeys).filter(
-    (key) => !contextKeys.has(key),
-  );
 
-  if (missingKeys.length > 0) {
-    throw new Error(
-      `Missing context values for the following keys: ${missingKeys.join(
-        ', ',
-      )}`,
-    );
-  }
-
-  // Perform the replacement using a replacer function.
-  return template.replace(placeholderRegex, (_match, key) =>
-    String(context.get(key)),
+  // Substitute the keys the context actually provides and pass the rest
+  // through unchanged.
+  return template.replace(placeholderRegex, (match, key) =>
+    contextKeys.has(key) ? String(context.get(key)) : match,
   );
 }
 
@@ -225,7 +211,10 @@ export class AgentHeadless implements SubagentExecutor {
   async execute(
     context: ContextState,
     externalSignal?: AbortSignal,
-    options: { resetStats?: boolean } = {},
+    options: {
+      resetStats?: boolean;
+      enforceTimeLimitDuringRetryWait?: boolean;
+    } = {},
   ): Promise<void> {
     if (this.executing) {
       throw new Error(
@@ -247,7 +236,12 @@ export class AgentHeadless implements SubagentExecutor {
 
     try {
       await this.core.runInHookFrame(() =>
-        this.executeTurn(context, externalSignal, !resetStats),
+        this.executeTurn(
+          context,
+          externalSignal,
+          !resetStats,
+          options.enforceTimeLimitDuringRetryWait,
+        ),
       );
     } finally {
       this.executing = false;
@@ -269,6 +263,7 @@ export class AgentHeadless implements SubagentExecutor {
     context: ContextState,
     externalSignal?: AbortSignal,
     preserveStats = false,
+    enforceTimeLimitDuringRetryWait?: boolean,
   ): Promise<void> {
     const initialMessagesOverride = context.get('initial_messages_override') as
       | Content[]
@@ -402,6 +397,7 @@ export class AgentHeadless implements SubagentExecutor {
             getExternalMessages: this.externalMessageProvider,
             waitForExternalMessages: this.externalMessageWaiter,
             shouldWaitForExternalMessages: this.externalMessageWaitPredicate,
+            enforceTimeLimitDuringRetryWait,
           },
         );
 

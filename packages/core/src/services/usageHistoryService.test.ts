@@ -804,6 +804,69 @@ describe('persistUsageBeforeTranscriptDeletion (issue #7384)', () => {
     expect(fs.existsSync(usagePath())).toBe(false);
   });
 
+  it.each([false, true])(
+    'ignores lifecycle frames during usage rebuild and salvage (metrics: %s)',
+    async (withMetrics) => {
+      const sessionId = `sess-lifecycle-${withMetrics}`;
+      const filePath = plantTranscript(sessionId, withMetrics);
+      const started = {
+        'event.name': 'request_lifecycle',
+        v: 1,
+        kind: 'request',
+        executionId: 'execution',
+        sessionId,
+        promptId: `${sessionId}########1`,
+        model: 'qwen-max',
+        startedAt: 100,
+        phase: 'started',
+      };
+      fs.appendFileSync(
+        filePath,
+        [
+          started,
+          {
+            ...started,
+            phase: 'ended',
+            endedAt: 120,
+            durationMs: 20,
+            outcome: 'cancelled',
+          },
+        ]
+          .map((uiEvent, i) =>
+            JSON.stringify({
+              uuid: `lifecycle-${i}`,
+              parentUuid: i === 0 ? 'u1' : 'lifecycle-0',
+              sessionId,
+              cwd: '/salvage/project',
+              timestamp: '2026-07-01T00:01:00.000Z',
+              type: 'system',
+              subtype: 'ui_telemetry',
+              systemPayload: { uiEvent },
+            }),
+          )
+          .join('\n') + '\n',
+      );
+
+      const rebuilt = await loadUsageHistory(undefined, {
+        persistRebuild: false,
+      });
+      expect(rebuilt).toHaveLength(withMetrics ? 1 : 0);
+      expect(aggregateUsage(rebuilt, 'all').sessionCount).toBe(
+        withMetrics ? 1 : 0,
+      );
+      const prepared = await prepareUsageBeforeTranscriptDeletion(filePath);
+      if (withMetrics) {
+        expect(prepared?.record.models['qwen-max']?.totalTokens).toBe(1000);
+      } else {
+        expect(prepared).toBeNull();
+        await expect(
+          persistUsageBeforeTranscriptDeletion(filePath),
+        ).resolves.toBe(false);
+        expect(fs.existsSync(usagePath())).toBe(false);
+      }
+    },
+  );
+
   it('never throws for a missing transcript', async () => {
     await expect(
       persistUsageBeforeTranscriptDeletion(

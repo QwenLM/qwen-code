@@ -232,6 +232,57 @@ describe('QwenAgentManager.createNewSession', () => {
 });
 
 describe('QwenAgentManager.getSessionMessages', () => {
+  it('omits request lifecycle telemetry from JSONL chat history while retaining messages and other telemetry', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'qwen-agent-manager-'));
+    const filePath = join(tempDir, 'session.jsonl');
+    const timestamp = '2026-10-10T00:00:00.000Z';
+    const rows = [
+      {
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'question' }] },
+      },
+      ...['started', 'ended', 'unknown'].map((phase) => ({
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'request_lifecycle',
+            v: phase === 'unknown' ? 99 : 1,
+            phase,
+          },
+        },
+      })),
+      {
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'answer' }] },
+      },
+      {
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: { uiEvent: { 'event.name': 'other_event' } },
+      },
+    ];
+    writeFileSync(
+      filePath,
+      rows.map((row) => JSON.stringify({ ...row, timestamp })).join('\n') +
+        '\n',
+    );
+    try {
+      const manager = new QwenAgentManager();
+      vi.spyOn(manager, 'getSessionList').mockResolvedValue([
+        { id: 'session-1', sessionId: 'session-1', filePath },
+      ]);
+      const messages = await manager.getSessionMessages('session-1');
+      expect(messages.map((message) => message.content)).toEqual([
+        'question',
+        'answer',
+        'System Event: other_event',
+      ]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('projects UserPromptSubmit provenance while mapping JSONL history', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'qwen-agent-manager-'));
     const filePath = join(tempDir, 'session.jsonl');
@@ -276,6 +327,55 @@ describe('QwenAgentManager.getSessionMessages', () => {
         },
       ]);
       expect(messages[0]?.content).not.toContain('hook-only context');
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('renders the outer tool result once and skips internal Code Mode results', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'qwen-agent-manager-'));
+    const filePath = join(tempDir, 'session.jsonl');
+    const timestamp = '2026-03-22T16:48:35.000Z';
+    const rows = [
+      {
+        type: 'tool_result',
+        subtype: 'code_mode_tool_result',
+        toolCallResult: { callId: 'exec-1:code:1', status: 'success' },
+      },
+      {
+        type: 'tool_result',
+        subtype: 'code_mode_tool_result',
+        toolCallResult: { callId: 'exec-1:code:2', status: 'success' },
+      },
+      {
+        type: 'tool_result',
+        toolCallResult: { callId: 'exec-1', status: 'success' },
+      },
+    ].map((row) => ({ sessionId: 'session-1', timestamp, ...row }));
+    writeFileSync(
+      filePath,
+      `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`,
+    );
+
+    try {
+      const manager = new QwenAgentManager();
+      vi.spyOn(manager, 'getSessionList').mockResolvedValue([
+        {
+          id: 'session-1',
+          sessionId: 'session-1',
+          filePath,
+        },
+      ]);
+
+      const messages = await manager.getSessionMessages('session-1');
+
+      expect(messages).toEqual([
+        {
+          role: 'assistant',
+          content: 'Tool Result (exec-1): success',
+          timestamp: new Date(timestamp).getTime(),
+        },
+      ]);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

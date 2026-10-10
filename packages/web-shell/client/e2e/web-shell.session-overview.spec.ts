@@ -77,6 +77,7 @@ test.beforeEach(async ({ page }, testInfo) => {
     baseURL: String(testInfo.project.use.baseURL),
   });
   await page.goto('/');
+  await page.getByRole('button', { name: 'More', exact: true }).click();
   await page
     .getByRole('button', { name: 'Session Overview', exact: true })
     .click();
@@ -361,6 +362,7 @@ for (const count of [4, 11]) {
       localStorage.setItem('qwen-web-shell-session-overview-page-size', '10'),
     );
     await page.goto('/');
+    await page.getByRole('button', { name: 'More', exact: true }).click();
     await page
       .getByRole('button', { name: 'Session Overview', exact: true })
       .click();
@@ -416,6 +418,7 @@ test('shadow portal details keep focus in the overview after hover replacement @
   page,
 }) => {
   await page.goto('/e2e/session-overview-shadow-dom.html');
+  await page.getByRole('button', { name: 'More', exact: true }).click();
   await page
     .getByRole('button', { name: 'Session Overview', exact: true })
     .click();

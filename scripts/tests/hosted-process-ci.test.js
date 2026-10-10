@@ -156,6 +156,22 @@ describe('Hosted real-process gates', () => {
     expect(run.run).toContain('clean verify checkstyle:check');
     expect(run.run).not.toContain('skip');
     expect(run['continue-on-error']).toBeUndefined();
+    // The relay-header filter otherwise surfaces only as an intermittent
+    // socket-reuse failure in the Maven gate below, so the direct check must
+    // keep running first.
+    const relay = job.steps.findIndex(
+      (step) => step.name === 'Check Hosted proxy header relay',
+    );
+    expect(relay).toBeGreaterThan(-1);
+    expect(job.steps[relay].run).toBe(
+      'cd integration-tests\n' +
+        'npx vitest run helpers/hosted-relay-headers.test.ts',
+    );
+    expect(job.steps[relay]['continue-on-error']).toBeUndefined();
+    expect(job.steps[relay].if).toBeUndefined();
+    expect(job.steps[relay].shell).toBeUndefined();
+    expect(job.steps[relay]['working-directory']).toBeUndefined();
+    expect(relay).toBeLessThan(job.steps.indexOf(run));
     const pom = read('packages/sdk-java/managed-agent-server/pom.xml').replace(
       /<!--[\s\S]*?-->/g,
       '',
@@ -228,5 +244,150 @@ describe('Hosted real-process gates', () => {
     );
     expect(upload.if).toBe('always()');
     expect(upload.with.path).toContain('failsafe-reports');
+  });
+
+  it('keeps the Hosted MySQL job ceiling above its summed step ceilings', () => {
+    const job = java.jobs['hosted-harness-mysql'];
+    const summed = job.steps.reduce(
+      (total, step) => total + (step['timeout-minutes'] ?? 0),
+      0,
+    );
+    // Step ceilings today (25 + 9x10 + 20); the uncapped setup steps need
+    // their own allowance, which is exactly what the job comment claims.
+    expect(summed).toBe(135);
+    expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 10);
+    expect(job['timeout-minutes']).toBe(148);
+  });
+
+  it.each([
+    [
+      'Run in-flight owner failover E2E',
+      'test:e2e:managed-inflight-failover',
+      ['--inflight-failover'],
+    ],
+    [
+      'Run continuation owner failover E2E',
+      'test:e2e:managed-continuation-failover',
+      ['--continuation-failover'],
+    ],
+    [
+      'Run session owner failover E2E',
+      'test:e2e:managed-session-failover',
+      ['--session-failover'],
+    ],
+    [
+      'Run Harness-restart session failover E2E',
+      'test:e2e:managed-harness-restart-failover',
+      ['--session-failover', '--harness-only'],
+    ],
+    [
+      'Run Harness-restart in-flight failover E2E',
+      'test:e2e:managed-harness-restart-inflight-failover',
+      ['--inflight-failover', '--harness-only'],
+    ],
+    [
+      'Run Harness-restart continuation failover E2E',
+      'test:e2e:managed-harness-restart-continuation-failover',
+      ['--continuation-failover', '--harness-only'],
+    ],
+    [
+      'Run frozen former-owner fencing E2E',
+      'test:e2e:managed-continuation-frozen-owner-failover',
+      ['--continuation-failover', '--freeze'],
+    ],
+  ])('pins the %s arm into the Hosted MySQL job', (stepName, script, flags) => {
+    const job = java.jobs['hosted-harness-mysql'];
+    const install = job.steps.find(
+      (step) => step.name === 'Install MySQL binaries for the failover E2E',
+    );
+    const step = job.steps.find((s) => s.name === stepName);
+    expect(step, stepName).toBeDefined();
+    expect(install, 'the MySQL binaries install step').toBeDefined();
+    expect(
+      job.steps.indexOf(step),
+      `${stepName} must run after the MySQL binaries install`,
+    ).toBeGreaterThan(job.steps.indexOf(install));
+    expect(step.run).toContain(`npm run ${script}`);
+    expect(step['timeout-minutes'], stepName).toBe(10);
+    expect(step.if, stepName).toBeUndefined();
+    expect(step['continue-on-error'], stepName).toBeUndefined();
+    // A renamed or deleted npm script would leave the step failing for
+    // the wrong reason; pin that it drives the failover runner — with
+    // the flags that make each row a different arm.
+    expect(pkg.scripts[script], script).toContain(
+      'run-managed-agent-server-e2e',
+    );
+    for (const flag of flags) {
+      expect(pkg.scripts[script], `${script} carries ${flag}`).toContain(flag);
+    }
+    // Each row must also be the only row with its mode flag, or two CI
+    // steps silently run the same arm.
+    for (const flag of [
+      '--session-failover',
+      '--inflight-failover',
+      '--continuation-failover',
+      '--harness-only',
+      '--freeze',
+    ]) {
+      if (!flags.includes(flag)) {
+        expect(pkg.scripts[script], `${script} omits ${flag}`).not.toContain(
+          flag,
+        );
+      }
+    }
+  });
+
+  it.each([
+    ['Verify Hosted Java, Spring and MySQL processes', 'hosted-harness-mysql'],
+    ['Verify O4 filesystem process and capacity gates', 'o4-mysql-gates'],
+  ])(
+    'keeps the %s step ceiling above its failsafe fork timeout',
+    (stepName, profile) => {
+      const run = java.jobs['hosted-harness-mysql'].steps.find(
+        (step) => step.name === stepName,
+      );
+      // Tie the asserted ceiling to the profile the step actually runs: a
+      // re-pointed -P flag must not leave the row reading the old profile.
+      expect(run.run).toContain(`-P${profile}`);
+      const forkSeconds = Number(
+        read('packages/sdk-java/managed-agent-server/pom.xml')
+          .split(`<id>${profile}</id>`)[1]
+          .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
+      );
+      // A step killed before its fork leaves no per-test failure lines, so
+      // the main-CI failure analyzer can only file an undiagnosable
+      // per-commit issue (#13503 for the Hosted verify step, #13684 for the
+      // O4 gates). The ceiling must cover the fork plus the wrapped
+      // compile/surefire/spotbugs/checkstyle work — 600 s is the wrap both
+      // steps actually carry, so a step trim or fork bump reddens this row.
+      expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
+        forkSeconds + 600,
+      );
+    },
+  );
+
+  it('keeps the HostedHarnessMySqlIT ceilings inside the shared fork budget', () => {
+    const forkSeconds = Number(
+      read('packages/sdk-java/managed-agent-server/pom.xml')
+        .split('<id>hosted-harness-mysql</id>')[1]
+        .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
+    );
+    const source = read(
+      'packages/sdk-java/managed-agent-server/src/test/java/' +
+        'com/alibaba/qwen/code/managedagent/HostedHarnessMySqlIT.java',
+    );
+    const ceilings = [...source.matchAll(/@Timeout\((\d+)\)/g)].map((m) =>
+      Number(m[1]),
+    );
+    expect(ceilings.length).toBeGreaterThan(0);
+    // The Hosted*IT classes share one failsafe fork, so a method stalled to
+    // its full @Timeout must still leave the fork its healthy runtime: the
+    // sibling classes measure ~532s and the fork itself ~14s, covered by the
+    // same 600s allowance the step-ceiling row carries. A larger ceiling
+    // lets failsafe kill the fork mid-run, and the classes left unrun never
+    // report, failing the gate undiagnosably (#13780).
+    for (const ceiling of ceilings) {
+      expect(ceiling + 600).toBeLessThanOrEqual(forkSeconds);
+    }
   });
 });

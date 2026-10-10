@@ -807,6 +807,8 @@ export type {
   DaemonExtensionEntry,
   DaemonExtensionUpdateState,
   DaemonWorkspaceExtensionsStatus,
+  DaemonExtensionSummary,
+  DaemonWorkspaceExtensionSummaries,
   ExtensionInstallRequest,
   ExtensionArchiveInstallRequest,
   ExtensionManagementInstallRequest,
@@ -894,3 +896,36 @@ export type { DaemonBackgroundTurn } from './types.js';
 
 export { isShellResultDisplay } from './shellResult.js';
 export type { ShellResultDisplay } from './shellResult.js';
+
+export {
+  QWEN_AGENT_MESSAGE_META_KEY,
+  parseQwenAgentMessageMeta,
+} from './session-agents.js';
+export type {
+  QwenAgentMessageMeta,
+  SessionAgentAuthor,
+  SessionAgentChangedFrame,
+  SessionAgentEventFrame,
+  SessionAgentPermissionPrompt,
+  SessionAgentProgram,
+  SessionAgentRunFrame,
+  SessionAgentRunStatus,
+  SessionAgentStep,
+  SessionAgentTerminalStatus,
+  SessionSquad,
+  SessionSquadLeaderIssue,
+  SessionSquadMember,
+  SessionSquadOutcome,
+  SessionSquadView,
+} from './session-agents.js';
+
+export {
+  createExecutionLifecycleState,
+  extractExecutionLifecycle,
+  reduceExecutionLifecycle,
+} from './ui/execution-lifecycle.js';
+export type {
+  DaemonExecutionLifecycle,
+  ExecutionLifecycleEntry,
+  ExecutionLifecycleState,
+} from './ui/execution-lifecycle.js';

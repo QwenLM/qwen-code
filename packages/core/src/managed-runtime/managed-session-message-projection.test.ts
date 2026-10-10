@@ -23,6 +23,7 @@ import { LocalManagedSessionResourceStore } from './managed-session-resources.js
 import { ManagedSessionRecordSink } from './managed-session-record-sink.js';
 import { managedSessionResourceRoot } from '../utils/sessionStorageUtils.js';
 import {
+  MANAGED_SESSION_LIMITS,
   managedSessionEventsDigest,
   parseManagedSessionEvent,
   type ManagedSessionDurableRef,
@@ -442,6 +443,54 @@ describe('managed session message projection', () => {
     await expect(
       projectManagedSessionTitleInfo({ scan, resources: harness.store }),
     ).resolves.toEqual({ title: 'Restored title', source: 'manual' });
+  });
+
+  it('keeps the hot projection deliberately narrower than the reader-facing list', async () => {
+    const harness = await createHarness();
+    const turnResult = {
+      ...records[0],
+      uuid: 'rec-turn-1',
+      type: 'system',
+      subtype: 'turn_result',
+      systemPayload: {
+        promptId: 'turn-1',
+        state: 'completed',
+        stopReason: 'end_turn',
+      },
+    } as ChatRecord;
+    const fileHistory = {
+      ...records[0],
+      uuid: 'rec-history-1',
+      type: 'system',
+      subtype: 'file_history_snapshot',
+      systemPayload: { snapshots: [] },
+    } as unknown as ChatRecord;
+    const user = records[0]!;
+    const sink = new ManagedSessionRecordSink(
+      harness.authority,
+      harness.store,
+      () => HOLDS,
+    );
+    try {
+      await sink.write(user);
+      await sink.write(turnResult);
+      await sink.write(fileHistory);
+
+      // The hot projection presents turn results and domain records as
+      // events, not message content; the reader-facing list materializes
+      // them for a reader. The width distinction is documented at both
+      // projection sites.
+      await expect(sink.project()).resolves.toEqual([user]);
+    } finally {
+      await harness.close();
+    }
+    await expect(
+      readManagedSessionRecords({
+        transcriptPath: harness.transcriptPath,
+        runtimeBaseDir: harness.runtimeBaseDir,
+        sessionKey,
+      }),
+    ).resolves.toEqual([user, turnResult, fileHistory]);
   });
 
   it.each(['none', 'before', 'after', 'both'] as const)(
@@ -896,6 +945,45 @@ describe('managed session message projection', () => {
     const projected = await harness.projection.project();
     expect(projected).toEqual(records);
     await harness.close();
+  });
+
+  it('commits a record past the inline limit as chunks and projects it whole', async () => {
+    const harness = await createHarness();
+    const big: ChatRecord = {
+      ...records[1],
+      uuid: 'rec-assistant-big',
+      message: {
+        role: 'model',
+        parts: [{ text: '长回答'.repeat(40_000) }],
+      },
+    };
+    await harness.projection.commit(
+      command('commitMessage', 'cmd-msg-big'),
+      { record: big },
+      HOLDS,
+    );
+
+    const committed = harness.authority
+      .readEvents({
+        afterSequence: 0,
+        limit: MANAGED_SESSION_LIMITS.maxReadEvents,
+      })
+      .find((event) => event.kind === 'message.committed');
+    const contentRef = committed?.payload['contentRef'];
+    expect(contentRef).toMatchObject({ kind: 'managed-message-chunks' });
+
+    const projected = await harness.projection.project();
+    expect(projected).toEqual([big]);
+    await harness.close();
+
+    // The cold read path reassembles the same record from the chunks.
+    await expect(
+      readManagedSessionRecords({
+        transcriptPath: harness.transcriptPath,
+        runtimeBaseDir: harness.runtimeBaseDir,
+        sessionKey,
+      }),
+    ).resolves.toEqual([big]);
   });
 
   it('keeps no legacy copy of the projected records', async () => {

@@ -7,11 +7,13 @@ import com.alibaba.qwen.code.managedagent.LegacyLifecycleCommands.Sessions;
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCommandOperation;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.service.ChildLifecycleAdmissions;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleService;
+import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
@@ -67,8 +69,13 @@ class ManagedSessionOperationMigrationTest {
             SessionLifecycleCoordinator coordinator =
                     new SessionLifecycleCoordinator(store,
                             new ManagedSessionStore(jdbc), harness,
-                            new DrainedRuntime(), executor, Clock.systemUTC(),
-                            properties);
+                            new DrainedRuntime(), new ChildResultRelayStore(jdbc),
+                            new ObjectMapper(),
+                            new ChildLifecycleAdmissions(store, digests,
+                                    new DrainedRuntime()),
+                            org.mockito.Mockito.mock(
+                                    org.springframework.beans.factory.ObjectProvider.class),
+                            executor, Clock.systemUTC(), properties);
             SessionLifecycleService lifecycle = new SessionLifecycleService(
                     store, new ManagedAgentService(store, digests, null,
                             harness, registry), digests, coordinator);
@@ -86,12 +93,12 @@ class ManagedSessionOperationMigrationTest {
                             sessions.archiving()).status())
                             && "DELETED".equals(store.requireSession(TENANT,
                                     sessions.deleting()).status()));
-            assertThat(lifecycle.getPublic(TENANT, null,
-                    sessions.archiving(), archive.id()).admissionStage())
-                    .isEqualTo("harness_confirmed");
-            assertThat(lifecycle.getPublic(TENANT, null,
-                    sessions.deleting(), operations.get(1)).admissionStage())
-                    .isEqualTo("java_durable");
+            assertThat(((PublicCommandOperation) lifecycle.getPublicOperation(
+                    TENANT, null, sessions.archiving(), archive.id()))
+                    .admissionStage()).isEqualTo("harness_confirmed");
+            assertThat(((PublicCommandOperation) lifecycle.getPublicOperation(
+                    TENANT, null, sessions.deleting(), operations.get(1)))
+                    .admissionStage()).isEqualTo("java_durable");
             // The archive was admitted on an active Session, so it closes it
             // as archive did before; the delete of an archived one does not.
             assertThat(harness.closeCount()).isEqualTo(1);

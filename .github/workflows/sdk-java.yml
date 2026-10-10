@@ -30,6 +30,9 @@ on:
       - 'scripts/run-managed-agent-server-e2e.ts'
       - 'scripts/check-failsafe-reports.js'
       - 'scripts/check-flyway-migrations.js'
+      - 'scripts/flyway-migration-utils.js'
+      - 'scripts/check-contract-version.js'
+      - 'scripts/contract-version-utils.js'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
   push:
@@ -60,6 +63,9 @@ on:
       - 'scripts/run-managed-agent-server-e2e.ts'
       - 'scripts/check-failsafe-reports.js'
       - 'scripts/check-flyway-migrations.js'
+      - 'scripts/flyway-migration-utils.js'
+      - 'scripts/check-contract-version.js'
+      - 'scripts/contract-version-utils.js'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
 
@@ -104,6 +110,102 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # A leftover workspace owned by a different uid than the step user
+          # (e.g. a runner-user checkout under root-run steps) makes every git
+          # call fail with "detected dubious ownership". The pinned
+          # actions/checkout adds safe.directory only to its own temporary
+          # global config, so later steps are uncovered; trust the workspace
+          # here instead. The --get-all guard keeps a persistent runner's
+          # gitconfig from accumulating a duplicate entry per job.
+          git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
+
+      # ci.yml's pre-checkout sweep, byte-identical to the ci.yml copies
+      # (pinned in scripts/tests/sdk-java-workflow.test.js): residue left by
+      # review/autofix jobs on the shared ECS pool fails actions/checkout's
+      # clean — the #13506 failure. Hosted legs skip it on fresh VMs.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
+                fi
+              }
+          done
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -218,16 +320,151 @@ jobs:
   # Flyway resolves classpath:db/migration across the jars and a version
   # claimed in any of them collides with managed-agent-server's exactly like
   # an in-module duplicate.
+  #
+  # Trusted triggers run on the ECS pool (#13245): a five-second scan sat 26
+  # minutes in the hosted queue. Untrusted fork PRs stay hosted, and the
+  # default merge-ref checkout is kept on both — the merge result is the point.
   flyway-migrations:
     name: 'Flyway migration version uniqueness'
-    runs-on: 'ubuntu-latest'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # A leftover workspace owned by a different uid than the step user
+          # (e.g. a runner-user checkout under root-run steps) makes every git
+          # call fail with "detected dubious ownership". The pinned
+          # actions/checkout adds safe.directory only to its own temporary
+          # global config, so later steps are uncovered; trust the workspace
+          # here instead. The --get-all guard keeps a persistent runner's
+          # gitconfig from accumulating a duplicate entry per job.
+          git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
+
+      # ci.yml's pre-checkout sweep, byte-identical to the ci.yml copies
+      # (pinned in scripts/tests/sdk-java-workflow.test.js): residue left by
+      # review/autofix jobs on the shared ECS pool fails actions/checkout's
+      # clean — the #13506 failure. Hosted legs skip it on fresh VMs.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
+                fi
+              }
+          done
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
       - name: 'Check Flyway migration versions are unique'
         run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker packages/sdk-java/qwencode'
+
+      # Contract version monotonicity, #13804: every pull request that
+      # changes the OpenAPI document must move info.version strictly past
+      # the base ref's — consumers key capability detection on it, and a
+      # regressed or stalled number breaks nothing at runtime to be caught
+      # by. The default checkout is one commit deep and holds the
+      # prospective merge result, so the base branch's head is fetched at
+      # depth one for the comparison copy. Pull requests only: a push has
+      # no base to compare, and the races that remain after this ran are
+      # the re-check workflow's. Comparing contents, not a changed-paths
+      # list, is what lets a merge result that already advanced (another
+      # pull request landed) read as regressed-or-stalled instead of
+      # passing on a stale branch point.
+      - name: 'Check the API contract version advances'
+        if: "${{ github.event_name == 'pull_request' }}"
+        env:
+          BASE_REF: '${{ github.event.pull_request.base.ref }}'
+        run: |-
+          set -uo pipefail
+          DOCUMENT='packages/sdk-java/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json'
+          BASE_DOCUMENT="${RUNNER_TEMP}/contract-base.json"
+          git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"
+          git show "FETCH_HEAD:${DOCUMENT}" > "${BASE_DOCUMENT}" 2>/dev/null || : > "${BASE_DOCUMENT}"
+          node scripts/check-contract-version.js "${BASE_DOCUMENT}" "${DOCUMENT}"
 
   mysql-integration:
     name: 'Runtime Broker and Managed Agent MariaDB / Java 21'
@@ -297,9 +534,12 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (12+10+20) leave room for the uncapped setup steps;
-    # a healthy run measured ~20 min end to end.
-    timeout-minutes: 60
+    # The step ceilings (25 + 9×10 + 20 = 135 — the Verify and O4 steps
+    # sit above their failsafe fork timeouts) plus ~10 minutes for the
+    # uncapped setup steps (Checkout..Install MySQL binaries, the report
+    # checks) need ~145; 148 keeps a thin margin, and each arm buys its
+    # own 10 instead of sharing an envelope.
+    timeout-minutes: 148
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -343,8 +583,19 @@ jobs:
           # These steps only stage jars; the SpotBugs gate lives on the
           # `clean verify` invocations (pinned by scripts/tests/spotbugs-gate.test.js).
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests -Dspotbugs.skip=true install
+      # The drivers' proxy header filter only shows up in the gates below as
+      # an intermittent socket-reuse failure, so pin it directly first.
+      - name: 'Check Hosted proxy header relay'
+        run: |-
+          cd integration-tests
+          npx vitest run helpers/hosted-relay-headers.test.ts
       - name: 'Verify Hosted Java, Spring and MySQL processes'
-        timeout-minutes: 12
+        # Must outlive the hosted-harness-mysql failsafe fork timeout (900 s)
+        # plus the wrapped compile/surefire/spotbugs/checkstyle work: a step
+        # killed before its fork leaves no per-test failure lines, so the
+        # main-CI failure analyzer can only file an undiagnosable per-commit
+        # issue (#13503). hosted-process-ci.test.js pins this ordering.
+        timeout-minutes: 25
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
@@ -375,6 +626,10 @@ jobs:
             sudo apt-get update
             sudo apt-get install --yes --no-install-recommends mysql-server mysql-client
           fi
+      - name: 'Run session owner failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-session-failover
       - name: 'Run in-flight owner failover E2E'
         timeout-minutes: 10
         run: >-
@@ -383,6 +638,26 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-continuation-failover
+      - name: 'Run long-answer persistence E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-big-output
+      - name: 'Run Harness-restart session failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-failover
+      - name: 'Run Harness-restart in-flight failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-inflight-failover
+      - name: 'Run Harness-restart continuation failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-continuation-failover
+      - name: 'Run frozen former-owner fencing E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-continuation-frozen-owner-failover
       - name: 'Upload Hosted process reports'
         if: 'always()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
@@ -396,7 +671,12 @@ jobs:
       - name: 'Verify O4 filesystem process and capacity gates'
         id: 'o4_mysql'
         if: "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}"
-        timeout-minutes: 12
+        # Must outlive the o4-mysql-gates failsafe fork timeout (600 s) plus
+        # the wrapped compile/surefire/spotbugs/checkstyle work — the same
+        # ordering the Hosted verify step needed at #13503: killed at 12
+        # minutes on a loaded runner, the step left no per-test failure
+        # lines (#13684). hosted-process-ci.test.js pins this ordering.
+        timeout-minutes: 20
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
@@ -441,6 +721,102 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # A leftover workspace owned by a different uid than the step user
+          # (e.g. a runner-user checkout under root-run steps) makes every git
+          # call fail with "detected dubious ownership". The pinned
+          # actions/checkout adds safe.directory only to its own temporary
+          # global config, so later steps are uncovered; trust the workspace
+          # here instead. The --get-all guard keeps a persistent runner's
+          # gitconfig from accumulating a duplicate entry per job.
+          git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
+
+      # ci.yml's pre-checkout sweep, byte-identical to the ci.yml copies
+      # (pinned in scripts/tests/sdk-java-workflow.test.js): residue left by
+      # review/autofix jobs on the shared ECS pool fails actions/checkout's
+      # clean — the #13506 failure. Hosted legs skip it on fresh VMs.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
+                fi
+              }
+          done
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3

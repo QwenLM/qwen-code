@@ -5,6 +5,16 @@ import {
   type PropsWithChildren,
 } from 'react';
 
+import {
+  TRAJECTORY_FILTER_MESSAGES_EN,
+  TRAJECTORY_FILTER_MESSAGES_ZH,
+} from './trajectory/filter-messages.js';
+
+import {
+  TRAJECTORY_WINDOW_MESSAGES_EN,
+  TRAJECTORY_WINDOW_MESSAGES_ZH,
+} from './trajectory/window-messages.js';
+
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
 import {
   COLLAB_MESSAGES_EN,
@@ -124,6 +134,8 @@ const EN: Messages = {
   'managed.cancel': 'Cancel turn',
   'managed.uncertain':
     'The request outcome is unconfirmed. Retry to check or complete the same submission.',
+  'managed.discard': 'Discard this request',
+  'managed.discarded': 'Request discarded. The draft is back in the composer.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
   'managed.approval.failed':
@@ -132,9 +144,13 @@ const EN: Messages = {
   'managed.approval.refreshFailed': 'Pending approvals could not be refreshed.',
   'managed.approval.retry': 'Retry loading approvals',
   'managed.approval.forbidden':
-    'Only the Session creator can answer this approval.',
+    "Only the Session's owner or a Workspace operator can answer this approval.",
   'managed.approval.argumentsUnavailable':
     'Tool arguments are unavailable for this approval.',
+  'managed.approval.previewComplete': (v) =>
+    `Input preview: ${v?.bytes ?? 0} bytes.`,
+  'managed.approval.previewTruncated': (v) =>
+    `Input preview truncated. Full input: ${v?.bytes ?? 0} bytes.`,
   'managed.result.range': (v) => `Bytes ${v?.start}–${v?.end} of ${v?.total}`,
   'managed.result.outputs': 'Outputs',
   'managed.result.view': 'View output',
@@ -367,9 +383,9 @@ const EN: Messages = {
   'gitMode.branchHint': 'Switches the working directory to a new branch',
   'gitMode.branchInvalidName': 'Invalid branch name',
   'gitMode.worktree': 'Worktree',
-  'gitMode.worktreeDesc': 'Isolated copy · can run in parallel',
+  'gitMode.worktreeDesc':
+    'Creates an isolated copy when you send your first message',
   'gitMode.confirmBranch': 'Create branch',
-  'gitMode.confirmWorktree': 'Create worktree',
   'gitMode.resetToCurrent': 'Reset to current branch',
   'gitLog.title': 'History',
   'gitLog.subtitle': (v) => `${v?.count ?? 0} commits`,
@@ -800,6 +816,18 @@ const EN: Messages = {
   'assistant.copy': 'Copy',
   'assistant.dissatisfied': 'Not satisfied',
   'assistant.satisfied': 'Satisfied',
+  // A workspace agent's reply in a chat session. These render in exported
+  // transcripts too, so they live here rather than in the collab dictionary.
+  'agentMessage.status.failed': 'Failed',
+  'agentMessage.status.cancelled': 'Stopped',
+  'agentMessage.status.offline': 'Runtime offline',
+  'agentMessage.tokens': (v) => `${v?.count ?? 0} tokens`,
+  'agentMessage.steps': 'Steps',
+  'agentMessage.noAction': (v) => `${v?.name ?? ''} had nothing to do`,
+  'agentMessage.step.running': 'Running',
+  'agentMessage.step.completed': 'Done',
+  'agentMessage.step.failed': 'Failed',
+  'agentMessage.step.stopped': 'Stopped',
   'at.category.extensions': 'Extensions',
   'at.category.extensions.description': 'Reference active extensions',
   'at.category.files': 'Files',
@@ -1156,6 +1184,18 @@ const EN: Messages = {
   'daemon.connection.add': 'Add connection',
   'daemon.connection.saved': 'Connected computers',
   'daemon.connection.forget': (v) => `Forget ${v?.address}`,
+  'workspaceHost.local': 'Local',
+  'workspaceHost.remote': 'Remote',
+  'workspaceHost.openHost': (v) => `Open ${v?.host ?? ''}`,
+  'workspaceHost.statusOffline': 'offline',
+  'workspaceHost.statusUnauthorized': 'unauthorized',
+  'workspaceHost.focused': 'connected',
+  'workspaceHost.focusedHint':
+    'This page is connected to this daemon — the chat runs against it.',
+  'workspaceHost.offlineHint':
+    'This host could not be reached; showing its last known projects.',
+  'workspaceHost.unauthorizedHint':
+    'The saved credential was rejected. Open this host to sign in again.',
   'daemon.connection.invalid': 'Enter a valid HTTP or HTTPS origin.',
   'daemon.connection.notReady':
     'The daemon did not accept the connection; the stored credential was left unchanged.',
@@ -1809,6 +1849,13 @@ const EN: Messages = {
       ? `File not found in the workspace · ${v.path}`
       : 'File not found in the workspace',
   'sidebar.label': 'Workspace sidebar',
+  'sidebar.home': 'Home',
+  'sidebar.channelSettings': 'Settings',
+  'sidebar.liveSettings': 'Settings',
+  'sidebar.liveSettingsUnavailable':
+    'Live settings are not available on this server.',
+  'sidebar.more': 'More',
+  'sidebar.navigation': 'Main navigation',
   'sidebar.toggleMenu': 'Toggle menu',
   'sidebar.newChat': 'New chat',
   'sidebar.newTask': 'New task',
@@ -3349,6 +3396,7 @@ const EN: Messages = {
   'trajectory.inspector.status': 'Status',
   'trajectory.inspector.permissionTitle': 'Title',
   'trajectory.inspector.permissionPending': 'pending',
+  'trajectory.inspector.executionId': 'Execution ID',
   'trajectory.inspector.responseId': 'Response ID',
   'trajectory.inspector.promptId': 'Prompt ID',
   'trajectory.inspector.subagent': 'Subagent',
@@ -3887,6 +3935,9 @@ const EN: Messages = {
   'workspacesOverview.dirty': (v) => `${v?.count ?? 0} changed`,
   'workspacesOverview.mcpFailed': (v) => `${v?.count ?? 0} failed`,
   'workspacesOverview.newTask': 'New task',
+  'workspacesOverview.trust': 'Trust',
+  'workspacesOverview.trusting': 'Trusting…',
+  'workspacesOverview.trustFailed': 'Could not trust the workspace',
   'workspacesOverview.remove': 'Remove workspace',
   'workspacesOverview.back': 'Back',
   'splitView.title': 'Split View',
@@ -3915,6 +3966,7 @@ const EN: Messages = {
   'channels.workspace.label': 'Workspace',
   'channels.workspace.primary': 'Primary',
   'channels.loading': 'Loading channels',
+  'channels.configuredCount': (v) => plural(v?.count, 'configured channel'),
   'channels.configured': 'Configured channels',
   'channels.configured.description':
     'Manage the bots that receive and deliver messages for this workspace.',
@@ -4257,6 +4309,8 @@ const EN: Messages = {
   ...LIVE_MESSAGES_EN,
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
+  ...TRAJECTORY_FILTER_MESSAGES_EN,
+  ...TRAJECTORY_WINDOW_MESSAGES_EN,
 };
 
 const ZH: Messages = {
@@ -4340,6 +4394,8 @@ const ZH: Messages = {
   'managed.retry': '重试同一请求',
   'managed.cancel': '取消本轮',
   'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
+  'managed.discard': '丢弃本次请求',
+  'managed.discarded': '已丢弃本次请求。草稿已放回输入框。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
   'managed.approval.failed':
@@ -4347,8 +4403,13 @@ const ZH: Messages = {
   'managed.approval.loadFailed': '待审批请求加载失败。',
   'managed.approval.refreshFailed': '待审批请求刷新失败。',
   'managed.approval.retry': '重新读取审批',
-  'managed.approval.forbidden': '只有此会话的创建者可以回答这项审批。',
+  'managed.approval.forbidden':
+    '只有此会话的拥有者或所属 Workspace 的操作者可以回答这项审批。',
   'managed.approval.argumentsUnavailable': '此项审批的工具参数暂不可见。',
+  'managed.approval.previewComplete': (v) =>
+    `输入预览：${v?.bytes ?? 0} 字节。`,
+  'managed.approval.previewTruncated': (v) =>
+    `输入预览已截断，完整输入共 ${v?.bytes ?? 0} 字节。`,
   'managed.result.range': (v) => `字节 ${v?.start}–${v?.end}，共 ${v?.total}`,
   'managed.result.outputs': '输出',
   'managed.result.view': '查看输出',
@@ -4566,9 +4627,8 @@ const ZH: Messages = {
   'gitMode.branchHint': '在工作目录中切换到新分支',
   'gitMode.branchInvalidName': '分支名不合法',
   'gitMode.worktree': 'Worktree 隔离',
-  'gitMode.worktreeDesc': '独立副本 · 可并行',
+  'gitMode.worktreeDesc': '发送首条消息时自动创建独立副本',
   'gitMode.confirmBranch': '创建分支',
-  'gitMode.confirmWorktree': '创建 Worktree',
   'gitMode.resetToCurrent': '恢复当前分支',
   'gitLog.title': '提交历史',
   'gitLog.subtitle': (v) => `${v?.count ?? 0} 条提交`,
@@ -5065,6 +5125,16 @@ const ZH: Messages = {
   'assistant.copy': '复制',
   'assistant.dissatisfied': '不满意',
   'assistant.satisfied': '满意',
+  'agentMessage.status.failed': '失败',
+  'agentMessage.status.cancelled': '已停止',
+  'agentMessage.status.offline': 'Runtime 离线',
+  'agentMessage.tokens': (v) => `${v?.count ?? 0} tokens`,
+  'agentMessage.steps': '步骤',
+  'agentMessage.noAction': (v) => `${v?.name ?? ''} 这次无需动作`,
+  'agentMessage.step.running': '进行中',
+  'agentMessage.step.completed': '已完成',
+  'agentMessage.step.failed': '失败',
+  'agentMessage.step.stopped': '已停止',
   'at.category.extensions': '扩展',
   'at.category.extensions.description': '引用已启用扩展',
   'at.category.files': '文件',
@@ -5384,6 +5454,17 @@ const ZH: Messages = {
   'daemon.connection.add': '添加连接',
   'daemon.connection.saved': '已连接的计算机',
   'daemon.connection.forget': (v) => `移除 ${v?.address}`,
+  'workspaceHost.local': '本地',
+  'workspaceHost.remote': '远程',
+  'workspaceHost.openHost': (v) => `打开 ${v?.host ?? ''}`,
+  'workspaceHost.statusOffline': '离线',
+  'workspaceHost.statusUnauthorized': '未授权',
+  'workspaceHost.focused': '已连接',
+  'workspaceHost.focusedHint': '本页面正连到这台 daemon，会话在这里运行。',
+  'workspaceHost.offlineHint':
+    '无法连接这台主机，当前显示的是最近一次已知的项目。',
+  'workspaceHost.unauthorizedHint':
+    '此主机保存的凭据已被拒绝，请打开该主机重新登录。',
   'daemon.connection.invalid': '请输入有效的 HTTP 或 HTTPS origin。',
   'daemon.connection.notReady': 'Daemon 未接受该连接，已保存的凭据未被修改。',
   'daemon.connection.authFailed':
@@ -5990,6 +6071,12 @@ const ZH: Messages = {
   'turnOutputs.artifactUnavailable': (v) =>
     v?.path ? `工作区中未找到该文件 · ${v.path}` : '工作区中未找到该文件',
   'sidebar.label': '工作区侧边栏',
+  'sidebar.home': '首页',
+  'sidebar.channelSettings': '设置',
+  'sidebar.liveSettings': '设置',
+  'sidebar.liveSettingsUnavailable': '当前服务未提供 Live 设置。',
+  'sidebar.more': '更多',
+  'sidebar.navigation': '主导航',
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',
   'sidebar.newTask': '新建任务',
@@ -7404,6 +7491,7 @@ const ZH: Messages = {
   'trajectory.inspector.status': '状态',
   'trajectory.inspector.permissionTitle': '标题',
   'trajectory.inspector.permissionPending': '等待处理',
+  'trajectory.inspector.executionId': '执行 ID',
   'trajectory.inspector.responseId': '响应 ID',
   'trajectory.inspector.promptId': '提示 ID',
   'trajectory.inspector.subagent': '子代理',
@@ -7902,6 +7990,9 @@ const ZH: Messages = {
   'workspacesOverview.dirty': (v) => `${v?.count ?? 0} 处改动`,
   'workspacesOverview.mcpFailed': (v) => `${v?.count ?? 0} 个失败`,
   'workspacesOverview.newTask': '新建任务',
+  'workspacesOverview.trust': '信任',
+  'workspacesOverview.trusting': '正在信任…',
+  'workspacesOverview.trustFailed': '无法信任该工作区',
   'workspacesOverview.remove': '移除工作区',
   'workspacesOverview.back': '返回',
   'splitView.title': '分屏',
@@ -7928,6 +8019,7 @@ const ZH: Messages = {
   'channels.workspace.label': '工作区',
   'channels.workspace.primary': '主工作区',
   'channels.loading': '正在加载频道',
+  'channels.configuredCount': (v) => `已配置 ${v?.count ?? 0} 个频道`,
   'channels.configured': '已配置频道',
   'channels.configured.description': '管理当前工作区中负责收发消息的机器人。',
   'channels.availablePlatforms': '可连接平台',
@@ -8242,6 +8334,8 @@ const ZH: Messages = {
   ...LIVE_MESSAGES_ZH,
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
+  ...TRAJECTORY_FILTER_MESSAGES_ZH,
+  ...TRAJECTORY_WINDOW_MESSAGES_ZH,
 };
 
 const MESSAGES: Record<WebShellLanguage, Messages> = {

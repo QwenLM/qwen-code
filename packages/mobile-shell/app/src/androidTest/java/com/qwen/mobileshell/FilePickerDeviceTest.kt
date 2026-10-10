@@ -8,6 +8,7 @@ import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Bundle
 import android.os.Process
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient.FileChooserParams
@@ -28,11 +29,11 @@ class FilePickerDeviceTest {
         if (fixtureUsed) context.contentResolver.call(FilePickerFixtureProvider.BASE_URI, "reset", null, null)
     }
 
-    private fun document(index: Int = 0, granted: Boolean = true): Uri {
+    private fun document(index: Int = 0, granted: Boolean = true, base: Uri = FilePickerFixtureProvider.BASE_URI): Uri {
         if (!fixtureUsed) context.contentResolver.call(FilePickerFixtureProvider.BASE_URI, "reset", null, null)
         fixtureUsed = true
-        val uri = FilePickerFixtureProvider.uri(index)
-        if (granted) context.contentResolver.call(FilePickerFixtureProvider.BASE_URI, "grant", index.toString(), null)
+        val uri = FilePickerFixtureProvider.uri(base, index)
+        if (granted) context.contentResolver.call(base, "grant", index.toString(), Bundle().apply { putString("authority", base.authority) })
         val provider = requireNotNull(context.packageManager.resolveContentProvider(uri.authority!!, 0))
         assertNotEquals("Fixture must be owned by a different UID", context.applicationInfo.uid, provider.applicationInfo.uid)
         assertEquals("Fixture URI grant", if (granted) PackageManager.PERMISSION_GRANTED else PackageManager.PERMISSION_DENIED,
@@ -64,6 +65,22 @@ class FilePickerDeviceTest {
         override fun getTitle(): CharSequence? = null
         override fun getFilenameHint(): String? = null
         override fun createIntent() = Intent()
+    }
+
+    private class CountingContext(base: Context) : ContextWrapper(base) {
+        var providerManagerReads = 0
+        var permissionChecks = 0
+
+        // The picker obtains PackageManager only when resolving a provider.
+        override fun getPackageManager(): PackageManager {
+            providerManagerReads++
+            return super.getPackageManager()
+        }
+
+        override fun checkUriPermission(uri: Uri, pid: Int, uid: Int, flags: Int): Int {
+            permissionChecks++
+            return super.checkUriPermission(uri, pid, uid, flags)
+        }
     }
 
     @Test fun intentUsesReadOnlyDocumentsAndPreservesMultipleMimeHints() {
@@ -144,6 +161,62 @@ class FilePickerDeviceTest {
         assertArrayEquals(uris.take(100).toTypedArray(), delivered(selection(uris.take(100))))
         assertNull(delivered(selection(uris)))
         assertNull(delivered(selection(uris.take(100)).setData(uris.last())))
+    }
+
+    @Test fun sameProviderIsResolvedOncePerSelectionAndEveryGrantIsChecked() {
+        val uris = (0 until 100).map { document(it) }
+        val countingContext = CountingContext(context)
+        val picker = NativeFilePicker(countingContext) { }
+        repeat(2) { index ->
+            var calls = 0
+            picker.open(Params(FileChooserParams.MODE_OPEN_MULTIPLE), { true }) {
+                assertArrayEquals(uris.toTypedArray(), it)
+                calls++
+            }
+            picker.result(Activity.RESULT_OK, selection(uris))
+            assertEquals(1, calls)
+            assertEquals(index + 1, countingContext.providerManagerReads)
+            assertEquals((index + 1) * uris.size, countingContext.permissionChecks)
+        }
+    }
+
+    @Test fun cachedProviderDoesNotAllowAnotherDocumentWithoutItsOwnGrant() {
+        val uris = listOf(document(0), document(1, granted = false))
+        val countingContext = CountingContext(context)
+        assertNull(delivered(selection(uris), pickerContext = countingContext))
+        assertEquals(1, countingContext.providerManagerReads)
+        assertEquals(2, countingContext.permissionChecks)
+    }
+
+    @Test fun secondAuthorityInOneSelectionIsResolvedSeparately() {
+        val uris = listOf(document(), android.provider.Settings.System.CONTENT_URI)
+        val countingContext = CountingContext(context)
+        assertNull(delivered(selection(uris), pickerContext = countingContext))
+        assertEquals(2, countingContext.providerManagerReads)
+    }
+
+    @Test fun multipleGrantedAuthoritiesPreserveOrderAndResolveEachProviderOnce() {
+        val uris = listOf(
+            document(0), document(0, base = FilePickerFixtureProvider.SECOND_BASE_URI),
+            document(1), document(1, base = FilePickerFixtureProvider.SECOND_BASE_URI),
+        )
+        val countingContext = CountingContext(context)
+        val actual = delivered(selection(uris), pickerContext = countingContext)
+        assertArrayEquals(uris.toTypedArray(), actual)
+        assertEquals(2, countingContext.providerManagerReads)
+        assertEquals(uris.size, countingContext.permissionChecks)
+        actual!!.forEach { uri ->
+            val bytes = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+            assertArrayEquals(FilePickerFixtureProvider.contents(uri.lastPathSegment!!.toInt()), bytes)
+        }
+    }
+
+    @Test fun mixedAuthoritiesStillRequireSeparateGrantsForTheSameDocumentIndex() {
+        val uris = listOf(document(0), document(0, granted = false, base = FilePickerFixtureProvider.SECOND_BASE_URI))
+        val countingContext = CountingContext(context)
+        assertNull(delivered(selection(uris), pickerContext = countingContext))
+        assertEquals(2, countingContext.providerManagerReads)
+        assertEquals(2, countingContext.permissionChecks)
     }
 
     @Test fun unsupportedModeAndStaleDocumentCancelWithoutLaunching() {
