@@ -490,11 +490,16 @@ jobs:
         ports:
           # A fixed host port collides between jobs sharing one pool host.
           - '3306/tcp'
+        # tmpfs, not the image's declared anonymous volume: the runner tears
+        # service containers down with `docker rm --force` (no -v), so a real
+        # /var/lib/mysql volume would strand ~150 MB per run on this shared
+        # pool host, and nothing on the host reaps dangling volumes.
         options: >-
           --health-cmd "healthcheck.sh --connect --innodb_initialized"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+          --mount type=tmpfs,destination=/var/lib/mysql
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"

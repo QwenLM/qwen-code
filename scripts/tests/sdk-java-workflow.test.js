@@ -369,6 +369,17 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     ).toHaveLength(2);
   });
 
+  it('keeps the MariaDB datadir on tmpfs so a pool run strands no anonymous volume', () => {
+    // mariadb declares VOLUME /var/lib/mysql, and the runner's service
+    // teardown is `docker rm --force` without -v: an unmounted datadir
+    // leaks one anonymous volume per pool run. tmpfs dies with the
+    // container, cancelled runs included.
+    const mariadb = parse(workflow).jobs['mysql-integration'].services.mariadb;
+    expect(mariadb.options).toContain(
+      '--mount type=tmpfs,destination=/var/lib/mysql',
+    );
+  });
+
   it('holds the per-host sdk-java lock around every Maven run', () => {
     // Derived from the parsed steps, not a string count: every Maven-bearing
     // step must open the test job's per-host lock — the shared path pinned
