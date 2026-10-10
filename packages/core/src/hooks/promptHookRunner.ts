@@ -309,7 +309,8 @@ export class PromptHookRunner {
           : {
               // Deterministic allow/block decisions — same input must
               // produce the same gating outcome to keep security checks
-              // reliable.
+              // reliable: allow/block gating must be reproducible across
+              // identical inputs.
               temperature: 0,
             }),
         // Responses are tiny JSON objects; cap output to avoid
