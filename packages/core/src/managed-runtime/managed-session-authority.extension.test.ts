@@ -1129,12 +1129,12 @@ describe('managed session authority Stage H records', () => {
   it('refuses a record of a disabled domain on the generic paths', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
-      // team_message is in the domain vocabulary but not in the plain
-      // enabled list: child_run is per-kind exempt here, and every
-      // H-family body takes the extension-funnel refusal before the
-      // enablement one this test names. schedule was the probe until H6b,
-      // then child_acceptance, then monitor_run, then team_state until
-      // H4e-b1 served similarly.
+      // team_message is in the domain vocabulary but neither in the plain
+      // enabled list nor in this suite's extension-record body index, so
+      // the generic path reaches the enablement refusal this test names
+      // (child_run is per-kind exempt here). schedule was the probe until
+      // H6b, then child_acceptance, monitor_run and, until H4e-b1,
+      // team_state.
       const recordRef = await harness.store.publish(
         'managed-team_message',
         Buffer.from('{}', 'utf8'),

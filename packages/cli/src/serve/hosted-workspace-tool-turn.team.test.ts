@@ -337,12 +337,26 @@ it('composes worktree isolation with team membership', async () => {
   });
 });
 
+// With the team on, `name` is a supported argument, so the refusal of
+// another legacy argument no longer lists it among them.
+it('stops listing name as legacy once the team domains are enabled', async () => {
+  const answer = await execute(createTurn(), [
+    member('alice', 'call-1', { model: 'other' }),
+  ]);
+  expect(answer).toContain('unsupported argument \\"model\\"');
+  expect(answer).toContain('working_dir, model and subagent_type');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
 it('keeps refusing name while the team domains are disabled', async () => {
   enablement.teamState = false;
   enablement.teamTask = false;
   const answer = await execute(createTurn(), [member('alice', 'call-1')]);
   expect(answer).toContain('unsupported argument');
   expect(answer).toContain('\\"name\\"');
+  expect(answer).toContain('working_dir, name, model');
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     0,
   );

@@ -5802,107 +5802,113 @@ describe('Hosted Harness no-tool session', () => {
   // a Session that led a team reopens with its own committed history.
   it('reopens a Session whose journal carries its team and board', async () => {
     domainEnablement.childRun = true;
-    const key = {
-      tenantId: 'tenant',
-      workspaceId: 'workspace',
-      sessionId: SESSION_ID,
-    };
-    const resources = LocalManagedSessionResourceStore.create({
-      runtimeBaseDir: state.root,
-      sessionKey: key,
-    });
-    const managed = await openManagedSession({
-      runtimeBaseDir: state.root,
-      transcriptPath: '',
-      sessionId: SESSION_ID,
-      sessionKey: key,
-      cwd: state.root,
-      version: 'hosted-harness/1',
-      workerId: BOOT_ID,
-      activationLeaseDurationMs: 60_000,
-      journalStore: new LocalJsonlManagedSessionJournalStore({
-        runtimeBaseDir: state.root,
-        sessionId: SESSION_ID,
-        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
-      }),
-      resourceStore: resources,
-      create: {
-        definitionRef: await resources.publish(
-          'managed-definition',
-          Buffer.from(
-            JSON.stringify({
-              engine: 'managed',
-              sessionId: SESSION_ID,
-              toolProfile: 'hosted-workspace-shell/1',
-            }),
-          ),
-        ),
-        rootSnapshotRef: await resources.publish(
-          'managed-root',
-          Buffer.from(JSON.stringify({ cwd: state.root })),
-        ),
-        createdBy: 'hosted-harness',
-      },
-    });
     try {
-      const store = {
-        authority: managed.authority,
-        resources: managed.resources,
+      const key = {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
       };
-      const children = new HostedChildAgentSession(store, key);
-      const teams = new HostedTeamSession(store, key);
-      await teams.run('team_create', { team_name: 'review' }, 'p:team');
-      const member = teams.admitMember('alice');
-      await children.admit({
-        childRunId: 'run-1',
-        ownerScopeId: SESSION_ID,
-        rootSessionId: SESSION_ID,
-        completion: 'sent',
-        description: 'audit the diff',
-        prompt: 'review the change',
-        definition: {
-          definitionId: 'hosted-agent/hosted-workspace-shell/1',
-          definitionRevision: 1,
-          definitionDigest:
-            managed.authority.sessionHeader.definitionRef.digest,
+      const resources = LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
+      const managed = await openManagedSession({
+        runtimeBaseDir: state.root,
+        transcriptPath: '',
+        sessionId: SESSION_ID,
+        sessionKey: key,
+        cwd: state.root,
+        version: 'hosted-harness/1',
+        workerId: BOOT_ID,
+        activationLeaseDurationMs: 60_000,
+        journalStore: new LocalJsonlManagedSessionJournalStore({
+          runtimeBaseDir: state.root,
+          sessionId: SESSION_ID,
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        }),
+        resourceStore: resources,
+        create: {
+          definitionRef: await resources.publish(
+            'managed-definition',
+            Buffer.from(
+              JSON.stringify({
+                engine: 'managed',
+                sessionId: SESSION_ID,
+                toolProfile: 'hosted-workspace-shell/1',
+              }),
+            ),
+          ),
+          rootSnapshotRef: await resources.publish(
+            'managed-root',
+            Buffer.from(JSON.stringify({ cwd: state.root })),
+          ),
+          createdBy: 'hosted-harness',
         },
-        workspaceMode: 'shared',
-        workingDirectory: '.',
-        executionCallId: 'run-1',
       });
-      await teams.join({ ...member, childRunId: 'run-1' });
-      await children.settleFailed('run-1', {
-        stopReason: 'creation_failed',
-        reason: null,
-        started: false,
-      });
-      await teams.run(
-        'task_create',
-        { subject: 'audit', description: 'audit the diff' },
-        'p:task',
+      try {
+        const store = {
+          authority: managed.authority,
+          resources: managed.resources,
+        };
+        const children = new HostedChildAgentSession(store, key);
+        const teams = new HostedTeamSession(store, key);
+        await teams.run('team_create', { team_name: 'review' }, 'p:team');
+        const member = teams.admitMember('alice');
+        await children.admit({
+          childRunId: 'run-1',
+          ownerScopeId: SESSION_ID,
+          rootSessionId: SESSION_ID,
+          completion: 'sent',
+          description: 'audit the diff',
+          prompt: 'review the change',
+          definition: {
+            definitionId: 'hosted-agent/hosted-workspace-shell/1',
+            definitionRevision: 1,
+            definitionDigest:
+              managed.authority.sessionHeader.definitionRef.digest,
+          },
+          workspaceMode: 'shared',
+          workingDirectory: '.',
+          executionCallId: 'run-1',
+        });
+        await teams.join({ ...member, childRunId: 'run-1' });
+        await children.settleFailed('run-1', {
+          stopReason: 'creation_failed',
+          reason: null,
+          started: false,
+        });
+        await teams.run(
+          'task_create',
+          { subject: 'audit', description: 'audit the diff' },
+          'p:task',
+        );
+      } finally {
+        await managed.close().catch(() => undefined);
+      }
+      mockBrokerBroker();
+      const server = await app(true);
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store() });
+      expect(loaded.status).toBe(200);
+      const journal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
       );
+      expect(
+        journal.events
+          .filter((event) => event.kind === 'domain.committed')
+          .map((event) => event.payload['domain']),
+      ).toEqual(
+        expect.arrayContaining(['team_state', 'team_task', 'child_run']),
+      );
+      expect(
+        (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+          .status,
+      ).toBe(204);
     } finally {
-      await managed.close().catch(() => undefined);
+      domainEnablement.childRun = false;
     }
-    mockBrokerBroker();
-    const server = await app(true);
-    const loaded = await headers(
-      supertest(server).post(`/session/${SESSION_ID}/load`),
-    ).send({ managedSessionStore: store() });
-    expect(loaded.status).toBe(200);
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
-    expect(
-      journal.events
-        .filter((event) => event.kind === 'domain.committed')
-        .map((event) => event.payload['domain']),
-    ).toEqual(expect.arrayContaining(['team_state', 'team_task', 'child_run']));
-    expect(
-      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
-        .status,
-    ).toBe(204);
   });
 
   // An array-valued `lineage` must not be silently accepted as a root
@@ -9847,28 +9853,13 @@ describe('Hosted Harness no-tool session', () => {
       body,
     );
     expect(created.status).toBe(200);
+    // Captured here and asserted after the Turn: an assertion inside the
+    // model mock fails only the Turn, which the test would not see.
+    let firstDeclarations: string[] | undefined;
     state.model.mockImplementationOnce(async ({ toolTurn }) => {
-      expect(
-        (await toolTurn!.declarations(new AbortController().signal)).map(
-          (tool) => tool.name,
-        ),
-      ).toEqual([
-        'read_file',
-        'write_file',
-        'edit',
-        'run_shell_command',
-        'monitor',
-        // H4b: a Shell-laned root Session advertises its Agent tool,
-        // and (H4d-b) messages the child tasks it launched.
-        'agent',
-        // H4e-b1: with the team domains enabled, so are its team tools.
-        'team_create',
-        'team_delete',
-        'task_create',
-        'task_update',
-        'task_list',
-        'send_message',
-      ]);
+      firstDeclarations = (
+        await toolTurn!.declarations(new AbortController().signal)
+      ).map((tool) => tool.name!);
       return { text: 'text without side effects', model: 'test-model' };
     });
     const prompt = [{ type: 'text', text: 'hello' }];
@@ -9893,6 +9884,23 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 10_000 },
     );
+    expect(firstDeclarations).toEqual([
+      'read_file',
+      'write_file',
+      'edit',
+      'run_shell_command',
+      'monitor',
+      // H4b: a Shell-laned root Session advertises its Agent tool,
+      // and (H4d-b) messages the child tasks it launched.
+      'agent',
+      // H4e-b1: with the team domains enabled, so are its team tools.
+      'team_create',
+      'team_delete',
+      'task_create',
+      'task_update',
+      'task_list',
+      'send_message',
+    ]);
     expect(acquire).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',

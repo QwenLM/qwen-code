@@ -1729,7 +1729,8 @@ export class HostedWorkspaceToolTurn {
           // The deliberate refusals below keep their texts whenever the
           // Agent call is not admitted.
           agentAdmitted = this.agentsAdmitted();
-          const named = this.teamsAdmitted() && args['name'] !== undefined;
+          const teamsOn = this.teamsAdmitted();
+          const named = teamsOn && args['name'] !== undefined;
           const unsupportedKey = Object.keys(args).find(
             (key) =>
               ![
@@ -1758,7 +1759,7 @@ export class HostedWorkspaceToolTurn {
             validationError =
               'Hosted child agents are unavailable on this Session profile; read work through ordinary tools instead.';
           } else if (unsupportedKey !== undefined) {
-            validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition, without nesting: fork_*, working_dir, name, model and subagent_type belong to the legacy Agent tool.`;
+            validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition, without nesting: fork_*, working_dir, ${teamsOn ? '' : 'name, '}model and subagent_type belong to the legacy Agent tool.`;
           } else if (
             args['isolation'] !== undefined &&
             args['isolation'] !== 'worktree'

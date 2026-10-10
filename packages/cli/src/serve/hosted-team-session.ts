@@ -159,7 +159,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'task_update',
     description:
-      'Update a board task: status, owner, subject, description, active form, metadata and dependencies. Set status to "deleted" to remove it. A task in progress needs an owner: "leader" or a member that is still running; a member that has finished can own only a completed task. Dependencies only grow, and a completed or deleted blocker stops blocking. Members are not told about the update.',
+      'Update a board task: status, owner, subject, description, active form, metadata and dependencies. Set status to "deleted" to remove it. A task in progress needs an owner: "leader" or a member that is still running; a member that has finished can be newly set as the owner only of a completed task. Dependencies only grow, and a completed or deleted blocker stops blocking. Members are not told about the update.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -718,8 +718,10 @@ export class HostedTeamSession {
     }
     const task = this.task(board.get(number)!.taskId);
     if (deleting) return `Task #${number} deleted.`;
+    const notified = team.members.find((each) => each.name === owner);
     const notice =
-      owner != null && owner !== MANAGED_TEAM_LEADER
+      notified !== undefined &&
+      this.memberState(notified.childRunId) === 'running'
         ? ` "${owner}" was not notified: members learn of board changes only once the team mailbox lands, so give a member its work in its launch prompt.`
         : '';
     return (
@@ -786,9 +788,19 @@ export class HostedTeamSession {
       );
     const status =
       (args['status'] as TeamTaskStatus | undefined) ?? task.status;
-    // A task keeps an owner whose run ended; only a new owner is checked.
+    // A task keeps an owner whose run ended, so the lead can complete, edit
+    // or delete it; a new owner is checked, and so is a kept owner when the
+    // call moves the task to another open status, so a member that ended
+    // never lands on open work.
     if (owner != null && owner !== task.owner)
       this.assertOwner(team, owner, status === 'completed');
+    else if (
+      (owner === undefined || owner === task.owner) &&
+      task.owner !== null &&
+      status !== task.status &&
+      status !== 'completed'
+    )
+      this.assertOwner(team, task.owner, false);
     if (
       status === 'in_progress' &&
       (owner === undefined ? task.owner : owner) === null
@@ -921,8 +933,8 @@ export class HostedTeamSession {
     if (state === 'running' || (state === 'completed' && completing)) return;
     throw new HostedTeamRefusal(
       state === 'completed'
-        ? `Member "${owner}" has finished, so it can own only a completed task. Set status "completed" to record it as the owner.`
-        : `Member "${owner}" has ${state} and cannot own a task.`,
+        ? `Member "${owner}" has finished, so it can own only a completed task. If it did this task's work, set status "completed" with this owner; otherwise assign "leader" or a running member.`
+        : `Member "${owner}" ${state === 'cancelled' ? 'was cancelled' : `has ${state}`} and cannot own a task.`,
     );
   }
 

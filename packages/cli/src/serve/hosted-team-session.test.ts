@@ -381,7 +381,7 @@ describe('the board', () => {
         teams.run('task_update', { taskId: '1', owner: 'bob' }, 'prompt:u3'),
       ),
     ).toBe(
-      'Member "bob" has finished, so it can own only a completed task. Set status "completed" to record it as the owner.',
+      'Member "bob" has finished, so it can own only a completed task. If it did this task\'s work, set status "completed" with this owner; otherwise assign "leader" or a running member.',
     );
     const assigned = await teams.run(
       'task_update',
@@ -466,13 +466,14 @@ describe('the board', () => {
 
   // The physical pass: a one-shot member finished before the lead's
   // assignment landed, so the board could never name it. A finished
-  // member may be recorded on the task the same call completes; a member
-  // that failed or was cancelled may not, and an open task still needs a
-  // running owner.
+  // member may be recorded on a task the call leaves completed; a member
+  // that failed or was cancelled may not, and a new owner of an open task
+  // must still be running.
   it('records a finished member on the task the call completes', async () => {
     await createTeam();
     await addMember('alice');
     await addMember('bob');
+    await addMember('carol');
     for (const subject of ['audit', 'fix', 'ship'])
       await teams.run(
         'task_create',
@@ -494,7 +495,7 @@ describe('the board', () => {
         ),
       ),
     ).toBe(
-      'Member "alice" has finished, so it can own only a completed task. Set status "completed" to record it as the owner.',
+      'Member "alice" has finished, so it can own only a completed task. If it did this task\'s work, set status "completed" with this owner; otherwise assign "leader" or a running member.',
     );
     expect(
       await teams.run(
@@ -502,13 +503,32 @@ describe('the board', () => {
         { taskId: '1', status: 'completed', owner: 'alice' },
         'prompt:done',
       ),
-    ).toContain('Task #1 updated (status: completed, owner: alice).');
+    ).toBe('Task #1 updated (status: completed, owner: alice).');
     expect(
       parseTeamTask(
         session.authority.extensionRecord('team_task', 'prompt:call-team#1')!
           .record,
       ),
     ).toMatchObject({ status: 'completed', owner: 'alice' });
+    // Reopening keeps the owner, so it is checked like a new one: the
+    // finished member never lands on open work in two steps.
+    for (const status of ['in_progress', 'pending'])
+      expect(
+        await refusal(
+          teams.run(
+            'task_update',
+            { taskId: '1', status },
+            `prompt:reopen-${status}`,
+          ),
+        ),
+      ).toContain('Member "alice" has finished');
+    expect(
+      await teams.run(
+        'task_update',
+        { taskId: '1', status: 'pending', owner: '' },
+        'prompt:reopen-unassigned',
+      ),
+    ).toBe('Task #1 updated (status: pending).');
     expect(
       await refusal(
         teams.run(
@@ -518,6 +538,17 @@ describe('the board', () => {
         ),
       ),
     ).toBe('Member "bob" has failed and cannot own a task.');
+    await children.requestStop('run-carol');
+    await children.settleCancelled('run-carol', { started: false });
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '2', status: 'completed', owner: 'carol' },
+          'prompt:cancelled',
+        ),
+      ),
+    ).toBe('Member "carol" was cancelled and cannot own a task.');
     await teams.run(
       'task_update',
       { taskId: '3', status: 'completed' },
@@ -529,7 +560,7 @@ describe('the board', () => {
         { taskId: '3', owner: 'alice' },
         'prompt:late',
       ),
-    ).toContain('Task #3 updated (status: completed, owner: alice).');
+    ).toBe('Task #3 updated (status: completed, owner: alice).');
   });
 
   it('commits no revision for an update that changes nothing', async () => {

@@ -58,7 +58,7 @@ The facts below are from `main` at `9ec44d45c4`.
 
    A record of a team that is closing or deleted can still take its later revisions: a message in flight is still delivered, a pending plan request is still withdrawn, and a task can still be updated. Only new records are refused, so a team in `closing` admits no new work while it drains.
 
-9. **The four domains stay disabled and project no task.** None is in `MANAGED_SESSION_ENABLED_DOMAINS`, and a commit is refused with "registered but not enabled" before anything publishes. The Java store validates all four ahead of any writer, in the server-first order of H1 through H4d-a. None is on the list of domains that Java's lifecycle gate admits for a Session under a close or delete claim, and H4e-b decides what a closing lead may still commit (open question 3). A team task is a board item, not a runtime task, so all four register a null task kind and their Java rows carry null task columns.
+9. **The four domains stay disabled and project no task.** In this slice none is in `MANAGED_SESSION_ENABLED_DOMAINS` (H4e-b1 later enabled `team_state` and `team_task` after its physical pass), and a commit is refused with "registered but not enabled" before anything publishes. The Java store validates all four ahead of any writer, in the server-first order of H1 through H4d-a. None is on the list of domains that Java's lifecycle gate admits for a Session under a close or delete claim, and H4e-b decides what a closing lead may still commit (open question 3). A team task is a board item, not a runtime task, so all four register a null task kind and their Java rows carry null task columns.
 
 ## Records
 
@@ -162,7 +162,7 @@ Chain identity: `requestId`.
 
 - **Fixture parity.** The shared cases and successors replay in both languages, and every invalid case names the clause both validators must report.
 - **Authority.** The suite lifts the domain gate to plant records, except where it tests the gate itself:
-  - The real gate refuses each of the four domains, and nothing publishes.
+  - The real gate refuses each of the four domains in this slice, and nothing publishes.
   - A team opens, gains members one at a time, closes and is deleted. Its tasks, messages and plan requests chain to their ends, and a reopened log rebuilds every chain.
   - Every rule of decision 8 refuses its violation with the named message.
 - **Java store.** The same chains commit over H2 in MySQL mode, the same rules refuse with `managed_session_extension_record_rejected`, and a team row projects no task.
@@ -171,7 +171,7 @@ Chain identity: `requestId`.
 ## Acceptance criteria
 
 - TypeScript and Java accept and refuse identical team records and successors from the shared fixtures, and every existing contract corpus replays unchanged.
-- The four domains stay off the enabled list and are refused before anything publishes.
+- In this slice the four domains stay off the enabled list and are refused before anything publishes.
 - In both languages, every rule of decision 8 refuses its violation, and a lawful team, task, message and plan request commit and rebuild.
 - No public API or migration changes, and every existing H1–H4d-a suite stays green.
 
