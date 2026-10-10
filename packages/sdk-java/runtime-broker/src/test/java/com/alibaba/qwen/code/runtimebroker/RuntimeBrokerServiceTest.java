@@ -1879,6 +1879,45 @@ class RuntimeBrokerServiceTest {
         }
     }
 
+    @Test
+    void reacquireNeverWaitsOnABackgroundObservation() throws Exception {
+        // The scan's observation is maintenance, not a gate: an acquire
+        // must complete while the observation's control is still in flight.
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "bg-async");
+        String processId = admitDetachedBackgroundProcess(bindings, sessions,
+                executions, recovery, "call");
+
+        Map<String, Object> exited = new LinkedHashMap<>();
+        exited.put("operationId", "call");
+        exited.put("state", "exited");
+        exited.put("evidence", Map.of("exitCode", 0));
+        FakeTransport transport = new FakeTransport();
+        transport.controlResult = CompletableFuture.completedFuture(exited);
+        transport.controlEntered = new CountDownLatch(1);
+        transport.continueControl = new CountDownLatch(1);
+        RuntimeScope scope = recovery.binding.getRequest().getScope();
+        try (var service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(scope),
+                readyAdoptionProvisioner(), transport, bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(10),
+                Duration.ofSeconds(10))) {
+            join(service.acquire(recovery.session.getSession()
+                    .getHarnessSessionId(), recovery.session
+                    .getRuntimeSessionId(), "bootstrap"));
+            assertTrue(transport.controlEntered.await(10,
+                    TimeUnit.SECONDS));
+            assertEquals(ToolExecutionRecord.State.PREPARED,
+                    executions.findByExecutionCallId(processId).getState());
+            transport.continueControl.countDown();
+            awaitExecution(executions, processId,
+                    ToolExecutionRecord.State.SETTLED);
+        }
+    }
+
     /** Seeds a settled-detached invocation plus its live `:process` row. */
     private static String admitDetachedBackgroundProcess(
             RuntimeBindingRepository bindings,
