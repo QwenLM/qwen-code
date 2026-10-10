@@ -17,13 +17,16 @@ import {
   useConnection,
   useStatusReport,
   useWorkspace,
+  type DaemonProductSessionContext,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import type {
-  DaemonSessionGroupPresetColor,
-  DaemonSessionPrInfo,
-  DaemonSessionSummary,
-  DaemonStatusReportSession,
-  SessionMetadataResult,
+import {
+  STANDALONE_SESSIONS_CAPABILITY,
+  type DaemonSessionGroupPresetColor,
+  type DaemonSessionPrInfo,
+  type DaemonSessionSummary,
+  type DaemonStandaloneSessionSummary,
+  type DaemonStatusReportSession,
+  type SessionMetadataResult,
 } from '@qwen-code/sdk/daemon';
 import {
   ArchiveIcon,
@@ -99,6 +102,9 @@ import styles from './SessionOverviewPanel.module.css';
 const LIST_POLL_MS = 3000;
 const STATUS_POLL_MS = 10000;
 const PAGE_SIZE = 50;
+// The standalone route accepts up to 100 entries per page; 50 matches the
+// sidebar's standalone walk so both views fetch the same page shape.
+const STANDALONE_SESSIONS_PAGE_SIZE = 50;
 const PAGE_SIZES = [10, 50, 100] as const;
 const PAGE_SIZE_STORAGE_KEY = 'qwen-web-shell-session-overview-page-size';
 
@@ -140,6 +146,8 @@ export interface SessionCard {
   gitBranch?: string;
   /** The workspace the session lives in. */
   workspaceCwd: string;
+  /** Catalog the session came from; 'standalone' has no workspace of its own. */
+  sourceType?: string;
 }
 
 type SessionStatusFilter = 'all' | 'attention' | 'running' | 'idle';
@@ -167,6 +175,19 @@ type SessionIdentity = Pick<SessionCard, 'sessionId' | 'workspaceCwd'>;
 
 function getSessionIdentity(session: SessionIdentity): string {
   return `${session.workspaceCwd}\0${session.sessionId}`;
+}
+
+/**
+ * Standalone conversations live outside every workspace catalog, so opening
+ * one through the workspace route would fail: rows without a workspace of
+ * their own carry the standalone context to the open handler.
+ */
+function openSessionContext(
+  card: Pick<SessionCard, 'workspaceCwd' | 'sourceType'>,
+): DaemonProductSessionContext | undefined {
+  return card.sourceType === 'standalone' || !card.workspaceCwd
+    ? { kind: 'standalone' }
+    : undefined;
 }
 
 function isCurrentSession(
@@ -235,6 +256,7 @@ export function deriveSessionCards(
       prs: session.prs,
       gitBranch: session.worktree?.branch ?? session.branch?.name,
       workspaceCwd: session.workspaceCwd,
+      sourceType: session.sourceType,
     };
   });
   cards.sort((a, b) => {
@@ -279,7 +301,11 @@ function SessionOverviewPanelInner({
   workspaceCwd,
   manageLiveState,
 }: {
-  onOpenSession: (sessionId: string, workspaceCwd?: string) => void;
+  onOpenSession: (
+    sessionId: string,
+    workspaceCwd?: string,
+    sessionContext?: DaemonProductSessionContext,
+  ) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
   onCurrentSessionRemoved?: (
     session: SessionIdentity,
@@ -389,11 +415,92 @@ function SessionOverviewPanelInner({
       includeOtherWorkspaces && !workspaceCwd,
       liveStateActive ? undefined : LIST_POLL_MS,
     );
-  const mergedSessions = useMemo(
-    () =>
-      otherSessions.length === 0 ? sessions : [...sessions, ...otherSessions],
-    [sessions, otherSessions],
-  );
+  // Standalone (no-workspace) sessions never appear in any workspace catalog,
+  // so without this the overview would miss every conversation the user has
+  // outside a workspace. Gated on the capability: daemons without the route
+  // must not get the request at all.
+  const standaloneFeatures = connection.capabilities?.features;
+  const standaloneSessionsSupported =
+    standaloneFeatures?.includes(STANDALONE_SESSIONS_CAPABILITY) === true;
+  const [standaloneSessions, setStandaloneSessions] = useState<
+    DaemonStandaloneSessionSummary[]
+  >([]);
+  // A re-run or unmount supersedes an in-flight walk: its pages must not
+  // land after the effect they belonged to is gone.
+  const standalonePollGenerationRef = useRef(0);
+  useEffect(() => {
+    if (!standaloneSessionsSupported) {
+      setStandaloneSessions([]);
+      return;
+    }
+    const generation = ++standalonePollGenerationRef.current;
+    let inFlight = false;
+    const run = async () => {
+      // A multi-page walk can outlast the 3s cadence; never overlap walks
+      // so a stale page set cannot overwrite a newer one.
+      if (inFlight) return;
+      inFlight = true;
+      // Walk the whole catalog page by page; a partial walk would hide the
+      // tail of the list for a whole poll interval.
+      const collected: DaemonStandaloneSessionSummary[] = [];
+      let cursor: string | undefined;
+      try {
+        do {
+          const page = await workspace.client.listStandaloneSessionsPage({
+            archiveState: 'active',
+            pageSize: STANDALONE_SESSIONS_PAGE_SIZE,
+            ...(cursor ? { cursor } : {}),
+          });
+          if (standalonePollGenerationRef.current !== generation) return;
+          collected.push(...page.sessions);
+          cursor = page.nextCursor;
+        } while (cursor);
+        if (standalonePollGenerationRef.current === generation) {
+          setStandaloneSessions(collected);
+        }
+      } catch (error) {
+        if (standalonePollGenerationRef.current === generation) {
+          console.warn(
+            '[web-shell] overview standalone sessions list failed:',
+            error,
+          );
+        }
+      } finally {
+        inFlight = false;
+      }
+    };
+    void run();
+    // Same cadence as the workspace catalog poll above; unlike that poll,
+    // the live-state channel does not cover standalone sessions, so this is
+    // their only refresh path — it pauses only while the tab is hidden,
+    // like the status poll below.
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      void run();
+    }, LIST_POLL_MS);
+    return () => {
+      window.clearInterval(timer);
+      standalonePollGenerationRef.current += 1;
+    };
+  }, [standaloneSessionsSupported, workspace.client]);
+  const mergedSessions = useMemo(() => {
+    // Deduplicate on the row identity (workspaceCwd + sessionId): a session
+    // can surface in more than one of the lists, and duplicate row ids would
+    // break the table.
+    const seen = new Set<string>();
+    const merged: DaemonSessionSummary[] = [];
+    for (const session of [
+      ...sessions,
+      ...otherSessions,
+      ...standaloneSessions,
+    ]) {
+      const identity = getSessionIdentity(session);
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      merged.push(session);
+    }
+    return merged;
+  }, [sessions, otherSessions, standaloneSessions]);
   const sessionByIdentity = useMemo(
     () =>
       new Map(
@@ -1165,7 +1272,11 @@ function SessionOverviewPanelInner({
                             window.getSelection()?.isCollapsed === false
                           )
                             return;
-                          onOpenSession(card.sessionId, card.workspaceCwd);
+                          onOpenSession(
+                            card.sessionId,
+                            card.workspaceCwd,
+                            openSessionContext(card),
+                          );
                         }}
                       >
                         {card.label}
@@ -1473,7 +1584,10 @@ function SessionOverviewPanelInner({
           card.sessionId !== selected.sessionId ||
           card.workspaceCwd === selected.workspaceCwd,
       ),
-    );
+    ) &&
+    // Standalone rows open through the standalone route only: the split/tab
+    // paths sanitize them away, so an enabled button would no-op silently.
+    selectedCards.every((selected) => !openSessionContext(selected));
   const canArchiveSelection =
     selectedCount > 0 && selectedCards.every(canArchiveCard);
   const canDeleteSelection =
@@ -1723,7 +1837,12 @@ function SessionOverviewPanelInner({
           onRowClick={(row) => {
             if (editingCard || window.getSelection()?.isCollapsed === false)
               return;
-            onOpenSession(row.original.sessionId, row.original.workspaceCwd);
+            const card = row.original;
+            onOpenSession(
+              card.sessionId,
+              card.workspaceCwd,
+              openSessionContext(card),
+            );
           }}
           data-web-shell-session-table-viewport
         />
@@ -1918,7 +2037,11 @@ export function SessionOverviewPanel({
   workspaceCwd,
   manageLiveState = true,
 }: {
-  onOpenSession: (sessionId: string, workspaceCwd?: string) => void;
+  onOpenSession: (
+    sessionId: string,
+    workspaceCwd?: string,
+    sessionContext?: DaemonProductSessionContext,
+  ) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
   onCurrentSessionRemoved?: (
     session: SessionIdentity,
