@@ -33,10 +33,9 @@ function snapshotRecord(sessionId: string, promptIds: string[]): ChatRecord {
 describe('computeInitialTurnFromHistory', () => {
   it('takes the highest retained snapshot ordinal with a safe successor', () => {
     const sessionId = 's';
-    // Ordering is load-bearing: a fork writes `retainedPromptIds` in insertion
-    // order with oldest-first eviction, so the lowest ordinal arrives first and
-    // the highest sits mid-array. Every snapshot must be scanned and the
-    // maximum kept — not the first match, not the last one.
+    // Deliberate fixture order, not production's: retained ids ascend there,
+    // so the max sits last. Parking it mid-array fails both first-match and
+    // last-wins scans; re-sorting ascending un-pins the last-wins one.
     const record = snapshotRecord(sessionId, [
       `${sessionId}########4`,
       `${sessionId}########${'9'.repeat(400)}`,
