@@ -41,9 +41,9 @@ import {
   resolveHostedAction,
 } from './hosted-tool-approval.js';
 
-// H4e-b1: team_state and team_task stay disabled until the physical
-// acceptance pass, so the gate is lifted per test; with it closed the turn
-// keeps the H4b surface exactly.
+// H4e-b1: team_state and team_task are enabled, so the flags close the
+// real gate per test; with either closed the turn keeps the H4b surface
+// exactly, which is what a rollback of the enablement restores.
 const enablement = vi.hoisted(() => ({ teamState: true, teamTask: true }));
 vi.mock(
   '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
@@ -58,12 +58,13 @@ vi.mock(
         domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
       ) => {
         if (
-          !(
-            (domain === 'team_state' && enablement.teamState) ||
-            (domain === 'team_task' && enablement.teamTask)
-          )
+          (domain === 'team_state' && !enablement.teamState) ||
+          (domain === 'team_task' && !enablement.teamTask)
         )
-          actual.assertManagedSessionDomainEnabled(domain);
+          throw new actual.ManagedSessionRecordError(
+            `domain ${domain} is registered but not enabled for submission.`,
+          );
+        actual.assertManagedSessionDomainEnabled(domain);
       },
     };
   },

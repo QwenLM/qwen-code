@@ -8,7 +8,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   openManagedSession,
   type ManagedSession,
@@ -26,29 +26,6 @@ import {
   type HostedTeamStore,
 } from './hosted-team-session.js';
 
-// H4e-b1: team_state and team_task are registered but not enabled for
-// submission until the physical acceptance pass, so this suite lifts the
-// domain gate for the team domains only, as the H4e-a authority suite does.
-const enablement = vi.hoisted(() => ({ teams: true }));
-vi.mock(
-  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
-  async (importOriginal) => {
-    const actual =
-      await importOriginal<
-        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
-      >();
-    return {
-      ...actual,
-      assertManagedSessionDomainEnabled: (
-        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
-      ) => {
-        if (!(domain.startsWith('team_') && enablement.teams))
-          actual.assertManagedSessionDomainEnabled(domain);
-      },
-    };
-  },
-);
-
 let root: string;
 let session: ManagedSession;
 let children: HostedChildAgentSession;
@@ -56,7 +33,6 @@ let teams: HostedTeamSession;
 let sessionKey: { tenantId: string; workspaceId: string; sessionId: string };
 
 beforeEach(async () => {
-  enablement.teams = true;
   root = await mkdtemp(path.join(tmpdir(), 'hosted-team-'));
   sessionKey = {
     tenantId: 'tenant',
