@@ -32,6 +32,7 @@ import { readManagedSessionRecords } from '@qwen-code/qwen-code-core/managed-run
 import {
   readHostedFileHistory,
   commitHostedFileHistory,
+  type HostedFileHistorySettleBlocker,
 } from './hosted-file-history.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import { HostedHookSession } from './hosted-hook-session.js';
@@ -2999,7 +3000,11 @@ it('stops the Turn when a late answer cannot record the expiry', async () => {
   const notify = vi.spyOn(waiters, 'notify');
   await expect(
     resolveHostedAction(session, waiters, requestId, answer('allow')),
-  ).resolves.toEqual({ status: 409, code: 'hosted_turn_recovery_required' });
+  ).resolves.toEqual({
+    status: 409,
+    code: 'hosted_turn_recovery_required',
+    reason: 'writes_stopped',
+  });
   expect(notify).toHaveBeenCalledWith(requestId);
   expect(session.authority.writesStopped).toBe(true);
   await expect(running).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
@@ -3008,7 +3013,11 @@ it('stops the Turn when a late answer cannot record the expiry', async () => {
   expect(session.authority.action(requestId)?.state).toBe('requested');
   await expect(
     resolveHostedAction(session, waiters, requestId, answer('allow')),
-  ).resolves.toEqual({ status: 409, code: 'hosted_turn_recovery_required' });
+  ).resolves.toEqual({
+    status: 409,
+    code: 'hosted_turn_recovery_required',
+    reason: 'writes_stopped',
+  });
   now.mockRestore();
 });
 
@@ -3066,7 +3075,11 @@ it('answers what a blocked Session already recorded but writes nothing', async (
   const publish = vi.spyOn(session.resources, 'publish');
   await expect(
     resolveHostedAction(session, waiters, waiting, answer('allow'), () => true),
-  ).resolves.toEqual({ status: 409, code: 'hosted_turn_recovery_required' });
+  ).resolves.toEqual({
+    status: 409,
+    code: 'hosted_turn_recovery_required',
+    reason: 'turn_blocked',
+  });
   expect(publish).not.toHaveBeenCalled();
   expect(session.authority.action(waiting)?.state).toBe('requested');
   await resolveHostedAction(session, waiters, waiting, answer('deny'));
@@ -3346,7 +3359,11 @@ it('writes nothing once the Turn blocks during an answer', async () => {
       answer('allow'),
       () => blocked,
     ),
-  ).resolves.toEqual({ status: 409, code: 'hosted_turn_recovery_required' });
+  ).resolves.toEqual({
+    status: 409,
+    code: 'hosted_turn_recovery_required',
+    reason: 'turn_blocked',
+  });
   expect(session.authority.action(requestId)?.state).toBe('requested');
   await resolveHostedAction(session, waiters, requestId, answer('allow'));
   await running;
@@ -3490,7 +3507,11 @@ it('writes nothing once the Turn blocks while the decision is published', async 
       answer('allow'),
       () => blocked,
     ),
-  ).resolves.toEqual({ status: 409, code: 'hosted_turn_recovery_required' });
+  ).resolves.toEqual({
+    status: 409,
+    code: 'hosted_turn_recovery_required',
+    reason: 'turn_blocked',
+  });
   expect(session.authority.action(requestId)?.state).toBe('requested');
   await resolveHostedAction(session, waiters, requestId, answer('deny'));
   await running;
@@ -3592,6 +3613,7 @@ it.each(['decision', 'expiry'])(
     await expect(answering).resolves.toEqual({
       status: 409,
       code: 'hosted_turn_recovery_required',
+      reason: 'turn_blocked',
     });
     expect(session.authority.action(requestId)?.state).toBe('requested');
     expect(session.authority.writesStopped).toBe(false);
@@ -4765,6 +4787,7 @@ it.each([
   'incomplete-results',
   'changed-snapshots',
   'missing-runtime',
+  'stranger-turn',
 ])('does not clear pending history for %s', async (failure) => {
   broker.fileHistory.mockImplementation(async (operation) => {
     if (operation.action === 'snapshot') throw new Error('response lost');
@@ -4781,6 +4804,7 @@ it.each([
   if (failure === 'previous-batch')
     saved.pendingMessageId = await commit('assistant', parts, 'model');
   if (failure === 'missing-message-id') delete saved.pendingMessageId;
+  if (failure === 'stranger-turn') saved.pendingTurn = 'stranger';
   if (failure === 'incomplete-results') {
     const project = session.sink.project.bind(session.sink);
     vi.spyOn(session.sink, 'project').mockImplementation(async (...args) => {
@@ -4806,15 +4830,37 @@ it.each([
     );
   broker.fileHistory.mockClear();
   const recovered = createTurn();
-  await expect(recovered.resumeCommittedResults()).rejects.toBeInstanceOf(
-    HostedToolRecoveryRequiredError,
+  const rejection: unknown = await recovered
+    .resumeCommittedResults()
+    .catch((cause: unknown) => cause);
+  expect(rejection).toBeInstanceOf(HostedToolRecoveryRequiredError);
+  // The settle ground must reach the cause message, or the one site that
+  // blocks a live Turn drops the sub-cause it had in hand.
+  const grounds: Record<string, HostedFileHistorySettleBlocker> = {
+    'previous-batch': 'pending_message_not_ready',
+    'missing-message-id': 'no_pending_message',
+    'incomplete-results': 'tool_results_mismatch',
+    'stranger-turn': 'pending_turn_mismatch',
+  };
+  const ground = grounds[failure];
+  if (ground !== undefined) {
+    const cause = (rejection as HostedToolRecoveryRequiredError).cause;
+    expect(cause).toBeInstanceOf(Error);
+    expect((cause as Error).message).toContain(
+      `Hosted file history requires recovery: ${ground}.`,
+    );
+  }
+  expect((await readHostedFileHistory(session))?.pendingTurn).toBe(
+    failure === 'stranger-turn' ? 'stranger' : 'prompt',
   );
-  expect((await readHostedFileHistory(session))?.pendingTurn).toBe('prompt');
   expect(broker.release).not.toHaveBeenCalled();
   if (
-    ['previous-batch', 'missing-message-id', 'incomplete-results'].includes(
-      failure,
-    )
+    [
+      'previous-batch',
+      'missing-message-id',
+      'incomplete-results',
+      'stranger-turn',
+    ].includes(failure)
   )
     expect(broker.fileHistory).not.toHaveBeenCalled();
 });

@@ -249,6 +249,28 @@ export async function readHostedActionOptions(
   ) as HostedActionOptions;
 }
 
+/** The closed vocabulary the Hosted refusals carry in 'reason'. */
+export type HostedRefusalReason =
+  | 'authorization_unreadable'
+  | 'activation_inactive'
+  | 'continuation_not_ready'
+  | 'file_history_unsettled'
+  | 'hook_operations_pending'
+  | 'mcp_operations_pending'
+  | 'not_runnable'
+  | 'publication_incomplete'
+  | 'recovery_unsupported'
+  | 'restore_blocked'
+  | 'restore_verification_failed'
+  | 'takeover_failed'
+  | 'takeover_unrecovered'
+  | 'takeover_unsupported'
+  | 'turn_blocked'
+  | 'turn_unsettled'
+  | 'undo_unsettled'
+  | 'workspace_not_writable'
+  | 'writes_stopped';
+
 export type HostedActionResolution =
   | {
       readonly status: 200;
@@ -258,12 +280,19 @@ export type HostedActionResolution =
         readonly optionId: string;
       };
     }
-  | { readonly status: 400 | 404 | 409; readonly code: string };
+  | {
+      readonly status: 400 | 404 | 409;
+      readonly code: string;
+      readonly reason?: HostedRefusalReason;
+    };
 
-const RECOVERY_REQUIRED = {
+const recoveryRequired = (session: ManagedSession): HostedActionResolution => ({
   status: 409,
   code: 'hosted_turn_recovery_required',
-} as const;
+  // A stopped writer is the narrower state, so it is named even when the
+  // Session is also recovery-blocked.
+  reason: session.authority.writesStopped ? 'writes_stopped' : 'turn_blocked',
+});
 
 const ENDED_CODES = {
   expired: 'action_expired',
@@ -332,13 +361,13 @@ export async function resolveHostedAction(
     }
     if (writable()) throw cause;
     waiters.notify(requestId);
-    return RECOVERY_REQUIRED;
+    return recoveryRequired(session);
   };
   if (
     authority.action(requestId)!.state === 'requested' &&
     Date.now() >= options.expiresAt
   ) {
-    if (!writable()) return RECOVERY_REQUIRED;
+    if (!writable()) return recoveryRequired(session);
     try {
       await endHostedAction(session, requestId, 'expired', writable);
     } catch (cause) {
@@ -348,7 +377,7 @@ export async function resolveHostedAction(
   }
   const current = recorded();
   if (current) return current;
-  if (!writable()) return RECOVERY_REQUIRED;
+  if (!writable()) return recoveryRequired(session);
   const decisionRef = await session.resources.publish(
     'managed-action-decision',
     bytes,
@@ -356,7 +385,7 @@ export async function resolveHostedAction(
   // Another answer, the expiry or a cancel may have landed meanwhile.
   const landed = recorded();
   if (landed) return landed;
-  if (!writable()) return RECOVERY_REQUIRED;
+  if (!writable()) return recoveryRequired(session);
   try {
     await authority.resolveAction(
       {

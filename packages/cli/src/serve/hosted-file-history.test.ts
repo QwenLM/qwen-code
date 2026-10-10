@@ -8,19 +8,23 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import type { Part } from '@google/genai';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   openManagedSession,
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import {
   assertHostedFileHistoryCapacity,
+  canSettleHostedFileHistory,
   commitHostedFileHistory,
   HostedFileHistoryRefusedError,
   HOSTED_UUID,
   readHostedFileHistory,
   type HostedFileHistoryRecord,
+  type HostedFileHistorySettleBlocker,
 } from './hosted-file-history.js';
 
 let root: string;
@@ -373,3 +377,242 @@ it.each([115, 125])(
     else expect(size).toBeGreaterThan(65536);
   },
 );
+
+describe('canSettleHostedFileHistory grounds', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const TURN = 'pending-turn';
+  const MESSAGE = 'pending-message';
+
+  const pendingRecord = (): HostedFileHistoryRecord => ({
+    ...history(1, true),
+    pendingTurn: TURN,
+    pendingMessageId: MESSAGE,
+  });
+
+  const mockAuthorization = (authorization: unknown) =>
+    vi
+      .spyOn(LocalManagedSessionAuthority.prototype, 'harnessRunAuthorization')
+      .mockResolvedValue(authorization as never);
+
+  const runnableAuthorization = (checkpoint: Record<string, unknown> = {}) =>
+    mockAuthorization({
+      status: 'runnable',
+      checkpoint: {
+        identity: { promptId: TURN, turnId: TURN },
+        continuation: { phase: 'results_ready' },
+        tools: {
+          items: [
+            { modelMessageId: MESSAGE, state: 'settled', outcomeRef: {} },
+          ],
+        },
+        ...checkpoint,
+      },
+    });
+
+  const project = async (
+    type: 'assistant' | 'tool_result' | 'user',
+    uuid: string,
+    parts: Part[],
+  ) => {
+    await session.sink.write({
+      uuid,
+      parentUuid: null,
+      sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+      timestamp: new Date().toISOString(),
+      model: 'test',
+      type,
+      cwd: root,
+      version: 'test',
+      daemonPromptId: TURN,
+      message: { role: type === 'assistant' ? 'model' : 'user', parts },
+    });
+  };
+
+  const call = (id: string): Part => ({
+    functionCall: { id, name: 'read_file', args: {} },
+  });
+  const result = (id: string): Part => ({
+    functionResponse: { id, name: 'read_file', response: {} },
+  });
+
+  const grounds: Array<{
+    ground: HostedFileHistorySettleBlocker | null;
+    detail?: string;
+    prepare: (record: HostedFileHistoryRecord) => unknown;
+  }> = [
+    {
+      ground: 'undo_pending',
+      prepare: (record) => {
+        record.pendingUndo = { requestId: randomUUID(), promptId: TURN };
+      },
+    },
+    {
+      ground: 'no_pending_turn',
+      prepare: (record) => {
+        record.pendingTurn = null;
+      },
+    },
+    {
+      ground: 'no_pending_message',
+      prepare: (record) => {
+        delete record.pendingMessageId;
+      },
+    },
+    {
+      ground: 'authorization_initial',
+      prepare: () => mockAuthorization({ status: 'initial' }),
+    },
+    ...(
+      [
+        'missing_checkpoint',
+        'missing_state',
+        'opaque_state',
+        'invalid_state',
+        'identity_mismatch',
+      ] as const
+    ).map((reason) => ({
+      ground: `authorization_blocked_${reason}` as const,
+      detail: 'core detail',
+      prepare: () =>
+        mockAuthorization({
+          status: 'blocked',
+          reason,
+          message: 'core detail',
+        }),
+    })),
+    {
+      ground: 'checkpoint_identity_mismatch',
+      prepare: () =>
+        runnableAuthorization({
+          identity: { promptId: 'another-turn', turnId: TURN },
+        }),
+    },
+    {
+      ground: 'checkpoint_identity_mismatch',
+      prepare: () =>
+        runnableAuthorization({
+          identity: { promptId: TURN, turnId: 'another-turn' },
+        }),
+    },
+    {
+      ground: 'phase_await_runtime',
+      prepare: () =>
+        runnableAuthorization({ continuation: { phase: 'await_runtime' } }),
+    },
+    {
+      ground: 'pending_message_not_ready',
+      prepare: () =>
+        runnableAuthorization({
+          tools: {
+            items: [
+              {
+                modelMessageId: 'another-message',
+                state: 'settled',
+                outcomeRef: {},
+              },
+            ],
+          },
+        }),
+    },
+    {
+      ground: 'tool_item_unsettled',
+      prepare: () =>
+        runnableAuthorization({
+          tools: {
+            items: [
+              {
+                modelMessageId: MESSAGE,
+                state: 'in_progress',
+                outcomeRef: null,
+              },
+            ],
+          },
+        }),
+    },
+    {
+      ground: 'assistant_mismatch',
+      prepare: async () => {
+        runnableAuthorization();
+        await project('assistant', 'another-message', [call('c1')]);
+        await project('tool_result', randomUUID(), [result('c1')]);
+      },
+    },
+    {
+      ground: 'no_pending_tool_calls',
+      prepare: async () => {
+        runnableAuthorization();
+        await project('assistant', MESSAGE, [{ text: 'noted' }]);
+      },
+    },
+    {
+      ground: 'unexpected_tail_item',
+      prepare: async () => {
+        runnableAuthorization();
+        await project('assistant', MESSAGE, [call('c1')]);
+        await project('user', randomUUID(), [{ text: 'interrupt' }]);
+      },
+    },
+    {
+      ground: 'duplicate_tool_call_id',
+      prepare: async () => {
+        runnableAuthorization();
+        await project('assistant', MESSAGE, [call('c1'), call('c1')]);
+        await project('tool_result', randomUUID(), [result('c1')]);
+        await project('tool_result', randomUUID(), [result('c1')]);
+      },
+    },
+    {
+      ground: 'tool_results_mismatch',
+      prepare: async () => {
+        runnableAuthorization();
+        await project('assistant', MESSAGE, [call('c1')]);
+        await project('tool_result', randomUUID(), [result('c2')]);
+      },
+    },
+    {
+      ground: null,
+      prepare: async () => {
+        runnableAuthorization();
+        await project('assistant', MESSAGE, [call('c1'), call('c2')]);
+        await project('tool_result', randomUUID(), [result('c2')]);
+        await project('tool_result', randomUUID(), [result('c1')]);
+      },
+    },
+  ];
+
+  it.each(grounds)(
+    'names $ground when the pending turn cannot settle past it',
+    async ({ ground, detail, prepare }) => {
+      const record = pendingRecord();
+      await prepare(record);
+      await expect(
+        canSettleHostedFileHistory(session, record),
+      ).resolves.toEqual(ground === null ? null : { blocker: ground, detail });
+    },
+  );
+
+  it('strips and caps the blocked authorization detail', async () => {
+    // The detail is Store-influenced free text riding into single-line
+    // stderr tags: control characters go and the length is capped once, at
+    // the point the detail is produced.
+    mockAuthorization({
+      status: 'blocked',
+      reason: 'invalid_state',
+      message: `core detail\n\u2028qwen serve: forged\x1b[2J\u202e${'x'.repeat(5000)}`,
+    });
+    const settle = await canSettleHostedFileHistory(session, pendingRecord());
+    expect(settle).toEqual({
+      blocker: 'authorization_blocked_invalid_state',
+      detail: expect.stringContaining('core detail qwen serve: forged'),
+    });
+    expect(settle?.detail).toHaveLength(4096);
+    // An oracle independent of the implementation: no code point of the
+    // log-line-unsafe class may survive into the detail.
+    expect(settle?.detail).not.toMatch(
+      /[\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/,
+    );
+  });
+});

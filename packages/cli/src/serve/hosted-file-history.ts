@@ -6,8 +6,13 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import type {
+  HarnessCheckpointPhase,
+  HarnessRunAuthorization,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
+import { sanitizeDaemonLogLine } from '../utils/stdioHelpers.js';
 import {
   parseHostedFileHistoryRecord,
   type HostedFileHistoryRecord,
@@ -92,30 +97,90 @@ export async function readHostedFileHistory(
   );
 }
 
+type HarnessRunAuthorizationBlockedReason = Extract<
+  HarnessRunAuthorization,
+  { status: 'blocked' }
+>['reason'];
+
+/** One name per conjunct that can keep the pending turn from settling. */
+export type HostedFileHistorySettleBlocker =
+  | 'undo_pending'
+  | 'no_pending_turn'
+  | 'no_pending_message'
+  | 'authorization_initial'
+  | `authorization_blocked_${HarnessRunAuthorizationBlockedReason}`
+  | 'checkpoint_identity_mismatch'
+  // Never returned below: the load gate and the live-Turn path name the
+  // stranger record before this probe runs.
+  | 'pending_turn_mismatch'
+  | `phase_${HarnessCheckpointPhase}`
+  | 'pending_message_not_ready'
+  | 'tool_item_unsettled'
+  | 'assistant_mismatch'
+  | 'no_pending_tool_calls'
+  | 'unexpected_tail_item'
+  | 'duplicate_tool_call_id'
+  | 'tool_results_mismatch';
+
+/**
+ * The settle verdict: `blocker` names the blocking conjunct and stays a
+ * byte-identical member of the closed union; `detail` rides beside it with
+ * the sub-cause core recorded — today only a blocked authorization's
+ * message — and is never concatenated into the ground.
+ */
+export interface HostedFileHistorySettlement {
+  blocker: HostedFileHistorySettleBlocker;
+  detail?: string;
+}
+
+/**
+ * Null when the pending turn settles clean; otherwise the blocking conjunct
+ * the cold-load refusal may log. The grounds are the same conjuncts the
+ * boolean version evaluated, in the same order, each with its own name.
+ */
 export async function canSettleHostedFileHistory(
   session: ManagedSession,
   record: HostedFileHistoryRecord,
-): Promise<boolean> {
-  if (!record.pendingTurn || !record.pendingMessageId || record.pendingUndo)
-    return false;
+): Promise<HostedFileHistorySettlement | null> {
+  if (record.pendingUndo) return { blocker: 'undo_pending' };
+  if (!record.pendingTurn) return { blocker: 'no_pending_turn' };
+  if (!record.pendingMessageId) return { blocker: 'no_pending_message' };
   const authorization = await session.authority.harnessRunAuthorization();
-  if (authorization.status !== 'runnable') return false;
+  if (authorization.status !== 'runnable')
+    return authorization.status === 'blocked'
+      ? {
+          blocker: `authorization_blocked_${authorization.reason}`,
+          // The message is Store-influenced free text that rides into the
+          // single-line stderr tags and the thrown recovery Error, so it is
+          // stripped and capped here, once, at the point it is produced.
+          detail:
+            authorization.message === undefined
+              ? undefined
+              : sanitizeDaemonLogLine(authorization.message),
+        }
+      : { blocker: `authorization_${authorization.status}` };
   const checkpoint = authorization.checkpoint;
   const items = checkpoint.tools?.items ?? [];
   if (
     checkpoint.identity.promptId !== record.pendingTurn ||
-    checkpoint.identity.turnId !== record.pendingTurn ||
-    checkpoint.continuation.phase !== 'results_ready' ||
-    !items.some((item) => item.modelMessageId === record.pendingMessageId) ||
-    items.some((item) => item.state !== 'settled' || !item.outcomeRef)
+    checkpoint.identity.turnId !== record.pendingTurn
   )
-    return false;
+    return { blocker: 'checkpoint_identity_mismatch' };
+  if (checkpoint.continuation.phase !== 'results_ready')
+    return { blocker: `phase_${checkpoint.continuation.phase}` };
+  if (!items.some((item) => item.modelMessageId === record.pendingMessageId))
+    return { blocker: 'pending_message_not_ready' };
+  // The parser enforces state === 'settled' iff outcomeRef !== null, so the
+  // state arm alone decides for every checkpoint that can reach here.
+  if (items.some((item) => item.state !== 'settled'))
+    return { blocker: 'tool_item_unsettled' };
   const current = (await session.sink.project()).filter(
     (item) => item.daemonPromptId === record.pendingTurn,
   );
   const index = current.findLastIndex((item) => item.type === 'assistant');
   const assistant = current[index];
-  if (assistant?.uuid !== record.pendingMessageId) return false;
+  if (assistant?.uuid !== record.pendingMessageId)
+    return { blocker: 'assistant_mismatch' };
   const calls =
     assistant.message?.parts?.flatMap((part) =>
       part.functionCall?.id ? [part.functionCall.id] : [],
@@ -127,12 +192,14 @@ export async function canSettleHostedFileHistory(
         part.functionResponse?.id ? [part.functionResponse.id] : [],
       ) ?? [],
   );
-  return (
-    calls.length > 0 &&
-    tail.every((item) => item.type === 'tool_result') &&
-    new Set(calls).size === calls.length &&
-    isDeepStrictEqual(calls.sort(), results.sort())
-  );
+  if (calls.length === 0) return { blocker: 'no_pending_tool_calls' };
+  if (!tail.every((item) => item.type === 'tool_result'))
+    return { blocker: 'unexpected_tail_item' };
+  if (new Set(calls).size !== calls.length)
+    return { blocker: 'duplicate_tool_call_id' };
+  return isDeepStrictEqual(calls.sort(), results.sort())
+    ? null
+    : { blocker: 'tool_results_mismatch' };
 }
 
 export async function commitHostedFileHistory(

@@ -10,6 +10,7 @@ import {
   assertHostedFileHistoryCapacity,
   HostedFileHistoryRefusedError,
   canSettleHostedFileHistory,
+  type HostedFileHistorySettleBlocker,
 } from './hosted-file-history.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -715,11 +716,16 @@ export class HostedWorkspaceToolTurn {
     if (saved?.pendingTurn) {
       this.uncertain = true;
       try {
-        if (
-          saved.pendingTurn !== this.promptId ||
-          !(await canSettleHostedFileHistory(this.session, saved))
-        )
-          throw new Error('Hosted file history requires recovery.');
+        if (saved.pendingTurn !== this.promptId) {
+          const ground: HostedFileHistorySettleBlocker =
+            'pending_turn_mismatch';
+          throw new Error(`Hosted file history requires recovery: ${ground}.`);
+        }
+        const settle = await canSettleHostedFileHistory(this.session, saved);
+        if (settle !== null)
+          throw new Error(
+            `Hosted file history requires recovery: ${settle.blocker}${settle.detail === undefined ? '' : `: ${settle.detail}`}.`,
+          );
         const authorization =
           await this.session.authority.harnessRunAuthorization();
         if (authorization.status !== 'runnable')
