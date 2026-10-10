@@ -460,4 +460,63 @@ class ManagedAgentWorkspaceReplayTest {
                                 assertThat(error.getCode())
                                         .isEqualTo("workspace_unavailable")));
     }
+
+    // The recorder admission (V66): a non-creator OPERATOR's retry of his
+    // own recorded key replays the recorded outcome — the retry an
+    // idempotency key exists for — while another OPERATOR who never
+    // recorded the key keeps the refusal.
+    @Test
+    void aNonCreatorOperatorReplaysHisOwnRecordedCommands() {
+        freshDatabase();
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        // A third actor holding OPERATOR who never records a key.
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+                        + " workspace_id, actor_id, role) VALUES (?, 'ws-a',"
+                        + " ?, 'OPERATOR')",
+                tenant, "actor-c".getBytes(StandardCharsets.UTF_8));
+        ManagedAgentService service = service(new AtomicBoolean(true));
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+
+        String turnId = transaction.execute(status -> {
+            var admission = service.submitTurn(tenant, "actor-b", "submit-b",
+                    sessionId, input);
+            assertThat(admission.replayed()).isFalse();
+            return admission.turnId();
+        });
+        transaction.executeWithoutResult(status -> {
+            var replay = service.submitTurn(tenant, "actor-b", "submit-b",
+                    sessionId, input);
+            assertThat(replay.replayed()).isTrue();
+            assertThat(replay.turnId()).isEqualTo(turnId);
+        });
+        transaction.executeWithoutResult(status -> assertThat(
+                service.cancelTurn(tenant, "actor-b", "cancel-b", sessionId,
+                        turnId).replayed()).isFalse());
+        transaction.executeWithoutResult(status -> {
+            var replay = service.cancelTurn(tenant, "actor-b", "cancel-b",
+                    sessionId, turnId);
+            assertThat(replay.replayed()).isTrue();
+            assertThat(replay.turnId()).isEqualTo(turnId);
+        });
+        transaction.executeWithoutResult(status -> assertThat(
+                service.renameSession(tenant, "actor-b", "rename-b",
+                        sessionId, "his title").replayed()).isFalse());
+        transaction.executeWithoutResult(status -> assertThat(
+                service.renameSession(tenant, "actor-b", "rename-b",
+                        sessionId, "his title").replayed()).isTrue());
+        // Another OPERATOR who never recorded the keys keeps the refusal.
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.submitTurn(tenant, "actor-c",
+                        "submit-b", sessionId, input))
+                        .isInstanceOfSatisfying(ApiException.class, error ->
+                                assertThat(error.getCode())
+                                        .isEqualTo("workspace_unavailable")));
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.renameSession(tenant,
+                        "actor-c", "rename-b", sessionId, "his title"))
+                        .isInstanceOfSatisfying(ApiException.class, error ->
+                                assertThat(error.getCode())
+                                        .isEqualTo("workspace_unavailable")));
+    }
 }

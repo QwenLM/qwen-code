@@ -13,13 +13,21 @@ start a separate Browser Use MCP server.
 
 Install and enable the Qwen Code Chrome extension in the profile the user wants
 to use. On macOS and Linux, first use of this SDK automatically registers the
-shared Native Messaging host in the user's installation directory. A browser
+shared Native Messaging host in the user's installation directory. Windows is
+not supported: no Native Messaging host is ever registered there, so the
+extension has nothing to connect back to. Calls that start a browser session
+fail with `BROWSER_DISCONNECTED`, and `browsers.list()` waits out the connect
+budget and returns an empty list: on Windows an empty list means the platform
+is unsupported, not that no profile exists. If the user is on Windows, tell them
+Browser Use needs macOS or Linux and stop. Do not retry, and do not send them to
+the Chrome Web Store or to `chrome://extensions`; neither can fix this. A browser
 task opts into this local setup, which can finish before the extension connects.
 The SDK checks the actual connection and protocol instead of reading Chrome's
 extension preferences.
 
-If the extension does not connect, ask the user to open Chrome and check the
-extension in the intended profile. It installs from the Chrome Web Store:
+If the extension does not connect on macOS or Linux, ask the user to open Chrome
+and check the extension in the intended profile. It installs from the Chrome Web
+Store:
 https://chromewebstore.google.com/detail/qwen-code/hdhmmjclhibojdddmancfgbkleahfaph
 
 If the store reports it is not available in the user's region, they can build

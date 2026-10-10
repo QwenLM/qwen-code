@@ -49,6 +49,7 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -353,10 +354,11 @@ public class ManagedAgentService {
         // Replay before the visibility and availability gates, so a
         // recorded submit still answers after a delete and through a
         // Harness outage. See createSession. The gates above pass every
-        // operator, but the recorded outcome stays creator-scoped — and
-        // the gate runs when the key exists, before any digest comparison:
-        // a reused key's idempotency_conflict would otherwise tell a
-        // non-creator the key is live.
+        // operator, but the recorded outcome stays scoped to its recorder
+        // and the Session's creator — and the gate runs when the key
+        // exists, before any digest comparison: a reused key's
+        // idempotency_conflict would otherwise tell another actor the key
+        // is live.
         Admission replay = replayForCreator(tenantId, SUBMIT,
                 idempotencyKey, requestDigest, session, actorId);
         if (replay != null) {
@@ -378,7 +380,7 @@ public class ManagedAgentService {
         try {
             admission = store.insertTurnCommand(tenantId, SUBMIT,
                     idempotencyKey, requestDigest, sessionId, input,
-                    payloadDigest);
+                    payloadDigest, actorId);
         } catch (DuplicateKeyException error) {
             admission = store.replayCommand(tenantId, SUBMIT,
                     idempotencyKey, requestDigest);
@@ -411,7 +413,8 @@ public class ManagedAgentService {
         Admission admission;
         try {
             admission = store.insertCancelCommand(tenantId, CANCEL,
-                    idempotencyKey, requestDigest, sessionId, turnId);
+                    idempotencyKey, requestDigest, sessionId, turnId,
+                    actorId);
         } catch (DuplicateKeyException error) {
             admission = store.replayCommand(tenantId, CANCEL,
                     idempotencyKey, requestDigest);
@@ -421,6 +424,42 @@ public class ManagedAgentService {
                     admission.turnId());
         } else {
             dispatch(tenantId, admission, session.workspace() != null);
+        }
+        return response(admission);
+    }
+
+    /**
+     * H4f: stops the child Session's running Turn on behalf of its parent
+     * run's committed stop request, called only by the child result relay.
+     * The key derives from the parent, the run and the Turn, so a redriven
+     * stop replays its admission and never mints a second cancel; a Turn
+     * that already ended answers without effect. The child acts under no
+     * caller: the request is the parent authority's own durable record.
+     */
+    public CommandAdmission cancelChildTurn(String tenantId,
+            String parentSessionId, String childSessionId, String childRunId,
+            String turnId) {
+        String key = childStopKey(parentSessionId, childRunId, turnId);
+        String requestDigest = digests.digest(Map.of(
+                "sessionId", childSessionId, "turnId", turnId));
+        Admission replay = replay(tenantId, CANCEL, key, requestDigest);
+        if (replay != null) {
+            dispatch(tenantId, replay);
+            return response(replay);
+        }
+        Admission admission;
+        try {
+            admission = store.insertCancelCommand(tenantId, CANCEL, key,
+                    requestDigest, childSessionId, turnId);
+        } catch (DuplicateKeyException error) {
+            admission = store.replayCommand(tenantId, CANCEL, key,
+                    requestDigest);
+        }
+        if (admission.commandEffect()) {
+            coordinator.cancel(tenantId, admission.sessionId(),
+                    admission.turnId());
+        } else {
+            dispatch(tenantId, admission);
         }
         return response(admission);
     }
@@ -442,15 +481,31 @@ public class ManagedAgentService {
         StoreModels.CommandRecord recorded = store.findCommand(tenantId,
                 RENAME, idempotencyKey).orElse(null);
         if (recorded != null && "COMPLETED".equals(recorded.status())
-                && recorded.sessionId().equals(sessionId)
-                && recorded.requestDigest().equals(renameDigest(sessionId,
-                        title))) {
+                && recorded.sessionId().equals(sessionId)) {
+            // The actor gates run ahead of the digest comparison:
+            // evaluating the digest first throws invalid_title for an
+            // over-bound title and would split a grant-less caller's
+            // answer on the key's liveness (400 against a recorded key,
+            // 404 against a fresh one); the uniform answer is the read
+            // grant's 404.
             SessionRecord session = store.requireSession(tenantId,
                     sessionId);
             requireSubmitterRole(session, actorId);
-            requireReplayCreator(session, actorId);
-            return new SessionMutationResult<>(publicSession(
-                    asLastVisible(session)), true);
+            if (!recordedByCaller(recorded, actorId)) {
+                requireReplayCreator(session, actorId);
+            }
+            // The replay comparison digests the title as sent, never the
+            // validated form: a title that fails validation cannot match a
+            // recorded rename, and validating here would throw ahead of
+            // the gates. A mismatched title falls through to the fresh
+            // path, whose validRenameTitle still answers 400 to an
+            // authorized caller.
+            if (title != null && recorded.requestDigest().equals(
+                    digests.digest(Map.of("sessionId", sessionId, "title",
+                            title)))) {
+                return new SessionMutationResult<>(publicSession(
+                        asLastVisible(session)), true);
+            }
         }
         // The fresh-key half answers a tombstone 404, as every other
         // Session read does; the recorded rename above is the only outcome
@@ -469,7 +524,7 @@ public class ManagedAgentService {
         String effectiveTitle = validRenameTitle(title);
         SessionMutationCommand command = store.beginSessionMutation(tenantId,
                 RENAME, idempotencyKey, renameDigest(sessionId, title),
-                sessionId, SessionMutationKind.RENAME);
+                sessionId, SessionMutationKind.RENAME, actorId);
         if (!"COMPLETED".equals(command.status())) {
             try {
                 requireHarness();
@@ -1116,8 +1171,9 @@ public class ManagedAgentService {
 
     // The creator half of the replay gate, deferred into the replay arm:
     // the read-grant and role halves already ran above the replay, and a
-    // recorded outcome answers only to the Session's creator. A legacy
-    // Session has no per-actor mutation gate at all.
+    // recorded outcome answers to the actor who recorded it or to the
+    // Session's creator. A legacy Session has no per-actor mutation gate
+    // at all.
     private void requireReplayCreator(SessionRecord session,
             String actorId) {
         if (session.workspace() != null
@@ -1149,6 +1205,35 @@ public class ManagedAgentService {
             String actorId) {
         if (session.workspace() != null && !maySubmitShape(session)) {
             requireLegacyWorkspace(session, actorId);
+        }
+    }
+
+    // The tenant-wide command namespace is shared with callers' keys,
+    // which are visible ASCII only (validateIdempotencyKey): the space
+    // makes this key one no caller can claim first.
+    private String childStopKey(String parentSessionId, String childRunId,
+            String turnId) {
+        return "child-stop " + digests.digest(Map.of(
+                "parentSessionId", parentSessionId, "childRunId", childRunId,
+                "turnId", turnId));
+    }
+
+    /**
+     * H4f: who may cancel a task. A bound Session's tasks run under its
+     * Workspace, so the caller needs OPERATOR there, as for cancelling a
+     * Turn; a readable caller below it gets {@code 403 task_forbidden}.
+     * Unlike the Turn rule, the Session's executable shape is not an
+     * authorization fact: a Session that stopped serving work answers the
+     * new-request state checks instead. An unbound Session has no role
+     * model beyond its read access.
+     */
+    void requireTaskCanceller(SessionRecord session, String actorId) {
+        if (session.workspace() != null
+                && !workspaces.accessOf(session.tenantId(), actorId,
+                        session.workspace().getWorkspaceId())
+                        .atLeast(WorkspaceAccess.OPERATOR)) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "task_forbidden",
+                    "Only a Workspace operator may cancel the task.");
         }
     }
 
@@ -1293,19 +1378,37 @@ public class ManagedAgentService {
                 .orElse(null);
     }
 
-    // The creator-gated twin: the moment the key exists the caller must be
-    // the Session's creator, before the digest comparison runs — its
-    // idempotency_conflict would otherwise confirm to a non-creator that
-    // the key is live. A fresh key never gates here; it meets the
-    // visibility and shape refusals below the replay.
+    // The creator-gated twin: the moment the key exists the caller must
+    // be the actor who recorded it (V66) or the Session's creator, before
+    // the digest comparison runs — its idempotency_conflict would
+    // otherwise confirm to another actor that the key is live. A fresh key
+    // never gates here; it meets the visibility and shape refusals below
+    // the replay.
     private Admission replayForCreator(String tenantId, String operation,
             String idempotencyKey, String requestDigest,
             SessionRecord session, String actorId) {
-        if (store.findCommand(tenantId, operation, idempotencyKey)
-                .isPresent()) {
-            requireReplayCreator(session, actorId);
-        }
+        store.findCommand(tenantId, operation, idempotencyKey)
+                .filter(command -> !recordedByCaller(command, actorId))
+                .ifPresent(command -> requireReplayCreator(session,
+                        actorId));
         return replay(tenantId, operation, idempotencyKey, requestDigest);
+    }
+
+    // The recorder half of the replay admission: a V66 command row names
+    // the actor whose own retry the recorded outcome answers. A NULL row —
+    // pre-V66 or server-keyed — leaves the creator gate alone.
+    private boolean recordedByCaller(StoreModels.CommandRecord command,
+            String actorId) {
+        byte[] recorded = command.actorKey();
+        if (recorded == null || actorId == null) {
+            return false;
+        }
+        try {
+            return Arrays.equals(recorded, ManagedWorkspaceRegistry
+                    .actorKey(command.tenantId(), actorId));
+        } catch (IllegalArgumentException error) {
+            return false;
+        }
     }
 
     private void requireHarness() {

@@ -80,7 +80,7 @@ public final class StoreModels {
     public record CommandRecord(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String status, String sessionStatusBefore,
-            long createdAt, long updatedAt) {
+            byte[] actorKey, long createdAt, long updatedAt) {
     }
 
     /**
@@ -108,13 +108,14 @@ public final class StoreModels {
         ARCHIVE,
         DELETE,
         ACTION_RESPONSE,
-        CWD_CHANGE
+        CWD_CHANGE,
+        TASK_CANCEL
     }
 
     /**
      * A durable lifecycle operation. {@code sessionStatusBefore} is the
      * Session status when it was admitted; only an operation admitted on an
-     * active Session closes the Harness. The cwd fields and
+     * active Session closes the Harness. The cwd fields, {@code taskId} and
      * {@code failureCode} are set only for the kinds that populate them.
      */
     public record OperationRecord(String tenantId, String sessionId,
@@ -124,7 +125,18 @@ public final class StoreModels {
             long claimGeneration, int attemptCount, String targetCwdRelative,
             Long expectedContextRevision, Long resultContextRevision,
             String failureCode, int lifecycleProtocolVersion,
-            byte[] actorKey) {
+            byte[] actorKey, String taskId) {
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState,
+                String sessionStatusBefore, String receiptId, String leaseOwner, long claimGeneration,
+                int attemptCount, String targetCwdRelative, Long expectedContextRevision,
+                Long resultContextRevision, String failureCode, int lifecycleProtocolVersion, byte[] actorKey) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, targetCwdRelative,
+                    expectedContextRevision, resultContextRevision, failureCode, lifecycleProtocolVersion, actorKey,
+                    null);
+        }
+
         public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
                 String requestDigest, String state, String admissionStage, String deliveryState, String sessionStatusBefore,
                 String receiptId, String leaseOwner, long claimGeneration, int attemptCount, String targetCwdRelative,

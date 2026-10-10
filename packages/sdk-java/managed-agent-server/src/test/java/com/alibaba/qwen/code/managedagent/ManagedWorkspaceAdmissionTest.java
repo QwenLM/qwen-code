@@ -667,6 +667,85 @@ class ManagedWorkspaceAdmissionTest {
                                         .isEqualTo("session_not_found")));
     }
 
+    // The grant-less arm of the rename replay gate: with the key recorded
+    // as a completed rename of the Session, every title shape — over-long,
+    // blank, control-bearing — must answer the same 404 a fresh key
+    // answers, never the invalid_title the digest evaluation would throw
+    // ahead of the actor gates.
+    @Test
+    void aRecordedRenameAnswers404ToAGrantlessActorForEveryTitleShape() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        String sessionId = store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create", "sha256:" + "a".repeat(64), "qwen-code",
+                null, null, List.of(), null, new WorkspaceSelection("ws-a",
+                        "."))
+                .sessionId();
+        ManagedAgentProperties enabled = new ManagedAgentProperties();
+        enabled.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {
+                }, registry, enabled);
+        UnavailableHarnessConnector harness =
+                new UnavailableHarnessConnector() {
+                    @Override
+                    public boolean isAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public boolean isWorkspaceFilesAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public Attachment createOrLoad(String tenantId,
+                            String sessionId, boolean loadExisting) {
+                        return new Attachment("boot");
+                    }
+
+                    @Override
+                    public void rename(String tenantId, String sessionId,
+                            String title) {
+                    }
+                };
+        ManagedAgentService service = new ManagedAgentService(gated,
+                new RequestDigests(), mock(HarnessCoordinator.class), harness,
+                registry);
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        transaction.executeWithoutResult(status -> assertThat(
+                service.renameSession(tenant, "actor-a", "rename", sessionId,
+                        "new title").replayed()).isFalse());
+
+        // actor-z holds no grant row at all: the recorded key and a fresh
+        // key answer alike for every title shape.
+        for (String title : new String[] {"t".repeat(300), "",
+                "bad\ntitle", "new title"}) {
+            assertNotFound(service, transaction, tenant, sessionId, "rename",
+                    title);
+            assertNotFound(service, transaction, tenant, sessionId, "fresh",
+                    title);
+        }
+    }
+
+    private void assertNotFound(ManagedAgentService service,
+            TransactionTemplate transaction, String tenant, String sessionId,
+            String key, String title) {
+        transaction.executeWithoutResult(status -> assertThatThrownBy(
+                () -> service.renameSession(tenant, "actor-z", key, sessionId,
+                        title))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus())
+                            .isEqualTo(HttpStatus.NOT_FOUND);
+                    assertThat(error.getCode())
+                            .isEqualTo("session_not_found");
+                }));
+    }
+
     // The rename key is tenant-global — managed_agent_command's primary key
     // is (tenant_id, operation, idempotency_key), with no session and no
     // actor — so a key actor-a's Session X consumed is not actor-b's request

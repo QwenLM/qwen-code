@@ -288,6 +288,8 @@ class ManagedAgentPropertiesTest {
                 p -> p.getRuntimeBroker().setEnabled(false),
                 p -> p.getRuntimeBroker().setProvisioner("kubernetes"),
                 p -> p.getRuntimeBroker().setIsolationClass("workspace"),
+                // A merge waits for the child's close, which only a durable Broker runs.
+                p -> p.getRuntimeBroker().setDurableLocalProcess(false),
                 p -> p.getRuntimeBroker().setWorkspaceMounts(List.of()));
         for (Consumer<ManagedAgentProperties> change : invalid) {
             ManagedAgentProperties properties = new ManagedAgentProperties();

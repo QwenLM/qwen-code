@@ -390,7 +390,7 @@ public class ManagedWorkspaceRegistry {
                 record.getPolicyRef());
     }
 
-    static byte[] actorKey(String tenantId, String actorId) {
+    public static byte[] actorKey(String tenantId, String actorId) {
         return new WorkspaceActor(tenantId, actorId).getActorId()
                 .getBytes(StandardCharsets.UTF_8);
     }

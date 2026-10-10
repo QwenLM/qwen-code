@@ -117,6 +117,10 @@ class SessionRowLockOrderTest {
     // a stale entry fails the sibling boundary test.
     private static final Map<String, Set<String>> AMBIGUITY_EXEMPTIONS =
             Map.ofEntries(
+                    Map.entry("ChildResultRelayStore.java",
+                            Set.of("ChildResultRelayStore.readTree/1")),
+                    Map.entry("ChildWorkspaceStore.java",
+                            Set.of("ChildWorkspaceStore.row/2")),
                     Map.entry("ManagedAgentDefinitionStore.java",
                             Set.of("ManagedAgentDefinitionStore.notFound/0",
                                     "ManagedAgentDefinitionStore.row/2",
@@ -142,6 +146,8 @@ class SessionRowLockOrderTest {
                                     "Source.sessionKey/0")),
                     Map.entry("ManagedWorkspaceRegistry.java",
                             Set.of("ManagedWorkspaceRegistry.findReadable/3")),
+                    Map.entry("SessionMessageRelayStore.java",
+                            Set.of("SessionMessageRelayStore.pending/2")),
                     Map.entry("ToolPublicationAdmissionStore.java",
                             Set.of("AcknowledgementBundle.captureIdentity/0",
                                     "AcknowledgementBundle.finished/0",
@@ -238,7 +244,8 @@ class SessionRowLockOrderTest {
                 "insertTurnCommand", "insertCancelCommand",
                 "insertSessionCommand", "insertWorkspaceSessionCommand",
                 "insertChildSessionCommand", "beginSessionMutation",
-                "completeSessionMutation", "beginOperation",
+                "beginTaskCancelOperation", "completeSessionMutation",
+                "beginOperation",
                 "beginWorkspaceClose", "beginWorkspaceLifecycle",
                 "unarchiveWorkspaceSession", "beginCwdChangeOperation",
                 "completeCwdChangeOperation", "completeOperation",
@@ -256,8 +263,8 @@ class SessionRowLockOrderTest {
                 .containsExactlyInAnyOrder("advanceReplayFloor",
                         "appendLiveSessionEventIfAbsent",
                         "appendPublicEventIfAbsent", "beginSessionMutation",
-                        "completeOperation", "completeSessionMutation",
-                        "unarchiveWorkspaceSession");
+                        "beginTaskCancelOperation", "completeOperation",
+                        "completeSessionMutation", "unarchiveWorkspaceSession");
         // The turn-row population, pinned exactly like the locker set: a
         // member that reaches the turn row without taking the session lock
         // never enters `lockers`, so this assertion — not the violation
@@ -272,8 +279,8 @@ class SessionRowLockOrderTest {
                         "deferTurnRetry", "failTurn", "findActiveTurns",
                         "findDispatchable", "findLatestTurns", "findTurn",
                         "findTurnSummary", "hasActiveTurn",
-                        "insertCancelCommand", "insertChildSessionCommand",
-                        "insertSession", "insertSessionCommand", "insertTurn",
+                        "insertCancelCommand", "insertChildSession",
+                        "insertChildSessionCommand", "insertSession", "insertSessionCommand", "insertTurn",
                         "insertTurnCommand", "insertWorkspaceSessionCommand",
                         "listTurns", "markSubmissionAttempted",
                         "materializeEvent", "materializeInput",

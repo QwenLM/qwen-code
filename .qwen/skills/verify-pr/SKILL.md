@@ -237,20 +237,25 @@ Read the diff and metadata, then write down — in the report — the PR's
 secondary claims. Budget by value:
 
 1. **A/B load-bearing proof of the central claim** (always, ~half the budget).
-   When the claim is about a turn's lifecycle (cancel, park, takeover,
-   recovery, approval, retry), name the scenario axes before choosing the
-   A/B instrument: take them from _Parameterise scenarios_ under wire-oracle
-   harnesses, and note the setting the author's tests use on each. The A/B
-   must also run at least one other setting, even when the instrument is the
-   PR's own test files: copy the author's new test and change only that
-   setting, such as parking Turn 2 after Turn 1 completed. The report lists
-   each axis with the settings that ran; the rest go under _Not covered_.
-   Measured example: a cancel fix settled a parked Turn only when it was the
-   Session's first. In a before/after re-run of this skill on that head,
-   neither arm named the axis. One ran the PR's own tests on base and head;
-   the other built cells that all parked the first Turn of a fresh Session.
-   The author's test, changed only to park Turn 2, failed there with
-   `expected 409 to be 200`.
+   When the diff changes how a Turn is cancelled, parked, taken over,
+   recovered, approved or retried, name the scenario axes before choosing
+   the A/B instrument, whether or not that code is the central claim; if it
+   is not, it gets its own A/B as a secondary claim. Take the axes from
+   _Parameterise scenarios_ under wire-oracle harnesses, and note the
+   setting the author's tests use on each. The A/B must also run at least
+   one other setting, even when the instrument is the PR's own test files:
+   copy the author's new test and change only that setting, such as parking
+   Turn 2 after Turn 1 completed. The report lists each axis with the
+   settings that ran; the rest go under _Not covered_. Measured example: a
+   cancel fix settled a parked Turn only when it was the Session's first.
+   In a before/after re-run of this skill on that head, neither arm named
+   the axis. One ran the PR's own tests on base and head; the other built
+   cells that all parked the first Turn of a fresh Session. The author's
+   test, changed only to park Turn 2, failed there with
+   `expected 409 to be 200`. A third arm had this rule keyed to the central
+   claim; it named Harness generation adoption as the claim, so the rule
+   never applied, although it mutated the cancellation-load branches. The
+   trigger is therefore the diff, not the claim.
 2. **One or two wire-oracle harnesses** on the changed surface.
 3. **Targeted gates**: tests/typecheck of the affected workspace(s) only.
 4. **Capture the A/B and the matrix as they print** — one command each,

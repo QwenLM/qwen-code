@@ -86,7 +86,18 @@ import {
   hostedHookOccurrenceId,
 } from './hosted-hook-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
-import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import {
+  ChildMessagesPendingError,
+  HostedChildAgentSession,
+} from './hosted-child-agent-session.js';
+import { HostedTeamSession } from './hosted-team-session.js';
+import { MANAGED_SESSION_MESSAGE_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
+import {
+  HostedSessionMessageSession,
+  SESSION_MESSAGE_INPUT_SOURCE,
+  SessionMessageNotReadyError,
+  withSessionMessageConsumption,
+} from './hosted-session-message-session.js';
 import { HostedMonitorSession } from './hosted-monitor-session.js';
 import {
   AutomationNotFoundError,
@@ -143,6 +154,8 @@ import {
 } from './hosted-workspace-broker.js';
 import { HostedTextDeltaStream } from './hosted-text-deltas.js';
 import {
+  answerCommittedTurnCalls,
+  answerResumedTurnCalls,
   fillParkedRoundAgentGaps,
   isDurableBlockedVerdict,
   originalRuntimeBroker,
@@ -258,6 +271,22 @@ interface HostedSession {
   /** H6: the Session's automation definitions and runs, on every profile. */
   automations?: HostedAutomationSession;
   childAgents?: HostedChildAgentSession;
+  /** H4d-b: the Session's messages along its lineage, beside its children. */
+  messages?: HostedSessionMessageSession;
+  /** H4d-b: message operations past the closing check, which a close waits
+   * out before it cancels the pending inputs. */
+  messageOperations?: Set<Promise<void>>;
+  /** H4f × H4d-b: the Session's run was stopped; no message input of it
+   * starts a turn any more. */
+  messagesStopped?: boolean;
+  /** H4e-b1: the lead's team funnel, beside its child orchestrator. */
+  teams?: HostedTeamSession;
+  /**
+   * #13753 I2: the control plane serves child Workspaces, so the Agent
+   * tool admits `isolation: "worktree"`. It describes the host, not the
+   * Session: every create or load restates it and nothing persists it.
+   */
+  childWorkspaces?: boolean;
   /** Depth of this Session in its child tree; absent or 0 is the root. */
   childDepth?: number;
   /** Tool-arm results answered by a turn; flushed at that turn's settle. */
@@ -539,6 +568,23 @@ function record(
   };
 }
 
+/**
+ * The child orchestration a Turn of this Session gets, the same for an
+ * ordinary Turn and a recovered one: its funnel, its depth, whether the
+ * host serves child Workspaces (#13753 I2), and the consumption queue.
+ */
+function childAgentsOf(session: HostedSession) {
+  return (
+    session.childAgents && {
+      funnel: session.childAgents,
+      depth: session.childDepth ?? 0,
+      childWorkspaces: session.childWorkspaces === true,
+      queueConsumption: (childRunId: string) =>
+        session.childConsumption.add(childRunId),
+    }
+  );
+}
+
 function hasAcceptedInput(session: HostedSession, promptId: string): boolean {
   return acceptedInputSequence(session, promptId) !== undefined;
 }
@@ -601,7 +647,8 @@ function isWakeInputSource(source: string): boolean {
   return (
     source === 'monitor' ||
     source === AUTOMATION_INPUT_SOURCE ||
-    source === 'child_agent'
+    source === 'child_agent' ||
+    source === SESSION_MESSAGE_INPUT_SOURCE
   );
 }
 
@@ -839,6 +886,18 @@ export async function settleCrashedWakeTurnAftermath(params: {
         }
       }
     }
+    // The calls the dead attempt committed but never answered get their
+    // answers by what committed before the Turn settles; core's orphan
+    // repair would tell the next Turn's model to retry them.
+    await answerCommittedTurnCalls({
+      session: session.managed,
+      sessionId,
+      cwd,
+      promptId: turnId,
+      children: session.childAgents,
+      teams: session.teams,
+      messages: session.messages,
+    });
     // Consume the crashed input: until its turnId settles, every reload
     // re-classifies it as recovery and re-blocks the Session over the
     // same crash (the journal-filter rule in the history builders then
@@ -1173,6 +1232,19 @@ async function settleCancelledHarnessTurn(
         event.kind === 'turn.settled' && event.payload['turnId'] === promptId,
     );
   if (alreadySettled) return;
+  // A Turn with no park can still have committed calls it never answered
+  // (a team call, a background launch). They get their answers by what
+  // committed before the terminal: core's orphan repair would tell the
+  // next Turn's model to retry them, and the retry redoes the work.
+  await answerCommittedTurnCalls({
+    session: managed,
+    sessionId,
+    cwd: session.cwd,
+    promptId,
+    children: session.childAgents,
+    teams: session.teams,
+    messages: session.messages,
+  });
   await managed.sink.write(
     record(session, sessionId, 'system', null, {
       subtype: 'turn_result',
@@ -1653,9 +1725,14 @@ async function verifyWorkspaceRestore(
         'automation_run',
         // H4b: the parent acceptance joins its child_run chains.
         'child_acceptance',
+        // H4d-b: messages along the lineage, outbox entries and receipts.
+        'session_message',
         // H5: channel routes and deliveries, parsed by their own bodies.
         'channel_route',
         'channel_delivery',
+        // H4e-b1: the lead's team roster and board.
+        'team_state',
+        'team_task',
       ].includes(event.payload['domain'] as string)
     )
       throw new Error('Hosted recovery domain is unsupported.');
@@ -2259,12 +2336,9 @@ async function executeHostedTurn(
                   childRuns: session.childRuns,
                   monitors: session.monitors,
                   backgroundLane: session.backgroundLane,
-                  childAgents: session.childAgents && {
-                    funnel: session.childAgents,
-                    depth: session.childDepth ?? 0,
-                    queueConsumption: (childRunId) =>
-                      session.childConsumption.add(childRunId),
-                  },
+                  childAgents: childAgentsOf(session),
+                  messages: session.messages,
+                  teams: session.teams,
                 },
               )
             : undefined;
@@ -2565,6 +2639,11 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     const resident = sessions.get(sessionId);
+    // H4f × H4d-b: the load of a stopped run's child carries the stop, so
+    // its wake pump starts none of its message inputs, not even the first
+    // pass this load kicks before the stop itself arrives.
+    const stopMessages = body?.['stopMessages'] === true;
+    const childWorkspaces = body?.['childWorkspaces'] === true;
     const passiveRecovery = body?.['passiveManagedRuntimeRecovery'] === true;
     const driveRecovery = body?.['driveRuntimeRecovery'] === true;
     const takeoverFlags = passiveRecovery || driveRecovery;
@@ -2671,6 +2750,9 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 409, 'hosted_session_store_mismatch');
         return;
       }
+      // The owner proven above restates the host's capability; a later
+      // Turn reads it, never a stale one from the first attach.
+      resident.childWorkspaces = childWorkspaces;
       // The cancellation signal pays identically on an attached re-answer
       // (R9-2): the settle separation lived only on the first-load branch,
       // so a cancellation takeover forced onto an attached Session fell
@@ -2755,6 +2837,7 @@ export function registerHostedHarnessSessionRoutes(
         // No single parked Turn: the first load's answer still holds, so the
         // redrive gets the same attachment restated — including a blocked
         // Session, whose recoveryRequired the coordinator already handles.
+        if (stopMessages) resident.messagesStopped = true;
         refusedAdoptions.delete(sessionId);
         sendAttachment(res, sessionId, resident);
         return;
@@ -2763,6 +2846,9 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 409, 'hosted_session_already_attached');
         return;
       }
+      // Only a load this resident Session admits may stop its messages,
+      // and before the recovery it drives can start one.
+      if (stopMessages) resident.messagesStopped = true;
       if (resident.toolProfile === undefined || !brokerOptions) {
         recoveryDeclined(res, 'model_start');
         return;
@@ -2838,6 +2924,9 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 409, 'hosted_tool_profile_conflict');
         return;
       }
+      // Only a load this resident Session admits may stop its messages: an
+      // identity, admission or profile refusal above changes nothing.
+      if (stopMessages) resident.messagesStopped = true;
       try {
         // Reuse the live owner without reopening its writer or driving work.
         // A lost passive-load reply must still report a parked Runtime Turn.
@@ -3091,6 +3180,7 @@ export function registerHostedHarnessSessionRoutes(
         stores,
         storeDescriptor: store,
         lifecycle,
+        ...(childWorkspaces ? { childWorkspaces: true } : {}),
         ...(toolProfile ? { toolProfile } : {}),
         ...(isHostedWorkspaceShellProfile(toolProfile) &&
         captureBytes !== undefined
@@ -3114,6 +3204,7 @@ export function registerHostedHarnessSessionRoutes(
               },
             }
           : {}),
+        ...(stopMessages ? { messagesStopped: true } : {}),
       };
       const savedLineage = object(definition?.['lineage']);
       if (
@@ -3160,7 +3251,7 @@ export function registerHostedHarnessSessionRoutes(
         // H4b: the Session's own child orchestrator, on the Shell lanes
         // the notification wake is proven over — files profiles keep their
         // exact current surface (their child admission is its own gate).
-        if (session.shell || session.backgroundLane)
+        if (session.shell || session.backgroundLane) {
           session.childAgents = new HostedChildAgentSession(
             {
               authority: session.managed.authority,
@@ -3168,6 +3259,32 @@ export function registerHostedHarnessSessionRoutes(
             },
             session.managed.authority.sessionHeader.sessionKey,
           );
+          session.teams = new HostedTeamSession(
+            {
+              authority: session.managed.authority,
+              resources: session.managed.resources,
+            },
+            session.managed.authority.sessionHeader.sessionKey,
+          );
+          // H4d-b: the Session messages along its lineage on the same
+          // writes chain; a child names its parent from its definition.
+          session.messages = new HostedSessionMessageSession(
+            {
+              authority: session.managed.authority,
+              resources: session.managed.resources,
+            },
+            session.managed.authority.sessionHeader.sessionKey,
+            session.childAgents,
+            session.childDepth !== undefined &&
+            typeof savedLineage?.['parentSessionId'] === 'string' &&
+            typeof savedLineage['parentChildRunId'] === 'string'
+              ? {
+                  parentSessionId: savedLineage['parentSessionId'],
+                  parentChildRunId: savedLineage['parentChildRunId'],
+                }
+              : undefined,
+          );
+        }
       }
       if (
         session.toolProfile &&
@@ -3246,6 +3363,11 @@ export function registerHostedHarnessSessionRoutes(
             wakeAftermathInFlight = false;
           }
         });
+        // H4f × H4d-b: a stopped run's message inputs never start a turn;
+        // the relay's stop settles them.
+        const stoppedMessage = (source: string | undefined) =>
+          session.messagesStopped === true &&
+          source === SESSION_MESSAGE_INPUT_SOURCE;
         session.monitorWake = new HostedMonitorWakeScheduler({
           next: async () => {
             // The whole committed prefix, not a bounded page: a notification
@@ -3256,8 +3378,9 @@ export function registerHostedHarnessSessionRoutes(
               authority.eventsInSequenceRange(1, authority.committedSequence),
             ).find(
               (input) =>
-                isWakeInputSource(input.source) ||
-                input.source === CHANNEL_INPUT_SOURCE,
+                (isWakeInputSource(input.source) ||
+                  input.source === CHANNEL_INPUT_SOURCE) &&
+                !stoppedMessage(input.source),
             );
             if (first === undefined) return undefined;
             if (first.source === CHANNEL_INPUT_SOURCE) {
@@ -3320,6 +3443,7 @@ export function registerHostedHarnessSessionRoutes(
                   brokerOptions,
                 ),
               busy: wakeBusy,
+              held: (turn) => stoppedMessage(turn.source),
               needsRecovery: monitorWakeNeedsRecovery,
               // F5/direction (a): channel turns interrupted mid-flight get
               // terminal settlement from their own funnel; monitor turns
@@ -3348,6 +3472,8 @@ export function registerHostedHarnessSessionRoutes(
                     children: session.childAgents,
                     consume: (childRunId) =>
                       session.childConsumption.add(childRunId),
+                    teams: session.teams,
+                    messages: session.messages,
                   });
                 } catch (cause) {
                   // R6 P1: a durable decline freezes for the fleet, but a
@@ -3424,8 +3550,12 @@ export function registerHostedHarnessSessionRoutes(
             // H4b: the consumption commits follow the turn's real settle,
             // the acceptance's step before the run's, never before the
             // turn is real.
-            const wakeWithConsumption = withChildAgentConsumption(
-              runWakeTurn,
+            const wakeWithConsumption = withSessionMessageConsumption(
+              withChildAgentConsumption(
+                runWakeTurn,
+                session,
+                writeStderrLineSafe,
+              ),
               session,
               writeStderrLineSafe,
             );
@@ -3564,6 +3694,30 @@ export function registerHostedHarnessSessionRoutes(
       // the Broker or settle anything. A bare load of a parked Session keeps
       // refusing with 409 so it never drives a Runtime by accident.
       const takeover = !lifecycle && !session.hooks && takeoverFlags;
+      // A Hooks Session recovers only through this load (it never takes
+      // over), and the file-history gate below needs every call of the
+      // pending round answered. The team and agent calls the dead Harness
+      // never answered are answered first — a committed one by what
+      // committed, any other as never run — or the gate would refuse this
+      // Session on every load. A failed answer leaves the gate's retriable
+      // refusal.
+      if (session.hooks && !lifecycle && unsettled !== undefined) {
+        try {
+          await answerResumedTurnCalls({
+            session: managed,
+            sessionId,
+            cwd,
+            promptId: unsettled,
+            children: session.childAgents,
+            teams: session.teams,
+            messages: session.messages,
+          });
+        } catch (cause) {
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${sessionId} could not answer the interrupted calls of ${unsettled}: ${String(cause)}`,
+          );
+        }
+      }
       const fileHistory = await readHostedFileHistory(managed);
       // H5/F5 follow-up: a channel turn interrupted inside a Write/Edit
       // owes the wake pump its recovery, but refusing here would kill that
@@ -3861,6 +4015,22 @@ export function registerHostedHarnessSessionRoutes(
           authorization.status === 'runnable'
             ? authorization.checkpoint.identity.promptId
             : null);
+        // The resume below reads only the round's journaled results. A
+        // sibling the Runtime does not own (a team call, a background
+        // launch) is answered first: by what committed when it committed
+        // before the Harness died — core's orphan repair would otherwise
+        // have the model retry it — and as never run otherwise, so the
+        // round the resume needs is whole.
+        if (promptId)
+          await answerResumedTurnCalls({
+            session: managed,
+            sessionId,
+            cwd,
+            promptId,
+            children: session.childAgents,
+            teams: session.teams,
+            messages: session.messages,
+          });
         const projected = await managed.sink.project();
         const current = projected.filter(
           (item) => item.daemonPromptId === promptId,
@@ -5100,10 +5270,16 @@ export function registerHostedHarnessSessionRoutes(
           case 'commit_result': {
             const result = body?.['result'];
             const receipt = body?.['receipt'];
+            const messageCount = body?.['messageCount'];
             if (
               typeof result !== 'string' ||
               Buffer.byteLength(result, 'utf8') < 1 ||
-              receipt === undefined
+              receipt === undefined ||
+              !(
+                messageCount === undefined ||
+                (Number.isSafeInteger(messageCount) &&
+                  (messageCount as number) >= 0)
+              )
             ) {
               return error(res, 400, 'invalid_child_operation');
             }
@@ -5113,6 +5289,9 @@ export function registerHostedHarnessSessionRoutes(
                 typeof receipt === 'string' ? receipt : JSON.stringify(receipt),
                 'utf8',
               ),
+              ...(messageCount === undefined
+                ? {}
+                : { messageCount: messageCount as number }),
             });
             break;
           }
@@ -5154,6 +5333,7 @@ export function registerHostedHarnessSessionRoutes(
             const reason = body?.['reason'];
             const started = body?.['started'];
             const childSessionId = body?.['childSessionId'];
+            const messageCount = body?.['messageCount'];
             const QUOTA = [
               'count_limit',
               'rate_limit',
@@ -5177,6 +5357,11 @@ export function registerHostedHarnessSessionRoutes(
                 childSessionId === null ||
                 childSessionId === undefined ||
                 typeof childSessionId === 'string'
+              ) ||
+              !(
+                messageCount === undefined ||
+                (Number.isSafeInteger(messageCount) &&
+                  (messageCount as number) >= 0)
               )
             ) {
               return error(res, 400, 'invalid_child_operation');
@@ -5196,6 +5381,9 @@ export function registerHostedHarnessSessionRoutes(
                   | 'duration_limit') ?? null,
               started,
               ...(typeof childSessionId === 'string' ? { childSessionId } : {}),
+              ...(messageCount === undefined
+                ? {}
+                : { messageCount: messageCount as number }),
             });
             break;
           }
@@ -5226,6 +5414,10 @@ export function registerHostedHarnessSessionRoutes(
         }
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
+        // H4d-b: not yet, never a conflict — the relay watches again.
+        if (cause instanceof ChildMessagesPendingError) {
+          return error(res, 409, 'child_messages_pending', message);
+        }
         if (cause instanceof ManagedSessionConflictError) {
           return error(res, 409, 'child_operation_conflict', message);
         }
@@ -5244,6 +5436,231 @@ export function registerHostedHarnessSessionRoutes(
           claimedRestore.lifecycleRestoreAuthority,
         );
       }
+    }
+  });
+
+  /**
+   * H4f × H4d-b: a stopped run's child takes no more message work. From
+   * now on the wake pump starts none of its message inputs; a message turn
+   * in flight is aborted, and its own end settles its input cancelled.
+   * The waiting ones settle cancelled once no turn runs, holding the
+   * Session as a close does, so neither the pump nor a prompt starts in
+   * between. Idempotent: the relay repeats it until the journal shows no
+   * message input owed.
+   */
+  const stopSessionMessageTurns = async (
+    session: HostedSession,
+    sessionId: string,
+  ): Promise<void> => {
+    session.messagesStopped = true;
+    const active = session.active;
+    if (active !== undefined) {
+      const authority = session.managed.authority;
+      if (
+        authority
+          .eventsInSequenceRange(1, authority.committedSequence)
+          .some(
+            (event) =>
+              event.kind === 'input.accepted' &&
+              event.payload['turnId'] === active.promptId &&
+              event.payload['source'] === SESSION_MESSAGE_INPUT_SOURCE,
+          )
+      )
+        active.abort.abort();
+      return;
+    }
+    if (session.mcpBusy || session.hooksBusy || session.mcpRecovering) return;
+    session.mcpBusy = true;
+    try {
+      await settlePendingMonitorInputs({
+        authority: session.managed.authority,
+        sink: session.managed.sink,
+        sessionId,
+        cwd: session.cwd,
+        sources: [SESSION_MESSAGE_INPUT_SOURCE],
+        stopReason: 'stop_requested',
+      });
+    } finally {
+      session.mcpBusy = false;
+    }
+    // What is left owed is a message turn that crashed in an earlier
+    // process: its aftermath, which the pump no longer picks for a stopped
+    // Session, settles it.
+    const authority = session.managed.authority;
+    for (const input of pendingSessionInputs(
+      authority.eventsInSequenceRange(1, authority.committedSequence),
+    ))
+      if (input.source === SESSION_MESSAGE_INPUT_SOURCE)
+        await session.wakeAftermath?.(input.turnId);
+  };
+
+  // One message verb onto the Session's journal, for the route below.
+  const runMessageOperation = async (
+    req: Request,
+    res: Response,
+    session: HostedSession,
+    messages: HostedSessionMessageSession,
+  ): Promise<void> => {
+    const body = object(req.body);
+    const operationId = body?.['operationId'];
+    const messageId = body?.['messageId'];
+    const kind = body?.['kind'];
+    if (typeof operationId !== 'string' || !HOSTED_UUID.test(operationId)) {
+      return error(res, 400, 'invalid_message_operation');
+    }
+    if (kind === 'stop') {
+      // H4f: the Session's run is stopped, and its message turns stop with
+      // it (H4d-b decision 8 counts them as its work).
+      try {
+        await stopSessionMessageTurns(session, req.params['id']);
+      } catch (cause) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted message turns of session ${req.params['id']} could not be stopped: ${String(cause)}`,
+        );
+        return error(res, 503, 'session_message_failed', String(cause));
+      }
+      res.status(202).json({ operationId, state: 'settled' });
+      return;
+    }
+    if (
+      typeof messageId !== 'string' ||
+      messageId.length < 1 ||
+      messageId.length > 320
+    ) {
+      return error(res, 400, 'invalid_message_operation');
+    }
+    let inputId: string | undefined;
+    try {
+      switch (kind) {
+        case 'handover': {
+          const targetSessionId = body?.['targetSessionId'];
+          if (
+            typeof targetSessionId !== 'string' ||
+            !HOSTED_UUID.test(targetSessionId)
+          ) {
+            return error(res, 400, 'invalid_message_operation');
+          }
+          await messages.handover(messageId, targetSessionId);
+          break;
+        }
+        case 'accepted': {
+          const accepted = body?.['inputId'];
+          if (typeof accepted !== 'string' || accepted.length < 1) {
+            return error(res, 400, 'invalid_message_operation');
+          }
+          await messages.accepted(messageId, accepted);
+          break;
+        }
+        case 'consumed':
+        case 'cancelled':
+        case 'rejected':
+        case 'unknown':
+          await messages.settle(messageId, kind);
+          break;
+        case 'consume':
+          await messages.consume(messageId);
+          break;
+        case 'receive': {
+          const route = body?.['route'];
+          const childRunId = body?.['childRunId'];
+          const senderSessionId = body?.['senderSessionId'];
+          const content = body?.['contentBase64'];
+          const contentDigest = body?.['contentDigest'];
+          if (
+            (route !== 'to_child' && route !== 'to_parent') ||
+            typeof childRunId !== 'string' ||
+            childRunId.length < 1 ||
+            childRunId.length > 320 ||
+            typeof senderSessionId !== 'string' ||
+            !HOSTED_UUID.test(senderSessionId) ||
+            typeof content !== 'string' ||
+            content.length < 1 ||
+            // The base64 of at most the 64 KiB content bound.
+            content.length >
+              Math.ceil(MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes / 3) *
+                4 ||
+            typeof contentDigest !== 'string' ||
+            !/^[0-9a-f]{64}$/.test(contentDigest)
+          ) {
+            return error(res, 400, 'invalid_message_operation');
+          }
+          inputId = await messages.receive({
+            messageId,
+            route,
+            childRunId,
+            senderSessionId,
+            content: Buffer.from(content, 'base64'),
+            contentDigest,
+          });
+          session.monitorWake?.kick();
+          break;
+        }
+        default:
+          return error(res, 400, 'invalid_message_operation');
+      }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (cause instanceof SessionMessageNotReadyError) {
+        return error(res, 409, 'session_message_not_ready', message);
+      }
+      // A store that faltered or stopped writing is not the target's
+      // verdict on the message: the relay retries it, never rejects.
+      if (
+        cause instanceof ManagedSessionStoreHttpError ||
+        cause instanceof ManagedSessionStoreTransportError ||
+        cause instanceof ManagedSessionWritesStoppedError
+      ) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted message operation ${kind} of session ${req.params['id']} failed in its store: ${message}`,
+        );
+        return error(res, 503, 'session_message_failed', message);
+      }
+      if (cause instanceof ManagedSessionConflictError) {
+        return error(res, 409, 'session_message_conflict', message);
+      }
+      if (cause instanceof ManagedSessionRecordError) {
+        return error(res, 409, 'session_message_record', message);
+      }
+      writeStderrLineSafe(
+        `qwen serve: Hosted message operation ${kind} of session ${req.params['id']} failed: ${message}`,
+      );
+      return error(res, 503, 'session_message_failed', message);
+    }
+    res.status(202).json({
+      operationId,
+      state: 'settled',
+      ...(inputId === undefined ? {} : { inputId }),
+    });
+  };
+
+  /**
+   * H4d-b: the control plane's message relay onto this Session's journal.
+   * A sender's outbox entry moves through its handover, its acceptance and
+   * its last step; a target commits the receipt together with the input
+   * and wake that carry the message. Every verb is replay-safe by the
+   * funnel's derived command ids, so a redriven relay request never mints
+   * a second input. A turn in flight is not a refusal: the input queues
+   * behind it in the journal. The child result relay's `stop` (H4f) is
+   * idempotent rather than replayed: it settles only what is still waiting.
+   */
+  app.post('/session/:id/messages/operations', async (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.messages)
+      return error(res, 409, 'hosted_messages_unavailable');
+    if (session.blocked)
+      return error(res, 409, 'hosted_turn_recovery_required');
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    // The close waits out an operation that passed the check above, so a
+    // receipt never lands after its pass over the pending inputs.
+    const operation = runMessageOperation(req, res, session, session.messages);
+    const settled = operation.catch(() => undefined);
+    const operations = (session.messageOperations ??= new Set());
+    operations.add(settled);
+    try {
+      await operation;
+    } finally {
+      operations.delete(settled);
     }
   });
 
@@ -5608,12 +6025,9 @@ export function registerHostedHarnessSessionRoutes(
             childRuns: session.childRuns,
             monitors: session.monitors,
             backgroundLane: session.backgroundLane,
-            childAgents: session.childAgents && {
-              funnel: session.childAgents,
-              depth: session.childDepth ?? 0,
-              queueConsumption: (childRunId) =>
-                session.childConsumption.add(childRunId),
-            },
+            childAgents: childAgentsOf(session),
+            messages: session.messages,
+            teams: session.teams,
           },
         );
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
@@ -5673,6 +6087,7 @@ export function registerHostedHarnessSessionRoutes(
               cwd: session.cwd,
               gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
               children: session.childAgents,
+              messages: session.messages,
               signal: abort.signal,
               consume: (childRunId) => session.childConsumption.add(childRunId),
             });
@@ -5680,6 +6095,25 @@ export function registerHostedHarnessSessionRoutes(
               projected = await session.managed.sink.project();
               ({ history, resumeParts } = deriveRound());
             }
+          }
+          // A sibling the Runtime reconciliation does not own (a team
+          // call, a background launch) is answered before the resumed round
+          // reads it: by what committed when it committed before the
+          // Harness died — core's orphan repair would have the model retry
+          // it, and the retry redoes the work — and as never run otherwise,
+          // or the pending file history's check refuses the resume.
+          const answered = await answerResumedTurnCalls({
+            session: session.managed,
+            sessionId,
+            cwd: session.cwd,
+            promptId,
+            children: session.childAgents,
+            teams: session.teams,
+            messages: session.messages,
+          });
+          if (answered > 0) {
+            projected = await session.managed.sink.project();
+            ({ history, resumeParts } = deriveRound());
           }
           if (resumeParts.length === 0) {
             throw new Error(
@@ -5923,6 +6357,7 @@ export function registerHostedHarnessSessionRoutes(
             cwd: session.cwd,
             gapText: HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
             children: session.childAgents,
+            messages: session.messages,
             signal: cancelFillAbort.signal,
             consume: (childRunId) => session.childConsumption.add(childRunId),
           });
@@ -5942,6 +6377,18 @@ export function registerHostedHarnessSessionRoutes(
             promptId,
           });
         }
+        // A Runtime park's non-Runtime siblings (a team call, a background
+        // launch) that committed before the Harness died are answered by
+        // what committed; the settlements above answer only what they own.
+        await answerCommittedTurnCalls({
+          session: session.managed,
+          sessionId,
+          cwd: session.cwd,
+          promptId,
+          children: session.childAgents,
+          teams: session.teams,
+          messages: session.messages,
+        });
         // Whatever shape the wait was in, its round is fully answered now:
         // the folds above landed (or the journaled proof they were never
         // owed), so only the terminal record below settles the Turn.
@@ -6438,6 +6885,9 @@ export function registerHostedHarnessSessionRoutes(
       // No wake turn may start once the authorized Session is draining;
       // a rejected close leaves its scheduler available for later wakes.
       session.monitorWake?.close();
+      // A message operation admitted before the close began lands before
+      // the pending inputs are cancelled below; a later one is refused.
+      await Promise.all(session.messageOperations ?? []);
       if (req.method === 'DELETE' && session.hooks) {
         session.hooksBusy = true;
         try {
@@ -6498,6 +6948,7 @@ export function registerHostedHarnessSessionRoutes(
           sources: [
             ...(session.monitors ? ['monitor'] : []),
             ...(session.childAgents ? ['child_agent'] : []),
+            ...(session.messages ? [SESSION_MESSAGE_INPUT_SOURCE] : []),
             ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
             ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),
           ],

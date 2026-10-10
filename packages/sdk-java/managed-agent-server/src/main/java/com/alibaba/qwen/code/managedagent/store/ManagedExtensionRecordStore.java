@@ -119,6 +119,15 @@ public class ManagedExtensionRecordStore {
     public record TaskPage(List<TaskRow> tasks, boolean hasMore) {
     }
 
+    /**
+     * H4f: the record a task id names and its latest committed body, which
+     * a task cancel reconciles against — the authority's own durable
+     * statement, mirrored in the transaction that committed it.
+     */
+    public record TaskTarget(String domain, String recordId, String kind,
+            String state, long revision, JsonNode body) {
+    }
+
     public List<JsonNode> listRecords(String tenantId, String sessionId,
             String domain) {
         Body body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
@@ -151,6 +160,39 @@ public class ManagedExtensionRecordStore {
                     return record;
                 }).filter(record -> "settled".equals(record.path("run").path("state").textValue()))
                 .findFirst();
+    }
+
+    /**
+     * H4f: the task's record identity and latest committed body, or empty
+     * when the id names no task of the Session.
+     */
+    public Optional<TaskTarget> findTaskTarget(String tenantId,
+            String sessionId, String taskId) {
+        String recordKey = recordKey(taskId);
+        if (recordKey == null) {
+            return Optional.empty();
+        }
+        return jdbc.query("SELECT * FROM"
+                        + " qwen_managed_session_extension_record WHERE"
+                        + " session_scope_key = ? AND record_key = ? AND task_kind IS NOT NULL",
+                (result, row) -> {
+                    taskRow(result, tenantId, sessionId);
+                    return new String[] {result.getString("domain"),
+                            result.getString("record_id"),
+                            result.getString("task_kind"),
+                            result.getString("task_state"),
+                            Long.toString(result.getLong("revision")),
+                            result.getString("record_resource_id")};
+                },
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                recordKey).stream().findFirst().map(row -> {
+                    JsonNode body = readBody(readResource(tenantId, sessionId,
+                            row[5]));
+                    ManagedExtensionProjection.RECORD_BODIES.get(row[0])
+                            .require().accept(body);
+                    return new TaskTarget(row[0], row[1], row[2], row[3],
+                            Long.parseLong(row[4]), body);
+                });
     }
 
     /** Reads only a committed resource in this Session's scope. */

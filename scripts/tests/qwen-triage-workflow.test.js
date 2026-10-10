@@ -5027,10 +5027,24 @@ describe('qwen-triage verify hardening round 2', () => {
     // neither arm moved the parked Turn off the first Turn, because the axis
     // rule lived only under the harness section and one arm used the PR's own
     // tests as its A/B instrument. The axes now sit in the plan the agent
-    // follows, so they are pinned inside Scope selection.
+    // follows, so they are pinned inside Scope selection. A third arm, with
+    // the rule keyed to the central claim, framed the claim as something else
+    // and never applied it, so the trigger is the diff.
     const scopeSelection = flat.slice(
       flat.indexOf('## Scope selection'),
       flat.indexOf('## Method'),
+    );
+    expect(scopeSelection).toContain(
+      'When the diff changes how a Turn is cancelled, parked, taken over',
+    );
+    expect(scopeSelection).toContain(
+      'whether or not that code is the central claim',
+    );
+    expect(scopeSelection).toContain(
+      'it gets its own A/B as a secondary claim',
+    );
+    expect(scopeSelection).toContain(
+      'The trigger is therefore the diff, not the claim.',
     );
     expect(scopeSelection).toContain(
       'name the scenario axes before choosing the A/B instrument',
