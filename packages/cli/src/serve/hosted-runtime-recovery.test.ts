@@ -10,6 +10,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import {
   openManagedSession,
   type ManagedSession,
@@ -18,10 +19,10 @@ import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-ru
 import { resetManagedRuntimeDispatchGatesForTest } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-dispatch-gate.js';
 import {
   stopParkedRuntimeExecutions,
+  settleParkedTurnCancelled,
   recoverHostedRuntimeTurn,
   RecoveryDeclined,
   settleInterruptedTurnRuntime,
-  settleParkedTurnCancelled,
   type HostedRecoveryTurn,
   type HostedRuntimeRecoveryOutcome,
 } from './hosted-runtime-recovery.js';
@@ -583,7 +584,7 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
-  it.each([undefined, { state: 'unknown' }])(
+  it.each([undefined, { state: 'unknown' } as const])(
     'reports an execution the Broker cannot account for as unknown (%s)',
     async (status) => {
       await parkAtAwaitRuntime();
@@ -627,6 +628,42 @@ describe('recoverHostedRuntimeTurn', () => {
       }
     },
   );
+
+  it('keeps the terminal fence of an abandoned execution in the report', async () => {
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'abandoned',
+    });
+    const replacement = await open('boot-2', false);
+    try {
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      );
+      // A terminally fenced record keeps its distinction instead of
+      // folding away: the outcome reads known, so the coordinator can
+      // cancel over it, and the broker line itself stays acceptably
+      // cancelled by the stop step's stopComplete predicate.
+      expect(recovered.report.executions).toEqual([
+        expect.objectContaining({
+          executionCallId: EXECUTION_ID,
+          outcome: 'known',
+          status: { state: 'abandoned' },
+        }),
+      ]);
+      expect(recovered.drivable).toBe(true);
+    } finally {
+      await replacement.close();
+    }
+  });
 
   it('declines a turn without a Runtime checkpoint as model_start', async () => {
     const session = await open('boot-1', true);
@@ -1172,12 +1209,13 @@ describe('recoverHostedRuntimeTurn', () => {
       });
     const replacement = await open('boot-2', false);
     try {
-      const broker = await stopParkedRuntimeExecutions({
+      const { broker, unobserved } = await stopParkedRuntimeExecutions({
         session: replacement,
         promptId: PROMPT_ID,
         brokerOptions,
       });
       expect(broker.runtimeSessionId).toBe('hooks-old-owner');
+      expect(unobserved.size).toBe(0);
       expect(cancel).toHaveBeenCalledOnce();
       expect(cancel).toHaveBeenCalledWith(EXECUTION_ID);
       // Issuing the cancel is not proof of the stop: a status read must
@@ -1337,7 +1375,7 @@ describe('recoverHostedRuntimeTurn', () => {
     } as never);
     const replacement = await open('boot-2', false);
     try {
-      const broker = await stopParkedRuntimeExecutions({
+      const { broker } = await stopParkedRuntimeExecutions({
         session: replacement,
         promptId: wakePromptId,
         brokerOptions,
@@ -1518,6 +1556,148 @@ describe('recoverHostedRuntimeTurn', () => {
             entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
         ),
       ).toHaveLength(0);
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('refuses the settle whose own park verification faulted after the stop', async () => {
+    // R9-2: the settle re-reads the authorization after a stop loop that
+    // can block for 30 s per execution — a transient Store fault there
+    // journaled nothing, so the settle is a retry-inviting failure, never
+    // a completed one the tail and the caller's terminal record may build
+    // on.
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'settled',
+    });
+    const replacement = await open('boot-2', false);
+    try {
+      const original =
+        LocalManagedSessionAuthority.prototype.harnessRunAuthorization;
+      let authorizationReads = 0;
+      vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'harnessRunAuthorization',
+      ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
+        authorizationReads += 1;
+        // The outer verdict and the stop's read pass; the settle's own
+        // re-read is the one that faults.
+        if (authorizationReads === 3)
+          return {
+            status: 'blocked',
+            reason: 'missing_state',
+            message: 'Session Store answered 503',
+          } as never;
+        return original.call(this);
+      });
+      await expect(
+        settleInterruptedTurnRuntime({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          toolProfile: true,
+        }),
+      ).rejects.toThrow(
+        'Interrupted turn settle cannot verify the park (authorization not runnable).',
+      );
+      // Nothing settled on the refused path: no tool_result, and the
+      // parked checkpoint still waits for the retry.
+      expect(
+        (await replacement.sink.project()).filter(
+          (entry) =>
+            entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+        ),
+      ).toHaveLength(0);
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('answers an unobserved execution’s owed call with the honest unknown when the settle journaled nothing', async () => {
+    // R9-3: the stop accepted the Broker's terminal fence — no stop was
+    // observed — and the settle's own re-read saw the checkpoint name a
+    // different Turn, a legitimate noop that journaled nothing. The
+    // abandoned-call tail still owes the dead Turn's dangling
+    // functionCall an answer, and it must not certify the cancellation
+    // nobody witnessed.
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'abandoned',
+    });
+    const replacement = await open('boot-2', false);
+    try {
+      // The assistant's durable functionCall the parked checkpoint points
+      // at: the tail re-derives what the dead Turn owes from the journal.
+      await replacement.sink.write({
+        uuid: 'assistant-1',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'assistant',
+        cwd: root,
+        version: 'hosted-harness/1',
+        daemonPromptId: PROMPT_ID,
+        message: {
+          role: 'assistant',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-1',
+                name: 'write_file',
+                args: { file_path: '0.txt', content: 'x' },
+              },
+            },
+          ],
+        },
+      });
+      const original =
+        LocalManagedSessionAuthority.prototype.harnessRunAuthorization;
+      let authorizationReads = 0;
+      vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'harnessRunAuthorization',
+      ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
+        authorizationReads += 1;
+        const verdict = await original.call(this);
+        // The settle's own re-read: the checkpoint moved to a different
+        // Turn during the stop.
+        if (authorizationReads === 3 && verdict.status === 'runnable')
+          return {
+            ...verdict,
+            checkpoint: {
+              ...verdict.checkpoint,
+              identity: {
+                ...verdict.checkpoint.identity,
+                turnId: '44444444-4444-4444-8444-444444444444',
+              },
+            },
+          };
+        return verdict;
+      });
+      const runtime = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: true,
+      });
+      expect(runtime.kind).toBe('ready');
+      const journaled = (await replacement.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+      );
+      expect(journaled).toHaveLength(1);
+      const response = journaled[0]?.message?.parts?.[0]?.functionResponse
+        ?.response as Record<string, unknown> | undefined;
+      expect(response?.['executionStatus']).toBe('unknown');
+      expect(String(response?.['error'])).toContain('could not be observed');
+      expect(String(response?.['error'])).not.toContain(
+        'cancelled with its owner',
+      );
     } finally {
       await replacement.close();
     }
@@ -2083,6 +2263,524 @@ describe('recoverHostedRuntimeTurn', () => {
       }
     },
   );
+
+  it('accepts a terminally abandoned record as cancellation-complete', async () => {
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'abandoned',
+    });
+    const cancel = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'cancel')
+      .mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      // The Broker fenced the record permanently, so neither a cancel nor
+      // the terminal poll could ever observe more: accepted without proof
+      // of a stop, unlike a still-reconcilable unknown — and unlike the old
+      // sentinel fold, never read back as "the Broker never knew it".
+      const { unobserved } = await stopParkedRuntimeExecutions({
+        session: replacement,
+        promptId: PROMPT_ID,
+        brokerOptions,
+      });
+      expect(cancel).not.toHaveBeenCalled();
+      const authorization =
+        await replacement.authority.harnessRunAuthorization();
+      expect(authorization.status).toBe('runnable');
+      if (authorization.status === 'runnable')
+        expect(authorization.checkpoint.continuation.phase).toBe(
+          'await_runtime',
+        );
+      // The fence ends the wait, but no stop was observed: the settle must
+      // journal an honest unobservable outcome for it — never the cancelled
+      // record a proved stop earns.
+      expect([...unobserved]).toEqual([EXECUTION_ID]);
+      await settleParkedTurnCancelled({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        unobserved,
+      });
+      const journaled = (await replacement.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+      );
+      expect(journaled).toHaveLength(1);
+      const response = journaled[0]?.message?.parts?.[0]?.functionResponse
+        ?.response as Record<string, unknown> | undefined;
+      expect(response?.['executionStatus']).toBe('unknown');
+      expect(String(response?.['error'])).toContain('could not be observed');
+      expect(String(response?.['error'])).not.toContain(
+        'cancelled with its owner',
+      );
+      const settled = await replacement.authority.harnessRunAuthorization();
+      expect(settled.status).toBe('runnable');
+      if (settled.status === 'runnable')
+        expect(settled.checkpoint.continuation.phase).not.toBe('await_runtime');
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('journals a proved stop as cancelled with its owner', async () => {
+    await parkAtAwaitRuntime();
+    let stopped = false;
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
+      async () => ({ state: stopped ? 'settled' : 'executing' }),
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockImplementation(
+      async () => {
+        stopped = true;
+      },
+    );
+    const replacement = await open('boot-2', false);
+    try {
+      const { unobserved } = await stopParkedRuntimeExecutions({
+        session: replacement,
+        promptId: PROMPT_ID,
+        brokerOptions,
+      });
+      // The stop was observed: nothing lands in the unobserved set, and the
+      // settle certifies the cancellation.
+      expect(unobserved.size).toBe(0);
+      await settleParkedTurnCancelled({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        unobserved,
+      });
+      const journaled = (await replacement.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+      );
+      expect(journaled).toHaveLength(1);
+      const response = journaled[0]?.message?.parts?.[0]?.functionResponse
+        ?.response as Record<string, unknown> | undefined;
+      expect(response?.['executionStatus']).toBe('cancelled');
+      expect(String(response?.['error'])).toContain('cancelled with its owner');
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('breaks the terminal poll when an execution is fenced abandoned after the cancel', async () => {
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status')
+      .mockResolvedValueOnce({ state: 'executing' })
+      .mockResolvedValue({ state: 'abandoned' });
+    const cancel = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'cancel')
+      .mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      // Loss evidence arriving late must still end the stop: a poll that
+      // does not break here spins the full 30 s deadline and throws.
+      const { unobserved } = await stopParkedRuntimeExecutions({
+        session: replacement,
+        promptId: PROMPT_ID,
+        brokerOptions,
+      });
+      expect(cancel).toHaveBeenCalledTimes(1);
+      const authorization =
+        await replacement.authority.harnessRunAuthorization();
+      expect(authorization.status).toBe('runnable');
+      // The stop was accepted on the terminal fence alone, so the execution
+      // lands in the unobserved set — and the settle journals an honest
+      // unknown for it rather than a cancelled nobody witnessed.
+      expect([...unobserved]).toEqual([EXECUTION_ID]);
+      await settleParkedTurnCancelled({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        unobserved,
+      });
+      const journaled = (await replacement.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+      );
+      expect(journaled).toHaveLength(1);
+      const response = journaled[0]?.message?.parts?.[0]?.functionResponse
+        ?.response as Record<string, unknown> | undefined;
+      expect(response?.['executionStatus']).toBe('unknown');
+      expect(String(response?.['error'])).toContain('could not be observed');
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('counts an execution that vanishes mid-cancel as unobserved', async () => {
+    await parkAtAwaitRuntime();
+    // The pre-cancel read proves the Broker knew the execution; the record
+    // then vanishes (a reclaimed owner answers a definitive not-found, not
+    // a terminal fence) before the first post-cancel poll.
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status')
+      .mockResolvedValueOnce({ state: 'executing' })
+      .mockResolvedValue(undefined);
+    const cancel = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'cancel')
+      .mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      const { unobserved } = await stopParkedRuntimeExecutions({
+        session: replacement,
+        promptId: PROMPT_ID,
+        brokerOptions,
+      });
+      expect(cancel).toHaveBeenCalledTimes(1);
+      // A record the Broker knew one read earlier and then lost is not a
+      // witnessed stop: it joins the fenced executions in the unobserved
+      // set instead of being certified as a cancellation.
+      expect([...unobserved]).toEqual([EXECUTION_ID]);
+      await settleParkedTurnCancelled({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        unobserved,
+      });
+      const journaled = (await replacement.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+      );
+      expect(journaled).toHaveLength(1);
+      const response = journaled[0]?.message?.parts?.[0]?.functionResponse
+        ?.response as Record<string, unknown> | undefined;
+      expect(response?.['executionStatus']).toBe('unknown');
+      expect(String(response?.['error'])).toContain('could not be observed');
+      expect(String(response?.['error'])).not.toContain(
+        'cancelled with its owner',
+      );
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('publishes the journaled unobserved outcome on a compensating retry', async () => {
+    await parkAtAwaitRuntime();
+    // Attempt 1 reads the execution pre-cancel, then its record vanishes
+    // before the first post-cancel poll: the stop counts it unobserved.
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status')
+      .mockResolvedValueOnce({ state: 'executing' })
+      .mockResolvedValue(undefined);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      const first = await stopParkedRuntimeExecutions({
+        session: replacement,
+        promptId: PROMPT_ID,
+        brokerOptions,
+      });
+      expect([...first.unobserved]).toEqual([EXECUTION_ID]);
+      const published: Buffer[] = [];
+      const publishOriginal =
+        LocalManagedSessionResourceStore.prototype.publish;
+      vi.spyOn(
+        LocalManagedSessionResourceStore.prototype,
+        'publish',
+      ).mockImplementation(async function (
+        this: LocalManagedSessionResourceStore,
+        type,
+        bytes,
+      ) {
+        if (type === 'managed-tool-outcome') published.push(bytes);
+        return publishOriginal.call(this, type, bytes);
+      });
+      // Fail the first settle after its journal write: the tool_result is
+      // durable while the checkpoint item stays in_progress.
+      let failCommit = true;
+      const commitOriginal = (
+        LocalManagedSessionAuthority.prototype as unknown as {
+          commitCheckpoint: (
+            this: LocalManagedSessionAuthority,
+            ...args: unknown[]
+          ) => Promise<unknown>;
+        }
+      ).commitCheckpoint;
+      vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'commitCheckpoint' as never,
+      ).mockImplementation(async function (
+        this: LocalManagedSessionAuthority,
+        ...args: unknown[]
+      ) {
+        if (failCommit) {
+          failCommit = false;
+          throw new Error('checkpoint commit rejected');
+        }
+        return commitOriginal.apply(this, args);
+      });
+      await expect(
+        settleParkedTurnCancelled({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          unobserved: first.unobserved,
+        }),
+      ).rejects.toThrow('checkpoint commit rejected');
+      // Attempt 2: the reclaimed record reads as already-stopped to the
+      // fresh stop, so the retry carries an empty unobserved set — but the
+      // outcome it publishes must stay the honest one the journal already
+      // carries, not a witnessed cancellation recomputed from this
+      // attempt's reads.
+      const second = await stopParkedRuntimeExecutions({
+        session: replacement,
+        promptId: PROMPT_ID,
+        brokerOptions,
+      });
+      expect(second.unobserved.size).toBe(0);
+      await settleParkedTurnCancelled({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        unobserved: second.unobserved,
+      });
+      const outcomes = published.map(
+        (bytes) =>
+          JSON.parse(bytes.toString()) as {
+            functionResponse?: { response?: Record<string, unknown> };
+          },
+      );
+      expect(outcomes).toHaveLength(2);
+      for (const outcome of outcomes)
+        expect(outcome.functionResponse?.response?.['executionStatus']).toBe(
+          'unknown',
+        );
+      // The dedup still holds: one durable tool_result total.
+      const journaled = (await replacement.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+      );
+      expect(journaled).toHaveLength(1);
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('carries an execution whose post-cancel poll reads unknown into the retry', async () => {
+    // R8-1: the throw exits of the stop loop are terminal exits too — the
+    // id must land in the caller's carry before the throw, or the retry
+    // reads the reclaimed record as already-stopped and certifies a
+    // cancellation nobody witnessed.
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status')
+      .mockResolvedValueOnce({ state: 'executing' })
+      .mockResolvedValueOnce({ state: 'unknown' })
+      // Attempt 2: the Broker reclaimed the record.
+      .mockResolvedValue(undefined);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      const carried = new Set<string>();
+      await expect(
+        stopParkedRuntimeExecutions({
+          session: replacement,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          carryUnobservedInto: carried,
+        }),
+      ).rejects.toThrow('Runtime execution outcome is unknown.');
+      expect([...carried]).toEqual([EXECUTION_ID]);
+      const retry = await stopParkedRuntimeExecutions({
+        session: replacement,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        carryUnobservedInto: carried,
+      });
+      expect(retry.unobserved).toBe(carried);
+      await settleParkedTurnCancelled({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        unobserved: carried,
+      });
+      const journaled = (await replacement.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+      );
+      expect(journaled).toHaveLength(1);
+      const response = journaled[0]?.message?.parts?.[0]?.functionResponse
+        ?.response as Record<string, unknown> | undefined;
+      expect(response?.['executionStatus']).toBe('unknown');
+      expect(String(response?.['error'])).toContain('could not be observed');
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('carries an execution whose post-cancel poll hits the deadline into the retry', async () => {
+    // R8-1's second throw exit: the 30 s deadline. Same contract as the
+    // unknown arm — the id rides the caller's carry across the throw.
+    await parkAtAwaitRuntime();
+    let currentTime = 1_700_000_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => currentTime);
+    let cancelled = false;
+    let recordReclaimed = false;
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
+      async () => {
+        if (recordReclaimed) return undefined;
+        // Every post-cancel poll lands past the deadline; the execution
+        // never reaches a terminal state.
+        if (cancelled) currentTime += 31_000;
+        return { state: 'executing' };
+      },
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockImplementation(
+      async () => {
+        cancelled = true;
+      },
+    );
+    const replacement = await open('boot-2', false);
+    try {
+      const carried = new Set<string>();
+      await expect(
+        stopParkedRuntimeExecutions({
+          session: replacement,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          carryUnobservedInto: carried,
+        }),
+      ).rejects.toThrow(
+        'Runtime execution did not reach a terminal state after cancellation.',
+      );
+      expect([...carried]).toEqual([EXECUTION_ID]);
+      recordReclaimed = true;
+      const retry = await stopParkedRuntimeExecutions({
+        session: replacement,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        carryUnobservedInto: carried,
+      });
+      expect(retry.unobserved).toBe(carried);
+      await settleParkedTurnCancelled({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        unobserved: carried,
+      });
+      const journaled = (await replacement.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+      );
+      expect(journaled).toHaveLength(1);
+      const response = journaled[0]?.message?.parts?.[0]?.functionResponse
+        ?.response as Record<string, unknown> | undefined;
+      expect(response?.['executionStatus']).toBe('unknown');
+      expect(String(response?.['error'])).toContain('could not be observed');
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('carries an execution whose post-cancel status read rejects into the retry', async () => {
+    // R9-1: a status() rejection is an exit the loop's own add sites never
+    // reach — the id must land in the caller's carry from the read's
+    // catch, or the retry reads the reclaimed record as already-stopped
+    // and certifies a cancellation nobody witnessed.
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status')
+      .mockResolvedValueOnce({ state: 'executing' })
+      .mockRejectedValue(new Error('transient broker error'));
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      const carried = new Set<string>();
+      await expect(
+        stopParkedRuntimeExecutions({
+          session: replacement,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          carryUnobservedInto: carried,
+        }),
+      ).rejects.toThrow('transient broker error');
+      expect([...carried]).toEqual([EXECUTION_ID]);
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('carries an execution whose pre-cancel status read rejects into the retry', async () => {
+    // R9-1's symmetric exit: the read faults before the cancel is even
+    // issued, and the carry is the only place the unproven stop survives
+    // the throw.
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockRejectedValue(
+      new Error('transient broker error'),
+    );
+    const cancel = vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel');
+    const replacement = await open('boot-2', false);
+    try {
+      const carried = new Set<string>();
+      await expect(
+        stopParkedRuntimeExecutions({
+          session: replacement,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          carryUnobservedInto: carried,
+        }),
+      ).rejects.toThrow('transient broker error');
+      expect([...carried]).toEqual([EXECUTION_ID]);
+      expect(cancel).not.toHaveBeenCalled();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('threads the caller-owned unobserved carry through an interrupted-turn settle retry', async () => {
+    // The wake funnel retries this helper on the busy cadence, so the
+    // R8-1 contract holds one level up: a stop that throws post-cancel
+    // hands the counted id to the caller's carry, and the retry that
+    // reads the reclaimed record journals the honest unknown.
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status')
+      .mockResolvedValueOnce({ state: 'executing' })
+      .mockResolvedValueOnce({ state: 'unknown' })
+      .mockResolvedValue(undefined);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      const carried = new Set<string>();
+      await expect(
+        settleInterruptedTurnRuntime({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          toolProfile: true,
+          carryUnobservedInto: carried,
+        }),
+      ).rejects.toThrow('Runtime execution outcome is unknown.');
+      expect([...carried]).toEqual([EXECUTION_ID]);
+      const runtime = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: true,
+        carryUnobservedInto: carried,
+      });
+      expect(runtime.kind).toBe('ready');
+      const journaled = (await replacement.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+      );
+      expect(journaled).toHaveLength(1);
+      const response = journaled[0]?.message?.parts?.[0]?.functionResponse
+        ?.response as Record<string, unknown> | undefined;
+      expect(response?.['executionStatus']).toBe('unknown');
+      expect(String(response?.['error'])).toContain('could not be observed');
+    } finally {
+      await replacement.close();
+    }
+  });
 
   it('does not journal a tool result twice across a recovery retry', async () => {
     await parkAtAwaitRuntime('write_file', true);

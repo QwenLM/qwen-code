@@ -749,6 +749,9 @@ it('distinguishes unknown outcomes from definitive not-found records', async () 
   }));
   await expect(missing.status('execution')).resolves.toBeUndefined();
 
+  // A terminally abandoned record carries the terminal marker and reaches
+  // the caller as its own state — never folded into the not-found sentinel
+  // the stop path reads as "already stopped".
   const abandoned = await fixture(() => ({
     code: 409,
     body: {
@@ -757,9 +760,11 @@ it('distinguishes unknown outcomes from definitive not-found records', async () 
     },
   }));
   await expect(abandoned.status('execution')).resolves.toEqual({
-    state: 'unknown',
+    state: 'abandoned',
   });
 
+  // A still-reconcilable UNKNOWN carries no marker, so it reaches the caller
+  // as a state instead of reading as stopped.
   const unknown = await fixture(() => ({
     code: 409,
     body: { code: 'runtime_broker_execution_unknown' },
