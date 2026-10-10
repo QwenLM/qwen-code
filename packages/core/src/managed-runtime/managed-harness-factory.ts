@@ -756,12 +756,12 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         // owes the Turn-bound commits its identity — `consumeRuntimeResults`
         // no-ops on this phase, so without the adoption here the next
         // `commitAwaitRuntimeBatch` would throw "Runtime work cannot
-        // continue a prior activation" (R2-1).
-        const previous = (
-          await this.requireRunnableAuthorization().catch(() => undefined)
-        )?.checkpoint;
+        // continue a prior activation" (R2-1). `null` means only "this
+        // resolve is inapplicable here": the authorization read itself
+        // must surface — swallowing it would let the continue route start
+        // the model round on an identity the adoption never proved (R2-9).
+        const previous = (await this.requireRunnableAuthorization()).checkpoint;
         if (
-          previous === undefined ||
           previous.continuation.phase !== 'model_output_committed' ||
           previous.agentWait === null ||
           !previous.agentWait.runs.every((run) => run.consumed) ||

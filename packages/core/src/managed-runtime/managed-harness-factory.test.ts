@@ -8,7 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '../config/storage.js';
 import {
   createManagedHarnessHandle,
@@ -1740,6 +1740,36 @@ describe('agent wait', () => {
     // The production shape: the batch carries the turn binding, exactly
     // like the live ToolTurn does — this is where an unadopted identity
     // throws "Runtime work cannot continue a prior activation."
+    const batch = await successor.commitAwaitRuntimeBatch(
+      [await runtimeCommit(session)],
+      turn,
+    );
+    expect(batch.kind).toBe('durable_wait');
+    await session.close();
+  });
+
+  it('surfaces the carried-adoption read fault instead of answering null (R2-9)', async () => {
+    const session = await open(await createWorkspace());
+    const { handle, turn } = await modelOutputCommittedTurn(session);
+    await handle.commitAwaitAgent([agentWaitRun('run-1')], turn);
+    await handle.resolveAwaitAgent('run-1');
+    const takeover = await session.replaceActivation();
+    const successor = createManagedHarnessHandle(session);
+    // One hiccup, only on the adoption's own read: the swallowed shape
+    // would answer null here and let the model round start anyway.
+    const hiccup = vi
+      .spyOn(session.authority, 'harnessRunAuthorization')
+      .mockImplementationOnce(async () => {
+        throw new Error('store hiccup');
+      });
+    await expect(successor.resolveAwaitAgent('run-1')).rejects.toThrow(
+      /store hiccup/,
+    );
+    expect(hiccup).toHaveBeenCalledTimes(1);
+    hiccup.mockRestore();
+    // The retry carries the adoption through and the next batch resolves.
+    const adopted = await successor.resolveAwaitAgent('run-1');
+    expect(adopted?.identity.activationId).toBe(takeover.activationId);
     const batch = await successor.commitAwaitRuntimeBatch(
       [await runtimeCommit(session)],
       turn,

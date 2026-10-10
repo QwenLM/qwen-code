@@ -5641,11 +5641,24 @@ export function registerHostedHarnessSessionRoutes(
               // Turn's identity to the next Turn-bound commit — restate
               // the last resolve so this handle adopts it; without it the
               // model's next Runtime batch dies as prior-activation work
-              // (R2-1).
+              // (R2-1). The model round must never start before the
+              // adoption is durable: the resolve's own read faults surface
+              // as a retriable block, and an inapplicable answer is a
+              // defect, never a round start (R2-9).
               const lastRun =
                 continueAuthorization.checkpoint.agentWait.runs.at(-1);
-              if (lastRun !== undefined)
-                await harness.resolveAwaitAgent(lastRun.childRunId);
+              if (lastRun !== undefined) {
+                let adopted;
+                try {
+                  adopted = await harness.resolveAwaitAgent(lastRun.childRunId);
+                } catch (cause) {
+                  throw new HostedToolRecoveryRequiredError(cause);
+                }
+                if (adopted === null)
+                  throw new Error(
+                    'Recovered agent wait did not adopt the takeover activation.',
+                  );
+              }
             }
             // Outstanding or not: a crash past the last fold (the carried
             // all-consumed group) can strand sibling calls the dead loop
