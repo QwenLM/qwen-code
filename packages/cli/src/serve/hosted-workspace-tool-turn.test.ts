@@ -50,6 +50,7 @@ import {
   HOSTED_WORKSPACE_FILE_TOOLS,
   HOSTED_WORKSPACE_SHELL_TOOLS,
   HOSTED_INPUT_PREVIEW_TOOLS,
+  HOSTED_AGENT_TOOL,
   type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -119,6 +120,13 @@ vi.mock(
         if (domain === 'child_run' && enablement.childRun) return;
         if (domain === 'monitor_run' && enablement.monitorRun) return;
         actual.assertManagedSessionDomainEnabled(domain);
+      },
+      // H4b: record commits gate per kind; the admission mock above keeps
+      // its plain-domain meaning, this one carries the commit side.
+      assertManagedSessionChildRunKindEnabled: (kind: string) => {
+        if (!enablement.childRun) {
+          actual.assertManagedSessionChildRunKindEnabled(kind);
+        }
       },
     };
   },
@@ -2192,6 +2200,68 @@ it('accepts the runtime foreground spelling is_background false', async () => {
   });
 });
 
+it('registers a foreground shell capture under the mapped Runtime identity', async () => {
+  // The wake-turn shape: the logical prompt id carries a colon, and the
+  // Broker reports a different Runtime identity (this double reports
+  // 'prompt'). The publisher's foreground guard compares the reference
+  // identity; a raw-id third register argument would throw here.
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'arun_x:input',
+    commit,
+    messageFitsInline,
+    { resources: session.resources, assertWritable: async () => undefined },
+  );
+  broker.prepare.mockResolvedValue('execution-shell');
+  const manifest = await session.resources.publish(
+    'managed-tool-result-manifest',
+    Buffer.from('{}'),
+  );
+  const capture = {
+    captureStatus: 'complete' as const,
+    captureReason: null,
+    manifest,
+    previewTruncated: false,
+    deliveryStatus: 'committed' as const,
+  };
+  broker.execute.mockResolvedValue({
+    executionStatus: 'success',
+    responseParts: [{ text: 'hi' }],
+    capture,
+  });
+  const outcomeRef = await session.resources.publish(
+    'managed-tool-outcome',
+    Buffer.from('{}'),
+  );
+  vi.spyOn(HostedShellPublisher.prototype, 'receipt').mockResolvedValue({
+    executionCallId: 'execution-shell',
+    manifest,
+    deliveryStatus: 'committed',
+    historyRevision: 1,
+    outcomeRef,
+  });
+  const register = vi.spyOn(HostedShellPublisher.prototype, 'register');
+  const args = { command: 'pwd', is_background: false };
+  const call = { ...calls[0], name: 'run_shell_command', args };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(register).toHaveBeenCalledOnce();
+  // One pair, two axes: the mapped Runtime Session against the execution,
+  // the logical prompt id against the checkpoint's identity. A mapped
+  // promptId here is refused by the store, and the wake Shell's execution
+  // goes unknown.
+  expect(register.mock.calls[0]?.[0]).toMatchObject({
+    reference: { sessionId: 'prompt', promptId: 'arun_x:input' },
+  });
+  expect(responses[0]?.functionResponse?.response?.['error']).toBeUndefined();
+});
+
 it('blocks recovery if the durable refusal cannot be committed', async () => {
   const original = commit;
   commit = async (...args) => {
@@ -3239,14 +3309,19 @@ it('asks before Shell in auto-edit mode and runs the edit when Shell is denied',
 it('admits exactly the declared native tools to the version 2 input preview', () => {
   // The Java reader admits a closed set. A name missing on either side degrades
   // to "Tool arguments are unavailable for this approval." with no error, so the
-  // set is pinned here and each name must still be a declared native tool.
+  // set is pinned here and each name must still be a declared native tool —
+  // the child launch declares through HOSTED_AGENT_TOOL, not the shell set.
   expect(HOSTED_INPUT_PREVIEW_TOOLS).toEqual([
     'read_file',
     'write_file',
     'edit',
     'run_shell_command',
+    'agent',
   ]);
-  const declared = HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name);
+  const declared = [
+    ...HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name),
+    HOSTED_AGENT_TOOL.name,
+  ];
   for (const name of HOSTED_INPUT_PREVIEW_TOOLS)
     expect(declared).toContain(name);
 });
@@ -5880,6 +5955,12 @@ describe('hosted Monitor admission arm', () => {
         monitoring: true,
       },
     });
+    // Same identity rule as the background Shell: the registered reference
+    // is the v3 dispatch reference the worker replays at prepare (#13532 A4).
+    expect(
+      (register.mock.calls[0]![0] as { reference: { argsDigest: string } })
+        .reference.argsDigest,
+    ).toBe(broker.prepareV3.mock.calls[0]![1]);
     expect(rig.options.monitorLoops?.has('monitor-execution')).toBe(true);
   });
 
@@ -6355,12 +6436,80 @@ it('registers the Session capture lane for a background turn in publication mode
       background: true,
     },
   });
+  // The registered reference must be exactly the v3 dispatch reference the
+  // worker replays at prepare — the prefixed argsDigest handed to
+  // prepareV3, never the bare inputDigest of the legacy prepare (#13532 A4).
+  expect(
+    (register.mock.calls[0]![0] as { reference: { argsDigest: string } })
+      .reference.argsDigest,
+  ).toBe(broker.prepareV3.mock.calls[0]![1]);
   expect(rig.orchestrator.calls.map(([name]) => name)).toEqual([
     'admit',
     'dispatchStarted',
     'attach',
   ]);
   expect(order2).toEqual(['settleAttached:shell-execution']);
+});
+
+it('registers a foreground Shell capture with the legacy lane’s bare input digest', async () => {
+  turn = createTurn(true);
+  broker.prepare.mockResolvedValue('execution-shell');
+  const manifest = await session.resources.publish(
+    'managed-tool-result-manifest',
+    Buffer.from('{}'),
+  );
+  const envelope = {
+    executionStatus: 'success' as const,
+    responseParts: [{ text: 'ok' }],
+    capture: {
+      captureStatus: 'complete' as const,
+      captureReason: null,
+      manifest,
+      previewTruncated: false,
+      deliveryStatus: 'committed' as const,
+    },
+  };
+  const outcomeRef = await session.resources.publish(
+    'managed-tool-outcome',
+    Buffer.from(JSON.stringify({ envelope })),
+  );
+  vi.spyOn(HostedShellPublisher.prototype, 'receipt').mockResolvedValue({
+    executionCallId: 'execution-shell',
+    manifest,
+    deliveryStatus: 'committed',
+    historyRevision: 1,
+    outcomeRef,
+  });
+  const register = vi.spyOn(HostedShellPublisher.prototype, 'register');
+  broker.execute.mockResolvedValue(envelope);
+  const call = {
+    ...calls[0],
+    name: 'run_shell_command',
+    args: { command: 'echo ok' },
+  };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['executionStatus']).toBe(
+    'success',
+  );
+  // This rig has no publication lane, so the shell takes the legacy
+  // prepare; the worker replays that lane's bare input digest at capture
+  // prepare, and the registration must carry exactly that value — the
+  // prefixed v3 argsDigest would never match it (#13532 A4).
+  expect(broker.prepareV3).not.toHaveBeenCalled();
+  expect(broker.prepare).toHaveBeenCalledOnce();
+  expect(register).toHaveBeenCalledOnce();
+  const registered = register.mock.calls[0]![0] as {
+    reference: { argsDigest: string };
+  };
+  expect(registered.reference.argsDigest).toBe(
+    broker.prepare.mock.calls[0]![2],
+  );
+  expect(registered.reference.argsDigest).not.toContain('sha256:');
 });
 
 it('answers a retried accept from the journal without minting a rerun', async () => {

@@ -35,6 +35,7 @@ import { SessionAgentEventHub } from './events.js';
 import {
   RECORD_RECOVERY_WATCH_MAX_MS,
   RECORD_WATCH_MAX_MS,
+  SESSION_AGENT_HOST_REMOVED_ERROR,
   SESSION_AGENT_OFFLINE_ERROR,
   SESSION_AGENT_REPLY_NOT_RECORDED_ERROR,
   SESSION_AGENT_RESTARTED_ERROR,
@@ -708,6 +709,64 @@ describe('SessionAgentOrchestrator', () => {
     });
     const second = await orchestrator.pickupForHost('h1', ['claude']);
     expect(second).toMatchObject({ runId, attempt: 2 });
+  });
+
+  it('ends the runs a removed Host held or alone could start', async () => {
+    // h1 serves dave too, but h2 still does: dropping h1 does not make dave
+    // local, so dave's queued run must survive.
+    const dave: WorkspaceAgent = {
+      id: 'ag_dave',
+      name: 'dave',
+      createdAt: 1,
+      execution: {
+        mode: 'managed-host',
+        hostIds: ['h1', 'h2'],
+        provider: 'claude',
+      },
+    };
+    const { orchestrator, lastFrame } = harness({
+      roster: [{ ...carol, agentType: undefined }, dave],
+    });
+    const first = await orchestrator.mention(SESSION, {
+      text: '@carol one',
+      clientMessageId: 'm1',
+    });
+    await orchestrator.pickupForHost('h1', ['claude']);
+    const second = await orchestrator.mention(SESSION, {
+      text: '@carol two',
+      clientMessageId: 'm2',
+    });
+    const third = await orchestrator.mention(SESSION, {
+      text: '@dave three',
+      clientMessageId: 'm3',
+    });
+    const runIds = [first.runs[0]!.runId, second.runs[0]!.runId];
+    expect(new Set(runIds).size).toBe(2);
+    const daveRunId = third.runs[0]!.runId;
+    expect(
+      (await orchestrator.snapshot(SESSION)).find(
+        (frame) => frame.runId === daveRunId,
+      ),
+    ).toMatchObject({ status: 'queued' });
+
+    await expect(
+      orchestrator.endRunsForRemovedHost('h1', ['ag_carol']),
+    ).resolves.toBe(2);
+    for (const runId of runIds) {
+      expect(lastFrame(runId)).toMatchObject({
+        status: 'offline',
+        error: SESSION_AGENT_HOST_REMOVED_ERROR,
+        retryable: true,
+      });
+    }
+    expect(await orchestrator.snapshot(SESSION)).toMatchObject([
+      { runId: daveRunId, status: 'queued' },
+      { status: 'offline', retryable: true },
+      { status: 'offline', retryable: true },
+    ]);
+    // Only the Host-held run pays the unreported-turn fallback; a queued run
+    // that never started a turn is charged 0.
+    expect((await fileFor()).chainTokens).toBe(UNREPORTED_TURN_TOKENS);
   });
 
   it('marks a remote run offline when its lease lapses, and offers it for retry', async () => {

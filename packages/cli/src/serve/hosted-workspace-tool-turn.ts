@@ -47,6 +47,7 @@ import {
   type ToolResultEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import {
+  assertManagedSessionChildRunKindEnabled,
   assertManagedSessionDomainEnabled,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
@@ -78,6 +79,17 @@ import type {
   HostedPromptHookRunner,
 } from './hosted-hook-session.js';
 import type { HostedChildRunSession } from './hosted-child-run-session.js';
+import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { childLaunchAdmission } from './hosted-child-agent-session.js';
+import {
+  encodeChildLaunchEnvelope,
+  MANAGED_CHILD_LIMITS,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  managedExtensionRecordKey,
+  managedTaskId,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import type { HostedMonitorSession } from './hosted-monitor-session.js';
 import { HostedMonitorLoop } from './hosted-monitor-loop.js';
 import { HostedMonitorRemoteExecutor } from './hosted-monitor-remote-executor.js';
@@ -197,6 +209,18 @@ function childRunAdmissionsEnabled(): boolean {
 function monitorRunAdmissionsEnabled(): boolean {
   try {
     assertManagedSessionDomainEnabled('monitor_run');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// H4b: child-agent admissions exist only while the child_run domain's
+// child_agent kind is enabled for commits; H3's shell keeps its own gate,
+// so this never reads the plain domain list.
+function childAgentAdmissionsEnabled(): boolean {
+  try {
+    assertManagedSessionChildRunKindEnabled('child_agent');
     return true;
   } catch {
     return false;
@@ -341,8 +365,40 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'write_file',
   'edit',
   'run_shell_command',
+  'agent',
 ];
 
+/**
+ * H4b: launch one child Session from the Session's own definition. The
+ * result crosses exactly once: a background child completes through a
+ * later durable notification input, a foreground child through its own
+ * tool result — never both paths.
+ */
+export const HOSTED_AGENT_TOOL: FunctionDeclaration = {
+  name: 'agent',
+  description:
+    "Launch one child agent as an independent Session of this Workspace, running this Session's own agent definition. Runs in the background by default: the child's terminal result arrives later as a notification input. With run_in_background false the call waits and returns the child's result directly. A child never inherits this Session's model context; give it a complete prompt. Nesting, custom subagent types and isolated workspaces are unavailable in this profile.",
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      description: {
+        type: 'string',
+        description: 'A short label for the child task, at most 512 bytes.',
+      },
+      prompt: {
+        type: 'string',
+        description: 'The complete first prompt the child Session runs.',
+      },
+      run_in_background: {
+        type: 'boolean',
+        description:
+          'Run the child in the background and notify at completion (default true).',
+      },
+    },
+    required: ['description', 'prompt'],
+    additionalProperties: false,
+  },
+};
 function physicalToolStatus(
   response: Record<string, unknown> | undefined,
 ): 'success' | 'error' | 'cancelled' {
@@ -353,6 +409,21 @@ function physicalToolStatus(
         ? 'cancelled'
         : 'error';
   return response?.['error'] ? 'error' : 'success';
+}
+
+/**
+ * The Broker admits only path-safe Runtime Session ids, while a wake
+ * turn's id is an input id (`arun_…:input`, `<monitor>:notify:<n>`):
+ * such an id is mapped to a stable path-safe digest instead of being
+ * refused at acquire. The mapped form is path-safe itself, so layering
+ * this over an id that was already mapped stays idempotent.
+ */
+export function hostedRuntimeSessionId(promptId: string): string {
+  return /^[A-Za-z0-9._-]{1,512}$/.test(promptId) &&
+    promptId !== '.' &&
+    !promptId.includes('..')
+    ? promptId
+    : `wake-${createHash('sha256').update(promptId).digest('hex')}`;
 }
 
 export class HostedToolRecoveryRequiredError extends Error {
@@ -370,6 +441,11 @@ export class HostedWorkspaceToolTurn {
   private readonly warmed: Promise<void>;
   private acquired = false;
   private uncertain = false;
+  // Agent calls never write a `tool.intent` (the Broker pipeline they
+  // bypass owns that marker), so completeHookResults needs the admitted
+  // launches this turn recorded directly — it is how PostToolUse learns
+  // an agent call actually ran (R1-62).
+  private readonly agentDispatched = new Set<string>();
   private publisher?: HostedShellPublisher;
   private bindingGeneration?: string;
   private advertised?: FunctionDeclaration[];
@@ -389,6 +465,9 @@ export class HostedWorkspaceToolTurn {
   private readonly childRuns?: HostedChildRunSession;
   private readonly monitors?: HostedMonitorSession;
   private readonly backgroundLane?: HostedShellTurnOptions;
+  private readonly childAgents?: HostedChildAgentSession;
+  private readonly childDepth: number;
+  private readonly childConsumption: (childRunId: string) => void;
 
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
@@ -423,6 +502,11 @@ export class HostedWorkspaceToolTurn {
       childRuns?: HostedChildRunSession;
       monitors?: HostedMonitorSession;
       backgroundLane?: HostedShellTurnOptions;
+      childAgents?: {
+        readonly funnel: HostedChildAgentSession;
+        readonly depth: number;
+        readonly queueConsumption: (childRunId: string) => void;
+      };
     },
   ) {
     this.mcp = extras?.mcp;
@@ -432,6 +516,10 @@ export class HostedWorkspaceToolTurn {
     this.childRuns = extras?.childRuns;
     this.monitors = extras?.monitors;
     this.backgroundLane = extras?.backgroundLane;
+    this.childAgents = extras?.childAgents?.funnel;
+    this.childDepth = extras?.childAgents?.depth ?? 0;
+    this.childConsumption =
+      extras?.childAgents?.queueConsumption ?? (() => undefined);
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
         ? publicationOrShell
@@ -446,7 +534,7 @@ export class HostedWorkspaceToolTurn {
       new HostedWorkspaceBroker(
         options,
         session.authority.sessionHeader.sessionKey,
-        promptId,
+        hostedRuntimeSessionId(promptId),
       );
     this.warmed = this.mcp ? this.mcp.ensureReady() : this.broker.warm();
     // Warmup runs alongside inference; a text-only answer need not wait for it.
@@ -483,8 +571,32 @@ export class HostedWorkspaceToolTurn {
           : tool,
       ),
       ...(this.mcp?.tools() ?? []),
+      // H4b: the Agent tool joins the declaration set only on a
+      // Shell-laned Session whose own child orchestrator exists (never in
+      // a child's), behind the kind gate — files profiles and the public
+      // files/1 flow keep their exact current vocabulary, mirrored by the
+      // admission check in prepareRequests.
+      ...(this.childAgents !== undefined &&
+      (this.shell !== undefined || this.backgroundLane !== undefined) &&
+      this.childDepth === 0 &&
+      childAgentAdmissionsEnabled()
+        ? [HOSTED_AGENT_TOOL]
+        : []),
     ];
     return this.advertised;
+  }
+
+  // The mount the Session already holds counts exactly like this Turn's
+  // own acquisition: `acquired` tracks only what this Turn took through
+  // the (possibly shared) broker, while the Hook catalog or MCP owner can
+  // hold the same Workspace mount until their Session-scoped close. A
+  // foreground child must not launch against either hold.
+  private sessionHoldsMount(): boolean {
+    return (
+      this.acquired ||
+      (this.mcp?.mountHeld ?? false) ||
+      (this.hooks?.mountHeld ?? false)
+    );
   }
 
   async resumeCommittedResults(signal?: AbortSignal): Promise<void> {
@@ -874,9 +986,17 @@ export class HostedWorkspaceToolTurn {
       return responses;
     }
     for (const [ordinal, call] of effective.entries()) {
-      const dispatched = intents.some(
-        (entry) => entry.payload['ordinal'] === ordinal,
-      );
+      const dispatched =
+        this.agentDispatched.has(call.callId) ||
+        // A resumed committed result never re-drives the launch, so the
+        // durable child_run record is the dispatch evidence that
+        // survives restart: it exists exactly because the admission
+        // committed (R1-62's recovery arm). The run id derives from the
+        // same collapsed key the launcher wrote — a wake turn's id would
+        // otherwise read as a hybrid between the two before the third hop.
+        this.childAgents?.record(this.childRunIdFor(call.callId)) !==
+          undefined ||
+        intents.some((entry) => entry.payload['ordinal'] === ordinal);
       const response = responses.find(
         (part) => part.functionResponse?.id === call.callId,
       )?.functionResponse?.response;
@@ -1064,6 +1184,7 @@ export class HostedWorkspaceToolTurn {
     signal.throwIfAborted();
     if (this.mcp) await waitForTurn(this.warmed, signal);
     const declarations = this.advertised ?? (await this.declarations(signal));
+    this.agentDispatched.clear();
     const prepareRequests = (source: ToolCallRequestInfo[]) => {
       const ids = new Set<string>();
       return source.map((call) => {
@@ -1090,6 +1211,8 @@ export class HostedWorkspaceToolTurn {
         let input: Record<string, unknown>;
         let backgroundAdmitted = false;
         let monitorAdmitted = false;
+        let agentAdmitted = false;
+        let agentBackground = true;
         if (mcpInput) {
           input = { ...mcpInput.input };
         } else if (isShell) {
@@ -1257,6 +1380,88 @@ export class HostedWorkspaceToolTurn {
               'Hosted Monitor max_events must be an integer from 1 to 10000.';
           }
           input = { ...args, is_monitor: true };
+        } else if (call.name === 'agent') {
+          const args = call.args;
+          // H4b: an Agent call is admitted exactly when this Shell-laned
+          // Session owns its child orchestrator (a child Session's own
+          // turn does not), behind the kind gate — the deliberate refusals
+          // below keep their texts otherwise.
+          agentAdmitted =
+            this.childAgents !== undefined &&
+            (this.shell !== undefined || this.backgroundLane !== undefined) &&
+            this.childDepth === 0 &&
+            childAgentAdmissionsEnabled();
+          const unsupportedKey = Object.keys(args).find(
+            (key) =>
+              !['description', 'prompt', 'run_in_background'].includes(key),
+          );
+          const backgroundValue = args['run_in_background'];
+          agentBackground = !(
+            backgroundValue === false ||
+            (typeof backgroundValue === 'string' &&
+              backgroundValue.toLowerCase() === 'false')
+          );
+          const backgroundIllFormed =
+            backgroundValue !== undefined &&
+            backgroundValue !== true &&
+            backgroundValue !== false &&
+            !(
+              typeof backgroundValue === 'string' &&
+              ['true', 'false'].includes(backgroundValue.toLowerCase())
+            );
+          if (!agentAdmitted) {
+            validationError =
+              'Hosted child agents are unavailable on this Session profile; read work through ordinary tools instead.';
+          } else if (unsupportedKey !== undefined) {
+            validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition in the shared Workspace, without nesting: fork_*, working_dir, isolation, name, model and subagent_type belong to the legacy Agent tool.`;
+          } else if (backgroundIllFormed) {
+            validationError =
+              'Hosted child agent run_in_background must be a boolean.';
+          } else if (!agentBackground && this.sessionHoldsMount()) {
+            // v1: a foreground child waits out the parent's own wait, and
+            // the shared Workspace's mount is held by exactly that wait —
+            // its child could never borrow it. The hold can belong to an
+            // owner this Turn never counts on its own flag: the Session's
+            // Hook catalog or MCP owner acquired and retains the mount
+            // until their Session-scoped close. Refuse before the
+            // deadlock rather than let both Turns burn down to the
+            // deadline.
+            validationError =
+              'Hosted child agent run_in_background=false is unavailable while this Turn holds the Workspace mount; run it in the background or let the current tool work finish first in a fresh turn.';
+          } else if (
+            agentBackground &&
+            (this.mcp?.mountHeld === true || this.hooks?.mountHeld === true)
+          ) {
+            // The background recommendation dies with this owner: a Session
+            // -scoped mount (Hook catalog, MCP owner) survives the Turn, so
+            // the launched child cannot warm its own until the Session
+            // closes — the ordinary turn-wait workaround does not release
+            // it either. Turn-owned mounts at their finish do release, so
+            // only the Session-owned holds are gated on the background arm.
+            validationError =
+              'Hosted child agent run_in_background=true is unavailable while the Session’s Hook catalog or MCP owner holds the Workspace mount, which ends when the Session closes; launch after the owner closes or from a Session without the mount held.';
+          } else if (
+            !agentBackground &&
+            calls.some((other) => other.name !== 'agent')
+          ) {
+            // The same one-batch candidacy: a non-agent sibling holds the
+            // mount for exactly the wait the foreground answer needs.
+            validationError =
+              'Hosted child agent run_in_background=false cannot share a batch with a non-agent tool; the sibling would hold the Workspace mount the child needs.';
+          } else if (
+            typeof args['description'] !== 'string' ||
+            !args['description'].trim() ||
+            Buffer.byteLength(args['description'], 'utf8') >
+              MANAGED_CHILD_LIMITS.maxDescriptionBytes
+          ) {
+            validationError = `Hosted child agent requires a nonempty description of at most ${MANAGED_CHILD_LIMITS.maxDescriptionBytes} bytes.`;
+          } else if (
+            typeof args['prompt'] !== 'string' ||
+            !args['prompt'].trim()
+          ) {
+            validationError = 'Hosted child agent requires a nonempty prompt.';
+          }
+          input = { ...args };
         } else {
           const file = call.args['file_path'];
           input = { ...call.args };
@@ -1282,7 +1487,12 @@ export class HostedWorkspaceToolTurn {
           validationError,
           input,
           isShell,
-          inputDigest: isShell ? managedToolDigest(input) : undefined,
+          // H3: the publication evidence chain pins the canonical input
+          // digest for Monitor calls exactly like Shell calls.
+          inputDigest:
+            isShell || call.name === 'monitor'
+              ? managedToolDigest(input)
+              : undefined,
           mcp: mcpInput !== undefined,
           ...encoded,
           argsDigest: `sha256:${managedToolDigest(input)}`,
@@ -1294,6 +1504,8 @@ export class HostedWorkspaceToolTurn {
           runtimeCallId,
           background: mcpInput === undefined && backgroundAdmitted,
           monitoring: mcpInput === undefined && monitorAdmitted,
+          agent: mcpInput === undefined && agentAdmitted,
+          agentBackground,
         };
       });
     };
@@ -1380,7 +1592,13 @@ export class HostedWorkspaceToolTurn {
       );
     }
     await waitForTurn(this.warmed, signal);
-    if (!this.acquired) {
+    // H4b: an agent-only batch runs entirely inside its own Sessions and
+    // needs no Runtime at all — holding the parent's mount across the
+    // child's wait is exactly the deadlock a shared Workspace creates
+    // (parent turn held, child tool call queued behind it forever). v1
+    // therefore takes the mount only for a batch with at least one
+    // non-agent tool.
+    if (!this.acquired && requests.some((request) => request.agent !== true)) {
       // Acquisition may have taken effect even when its reply is lost.
       await this.acquire(false, signal);
     }
@@ -1521,9 +1739,20 @@ export class HostedWorkspaceToolTurn {
           if (permission === 'ask') askAgain.add(index);
         }
         const revised = prepareRequests(updated);
-        requests = requests.map((request, index) =>
-          updated[index] === request.call ? request : revised[index],
-        );
+        requests = requests.map((request, index) => {
+          if (updated[index] !== request.call) return revised[index];
+          // An unchanged call keeps its prepared request, but not its
+          // stale verdict: the PreToolUse fire may have acquired the
+          // Workspace mount (the Session's Hook owner retains it until
+          // close), and prepareRequests re-evaluated the call against
+          // that current Session. A refusal found only now must still
+          // block the admission; a verdict never found is never invented.
+          if (revised[index].validationError === undefined) return request;
+          return {
+            ...request,
+            validationError: revised[index].validationError,
+          };
+        });
         for (const [index, request] of requests.entries()) {
           if (refusals[index]) continue;
           if (request.validationError) {
@@ -1634,6 +1863,10 @@ export class HostedWorkspaceToolTurn {
       const bindings = [];
       for (const [ordinal, request] of requests.entries()) {
         if (refusals[ordinal] !== undefined) continue;
+        // A child-agent launch has no Runtime execution to reserve: the
+        // control plane's relay owns its side effect, so it never enters
+        // the Broker pipeline below.
+        if (request.agent) continue;
         if (request.mcp) {
           const renewed = this.mcp!.toolInput(
             request.call.name,
@@ -1666,6 +1899,10 @@ export class HostedWorkspaceToolTurn {
                   request.argsDigest,
                   request.digest,
                   request.publicationId!,
+                  // The reserve persists this logical id as the
+                  // execution's turn id, exactly what the publisher's
+                  // register reference names on the checkpoint axis.
+                  this.promptId,
                 )
               : null;
           executionCallId =
@@ -1816,10 +2053,22 @@ export class HostedWorkspaceToolTurn {
           this.publisher!.register(
             {
               reference: {
-                sessionId: this.promptId,
+                // One pair, two axes: the mapped Broker Runtime Session
+                // on the execution axis (a wake turn's arun_…:input maps
+                // to wake-<sha256>), the logical prompt id on the
+                // checkpoint axis — the execution's own (runtimeSessionId,
+                // turnId) is exactly that pair.
+                sessionId: this.broker.runtimeSessionId,
                 promptId: this.promptId,
                 callId: request.runtimeCallId,
-                argsDigest: request.inputDigest!,
+                // The worker replays the dispatch reference of the lane the
+                // request actually took: a v3 prepare stores and replays the
+                // prefixed argsDigest, while the legacy prepare's replay
+                // carries the bare input digest. Registration must name the
+                // same lane's value or the worker's prepare never matches it.
+                argsDigest: prepared
+                  ? request.argsDigest
+                  : request.inputDigest!,
               },
               capture: {
                 tenantId: authority.sessionHeader.sessionKey.tenantId,
@@ -1835,7 +2084,10 @@ export class HostedWorkspaceToolTurn {
               },
             },
             request.call.callId,
-            this.promptId,
+            // The guard compares the register's reference identity, which
+            // is the Runtime identity above; the raw logical promptId only
+            // equals it for ids the mapping carries through unchanged.
+            this.broker.runtimeSessionId,
           );
         }
       }
@@ -1876,7 +2128,10 @@ export class HostedWorkspaceToolTurn {
             modelCallId: saved.modelCallId,
             runtimeBindingId: saved.runtimeBindingId,
             reference: {
-              sessionId: this.promptId,
+              // One pair, two axes, as at the publisher: the mapped
+              // Broker Runtime Session against the execution, the logical
+              // prompt id against the checkpoint's identity.
+              sessionId: this.broker.runtimeSessionId,
               promptId: this.promptId,
               callId: saved.runtimeCallId,
               argsDigest: saved.argsDigest,
@@ -1969,6 +2224,12 @@ export class HostedWorkspaceToolTurn {
         if (refused) {
           await this.commit('tool_result', refused, model);
           responses.push(...refused);
+          continue;
+        }
+        if (request.agent) {
+          responses.push(
+            ...(await this.acceptChildAgent(request, model, signal)),
+          );
           continue;
         }
         const executionCallId = reserved.get(index)!;
@@ -2511,6 +2772,228 @@ export class HostedWorkspaceToolTurn {
       );
     }
     return converted;
+  }
+
+  /**
+   * One derivation of the child run id shared by the launcher and the
+   * recovery probe: a wake turn's turn id already embeds its
+   * commissioning child run (`<childRunId>:accept:notify`), so using it
+   * verbatim as the launch base grows the next run id one suffix per hop
+   * and walks a chained helper into the 128-char lineage bound by the
+   * third hop. The replay-stable key needs determinism, not readability:
+   * collapse the wake turn's identity to a bounded digest of its own
+   * stable name — never grow across hops, always 17 chars plus the call
+   * id. Calls keyed verbatim for every other turn — re-driven batches
+   * and resumed Hook results both name the same run again and again.
+   */
+  private childRunIdFor(callId: string): string {
+    const promptKey = this.promptId.endsWith(':accept:notify')
+      ? createHash('sha256').update(this.promptId).digest('hex').slice(0, 16)
+      : this.promptId;
+    return `${promptKey}:${callId}`;
+  }
+
+  /**
+   * H4b: launch one child Session and complete the call through its own
+   * arm. The intent commits before any physical effect; the control
+   * plane's relay owns creation and delivery from there. The launch is
+   * replay-safe by its derived record key: a re-driven batch names the
+   * same child Run id, so nothing creates a second child Session.
+   */
+  private async acceptChildAgent(
+    request: {
+      call: ToolCallRequestInfo;
+      agentBackground: boolean;
+    },
+    model: string,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    // A cancelled turn admits nothing further: keeping an already-launched
+    // child running is documented, but a batch that re-enters here after
+    // its abort (a sibling's abandoned wait returned control) must not
+    // stamp a new child the cancelled turn never started.
+    if (signal.aborted) {
+      const skipped = convertToFunctionErrorResponse(
+        request.call.name,
+        request.call.callId,
+        [],
+        'The turn was cancelled before this child agent was admitted.',
+      );
+      await this.commit('tool_result', skipped, model);
+      return skipped;
+    }
+    const children = this.childAgents!;
+    const authority = this.session.authority;
+    const key = authority.sessionHeader.sessionKey;
+    const description = (request.call.args['description'] as string).trim();
+    const prompt = request.call.args['prompt'] as string;
+    const childRunId = this.childRunIdFor(request.call.callId);
+    // The v1 pin: the parent's own definition, documented by its
+    // definition resource's digest (the control plane reads the pin from
+    // the committed body when it stamps the child's lineage).
+    const definition = {
+      definitionId: `hosted-agent/${this.profile ?? 'unknown'}`,
+      definitionRevision: 1,
+      definitionDigest: authority.sessionHeader.definitionRef.digest,
+    };
+    // The envelope bound is enforced by the admission's byte_limit
+    // refusal — but the encoder throws a size error before that branch
+    // can ever answer. Translate the throw into the same refusal: an
+    // over-size prompt is a model-correctable argument error, never a
+    // recovery-blocked Turn.
+    let envelopeBytes: number;
+    try {
+      envelopeBytes = encodeChildLaunchEnvelope({
+        description,
+        prompt,
+        definition,
+      }).byteLength;
+    } catch (cause) {
+      if (!(cause instanceof ManagedSessionRecordError)) throw cause;
+      envelopeBytes = Number.POSITIVE_INFINITY;
+    }
+    // Quotas gate NEW children only: a re-driven batch names the same
+    // run id, and `children.admit` answers that replay identically —
+    // counting the replayed child against `count_limit` or the launch
+    // budget would refuse the launch it is already running. Both counts
+    // read committed records only, so a refusal re-derives on replay.
+    if (children.record(childRunId) === undefined) {
+      const admission = childLaunchAdmission({
+        workspaceMode: 'shared',
+        sameDefinition: true,
+        closing: authority.currentActivation?.phase !== 'active',
+        activeInScope: children.activeChildRunsOf(key.sessionId).length,
+        launchedInScope: children.launchedChildRunsOf(key.sessionId).length,
+        envelopeBytes,
+      });
+      if (!admission.admitted) {
+        const refused = convertToFunctionErrorResponse(
+          request.call.name,
+          request.call.callId,
+          [],
+          `Hosted child agent refused this launch (${admission.reason}).`,
+        );
+        await this.commit('tool_result', refused, model);
+        return refused;
+      }
+    }
+    await children.admit({
+      childRunId,
+      ownerScopeId: key.sessionId,
+      rootSessionId: key.sessionId,
+      completion: request.agentBackground ? 'sent' : 'tool',
+      description,
+      prompt,
+      definition,
+      workingDirectory: '.',
+      executionCallId: childRunId,
+    });
+    this.agentDispatched.add(request.call.callId);
+    if (!request.agentBackground) {
+      return await this.awaitChildToolResult(
+        children,
+        request,
+        childRunId,
+        model,
+        signal,
+      );
+    }
+    const taskId = managedTaskId(
+      managedExtensionRecordKey(key.sessionId, 'child_run', childRunId),
+    );
+    const started = convertToFunctionResponse(
+      request.call.name,
+      request.call.callId,
+      [
+        {
+          text: `Child agent started in the background as ${taskId}; the task surface stays current with it. A completed child delivers its result as a durable notification input; a failed or cancelled child produces no notification — read the task surface instead of waiting.`,
+        },
+      ],
+    );
+    await this.commit('tool_result', started, model);
+    return started;
+  }
+
+  /**
+   * The foreground arm: the call's answer always re-derives from the
+   * committed chain — a crashed Session resumes into this same wait and
+   * answers from the settled run and its acceptance, never from relay
+   * memory. A failed or cancelled child is read and told, never revived.
+   */
+  private async awaitChildToolResult(
+    children: HostedChildAgentSession,
+    request: { call: ToolCallRequestInfo },
+    childRunId: string,
+    model: string,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    for (;;) {
+      if (signal.aborted) {
+        const abandoned = convertToFunctionErrorResponse(
+          request.call.name,
+          request.call.callId,
+          [],
+          'The turn was cancelled before the child agent finished; the child keeps running and its committed result is retained.',
+        );
+        await this.commit('tool_result', abandoned, model);
+        return abandoned;
+      }
+      const record = children.record(childRunId);
+      if (record !== undefined) {
+        if (record.run.state === 'failed' || record.run.state === 'cancelled') {
+          const ended = convertToFunctionErrorResponse(
+            request.call.name,
+            request.call.callId,
+            [],
+            `Child agent run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).`,
+          );
+          await this.commit('tool_result', ended, model);
+          return ended;
+        }
+        const acceptance = children.acceptance(childRunId);
+        if (acceptance !== undefined) {
+          const text = (
+            await this.session.resources.read(acceptance.contentRef)
+          ).toString('utf8');
+          const whole = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [{ text }],
+          );
+          let fitted = this.messageFitsInline('tool_result', whole, model)
+            ? whole
+            : undefined;
+          if (fitted === undefined) {
+            // The answer still must land: fold the accepted result down
+            // to the inline bound with its marker instead of parking the
+            // parent — the full bytes stay on the acceptance record. The
+            // fit predicate, not an estimate, measures the fold.
+            const marker =
+              '\n… (truncated: the full result is on the acceptance record)';
+            for (
+              let head = Math.floor(text.length / 2);
+              head > 0 && fitted === undefined;
+              head = Math.floor(head / 2)
+            ) {
+              const folded = convertToFunctionResponse(
+                request.call.name,
+                request.call.callId,
+                [{ text: text.slice(0, head) + marker }],
+              );
+              if (this.messageFitsInline('tool_result', folded, model))
+                fitted = folded;
+            }
+          }
+          if (fitted === undefined)
+            throw new Error('Child agent result cannot be recorded.');
+          await this.commit('tool_result', fitted, model);
+          await children.markAccepted(childRunId);
+          this.childConsumption(childRunId);
+          return fitted;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
   }
 
   /**

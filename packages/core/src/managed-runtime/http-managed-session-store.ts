@@ -313,7 +313,7 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
     for (const prior of revisions.values()) requireSameRef(prior, ref);
     revisions.set(revision, ref);
     references.set(ref.resourceId, revisions);
-    const nested = nestedResourceRefs(ref, stored.bytes);
+    const nested = collectNestedResourceRefs(ref, stored.bytes);
     pending.push(...nested.map((ref) => ({ revision, ref })));
   }
   if (resources.size !== references.size) {
@@ -499,7 +499,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       const staged = this.staged.get(ref.resourceId);
       if (staged !== undefined) {
         requireSameRef(staged.ref, ref);
-        pending.push(...nestedResourceRefs(ref, staged.bytes));
+        pending.push(...collectNestedResourceRefs(ref, staged.bytes));
       }
     }
     return [...closure.values()].map((ref) => {
@@ -842,7 +842,15 @@ class ManagedSessionStoreHttpClient {
           attempt === 0 &&
           error instanceof ManagedSessionStoreHttpError &&
           ((error.status === 409 &&
-            error.remoteCode === 'workspace_lifecycle_admission_closed') ||
+            (error.remoteCode === 'workspace_lifecycle_admission_closed' ||
+              // The verdict/mint gate's refusal is a rollbackable
+              // non-commit: the corrected retry must reach the backend
+              // without the authority latching a write failure behind it.
+              error.remoteCode === 'child_run_lineage_minted' ||
+              // So is a session message the lineage refuses: only the
+              // store holds a child's lineage, so the authority could not
+              // refuse it first, and the Session's log stays writable.
+              error.remoteCode === 'session_message_lineage_refused')) ||
             (this.lifecycleAuthority &&
               (error.status === 403 ||
                 (error.status === 409 &&
@@ -1690,7 +1698,12 @@ function parseRestoreHead(value: unknown): RestoreHead {
   };
 }
 
-function nestedResourceRefs(
+/**
+ * Every ref a committed resource closes over transitively. Exported so the
+ * envelope-closure invariant (a `managed-input` carrying attachment refs)
+ * has a directly testable seam.
+ */
+export function collectNestedResourceRefs(
   ref: ManagedSessionDurableRef,
   bytes: Buffer,
 ): ManagedSessionDurableRef[] {
@@ -1716,6 +1729,23 @@ function nestedResourceRefs(
     if (ref.kind === 'managed-hook-message-chunks')
       return collectRefs((record as { parts: unknown[] }).parts);
     return collectRefs([record]);
+  }
+  // An input's envelope embeds what it admits — a channel attachment's ref
+  // among them. The commit closes over those bytes exactly like an
+  // explicit ref, or a reopened reader finds the envelope but 404s on its
+  // attachments (R8 P1). A body this parse cannot represent has no refs
+  // to close over by definition.
+  if (ref.kind === 'managed-input') {
+    try {
+      return collectRefs([
+        parseManagedSessionRecordJson(
+          bytes.toString('utf8'),
+          MANAGED_SESSION_LIMITS.maxEventBytes,
+        ),
+      ]);
+    } catch {
+      return [];
+    }
   }
   return [];
 }

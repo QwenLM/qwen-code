@@ -75,8 +75,8 @@ class QwenHostedHarnessColdCancelRegressionTest {
                         + " workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, 'ws-a', 1, 'storage-a', 'Workspace', ?, ?, 'ACTIVE')",
                 tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES (?, 'ws-a', ?, TRUE, TRUE)",
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                        + " VALUES (?, 'ws-a', ?, 'OPERATOR')",
                 tenant, "actor-a".getBytes(StandardCharsets.UTF_8));
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
@@ -129,7 +129,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
             assertThatThrownBy(() -> connector.recoverManagedRuntime(tenant, session, true))
                     .isInstanceOfSatisfying(RuntimeBrokerException.class,
                             error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
-            jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE WHERE tenant_id = ?", tenant);
+            jdbc.update("UPDATE managed_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
             assertThat(store.insertCancelCommand(tenant, "CANCEL", "cancel", "digest", session, turn)
                     .commandEffect()).isTrue();
 
@@ -147,9 +147,9 @@ class QwenHostedHarnessColdCancelRegressionTest {
             clearInvocations(client);
             doNothing().when(client).cancelTurn(attached);
             coordinator.cancel(tenant, session, turn);
-            jdbc.update("UPDATE managed_workspace_access SET can_create = TRUE WHERE tenant_id = ?", tenant);
+            jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR' WHERE tenant_id = ?", tenant);
             assertThat(connector.recoverManagedRuntime(tenant, session, false).runtimeRecovery()).isNull();
-            jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE WHERE tenant_id = ?", tenant);
+            jdbc.update("UPDATE managed_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
 
             assertThat(store.findTurn(tenant, session, turn).orElseThrow().status()).isEqualTo("CANCELLING");
             verify(client).cancelTurn(attached);
@@ -159,7 +159,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
             verify(client, never()).submitTurn(any());
 
             for (String change : List.of(
-                    "UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?",
+                    "DELETE FROM managed_workspace_access WHERE tenant_id = ?",
                     "UPDATE managed_workspace_registry SET state = 'DRAINING' WHERE tenant_id = ?",
                     "UPDATE managed_workspace_registry SET workspace_generation = workspace_generation + 1 WHERE tenant_id = ?",
                     "UPDATE managed_workspace_registry SET storage_id = 'replacement-storage' WHERE tenant_id = ?")) {

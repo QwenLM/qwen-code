@@ -238,7 +238,7 @@ export async function endHostedAction(
   }
 }
 
-async function readHostedActionOptions(
+export async function readHostedActionOptions(
   session: ManagedSession,
   action: ManagedSessionAction,
 ): Promise<HostedActionOptions> {
