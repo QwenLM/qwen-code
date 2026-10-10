@@ -334,7 +334,7 @@ class WorkspaceStorageGuardTest {
                 + " VALUES ('tenant', ?, 'create-1', 'digest', ?, 0)",
                 "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8), sessionId);
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id,"
-                + " can_read, can_create) VALUES ('tenant', 'workspace', ?, TRUE, TRUE)",
+                + " role) VALUES ('tenant', 'workspace', ?, 'OPERATOR')",
                 "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         var session = new SessionRecord("tenant", sessionId, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
@@ -359,7 +359,7 @@ class WorkspaceStorageGuardTest {
                 .put("inputRevision", 1).put("policyRevision", "policy");
         doAnswer(invocation -> {
             invocation.callRealMethod();
-            assertThat(jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE"
+            assertThat(jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
                     + " WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'")).isEqualTo(1);
             return null;
         }).doCallRealMethod().when(execution).authorizeActionResponse(session);
@@ -370,7 +370,7 @@ class WorkspaceStorageGuardTest {
                 });
         // A revoked creation grant is operator-reversible: the refusal must
         // stay retryable so a restored grant still delivers the answer.
-        jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE"
+        jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
                 + " WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'");
         assertThatThrownBy(() -> connector.resolveAction("tenant", sessionId, "action", response))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
@@ -378,7 +378,7 @@ class WorkspaceStorageGuardTest {
                     assertThat(error.isRetryable()).isTrue();
                 });
         // So is a registry that left ACTIVE.
-        jdbc.update("UPDATE managed_workspace_access SET can_create = TRUE"
+        jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR'"
                 + " WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'");
         jdbc.update("UPDATE managed_workspace_registry SET state = 'DRAINING'"
                 + " WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'");

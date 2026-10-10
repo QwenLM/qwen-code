@@ -126,6 +126,20 @@ final class WorkspaceRuntimeResolver {
         }
     }
 
+    /**
+     * The child Workspace provider's storage root (#13753 I1): the
+     * administrator mount of the binding's storage, held to the same
+     * continuity check as an acquisition.
+     */
+    java.nio.file.Path storageRoot(ContextBinding binding) {
+        Mount mount = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
+        if (mount == null) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        verifyMountIntact(mount);
+        return mount.root();
+    }
+
     // The acquire-path mount check: every I/O anomaly is the terminal
     // verdict it has always been — only the settlement probe below is
     // allowed to classify a momentary fault as retryable.

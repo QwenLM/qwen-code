@@ -121,6 +121,7 @@ describe('managed-extension-projection/1 fixtures', () => {
               ? {
                   shell: body?.taskKindOf({ kind: 'shell' }),
                   child_agent: body?.taskKindOf({ kind: 'child_agent' }),
+                  workflow: body?.taskKindOf({ kind: 'workflow' }),
                 }
               : body?.taskKindOf({
                   configurationId: 'probe',
