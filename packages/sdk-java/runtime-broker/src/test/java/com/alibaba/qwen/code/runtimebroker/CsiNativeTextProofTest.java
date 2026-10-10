@@ -138,6 +138,190 @@ class CsiNativeTextProofTest {
                 activation, standalone.path("expectedJournalRevision").longValue(), 8, prefix(8), reader));
     }
 
+    @Test
+    void acceptsOriginalTerminalAsFactAndRetainsSettledPredecessor() {
+        var settled = prefix(32);
+        var proof = terminal(records(32), request(32), activation, settled, reader);
+        assertEquals(activation, proof.predecessorActivation());
+        assertEquals(settled, proof.predecessorPrefix());
+        assertEquals(41, proof.predecessorSequence());
+        assertEquals("941bb2c6-c5a2-4571-8856-6e8820365fa9", proof.predecessorLastRecordUuid());
+        assertEquals(request(31).path("commitDigest").textValue(), proof.predecessorCommitDigest());
+        assertEquals(42, proof.terminalSequence());
+        assertEquals("fc17e89d-c50c-4b55-b69d-aa58659e7242", proof.lastRecordUuid());
+        JsonNode ref = proof.boundaryRef();
+        ((ObjectNode) ref).put("digest", "changed");
+        assertEquals("0c89c0851c49d8ce264f4359c8c7da89703971df8c5f4ef9b870a9612983180e",
+                proof.boundaryRef().path("digest").textValue());
+        rejected(() -> CsiNativeActivationProof.activation(transaction(32), request(32), original,
+                writer, genesis.definitionDigest(), activation, reader));
+        rejected(() -> advance(32, settled, reader));
+        var savedActivation = proof.predecessorActivation();
+        var savedPrefix = proof.predecessorPrefix();
+        ((ObjectNode) activation.installRef()).put("digest", "changed source");
+        ((ObjectNode) settled.checkpoint().state()).put("changed", true);
+        ((ObjectNode) proof.predecessorActivation().installRef()).put("digest", "changed accessor");
+        ((ObjectNode) proof.predecessorPrefix().checkpoint().state()).put("changed", true);
+        assertEquals(savedActivation, proof.predecessorActivation());
+        assertEquals(savedPrefix, proof.predecessorPrefix());
+    }
+
+    @Test
+    void terminalSnapshotIsolatesConstructedHistoricalGraphWithoutGrantingHistoryAuthority() {
+        ObjectNode mutable = JSON.createObjectNode().put("value", "original");
+        var batch = new CsiNativeActivationProof.PendingBatch("message", mutable,
+                List.of(new CsiNativeActivationProof.FunctionCall("call", "tool", mutable, 0, 0)));
+        var frozen = new CsiNativeActivationProof.FrozenBatch(mutable, mutable, List.of(mutable), 1, 2);
+        var historical = new CsiNativeActivationProof.Prefix(null,
+                new CsiNativeActivationProof.Checkpoint(mutable, mutable), "message", null, false, null,
+                new java.util.HashSet<>(List.of("used")), null,
+                Map.of("batch", new CsiNativeActivationProof.OriginalBatch("prompt", batch)),
+                new CsiNativeActivationProof.FileHistory(mutable, mutable, Map.of("batch", frozen)),
+                Map.of("intent", new CsiNativeActivationProof.ToolIntent(mutable, 1, 1, "digest")),
+                Map.of("receipt", new CsiNativeActivationProof.ToolReceipt(mutable, mutable, 1, 1, 1)), 0);
+        var proof = new CsiNativeActivationProof.TerminalProof(activation, historical, mutable,
+                41, "941bb2c6-c5a2-4571-8856-6e8820365fa9", "digest", 42,
+                "fc17e89d-c50c-4b55-b69d-aa58659e7242");
+        var saved = proof.predecessorPrefix();
+        mutable.put("value", "source changed");
+        historical.usedIds().add("source changed");
+        var returned = proof.predecessorPrefix();
+        returned.usedIds().add("accessor changed");
+        ((ObjectNode) returned.batches().get("batch").batch().calls().getFirst().args()).put("value", "changed");
+        ((ObjectNode) returned.fileHistory().batches().get("batch").invocations().getFirst()).put("value", "changed");
+        ((ObjectNode) returned.intents().get("intent").payload()).put("value", "changed");
+        ((ObjectNode) returned.receipts().get("receipt").body()).put("value", "changed");
+        assertEquals(saved, proof.predecessorPrefix());
+        assertEquals("original", proof.boundaryRef().path("value").textValue());
+    }
+
+    @Test
+    void refusesTerminalClosedEventPayloadSubjectAndReferenceFieldsWithValidFrame() throws IOException {
+        for (String section : List.of("event", "payload", "subject", "boundaryRef")) {
+            ObjectNode source = terminalSection((ObjectNode) records(32).getFirst().path("managedSession"), section);
+            for (String field : java.util.stream.StreamSupport.stream(
+                    java.util.Spliterators.spliteratorUnknownSize(source.fieldNames(), 0), false).toList()) {
+                changedTerminal(event -> terminalSection(event, section).remove(field), metadata -> { }, null);
+            }
+            changedTerminal(event -> terminalSection(event, section).put("unknown", true), metadata -> { }, null);
+        }
+        for (String field : List.of("activationId", "workerId", "phase")) {
+            changedTerminal(event -> ((ObjectNode) event.path("payload")).put(field, "different"), metadata -> { }, null);
+        }
+        for (String field : List.of("epoch", "expiresAt", "leaseDurationMs")) {
+            changedTerminal(event -> ((ObjectNode) event.path("payload")).put(field, 2), metadata -> { }, null);
+        }
+        changedTerminal(event -> ((ObjectNode) event.path("payload")).putObject("installRef"), metadata -> { }, null);
+        changedTerminal(event -> ((ObjectNode) event.path("payload")).put("renewalSeq", 1), metadata -> { }, null);
+        for (String field : List.of("type", "scopeId", "activationId")) {
+            changedTerminal(event -> ((ObjectNode) event.path("payload").path("subject")).put(field, "different"), metadata -> { }, null);
+        }
+        changedTerminal(event -> ((ObjectNode) event.path("payload").path("subject")).put("epoch", 2), metadata -> { }, null);
+        for (String field : List.of("kind", "eventId")) {
+            changedTerminal(event -> event.put(field, "different"), metadata -> { }, null);
+        }
+        changedTerminal(event -> event.put("occurredAt", -1), metadata -> { }, null);
+        changedTerminal(event -> ((ObjectNode) event.path("payload").path("boundaryRef")).put("kind", "managed-root"), metadata -> { }, null);
+        changedTerminal(event -> ((ObjectNode) event.path("payload").path("boundaryRef")).put("schemaVersion", 2), metadata -> { }, null);
+    }
+
+    @Test
+    void refusesTerminalMetadataAndPredecessorConflictsWithValidFrame() throws IOException {
+        for (String field : List.of("operation", "commandId", "contentDigest", "writerId", "previousCommitDigest")) {
+            changedTerminal(event -> { }, metadata -> metadata.put(field, "different"), null);
+        }
+        for (String field : List.of("writerGeneration", "activationEpoch", "firstSequence", "lastSequence", "eventCount")) {
+            changedTerminal(event -> { }, metadata -> metadata.put(field, 2), null);
+        }
+        changedTerminal(event -> { }, metadata -> metadata.put("latestCheckpointResourceId", "checkpoint"), null);
+        for (String field : List.of("checkpoint", "input", "attempt", "stream", "pendingBatch")) {
+            ObjectNode changed = JSON.valueToTree(prefix(32));
+            changed.set(field, switch (field) {
+                case "checkpoint" -> JSON.nullNode();
+                case "input" -> JSON.valueToTree(prefix(5).input());
+                case "attempt" -> JSON.valueToTree(prefix(6).attempt());
+                case "stream" -> JSON.valueToTree(new CsiNativeActivationProof.Stream("message", 1, "text"));
+                default -> JSON.valueToTree(new CsiNativeActivationProof.PendingBatch("message", JSON.createObjectNode(), List.of()));
+            });
+            var incomplete = JSON.treeToValue(changed, CsiNativeActivationProof.Prefix.class);
+            rejected(() -> terminal(records(32), request(32), activation, incomplete, reader));
+        }
+        var successor = new CsiNativeActivationProof.Activation(activation.activationId(), writer,
+                activation.installRef(), activation.leaseDurationMs(), activation.expiresAt(), 0, 2, 3);
+        rejected(() -> terminal(records(32), request(32), successor, prefix(32), reader));
+        rejected(() -> CsiNativeActivationProof.terminal(records(32), request(32), original, genesis,
+                activation, prefix(32), 40, records(31).getLast().path("uuid").textValue(),
+                request(31).path("commitDigest").textValue(), reader));
+        rejected(() -> CsiNativeActivationProof.terminal(records(32), request(32), original, genesis,
+                activation, prefix(32), 41, records(32).getLast().path("uuid").textValue(),
+                request(31).path("commitDigest").textValue(), reader));
+    }
+
+    @Test
+    void refusesTerminalBoundaryGrammarAndBytesWithMatchingReferenceAndFrame() throws IOException {
+        JsonNode ref = records(32).getFirst().path("managedSession").path("payload").path("boundaryRef");
+        ObjectNode originalBody = (ObjectNode) JSON.readTree(reader.apply(ref));
+        for (String field : List.of("version", "activationId", "epoch", "committedSequence", "lastRecordUuid")) {
+            ObjectNode missing = originalBody.deepCopy();
+            missing.remove(field);
+            changedTerminal(event -> { }, metadata -> { }, JSON.writeValueAsBytes(missing));
+            ObjectNode wrong = originalBody.deepCopy();
+            wrong.put(field, "different");
+            changedTerminal(event -> { }, metadata -> { }, JSON.writeValueAsBytes(wrong));
+        }
+        ObjectNode unknown = originalBody.deepCopy();
+        unknown.put("unknown", true);
+        changedTerminal(event -> { }, metadata -> { }, JSON.writeValueAsBytes(unknown));
+        String body = new String(reader.apply(ref), java.nio.charset.StandardCharsets.UTF_8);
+        for (byte[] bytes : List.of(
+                (body + "{}").getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                body.replace("\"version\":1", "\"version\":1,\"version\":1").getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                (body + " ".repeat(16 * 1024)).getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                new byte[] {(byte) 0xff}, new byte[0])) {
+            changedTerminal(event -> { }, metadata -> { }, bytes);
+        }
+        rejected(() -> terminal(records(32), request(32), activation, prefix(32), ignored -> null));
+    }
+
+    private void changedTerminal(java.util.function.Consumer<ObjectNode> changeEvent,
+            java.util.function.Consumer<ObjectNode> changeMetadata, byte[] boundaryBytes) throws IOException {
+        ObjectNode eventRecord = records(32).getFirst().deepCopy();
+        ObjectNode markerRecord = records(32).getLast().deepCopy();
+        ObjectNode event = (ObjectNode) eventRecord.path("managedSession");
+        ObjectNode metadata = request(32).deepCopy();
+        String resourceId = event.path("payload").path("boundaryRef").path("resourceId").textValue();
+        if (boundaryBytes != null) {
+            ((ObjectNode) event.path("payload").path("boundaryRef")).put("byteLength", boundaryBytes.length)
+                    .put("digest", CsiNativeActivationProof.sha256(boundaryBytes));
+        }
+        changeEvent.accept(event);
+        changeMetadata.accept(metadata);
+        metadata.put("eventsDigest", CsiNativeActivationProof.sha256(CsiNativeActivationProof.canonical(
+                JSON.createArrayNode().add(event)).getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        ObjectNode marker = (ObjectNode) markerRecord.path("managedSession");
+        marker.fieldNames().forEachRemaining(field -> marker.set(field, metadata.get(field)));
+        metadata.put("commitDigest", CsiNativeActivationProof.sha256(CsiNativeActivationProof.canonical(marker)
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        rejected(() -> terminal(List.of(eventRecord, markerRecord), metadata, activation, prefix(32),
+                ref -> boundaryBytes != null && resourceId.equals(ref.path("resourceId").textValue())
+                        ? boundaryBytes : reader.apply(ref)));
+    }
+
+    private static ObjectNode terminalSection(ObjectNode event, String section) {
+        return (ObjectNode) switch (section) {
+            case "event" -> event;
+            case "payload" -> event.path("payload");
+            default -> event.path("payload").path(section);
+        };
+    }
+
+    private CsiNativeActivationProof.TerminalProof terminal(List<JsonNode> terminalRecords, JsonNode metadata,
+            CsiNativeActivationProof.Activation previous, CsiNativeActivationProof.Prefix settled,
+            Function<JsonNode, byte[]> resources) {
+        return CsiNativeActivationProof.terminal(terminalRecords, metadata, original, genesis, previous, settled,
+                41, records(31).getLast().path("uuid").textValue(), request(31).path("commitDigest").textValue(), resources);
+    }
+
     private void mutatedBody(int index, String field, java.util.function.Consumer<ObjectNode> change) throws IOException {
         var tx = transaction(index);
         JsonNode event = tx.events().get(field.equals("stateRef") ? 1 : 0);

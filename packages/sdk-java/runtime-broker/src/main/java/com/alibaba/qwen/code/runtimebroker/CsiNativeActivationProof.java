@@ -60,6 +60,35 @@ public final class CsiNativeActivationProof {
             long leaseDurationMs, long expiresAt, long renewalSequence, long epoch, long writerGeneration) {
     }
 
+    public record TerminalProof(Activation predecessorActivation, Prefix predecessorPrefix, JsonNode boundaryRef,
+            long predecessorSequence, String predecessorLastRecordUuid, String predecessorCommitDigest,
+            long terminalSequence, String lastRecordUuid) {
+        public TerminalProof {
+            predecessorActivation = snapshot(predecessorActivation, Activation.class);
+            predecessorPrefix = snapshot(predecessorPrefix, Prefix.class);
+            boundaryRef = boundaryRef.deepCopy();
+        }
+
+        @Override
+        public Activation predecessorActivation() {
+            return snapshot(predecessorActivation, Activation.class);
+        }
+
+        @Override
+        public Prefix predecessorPrefix() {
+            return snapshot(predecessorPrefix, Prefix.class);
+        }
+
+        @Override
+        public JsonNode boundaryRef() {
+            return boundaryRef.deepCopy();
+        }
+
+        private static <T> T snapshot(T value, Class<T> type) {
+            return JSON.convertValue(JSON.valueToTree(value).deepCopy(), type);
+        }
+    }
+
     public record Input(String inputId, String text, String userMessageId, boolean noDeadline) {
     }
 
@@ -1602,6 +1631,55 @@ public final class CsiNativeActivationProof {
 
     public static boolean hasActivation(Transaction transaction) {
         return transaction.events().stream().anyMatch(event -> "activation.changed".equals(event.path("kind").textValue()));
+    }
+
+    /** Decodes facts from a validated, unmodified parser continuation; grants no live authority. */
+    public static TerminalProof terminal(List<JsonNode> records, JsonNode metadata,
+            RuntimeProvisionRequest original, Genesis genesis, Activation previous, Prefix prefix,
+            long previousSequence, String previousUuid, String previousCommitDigest,
+            Function<JsonNode, byte[]> resources) {
+        require(genesis != null && previous != null && prefix != null
+                && previous.writerGeneration() == 1 && previous.epoch() == 1
+                && prefix.checkpoint() != null && prefix.input() == null && prefix.attempt() == null
+                && prefix.stream() == null && prefix.pendingBatch() == null
+                && previousSequence > 0 && previousSequence < MAX_SAFE
+                && "releaseActivation".equals(text(metadata, "operation"))
+                && (previous.activationId() + ":released").equals(id(metadata, "commandId"))
+                && genesis.definitionDigest().equals(text(metadata, "contentDigest"))
+                && number(metadata.get("eventCount")) == 1
+                && number(metadata.get("firstSequence")) == previousSequence + 1
+                && previousCommitDigest != null && previousCommitDigest.equals(text(metadata, "previousCommitDigest"))
+                && previous.workerId().equals(text(metadata, "writerId"))
+                && number(metadata.get("writerGeneration")) == 1 && number(metadata.get("activationEpoch")) == 1
+                && metadata.path("latestCheckpointResourceId").isNull());
+        uuid(previousUuid);
+        Transaction transaction = transaction(records, metadata, original, previousUuid);
+        JsonNode event = transaction.events().getFirst();
+        closed(event, Set.of("v", "sequence", "eventId", "sessionKey", "kind", "occurredAt", "payload"));
+        require("activation.changed".equals(text(event, "kind"))
+                && ("activation:" + previous.activationId() + ":released").equals(id(event, "eventId")));
+        time(event.get("occurredAt"));
+        JsonNode payload = event.path("payload");
+        closed(payload, PAYLOAD);
+        require(previous.activationId().equals(id(payload, "activationId")) && number(payload.get("epoch")) == 1
+                && previous.workerId().equals(text(payload, "workerId"))
+                && "released".equals(text(payload, "phase")) && payload.path("leaseDurationMs").isNull()
+                && time(payload.get("expiresAt")) == previous.expiresAt() && payload.path("installRef").isNull());
+        JsonNode subject = payload.path("subject");
+        closed(subject, Set.of("type", "scopeId", "activationId", "epoch"));
+        require("activation".equals(text(subject, "type"))
+                && previous.activationId().equals(text(subject, "scopeId"))
+                && previous.activationId().equals(text(subject, "activationId")) && number(subject.get("epoch")) == 1);
+        JsonNode ref = payload.path("boundaryRef");
+        byte[] bytes = reference(ref, "managed-activation-boundary", resources);
+        require(bytes.length <= 16 * 1024);
+        JsonNode boundary = readObject(bytes);
+        closed(boundary, Set.of("version", "activationId", "epoch", "committedSequence", "lastRecordUuid"));
+        require(number(boundary.get("version")) == 1 && previous.activationId().equals(id(boundary, "activationId"))
+                && number(boundary.get("epoch")) == 1 && number(boundary.get("committedSequence")) == previousSequence
+                && previousUuid.equals(text(boundary, "lastRecordUuid")));
+        return new TerminalProof(previous, prefix, ref, previousSequence, previousUuid, previousCommitDigest,
+                previousSequence + 1, transaction.lastRecordUuid());
     }
 
     public static JsonNode readObject(byte[] bytes) {
