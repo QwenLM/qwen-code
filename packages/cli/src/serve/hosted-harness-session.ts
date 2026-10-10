@@ -144,6 +144,8 @@ import {
 } from './hosted-workspace-broker.js';
 import { HostedTextDeltaStream } from './hosted-text-deltas.js';
 import {
+  answerCommittedTurnCalls,
+  answerResumedTurnCalls,
   fillParkedRoundAgentGaps,
   isDurableBlockedVerdict,
   originalRuntimeBroker,
@@ -842,6 +844,17 @@ export async function settleCrashedWakeTurnAftermath(params: {
         }
       }
     }
+    // The calls the dead attempt committed but never answered get their
+    // answers by what committed before the Turn settles; core's orphan
+    // repair would tell the next Turn's model to retry them.
+    await answerCommittedTurnCalls({
+      session: session.managed,
+      sessionId,
+      cwd,
+      promptId: turnId,
+      children: session.childAgents,
+      teams: session.teams,
+    });
     // Consume the crashed input: until its turnId settles, every reload
     // re-classifies it as recovery and re-blocks the Session over the
     // same crash (the journal-filter rule in the history builders then
@@ -1176,6 +1189,18 @@ async function settleCancelledHarnessTurn(
         event.kind === 'turn.settled' && event.payload['turnId'] === promptId,
     );
   if (alreadySettled) return;
+  // A Turn with no park can still have committed calls it never answered
+  // (a team call, a background launch). They get their answers by what
+  // committed before the terminal: core's orphan repair would tell the
+  // next Turn's model to retry them, and the retry redoes the work.
+  await answerCommittedTurnCalls({
+    session: managed,
+    sessionId,
+    cwd: session.cwd,
+    promptId,
+    children: session.childAgents,
+    teams: session.teams,
+  });
   await managed.sink.write(
     record(session, sessionId, 'system', null, {
       subtype: 'turn_result',
@@ -3580,6 +3605,29 @@ export function registerHostedHarnessSessionRoutes(
       // the Broker or settle anything. A bare load of a parked Session keeps
       // refusing with 409 so it never drives a Runtime by accident.
       const takeover = !lifecycle && !session.hooks && takeoverFlags;
+      // A Hooks Session recovers only through this load (it never takes
+      // over), and the file-history gate below needs every call of the
+      // pending round answered. The team and agent calls the dead Harness
+      // never answered are answered first — a committed one by what
+      // committed, any other as never run — or the gate would refuse this
+      // Session on every load. A failed answer leaves the gate's retriable
+      // refusal.
+      if (session.hooks && !lifecycle && unsettled !== undefined) {
+        try {
+          await answerResumedTurnCalls({
+            session: managed,
+            sessionId,
+            cwd,
+            promptId: unsettled,
+            children: session.childAgents,
+            teams: session.teams,
+          });
+        } catch (cause) {
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${sessionId} could not answer the interrupted calls of ${unsettled}: ${String(cause)}`,
+          );
+        }
+      }
       const fileHistory = await readHostedFileHistory(managed);
       // H5/F5 follow-up: a channel turn interrupted inside a Write/Edit
       // owes the wake pump its recovery, but refusing here would kill that
@@ -3877,6 +3925,21 @@ export function registerHostedHarnessSessionRoutes(
           authorization.status === 'runnable'
             ? authorization.checkpoint.identity.promptId
             : null);
+        // The resume below reads only the round's journaled results. A
+        // sibling the Runtime does not own (a team call, a background
+        // launch) is answered first: by what committed when it committed
+        // before the Harness died — core's orphan repair would otherwise
+        // have the model retry it — and as never run otherwise, so the
+        // round the resume needs is whole.
+        if (promptId)
+          await answerResumedTurnCalls({
+            session: managed,
+            sessionId,
+            cwd,
+            promptId,
+            children: session.childAgents,
+            teams: session.teams,
+          });
         const projected = await managed.sink.project();
         const current = projected.filter(
           (item) => item.daemonPromptId === promptId,
@@ -5698,6 +5761,24 @@ export function registerHostedHarnessSessionRoutes(
               ({ history, resumeParts } = deriveRound());
             }
           }
+          // A sibling the Runtime reconciliation does not own (a team
+          // call, a background launch) is answered before the resumed round
+          // reads it: by what committed when it committed before the
+          // Harness died — core's orphan repair would have the model retry
+          // it, and the retry redoes the work — and as never run otherwise,
+          // or the pending file history's check refuses the resume.
+          const answered = await answerResumedTurnCalls({
+            session: session.managed,
+            sessionId,
+            cwd: session.cwd,
+            promptId,
+            children: session.childAgents,
+            teams: session.teams,
+          });
+          if (answered > 0) {
+            projected = await session.managed.sink.project();
+            ({ history, resumeParts } = deriveRound());
+          }
           if (resumeParts.length === 0) {
             throw new Error(
               'Recovered Runtime turn has no journaled tool results.',
@@ -5959,6 +6040,17 @@ export function registerHostedHarnessSessionRoutes(
             promptId,
           });
         }
+        // A Runtime park's non-Runtime siblings (a team call, a background
+        // launch) that committed before the Harness died are answered by
+        // what committed; the settlements above answer only what they own.
+        await answerCommittedTurnCalls({
+          session: session.managed,
+          sessionId,
+          cwd: session.cwd,
+          promptId,
+          children: session.childAgents,
+          teams: session.teams,
+        });
         // Whatever shape the wait was in, its round is fully answered now:
         // the folds above landed (or the journaled proof they were never
         // owed), so only the terminal record below settles the Turn.
