@@ -20272,7 +20272,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
     vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
     const { server, loaded } = await loadReplacement(true);
-    console.error('DIAG loaded', loaded.status, JSON.stringify(loaded.body));
     expect(loaded.status).toBe(200);
     const clientId = loaded.body.clientId as string;
     const recovery = loaded.body._meta?.[
