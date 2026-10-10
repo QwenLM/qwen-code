@@ -263,6 +263,7 @@ export class QwenSessionUpdateHandler {
     }
 
     const raw = meta.usage as Record<string, unknown> | null | undefined;
+    if (!raw && meta.durationMs == null) return;
     const usage = raw
       ? {
           // SDK field names

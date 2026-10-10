@@ -979,3 +979,5 @@ export {
   runWithHookExecutionOwner,
 } from './hooks/hook-execution-context.js';
 export type { HookExecutionOwner } from './hooks/hook-execution-context.js';
+
+export type { RequestLifecycleEvent } from './telemetry/request-lifecycle.js';
