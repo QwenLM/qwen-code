@@ -786,11 +786,13 @@ export async function settleCrashedWakeTurnAftermath(params: {
             // that can never answer. Skip it; the 409-aware release
             // block below still completes what the lease owes.
             if (adopted)
-              broker = await stopParkedRuntimeExecutions({
-                session: session.managed,
-                promptId: turnId,
-                brokerOptions,
-              });
+              broker = (
+                await stopParkedRuntimeExecutions({
+                  session: session.managed,
+                  promptId: turnId,
+                  brokerOptions,
+                })
+              ).broker;
           } catch (cause) {
             // A decline is deterministic evidence read from the journal
             // (a shell under a hooks/MCP definition, a mismatched own

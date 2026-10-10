@@ -4917,6 +4917,113 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(204);
   });
 
+  it('keeps an interrupted channel Write unsettled while its settle cannot verify the park', async () => {
+    // R9-2 through the wake funnel: the stop proves cleanly, but the
+    // settle's own authorization re-read faults transiently — a
+    // retry-inviting refusal the funnel must answer busy with, never a
+    // terminal record over a turn whose parked executions the settle
+    // could not see.
+    const channelTurn = await prewriteChannelWriteInterruption();
+    mockBrokerBroker();
+    // Hold the stop's first Broker read until the load answered, so the
+    // settle block arms deterministically behind it; the block then
+    // catches the settle's own re-read and the funnel's retryable check.
+    let releaseStatus!: () => void;
+    const statusGate = new Promise<void>((resolve) => {
+      releaseStatus = resolve;
+    });
+    const status = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'status')
+      .mockImplementation(async () => {
+        await statusGate;
+        return { state: 'settled' };
+      });
+    let blockSettleReads = false;
+    const original =
+      LocalManagedSessionAuthority.prototype.harnessRunAuthorization;
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
+      if (blockSettleReads)
+        return {
+          status: 'blocked',
+          reason: 'missing_state',
+          message: 'Session Store answered 503',
+        } as never;
+      return original.call(this);
+    });
+    const stderr = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => undefined);
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-files/1',
+    });
+    expect(loaded.status).toBe(200);
+    const clientId = loaded.body.clientId as string;
+    // The pump is parked in the stop's gated Broker read now; arm the
+    // settle block behind it and let the stop through.
+    await vi.waitFor(
+      () => {
+        expect(status.mock.calls.length).toBeGreaterThan(0);
+      },
+      { timeout: 10_000 },
+    );
+    blockSettleReads = true;
+    releaseStatus();
+    // The settle's refusal surfaces as the retry-inviting busy answer.
+    await vi.waitFor(
+      () => {
+        expect(
+          stderr.mock.calls.some(([line]) =>
+            String(line).includes(
+              'defers its recovery to the next wake attempt',
+            ),
+          ),
+        ).toBe(true);
+      },
+      { timeout: 10_000 },
+    );
+    const readSettled = async () =>
+      (
+        await LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: SESSION_ID,
+          },
+        )
+      ).events.filter(
+        (event) =>
+          event.kind === 'turn.settled' &&
+          event.payload['turnId'] === channelTurn,
+      );
+    // While the block holds, no terminal record lands over the park the
+    // settle could not verify.
+    expect(await readSettled()).toHaveLength(0);
+    // The block lifts; the busy-cadence retry settles the turn for real.
+    blockSettleReads = false;
+    await vi.waitFor(
+      async () => {
+        expect(await readSettled()).toHaveLength(1);
+      },
+      { timeout: 10_000 },
+    );
+    expect(
+      (
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+          'X-Qwen-Client-Id',
+          clientId,
+        )
+      ).status,
+    ).toBe(204);
+  });
+
   it('crosses a durable store fault to 503 instead of mislabelling it as 400 (F10)', async () => {
     const server = await app(true);
     const created = await headers(supertest(server).post('/session')).send({

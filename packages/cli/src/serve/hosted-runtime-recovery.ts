@@ -415,7 +415,16 @@ export async function stopParkedRuntimeExecutions(input: {
   for (const item of authorization.checkpoint.tools?.items ?? []) {
     if (item.state !== 'in_progress' || item.outcomeSource !== 'runtime')
       continue;
-    const before = await broker.status(item.executionCallId);
+    // A faulting read observed nothing, so the id rides the carry across
+    // the throw — the retry would otherwise read the reclaimed record as
+    // already-stopped and certify the stop nobody observed.
+    let before: { state: string } | undefined;
+    try {
+      before = await broker.status(item.executionCallId);
+    } catch (cause) {
+      unobserved.add(item.executionCallId);
+      throw cause;
+    }
     if (before?.state === 'unknown')
       throw new Error('Runtime execution outcome is unknown.');
     if (before?.state === 'abandoned') {
@@ -426,7 +435,13 @@ export async function stopParkedRuntimeExecutions(input: {
     await broker.cancel(item.executionCallId).catch(() => undefined);
     const deadline = Date.now() + 30_000;
     for (;;) {
-      const status = await broker.status(item.executionCallId);
+      let status: { state: string } | undefined;
+      try {
+        status = await broker.status(item.executionCallId);
+      } catch (cause) {
+        unobserved.add(item.executionCallId);
+        throw cause;
+      }
       if (status?.state === 'unknown') {
         unobserved.add(item.executionCallId);
         throw new Error('Runtime execution outcome is unknown.');
@@ -473,6 +488,10 @@ async function answerAbandonedTurnCalls(input: {
   cwd: string;
   promptId: string;
   message: string;
+  /** Calls whose Runtime stop was never observed answer with the honest
+   * unobservable outcome the parked-Runtime settle journals for them —
+   * never a cancellation nobody witnessed. */
+  unobserved?: ReadonlySet<string>;
 }): Promise<void> {
   const records = (await input.session.sink.project()).filter(
     (entry) => entry.daemonPromptId === input.promptId,
@@ -492,18 +511,21 @@ async function answerAbandonedTurnCalls(input: {
         owed.set(call.id, { name: call.name, messageId: record.uuid });
     }
   for (const [functionCallId, call] of owed) {
+    const observed = !input.unobserved?.has(functionCallId);
     const parts = convertToFunctionErrorResponse(
       call.name,
       functionCallId,
       [],
-      `The tool call never ran: ${input.message}.`,
+      observed
+        ? `The tool call never ran: ${input.message}.`
+        : "The Runtime execution's outcome could not be observed: the Broker fenced the record after losing its owner.",
     );
     const response = parts[0]?.functionResponse;
     if (!response || parts.length !== 1)
       throw new Error('Runtime result cannot be represented durably.');
     response.response = {
       ...response.response,
-      executionStatus: 'cancelled',
+      executionStatus: observed ? 'cancelled' : 'unknown',
     };
     await input.session.sink.write({
       uuid: randomUUID(),
@@ -543,7 +565,8 @@ async function answerAbandonedTurnCalls(input: {
  * stop cannot be proven, leaving the Turn to the recovery fleet; a
  * checkpoint the authorization could not verify (a faulting Store read
  * erases into `missing_state`) refuses the same way rather than being
- * mistaken for "no Runtime wait to settle".
+ * mistaken for "no Runtime wait to settle" — and the settle's own
+ * re-read after the stop refuses identically, having journaled nothing.
  */
 export async function settleInterruptedTurnRuntime(input: {
   session: ManagedSession;
@@ -574,6 +597,11 @@ export async function settleInterruptedTurnRuntime(input: {
     throw new RecoveryDeclined();
   }
   let broker: HostedWorkspaceBroker | undefined;
+  // The calls whose executions the stop counted on the Broker's terminal
+  // fence alone, translated for the abandoned-call tail: their stop was
+  // never observed, so the tail owes them the honest unobservable outcome
+  // rather than a cancellation nobody witnessed.
+  let unobservedCalls: ReadonlySet<string> | undefined;
   if (
     authorization.status === 'runnable' &&
     authorization.checkpoint.identity.turnId === input.promptId
@@ -622,13 +650,26 @@ export async function settleInterruptedTurnRuntime(input: {
         carryUnobservedInto: input.carryUnobservedInto,
       });
       broker = stopped.broker;
-      await settleParkedTurnCancelled({
+      const settleOutcome = await settleParkedTurnCancelled({
         session: input.session,
         sessionId: input.sessionId,
         cwd: input.cwd,
         promptId: input.promptId,
         unobserved: stopped.unobserved,
       });
+      // A settle that could not verify the park journaled nothing: its
+      // contract names that a retry-inviting failure, never a completed
+      // settle the tail and the caller's terminal record may build on.
+      if (settleOutcome === 'not-runnable')
+        throw new Error(
+          'Interrupted turn settle cannot verify the park (authorization not runnable).',
+        );
+      if (stopped.unobserved.size > 0)
+        unobservedCalls = new Set(
+          (authorization.checkpoint.tools?.items ?? [])
+            .filter((item) => stopped.unobserved.has(item.executionCallId))
+            .map((item) => item.functionCallId),
+        );
     }
   }
   // The dead Turn's pending file-history obligation dies with it: keep
@@ -665,6 +706,7 @@ export async function settleInterruptedTurnRuntime(input: {
         action !== undefined && action.state !== 'requested'
           ? `the approval ended ${action.state} after the Harness that asked was interrupted`
           : 'the Harness that asked was interrupted',
+      unobserved: unobservedCalls,
     });
   }
   // The handback owed for a taken Workspace survives a settlement split
