@@ -1221,6 +1221,19 @@ export class MemoryManager {
       } as never;
     }
 
+    // Compaction and rewind shrink history without a session switch, so no
+    // discard fires. History only grows between this session's own requests,
+    // so a shorter one proves the parked snapshot predates the shrink. A flush
+    // replay is exempt: it runs a snapshot a newer skip replaced.
+    const cadenceNow = this.extractCadence.get(params.sessionId);
+    if (
+      !options.bypassCadence &&
+      cadenceNow?.pending !== undefined &&
+      params.history.length < cadenceNow.pending.history.length
+    ) {
+      delete cadenceNow.pending;
+    }
+
     if (this.extractRunning.has(params.projectRoot)) {
       const currentTaskId = this.extractCurrentTaskId.get(params.projectRoot);
       if (!currentTaskId) {
@@ -1485,10 +1498,14 @@ export class MemoryManager {
       // that was extracted and persist the cursor backwards, which the next
       // run then reads as a reason to re-scan everything after it. Leave the
       // newer run's entry alone; only clear one this snapshot still owns.
+      // A run that instead *dropped* the snapshot (history shrank under it)
+      // rewrites the cursor downward, so the length test cannot see it. A newer
+      // skip that replaced it leaves `pending` defined and still owes a run.
       const state = this.extractCadence.get(sessionId);
       if (
         state !== undefined &&
-        state.lastExtractedLength >= pending.history.length
+        (state.pending === undefined ||
+          state.lastExtractedLength >= pending.history.length)
       ) {
         if (state.pending === pending) this.extractCadence.delete(sessionId);
         return false;

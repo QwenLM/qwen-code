@@ -2550,6 +2550,62 @@ describe('MemoryManager', () => {
       expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
     });
 
+    it('drops a snapshot a partial compaction left above the cursor', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 13)).skippedReason).toBe('cadence');
+
+      // Compaction collapses the live history to 6: still above what the
+      // session extracted, so this run is not a shrink by cursor, and the spent
+      // budget makes the gate decline. The snapshot predates the shrink anyway.
+      await turn(mgr, 6);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+
+      // Carrying it would keep the gate shut until the history regrew past 13,
+      // and a close would replay it into a cursor no live history can match.
+      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      expect((await turn(mgr, 8)).skippedReason).toBe('cadence');
+    });
+
+    it('refuses a parked flush whose snapshot a shrink dropped', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 4);
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+
+      let release!: () => void;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve(engagedNoop('other'));
+          }),
+      );
+      // Another session holds the project slot, so the flush parks behind it.
+      const other = turn(mgr, 2, 'other');
+      await expect(mgr.flushPendingExtract('sess', 1)).resolves.toBe(false);
+
+      // Compaction shrinks this session while that flush is still parked: the
+      // run queues behind the same blocker, drops the snapshot and rewrites the
+      // cursor downward before the parked flush gets the slot.
+      const shrunk = turn(mgr, 2);
+      release();
+      await other;
+      await shrunk;
+      await mgr.drain();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      // The forward-only cursor test reads `2 >= 6` as false and replays the
+      // abandoned snapshot while resolving `true` to a boundary that is gone.
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).not.toContain(6);
+    });
+
     it('drops the pending snapshot when the turn wrote to a memory file', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
       const mgr = new MemoryManager();
