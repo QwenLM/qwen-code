@@ -29,6 +29,14 @@ public final class StoreModels {
                     lastSequence, 0, createdAt, updatedAt, deletedAt, version,
                     null, "yolo", null);
         }
+
+        public SessionRecord withStatus(String value) {
+            return new SessionRecord(tenantId, sessionId, agentId,
+                    agentRevision, title, value, harnessBootId,
+                    harnessEventEpoch, harnessLastEventId, lastSequence,
+                    replayFloorSequence, createdAt, updatedAt, deletedAt,
+                    version, workspace, approvalMode, toolProfile);
+        }
     }
 
     public record TurnRecord(String tenantId, String sessionId,

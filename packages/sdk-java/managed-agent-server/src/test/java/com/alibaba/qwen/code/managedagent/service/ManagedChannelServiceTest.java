@@ -194,6 +194,28 @@ class ManagedChannelServiceTest {
                 Integer.class, TENANT, channel)).isEqualTo(1);
     }
 
+    // A TAB in an inbound subject survives the producer chain's
+    // [\r\n\0] sanitization, and the create route refuses control
+    // characters in a title — folding them to spaces at the derivation
+    // keeps the route's Session creatable instead of dropping the event as
+    // a deterministic refusal the adapter never re-drives.
+    @Test
+    void bindsARouteWhoseSubjectCarriesAControlCharacter() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                new InboundEventRequest(1, "1700:99", 1,
+                        new RouteScope("chat_thread", null,
+                                "alice@example.com", "thread-9"),
+                        "alice@example.com", "alice@example.com", "thread-9",
+                        "Build\tstatus", "check the build", List.of(), null));
+        assertThat(admitted.replayed()).isFalse();
+        assertThat(instances.findBinding(TENANT, channel, admitted.routeId()))
+                .isPresent();
+        assertThat(jdbc.queryForObject("SELECT title FROM"
+                        + " managed_agent_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, TENANT,
+                admitted.sessionId())).isEqualTo("email: Build status");
+    }
+
     @Test
     void recoversAnAdmissionWhoseAnswerWasLost() {
         // The Harness committed, the control plane died before marking the

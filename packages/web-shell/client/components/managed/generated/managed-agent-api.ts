@@ -390,7 +390,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the Session's recorded owner with current read access (404 unreadable, 403 readable non-owner). Bound keys are tenant/Session/actor scoped. Replay returns the current visible Session without repeating the mutation; a deleted Session returns 404. The permanent close fence is preserved and no Harness or Runtime call is made. */
+        /** @description Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the Session's recorded owner with current read access (404 unreadable, 403 readable non-owner). Bound keys are tenant/Session/actor scoped. Replay returns the recorded outcome without repeating the mutation; a replay after delete answers with the Session as last visible — its pre-delete status — rather than 404. The permanent close fence is preserved and no Harness or Runtime call is made. */
         post: operations["unarchiveWebShellSession"];
         delete?: never;
         options?: never;
@@ -460,6 +460,7 @@ export interface components {
             agentId: string;
             /** @description Planned; phase one rejects non-blank values. */
             environmentId?: string | null;
+            /** @description The server enforces the bound in UTF-16 code units (Java String.length()), so an astral character counts as two: a title this schema's code-point maxLength accepts can still exceed the server's 256-unit bound and answer 400 invalid_title. */
             title?: string | null;
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
@@ -1141,7 +1142,7 @@ export interface components {
     parameters: never;
     requestBodies: never;
     headers: {
-        /** @description True when an accepted command or operation was replayed for the same idempotency key and digest without repeating its mutation. Session mutation responses represent the current visible Session; operation responses represent the original operation at its current state. */
+        /** @description True when an accepted command or operation was replayed for the same idempotency key and digest without repeating its mutation. Session mutation responses represent the recorded outcome on the Session as last visible — a rename or unarchive replay after delete answers with the Session's pre-delete status rather than 404, while a create replay after delete answers 404 on the public create route, which re-reads the Session before responding, and answers the recorded 202 admission carrying the tombstoned sessionId on the WebShell create route, which does not re-read it; operation responses represent the original operation at its current state. */
         IdempotentReplay: boolean;
         /** @description Trace-only correlation identifier; never an idempotency key. */
         RequestId: string;

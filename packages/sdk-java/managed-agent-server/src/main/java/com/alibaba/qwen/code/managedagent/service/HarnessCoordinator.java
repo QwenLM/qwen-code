@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.harness.HarnessDisabledException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Admission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
@@ -321,6 +322,14 @@ public class HarnessCoordinator {
         // lease itself rather than by the pre-admission retry budget.
         recoveryPath.set(session.harnessBootId() != null);
         if (session.workspace() != null && !harness.isWorkspaceFilesAvailable()) {
+            if (!claimed.submissionAttempted()) {
+                // Before submission a Workspace-files outage holds the Turn
+                // like a Harness outage: a replay may already have answered
+                // 202 for it. Once submitted, the Turn stays terminal here.
+                return deferOutage(claimed, "workspace_unavailable",
+                        "Hosted Workspace execution remained unavailable"
+                                + " before Turn admission.");
+            }
             return fail(claimed, "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
         }
@@ -1001,6 +1010,11 @@ public class HarnessCoordinator {
     private boolean transientFailure(TurnRecord turn,
             boolean submissionAttempted, RuntimeException error,
             boolean exemptFromPreAdmissionBudget) {
+        if (!submissionAttempted && isHarnessDisabled(error)) {
+            return deferOutage(turn, "hosted_harness_unavailable",
+                    "Hosted Harness remained unavailable before Turn"
+                            + " admission.", error);
+        }
         if (!submissionAttempted
                 && !exemptFromPreAdmissionBudget
                 && turn.retryCount() >= maxPreAdmissionRetries) {
@@ -1046,6 +1060,44 @@ public class HarnessCoordinator {
                 turn.tenantId(), turn.sessionId(), turn.turnId(),
                 turn.retryCount() + 1, delay, failureLabel(error));
         return true;
+    }
+
+    // The two outage arms age differently. The Workspace-files arm spends
+    // the pre-admission budget: the recovery sweep gates on isAvailable()
+    // alone, which the production connector answers true even with files
+    // off, so the sweep keeps re-offering the Turn and a permanent files
+    // outage terminates with the actionable code instead of an eternal
+    // ACCEPTED. The Harness-disabled arm is not budget-bounded: the sweep
+    // and the replay dispatch both gate on isAvailable(), so the first
+    // defer parks the Turn — retry count frozen — until availability
+    // returns. Either way the backoff grows like any other retry.
+    private boolean deferOutage(TurnRecord turn, String exhaustionCode,
+            String exhaustionMessage) {
+        return deferOutage(turn, exhaustionCode, exhaustionMessage, null);
+    }
+
+    private boolean deferOutage(TurnRecord turn, String exhaustionCode,
+            String exhaustionMessage, RuntimeException cause) {
+        if (turn.retryCount() >= maxPreAdmissionRetries) {
+            LOG.error("Managed Turn coordination exhausted outage deferrals"
+                            + " tenant={} session={} turn={} failure={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId(),
+                    cause == null ? "none" : failureLabel(cause), cause);
+            return fail(turn, exhaustionCode, exhaustionMessage);
+        }
+        long delay = retryDelay(retryInitialDelay, retryMaxDelay,
+                turn.retryCount());
+        store.deferTurnRetry(turn.tenantId(), turn.sessionId(),
+                turn.turnId(), owner, clock.millis() + delay);
+        LOG.warn("Managed Turn coordination deferred tenant={} session={}"
+                        + " turn={} retry={} delayMs={}",
+                turn.tenantId(), turn.sessionId(), turn.turnId(),
+                turn.retryCount() + 1, delay);
+        return true;
+    }
+
+    private static boolean isHarnessDisabled(RuntimeException error) {
+        return error instanceof HarnessDisabledException;
     }
 
     private static String failureLabel(RuntimeException error) {

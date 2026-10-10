@@ -456,6 +456,9 @@ public class ManagedSessionStore {
                 || "READY".equals(request.recoveryStatus())) {
             throw invalid("recoveryStatus must be a blocked state.");
         }
+        // The 128-character column width is enforced one layer up by
+        // @Size(max = 128) on BlockRecoveryRequest — byte-counting here
+        // would reject non-ASCII codes that legitimately fit VARCHAR(128).
         validateText(request.recoveryDetailCode(), "recoveryDetailCode",
                 MAX_TEXT_BYTES);
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
