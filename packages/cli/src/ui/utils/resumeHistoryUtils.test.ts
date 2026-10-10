@@ -2246,7 +2246,41 @@ describe('resumed promptId attachment', () => {
 });
 
 describe('computeResumedPromptCountSeed', () => {
-  it('keeps seeding from zero when no turn claims an id', () => {
+  it('keeps seeding from zero when history is empty', () => {
     expect(computeResumedPromptCountSeed([], 's')).toBe(0);
   });
+
+  it.each([0, 12])(
+    'does not reuse retained snapshot turn %i without surviving user turns',
+    (turn) => {
+      const snapshotRecord: ChatRecord = {
+        uuid: 'retained-snapshots',
+        parentUuid: null,
+        sessionId: 's',
+        timestamp: '2026-10-08T00:00:00.000Z',
+        cwd: '/workspace',
+        version: '0.25.0',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        systemPayload: {
+          snapshots: [
+            `s########${turn}`,
+            'other-session########99',
+            's########invalid',
+            `s########${'9'.repeat(400)}`,
+            's########9007199254740992',
+            `s########${Number.MAX_SAFE_INTEGER}`,
+          ].map((promptId) => ({
+            promptId,
+            timestamp: '2026-10-08T00:00:00.000Z',
+            trackedFileBackups: {},
+          })),
+        },
+      };
+
+      expect(computeResumedPromptCountSeed([snapshotRecord], 's')).toBe(
+        turn + 1,
+      );
+    },
+  );
 });
