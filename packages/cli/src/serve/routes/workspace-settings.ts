@@ -30,6 +30,7 @@ import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js'
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import {
   isAuxModelSelectorSettingKey,
+  isCleanPublicProviderBaseUrl,
   publicAuxModelSelectorValue,
 } from '../../utils/aux-model-selector.js';
 import {
@@ -286,6 +287,20 @@ export function prepareSettingWrite(
       );
       if (persistedValue === null) {
         throw new Error('Fast model ACP route is unavailable');
+      }
+    }
+    if (
+      scope === SettingScope.Workspace &&
+      typeof persistedValue === 'string' &&
+      isAuxModelSelectorSettingKey(key)
+    ) {
+      const nul = persistedValue.indexOf('\0');
+      if (nul >= 0) {
+        const selector = persistedValue.slice(0, nul);
+        const baseUrl = persistedValue.slice(nul + 1);
+        if (baseUrl && !isCleanPublicProviderBaseUrl(baseUrl)) {
+          persistedValue = selector;
+        }
       }
     }
     return {

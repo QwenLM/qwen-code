@@ -2268,6 +2268,88 @@ describe('<ModelDialog />', () => {
     });
   });
 
+  it('redacts baseUrl credentials in model switch feedback and recording', async () => {
+    const recordSlashCommand = vi.fn();
+    const credentialUrl = 'https://user:sk-secret@api.example.com/v1';
+    const { mockHistoryManager } = renderComponent({}, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel: vi.fn().mockResolvedValue(undefined),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: credentialUrl,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+        baseUrl: credentialUrl,
+        apiKey: 'sk-1234567',
+      })),
+      getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
+    } as unknown as Partial<Config>);
+
+    await act(async () => {
+      await mockedSelect.mock.calls[0][0].onSelect(
+        `${AuthType.USE_OPENAI}::gpt-4`,
+      );
+    });
+
+    const feedbackItem = vi.mocked(mockHistoryManager.addItem).mock.calls[0][0];
+    expect(feedbackItem.text).not.toContain('sk-secret');
+    expect(feedbackItem.text).toContain('Base URL: https://api.example.com/v1');
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [feedbackItem],
+    });
+  });
+
+  it('writes an empty-string tombstone for model.baseUrl at workspace scope when baseUrl carries credentials', async () => {
+    const credentialUrl = 'https://user:sk-secret@api.example.com/v1';
+    const { mockSettings } = renderComponent(
+      { persistScope: 'workspace' },
+      {
+        getModel: vi.fn(() => 'gpt-4'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        switchModel: vi.fn().mockResolvedValue(undefined),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'gpt-4',
+            label: 'GPT-4',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: credentialUrl,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+          baseUrl: credentialUrl,
+        })),
+      } as unknown as Partial<Config>,
+    );
+
+    await act(async () => {
+      await mockedSelect.mock.calls[0][0].onSelect(
+        `${AuthType.USE_OPENAI}::gpt-4`,
+      );
+    });
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'model.name',
+      'gpt-4',
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'model.baseUrl',
+      '',
+    );
+  });
+
   it('remains dismissible after a failed model switch', async () => {
     const { props, mockHistoryManager } = renderComponent({}, {
       getModel: vi.fn(() => 'gpt-4'),

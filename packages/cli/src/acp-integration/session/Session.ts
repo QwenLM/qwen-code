@@ -365,6 +365,7 @@ import type {
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import { hasBaseUrlCredentials } from '../../utils/aux-model-selector.js';
 import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
 import { isSameConversationPath } from '../../utils/conversation-directory-identity.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
@@ -12550,6 +12551,16 @@ export class Session implements SessionContext {
         'model.name',
         resolvedRoute?.isRuntime ? resolvedRoute.modelId : effectiveModelId,
       );
+      const rawBaseUrl =
+        resolvedRoute && !resolvedRoute.isRuntime
+          ? (resolvedRoute.baseUrl ?? '')
+          : '';
+      const persistedBaseUrl =
+        persistScope === SettingScope.Workspace &&
+        rawBaseUrl &&
+        hasBaseUrlCredentials(rawBaseUrl)
+          ? ''
+          : rawBaseUrl;
       this.settings.setValue(persistScope, 'model.baseUrl', persistedBaseUrl);
       this.settings.setValue(
         persistScope,

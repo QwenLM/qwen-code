@@ -32,7 +32,10 @@ import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
-import { publicProviderBaseUrl } from '../../utils/acpModelUtils.js';
+import {
+  publicProviderBaseUrl,
+  sanitizeProviderBaseUrl,
+} from '../../utils/acpModelUtils.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
@@ -43,6 +46,10 @@ import {
   checkAdvisorModelAvailability,
   isAdvisorModelEligible,
 } from '../../config/advisor-model.js';
+import {
+  hasBaseUrlCredentials,
+  isCleanPublicProviderBaseUrl,
+} from '../../utils/aux-model-selector.js';
 
 function formatModalities(modalities?: InputModalities): string {
   if (!modalities) return t('text-only');
@@ -117,6 +124,24 @@ export function encodeAuxModelSelector(selected: string): string {
     return parts[1] && parts[2] ? `${parts[1]}:${parts[2]}` : selected;
   }
   return selected;
+}
+
+function encodeVisionModelSelector(
+  selected: string,
+  scope?: SettingScope,
+): string {
+  if (!selected.includes('::')) {
+    return encodeAuxModelSelector(selected);
+  }
+  const parsed = parseModelSelectionKey(selected);
+  const selector = `${parsed.authType}:${parsed.modelId}`;
+  if (!parsed.baseUrl) return selector;
+  if (scope === SettingScope.Workspace) {
+    return isCleanPublicProviderBaseUrl(parsed.baseUrl)
+      ? `${selector}\0${parsed.baseUrl}`
+      : selector;
+  }
+  return `${selector}\0${parsed.baseUrl}`;
 }
 
 interface ModelDialogProps {
@@ -209,7 +234,13 @@ function persistModelSelection(
   // has no baseUrl, write an empty-string tombstone (not undefined): undefined
   // is dropped from JSON, so it would not override a stale model.baseUrl left
   // in a lower-priority scope, whereas '' is a present value that does.
-  settings.setValue(scope, 'model.baseUrl', baseUrl ?? '');
+  const persistedBaseUrl =
+    scope === SettingScope.Workspace &&
+    baseUrl &&
+    hasBaseUrlCredentials(baseUrl)
+      ? ''
+      : (baseUrl ?? '');
+  settings.setValue(scope, 'model.baseUrl', persistedBaseUrl);
 }
 
 function persistAuthTypeSelection(
@@ -272,7 +303,10 @@ function handleModelSwitchSuccess({
     persistAuthTypeSelection(settings, effectiveAuthType, persistScope);
   }
 
-  const baseUrl = after?.baseUrl ?? t('(default)');
+  const rawBaseUrl = after?.baseUrl;
+  const baseUrl = rawBaseUrl
+    ? sanitizeProviderBaseUrl(rawBaseUrl)
+    : t('(default)');
   const maskedKey = maskApiKey(after?.apiKey);
   const scopeSuffix =
     persistScope === 'workspace'
@@ -1020,7 +1054,8 @@ export function ModelDialog({
       // Vision model mode: keep the selected row's baseUrl when present so
       // same-provider OpenAI-compatible endpoints with the same id stay distinct.
       if (isVisionModelMode) {
-        const visionModel = encodeAuxModelSelector(selected);
+        const scope = resolvePersistScope(settings, persistScope);
+        const visionModel = encodeVisionModelSelector(selected, scope);
         const visionModelDisplay =
           parseVisionModelSetting(visionModel)?.selector ?? visionModel;
         // Pinning the primary itself is ignored by the bridge at runtime, so
@@ -1037,7 +1072,6 @@ export function ModelDialog({
           );
           return;
         }
-        const scope = resolvePersistScope(settings, persistScope);
         settings.setValue(scope, 'visionModel', visionModel);
         // Sync runtime Config so the vision bridge picks it up without a restart.
         config?.setVisionModel(visionModel);
@@ -1095,7 +1129,8 @@ export function ModelDialog({
           setErrorMessage(t('Selected image model is unavailable.'));
           return;
         }
-        const imageModel = encodeAuxModelSelector(selected);
+        const scope = resolvePersistScope(settings, persistScope);
+        const imageModel = encodeVisionModelSelector(selected, scope);
         const imageModelDisplay =
           parseVisionModelSetting(imageModel)?.selector ?? imageModel;
         if (!config.resolveImageGenerationModel(imageModel)) {
@@ -1107,7 +1142,6 @@ export function ModelDialog({
           );
           return;
         }
-        const scope = resolvePersistScope(settings, persistScope);
         settings.setValue(scope, 'imageModel', imageModel);
         selectionInFlightRef.current = true;
         try {
