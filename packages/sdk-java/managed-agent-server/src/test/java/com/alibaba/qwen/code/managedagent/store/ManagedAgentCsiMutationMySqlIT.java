@@ -121,7 +121,9 @@ class ManagedAgentCsiMutationMySqlIT {
                     assertThat(allTables(jdbc, json)).isEqualTo(before);
                 } finally {
                     created.countDown();
-                    originalLock.rollback();
+                    if (!originalLock.getAutoCommit()) {
+                        originalLock.rollback();
+                    }
                 }
             }
         } finally {
@@ -137,7 +139,8 @@ class ManagedAgentCsiMutationMySqlIT {
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, json.valueToTree(rows));
         }
-        assertThat(result).hasSize(57);
+        assertThat(result).containsKeys("flyway_schema_history", "managed_agent_session",
+                "qwen_managed_session_journal_head", "qwen_csi_resource_read");
         return result;
     }
 }

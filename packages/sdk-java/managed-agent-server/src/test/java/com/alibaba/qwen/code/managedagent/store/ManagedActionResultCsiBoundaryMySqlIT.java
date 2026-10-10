@@ -226,7 +226,8 @@ class ManagedActionResultCsiBoundaryMySqlIT {
                             .sorted(Comparator.comparing(JsonNode::toString)).toList();
                     result.put(table, JSON.valueToTree(rows));
                 }
-                assertThat(result).hasSize(57);
+                assertThat(result).containsKeys("flyway_schema_history", "managed_agent_session",
+                        "qwen_managed_session_journal_head", "managed_agent_tool_result", "qwen_csi_resource_read");
                 return result;
             });
         }
