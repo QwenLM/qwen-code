@@ -2,7 +2,7 @@
 
 [English](2026-10-10-managed-agent-team-lead-runtime.md) | [简体中文](2026-10-10-managed-agent-team-lead-runtime.zh-CN.md)
 
-状态:提议中。本文档在实现开始之前固定决策;其中描述的内容尚未实现。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 **H4e** 的第一个运行时切片,即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段,由 [#13745](https://github.com/QwenLM/qwen-code/issues/13745) 跟踪。它建立在 H4b([child Session 运行时](2026-10-07-managed-child-session-runtime.zh-CN.md),#13550)与 H4e-a([团队记录契约](2026-10-10-managed-agent-teams.zh-CN.md),#13811)之上,首次生产后者的四个团队记录体与 lead Session 规则。
+状态:除启用外已在本变更中实现。已落地:lead 的团队写入漏斗、Hosted 路径上的五个团队工具与 Agent 工具的 `name`、`<teammate>` 标签、`task_list` 的预批准与输入预览,以及重开白名单。`team_state` 与 `team_task` 仍不开放提交,因此目前没有 Session 声明团队工具。尚待完成:在真实 Hosted 环境上完成实机验收之后启用(决策 10)。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 **H4e** 的第一个运行时切片,即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段,由 [#13745](https://github.com/QwenLM/qwen-code/issues/13745) 跟踪。它建立在 H4b([child Session 运行时](2026-10-07-managed-child-session-runtime.zh-CN.md),#13550)与 H4e-a([团队记录契约](2026-10-10-managed-agent-teams.zh-CN.md),#13811)之上,首次生产后者的四个团队记录体与 lead Session 规则。
 
 ## 问题与范围
 
@@ -34,16 +34,16 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
 1. **每个 lead Session 只有一个开启中的团队,且只由 lead 操作。** 与 Legacy 一样,一个 Session 同一时间最多领导一个开启中(`active` 或 `closing`)的团队。团队工具恰好在 Agent 工具声明的地方声明(child depth 为 0 的 Shell 或后台通道,`child_agent` kind 门禁打开),且只在 `team_state` 与 `team_task` 都已启用时声明。child Session 看不到它们:它的深度为 1,因此成员既不能创建团队,也不能拉起自己的成员。在 H4e-b1 中,每次团队写入都由 lead 完成。成员要随 mailbox(H4e-b2)才能访问任务板,因为成员的写入是从另一个 Session 发往 lead journal 的命令。
 2. **`team_create` 以 Legacy 形式的名字开启团队。** 它只有一个参数 `team_name`。名字按 Legacy 规则清洗,然后必须符合 H4e-a 的名字形式(最多 64 个字符);清洗后为空则拒绝。团队 id 是该调用的键 `${promptKey}:${callId}`,因此调用的重放会找到已提交的团队,而不会开启第二个。提交的是 `team_state` 的开启修订:`active`、没有成员、`leadSessionId` 为本 Session。Legacy 的可选 `description` 不保留,因为记录中没有对应字段。Managed 团队没有文件也没有进程,因此 Legacy 的全局名字目录与基于 PID 的陈旧团队回收在这里没有对应物:团队名的作用域是其 lead Session。
 3. **成员是具名的、一次性的、后台运行的 child agent。** 团队开启时,managed Agent 工具接受 `name`。带 `name` 的启动是一次 H4b 启动外加一次加入名册:
-   - **准入**在 H4b 自身的检查之外加上团队检查,H4b 的检查(父 Session 正在关闭、配额、envelope)保持不变。团队必须是 `active`;清洗后的名字不能为空、不能是 `leader`,且在名册中尚未出现;名册必须少于 10 个成员;`run_in_background` 不能为 `false`。`plan_mode_required`、`read_only`、`model` 与 `subagent_type` 仍被拒绝:计划审批属于 H4e-b3,而只读或换类型的成员需要本切片无法应用的定义(H4b 决策 11)。同一个工具批次内,成员名必须互不相同,拉起成员的批次也不能同时创建或删除团队。
+   - **准入**在 H4b 自身的检查之外加上团队检查,H4b 的检查(父 Session 正在关闭、配额、envelope)保持不变。团队必须是 `active`;清洗后的名字不能为空、不能是 `leader`,且在名册中尚未出现;名册必须少于 10 个成员;`run_in_background` 不能为 `false`。`plan_mode_required`、`read_only`、`model` 与 `subagent_type` 仍被拒绝:计划审批属于 H4e-b3,而只读或换类型的成员需要本切片无法应用的定义(H4b 决策 11)。同一个工具批次内,成员名必须互不相同,拉起成员的批次也不能同时创建或删除团队,或启动前台 child,因为前台 child 被恢复的等待(#13708)会把成员回答成普通的后台启动。
    - **执行**先以 completion `sent` 提交 H4b 启动,再提交加入:下一个 `team_state` 修订,以命令 id `${childRunId}:join` 追加 `{ name, childRunId, planModeRequired: false }`。准入已经检查过加入所执行的每条团队规则,而 lead 自己的写入是串行的,因此加入只会在一种情况下被拒绝:run 已经结束。H4e-a 只允许存活的 run 加入名册,而 relay 是异步工作的,一次创建被拒就可能在启动后几秒内让 run 失败。此时调用以该 run 的失败作答,成员不会加入,其名字仍然空闲。
    - **没有团队时**,`name` 以工具错误被拒绝,而不是像 Legacy 那样被忽略:一个静默失效的参数,正是 H4b 决策 11 拒绝过的死开关。
    - **生命周期。** 成员就是 H4b 的 child:它运行一轮,结果被投递,relay 关闭它的 Session。在成员可以被续跑(H4e-b2)之前,它无法接收更多工作。它结束后名册条目仍然保留,与 Legacy 成员一样,因此 10 的上限计的是团队整个生命周期中的成员,而同时运行的数量由 H4b 的 4 个活跃 child 上限约束,成员与其他 child 共用。
-   - **崩溃窗口。** 如果 Session 在启动与加入之间停止,同一调用(同一 `childRunId`)的重放会重放启动,并在 run 仍存活时完成加入。如果 run 在此期间已结束,或者该调用再也没有被重放,已启动的 child 仍会作为普通后台 child 运行并汇报,既不重复也不丢失,其名字仍然空闲(开放问题 1)。
+   - **崩溃窗口。** 已执行的调用在崩溃后不会再次运行,因此如果 Session 在启动与加入之间停止,已启动的 child 仍会作为普通后台 child 运行并汇报,既不重复也不丢失,其名字仍然空闲(开放问题 1)。在中断 Turn 的收尾会回答该调用的地方(决策 11),它被回答为已启动,加入已提交时再回答为已加入。只有重新驱动的批次(如果某天会再次运行同一调用,即同一 `childRunId`)才会重放启动,并在 run 仍存活时完成加入。在加入之前结束的 run 以其结束回答该调用:失败回答为失败,完成回答为已结束,其结果以不带标签的形式送达。
 4. **成员通过 H4b 的通知汇报,并带上名字。** 成员的结果以与每个后台 child 相同的方式到达 lead:一个随其 acceptance 提交的 input,唤醒 lead。当该 child run 在名册中时,通知带有一个包含成员名的 `<teammate>` 元素。这对应 Legacy 的自动最终汇报。失败或被取消的成员不发送通知,与任何 H4b child 一样;`task_list` 会显示其状态(决策 6)。
 5. **任务板属于 lead。** 三个任务板工具沿用其 Legacy 的 schema 与校验,差异列在"工具"一节:
    - **身份。** 任务的记录 id 是 `${teamId}#${number}`。其 `number` 比团队中最大的编号(含已删除任务)多 1,因此编号永不复用。只有尚未提交其任务的调用才会分配编号(决策 11),因此重放会以该调用已经取得的编号作答。模型以编号指称任务,与 Legacy 一样(`3` 或 `#3`)。
    - **内容。** `subject` 是内联文本(最多 200 个字符,与 Legacy 一致)。description 存为一个由 `descriptionRef` 指向的 Session 资源(工具中最多 10,000 个字符,与 Legacy 一致,在记录的 64 KiB 之内)。metadata 是由 `metadataRef` 指向的资源(最多 32 KiB);`task_update` 把键合并进去,值为 `null` 时删除该键,与 Legacy 一致。
-   - **依赖。** `addBlockedBy` 追加到被更新任务的 `blockedBy`;`addBlocks: [B]` 把被更新任务追加到 B 的 `blockedBy`,这是 B 的一个修订。因此一次调用可能提交多条记录。在第一次提交之前校验每条边(没有自指边、每个任务都在团队中、不形成环),随后按顺序以命令 id `${callKey}:${n}` 提交。重放会跳过已经落地的提交(决策 11),因此会完成部分提交的调用,且不会重复添加任何东西。一个任务只要其 `blockedBy` 中有任何任务既不是 `completed` 也不是 `deleted`,就处于阻塞状态。因此完成或删除一个阻塞方不需要写入其依赖方,而 Legacy 要逐一改写它们。
+   - **依赖。** `addBlockedBy` 追加到被更新任务的 `blockedBy`;`addBlocks: [B]` 把被更新任务追加到 B 的 `blockedBy`,这是 B 的一个修订。因此一次调用可能提交多条记录。在第一次提交之前校验每条边(没有自指边、每个任务都在团队中、不形成环、没有任务超过记录上限的 64 个阻塞方),随后按顺序以命令 id `${callKey}:${n}` 提交。重放会跳过已经落地的提交(决策 11),因此会完成部分提交的调用,且不会重复添加任何东西。一个任务只要其 `blockedBy` 中有任何任务既不是 `completed` 也不是 `deleted`,就处于阻塞状态。因此完成或删除一个阻塞方不需要写入其依赖方,而 Legacy 要逐一改写它们。
    - **owner 与状态。** `in_progress` 需要 owner,与 Legacy 一致;lead 没有隐含的名字,因此必须指名一个。调用设置或更改的 owner 是 `leader` 或一个 run 尚未结束的成员;`""` 取消分配。成员的 run 结束后,任务仍保留原有的 owner,因此 lead 无需重新分配即可完成、修改或删除该任务。这正是常见的流程,因为一次性成员的汇报到达时,它已经结束。
    - **暂不投递任务分配。** 没有 mailbox 时,成员永远不会得知分配。`task_update` 把 owner 作为任务板事实记录下来,其回答会说明该成员没有收到通知。lead 在成员的启动提示中传达工作内容。
    - **删除**即 `status: "deleted"`,它结束任务的 run 并冻结任务。
@@ -52,7 +52,7 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
 8. **团队下的关闭级联沿用 H4b,关闭期间不写团队记录(#13745 E3)。** 成员是 `child_agent` run,因此关闭 lead Session 已经完成了 E3 要求的全部三件事。它经由 H4b 级联取消每个正在运行的成员(停止请求、成员 Session 自己的关闭、终态 `cancelled`/`stop_requested` 修订)。它绝不会因孤儿结果复活 lead(H4b 决策 8 与 13)。它让每个成员的终态事实都能单独观察到,即该成员自己的 `child_run` 修订。团队自身的记录保持原样。团队的生命以其 lead Session 的生命为界,读者把 lead Session 处于 closing、closed 或 deleted 的团队视为已关闭。这回答了 H4e-a 的开放问题 3。在认领下提交 `closing` 与 `deleted` 只会重复 Session 自身的状态,还会放宽如今只放行 child 与 hook 记录的生命周期门禁。因此 Java 生命周期门禁不做改动。
 9. **审批遵循 Hosted 规则,只有一个例外。** `team_create`、`team_delete`、`task_create` 与 `task_update` 在 `default` 与 `auto-edit` 模式下请求审批,与预批准列表之外的每个 Hosted 工具一样,也与 Legacy 的任务板工具一样。`task_list` 只读取 journal,因此加入两种模式的预批准列表,与 `read_file` 和 `glob` 一样。带 `name` 的启动与任何 Agent 启动一样请求审批。`team_create`、`task_create` 与 `task_update` 同时加入 `HOSTED_INPUT_PREVIEW_TOOLS` 与 Java 的 `PREVIEW_TOOLS`,使审批界面显示要批准的团队名、subject、owner 与状态。
 10. **按 domain 启用,并在实机验收之后。** 每个团队 domain 恰好承载一项能力。因此与 `child_run`(H4b 决策 10)不同,普通的启用列表就是合适的门禁,不新增按能力的门禁。这回答了 #13745 分诊提出的门禁形态问题。H4e-b1 落地运行时时 `team_state` 与 `team_task` 仍保持关闭,测试像 H4e-a 的测试套件那样放开门禁;它的最后一步在真实 Hosted 环境上完成实机验收之后,才把两者加入 `MANAGED_SESSION_ENABLED_DOMAINS`,这是 #13803 在 #13532 之后采用的顺序。`team_message` 与 `team_plan` 保持关闭。`verifyWorkspaceRestore` 的重开白名单放行 `team_state` 与 `team_task`。Java 只需要决策 9 的预览列表:它的 store 自 H4e-a 起就已校验团队记录体,因此 server 先行顺序成立。
-11. **重放从其调用已经提交的内容继续。** 每次团队写入都以由其调用派生的命令 id 提交:`team_create` 与 `task_create` 为 `${callKey}`,加入为 `${childRunId}:join`,`task_update` 的各个修订为 `${callKey}:${n}`,`team_delete` 为 `${callKey}:closing` 与 `${callKey}:deleted`。在计算一次写入之前,漏斗先用 authority 的 `committedExtensionOperation` 查询其命令 id。已提交的命令视为完成,由其已提交的记录回答调用。只有尚未提交的命令才按当前状态计算。查询必须放在前面,因为按当前状态重建的记录可能与已提交的不同:`task_create` 会分配下一个编号,而 `task_update` 后面的修订会已经包含同一调用较早添加的边。authority 会把已提交命令 id 下改变了的记录体作为冲突拒绝。这不需要任何记录字段:命令 id 就是该调用自身的持久痕迹。
+11. **重放从其调用已经提交的内容继续。** 每次团队写入都以由其调用派生的命令 id 提交:`team_create` 与 `task_create` 为 `${callKey}`,加入为 `${childRunId}:join`,`task_update` 的各个修订为 `${callKey}:${n}`,`team_delete` 为 `${callKey}:closing` 与 `${callKey}:deleted`。在计算一次写入之前,漏斗先用 authority 的 `committedExtensionOperation` 查询其命令 id。已提交的命令视为完成,由其已提交的记录回答调用。只有尚未提交的命令才按当前状态计算。查询必须放在前面,因为按当前状态重建的记录可能与已提交的不同:`task_create` 会分配下一个编号,而 `task_update` 后面的修订会已经包含同一调用较早添加的边。authority 会把已提交命令 id 下改变了的记录体作为冲突拒绝。这不需要任何记录字段:命令 id 就是该调用自身的持久痕迹。在团队写入与其回答之间中断的 Turn 不会被重放。在中断 Turn 的收尾会回答其遗留调用的地方(如 channel Turn),对于命令已提交的团队调用,回答为已全部或部分提交并指引模型查看 `task_list`;对于后台启动,回答为已启动(加入已提交时还回答为已加入),而不会回答为从未运行。其他恢复路径目前完全不回答只写 journal 的调用(开放问题 4)。
 
 ## 工具
 
@@ -83,17 +83,17 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
 - **只读、换类型或换模型的成员**,它们需要把定义字段应用到执行(D8b/D8c)。
 - **任何公共契约变更。** 不改路由、OpenAPI 或 Flyway;公共团队资源属于 #13785。
 
-## 受影响的文件(计划)
+## 受影响的文件
 
-- `packages/core/src/managed-runtime/managed-team-operations.ts`(新增):团队开启、加入、`closing` 与 `deleted`、任务修订的记录体构造函数,以及派生的阻塞状态与名册视图。
-- `packages/core/src/managed-runtime/managed-session-records.ts`:在本切片最后一步把 `team_state` 与 `team_task` 加入启用列表。
+- `packages/core/src/managed-runtime/managed-team-operations.ts`(新增):团队开启、加入、`closing` 与 `deleted`、任务修订的记录体构造函数,以及派生的阻塞状态。
+- `packages/core/src/managed-runtime/managed-session-records.ts`:在本切片最后一步把 `team_state` 与 `team_task` 加入启用列表,这一步不在本变更中。
 - `packages/cli/src/serve/`:
-  - `hosted-workspace-tool-turn.ts`:五个工具的声明与 Agent 工具的 `name`、它们的准入与批次规则,以及在 Broker acquire 与 Runtime 预留之外的执行分支。
-  - `hosted-team-session.ts`(新增):位于 `hosted-child-agent-session.ts` 旁的团队写入漏斗,遵循 H3 的漏斗纪律:单一串行写入链、确定性命令 id 与 `trusted_entry`,并在每次写入前执行决策 11 的已提交命令查询。
+  - `hosted-workspace-tool-turn.ts`:声明门禁、Agent 工具的 `name` 及其准入与批次规则、在 Broker acquire 与 Runtime 预留之外的执行分支,以及输入预览列表。
+  - `hosted-team-session.ts`(新增):五个工具的声明及其参数形状,以及位于 `hosted-child-agent-session.ts` 旁的团队写入漏斗:团队与任务板规则、名册视图与提交,遵循 H3 的漏斗纪律:单一串行写入链、确定性命令 id 与 `trusted_entry`,并在每次写入前执行决策 11 的已提交命令查询。
   - `hosted-child-agent-session.ts`:通知中的 `<teammate>` 标签。
   - `hosted-harness-session.ts`:漏斗接线与重开白名单。
-  - `hosted-tool-approval.ts`:`task_list` 预批准,以及预览列表。
-- `packages/sdk-java/managed-agent-server`:`ManagedActionService.PREVIEW_TOOLS`,以及一个协调器测试,证明带开启团队的 lead 关闭会取消其成员且不写任何团队记录。
+  - `hosted-tool-approval.ts`:`task_list` 预批准。
+- `packages/sdk-java/managed-agent-server`:`ManagedActionService.PREVIEW_TOOLS`,一个协调器测试,证明带开启团队的 lead 关闭会取消其成员且不写任何团队记录,以及一个生命周期门禁测试,确保关闭声明下团队记录仍被拒绝。
 - 各文件旁的测试,以及 `.qwen/e2e-tests/` 中的 E2E 计划。
 
 ## 验证计划
@@ -104,7 +104,7 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
 - **实机验收**,在启用之前,于真实 Hosted 环境上:
   - lead 创建团队,按名字拉起两个成员,分配任务板任务,收到两个带名字的汇报,把任务标记为完成并删除团队;
   - lead 在仍有成员运行时关闭,该成员被取消,而团队记录保持不变;
-  - 在成员启动与加入之间杀掉 Harness,重放完成加入。
+  - 在成员启动与加入之间杀掉 Harness:child 作为普通后台 child 继续运行,恰好只有一个 `child_run`,也永远不会出现第二个名册条目。
 
 ## 验收标准
 
@@ -116,9 +116,10 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
 
 ## 开放问题
 
-1. **补齐未进名册的成员。** 启动与加入之间发生崩溃且再也没有重放,会留下一个没有名册指名的、正在运行的 child。该调用的 `tool.intent` 记录了它的参数(包括 `name`),因此恢复后可以由一个补齐流程完成加入。本切片接受这种降级结果(一个普通后台 child),补齐流程留待后定。
+1. **补齐未进名册的成员。** 启动与加入之间发生崩溃且再也没有重放,会留下一个没有名册指名的、正在运行的 child。Agent 调用不写 `tool.intent`,但它的参数(包括 `name`)保存在已入 journal 的 assistant 消息中,因此恢复后可以由一个补齐流程完成加入。本切片接受这种降级结果(一个普通后台 child),补齐流程留待后定。
 2. **成员占用的活跃上限。** 成员与其他 child 共用 H4b 每个 Session 4 个活跃 child 的上限,而 Legacy 可同时运行最多 10 个 teammate。团队是否应有自己的活跃上限,待真实团队显示出需要时再定。
 3. **让成员第二次派上用场。** 一次性成员无法接收更多工作。成员续跑(H4e-a 开放问题 4)属于 H4e-b2,与承载新工作的 mailbox 一起。
+4. **在每条恢复路径上回答只写 journal 的调用。** 团队工具与 H4b 的后台启动一样,在回答之前只写 journal。channel 收尾会按已提交的内容回答这类调用(决策 11),但协调器的 continue 与 cancel 路径只回答 Runtime 执行与 agent 等待,因此一个混有 Runtime 工具与只写 journal 调用的批次,如果在该调用写入之后、回答之前中断,恢复或结束时该调用都得不到回答。补上这个缺口属于恢复路径,对团队工具与后台启动同样适用。
 
 ## 后续工作
 
