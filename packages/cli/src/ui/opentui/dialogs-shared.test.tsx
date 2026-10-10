@@ -193,6 +193,25 @@ describe('useDialogSelect numeric quick-select', () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
+  it('refuses the pending flush when the window shrank past the highlight', () => {
+    // The digit armed the flush against the window it was typed into. A
+    // resize inside the timeout window can leave the highlight unpainted,
+    // and the flush would then commit it with no row on screen to show for
+    // the choice.
+    const onSelect = vi.fn();
+    const { rerender } = renderHook(
+      ({ maxItemsToShow }: { maxItemsToShow: number }) =>
+        useDialogSelect({ items, numbers: true, maxItemsToShow, onSelect }),
+      { initialProps: { maxItemsToShow: items.length } },
+    );
+    press({ name: '1', sequence: '1' });
+    rerender({ maxItemsToShow: 0 });
+    act(() => {
+      vi.advanceTimersByTime(NUMBER_SELECT_TIMEOUT_MS + 10);
+    });
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
   it('fires onSelect exactly once on the timeout flush (R2-1, StrictMode)', () => {
     const onSelect = vi.fn();
     const Wrapper = ({ children }: { children: React.ReactNode }) => (
@@ -252,6 +271,29 @@ describe('useDialogSelect cursor within one key batch', () => {
     ]);
     expect(onSelect).toHaveBeenCalledTimes(1);
     expect(onSelect).toHaveBeenCalledWith('item-2');
+  });
+
+  it('refuses Enter when the batch walked the highlight off the painted row', () => {
+    // One painted row, held ↓: the burst writes the cursor through its ref
+    // while `scrollOffset` stays at the value this render painted with, and
+    // no render happens between the keys, so Enter would commit a row the
+    // screen never showed as highlighted.
+    const onSelect = vi.fn();
+    renderHook(() =>
+      useDialogSelect({
+        items,
+        numbers: false,
+        maxItemsToShow: 1,
+        initialIndex: items.length - 1,
+        onSelect,
+      }),
+    );
+    pressBatched([
+      { name: 'down' },
+      { name: 'down' },
+      { name: 'return', sequence: '\r' },
+    ]);
+    expect(onSelect).not.toHaveBeenCalled();
   });
 });
 

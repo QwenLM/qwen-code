@@ -25,7 +25,7 @@ import {
   THEME_PREVIEW_CODE,
   THEME_PREVIEW_DIFF,
 } from './dialogs-theme.js';
-import { regionListWindow } from './dialogs-core.js';
+import { regionListWindow, wrappedRows } from './dialogs-core.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 
 describe('capitalizeThemeType', () => {
@@ -110,20 +110,20 @@ describe('preview pane content parity', () => {
 
 describe('computeThemePreviewLayout', () => {
   it('keeps padding when the region pays for it', () => {
-    const layout = computeThemePreviewLayout(40);
+    const layout = computeThemePreviewLayout(40, 1);
     expect(layout.includePadding).toBe(true);
     expect(layout.codeBlockHeight).toBeGreaterThan(0);
     expect(layout.diffHeight).toBeGreaterThan(0);
   });
 
   it('drops padding when the region cannot pay for it', () => {
-    const layout = computeThemePreviewLayout(14);
+    const layout = computeThemePreviewLayout(14, 1);
     expect(layout.includePadding).toBe(false);
     expect(layout.showPreview).toBe(true);
   });
 
   it('splits the remaining space 60/40 between code and diff', () => {
-    const layout = computeThemePreviewLayout(60);
+    const layout = computeThemePreviewLayout(60, 1);
     expect(layout.codeBlockHeight).toBeGreaterThanOrEqual(layout.diffHeight);
   });
 
@@ -132,7 +132,7 @@ describe('computeThemePreviewLayout', () => {
     // the padding two, so the panes split 27 rows as ceil(27 * 0.6) = 17
     // code and the remaining 10 diff. A `>=` pin alone cannot tell the diff
     // pane shrinking to zero from the intended ratio.
-    const layout = computeThemePreviewLayout(40);
+    const layout = computeThemePreviewLayout(40, 1);
     expect(layout.includePadding).toBe(true);
     expect(layout.codeBlockHeight).toBe(17);
     expect(layout.diffHeight).toBe(10);
@@ -141,7 +141,7 @@ describe('computeThemePreviewLayout', () => {
   it('stops painting the pane when even its one-row-per-pane minimum does not fit', () => {
     // Region 12 leaves the columns 6 rows; the pane chrome pays 5, so one
     // row is left — less than the code+diff minimum of two.
-    const layout = computeThemePreviewLayout(12);
+    const layout = computeThemePreviewLayout(12, 1);
     expect(layout.showPreview).toBe(false);
   });
 
@@ -165,7 +165,7 @@ describe('computeThemePreviewLayout', () => {
       );
       const leftRows =
         2 + window.maxItemsToShow + (window.showScrollArrows ? 2 : 0);
-      const layout = computeThemePreviewLayout(region);
+      const layout = computeThemePreviewLayout(region, 1);
       const previewRows = layout.showPreview
         ? 5 +
           (layout.includePadding ? 2 : 0) +
@@ -173,6 +173,47 @@ describe('computeThemePreviewLayout', () => {
           layout.diffHeight
         : 0;
       expect(6 + Math.max(leftRows, previewRows)).toBeLessThanOrEqual(region);
+    }
+  });
+
+  it('keeps the frame inside the region when the footer hint wraps', () => {
+    // At a 50-column terminal the frame's content is 42 columns and the
+    // 45-column footer hint wraps into two rows. The list window charges
+    // those rows; a pane column that charges a flat footer leaves the
+    // unshrinkable frame one row taller than the region clips.
+    const ITEM_COUNT = 16;
+    const CONTENT_WIDTH = 42;
+    const FOOTER = '(Use Enter to select, Tab to configure scope)';
+    const footerRows = wrappedRows(FOOTER, CONTENT_WIDTH);
+    expect(footerRows).toBe(2);
+    for (let height = 10; height <= 24; height++) {
+      const region = clampDialogHeight(height)!;
+      const window = regionListWindow(
+        region,
+        {
+          fixed: 6,
+          runs: [
+            { text: '> Select Theme ', width: CONTENT_WIDTH },
+            { text: FOOTER, width: CONTENT_WIDTH },
+          ],
+        },
+        ITEM_COUNT,
+        THEME_DIALOG_MAX_ITEMS_TO_SHOW,
+      );
+      const leftRows =
+        2 + window.maxItemsToShow + (window.showScrollArrows ? 2 : 0);
+      const layout = computeThemePreviewLayout(region, footerRows);
+      const previewRows = layout.showPreview
+        ? 5 +
+          (layout.includePadding ? 2 : 0) +
+          layout.codeBlockHeight +
+          layout.diffHeight
+        : 0;
+      // Frame border and padding (4), the footer's margin (1) and the rows
+      // the footer itself paints.
+      expect(
+        5 + footerRows + Math.max(leftRows, previewRows),
+      ).toBeLessThanOrEqual(region);
     }
   });
 });

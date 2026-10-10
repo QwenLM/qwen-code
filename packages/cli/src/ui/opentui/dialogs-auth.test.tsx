@@ -1211,14 +1211,55 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
    * holds focus. A custom provider ships no recommended list, so a preset is
    * the only route to the checkboxes.
    */
-  async function runToModelsStep(): Promise<void> {
-    renderDialog();
+  async function runToModelsStep(availableTerminalHeight?: number) {
+    const dialog = renderDialog({ availableTerminalHeight });
     await press('down'); // main: THIRD_PARTY_PROVIDERS
     await press('return'); // → thirdparty-select, DeepSeek on top
     await press('return'); // DeepSeek → apiKey
     await typeText('sk-test');
     await press('return'); // apiKey → models (custom-ID input focused)
+    return dialog;
   }
+
+  it('clips a model label to the one physical row its charge pays', async () => {
+    // The list charges each row a single physical row, so the label owns the
+    // content width less the radio box's four columns and must clip: an
+    // unclipped 51-column label wraps at a 38-column terminal and paints a
+    // second row the unshrinkable frame cannot shed.
+    mocks.state.width = 38;
+    try {
+      const dialog = await runToModelsStep();
+      dialog.rerenderAt(29);
+      expect(screen.getByText(/^deepseek-v4-pro/).textContent).toHaveLength(26);
+    } finally {
+      mocks.state.width = 100;
+    }
+  });
+
+  it('refuses the recommended rows a short region cannot paint', async () => {
+    // At region 21 the step's measured chrome pays for exactly one model row,
+    // so `deepseek-v4-flash` sits below the clip. A held ↓ walks `focus` on
+    // to it and Space would toggle a model the user never saw — which the
+    // Enter of the same read then writes into the install plan.
+    const dialog = await runToModelsStep();
+    dialog.rerenderAt(21);
+    await press('tab'); // custom-ID input → search field
+    await press('tab'); // search field → the one painted row
+    expect(screen.getByText(/^deepseek-v4-pro(\s|$)/)).not.toBeNull();
+    expect(screen.queryByText(/^deepseek-v4-flash(\s|$)/)).toBeNull();
+
+    const build = vi.spyOn(coreRuntime, 'buildInstallPlan');
+    try {
+      await pressBatched([DOWN, SPACE, ENTER]);
+      await vi.waitFor(() => expect(build).toHaveBeenCalledTimes(1));
+      // Only the painted row's tick was undone. Without the window the ↓
+      // reaches `deepseek-v4-flash` below the clip and the Space unticks it,
+      // so the plan ships `deepseek-v4-pro` alone.
+      expect(build.mock.calls[0]?.[1]?.modelIds).toEqual(['deepseek-v4-flash']);
+    } finally {
+      build.mockRestore();
+    }
+  });
 
   async function runToRecommendedList(): Promise<void> {
     await runToModelsStep();

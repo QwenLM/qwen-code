@@ -276,6 +276,30 @@ describe('OpenTuiExtensionsDialog region budget', () => {
     expect(screen.getByText('ext-a')).toBeTruthy();
     expect(screen.queryByText('ext-b')).toBeNull();
   });
+
+  it('clips an installed row label to the columns its one-row charge owns', () => {
+    // The row is charged one physical row, but the label painted whole
+    // beside the trailing status run. At a forty-column terminal the frame's
+    // content is 32 columns, the row owns 30 of them past DialogSelect's
+    // indicator box, and ` (active)` takes 9 — so a 28-column npm-style name
+    // wrapped the row into two, the unshrinkable frame grew past the region,
+    // and the region's tail clip ate the footer and the highlighted row.
+    mocks.state.width = 40;
+    renderDialog({
+      rows: [
+        {
+          key: 'long',
+          label: 'qwen-code-context-mcp-server',
+          enabled: true,
+          scope: 'user',
+        },
+        { key: 'ext-b', label: 'ext-b', enabled: true, scope: 'user' },
+      ],
+      availableTerminalHeight: 24,
+    });
+    expect(screen.getByText('qwen-code-context-mc…')).toBeTruthy();
+    expect(screen.getByText('ext-b')).toBeTruthy();
+  });
 });
 
 describe('OpenTuiExtensionsDialog management keys (#44)', () => {

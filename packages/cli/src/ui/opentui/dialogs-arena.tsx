@@ -218,7 +218,21 @@ function ArenaStart({
   // content columns less the four columns of the `[x] ` checkbox.
   const modelLabelWidth = Math.max(1, frameContentWidth - 4);
   const errorRows = error ? 1 + wrappedRows(error, frameContentWidth) : 0;
-  const guidanceRows =
+  // The empty branch paints a text row where the list would paint its first
+  // model row, so it pays the rows that text wraps into.
+  const emptyRows =
+    modelItems.length === 0
+      ? wrappedRows(ARENA_NO_MODELS, frameContentWidth)
+      : 0;
+  // The model list is the dialog's only interactive part, and no key wins an
+  // advisory row back, so the list keeps a one-row floor: an advisory block
+  // the floor cannot pay does not paint at all. Charging it less than it
+  // paints would instead grow the unshrinkable frame past the region's clip.
+  const advisoryRows =
+    regionHeight === undefined
+      ? Number.POSITIVE_INFINITY
+      : Math.max(0, regionHeight - 8 - emptyRows - errorRows - 1);
+  const guidanceBlockRows =
     hasDisabledQwenOauth || needsMoreModels
       ? 1 +
         (hasDisabledQwenOauth
@@ -230,17 +244,18 @@ function ArenaStart({
             wrappedRows(ARENA_ADD_VIA_SETTINGS, frameContentWidth)
           : 0)
       : 0;
-  const moreModelsRows = showMoreModelsHint
+  const moreModelsBlockRows = showMoreModelsHint
     ? 1 +
       wrappedRows(ARENA_MORE_MODELS_GUIDE, frameContentWidth) +
       wrappedRows(MODEL_PROVIDERS_DOCUMENTATION_URL, frameContentWidth)
     : 0;
-  // The empty branch paints a text row where the list would paint its first
-  // model row, so it pays the rows that text wraps into.
-  const emptyRows =
-    modelItems.length === 0
-      ? wrappedRows(ARENA_NO_MODELS, frameContentWidth)
-      : 0;
+  const showGuidance =
+    (hasDisabledQwenOauth || needsMoreModels) &&
+    guidanceBlockRows <= advisoryRows;
+  const guidanceRows = showGuidance ? guidanceBlockRows : 0;
+  const showMoreModelsGuide =
+    showMoreModelsHint && moreModelsBlockRows <= advisoryRows - guidanceRows;
+  const moreModelsRows = showMoreModelsGuide ? moreModelsBlockRows : 0;
   const modelWindowRows =
     regionHeight === undefined
       ? modelItems.length
@@ -333,7 +348,7 @@ function ArenaStart({
           <text fg={C.red}>{error}</text>
         </box>
       )}
-      {(hasDisabledQwenOauth || needsMoreModels) && (
+      {showGuidance && (
         <box marginTop={1} flexDirection="column">
           {hasDisabledQwenOauth && (
             <text fg={C.yellow}>{ARENA_OAUTH_NOTE}</text>
@@ -347,7 +362,7 @@ function ArenaStart({
           )}
         </box>
       )}
-      {showMoreModelsHint && (
+      {showMoreModelsGuide && (
         <box marginTop={1} flexDirection="column">
           <text fg={C.dim}>{ARENA_MORE_MODELS_GUIDE}</text>
           <text fg={C.dim}>{MODEL_PROVIDERS_DOCUMENTATION_URL}</text>
@@ -1117,19 +1132,23 @@ function ArenaSelect({
             }
             // The stats run is the one run in the row that is not
             // width-bounded, and the row is charged two physical rows
-            // (label + stats); clip the segments to the columns the row
-            // owns, trailing segments first, so the run cannot wrap.
+            // (label + stats); drop the segments the row cannot pay whole,
+            // trailing segments first, so the run cannot wrap.
             let statsBudget = Math.max(0, frameContentWidth - 2);
             const statsRuns: Array<{ text: string; color: string }> = [];
             for (const segment of statsSegments) {
-              if (statsBudget <= 0) break;
-              const clipped = clipToWidth(
-                sanitizeTerminalLine(segment.text),
-                statsBudget,
-              );
-              if (clipped === '') break;
-              statsRuns.push({ text: clipped, color: segment.color });
-              statsBudget -= getCachedStringWidth(clipped);
+              const text = sanitizeTerminalLine(segment.text);
+              const segmentWidth = getCachedStringWidth(text);
+              // A segment the row cannot pay whole is dropped, not clipped:
+              // clipping `+40` to `+4` paints a count the user reads as the
+              // agent's real one, with nothing marking it truncated.
+              if (segmentWidth > statsBudget) break;
+              statsRuns.push({ text, color: segment.color });
+              statsBudget -= segmentWidth;
+            }
+            // The dropped segment can leave its separator as the run's tail.
+            while (statsRuns[statsRuns.length - 1]?.text.trim() === '·') {
+              statsRuns.pop();
             }
             return (
               <box key={row.key} flexDirection="row" alignItems="flex-start">

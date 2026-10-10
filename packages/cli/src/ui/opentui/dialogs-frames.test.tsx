@@ -319,10 +319,11 @@ describe('sibling dialog frames (region clips, frame does not shrink)', () => {
   it('clips a theme label to the one row its item charge pays', () => {
     // Each theme row is charged one physical row, so the label clips to the
     // columns the row owns: at a forty-column terminal with the preview pane
-    // painted, the column is 32 * 0.45 - 2 = 12 and the label owns
-    // 12 - 3 - 2 = 7 of them, so a longer name clips instead of wrapping
-    // onto a second row. The custom theme is the highlighted (last) row, so
-    // the window follows the cursor down to it.
+    // painted, the column is 32 * 0.45 - 2 = 12, and DialogSelect's row
+    // spends 2 on the `›` indicator box and `digits + 2` on the number box,
+    // so the label owns 12 - 2 - 4 = 6 of them and a longer name clips
+    // instead of wrapping onto a second row. The custom theme is the
+    // highlighted (last) row, so the window follows the cursor down to it.
     frameState.width = 40;
     const themeSettings = {
       merged: { ui: { theme: 'a-very-long-custom-theme-name' } },
@@ -342,7 +343,7 @@ describe('sibling dialog frames (region clips, frame does not shrink)', () => {
         availableTerminalHeight={24}
       />,
     );
-    expect(within(container).getByText('a-very-')).toBeTruthy();
+    expect(within(container).getByText('a-very')).toBeTruthy();
     expect(within(container).queryByText(/a-very-long/)).toBeNull();
     frameState.width = 100;
   });

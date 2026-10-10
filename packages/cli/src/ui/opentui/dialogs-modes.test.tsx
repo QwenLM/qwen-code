@@ -143,6 +143,25 @@ function press(name: string, shift = false) {
   });
 }
 
+/** One stdin read: every key hits the handler the last render registered,
+ *  with no render in between — what a held arrow key produces. */
+function burst(names: string[]) {
+  if (mocks.state.keyboardHandlers.length === 0) {
+    throw new Error('no keyboard handler registered');
+  }
+  act(() => {
+    for (const name of names) {
+      for (const handler of [...mocks.state.keyboardHandlers]) {
+        handler({
+          name,
+          shift: false,
+          sequence: name.length === 1 ? name : '',
+        });
+      }
+    }
+  });
+}
+
 /** The row's text: marker, then the number column, then the label. */
 function rowText(labelPrefix: string): string {
   const label = screen.getByText((content) =>
@@ -864,6 +883,19 @@ describe('OpenTuiApprovalModeDialog trust gate', () => {
     expect(screen.getByText('▼')).not.toBeNull();
     expect(queryRow('plan mode - ')).toBeNull();
     expect(queryRow('YOLO mode - ')).not.toBeNull();
+  });
+
+  it('refuses to commit a row a held arrow walked off the painted window', () => {
+    // Region 13 paints one row, YOLO. A held ↓ hands its whole burst to the
+    // handler that render registered, so the cursor wraps on to DEFAULT
+    // while the screen still shows YOLO highlighted — Enter must not persist
+    // the mode the user never saw selected.
+    const { setValue, setApprovalMode } = renderUntrusted(13);
+    press('return');
+    burst(['down', 'down', 'return']);
+
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setApprovalMode).not.toHaveBeenCalled();
   });
 
   it('caps the refusal charge at what the region can pay, and clips the paint to match', () => {
@@ -2399,6 +2431,15 @@ describe('wrappedRows (the row count a wrapped notice pays for)', () => {
 
   it('counts a newline as a row break', () => {
     expect(wrappedRows('a\nb', 40)).toBe(2);
+  });
+
+  it('charges the spaces a run begins with', () => {
+    // The arena guidance block's two bullet runs each begin with two spaces.
+    // A separator charged only once the row already holds something pays
+    // neither of them, so the block under-charges a row and the unshrinkable
+    // frame grows past the region that clips it.
+    expect(wrappedRows(' ab', 2)).toBe(2);
+    expect(wrappedRows('  - Or configure x', 8)).toBe(3);
   });
 
   it('measures the warning glyph the one column the renderer paints it in', () => {

@@ -251,6 +251,19 @@ describe('OpenTuiArenaDialog select panes at a zero-row window', () => {
 
     // Still closed: opening is the direction the zero-row window refuses.
     await press('p');
+    // At region 12 the region cannot pay any pane's chrome, so the pane does
+    // not paint whatever the toggle state is — the nulls above observe
+    // nothing. Grow the region back and read the state there: a guard that
+    // refuses both directions left it open and it paints now.
+    rerender(
+      <OpenTuiArenaDialog
+        mode="select"
+        config={config}
+        onClose={() => {}}
+        notify={() => {}}
+        availableTerminalHeight={24}
+      />,
+    );
     expect(screen.queryByText(/Quick Preview/)).toBeNull();
   });
 
@@ -284,16 +297,9 @@ describe('OpenTuiArenaDialog select panes at a zero-row window', () => {
     expect(screen.queryByText(/Detailed Diff/)).toBeNull();
 
     await press('d');
-    expect(screen.queryByText(/Detailed Diff/)).toBeNull();
-  });
-
-  it('decides the pane direction from the burst-live flag, not the render closure', async () => {
-    // Two p presses delivered in one stdin read run against the same render
-    // closure: the first closes the open pane, and the second must see that
-    // close — reading the closure's stale `true` toggles twice and strands
-    // the pane open at a zero-row window, the state the guard exists to
-    // prevent.
-    const { rerender } = render(
+    // As above: region 12 cannot pay any pane's chrome, so the state is only
+    // observable once the region grows back.
+    rerender(
       <OpenTuiArenaDialog
         mode="select"
         config={config}
@@ -302,19 +308,26 @@ describe('OpenTuiArenaDialog select panes at a zero-row window', () => {
         availableTerminalHeight={24}
       />,
     );
+    expect(screen.queryByText(/Detailed Diff/)).toBeNull();
+  });
 
-    await press('p');
-    expect(screen.getByText(/Quick Preview/)).toBeTruthy();
-
-    rerender(
+  it('decides the pane direction from the burst-live flag, not the render closure', async () => {
+    // Two p presses delivered in one stdin read run against the same render
+    // closure, whose `showPreview` is the pre-burst value for both keys: a
+    // handler reading the closure writes the same state twice and strands the
+    // pane open, while the ref sees the first press's write and ends closed.
+    // Observed at region 24 with the pane closed, where an open pane paints —
+    // at a zero-row window neither wiring paints anything.
+    render(
       <OpenTuiArenaDialog
         mode="select"
         config={config}
         onClose={() => {}}
         notify={() => {}}
-        availableTerminalHeight={12}
+        availableTerminalHeight={24}
       />,
     );
+    expect(screen.queryByText(/Quick Preview/)).toBeNull();
 
     await act(async () => {
       for (const handler of [...mocks.state.keyboardHandlers]) {
@@ -322,11 +335,6 @@ describe('OpenTuiArenaDialog select panes at a zero-row window', () => {
         handler(baseKeyEvent({ name: 'p', sequence: 'p' }));
       }
     });
-    expect(screen.queryByText(/Quick Preview/)).toBeNull();
-
-    // One more press stays refused: the pane never reopens at a zero-row
-    // window.
-    await press('p');
     expect(screen.queryByText(/Quick Preview/)).toBeNull();
   });
 });
@@ -337,12 +345,13 @@ describe('OpenTuiArenaDialog select pane charging', () => {
     mocks.state.width = 100;
   });
 
-  it('clips the agent stats run to the one row its two-row charge pays', async () => {
+  it('drops the agent stats segments its two-row charge cannot pay', async () => {
     // The select row is charged two physical rows (label + stats); the stats
     // run was the one run in the row not width-bounded, so a narrow terminal
     // wrapped it and the frame grew past the region. At width 40 the frame's
-    // content is 30 columns: the status and duration segments paint and the
-    // diff-stat tail drops.
+    // content is 30 columns: the status and duration segments paint, and the
+    // diff-stat tail is dropped whole — a partial `+40` would paint `+4`, a
+    // count that reads as the agent's real one.
     mocks.state.width = 40;
     render(
       <OpenTuiArenaDialog
@@ -355,8 +364,10 @@ describe('OpenTuiArenaDialog select pane charging', () => {
     );
 
     const text = document.body.textContent ?? '';
-    expect(text.includes('Done')).toBe(true);
+    expect(text.includes('Done · 1.0s · 42 tokens')).toBe(true);
     expect(text.includes('+40')).toBe(false);
+    expect(text.includes('+4')).toBe(false);
+    expect(text.includes('42 tokens ·')).toBe(false);
   });
 
   it('clips each detailed-diff line to the one row its charge pays', async () => {
@@ -610,47 +621,34 @@ describe('OpenTuiArenaDialog select pane charging', () => {
     expect(screen.getByText(/\[openai\] model-5/)).toBeTruthy();
   });
 
-  it('pays the more-models guide the rows it wraps into, so the frame stays inside the region', () => {
+  it('sheds the more-models guide rather than the model rows it would cost', async () => {
     // Two selectable models at a twelve-row region and an 80-column
-    // terminal: the 87-column modelProviders URL wraps to two rows at the
-    // frame's seventy-column content width, so the guide block paints four
-    // rows. Charged a flat three, the window would still pay one model row
-    // and the unshrinkable frame would grow one row past the region, losing
-    // its bottom border; charged the measured four, the window pays zero
-    // rows and the frame is exactly the region. One region row more pays a
-    // model row again.
+    // terminal: the 88-column modelProviders URL wraps to two rows at the
+    // frame's seventy-column content width, so the guide block costs four
+    // rows. Paying it left the window zero rows — and because no key clears
+    // the guide, Space and the arrows were refused forever and the dialog
+    // could not start a session at all. The list is the interactive part, so
+    // it keeps a one-row floor and the guide does not paint; one region row
+    // more pays the guide's four rows and a model row together.
     mocks.state.width = 80;
-    const twoModelConfig = {
-      getArenaManager: () => ({ getAgents: () => [] }),
-      getContentGeneratorConfig: () => ({
-        model: 'test-model',
-        authType: 'openai',
-      }),
-      getAllConfiguredModels: () => [
-        { authType: 'openai', id: 'm1', label: 'model-1' },
-        { authType: 'openai', id: 'm2', label: 'model-2' },
-      ],
-    } as unknown as Config;
-    const { rerender } = render(
+    const start = (availableTerminalHeight: number) => (
       <OpenTuiArenaDialog
         mode="start"
-        config={twoModelConfig}
+        config={twoModelStartConfig}
         onClose={() => {}}
         notify={() => {}}
-        availableTerminalHeight={12}
-      />,
+        availableTerminalHeight={availableTerminalHeight}
+      />
     );
-    expect(screen.queryByText(/\[openai\] model-1/)).toBeNull();
+    const { rerender } = render(start(12));
+    expect(screen.queryByText(/modelProviders guide/)).toBeNull();
+    expect(screen.getByText(/\[openai\] model-1/)).toBeTruthy();
+    await press('space');
+    expect(
+      (document.body.textContent ?? '').includes('[x] [openai] model-1'),
+    ).toBe(true);
+    rerender(start(13));
     expect(screen.getByText(/modelProviders guide/)).toBeTruthy();
-    rerender(
-      <OpenTuiArenaDialog
-        mode="start"
-        config={twoModelConfig}
-        onClose={() => {}}
-        notify={() => {}}
-        availableTerminalHeight={13}
-      />,
-    );
     expect(screen.getByText(/\[openai\] model-1/)).toBeTruthy();
   });
 
@@ -688,11 +686,10 @@ describe('OpenTuiArenaDialog select pane charging', () => {
 
   it('charges the start hint runs the rows they wrap into at the frame width', () => {
     // At width 80 the frame's content is seventy columns, so the 88-column
-    // modelProviders URL wraps into two rows. Charged a flat row each, the
-    // hint block under-paid one row and the unshrinkable frame grew past a
-    // twelve-row region, pushing its bottom border out; measured at the
-    // paint width the block pays four rows and the model window drops to
-    // zero — no model row the region cannot pay for paints.
+    // modelProviders URL wraps into two rows and the hint block costs four.
+    // At a thirteen-row region the measured charge leaves the window exactly
+    // one model row; a flat row per run would leave two and paint a row the
+    // unshrinkable frame has no space for.
     mocks.state.width = 80;
     render(
       <OpenTuiArenaDialog
@@ -700,7 +697,7 @@ describe('OpenTuiArenaDialog select pane charging', () => {
         config={twoModelStartConfig}
         onClose={() => {}}
         notify={() => {}}
-        availableTerminalHeight={12}
+        availableTerminalHeight={13}
       />,
     );
     expect(
@@ -708,7 +705,8 @@ describe('OpenTuiArenaDialog select pane charging', () => {
         'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/#modelproviders',
       ),
     ).toBeTruthy();
-    expect(screen.queryByText(/model-1/)).toBeNull();
+    expect(screen.getByText(/\[openai\] model-1/)).toBeTruthy();
+    expect(screen.queryByText(/model-2/)).toBeNull();
   });
 
   it('sanitizes the preview and detailed-diff runs before they are measured and painted', async () => {

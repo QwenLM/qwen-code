@@ -205,6 +205,21 @@ function resolveDocumentationUrl(
 const NAV_HINT_SELECT = t('Enter to select, ↑↓ to navigate, Esc to go back');
 const NAV_HINT_INPUT = t('Enter to submit, Esc to go back');
 
+// The model-IDs step's runs, hoisted so the region budget measures the same
+// strings the step paints.
+const MODELS_INTRO = t(
+  'Enter model IDs directly. Use commas to configure multiple models.',
+);
+const MODELS_CHECKED_NOTE = t(
+  'Checked recommended models are applied on submit but not copied into the input.',
+);
+const MODELS_RECOMMENDED = t('Recommended models');
+const MODELS_SEARCH = t('Search');
+const MODELS_EMPTY = t('No recommended models match.');
+const MODELS_HINT = t(
+  'Enter to submit, ↑↓/Tab to switch input, search, and recommendations, Space to toggle recommendations, Esc to go back',
+);
+
 // ---------------------------------------------------------------------------
 // Shared view primitives
 // ---------------------------------------------------------------------------
@@ -414,6 +429,8 @@ function useLineInputKeys(
 interface StepWindow {
   regionHeight: number | undefined;
   chromeRows: number;
+  /** The shell and error rows alone, for a step that paints its own hint. */
+  baseChromeRows: number;
 }
 
 type StepWindowProps = { flow: ProviderSetupFlow; window: StepWindow };
@@ -660,10 +677,12 @@ function ModelsStep({
   provider,
   flow,
   retrySeq,
+  window,
 }: {
   provider: ProviderConfig;
   flow: ProviderSetupFlow;
   retrySeq: number;
+  window: StepWindow;
 }) {
   // ink ModelIdsStep parity: rows carry the formatted label (id padded to the
   // description column plus context/thinking/modality details), the list is a
@@ -743,20 +762,46 @@ function ModelsStep({
     );
   }, [modelOptions, searchText]);
 
-  const scrollOffset =
-    focus < 0
-      ? 0
-      : Math.max(
-          0,
-          Math.min(
-            focus - MAX_MODELS_TO_SHOW + 1,
-            filtered.length - MAX_MODELS_TO_SHOW,
-          ),
-        );
-  const visible = filtered.slice(
-    scrollOffset,
-    scrollOffset + MAX_MODELS_TO_SHOW,
+  const { width } = useTerminalDimensions();
+  const contentWidth = dialogContentWidth(width);
+  // The row's radio box owns four columns of the content width.
+  const modelLabelWidth = Math.max(1, contentWidth - 4);
+  const modelIdsError = flow.state.modelIdsError;
+  // Every run the step paints besides the list rows, measured at the content
+  // width so a wrapped run is charged the rows it occupies: the step's own
+  // margin, the intro, the custom-ID input line, the checked-note, the
+  // "Recommended models" heading, the search label and its input line, the
+  // list's margin row, an armed error and the footer key legend. The shell's
+  // rows and its own error come from the caller.
+  const modelsChromeRows =
+    window.baseChromeRows +
+    // the step's own margin row
+    1 +
+    (1 + wrappedRows(MODELS_INTRO, contentWidth)) +
+    // the custom-ID input line and its margin row
+    2 +
+    wrappedRows(MODELS_CHECKED_NOTE, contentWidth) +
+    (1 + wrappedRows(MODELS_RECOMMENDED, contentWidth)) +
+    // the search label, and its input line, which carries no margin
+    wrappedRows(MODELS_SEARCH, contentWidth) +
+    1 +
+    // the list's own margin row
+    1 +
+    (modelIdsError ? 1 + wrappedRows(modelIdsError, contentWidth) : 0) +
+    (1 + wrappedRows(MODELS_HINT, contentWidth)) +
+    (filtered.length === 0 ? wrappedRows(MODELS_EMPTY, contentWidth) : 0);
+  // ink's cap stays the ceiling; the region budget can only lower it. A row
+  // is one physical row here — the list paints no margin between rows — so
+  // the stride charges one, and the list's own margin row is chrome above.
+  const maxItems = Math.min(
+    MAX_MODELS_TO_SHOW,
+    wizardListWindow(window.regionHeight, modelsChromeRows, filtered.length, 1),
   );
+  const scrollOffset =
+    focus < 0 || maxItems < 1
+      ? 0
+      : Math.max(0, Math.min(focus - maxItems + 1, filtered.length - maxItems));
+  const visible = filtered.slice(scrollOffset, scrollOffset + maxItems);
 
   const toggleRecommended = useCallback(
     (id: string) => {
@@ -786,15 +831,24 @@ function ModelsStep({
     if (custom.settled) return;
     const o = toOriginalKey(key);
     const focused = focusRef.current;
+    // The rows this render painted. A burst writes `focus` through its ref
+    // while the window stays at the rendered one, so the keys below refuse a
+    // row nothing painted: Space on it would toggle a model the user never
+    // saw, and Enter submits the checked set.
+    const isPainted = (index: number) =>
+      index >= scrollOffset && index < scrollOffset + maxItems;
     if (focused >= 0) {
       if (o.name === 'tab') {
         setFocus(MODEL_CUSTOM_INPUT_FOCUS_INDEX);
       } else if (o.name === 'up') {
-        setFocus(focused <= 0 ? MODEL_SEARCH_INPUT_FOCUS_INDEX : focused - 1);
+        const next =
+          focused <= 0 ? MODEL_SEARCH_INPUT_FOCUS_INDEX : focused - 1;
+        if (next < 0 || isPainted(next)) setFocus(next);
       } else if (o.name === 'down') {
-        setFocus(Math.max(0, Math.min(focused + 1, filtered.length - 1)));
+        const next = Math.max(0, Math.min(focused + 1, filtered.length - 1));
+        if (isPainted(next)) setFocus(next);
       } else if (o.name === 'space') {
-        const item = filtered[focused];
+        const item = isPainted(focused) ? filtered[focused] : undefined;
         if (item) toggleRecommended(item.key);
       } else if (o.name === 'return') {
         submit();
@@ -805,7 +859,7 @@ function ModelsStep({
       if (o.name === 'up') {
         setFocus(MODEL_CUSTOM_INPUT_FOCUS_INDEX);
       } else if (o.name === 'tab' || o.name === 'down') {
-        if (filtered.length > 0) setFocus(0);
+        if (isPainted(0)) setFocus(0);
       } else if (o.name === 'return' || o.name === 'enter') {
         submit();
       } else if (!search.handleKey(o) && isPrintableKeyInput(key)) {
@@ -882,11 +936,7 @@ function ModelsStep({
   return (
     <box flexDirection="column" marginTop={1}>
       <box marginTop={1}>
-        <text fg={C.dim}>
-          {t(
-            'Enter model IDs directly. Use commas to configure multiple models.',
-          )}
-        </text>
+        <text fg={C.dim}>{MODELS_INTRO}</text>
       </box>
       <InputLine
         value={customText}
@@ -895,17 +945,13 @@ function ModelsStep({
         active={focus === MODEL_CUSTOM_INPUT_FOCUS_INDEX}
       />
       <box>
-        <text fg={C.dim}>
-          {t(
-            'Checked recommended models are applied on submit but not copied into the input.',
-          )}
-        </text>
+        <text fg={C.dim}>{MODELS_CHECKED_NOTE}</text>
       </box>
       <box marginTop={1}>
-        <text fg={C.dim}>{t('Recommended models')}</text>
+        <text fg={C.dim}>{MODELS_RECOMMENDED}</text>
       </box>
       <box flexDirection="column">
-        <text fg={C.dim}>{t('Search')}</text>
+        <text fg={C.dim}>{MODELS_SEARCH}</text>
         <InputLine
           value={searchText}
           caret={search.caret}
@@ -915,7 +961,9 @@ function ModelsStep({
         />
       </box>
       <box flexDirection="column" marginTop={1}>
-        {visible.length > 0 ? (
+        {filtered.length === 0 ? (
+          <text fg={C.dim}>{MODELS_EMPTY}</text>
+        ) : (
           visible.map((item, visibleIndex) => {
             const modelIndex = scrollOffset + visibleIndex;
             const isFocused = focus === modelIndex;
@@ -929,13 +977,15 @@ function ModelsStep({
                   </text>
                 </box>
                 <box flexGrow={1}>
-                  <text fg={color}>{item.label}</text>
+                  {/* One charged physical row, so the label clips to the
+                      columns the row leaves it instead of wrapping. */}
+                  <text fg={color}>
+                    {clipToWidth(item.label, modelLabelWidth)}
+                  </text>
                 </box>
               </box>
             );
           })
-        ) : (
-          <text fg={C.dim}>{t('No recommended models match.')}</text>
         )}
       </box>
       {flow.state.modelIdsError && (
@@ -944,11 +994,7 @@ function ModelsStep({
         </box>
       )}
       <box marginTop={1}>
-        <text fg={C.dim}>
-          {t(
-            'Enter to submit, ↑↓/Tab to switch input, search, and recommendations, Space to toggle recommendations, Esc to go back',
-          )}
-        </text>
+        <text fg={C.dim}>{MODELS_HINT}</text>
       </box>
     </box>
   );
@@ -1136,7 +1182,14 @@ function SetupSteps({
     case 'apiKey':
       return <ApiKeyStep provider={provider} flow={flow} retrySeq={retrySeq} />;
     case 'models':
-      return <ModelsStep provider={provider} flow={flow} retrySeq={retrySeq} />;
+      return (
+        <ModelsStep
+          provider={provider}
+          flow={flow}
+          retrySeq={retrySeq}
+          window={window}
+        />
+      );
     case 'advancedConfig':
       return <AdvancedConfigStep flow={flow} />;
     case 'review':
@@ -1501,6 +1554,7 @@ function AuthDialogFlow({
   const listWindow: StepWindow = {
     regionHeight,
     chromeRows: listChromeRows,
+    baseChromeRows: shellChromeRows + errorRows,
   };
   const mainWindow = wizardListWindow(
     regionHeight,

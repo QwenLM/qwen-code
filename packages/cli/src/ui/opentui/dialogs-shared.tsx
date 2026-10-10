@@ -272,8 +272,20 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   // The number-select flush reads the highlight at timeout time via a ref,
   // not inside a setState updater — updaters must stay pure (StrictMode
   // double-invokes them) and React re-renders keep the ref current.
-  const latestRef = useRef({ items, activeIndex, onSelect });
-  latestRef.current = { items, activeIndex, onSelect };
+  const latestRef = useRef({
+    items,
+    activeIndex,
+    onSelect,
+    scrollOffset,
+    maxItemsToShow,
+  });
+  latestRef.current = {
+    items,
+    activeIndex,
+    onSelect,
+    scrollOffset,
+    maxItemsToShow,
+  };
 
   // Ink parity: useSelectionList re-runs its INITIALIZE reducer on every
   // items change — the cursor follows the active item's key when it
@@ -435,6 +447,21 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
           // Flush against the highlight at timeout time, outside any setState
           // updater (updaters are pure and StrictMode re-runs them).
           const latest = latestRef.current;
+          // The digit armed this against the window it was typed into; a
+          // resize in between can leave the highlight unpainted, and the
+          // flush commits it a second later with nothing on screen to show
+          // for it.
+          const painted = selectionWindow(
+            latest.scrollOffset,
+            latest.items.length,
+            latest.maxItemsToShow,
+          );
+          if (
+            latest.activeIndex < painted.start ||
+            latest.activeIndex >= painted.end
+          ) {
+            return;
+          }
           const item = latest.items[latest.activeIndex];
           if (item && !item.disabled) latest.onSelect?.(item.value);
         }, NUMBER_SELECT_TIMEOUT_MS);
@@ -460,6 +487,21 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
       return;
     }
     if (original.name === 'return') {
+      // A held arrow hands its whole burst to the handler the last render
+      // registered: the cursor moves by ref while `scrollOffset` stays at the
+      // rendered value, so Enter can land on a row the painted window never
+      // showed. Re-check membership at commit time, mirroring the digit guard.
+      const painted = selectionWindow(
+        scrollOffset,
+        items.length,
+        maxItemsToShow,
+      );
+      if (
+        cursorRef.current < painted.start ||
+        cursorRef.current >= painted.end
+      ) {
+        return;
+      }
       const item = items[cursorRef.current];
       if (item && !item.disabled) onSelect?.(item.value);
     }

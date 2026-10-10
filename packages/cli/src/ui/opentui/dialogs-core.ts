@@ -108,9 +108,13 @@ export function wrappedRows(text: string, width: number): number {
   for (const line of text.split('\n')) {
     let lineRows = 1;
     let used = 0;
-    for (const word of line.split(' ')) {
-      const wordWidth = renderWidth(word);
-      if (used > 0) {
+    const words = line.split(' ');
+    // The separator is charged by position, not by whether the row already
+    // holds something: a run of leading spaces occupies columns the renderer
+    // paints, and a `used > 0` test charges none of them.
+    for (let i = 0; i < words.length; i += 1) {
+      const wordWidth = renderWidth(words[i]);
+      if (i > 0) {
         if (used + 1 + wordWidth > width) {
           lineRows += 1;
           used = 0;
@@ -124,7 +128,7 @@ export function wrappedRows(text: string, width: number): number {
       }
       // A word wider than the space left to it is broken across rows, cell by
       // cell; a two-cell glyph that would straddle the boundary moves whole.
-      for (const char of toCodePoints(word)) {
+      for (const char of toCodePoints(words[i])) {
         const charWidth = renderWidth(char);
         if (used > 0 && used + charWidth > width) {
           lineRows += 1;

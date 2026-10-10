@@ -34,7 +34,11 @@ import {
   useDialogFrameKeys,
   useDialogSelect,
 } from './dialogs-shared.js';
-import { regionListWindow, type DialogListItem } from './dialogs-core.js';
+import {
+  regionListWindow,
+  wrappedRows,
+  type DialogListItem,
+} from './dialogs-core.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 import {
   clipToWidth,
@@ -125,14 +129,19 @@ export interface ThemePreviewLayout {
  * The preview column's region-paid budget. ink floors the pane at the left
  * column's height, but the port's left column is windowed from the region,
  * so the pane derives from what the region leaves the columns — the frame's
- * border and padding (4) and the footer hint (2) — not from the full item
- * count, whose floor would grow the unshrinkable frame past the region.
+ * border and padding (4), the footer hint's margin (1) and the rows the
+ * footer hint wraps into — not from the full item count, whose floor would
+ * grow the unshrinkable frame past the region. The list window charges the
+ * footer the same measured rows, so the two budgets cannot drift on a run
+ * where the hint wraps.
+ *
  * Rows shed in ink's order — padding, then the 60/40 split shrinks — and
  * when even the pane's one-row-per-pane minimum does not fit, the pane does
  * not paint at all.
  */
 export function computeThemePreviewLayout(
   regionHeight: number | undefined,
+  footerRows: number,
 ): ThemePreviewLayout {
   if (regionHeight === undefined) {
     // No region: the samples paint whole.
@@ -143,7 +152,7 @@ export function computeThemePreviewLayout(
       showPreview: true,
     };
   }
-  const columnBudget = Math.max(0, regionHeight - 6);
+  const columnBudget = Math.max(0, regionHeight - 5 - footerRows);
   // The pane's own chrome: the Preview title (1), the pane box's marginTop
   // (1) and border (2), and the diff's marginTop (1).
   const paneChromeRows = 5;
@@ -207,20 +216,23 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
   const safeInitialThemeIndex = initialThemeIndex >= 0 ? initialThemeIndex : 0;
 
   const regionHeight = clampDialogHeight(availableTerminalHeight);
-  // The pane windows from the same region the list does; ink's floor at the
-  // left column's height is inert here because the windowed column never
-  // exceeds the budget the region leaves.
-  const layout = computeThemePreviewLayout(regionHeight);
   const { width } = useTerminalDimensions();
   const contentWidth = dialogContentWidth(width);
+  const themeTitleRun = `> ${t('Select Theme')} `;
+  const themeFooterText = t('(Use Enter to select, Tab to configure scope)');
+  // The pane windows from the same region the list does; ink's floor at the
+  // left column's height is inert here because the windowed column never
+  // exceeds the budget the region leaves. Both budgets charge the footer the
+  // rows it wraps into, so a hint that wraps cannot leave the frame a row
+  // taller than the region clips.
+  const footerRows = wrappedRows(themeFooterText, contentWidth);
+  const layout = computeThemePreviewLayout(regionHeight, footerRows);
   // The title row's width is the left column's: its 45% share of the frame's
   // content less the column's padding, or the whole content width once the
   // preview pane sheds.
   const titleColumnWidth = layout.showPreview
     ? Math.max(1, Math.floor(contentWidth * 0.45) - 2)
     : Math.max(1, contentWidth);
-  const themeTitleRun = `> ${t('Select Theme')} `;
-  const themeFooterText = t('(Use Enter to select, Tab to configure scope)');
   // The frame (4), the title's margin (1) and the footer hint's margin (1)
   // are the rows no run can wrap into; the title and the footer are charged
   // the rows they wrap into at the width they paint, and the list windows
@@ -341,10 +353,11 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
               renderLabel={(item, { titleColor }) => {
                 // Each item row is charged one physical row, so the label
                 // clips to the columns the row owns: the column's width less
-                // DialogSelect's indicator and number boxes.
+                // DialogSelect's indicator box (2) and its number box
+                // (digits + 2).
                 const labelWidth = Math.max(
                   1,
-                  titleColumnWidth - 3 - String(themeItems.length).length,
+                  titleColumnWidth - 4 - String(themeItems.length).length,
                 );
                 const nameRun = clipToWidth(
                   `${item.themeNameDisplay} `,
@@ -429,7 +442,7 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
                   item.label,
                   Math.max(
                     1,
-                    contentWidth - 3 - String(scopeItems.length).length,
+                    contentWidth - 4 - String(scopeItems.length).length,
                   ),
                 )}
               </text>

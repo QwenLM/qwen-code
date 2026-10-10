@@ -616,15 +616,36 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
           const row = item.row;
           const enabled = row.enabled !== false;
           const color = context.isSelected ? C.green : enabled ? C.text : C.dim;
+          // The row is charged one physical row, so its runs clip to the
+          // columns it owns: the content width less DialogSelect's indicator
+          // box (2), less the scope/status run that shares the row. An
+          // unclipped npm-style name wraps the row into two and the window
+          // paints rows the region clips off the tail.
+          const scopeRun = row.scope === 'project' ? ` (${t('project')})` : '';
+          const statusRun = enabled
+            ? ` (${t('active')})`
+            : ` (${t('disabled')})`;
+          const labelWidth = Math.max(
+            1,
+            extensionsContentWidth -
+              2 -
+              getCachedStringWidth(scopeRun) -
+              getCachedStringWidth(statusRun),
+          );
+          const starRun = row.favorite && labelWidth > 2 ? ' ★' : '';
+          const nameRun = truncateToWidth(
+            row.label,
+            Math.max(1, labelWidth - getCachedStringWidth(starRun)),
+          );
           return (
             <box flexDirection="row">
               <box flexGrow={1}>
-                <text fg={color}>{row.label}</text>
-                {row.favorite ? <text fg={C.yellow}> ★</text> : null}
+                <text fg={color}>{nameRun}</text>
+                {starRun ? <text fg={C.yellow}>{starRun}</text> : null}
               </box>
               <text fg={context.isSelected ? C.green : C.dim}>
-                {row.scope === 'project' ? ` (${t('project')})` : ''}
-                {enabled ? ` (${t('active')})` : ` (${t('disabled')})`}
+                {scopeRun}
+                {statusRun}
               </text>
             </box>
           );
