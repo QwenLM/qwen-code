@@ -389,6 +389,42 @@ public class ManagedAgentService {
         return response(admission);
     }
 
+    /**
+     * H4f: stops the child Session's running Turn on behalf of its parent
+     * run's committed stop request, called only by the child result relay.
+     * The key derives from the parent, the run and the Turn, so a redriven
+     * stop replays its admission and never mints a second cancel; a Turn
+     * that already ended answers without effect. The child acts under no
+     * caller: the request is the parent authority's own durable record.
+     */
+    public CommandAdmission cancelChildTurn(String tenantId,
+            String parentSessionId, String childSessionId, String childRunId,
+            String turnId) {
+        String key = childStopKey(parentSessionId, childRunId, turnId);
+        String requestDigest = digests.digest(Map.of(
+                "sessionId", childSessionId, "turnId", turnId));
+        Admission replay = replay(tenantId, CANCEL, key, requestDigest);
+        if (replay != null) {
+            dispatch(tenantId, replay);
+            return response(replay);
+        }
+        Admission admission;
+        try {
+            admission = store.insertCancelCommand(tenantId, CANCEL, key,
+                    requestDigest, childSessionId, turnId);
+        } catch (DuplicateKeyException error) {
+            admission = store.replayCommand(tenantId, CANCEL, key,
+                    requestDigest);
+        }
+        if (admission.commandEffect()) {
+            coordinator.cancel(tenantId, admission.sessionId(),
+                    admission.turnId());
+        } else {
+            dispatch(tenantId, admission);
+        }
+        return response(admission);
+    }
+
     public SessionMutationResult<PublicSession> renameSession(
             String tenantId, String actorId, String idempotencyKey, String sessionId,
             String title) {
@@ -1029,6 +1065,35 @@ public class ManagedAgentService {
                         session.workspace().getWorkspaceId())
                         .atLeast(WorkspaceAccess.OPERATOR)) {
             requireLegacyWorkspace(session, actorId);
+        }
+    }
+
+    // The tenant-wide command namespace is shared with callers' keys,
+    // which are visible ASCII only (validateIdempotencyKey): the space
+    // makes this key one no caller can claim first.
+    private String childStopKey(String parentSessionId, String childRunId,
+            String turnId) {
+        return "child-stop " + digests.digest(Map.of(
+                "parentSessionId", parentSessionId, "childRunId", childRunId,
+                "turnId", turnId));
+    }
+
+    /**
+     * H4f: who may cancel a task. A bound Session's tasks run under its
+     * Workspace, so the caller needs OPERATOR there, as for cancelling a
+     * Turn; a readable caller below it gets {@code 403 task_forbidden}.
+     * Unlike the Turn rule, the Session's executable shape is not an
+     * authorization fact: a Session that stopped serving work answers the
+     * new-request state checks instead. An unbound Session has no role
+     * model beyond its read access.
+     */
+    void requireTaskCanceller(SessionRecord session, String actorId) {
+        if (session.workspace() != null
+                && !workspaces.accessOf(session.tenantId(), actorId,
+                        session.workspace().getWorkspaceId())
+                        .atLeast(WorkspaceAccess.OPERATOR)) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "task_forbidden",
+                    "Only a Workspace operator may cancel the task.");
         }
     }
 
