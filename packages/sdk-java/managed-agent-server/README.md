@@ -588,7 +588,9 @@ Public Shell close, archive, unarchive and delete stay unavailable, including
 protocol-0. Archive, delete and unarchive of non-Shell Sessions follow their
 separate retention capabilities after reliable Workspace close. Controlled cwd
 changes ship below (W2); broad Workspace capability advertisement remains
-gated. Public foreground Shell does not publish the child agent tool.
+gated. Public foreground Shell does not publish the child agent tool, and it
+has no Session message funnel because that funnel shares the child
+orchestrator's write chain.
 Background Shell, Monitor and complete in-flight recovery remain separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.

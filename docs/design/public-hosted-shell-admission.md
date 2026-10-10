@@ -33,8 +33,9 @@ private H3 tool family is unchanged.
 
 Public Shell create and load set `suppressChildAgents`. The Harness then does
 not attach the child-agent orchestrator, so the public tool list stays the
-file tools plus foreground `run_shell_command` and Monitor. A Shell lane that
-omits the flag keeps the child agent tool.
+file tools plus foreground `run_shell_command` and Monitor. Session messages
+share that orchestrator's write chain, so the same lane has no message funnel.
+A Shell lane that omits the flag keeps the child agent tool.
 
 ## Admission and persistence
 

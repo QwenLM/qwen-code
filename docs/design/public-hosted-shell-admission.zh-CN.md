@@ -27,8 +27,9 @@ Session 行为不变。不添加调用者 profile 选择、metadata 覆盖、数
 尝试两种请求并断言零副作用；私有 H3 工具族保持不变。
 
 公开 Shell 的创建和加载会设置 `suppressChildAgents`。Harness 因此不挂 child-agent
-编排器，公开工具列表保持文件工具、前台 `run_shell_command` 和 Monitor。未带该
-标志的 Shell 车道仍声明 child agent 工具。
+编排器，公开工具列表保持文件工具、前台 `run_shell_command` 和 Monitor。Session
+消息与该编排器共用同一条写链，因此这条车道也没有消息漏斗。未带该标志的 Shell
+车道仍声明 child agent 工具。
 
 ## 准入与持久化
 

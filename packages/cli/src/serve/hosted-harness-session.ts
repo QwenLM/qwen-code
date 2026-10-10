@@ -3275,24 +3275,26 @@ export function registerHostedHarnessSessionRoutes(
             },
             session.managed.authority.sessionHeader.sessionKey,
           );
-          // H4d-b: the Session messages along its lineage on the same
-          // writes chain; a child names its parent from its definition.
-          session.messages = new HostedSessionMessageSession(
-            {
-              authority: session.managed.authority,
-              resources: session.managed.resources,
-            },
-            session.managed.authority.sessionHeader.sessionKey,
-            session.childAgents,
-            session.childDepth !== undefined &&
-            typeof savedLineage?.['parentSessionId'] === 'string' &&
-            typeof savedLineage['parentChildRunId'] === 'string'
-              ? {
-                  parentSessionId: savedLineage['parentSessionId'],
-                  parentChildRunId: savedLineage['parentChildRunId'],
-                }
-              : undefined,
-          );
+          // H4d-b: messages share the child orchestrator's write chain, so
+          // a Shell lane that suppressed the agent tool has no funnel.
+          if (session.childAgents) {
+            session.messages = new HostedSessionMessageSession(
+              {
+                authority: session.managed.authority,
+                resources: session.managed.resources,
+              },
+              session.managed.authority.sessionHeader.sessionKey,
+              session.childAgents,
+              session.childDepth !== undefined &&
+              typeof savedLineage?.['parentSessionId'] === 'string' &&
+              typeof savedLineage['parentChildRunId'] === 'string'
+                ? {
+                    parentSessionId: savedLineage['parentSessionId'],
+                    parentChildRunId: savedLineage['parentChildRunId'],
+                  }
+                : undefined,
+            );
+          }
         }
       }
       if (

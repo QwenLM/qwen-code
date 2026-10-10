@@ -47,7 +47,8 @@ public final class LoadHarnessSession {
      * of its message inputs, from before the load can kick it. */
     public LoadHarnessSession withStoppedMessages() {
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
-                passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover);
+                passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
+                suppressChildAgents);
         copy.lifecycleAuthority = lifecycleAuthority;
         copy.childWorkspaces = childWorkspaces;
         copy.stopMessages = true;

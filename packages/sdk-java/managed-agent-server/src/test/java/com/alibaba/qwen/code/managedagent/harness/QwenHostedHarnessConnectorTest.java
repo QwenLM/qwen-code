@@ -872,6 +872,7 @@ class QwenHostedHarnessConnectorTest {
                 loads.getValue(), "toJson"))
                 .containsEntry("stopMessages", true)
                 .containsEntry("passiveManagedRuntimeRecovery", true)
+                .containsEntry("suppressChildAgents", true)
                 .doesNotContainKey("driveRuntimeRecovery");
         verify(execution).authorizeCommittedStop(session);
         verify(execution, never()).authorize(session);
