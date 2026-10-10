@@ -844,20 +844,29 @@ public class ManagedSessionStore {
         requireHeadScope(head, tenantId, workspaceId, sessionId);
         requireReadGrant(head, writerToken);
         try (var lease = outputRetention.read(tenantId, sessionId)) {
-            String scopeKey = sessionScopeKey(tenantId, sessionId);
-            ResourceRow resource = findResource(scopeKey, resourceId);
-            if (resource == null) {
-                throw new ApiException(HttpStatus.NOT_FOUND,
-                        ManagedSessionStoreModels.ERROR_RESOURCE_NOT_FOUND,
-                        "The Managed Session resource does not exist.");
-            }
-            requireResourceScope(resource, tenantId, workspaceId, sessionId,
-                    resourceId);
-            verifyStoredResource(resource);
-            jdbc.update("UPDATE qwen_managed_session_resource SET"
-                            + " last_verified_at = ? WHERE session_scope_key = ?"
-                            + " AND resource_id = ?",
-                    databaseNow(), scopeKey, resourceId);
+            ResourceRow resource = ownerReads.execute(status -> {
+                ToolPublicationRetentionStore.lockGenericSession(jdbc, tenantId, sessionId);
+                HeadRow currentHead = requireHeadForUpdate(tenantId, sessionId);
+                requireHeadScope(currentHead, tenantId, workspaceId, sessionId);
+                requireReadGrant(currentHead, writerToken);
+                String scopeKey = sessionScopeKey(tenantId, sessionId);
+                var rows = jdbc.query("SELECT * FROM qwen_managed_session_resource"
+                                + " WHERE session_scope_key = ? AND resource_id = ? FOR UPDATE",
+                        resourceMapper, scopeKey, resourceId);
+                if (rows.isEmpty()) {
+                    throw new ApiException(HttpStatus.NOT_FOUND,
+                            ManagedSessionStoreModels.ERROR_RESOURCE_NOT_FOUND,
+                            "The Managed Session resource does not exist.");
+                }
+                ResourceRow current = rows.getFirst();
+                requireResourceScope(current, tenantId, workspaceId, sessionId, resourceId);
+                verifyStoredResource(current);
+                jdbc.update("UPDATE qwen_managed_session_resource SET"
+                                + " last_verified_at = ? WHERE session_scope_key = ?"
+                                + " AND resource_id = ?",
+                        databaseNow(), scopeKey, resourceId);
+                return current;
+            });
             byte[] bytes = "TOOL_PUBLICATION".equals(resource.storageKind())
                     ? readPublicationObject(resource, lease) : resource.bytes();
             var result = new StoredResource(resource.resourceId(), resource.kind(),

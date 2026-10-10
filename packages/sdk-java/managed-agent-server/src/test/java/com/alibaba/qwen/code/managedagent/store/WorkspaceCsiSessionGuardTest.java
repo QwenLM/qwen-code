@@ -318,6 +318,22 @@ class WorkspaceCsiSessionGuardTest {
         assertBrokerCode(() -> transaction.execute(status -> acquire()), "csi_original_binding_unavailable");
     }
 
+    @Test
+    void genericReadRefusesOriginalPrivateSessionEvenAfterProfileChangesWithPinRetained() {
+        var source = jdbc.getDataSource();
+        var retention = new ToolPublicationRetentionStore(jdbc, new DataSourceTransactionManager(source));
+        var before = jdbc.queryForMap("SELECT * FROM managed_agent_session WHERE session_id = ?", sessionId);
+        for (int index = 0; index < 2; index++) {
+            assertApiCode(() -> retention.read("tenant", sessionId), "csi_managed_mutation_unavailable");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_read_lease", Integer.class)).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_tenant", Integer.class)).isZero();
+            assertThat(jdbc.queryForMap("SELECT * FROM managed_agent_session WHERE session_id = ?", sessionId))
+                    .usingRecursiveComparison().isEqualTo(before);
+            jdbc.update("UPDATE managed_agent_session SET tool_profile = 'hosted-workspace-files/1' WHERE session_id = ?", sessionId);
+            before = jdbc.queryForMap("SELECT * FROM managed_agent_session WHERE session_id = ?", sessionId);
+        }
+    }
+
     private ManagedSessionStoreModels.WriterGrant acquire() {
         return journal.acquireWriter("tenant", sessionId, TOKEN,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 60_000L));

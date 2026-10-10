@@ -780,7 +780,11 @@ public final class ToolPublicationDataStore {
                 try {
                     verify(scope, publicationId, claim.objectKey(), bytes.length, digest);
                 } catch (IllegalArgumentException error) {
-                    quarantineCandidate(scope, publicationId, "terminal", operationId);
+                    try {
+                        quarantineCandidate(scope, publicationId, "terminal", operationId);
+                    } catch (RuntimeException cleanup) {
+                        error.addSuppressed(cleanup);
+                    }
                     throw error;
                 }
             }
@@ -1282,7 +1286,11 @@ public final class ToolPublicationDataStore {
                 try {
                     verify(scope, publicationId, candidate.objectKey(), bytes.length, digest);
                 } catch (IllegalArgumentException error) {
-                    quarantineCandidate(scope, publicationId, slot, operationId);
+                    try {
+                        quarantineCandidate(scope, publicationId, slot, operationId);
+                    } catch (RuntimeException cleanup) {
+                        error.addSuppressed(cleanup);
+                    }
                     throw error;
                 }
             }
@@ -1541,18 +1549,21 @@ public final class ToolPublicationDataStore {
     }
 
     private void verify(String scope, String publicationId, String objectKey, long length, String digest) {
-        objects.requireUnversioned();
-        try (InputStream stream = retention.open(scope, publicationId, objectKey, objects)) {
-            var hash = java.security.MessageDigest.getInstance("SHA-256");
-            byte[] buffer = new byte[64 * 1024];
-            long read = 0;
-            for (int count; (count = stream.read(buffer)) != -1; ) {
-                hash.update(buffer, 0, count);
-                read += count;
-                require(read <= length, "Publication object length changed");
+        try (var lease = retention.readPublication(scope, publicationId)) {
+            lease.check();
+            objects.requireUnversioned();
+            try (InputStream stream = retention.open(objectKey, objects, lease, () -> {})) {
+                var hash = java.security.MessageDigest.getInstance("SHA-256");
+                byte[] buffer = new byte[64 * 1024];
+                long read = 0;
+                for (int count; (count = stream.read(buffer)) != -1; ) {
+                    hash.update(buffer, 0, count);
+                    read += count;
+                    require(read <= length, "Publication object length changed");
+                }
+                require(read == length && HexFormat.of().formatHex(hash.digest()).equals(digest),
+                        "Publication object digest changed");
             }
-            require(read == length && HexFormat.of().formatHex(hash.digest()).equals(digest),
-                    "Publication object digest changed");
         } catch (IOException | java.security.NoSuchAlgorithmException error) {
             throw new IllegalStateException("Publication object verification failed", error);
         }

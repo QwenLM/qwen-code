@@ -390,6 +390,118 @@ public class ToolPublicationRetentionStoreTest {
                 .satisfies(error -> assertThat(error.getSuppressed()).singleElement().extracting(Throwable::getMessage).isEqualTo("cleanup failed"));
     }
 
+    @Test
+    void leaseCloseCanRetryAfterItsOuterTransactionRollsBack() {
+        var lease = retention.read(key);
+        tx.executeWithoutResult(status -> {
+            lease.close();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_read_lease", Integer.class)).isZero();
+            status.setRollbackOnly();
+        });
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_read_lease", Integer.class)).isEqualTo(1);
+        lease.check();
+        lease.close();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_read_lease", Integer.class)).isZero();
+    }
+
+    @Test
+    void leaseCloseRefusesPersistedScopeConflictAndCanRetryAfterCorrection() {
+        var lease = retention.read(key);
+        String original = ToolPublicationRetentionStore.hash(session);
+        jdbc.update("UPDATE qwen_output_read_lease SET session_key = ?", "b".repeat(64));
+        var before = jdbc.queryForMap("SELECT * FROM qwen_output_read_lease");
+        assertThatThrownBy(lease::check).isInstanceOf(ApiException.class);
+        assertThatThrownBy(lease::close).isInstanceOf(IllegalArgumentException.class);
+        assertThat(jdbc.queryForMap("SELECT * FROM qwen_output_read_lease")).isEqualTo(before);
+        jdbc.update("UPDATE qwen_output_read_lease SET session_key = ?", original);
+        lease.close();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_read_lease", Integer.class)).isZero();
+    }
+
+    @Test
+    void failedLeaseDeleteKeepsTheSameHandleRetryable() {
+        var fail = new java.util.concurrent.atomic.AtomicBoolean(true);
+        var observed = new JdbcTemplate(jdbc.getDataSource()) {
+            @Override public int update(String sql, Object... arguments) {
+                if (sql.startsWith("DELETE FROM qwen_output_read_lease") && fail.getAndSet(false)) {
+                    throw new org.springframework.dao.DataAccessResourceFailureException("first cleanup failed");
+                }
+                return super.update(sql, arguments);
+            }
+        };
+        var lease = new ToolPublicationRetentionStore(observed, manager).read(key);
+        assertThatThrownBy(lease::close).hasMessage("first cleanup failed");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_read_lease", Integer.class)).isEqualTo(1);
+        lease.close();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_read_lease", Integer.class)).isZero();
+    }
+
+    @Test
+    void putCannotBorrowAnotherWorkspacePublication() {
+        var objects = new MemoryObjects();
+        key.put("workspaceId", "other-workspace");
+        assertThatThrownBy(() -> retention.put(key, scope, "pub-1", "object", new byte[] {1}, objects))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(objects.bytes).isEmpty();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_put_attempt", Integer.class)).isZero();
+    }
+
+    @Test
+    void alreadyAdmittedPutStillSettlesWhenOrdinarySessionRetiresDuringIo() {
+        var objects = new MemoryObjects() {
+            @Override public void putIfAbsent(String objectKey, byte[] bytes) {
+                retire();
+                super.putIfAbsent(objectKey, bytes);
+            }
+        };
+        retention.put(key, scope, "pub-1", "object", new byte[] {1}, objects);
+        assertThat(jdbc.queryForObject("SELECT state FROM qwen_output_put_attempt", String.class)).isEqualTo("RETURNED");
+        assertThat(objects.bytes).containsKey("object");
+    }
+
+    @Test
+    void successfulPhysicalPutCannotSettleAnAttemptWithChangedObjectIdentity() {
+        var objects = new MemoryObjects() {
+            @Override public void putIfAbsent(String objectKey, byte[] bytes) {
+                super.putIfAbsent(objectKey, bytes);
+                jdbc.update("UPDATE qwen_output_put_attempt SET object_key = 'other-object'");
+            }
+        };
+        assertThatThrownBy(() -> retention.put(key, scope, "pub-1", "object", new byte[] {1}, objects))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(jdbc.queryForObject("SELECT state FROM qwen_output_put_attempt", String.class)).isEqualTo("IN_FLIGHT");
+        assertThat(objects.bytes).containsKey("object");
+    }
+
+    @Test
+    void unknownCompletionFailureIsSuppressedOnTheOriginalPhysicalFailure() {
+        var original = new IllegalStateException("physical response lost");
+        var objects = new MemoryObjects() {
+            @Override public void putIfAbsent(String objectKey, byte[] bytes) {
+                jdbc.update("UPDATE qwen_output_put_attempt SET state = 'RETURNED'");
+                throw original;
+            }
+        };
+        assertThatThrownBy(() -> retention.put(key, scope, "pub-1", "object", new byte[] {1}, objects))
+                .isSameAs(original);
+        assertThat(original.getSuppressed()).singleElement().isInstanceOf(IllegalArgumentException.class);
+        assertThat(jdbc.queryForObject("SELECT state FROM qwen_output_put_attempt", String.class)).isEqualTo("RETURNED");
+    }
+
+    @Test
+    void zeroRowPutCompletionCannotReportSuccess() {
+        var observed = new JdbcTemplate(jdbc.getDataSource()) {
+            @Override public int update(String sql, Object... arguments) {
+                if (sql.startsWith("UPDATE qwen_output_put_attempt SET state = ?")) { return 0; }
+                return super.update(sql, arguments);
+            }
+        };
+        var store = new ToolPublicationRetentionStore(observed, manager);
+        assertThatThrownBy(() -> store.put(key, scope, "pub-1", "object", new byte[] {1}, new MemoryObjects()))
+                .isInstanceOf(IllegalArgumentException.class).hasMessage("PUT attempt did not complete");
+        assertThat(jdbc.queryForObject("SELECT state FROM qwen_output_put_attempt", String.class)).isEqualTo("IN_FLIGHT");
+    }
+
     protected static class MemoryObjects implements ToolPublicationObjectStore {
         protected final Map<String, byte[]> bytes = new HashMap<>();
         @Override public void putIfAbsent(String key, byte[] value) { bytes.putIfAbsent(key, value.clone()); }
