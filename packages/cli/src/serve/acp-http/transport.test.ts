@@ -8565,7 +8565,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const connId = await initialize();
     await newSession(connId);
     const connStream = await openStream(connId);
-    const got = takeFrames(connStream, 2); // session/new reply + load reject
+    const reader = frameReader(connStream);
     await new Promise((r) => setTimeout(r, 50));
     // close is now in flight (awaiting closeGate) → sess-1 is "closing".
     void post(connId, {
@@ -8581,11 +8581,23 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       method: 'session/load',
       params: { sessionId: 'sess-1' },
     });
-    const frames = (await got) as Array<{
-      id: number;
-      error?: { code: number; message: string };
-    }>;
-    const loadReply = frames.find((f) => f.id === 301);
+    // The load reject is the only frame this stream is owed — the
+    // session/new reply rode the delivery stream newSession opened, and a
+    // replayed duplicate of it may or may not precede the reject. Read
+    // until the reject lands instead of counting frames.
+    let loadReply:
+      | { id: number; error?: { code: number; message: string } }
+      | undefined;
+    for (;;) {
+      const frame = (await reader.next()) as {
+        id: number;
+        error?: { code: number; message: string };
+      };
+      if (frame.id === 301) {
+        loadReply = frame;
+        break;
+      }
+    }
     // Transient server-side race → INTERNAL_ERROR (-32603), not INVALID_PARAMS.
     expect(loadReply?.error?.code).toBe(-32603); // "being closed; retry"
     expect(loadReply?.error?.message).toContain('being closed');
@@ -9427,7 +9439,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         method: '_qwen/session/tasks',
         params: { sessionId: 'sess-1', includeWorkflows: true },
       });
-      const frames = await takeFrames(await streamRes, 7);
+      // Exactly the five replies this stream carries: session/new plus the
+      // four extension calls above — the session_update push rides the
+      // session stream, not this one.
+      const frames = await takeFrames(await streamRes, 5);
       const byId = new Map(
         frames
           .filter(
