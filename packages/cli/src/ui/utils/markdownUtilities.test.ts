@@ -19,6 +19,13 @@ describe('markdownUtilities', () => {
       expect(findLastSafeSplitPoint(content)).toBe(24); // After the second \n\n
     });
 
+    it('should split on the paragraph boundary despite an inline fence marker', () => {
+      // Issue #13309: an inline `~~~` is prose, not a block fence, so the
+      // paragraph boundary after it stays a valid split point.
+      const content = 'First para with `~~~` inline.\n\nSecond para.';
+      expect(findLastSafeSplitPoint(content)).toBe(content.indexOf('Second'));
+    });
+
     it('should return content.length if no safe split point is found', () => {
       const content = 'longstringwithoutanysafesplitpoint';
       expect(findLastSafeSplitPoint(content)).toBe(content.length);
@@ -219,6 +226,33 @@ describe('markdownUtilities', () => {
         after: '',
       });
     });
+
+    it('does not treat an inline tilde fence marker as a code block', () => {
+      // Issue #13309: `~~~` inside inline code is prose, not a block fence.
+      const content =
+        'Use `~~~` as the fence marker.\nMore ordinary prose follows.';
+      const splitPoint = content.indexOf('More');
+      const { before, after } = splitFencedMarkdown(content, splitPoint);
+      expect(before).toBe(content.slice(0, splitPoint));
+      expect(after).toBe(content.slice(splitPoint));
+    });
+
+    it('does not treat an inline backtick fence marker as a code block', () => {
+      const content =
+        'Inline ```ts mentions stay prose.\nMore ordinary prose follows.';
+      const splitPoint = content.indexOf('More');
+      const { before, after } = splitFencedMarkdown(content, splitPoint);
+      expect(before).toBe(content.slice(0, splitPoint));
+      expect(after).toBe(content.slice(splitPoint));
+    });
+
+    it('still closes and re-opens a genuine line-start fence after inline markers', () => {
+      const content = 'Prose with `~~~` inline.\n```python\nline1\nline2\n';
+      const splitPoint = content.indexOf('line2');
+      const { before, after } = splitFencedMarkdown(content, splitPoint);
+      expect(before).toBe('Prose with `~~~` inline.\n```python\nline1\n```\n');
+      expect(after).toBe('```python qwen-code:start-line=2\nline2\n');
+    });
   });
 
   describe('parseCodeFenceInfo', () => {
@@ -257,6 +291,13 @@ describe('markdownUtilities', () => {
       const content = 'plain intro\n\n```ts\ncode\n```\n\nafter';
       expect(getEnclosingFenceInfo(content, 3)).toBeNull(); // in the intro
       expect(getEnclosingFenceInfo(content, content.length - 2)).toBeNull(); // after the closed block
+    });
+
+    it('returns null near an inline fence marker that is not at line start', () => {
+      const content = 'Use `~~~` as the fence marker.\nMore prose.';
+      expect(
+        getEnclosingFenceInfo(content, content.indexOf('More')),
+      ).toBeNull();
     });
 
     it('reports the language and start line of the enclosing code block', () => {
