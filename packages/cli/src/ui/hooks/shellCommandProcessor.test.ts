@@ -566,6 +566,53 @@ describe('useShellCommandProcessor', () => {
     expect(setShellInputFocusedMock).toHaveBeenCalledWith(false);
   });
 
+  it.each([
+    {
+      aborted: true,
+      status: ToolCallStatus.Canceled,
+      cancellationPrefix: 'Command was cancelled.\n',
+    },
+    { aborted: false, status: ToolCallStatus.Error, cancellationPrefix: '' },
+  ])(
+    'preserves cleanup diagnostics with aborted=$aborted as $status',
+    async ({ aborted, status, cancellationPrefix }) => {
+      const cleanupDiagnostic =
+        'Process group 12345 did not stop after SIGKILL';
+      const output = 'partial command output';
+      const finalOutput = `${cancellationPrefix}${cleanupDiagnostic}\n${output}`;
+      const { result } = renderProcessorHook();
+      const abortController = new AbortController();
+
+      act(() => {
+        result.current.handleShellCommand('sleep 5', abortController.signal);
+      });
+      const execPromise = onExecMock.mock.calls[0][0];
+
+      act(() => {
+        if (aborted) abortController.abort();
+        resolveExecutionPromise(
+          createMockServiceResult({
+            aborted,
+            error: new Error(cleanupDiagnostic),
+            exitCode: null,
+            output,
+          }),
+        );
+      });
+      await act(async () => await execPromise);
+
+      const finalToolDisplay = addItemToHistoryMock.mock.calls[1][0].tools[0];
+      expect.soft(finalToolDisplay.resultDisplay).toBe(finalOutput);
+      expect(finalToolDisplay.status).toBe(status);
+      const modelHistoryText = (
+        vi.mocked(mockLlmClient.addHistory).mock.calls[0]![0].parts![0]! as {
+          text: string;
+        }
+      ).text;
+      expect.soft(modelHistoryText).toContain(`\`\`\`\n${finalOutput}\n\`\`\``);
+    },
+  );
+
   it('should handle binary output result correctly', async () => {
     const { result } = renderProcessorHook();
     const binaryBuffer = Buffer.from([0x89, 0x50, 0x4e, 0x47]);

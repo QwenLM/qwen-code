@@ -153,8 +153,11 @@ export async function executeUserShell(
         let prefixText = '';
         if (res.error) {
           success = false;
-          summary = 'error';
-          prefixText = `${res.error.message}\n`;
+          summary = res.aborted ? 'cancelled' : 'error';
+          const cancellationPrefix = res.aborted
+            ? 'Command was cancelled.\n'
+            : '';
+          prefixText = `${cancellationPrefix}${res.error.message}\n`;
         } else if (res.aborted) {
           success = false;
           // Ink's processor sets Canceled for a user-cancelled `!` command;
