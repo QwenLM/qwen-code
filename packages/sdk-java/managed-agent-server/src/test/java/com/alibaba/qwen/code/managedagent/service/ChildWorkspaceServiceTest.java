@@ -22,11 +22,15 @@ import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -49,11 +53,15 @@ import org.springframework.jdbc.core.JdbcTemplate;
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.enabled=false"
+        "qwen.managed-agent.harness.enabled=false",
+        // The context's own scan judges claims by the real clock, while
+        // these tests drive their own service on a fake one.
+        "qwen.managed-agent.child-workspace.scan-delay=1h"
 })
-@DisabledOnOs(value = OS.WINDOWS, disabledReason = "Child Workspaces run on the local-process provider")
+@DisabledOnOs(value = OS.WINDOWS, disabledReason = "Child Workspaces are not supported on Windows")
 class ChildWorkspaceServiceTest {
     private static ChildWorktreeGit git;
+    private static String unavailable;
 
     @Autowired
     private ManagedAgentStore sessions;
@@ -70,20 +78,24 @@ class ChildWorkspaceServiceTest {
     private Path project;
     private final AtomicLong clock = new AtomicLong(1_000_000);
     private final StubWarmer warmer = new StubWarmer();
+    /** The tenants this test created: the one database is shared by every test of the class. */
+    private final Set<String> tenants = ConcurrentHashMap.newKeySet();
     private ChildWorkspaceService service;
 
     @BeforeAll
-    static void requireGit() {
+    static void probeGit() {
         git = new ChildWorktreeGit("git", Duration.ofSeconds(60));
-        try {
-            git.requireSupportedVersion();
-        } catch (IllegalStateException error) {
-            assumeTrue(false, "Git 2.40 or later is unavailable: " + error.getMessage());
-        }
+        unavailable = ChildWorktreeGitTest.unusableGit(git);
+    }
+
+    @AfterAll
+    static void closeGit() {
+        git.close();
     }
 
     @BeforeEach
     void setUp() throws Exception {
+        assumeTrue(unavailable == null, () -> "Git 2.40 or later is unavailable: " + unavailable);
         root = Files.createDirectory(temp.toRealPath().resolve("root"));
         project = Files.createDirectory(root.resolve("project"));
         plain(project, "init", "-q", "-b", "main");
@@ -93,6 +105,15 @@ class ChildWorkspaceServiceTest {
         plain(project, "commit", "-q", "-m", "init");
         warmer.provider = provider(root);
         service = worker("worker-a");
+    }
+
+    /** Parks whatever this test left owing, so no later scan drives it. */
+    @AfterEach
+    void parkLeftovers() {
+        for (String tenant : tenants) {
+            jdbc.update("UPDATE qwen_managed_child_workspace SET finish_request = NULL, claimed_until = ?,"
+                    + " next_retry_at = ? WHERE tenant_id = ?", Long.MAX_VALUE, Long.MAX_VALUE, tenant);
+        }
     }
 
     @Test
@@ -131,10 +152,22 @@ class ChildWorkspaceServiceTest {
         assertThat(root.resolve(ChildWorktreeGit.childDirectory(ready.childWorkspaceId()))).doesNotExist();
         assertThat(jdbc.queryForList("SELECT holder_key FROM managed_workspace_execution_lease"
                 + " WHERE storage_key = ?", String.class, storageKey(parent.workspace()))).containsOnlyNulls();
+        assertPinsGone(ready);
         assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE))
                 .isEqualTo(merged);
         assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD),
                 "child_workspace_conflict");
+    }
+
+    @Test
+    void siblingRunsFromOneParentStateGetBasesOfTheirOwn() throws Exception {
+        var parent = createSession("project");
+        Row first = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
+        Row second = service.prepare(parent.tenantId(), parent.sessionId(), "run-2");
+
+        assertThat(first.baseCommit()).isNotEqualTo(second.baseCommit());
+        assertThat(plain(project, "rev-parse", first.baseCommit() + "^{tree}"))
+                .isEqualTo(plain(project, "rev-parse", second.baseCommit() + "^{tree}"));
     }
 
     @Test
@@ -164,6 +197,47 @@ class ChildWorkspaceServiceTest {
     }
 
     @Test
+    void aConflictRecordsAtMostTheCappedPathsInMergeOrder() throws Exception {
+        int count = ChildWorktreeGit.MAX_CONFLICT_PATHS + 1;
+        for (int file = 0; file < count; file++) {
+            Files.writeString(project.resolve(String.format("g%03d.txt", file)), "line\n");
+        }
+        plain(project, "add", "-A");
+        plain(project, "commit", "-q", "-m", "many");
+        var parent = createSession("project");
+        Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
+        Path child = root.resolve(ready.childCwdRelative());
+        for (int file = 0; file < count; file++) {
+            String name = String.format("g%03d.txt", file);
+            Files.writeString(child.resolve(name), "child\n");
+            Files.writeString(project.resolve(name), "parent\n");
+        }
+
+        Row conflicted = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
+
+        assertThat(conflicted.state()).isEqualTo(ChildWorkspaceStore.CONFLICTED);
+        assertThat(conflicted.conflictPaths()).hasSize(ChildWorktreeGit.MAX_CONFLICT_PATHS);
+        assertThat(conflicted.conflictPaths().getFirst()).isEqualTo("g000.txt");
+        assertThat(conflicted.conflictPaths().getLast())
+                .isEqualTo(String.format("g%03d.txt", ChildWorktreeGit.MAX_CONFLICT_PATHS - 1));
+    }
+
+    @Test
+    void aMergedPathTheParentNowIgnoresEndsMerged() throws Exception {
+        var parent = createSession("project");
+        Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
+        Files.createDirectories(root.resolve(ready.childCwdRelative()).resolve("gen"));
+        Files.writeString(root.resolve(ready.childCwdRelative()).resolve("gen/x.txt"), "generated\n");
+        Files.writeString(project.resolve(".gitignore"), "gen/\n");
+
+        Row merged = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
+
+        assertThat(merged.state()).isEqualTo(ChildWorkspaceStore.MERGED);
+        assertThat(project.resolve("gen/x.txt")).hasContent("generated");
+        assertThat(root.resolve(ChildWorktreeGit.childDirectory(ready.childWorkspaceId()))).doesNotExist();
+    }
+
+    @Test
     void aRefusedLayoutEndsFailedCreatingNothing() throws Exception {
         Files.createDirectory(root.resolve("plain"));
         var parent = createSession("plain");
@@ -178,6 +252,24 @@ class ChildWorkspaceServiceTest {
                 "child_workspace_not_ready");
         assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD).state())
                 .isEqualTo(ChildWorkspaceStore.DISCARDED);
+    }
+
+    @Test
+    void aParentDirectoryTheSnapshotDoesNotCarryIsALayoutRefusal() throws Exception {
+        Files.createDirectory(project.resolve("empty"));
+        Files.createDirectories(project.resolve("build/out"));
+        Files.writeString(project.resolve(".gitignore"), "build/\n");
+        Files.writeString(project.resolve("build/out/a.bin"), "built\n");
+        for (String cwd : List.of("project/empty", "project/build")) {
+            var parent = createSession(cwd);
+
+            Row failed = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
+
+            assertThat(failed.state()).as(cwd).isEqualTo(ChildWorkspaceStore.FAILED);
+            assertThat(failed.outcomeCode()).as(cwd).isEqualTo(ChildWorkspaceException.LAYOUT);
+            assertThat(failed.baseCommit()).as(cwd).isNull();
+            assertThat(root.resolve(ChildWorktreeGit.CONTAINER)).as(cwd).doesNotExist();
+        }
     }
 
     @Test
@@ -222,11 +314,17 @@ class ChildWorkspaceServiceTest {
         Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
         assertApi(() -> bindChild(parent, "run-1", ready.childCwdRelative() + "/elsewhere"),
                 "child_workspace_not_ready");
-        jdbc.update("UPDATE qwen_managed_child_workspace SET storage_id = 'moved'"
+        for (String moved : List.of("storage_id = 'moved'", "workspace_id = 'moved'", "workspace_generation = 2")) {
+            jdbc.update("UPDATE qwen_managed_child_workspace SET " + moved + " WHERE child_workspace_id = ?",
+                    ready.childWorkspaceId());
+            assertApi(() -> bindChild(parent, "run-1", ready.childCwdRelative()), "child_workspace_not_ready");
+            jdbc.update("UPDATE qwen_managed_child_workspace SET storage_id = ?, workspace_id = ?,"
+                    + " workspace_generation = ? WHERE child_workspace_id = ?", parent.workspace().getStorageId(),
+                    parent.workspace().getWorkspaceId(), parent.workspace().getWorkspaceGeneration(),
+                    ready.childWorkspaceId());
+        }
+        jdbc.update("UPDATE qwen_managed_child_workspace SET finish_request = 'discard'"
                 + " WHERE child_workspace_id = ?", ready.childWorkspaceId());
-        assertApi(() -> bindChild(parent, "run-1", ready.childCwdRelative()), "child_workspace_not_ready");
-        jdbc.update("UPDATE qwen_managed_child_workspace SET storage_id = ?, finish_request = 'discard'"
-                + " WHERE child_workspace_id = ?", parent.workspace().getStorageId(), ready.childWorkspaceId());
         assertApi(() -> bindChild(parent, "run-1", ready.childCwdRelative()), "child_workspace_not_ready");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE parent_session_id = ?",
                 Integer.class, parent.sessionId())).isZero();
@@ -274,11 +372,16 @@ class ChildWorkspaceServiceTest {
                 "workspace_unavailable");
         leases.holdForMaintenance(storage, second.childWorkspaceId(), second.claimGeneration());
         leases.releaseMaintenance(storage, first.childWorkspaceId(), first.claimGeneration());
-        assertThat(leases.holdsMaintenance(storage, second.childWorkspaceId(), second.claimGeneration())).isTrue();
+        assertThat(holder(storage)).isEqualTo(maintenanceHolder(second));
         leases.releaseMaintenance(storage, second.childWorkspaceId(), second.claimGeneration());
-        assertThat(leases.holdsMaintenance(storage, second.childWorkspaceId(), second.claimGeneration())).isFalse();
+        assertThat(holder(storage)).isNull();
+        // An expired claim still of the current generation may take the
+        // hold; the scan frees it once nothing renews that claim.
+        assertThat(rival.claimedUntil()).isLessThan(clock.get());
         leases.holdForMaintenance(storage, rival.childWorkspaceId(), rival.claimGeneration());
+        assertThat(holder(storage)).isEqualTo(maintenanceHolder(rival));
         leases.releaseMaintenance(storage, rival.childWorkspaceId(), rival.claimGeneration());
+        assertThat(holder(storage)).isNull();
     }
 
     @Test
@@ -353,13 +456,44 @@ class ChildWorkspaceServiceTest {
         Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
         Path child = root.resolve(ready.childCwdRelative());
         Files.writeString(child.resolve("keep.txt"), "child\n");
+        Files.writeString(child.resolve("f.txt"), "a\nb\nc\nd\nCHILD\n");
         var repository = git.open(root, "project");
         String result = git.result(root, repository, ready.childWorkspaceId(), ready.baseCommit());
+        git.pin(root, repository, ready.childWorkspaceId(), "result", result);
+        var merge = git.merge(root, repository, ready.baseCommit(), result);
+        // The write landed and was recorded, then the worker died before
+        // committing merged; the storage was free since, and the parent
+        // edited a merged path.
+        git.apply(root, repository, merge.parentTree(), merge.mergedTree());
+        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'applied', finish_request = 'merge',"
+                + " result_commit = ?, parent_tree = ?, merged_tree = ? WHERE child_workspace_id = ?",
+                result, merge.parentTree(), merge.mergedTree(), ready.childWorkspaceId());
+        Files.writeString(project.resolve("keep.txt"), "the parent's later edit\n");
+
+        service.scan();
+
+        Row merged = service.find(parent.tenantId(), parent.sessionId(), "run-1");
+        assertThat(merged.state()).isEqualTo(ChildWorkspaceStore.MERGED);
+        assertThat(merged.outcomeCode()).isEqualTo("merged");
+        assertThat(project.resolve("keep.txt")).hasContent("the parent's later edit");
+        assertThat(project.resolve("f.txt")).hasContent("a\nb\nc\nd\nCHILD");
+        assertThat(child).doesNotExist();
+        assertPinsGone(ready);
+    }
+
+    @Test
+    void aCrashBeforeTheLandedWriteWasRecordedResumesItsWrite() throws Exception {
+        var parent = createSession("project");
+        Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
+        Path child = root.resolve(ready.childCwdRelative());
+        Files.writeString(child.resolve("keep.txt"), "child\n");
+        var repository = git.open(root, "project");
+        String result = git.result(root, repository, ready.childWorkspaceId(), ready.baseCommit());
+        git.pin(root, repository, ready.childWorkspaceId(), "result", result);
         var merge = git.merge(root, repository, ready.baseCommit(), result);
         jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'applying', finish_request = 'merge',"
                 + " result_commit = ?, parent_tree = ?, merged_tree = ? WHERE child_workspace_id = ?",
                 result, merge.parentTree(), merge.mergedTree(), ready.childWorkspaceId());
-        // The write landed, then the worker died before committing merged.
         git.apply(root, repository, merge.parentTree(), merge.mergedTree());
 
         service.scan();
@@ -368,6 +502,72 @@ class ChildWorkspaceServiceTest {
         assertThat(merged.state()).isEqualTo(ChildWorkspaceStore.MERGED);
         assertThat(project.resolve("keep.txt")).hasContent("child");
         assertThat(child).doesNotExist();
+        assertPinsGone(ready);
+    }
+
+    @Test
+    void aMergeRecordsItsLandedWriteBeforeTheCleanup() throws Exception {
+        var parent = createSession("project");
+        Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
+        Files.writeString(root.resolve(ready.childCwdRelative()).resolve("keep.txt"), "child\n");
+        // The cleanup's unpin fails; the write before it does not.
+        Path failing = temp.resolve("unpin-fails-git");
+        Files.writeString(failing, "#!/bin/sh\ncase \" $* \" in *\" update-ref \"*\" -d \"*) exit 1;; esac\n"
+                + "exec git \"$@\"\n");
+        assumeTrue(failing.toFile().setExecutable(true));
+        ChildWorktreeGit failingGit = new ChildWorktreeGit(failing.toString(), Duration.ofSeconds(60));
+        try {
+            warmer.provider = provider(root, Integer.MAX_VALUE, failingGit);
+
+            Row parked = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
+
+            assertThat(parked.state()).isEqualTo(ChildWorkspaceStore.APPLIED);
+            assertThat(parked.attempts()).isEqualTo(1);
+            assertThat(project.resolve("keep.txt")).hasContent("child");
+        } finally {
+            failingGit.close();
+        }
+        warmer.provider = provider(root);
+        Files.writeString(project.resolve("keep.txt"), "the parent's later edit\n");
+        clock.addAndGet(ChildWorkspaceService.LEASE_MS);
+        service.scan();
+        Row merged = service.find(parent.tenantId(), parent.sessionId(), "run-1");
+        assertThat(merged.state()).isEqualTo(ChildWorkspaceStore.MERGED);
+        assertThat(project.resolve("keep.txt")).hasContent("the parent's later edit");
+        assertPinsGone(ready);
+    }
+
+    @Test
+    void aLandedMergeWhoseCleanupCannotFinishStaysMerged() throws Exception {
+        var parent = createSession("project");
+        Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
+        Files.writeString(root.resolve(ready.childCwdRelative()).resolve("keep.txt"), "child\n");
+        var repository = git.open(root, "project");
+        String result = git.result(root, repository, ready.childWorkspaceId(), ready.baseCommit());
+        git.pin(root, repository, ready.childWorkspaceId(), "result", result);
+        var merge = git.merge(root, repository, ready.baseCommit(), result);
+        git.apply(root, repository, merge.parentTree(), merge.mergedTree());
+        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'applied', finish_request = 'merge',"
+                + " result_commit = ?, parent_tree = ?, merged_tree = ? WHERE child_workspace_id = ?",
+                result, merge.parentTree(), merge.mergedTree(), ready.childWorkspaceId());
+        plain(project, "config", "filter.evil.clean", "cat");
+
+        service.scan();
+
+        Row blocked = service.find(parent.tenantId(), parent.sessionId(), "run-1");
+        assertThat(blocked.state()).isEqualTo(ChildWorkspaceStore.BLOCKED);
+        assertThat(blocked.outcomeCode()).isEqualTo("merged");
+        assertThat(blocked.lastError()).contains("filter.evil.clean");
+        // A discard that fails too keeps the outcome: the merge landed.
+        Row still = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD);
+        assertThat(still.state()).isEqualTo(ChildWorkspaceStore.BLOCKED);
+        assertThat(still.outcomeCode()).isEqualTo("merged");
+        plain(project, "config", "--unset", "filter.evil.clean");
+        Row discarded = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD);
+        assertThat(discarded.state()).isEqualTo(ChildWorkspaceStore.DISCARDED);
+        assertThat(discarded.outcomeCode()).isEqualTo("merged");
+        assertThat(project.resolve("keep.txt")).hasContent("child");
+        assertPinsGone(ready);
     }
 
     @Test
@@ -486,47 +686,175 @@ class ChildWorkspaceServiceTest {
                 dead.childWorkspaceId());
 
         service.scan();
-        assertThat(leases.holdsMaintenance(parent.workspace(), dead.childWorkspaceId(), dead.claimGeneration()))
-                .isTrue();
+        assertThat(holder(parent.workspace())).isEqualTo(maintenanceHolder(dead));
         clock.addAndGet(1_001);
         service.scan();
-        assertThat(leases.holdsMaintenance(parent.workspace(), dead.childWorkspaceId(), dead.claimGeneration()))
-                .isFalse();
+        assertThat(holder(parent.workspace())).isNull();
         assertThat(jdbc.queryForList("SELECT holder_key FROM managed_workspace_execution_lease"
                 + " WHERE storage_key = ?", String.class, storageKey(parent.workspace()))).containsOnlyNulls();
     }
 
     @Test
+    void aCrashedStepsHoldPassesToItsResumedStepWithoutAGap() throws Exception {
+        for (String state : List.of(ChildWorkspaceStore.PREPARING, ChildWorkspaceStore.MERGING,
+                ChildWorkspaceStore.APPLYING, ChildWorkspaceStore.APPLIED, ChildWorkspaceStore.DISCARDING)) {
+            var parent = createSession("project");
+            Row row = store.admit(parent.tenantId(), parent.sessionId(), "run-1", parent.workspace(), clock.get());
+            jdbc.update("UPDATE qwen_managed_child_workspace SET state = ? WHERE child_workspace_id = ?", state,
+                    row.childWorkspaceId());
+            Row dead = store.claim(store.find(parent.tenantId(), parent.sessionId(), "run-1"), "dead-worker",
+                    clock.get(), 1_000);
+            leases.holdForMaintenance(parent.workspace(), dead.childWorkspaceId(), dead.claimGeneration());
+            List<String> heldWhenResumed = new java.util.concurrent.CopyOnWriteArrayList<>();
+            ChildWorkspaceProvider real = provider(root);
+            warmer.provider = new ChildWorkspaceProvider() {
+                @Override
+                public Path storageRoot(ContextBinding binding) {
+                    if (heldWhenResumed.isEmpty()) {
+                        heldWhenResumed.add(String.valueOf(jdbc.queryForObject("SELECT maintenance_id FROM"
+                                + " managed_workspace_execution_lease WHERE storage_key = ?", String.class,
+                                storageKeyOf(binding))));
+                    }
+                    return real.storageRoot(binding);
+                }
+
+                @Override
+                public ChildWorktreeGit git() {
+                    return git;
+                }
+            };
+            clock.addAndGet(1_001);
+
+            service.scan();
+
+            // The resumed step may fail on this bare row; what matters is
+            // that it found the hold still standing, and freed it after.
+            assertThat(heldWhenResumed).as(state).containsExactly(dead.childWorkspaceId());
+            assertThat(holder(parent.workspace())).as(state).isNull();
+            parkLeftovers();
+        }
+    }
+
+    @Test
+    void aStrandedHoldIsReleasedEvenWithTheCapabilityOff() throws Exception {
+        var parent = createSession("project");
+        Row row = store.admit(parent.tenantId(), parent.sessionId(), "run-1", parent.workspace(), clock.get());
+        Row dead = store.claim(row, "dead-worker", clock.get(), 1_000);
+        leases.holdForMaintenance(parent.workspace(), dead.childWorkspaceId(), dead.claimGeneration());
+        warmer.provider = null;
+        clock.addAndGet(1_001);
+
+        // A step's row: a host that runs steps may resume it, so this one
+        // waits a grace period, then frees the storage anyway.
+        service.scan();
+        assertThat(holder(parent.workspace())).isEqualTo(maintenanceHolder(dead));
+        clock.addAndGet(ChildWorkspaceService.RESUMABLE_GRACE_MS);
+        service.scan();
+
+        assertThat(holder(parent.workspace())).isNull();
+    }
+
+    @Test
+    void aScanStopsDrivingRowsOnceItsBudgetIsSpent() throws Exception {
+        var parent = createSession("project");
+        ChildWorkspaceProvider slow = provider(root);
+        warmer.provider = new ChildWorkspaceProvider() {
+            @Override
+            public Path storageRoot(ContextBinding binding) {
+                clock.addAndGet(ChildWorkspaceService.SCAN_BUDGET_MS);
+                return slow.storageRoot(binding);
+            }
+
+            @Override
+            public ChildWorktreeGit git() {
+                return git;
+            }
+        };
+        store.admit(parent.tenantId(), parent.sessionId(), "run-1", parent.workspace(), clock.get());
+        clock.addAndGet(1);
+        store.admit(parent.tenantId(), parent.sessionId(), "run-2", parent.workspace(), clock.get());
+        Row dead = store.claim(store.admit(parent.tenantId(), parent.sessionId(), "run-3", parent.workspace(),
+                clock.get()), "dead-worker", clock.get(), 1);
+        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'merged' WHERE child_workspace_id = ?",
+                dead.childWorkspaceId());
+        leases.holdForMaintenance(parent.workspace(), dead.childWorkspaceId(), dead.claimGeneration());
+        clock.addAndGet(2);
+
+        service.scan();
+
+        assertThat(service.find(parent.tenantId(), parent.sessionId(), "run-1").state())
+                .isEqualTo(ChildWorkspaceStore.READY);
+        Row waiting = service.find(parent.tenantId(), parent.sessionId(), "run-2");
+        assertThat(waiting.state()).isEqualTo(ChildWorkspaceStore.PREPARING);
+        assertThat(waiting.attempts()).isZero();
+        assertThat(waiting.claimGeneration()).isZero();
+    }
+
+    @Test
     void aStepWhoseClaimMovesOnStopsItsGit() throws Exception {
         Path gate = Files.createFile(temp.resolve("gate"));
+        Path pid = temp.resolve("gated-pid");
         Path gated = temp.resolve("gated-git");
-        Files.writeString(gated, "#!/bin/sh\nwhile [ -f '" + gate + "' ]; do sleep 0.05; done\nexec git \"$@\"\n");
+        Files.writeString(gated, "#!/bin/sh\necho $$ > '" + pid + "'\nwhile [ -f '" + gate
+                + "' ]; do sleep 0.05; done\nexec git \"$@\"\n");
         assumeTrue(gated.toFile().setExecutable(true));
-        warmer.provider = provider(root, Integer.MAX_VALUE,
-                new ChildWorktreeGit(gated.toString(), Duration.ofSeconds(60)));
+        ChildWorktreeGit gatedGit = new ChildWorktreeGit(gated.toString(), Duration.ofSeconds(60));
+        warmer.provider = provider(root, Integer.MAX_VALUE, gatedGit);
         var parent = createSession("project");
         Row row = store.admit(parent.tenantId(), parent.sessionId(), "run-1", parent.workspace(), clock.get());
         try {
             CompletableFuture<Row> step = CompletableFuture.supplyAsync(() -> service.drive(row));
             String key = storageKey(parent.workspace());
-            for (int wait = 0; wait < 500 && jdbc.queryForList("SELECT maintenance_id FROM"
-                    + " managed_workspace_execution_lease WHERE storage_key = ? AND maintenance_id IS NOT NULL",
-                    String.class, key).isEmpty(); wait++) {
+            // The step holds the storage and its first Git command waits at
+            // the gate.
+            for (int wait = 0; wait < 500 && !Files.exists(pid); wait++) {
                 sleep(10);
             }
-            clock.addAndGet(ChildWorkspaceService.LEASE_MS + 1);
-            assertThat(store.claim(store.find(parent.tenantId(), parent.sessionId(), "run-1"), "thief",
-                    clock.get(), ChildWorkspaceService.LEASE_MS)).isNotNull();
+            assertThat(jdbc.queryForList("SELECT maintenance_id FROM managed_workspace_execution_lease"
+                    + " WHERE storage_key = ? AND maintenance_id IS NOT NULL", String.class, key)).hasSize(1);
+            // Another worker takes the row over. Done in SQL, not by waiting
+            // out the claim, which the running step keeps renewing.
+            assertThat(jdbc.update("UPDATE qwen_managed_child_workspace SET claimed_by = 'thief',"
+                    + " claim_generation = claim_generation + 1 WHERE child_workspace_id = ?",
+                    row.childWorkspaceId())).isEqualTo(1);
 
             Row after = step.get(10, java.util.concurrent.TimeUnit.SECONDS);
 
-            assertThat(gate).exists();
             assertThat(after.claimedBy()).isEqualTo("thief");
             assertThat(after.state()).isEqualTo(ChildWorkspaceStore.PREPARING);
             assertThat(root.resolve(ChildWorktreeGit.CONTAINER)).doesNotExist();
+            // The worker that gave up its claim still freed the storage it
+            // held, though its generation is no longer the row's.
+            assertThat(jdbc.queryForList("SELECT holder_key FROM managed_workspace_execution_lease"
+                    + " WHERE storage_key = ?", String.class, key)).containsOnlyNulls();
+            long blocked = Long.parseLong(Files.readString(pid).strip());
+            for (int wait = 0; wait < 100 && ProcessHandle.of(blocked).map(ProcessHandle::isAlive).orElse(false);
+                    wait++) {
+                sleep(20);
+            }
+            assertThat(ProcessHandle.of(blocked).map(ProcessHandle::isAlive).orElse(false)).isFalse();
         } finally {
             Files.deleteIfExists(gate);
+            gatedGit.close();
         }
+    }
+
+    @Test
+    void theScanTheMigrationGateAndTheHoldSweepReadThroughIndexes() {
+        // None of the three tables is pruned: each read must key on what it
+        // filters, not scan the accumulated history.
+        assertThat(indexColumns("qwen_managed_child_workspace", "idx_child_workspace_poll"))
+                .containsExactly("state", "finish_request", "next_retry_at");
+        assertThat(indexColumns("qwen_managed_child_workspace", "idx_child_workspace_storage"))
+                .containsExactly("tenant_id", "storage_id", "state");
+        assertThat(indexColumns("managed_workspace_execution_lease", "idx_execution_lease_maintenance"))
+                .containsExactly("maintenance_id");
+    }
+
+    private List<String> indexColumns(String table, String index) {
+        return jdbc.queryForList("SELECT LOWER(column_name) FROM information_schema.index_columns"
+                + " WHERE LOWER(table_name) = ? AND LOWER(index_name) = ? ORDER BY ordinal_position",
+                String.class, table, index);
     }
 
     @Test
@@ -582,6 +910,7 @@ class ChildWorkspaceServiceTest {
 
     private StoreModels.SessionRecord createSession(String cwd) {
         String tenant = "tenant-" + UUID.randomUUID();
+        tenants.add(tenant);
         jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
                 + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1,"
                 + " 'storage', 'Workspace', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
@@ -607,6 +936,10 @@ class ChildWorkspaceServiceTest {
         return new ChildWorkspaceProvider() {
             @Override
             public Path storageRoot(ContextBinding binding) {
+                // Another test's row must never reach this test's repository.
+                if (!tenants.contains(binding.getTenantId())) {
+                    throw new IllegalStateException("foreign storage " + binding.getTenantId());
+                }
                 if (calls.incrementAndGet() > budget) {
                     throw new RuntimeBrokerException(409, "workspace_busy",
                             "Workspace storage is held by another tool turn.", true);
@@ -619,6 +952,33 @@ class ChildWorkspaceServiceTest {
                 return runner;
             }
         };
+    }
+
+    private void assertPinsGone(Row row) {
+        var repository = git.open(root, "project");
+        assertThat(git.pinned(root, repository, row.childWorkspaceId(), "base")).isNull();
+        assertThat(git.pinned(root, repository, row.childWorkspaceId(), "result")).isNull();
+    }
+
+    /** The holder of the storage's lease when a maintenance hold holds it, else null. */
+    private String holder(ContextBinding storage) throws Exception {
+        List<String> holders = jdbc.queryForList("SELECT holder_key FROM managed_workspace_execution_lease"
+                + " WHERE storage_key = ? AND maintenance_id IS NOT NULL", String.class, storageKey(storage));
+        return holders.isEmpty() ? null : holders.getFirst();
+    }
+
+    private static String maintenanceHolder(Row claimed) throws Exception {
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(("child-workspace\u0000"
+                + claimed.childWorkspaceId() + "\u0000" + claimed.claimGeneration())
+                .getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static String storageKeyOf(ContextBinding binding) {
+        try {
+            return storageKey(binding);
+        } catch (Exception error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     private static String storageKey(ContextBinding binding) throws Exception {

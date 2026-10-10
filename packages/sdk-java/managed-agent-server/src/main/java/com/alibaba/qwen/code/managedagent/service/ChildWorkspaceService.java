@@ -31,6 +31,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.APPLIED;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.APPLYING;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.BLOCKED;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.CONFLICTED;
@@ -67,6 +68,10 @@ public class ChildWorkspaceService {
     static final long BUSY_DELAY_MS = 1_000;
     private static final long MAX_BACKOFF_MS = 60_000;
     private static final int MAX_STEPS = 8;
+    /** How long past its claim a resumable step's hold waits on a host that runs no steps. */
+    static final long RESUMABLE_GRACE_MS = 2 * LEASE_MS;
+    /** A scan drives no new row after this long; the rest wait for the next tick. */
+    static final long SCAN_BUDGET_MS = LEASE_MS / 2;
 
     private final AgentStateStore sessions;
     private final ChildWorkspaceStore store;
@@ -140,10 +145,27 @@ public class ChildWorkspaceService {
     @Scheduled(scheduler = "childWorkspaceScheduler", fixedDelayString =
             "${qwen.managed-agent.child-workspace.scan-delay:2s}")
     public void scan() {
-        if (warmer.childWorkspaces() == null) {
+        // First, and on every host: a hold whose claim expired belongs to
+        // no step, and nothing else frees its storage. It needs no Git, so
+        // turning the capability off must not strand it, and it must not
+        // wait behind the steps below. Where steps run, a crashed step's
+        // row is resumed below and its new claimant takes the hold over,
+        // so no tool turn slips in between; that hold is kept. A host that
+        // runs no steps leaves it to one that does for a grace period.
+        boolean capable = warmer.childWorkspaces() != null;
+        int released = leases.releaseStaleMaintenance(clock.get(),
+                capable ? Long.MAX_VALUE : RESUMABLE_GRACE_MS);
+        if (released > 0) {
+            LOG.warn("released {} child workspace maintenance hold(s) no step owned", released);
+        }
+        if (!capable) {
             return;
         }
-        for (Row row : store.findDue(clock.get(), SCAN_LIMIT)) {
+        long started = clock.get();
+        for (Row row : store.findDue(started, SCAN_LIMIT)) {
+            if (clock.get() - started >= SCAN_BUDGET_MS) {
+                break;
+            }
             try {
                 drive(row);
             } catch (RuntimeException error) {
@@ -151,18 +173,11 @@ public class ChildWorkspaceService {
                         row.tenantId(), row.parentSessionId(), row.childRunId(), error.getMessage(), error);
             }
         }
-        // After the due rows: a crashed step's row is claimed again above,
-        // and its new claimant takes the hold over, so what is left holding
-        // a storage here is a hold no step owns any more.
-        int released = leases.releaseStaleMaintenance(clock.get());
-        if (released > 0) {
-            LOG.warn("released {} child workspace maintenance hold(s) no step owned", released);
-        }
     }
 
     static boolean owes(Row row) {
         return switch (row.state()) {
-            case PREPARING, MERGING, APPLYING, DISCARDING -> true;
+            case PREPARING, MERGING, APPLYING, APPLIED, DISCARDING -> true;
             case READY -> row.finishRequest() != null;
             case CONFLICTED, BLOCKED, FAILED -> DISCARD.equals(row.finishRequest());
             default -> false;
@@ -223,6 +238,7 @@ public class ChildWorkspaceService {
                     columns());
             case MERGING -> mergeStep(provider, claimed);
             case APPLYING -> applyStep(provider, claimed);
+            case APPLIED -> appliedStep(provider, claimed);
             case DISCARDING -> discardStep(provider, claimed);
             case CONFLICTED, BLOCKED, FAILED -> advance(claimed, DISCARDING, columns());
             default -> throw new IllegalStateException("A " + claimed.state() + " child Workspace owes no step");
@@ -239,7 +255,7 @@ public class ChildWorkspaceService {
                 ChildWorktreeGit.Layout layout = git.layout(root, claimed.parentCwdRelative());
                 childCwd = childCwd(claimed.childWorkspaceId(), layout.offset());
                 repository = git.open(root, layout.repositoryRelative());
-                base = git.snapshot(root, repository, repository.top(), null);
+                base = git.base(root, repository, claimed.childWorkspaceId());
                 if (!git.hasDirectory(root, repository, base, layout.offset())) {
                     throw new ChildWorkspaceException(ChildWorkspaceException.LAYOUT, false,
                             "The parent's working directory holds nothing the snapshot carries");
@@ -296,9 +312,7 @@ public class ChildWorkspaceService {
                 // The write follows under the same hold: a tool turn waiting
                 // for the storage must not change the parent's tree between
                 // the merge and its write.
-                Row applying = store.find(claimed.tenantId(), claimed.parentSessionId(), claimed.childRunId());
-                write(git, root, repository, applying);
-                advance(applying, MERGED, columns("outcome_code", "merged"));
+                land(git, root, repository, find(claimed));
                 return null;
             }
             // The child's result stays pinned: a conflict never loses work.
@@ -314,27 +328,56 @@ public class ChildWorkspaceService {
     private void applyStep(ChildWorkspaceProvider provider, Row claimed) {
         ChildWorktreeGit git = provider.git();
         held(provider, claimed, root -> {
-            write(git, root, git.open(root, claimed.repositoryRelative()), claimed);
+            land(git, root, git.open(root, claimed.repositoryRelative()), claimed);
             return null;
         });
-        advance(claimed, MERGED, columns("outcome_code", "merged"));
     }
 
-    /** Writes the recorded merge into the parent's tree, then removes the worktree and both pins. */
-    private static void write(ChildWorktreeGit git, Path root, ChildWorktreeGit.Repository repository,
-            Row applying) {
+    /**
+     * Resumes a merge that already landed: its write is done, so the
+     * parent's tree is not judged again (the storage was free since, and a
+     * later edit there is the parent's own). Only the worktree and both
+     * pins remain to remove.
+     */
+    private void appliedStep(ChildWorkspaceProvider provider, Row claimed) {
+        ChildWorktreeGit git = provider.git();
+        held(provider, claimed, root -> {
+            settle(git, root, claimed);
+            return null;
+        });
+    }
+
+    /**
+     * Writes the recorded merge into the parent's tree and records, under
+     * the same hold, that it landed, then removes the worktree and both
+     * pins.
+     */
+    private void land(ChildWorktreeGit git, Path root, ChildWorktreeGit.Repository repository, Row applying) {
         git.apply(root, repository, applying.parentTree(), applying.mergedTree());
-        git.discard(root, applying.repositoryRelative(), applying.childWorkspaceId(), false);
+        advance(applying, APPLIED, columns());
+        settle(git, root, find(applying));
+    }
+
+    private void settle(ChildWorktreeGit git, Path root, Row applied) {
+        git.discard(root, applied.repositoryRelative(), applied.childWorkspaceId(), false);
+        advance(applied, MERGED, columns("outcome_code", "merged"));
     }
 
     private void discardStep(ChildWorkspaceProvider provider, Row claimed) {
+        // A merge that landed and then ended blocked keeps no result pin:
+        // its work is in the parent's tree.
+        boolean merged = "merged".equals(claimed.outcomeCode());
         held(provider, claimed, root -> {
             provider.git().discard(root, claimed.repositoryRelative(), claimed.childWorkspaceId(),
-                    claimed.resultCommit() != null);
+                    claimed.resultCommit() != null && !merged);
             return null;
         });
         advance(claimed, DISCARDED, columns("outcome_code",
                 claimed.outcomeCode() == null ? "discarded" : claimed.outcomeCode()));
+    }
+
+    private Row find(Row row) {
+        return store.find(row.tenantId(), row.parentSessionId(), row.childRunId());
     }
 
     /**
@@ -421,10 +464,14 @@ public class ChildWorkspaceService {
     /**
      * Ends the row. A discard that cannot finish clears the discard
      * request with it: {@code blocked} must not lead straight back into
-     * the discard that just failed, so only a new request retries it.
+     * the discard that just failed, so only a new request retries it. A
+     * merge that already landed keeps {@code merged} as its outcome, with
+     * the cleanup's failure as the last error.
      */
     private void end(Row latest, String state, String code, String message) {
-        java.util.Map<String, Object> columns = columns("outcome_code", code, "last_error", truncate(message));
+        boolean landed = APPLIED.equals(latest.state()) || "merged".equals(latest.outcomeCode());
+        java.util.Map<String, Object> columns = columns("outcome_code", landed ? "merged" : code,
+                "last_error", truncate(message));
         if (DISCARDING.equals(latest.state())) {
             columns.put("finish_request", null);
         }

@@ -24,7 +24,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * The durable command of a child Workspace (#13753 I1): one row per child
- * run in {@code qwen_managed_child_workspace} (V58). The row holds the
+ * run in {@code qwen_managed_child_workspace} (V60). The row holds the
  * recorded base, the merge evidence and the outcome. Claims fence its
  * writers: every transition compares the state and the claim generation,
  * so a worker whose claim expired cannot commit a step. See
@@ -36,6 +36,8 @@ public class ChildWorkspaceStore {
     public static final String READY = "ready";
     public static final String MERGING = "merging";
     public static final String APPLYING = "applying";
+    /** The merge is in the parent's working tree; only the worktree and the pins remain. */
+    public static final String APPLIED = "applied";
     public static final String MERGED = "merged";
     public static final String CONFLICTED = "conflicted";
     public static final String DISCARDING = "discarding";
@@ -125,13 +127,13 @@ public class ChildWorkspaceStore {
      * live claim is a step running right now.
      */
     public List<Row> findDue(long now, int limit) {
-        return jdbc.query(SELECT + " WHERE (state IN (?, ?, ?, ?)"
+        return jdbc.query(SELECT + " WHERE (state IN (?, ?, ?, ?, ?)"
                         + " OR (state = ? AND finish_request IS NOT NULL)"
                         + " OR (state IN (?, ?, ?) AND finish_request = ?))"
                         + " AND next_retry_at <= ?"
                         + " AND (claimed_until IS NULL OR claimed_until <= ?)"
                         + " ORDER BY next_retry_at, created_at, parent_session_id, child_run_id LIMIT ?",
-                this::row, PREPARING, MERGING, APPLYING, DISCARDING, READY, CONFLICTED, BLOCKED,
+                this::row, PREPARING, MERGING, APPLYING, APPLIED, DISCARDING, READY, CONFLICTED, BLOCKED,
                 FAILED, DISCARD, now, now, limit);
     }
 
@@ -258,7 +260,7 @@ public class ChildWorkspaceStore {
                 if (DISCARDED.equals(row.state())) {
                     return row;
                 }
-                if (MERGING.equals(row.state()) || APPLYING.equals(row.state())
+                if (MERGING.equals(row.state()) || APPLYING.equals(row.state()) || APPLIED.equals(row.state())
                         || MERGE.equals(row.finishRequest())
                                 && !CONFLICTED.equals(row.state()) && !BLOCKED.equals(row.state())) {
                     throw new ApiException(HttpStatus.CONFLICT, "child_workspace_finishing",

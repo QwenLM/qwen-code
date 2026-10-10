@@ -302,12 +302,13 @@ public class WorkspaceExecutionStore {
     /**
      * The child Workspace maintenance holder (#13753 I1): a physical step
      * of a child Workspace holds the storage exactly as a tool turn does,
-     * so a turn meets it as workspace_busy and W1a fence and registration
-     * wait for it. The Runtime holder columns stay null and maintenance_id
-     * names the child Workspace. The caller must hold the child
-     * Workspace's current claim: a hold naming that child Workspace is
-     * taken over only by its current claim generation, so a worker whose
-     * claim expired can neither take nor keep the storage.
+     * so a turn meets it as workspace_busy and polls, while W1a fence and
+     * registration, which need an idle lease, refuse. The Runtime holder
+     * columns stay null and maintenance_id names the child Workspace. The
+     * hold belongs to the child Workspace's current claim generation: a
+     * newer generation takes it over, an older one is refused, and a hold
+     * whose claim has since expired is freed by
+     * {@link #releaseStaleMaintenance}.
      */
     public void holdForMaintenance(ContextBinding binding, String maintenanceId,
             long claimGeneration) {
@@ -348,6 +349,11 @@ public class WorkspaceExecutionStore {
         });
     }
 
+    /** The child Workspace states a physical step runs in, and that a scan resumes. */
+    private static final java.util.Set<String> RESUMABLE_STATES = java.util.Set.of(ChildWorkspaceStore.PREPARING,
+            ChildWorkspaceStore.MERGING, ChildWorkspaceStore.APPLYING, ChildWorkspaceStore.APPLIED,
+            ChildWorkspaceStore.DISCARDING);
+
     /** Releases a maintenance hold, and only the one this claim took. */
     public void releaseMaintenance(ContextBinding binding, String maintenanceId,
             long claimGeneration) {
@@ -363,11 +369,14 @@ public class WorkspaceExecutionStore {
     /**
      * Clears the maintenance holds no step owns any more: their child
      * Workspace has no live claim, because the worker died (or failed to
-     * release) after its last commit. A live step renews its claim, and a
-     * crashed step's row is claimed again before this runs, so the hold
-     * of any step still going is never touched.
+     * release) after its last step. A live step renews its claim, so the
+     * hold of any step still going is never touched. A hold whose child
+     * Workspace is still in a step's state waits {@code resumableGraceMillis}
+     * past its claim (forever with {@code Long.MAX_VALUE}): a scan that
+     * resumes the row lets its new claimant take the hold over without a
+     * gap.
      */
-    public int releaseStaleMaintenance(long now) {
+    public int releaseStaleMaintenance(long now, long resumableGraceMillis) {
         // Every maintenance hold is a candidate; the claim is judged once,
         // under the child Workspace's row lock, so a claim taken meanwhile
         // keeps its hold.
@@ -379,10 +388,17 @@ public class WorkspaceExecutionStore {
         for (String[] hold : holds) {
             Integer cleared = transaction.execute(status -> {
                 WorkspaceStorageKindGuard.lockDomain(jdbc, hold[0]);
-                List<Boolean> unclaimed = jdbc.query("SELECT claimed_until FROM qwen_managed_child_workspace"
+                List<Boolean> unclaimed = jdbc.query("SELECT claimed_until, state FROM qwen_managed_child_workspace"
                         + " WHERE child_workspace_id = ? FOR UPDATE", (row, index) -> {
                             long until = row.getLong(1);
-                            return row.wasNull() || until <= now;
+                            if (row.wasNull()) {
+                                return true;
+                            }
+                            if (!RESUMABLE_STATES.contains(row.getString(2))) {
+                                return until <= now;
+                            }
+                            return resumableGraceMillis != Long.MAX_VALUE
+                                    && until <= now - resumableGraceMillis;
                         }, hold[2]);
                 if (unclaimed.size() != 1 || !unclaimed.getFirst()) {
                     return 0;
@@ -394,16 +410,6 @@ public class WorkspaceExecutionStore {
             released += cleared == null ? 0 : cleared;
         }
         return released;
-    }
-
-    /** Whether a maintenance hold of this child Workspace claim holds the storage. */
-    public boolean holdsMaintenance(ContextBinding binding, String maintenanceId,
-            long claimGeneration) {
-        List<String> holders = jdbc.queryForList("SELECT holder_key FROM"
-                + " managed_workspace_execution_lease WHERE storage_key = ? AND storage_kind = 'LOCAL'"
-                + " AND maintenance_id = ?", String.class, storageKey(binding), maintenanceId);
-        return holders.size() == 1
-                && maintenanceHolderKey(maintenanceId, claimGeneration).equals(holders.getFirst());
     }
 
     public boolean hasHolder(RuntimeBindingRecord saved) {

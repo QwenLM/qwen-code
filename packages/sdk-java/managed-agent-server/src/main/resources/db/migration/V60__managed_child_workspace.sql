@@ -32,11 +32,16 @@ CREATE TABLE qwen_managed_child_workspace (
     updated_at BIGINT NOT NULL,
     PRIMARY KEY (parent_session_id, child_run_id),
     UNIQUE KEY uq_child_workspace_id (child_workspace_id),
-    INDEX idx_child_workspace_poll (state, next_retry_at)
+    -- The scan: every arm of its predicate is a range of (state,
+    -- finish_request), so ended rows that owe nothing are never read.
+    INDEX idx_child_workspace_poll (state, finish_request, next_retry_at),
+    -- The storage migration gate counts one storage's unsettled rows.
+    INDEX idx_child_workspace_storage (tenant_id, storage_id, state)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 -- The maintenance holder of a storage: the child Workspace whose physical
 -- step holds the execution lease. Null for every Runtime holder and for an
--- idle lease.
+-- idle lease; indexed so the stale-hold sweep reads only the held rows.
 ALTER TABLE managed_workspace_execution_lease
     ADD COLUMN maintenance_id CHAR(32) NULL;
+CREATE INDEX idx_execution_lease_maintenance ON managed_workspace_execution_lease (maintenance_id);

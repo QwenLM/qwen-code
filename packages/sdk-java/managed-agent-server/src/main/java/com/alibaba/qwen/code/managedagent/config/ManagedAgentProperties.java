@@ -130,14 +130,41 @@ public class ManagedAgentProperties {
         // The child Workspace capability (#13753 I1) runs Git in this
         // control plane against an administrator mount, so it needs the
         // local-process Broker that mounts the storage here.
-        if (runtimeBroker.isChildWorkspacesEnabled()
-                && (!runtimeBroker.isEnabled()
-                        || !"local-process".equals(runtimeBroker.getProvisioner())
-                        || !"session".equals(runtimeBroker.getIsolationClass())
-                        || runtimeBroker.getWorkspaceMounts().isEmpty())) {
-            throw new IllegalStateException("Child Workspaces require a Session-isolated"
-                    + " local-process Broker with Workspace mounts");
+        if (runtimeBroker.isChildWorkspacesEnabled()) {
+            if (!runtimeBroker.isEnabled()
+                    || !"local-process".equals(runtimeBroker.getProvisioner())
+                    || !"session".equals(runtimeBroker.getIsolationClass())
+                    || runtimeBroker.getWorkspaceMounts().isEmpty()) {
+                throw new IllegalStateException("Child Workspaces require a Session-isolated"
+                        + " local-process Broker with Workspace mounts");
+            }
+            // A suffix-less number binds as milliseconds: refuse it here,
+            // naming the key, rather than time out every Git command.
+            Duration gitTimeout = runtimeBroker.getChildWorkspaceGitTimeout();
+            if (gitTimeout == null || gitTimeout.compareTo(Duration.ofSeconds(1)) < 0
+                    || gitTimeout.compareTo(Duration.ofHours(1)) > 0) {
+                throw new IllegalStateException("child-workspace-git-timeout must be between 1s and 1h");
+            }
+            if (!childWorkspacesSupportedOn(System.getProperty("os.name", ""))) {
+                throw new IllegalStateException("Child Workspaces are not supported on Windows");
+            }
+            // The steps name the files Git reports: a JVM whose file names
+            // are not UTF-8 (a C or POSIX locale) cannot spell most of them.
+            if (!utf8FileNames(System.getProperty("sun.jnu.encoding", ""))) {
+                throw new IllegalStateException("Child Workspaces need UTF-8 file names; run the server"
+                        + " under a UTF-8 locale (sun.jnu.encoding is "
+                        + System.getProperty("sun.jnu.encoding") + ")");
+            }
         }
+    }
+
+    static boolean utf8FileNames(String encoding) {
+        return "UTF-8".equalsIgnoreCase(encoding) || "UTF8".equalsIgnoreCase(encoding);
+    }
+
+    /** Child Workspaces run their Git steps on POSIX hosts only. */
+    static boolean childWorkspacesSupportedOn(String osName) {
+        return !osName.toLowerCase(Locale.ROOT).startsWith("windows");
     }
 
     public static class Harness {

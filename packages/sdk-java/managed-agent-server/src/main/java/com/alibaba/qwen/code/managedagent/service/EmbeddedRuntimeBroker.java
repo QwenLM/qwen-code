@@ -263,7 +263,12 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         }
         ChildWorktreeGit git = new ChildWorktreeGit(broker.getChildWorkspaceGit(),
                 broker.getChildWorkspaceGitTimeout());
-        LOG.info("Child Workspaces enabled with {}", git.requireSupportedVersion());
+        try {
+            LOG.info("Child Workspaces enabled with {}", git.requireSupportedVersion());
+        } catch (RuntimeException error) {
+            git.close();
+            throw error;
+        }
         return new ChildWorkspaceProvider() {
             @Override
             public java.nio.file.Path storageRoot(ContextBinding binding) {
@@ -314,6 +319,9 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             recovery.close();
         }
         server.close();
+        if (childWorkspaces != null) {
+            childWorkspaces.git().close();
+        }
     }
 
     private static RuntimeProvisioner provisioner(

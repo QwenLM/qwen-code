@@ -271,19 +271,29 @@ class EmbeddedRuntimeBrokerTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("need Git");
         properties.getRuntimeBroker().setChildWorkspaceGit("git");
+        var probe = new com.alibaba.qwen.code.managedagent.service.ChildWorktreeGit("git",
+                java.time.Duration.ofSeconds(30));
         try {
-            new com.alibaba.qwen.code.managedagent.service.ChildWorktreeGit("git",
-                    java.time.Duration.ofSeconds(30)).requireSupportedVersion();
+            probe.requireSupportedVersion();
         } catch (IllegalStateException error) {
             org.junit.jupiter.api.Assumptions.assumeTrue(false, error.getMessage());
+        } finally {
+            probe.close();
         }
         try (EmbeddedRuntimeBroker broker = mountedBroker(properties)) {
             var provider = broker.childWorkspaces();
             assertThat(provider).isNotNull();
-            assertThat(provider.storageRoot(new ContextBinding("tenant", "workspace", 1, "storage", ".",
-                    "config", 1))).isEqualTo(storage);
+            ContextBinding binding = new ContextBinding("tenant", "workspace", 1, "storage", ".", "config", 1);
+            assertThat(provider.storageRoot(binding)).isEqualTo(storage);
             assertThatThrownBy(() -> provider.storageRoot(new ContextBinding("tenant", "workspace", 1,
                     "other", ".", "config", 1)))
+                    .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+            // A mount replaced after boot is not the administrator's mount.
+            Path elsewhere = java.nio.file.Files.createDirectory(temp.toRealPath().resolve("elsewhere"));
+            java.nio.file.Files.delete(storage);
+            java.nio.file.Files.createSymbolicLink(storage, elsewhere);
+            assertThatThrownBy(() -> provider.storageRoot(binding))
                     .isInstanceOfSatisfying(RuntimeBrokerException.class,
                             error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
         }

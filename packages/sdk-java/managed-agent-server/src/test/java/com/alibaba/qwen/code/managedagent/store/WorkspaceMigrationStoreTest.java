@@ -371,7 +371,12 @@ class WorkspaceMigrationStoreTest {
                 + " state, created_at, updated_at) VALUES ('tenant', 'parent', 'run', ?, 'workspace', 1,"
                 + " 'storage', '.', 'ready', 0, 0)", "0".repeat(32));
         assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
-        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'conflicted'");
+        // A landed merge still owes its cleanup.
+        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'applied' WHERE child_workspace_id = ?",
+                "0".repeat(32));
+        assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
+        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'conflicted' WHERE child_workspace_id = ?",
+                "0".repeat(32));
         assertThat(store(true).inspect().path("state").asText()).isEqualTo("RETIRING");
     }
 

@@ -7,7 +7,10 @@ package com.alibaba.qwen.code.managedagent.service;
  * retryable one is a momentary fault, retried with backoff.
  */
 public final class ChildWorkspaceException extends RuntimeException {
-    /** The layout of decision 2 is not met; nothing was created. */
+    /**
+     * The layout of decision 2 is not met. No worktree, pin or recorded
+     * base exists; at most an unreachable snapshot object that gc collects.
+     */
     public static final String LAYOUT = "child_workspace_layout";
     /** The repository config names a program or redirects Git. */
     public static final String UNSAFE_CONFIG = "child_workspace_unsafe_config";
