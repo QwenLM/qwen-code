@@ -63,7 +63,7 @@ class WorkspaceMigrationMySqlIT {
         assertThat(jdbc.queryForList("SELECT version FROM flyway_schema_history"
                 + " WHERE installed_rank > ? AND success = TRUE ORDER BY installed_rank",
                 String.class, lastRank)).containsExactly("48", "49", "50",
-                "51", "52", "53", "54", "55", "56", "57", "58");
+                "51", "52", "53", "54", "55", "56", "57", "58", "60");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Integer.class)).isZero();
     }
@@ -196,7 +196,7 @@ class WorkspaceMigrationMySqlIT {
         if (cwd) {
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = 'migrating'",
                     Integer.class)).isEqualTo(1);
-            var cwdReplay = changeCwd(store, transaction, "migrating", "original", 1);
+            var cwdReplay = changeCwd(store, transaction, "migrating", original.sessionId(), "original", 1);
             assertThat(cwdReplay.replayed()).isTrue();
             assertThat(cwdReplay.operation().operationId()).isEqualTo(originalCwd.operation().operationId());
             assertThat(cwdReplay.operation().state()).isEqualTo("COMPLETED");
