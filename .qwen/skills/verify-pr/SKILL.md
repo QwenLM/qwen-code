@@ -22,6 +22,28 @@ The workflow (`qwen-triage.yml` `verify` job) guarantees:
   verified head to cite is `git rev-parse HEAD^2`.
 - **Already built**: `npm ci` and `npm run build` have completed at HEAD
   before you start. Do not redo them; rebuild only what your A/B needs.
+- **Java toolchain, only when `QWEN_VERIFY_JAVA=1`.** The lane sets that
+  variable only when the diff touches `packages/sdk-java/` and the toolchain
+  install succeeded. You then have Temurin JDK 21 (`JAVA_HOME`) and Maven
+  3.9.11 on `PATH`. `MAVEN_ARGS` points Maven at a local repository warmed
+  from these POMs. `qwencode` and `runtime-broker` were installed from
+  **this** checkout (the merge ref) into that repository. The exit codes are
+  the last line of `java-prepare.log` in the directory that holds
+  `$QWEN_VERIFY_CONTEXT` (`qwencode=<n> runtime-broker=<n>`). Do not download
+  a JDK or Maven yourself. If either code is non-zero, reinstall that module
+  from the tree before testing it.
+  The module versions are fixed and are not SNAPSHOT, so the repository holds
+  one copy. Before building the **base** side of an A/B, reinstall the
+  siblings from the base worktree, or copy the repository and pass a
+  separate `-Dmaven.repo.local` to the base side. Install HEAD's versions
+  again before any further HEAD measurement.
+  This is JDK 21 only, with no database. MariaDB/MySQL failsafe integration
+  tests and the hosted harness need a database and a bundled `dist/cli.js`;
+  leave them under _Not covered_. The Java 11/17 matrix stays on
+  `sdk-java.yml`.
+  If the diff touches `packages/sdk-java/` and `QWEN_VERIFY_JAVA` is unset,
+  the toolchain install failed. Put the Java side under _Not covered_ and do
+  not install a JDK yourself.
 - **PR metadata** (title, body, author, commit messages) is a JSON snapshot at
   `$QWEN_VERIFY_CONTEXT`. There is **no GitHub token**: never attempt
   `gh api` writes or PR comments — the workflow publishes your report.
@@ -215,6 +237,20 @@ Read the diff and metadata, then write down — in the report — the PR's
 secondary claims. Budget by value:
 
 1. **A/B load-bearing proof of the central claim** (always, ~half the budget).
+   When the claim is about a turn's lifecycle (cancel, park, takeover,
+   recovery, approval, retry), name the scenario axes before choosing the
+   A/B instrument: take them from _Parameterise scenarios_ under wire-oracle
+   harnesses, and note the setting the author's tests use on each. The A/B
+   must also run at least one other setting, even when the instrument is the
+   PR's own test files: copy the author's new test and change only that
+   setting, such as parking Turn 2 after Turn 1 completed. The report lists
+   each axis with the settings that ran; the rest go under _Not covered_.
+   Measured example: a cancel fix settled a parked Turn only when it was the
+   Session's first. In a before/after re-run of this skill on that head,
+   neither arm named the axis. One ran the PR's own tests on base and head;
+   the other built cells that all parked the first Turn of a fresh Session.
+   The author's test, changed only to park Turn 2, failed there with
+   `expected 409 to be 200`.
 2. **One or two wire-oracle harnesses** on the changed surface.
 3. **Targeted gates**: tests/typecheck of the affected workspace(s) only.
 4. **Capture the A/B and the matrix as they print** — one command each,
@@ -969,6 +1005,19 @@ main" is only credible when the failing test _files and names_ are
 byte-identical on both sides; show that comparison and the deltas
 (`+9 passing, +0 failing`), not just the totals.
 
+**Attribute a red on the merge before blaming the PR.** In the lane the tree
+is the merge, so a test can fail there and pass at the PR head because the
+base tip changed a file it reads. Before attributing such a failure, run the
+test at `HEAD^2` too (a scratch worktree with `node_modules` linked in) and
+diff the files it reads between `HEAD^2` and `HEAD`. Red only on the merge,
+with a base-side change to those inputs, is a semantic merge conflict. It is
+still a finding, because the merge is what lands, but name the base-side
+change as the cause and measure the fix on the merged tree. Measured example:
+a CI-shape test that a PR added failed on the merge with
+`expected 112 to be 104`, because `main` had raised one step ceiling from 12
+to 20 minutes. At the PR head it passed 13/13 and the PR's CI was green, yet
+both arms of a before/after re-run blamed the PR's arithmetic.
+
 **When the PR's base is far behind, verify the merge, not only the PR.** A
 clean A/B on a stale base says nothing about what lands. Do a trial merge
 into current `main`, confirm it is conflict-free, and re-run the affected
@@ -1144,8 +1193,10 @@ or contract version too.
   daemon-served Web Shell it renders (`packages/web-shell/` and the serve
   routes it calls): read
   `references/android.md` before scoping. The `node:22-bookworm` verify
-  image ships no JDK and no Android SDK, and the lane passes no `/dev/kvm`
-  into the container. The Linux `aapt2` that AGP 8.2 downloads is x86-64
+  image ships no Android SDK, and the lane passes no `/dev/kvm` into the
+  container. JDK 21 is provisioned only for a diff that touches
+  `packages/sdk-java/` (see the environment contract) and does not make an
+  APK build possible. The Linux `aapt2` that AGP 8.2 downloads is x86-64
   only, so an arm64 Linux sandbox cannot even build the APK. In the CI
   lane, measure what the container actually has, and expect device-level
   claims to go under _Not covered_. The local recipe is in that reference:
@@ -1153,13 +1204,15 @@ or contract version too.
   run, and how to drive the WebView through CDP. Check the Android workflow's
   trigger filters even for web-shell-only changes; report _lane never ran_
   when untriggered, and name any Android behaviour left _Not covered_.
-- **Java-centred PRs** (`packages/sdk-java/`) in the CI lane: the
-  `node:22-bookworm` verify image ships no JDK. Measure `command -v java`
-  first. If it is absent, list the Java side under _Not covered_; when the
-  central claim lives in Java, the verdict is `inconclusive`, never
-  `merge-ready`. Measured example: a sandbox run with no JDK left roughly
-  900 Java lines unexecuted (SQL contention, stale release, settlement, a
-  migration), and a later maintainer round had to cover them.
+- **Java-centred PRs** (`packages/sdk-java/`) in the CI lane: JDK 21 and
+  Maven are provisioned for these diffs, gated on `QWEN_VERIFY_JAVA=1` (see
+  the environment contract). Measure `command -v java` first. If it is
+  absent, the toolchain install failed: list the Java side under _Not
+  covered_; when the central claim lives in Java, the verdict is
+  `inconclusive`, never `merge-ready`. Measured example: a sandbox run
+  with no JDK left roughly 900 Java lines unexecuted (SQL contention,
+  stale release, settlement, a migration), and a later maintainer round
+  had to cover them.
 
 ## Artifact contract (the workflow collects and publishes these)
 

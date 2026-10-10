@@ -5,7 +5,9 @@
 Issue: #13535 (R1 actor roles, R2 isolation acceptance). Parent: #12380 production
 enablement. Vocabulary source: #12867 section 10 (`reader`, `operator`, `owner`;
 `404` without read, `403` with read but without operate; idempotency domain
-includes the actor — the last part already landed with D4). This design answers
+includes the actor — landed with D4 for the operation ledger; the
+submitter-family command key stays `(tenant_id, operation, idempotency_key)`
+and its actor scoping is tracked as #13619). This design answers
 #12867's open question Q4 (where roles come from) and defines the surface
 registry plus its build gate.
 
@@ -13,9 +15,9 @@ Verified at `main` = `ac497aeed9` (one commit past the `b585508733` baseline the
 issue names; the delta is a TUI change outside this module).
 
 Status: slice A (#13543) lands the registry and its gates over today's
-admission. The V53 storage in D2/D3 lands with slice B (#13544) and the
-enforcement in D4/D7 with slice C (#13545); until those merge, their sections
-describe planned changes, not the tree.
+admission, and the V53 role storage of D2/D3 lands with slice B (#13544);
+both are merged. This PR is slice C — the D4/D7 enforcement sections below
+describe the changes it lands.
 
 ## 1. Problem
 
@@ -31,11 +33,11 @@ Two gaps, different in kind:
   slice, per merged capability. For the 56 public and WebShell routes the API
   contract test already fails a mapped route that the OpenAPI contract lacks,
   and fires a cross-tenant probe at every contract operation. Nothing gates
-  the original slice-A baseline's 22 internal routes, nothing probes a caller below read or with read but
-  without the family's power, and nothing ties a route to the admission rule
-  it should follow — so a route can land with the wrong check and every test
-  stays green, which is the failure mode that matters most while this surface
-  is still growing quickly.
+  the original slice-A baseline's 22 internal routes, nothing probes a caller
+  below read or with read but without the family's power, and nothing ties a
+  route to the admission rule it should follow — so a route can land with the
+  wrong check and every test stays green, which is the failure mode that
+  matters most while this surface is still growing quickly.
 
 ## 2. Current state
 
@@ -46,10 +48,10 @@ this design.
 
 Authorization today is grant rows plus a creator record:
 
-- `managed_workspace_access(tenant_id, workspace_id, actor_id, can_read, can_create)`
-  (V8) — the only per-actor grant table, read on every Workspace-bound route.
-  Its domain enum is `WorkspaceAccess` (NONE/READ/CREATE, CREATE implies
-  READ) in the runtime-broker module.
+- `managed_workspace_access(tenant_id, workspace_id, actor_id, can_read,
+can_create)` (V8) — the only per-actor grant table, read on every
+  Workspace-bound route. Its domain enum is `WorkspaceAccess`
+  (NONE/READ/CREATE, CREATE implies READ) in the runtime-broker module.
 - `managed_agent_session.creator_actor_key` (V40) plus
   `managed_workspace_create_command` (V9, the idempotency-command record) —
   two copies of "creator".
@@ -59,7 +61,7 @@ Authorization today is grant rows plus a creator record:
 | Family                                                     | Routes                                                                                                                             | Check                                                                                     | Readable non-creator gets         |
 | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | --------------------------------- |
 | Turn submit / cancel / rename                              | public `POST …/events` (submit and cancel), `PATCH …/{id}`; WebShell `turns/submit`, `turns/cancel` (rename has no WebShell route) | `requireSubmitter` → `maySubmitWorkspaceTurn` (create-command row + current `can_create`) | **409 `workspace_unavailable`**   |
-| Lifecycle (close, archive, unarchive, delete) + cwd change | `POST …/close` / `…/archive` / `…/unarchive`, `DELETE`, `POST …/cwd`, WebShell twins                                               | `requireWorkspaceCreator` (can_read then create-command row)                              | 403 `session_operation_forbidden` |
+| Lifecycle (close, archive, unarchive, delete) + cwd change | `POST …/close \| archive \| unarchive`, `DELETE`, `POST …/cwd`, WebShell twins                                                     | `requireWorkspaceCreator` (can_read then create-command row)                              | 403 `session_operation_forbidden` |
 | Action (approval) respond                                  | `POST …/actions/{id}/responses`, WebShell `actions/respond`                                                                        | `requireOwner` (creator_actor_key, create-command fallback)                               | 403 `action_forbidden`            |
 
 Other rule shapes as implemented: bound reads and all list/stream/catalog
@@ -69,11 +71,15 @@ reads add a deployment policy gate (`403 artifact_content_forbidden`);
 workspace discovery lists only `can_read` rows (401 without actor); legacy
 (unbound) Sessions and agent definitions are **tenant-wide** — any actor in the
 tenant may mutate them today; internal store/publication routes admit a writer
-HMAC credential, not an actor. The public surface is `/v1/agents/**` plus
-`/api/agent/web-shell/v1/**` (`PublicSurface`), realised by ten Spring
-controllers — the section-10 matrix enumerates the current 32 public + 24
-WebShell + 24 internal routes (80 in total, including the two L3 authorization
-routes, counted by the gate).
+<<<<<<< HEAD
+HMAC credential, not an actor. The public surface is `/v1/agents/**`, `/v1/agent-automations` and
+`/api/agent/web-shell/v1/**` (`PublicSurface`), realised by eleven Spring
+controllers — the section-10 matrix enumerates the current 39 public + 24
+WebShell + 24 internal routes (87 in total, including the two L3
+authorization routes, counted by the gate; the body previously said 77/21
+before #13088's `receipts/verify` handler and 78 before L3, and the H6b
+automation runtime adds the seven public routes of the eleventh
+controller).
 
 There is no production provisioning of workspace registry/access rows —
 today only tests and fixture entry points write them, and a deployment writes
@@ -97,7 +103,7 @@ Three roles, ordered NONE < READER < OPERATOR < OWNER, with the meaning
 The refusal contract is #12867's: no read grant → `404`; read but insufficient
 operate → `403`, named per family (`session_operation_forbidden`,
 `action_forbidden`). The `409 workspace_unavailable` anomaly on the submitter
-family is removed (section 6).
+family is removed (section 5).
 
 ### D2 — roles belong to the Workspace binding
 
@@ -132,25 +138,15 @@ ALTER TABLE managed_workspace_access
         OR (role = 'OWNER' AND CHAR_LENGTH(role) = 5));
 ```
 
-The equality-plus-length form replaces an `IN` list on purpose:
-utf8mb4 comparisons ignore trailing spaces (PAD SPACE), so an `IN` list
-would store `READER ` — a value the enum parser then rejects at read
-time, turning one out-of-band provisioning slip into 400s on that
-actor's discovery routes. An anchored REGEXP would solve that in
-isolation, but its backslash gets rewritten on the way in (MySQL string
-literals treat it as an escape, H2's do not), so the predicate carries
-none: per-name equality plus its exact length keeps the stored values
-byte-identical to the enum names.
-
 The compound shapes are split into per-action statements, matching the
-in-repo migration precedent (V7, V12, V24, V40); dropping unreadable rows
-before the backfill is what makes the change purely a relabelling for every
-reachable grant row. `role` is the single stored vocabulary; no
-dual-write. `role` carries no default either: the column arrives NULL so
-the backfill can fill every existing row, `MODIFY COLUMN` tightens it to NOT
-NULL immediately after, and from then an INSERT omitting it violates NOT
-NULL, as omitting a boolean did before, so out-of-band provisioning SQL
-fails loudly instead of silently granting READER. The `WorkspaceAccess`
+in-repo migration precedent (V7, V12, V24, V40); `role` arrives without a
+default so an omission fails loudly exactly as a boolean omission did, the
+backfill supplies every existing row's value before `NOT NULL` is set, and
+the `CHAR_LENGTH` pin defeats utf8mb4's PAD-SPACE equality storing
+`'READER '` instead of `READER`. Dropping unreadable rows before the
+backfill is what makes the change purely a relabelling for every reachable
+grant row. `role` is the single stored vocabulary; no
+dual-write. The `WorkspaceAccess`
 enum becomes `NONE / READER / OPERATOR / OWNER` (READ→READER,
 CREATE→OPERATOR); `OWNER` implies `OPERATOR` implies `READER`. Every store
 reader (`canRead`, `findReadable`, `listReadable`, `canCreateSession`,
@@ -162,7 +158,7 @@ remains the domain value for "no row".
 
 Grant provisioning stays out-of-band, exactly as the booleans are provisioned
 today: fixture/deployment SQL writes rows; no HTTP grant-management route
-appears in this slice (section 7).
+appears in this slice (section 6).
 
 ### D3 — the Session record keeps an owner, defaulting to its creator
 
@@ -176,18 +172,23 @@ deliberately separate:
   may do on Workspaces;
 - the **role** is the vocabulary the admission path consults — for
   Session-scoped checks, the Session's owner acts with OWNER rights on that
-  Session regardless of workspace grants, which preserves today's creator
-  behaviour exactly.
+  Session without holding an OPERATOR or OWNER workspace role, provided it
+  keeps a readable grant; an actor with no readable row is invisible (`404`),
+  which is exactly today's `can_read`-then-creator order.
 
 `managed_workspace_create_command` remains what it is — an idempotency-command
 record whose `actor_id` belongs to the idempotency domain, not to
-authorization. After V53 the authorization reads of it (the NULL-creator
-fallbacks in `requireOwner` / `requireWorkspaceCreator`) survive only for
-sessions created before V40; new sessions always carry creator and owner.
+authorization. After V53 its authorization reads (the NULL-creator fallbacks
+in `requireOwner` / `requireWorkspaceCreator`) do not cover only sessions
+created before V40: every actor-less legacy open-mode creation still writes
+NULL to both key columns, so the fallbacks stay live for the legacy arm, and
+the handover slice must decide what a NULL owner means instead of assuming it
+cannot occur.
 
 An owner update path (the handover command) is a follow-up slice on top of
-this column; this slice creates the vocabulary and the storage the handover
-needs, and re-points every creator check at the owner (section 7).
+this column, tracked as #13617; this slice creates the vocabulary and the
+storage the handover needs, and re-points every creator check at the owner
+(section 7).
 
 ### D4 — route reclassification
 
@@ -206,7 +207,7 @@ map to OPERATOR, creators map to owner):
 | Artifacts (metadata)                                                      | actor + `can_read`                              | actor + READER — unchanged                                            |
 | Artifact content bytes                                                    | actor + read + deployment policy                | actor + READER + policy — unchanged                                   |
 | Workspace discovery list/get                                              | actor, filtered by `can_read`                   | actor, filtered by role ≥ READER — unchanged                          |
-| Legacy (unbound) Session routes                                           | tenant-wide                                     | tenant-wide — unchanged (section 7)                                   |
+| Legacy (unbound) Session routes                                           | tenant-wide                                     | tenant-wide — unchanged (section 6)                                   |
 | Agent definitions                                                         | tenant-scoped                                   | tenant-scoped — unchanged                                             |
 | Internal store / tool-publication routes                                  | writer HMAC, no actor                           | unchanged                                                             |
 
@@ -214,10 +215,29 @@ Live behaviour that re-reads grants (SSE read-grant recheck, mid-stream
 artifact revalidation, execution-time `authorizePassiveAttachment`) consults
 `role` with identical thresholds, so revocation keeps its current meaning.
 
+On the bound arm, new work — Turn submit, rename and the cwd change —
+additionally certifies the Session's creator-keyed execution facts — the
+Registry still backs the binding exactly and stays ACTIVE, and the actor
+recorded by the Workspace create command keeps OPERATOR or above, because
+the admitted work executes under that actor's grants (the execution
+authority re-verifies the same join). Turn cancel admits on the OPERATOR
+role and the executable shape alone, because its delivery reuses the
+admitted attachment and re-checks no grants. Every bound Action respond
+certifies the same facts at admission, whichever arm — recorded owner or
+Workspace operator — admitted the caller. The failure is the family's
+domain `409 workspace_unavailable`, answered synchronously at admission
+rather than as an asynchronously failing Turn. A cwd operation's settlement re-verifies both the recorded
+creator-keyed facts and the V56-persisted initiator's role, so an
+operation fails with `workspace_unavailable` when either actor is
+demoted after admission (pre-V56 rows carry no initiator key and settle
+on the creator-keyed facts alone); that is the W2 design's "grant
+revoked after admission still blocks the change", now covering the
+widened admission.
+
 ### D5 — the versioned surface registry
 
-One enum in the server module's test tree — `api/SurfaceRegistry.java`, one
-constant per implemented route — carrying: HTTP method, path template, surface (PUBLIC /
+One enum in the server module — `api/SurfaceRegistry.java`, one constant per
+implemented route — carrying: HTTP method, path template, surface (PUBLIC /
 WEBSHELL / INTERNAL), capability id (shared by the public/WebShell twins of
 one capability, e.g. `TURN_SUBMIT`), and rule class (`legacy_create`,
 `legacy_tenant`, `workspace_create`, `reader`, `reader_actor`,
@@ -226,24 +246,7 @@ one capability, e.g. `TURN_SUBMIT`), and rule class (`legacy_create`,
 issue R2 enumeration: per route it states which actor may read, mutate,
 cancel, answer or delete. It is versioned exactly as the surface is versioned
 — registry changes ride the contract version they implement (the R1 flip is
-v1.34), so `git blame` of the registry is the authoritative per-route history.
-
-The registry lives under `src/test/java` because nothing in production reads
-it: the gate and the acceptance probes below are its only consumers, in this
-slice and in slice C, whose enforcement reads the stored roles. It moves to
-`src/main` only if a runtime consumer appears.
-
-It does not replace the OpenAPI contract
-(`managed-agent-public-api.openapi.json`), which stays the single source for
-the published shape of the 56 public and WebShell routes and which the API
-contract test keeps in bijection with the mounted handlers. The rule class is
-deliberately not an `x-qwen-*` extension on the spec: the spec is the
-published, machine-consumed contract (the WebShell client types are generated
-from it), it does not describe the 24 internal routes, and an admission rule
-class is a server-internal classification. A new public or WebShell route is
-therefore named three times — controller, spec, registry — and each pairing
-is gated: the contract test fails a route the spec lacks, and the
-correspondence gate fails a route the registry lacks.
+v1.37), so `git blame` of the registry is the authoritative per-route history.
 
 ### D6 — the build gate
 
@@ -270,43 +273,52 @@ so a public route and its WebShell twin cannot drift apart.
 
 ### D7 — WebShell capability advertisement follows roles
 
-The per-caller capability advertisement (`workspaceTurns` and friends in the
-create/get session views) is computed from the caller's role, not from
-creator identity: OPERATOR-or-above sees turn submission and cancel
-capabilities, the Session owner sees lifecycle capabilities. The UI's
-composer/cancel exposure stays a mirror of server admission — the parity
-assertion in D6 covers the rule; existing WebShell coverage covers the
-advertisement.
+The per-caller `workspaceTurns` flag in the session views mirrors the
+submitter family's server admission exactly: it is computed from the
+caller's OPERATOR-or-above role and the Session's creator-keyed execution
+facts, not from creator identity, so the composer's exposure stays a mirror
+of what submit would answer. The lifecycle capability flags stay
+Session-scoped and caller-blind in this slice — they describe whether the
+Session supports close/archive/delete at all, not whether the current
+caller may drive them; owner-scoped advertisement of the lifecycle flags is
+deferred with the handover (#13617). The parity assertion in D6 covers the
+rule; existing WebShell coverage covers the advertisement.
 
 ## 4. Delivery plan
 
 Three slices, two parallel lanes then one closing lane. Lane split follows
 file-scope disjointness, not topic:
 
-| Slice                              | Content                                                                                                                                                                                                                                             | Touches                                                                                                                          |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| **A — registry + gate (R2 first)** | `SurfaceRegistry` over today's rules, correspondence gate, acceptance probes, parity assertions, bilingual route matrix in this doc                                                                                                                 | new test-tree files only: `api/SurfaceRegistry.java`, the gate and its negative twin, the acceptance probes; no production edits |
-| **B — role storage (R1 storage)**  | V53 migration + backfill, `WorkspaceAccess` rename, registry store reads re-derivd from `role`, `owner_actor_key` column + write at creation, fixture INSERT updates (~24 sites), migration-shape tests                                             | `store/**`, `runtime-broker` enum, `db/migration`, test fixtures; no admission-decision change                                   |
-| **C — enforcement (R1)**           | the three creator helpers re-pointed at role/owner, refusal-code normalisation, Action respond opens to OPERATOR, WebShell capabilities by role, registry rule flips, probe expectation flips, contract v1.34 + OpenAPI text, contract-test updates | `service/**`, `store/**` checks, controllers, contract, A's enum + tests                                                         |
+| Slice                              | Content                                                                                                                                                                                                                                             | Touches                                                                                        |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| **A — registry + gate (R2 first)** | `SurfaceRegistry` over today's rules, correspondence gate, acceptance probes, parity assertions, bilingual route matrix in this doc                                                                                                                 | new files only: `api/SurfaceRegistry.java`, two test classes; no production edits              |
+| **B — role storage (R1 storage)**  | V53 migration + backfill, `WorkspaceAccess` rename, registry store reads re-derivd from `role`, `owner_actor_key` column + write at creation, fixture INSERT updates (~24 sites), migration-shape tests                                             | `store/**`, `runtime-broker` enum, `db/migration`, test fixtures; no admission-decision change |
+| **C — enforcement (R1)**           | the three creator helpers re-pointed at role/owner, refusal-code normalisation, Action respond opens to OPERATOR, WebShell capabilities by role, registry rule flips, probe expectation flips, contract v1.37 + OpenAPI text, contract-test updates | `service/**`, `store/**` checks, controllers, contract, A's enum + tests                       |
 
 A ∥ B is safe: disjoint files (A adds; B edits store-side). C is serial after
 both merge because it rewrites both A's registry entries and B's helpers —
 this is the one genuine blocking dependency, and it is sequenced rather than
-raced. C closes #13535; A and B reference it.
+raced. C advances #13535 (the handover command and legacy hardening are
+tracked as #13617 and #13618 respectively); A and B reference it.
 
 ## 5. Migration and compatibility
 
 - V53 follows the established single-version doctrine (stop old servers
-  before the migration; no `outOfOrder`). Taking V53 requires renumbering any
-  open branch's later migration; `scripts/check-flyway-migrations.js` already
+  before the migration; no `outOfOrder`). `scripts/check-flyway-migrations.js` already
   gates numbering across both migration locations.
-- Contract v1.34 records: the role vocabulary, OPERATOR admission for the
+- Contract v1.37 records: the role vocabulary, OPERATOR admission for the
   submitter and Action families, owner-based lifecycle, the submitter-family
   refusal change 409 `workspace_unavailable` → 403
   `session_operation_forbidden`, and role-based capability advertisement.
-- Refusal-code changes a client can observe: non-creator submitter on a bound
-  Session (409 → 403); Action respond now succeeds for OPERATORs that are not
-  the creator. Everything else is caller-preserving.
+- What a client can observe: a readable non-owner submitter (submit, cancel,
+  rename) keeps the same requests but its below-OPERATOR refusal normalizes
+  from 409 `workspace_unavailable` to 403 `session_operation_forbidden`,
+  while an OPERATOR past the role check still meets the family's domain 409
+  on shape or creator-fact failure; Action respond now succeeds for
+  OPERATORs that are not the creator; Turn submit, rename and cwd change
+  now succeed for OPERATORs that are not the creator, while the Session's
+  creator-keyed execution facts hold, and cancel succeeds for them on the
+  role and shape alone. Everything else is caller-preserving.
 - Test fixtures writing `can_read`/`can_create` move to `role` in slice B;
   the generated-columns alternative was rejected to keep one source of truth
   and H2/MySQL parity simple.
@@ -316,12 +328,23 @@ raced. C closes #13535; A and B reference it.
 Same as the issue's, plus the explicit deferrals named there:
 
 - Legacy (unbound) Sessions stay tenant-wide this slice. Hardening them
-  (they already record a creator since V40) is a named follow-up; widening R1
-  to legacy would double this slice's blast radius without fixing a named
-  product block.
+  (they already record a creator since V40) is tracked as #13618; widening
+  R1 to legacy would double this slice's blast radius without fixing a
+  named product block.
 - No handover command: `owner_actor_key` and the role checks it trips land
   here; the transfer operation (idempotent command, owner-only admission,
-  audit event) is its own slice and issue.
+  audit event) is its own slice, tracked as #13617. Note which families the
+  owner column drives: lifecycle and Action respond key on it, while
+  submit, cancel, rename, cwd change and execution itself stay
+  create-command-keyed (the execution authority's join names the
+  create-command actor), so the handover slice must also decide whether
+  the transfer re-points the create command or re-keys execution — or
+  accepts a Session that is inoperable for its new owner.
+- No actor term in the submitter-family command idempotency key: the
+  operation ledger is actor-scoped since D4, but `managed_agent_command`
+  keeps its `(tenant_id, operation, idempotency_key)` domain this slice —
+  scoping it by actor (without breaking the single-unique-index dedupe its
+  racing inserts rely on) is tracked as #13619.
 - No HTTP grant-management routes (`actor_manager` provisioning): workspace
   grants arrive through out-of-band provisioning today, and this slice
   extends that same channel with the `role` column. If deployments need
@@ -334,14 +357,19 @@ Same as the issue's, plus the explicit deferrals named there:
 
 ## 7. Validation plan
 
-- Slice A: the correspondence gate fails on an unregistered route, typed or
-  untyped, and on a registered route nothing mounts — a committed negative
-  test keeps proving both; probes pin today's statuses per rule class on
-  public, WebShell and internal routes.
-- Slice B: migration-shape test applying V53 over V47 fixtures asserts the
-  backfill (can_create → OPERATOR, can_read-only → READER, owner := creator);
-  the full existing suite stays green untouched except fixture INSERTs —
-  that is the behaviour-invisibility proof.
+- Slice A: the correspondence gate's fail-closed arms are pinned by the
+  committed `SurfaceRegistryGateNegativeTest` (one mounted route the
+  registry does not register, and one registered route with no handler);
+  `SurfaceRegistryGateUnconstrainedTest` adds the method-agnostic-mapping
+  arm; probes pin today's statuses per rule class on public + WebShell.
+- Slice B: migration-shape test applying V53 over the earlier fixtures
+  asserts the backfill (can_create → OPERATOR, can_read-only → READER,
+  owner := creator) and the hardened CHECK (a padded role value is
+  rejected).
+  Existing expectations change only where they name a renamed
+  `WorkspaceAccess` constant; the behaviour-invisibility proof is the
+  preserved `canRead()`/`canCreate()` truth table pinned by
+  `WorkspaceAccessTest`, not untouched files.
 - Slice C: updated probes and contract tests pin the new matrix; targeted
   tests: second-operator answers a pending approval on both surfaces,
   OPERATOR submits/cancels/renames/changes cwd, owner lifecycle unchanged,
@@ -362,9 +390,11 @@ Same as the issue's, plus the explicit deferrals named there:
       public route and the WebShell route (R1's blocked behaviour #1).
 - [ ] `owner_actor_key` exists, defaults to creator on new bound and legacy
       creations, and drives every former creator check (vocabulary for
-      handover ready; the command itself is follow-up) (R1's blocked
-      behaviour #2, storage half).
-- [ ] Contract v1.34 documents the roles, the refusal normalisation and the
+      handover ready; the command itself is follow-up): lifecycle and
+      respond key on it after this PR, while submit/cancel/rename/cwd and
+      execution stay on the create-command actor until #13617 decides the
+      transfer's re-keying (R1's blocked behaviour #2, storage half).
+- [ ] Contract v1.37 documents the roles, the refusal normalisation and the
       capability-advertisement rule; the OpenAPI changelog names them.
 - [ ] Full managed-agent-server suite green on H2; `mysql-integration`
       profile green where the runner offers MySQL.
@@ -384,33 +414,30 @@ Same as the issue's, plus the explicit deferrals named there:
 
 ## 10. Surface route matrix (the slice-A registry, bilingual summary)
 
-`api/SurfaceRegistry.java` integrated with L3 carries 80 route constants: 32
-public + 24 WebShell + 24 internal handler methods of the ten controllers,
-including the two L3 authorization routes.
-The gate derives everything from scanning, so the count is information, not
-an asserted constant.
+`api/SurfaceRegistry.java` integrated with L3 carries 80 route constants:
+32 public + 24 WebShell + 24 internal handler methods of the ten
+controllers, including the two L3 authorization routes. (The 21-internal
+figure section 2 previously carried is stale: #13088 added the
+`receipts/verify` handler to ToolPublicationController, and L3 added its
+two authorization routes; the gate derives everything from scanning, so the
+count is information, not an asserted constant.) The H6b automation
+runtime adds the seven public `/v1/agent-automations` routes of an
+eleventh controller, so the registry now carries 87 constants: 39 public +
+24 WebShell + 24 internal.
 
-Rule classes name today's admission: `WORKSPACE_CREATE` (2), `READER` (24),
-`READER_ACTOR` (6), `READER_ACTOR_POLICY` (1), `OPERATOR` as today's
-submitter family (4), `OWNER` as today's creator families — lifecycle and
-cwd plus Action respond — (12), `WORKSPACE_DISCOVERY` (4), `TENANT_SCOPED`
-(3), `INTERNAL_WRITER` (24). The design's `legacy_create` and
-`legacy_tenant` names are kept in the class documentation as the names of
-the legacy arms: a route carries exactly one rule class and, per the
-separation rule, it is the bound-Session one. Slice C flips cwd and Action
-respond `OWNER` → `OPERATOR`, rewrites the submitter-family refusals, and
-splits the legacy arms only if the probes need distinct expectations.
+Rule classes name the implemented admission. After slice C (contract
+v1.37): `WORKSPACE_CREATE` (2), `READER` (27 — the automation routes add
+three), `READER_ACTOR` (6), `READER_ACTOR_POLICY` (1), `OPERATOR` — the
+submitter family plus cwd change and Action respond — (8), `OWNER` — the
+lifecycle family, plus the four automation mutations — (12),
+`WORKSPACE_DISCOVERY` (4), `TENANT_SCOPED` (3), `INTERNAL_WRITER`
+(24). The design's `legacy_create` and `legacy_tenant` names are kept in
+the class documentation as the names of the legacy arms: a route carries
+exactly one rule class and, per the separation rule, it is the
+bound-Session one. The matrix's rule column below is the post-C matrix;
+the pre-C values it replaced are D4's "Rule today" column.
 
-For `INTERNAL_WRITER` the walk pins each route's wrong-credential answer as
-observed. The Session-store routes and the publication routes that carry the
-writer token refuse at the credential check (403 `writer_credential_invalid`).
-The publication-grant routes validate the payload and the publication scope
-first, so their wrong-token answer is a 400 (404 for the operation read):
-proof that a wrong token does not get in, not that the credential check
-refused it. The credential check itself is pinned by a dedicated test on a
-store route and a publication route.
-
-| Route                                                                                                                            | Surface  | Capability                | Rule class (today)  |
+| Route                                                                                                                            | Surface  | Capability                | Rule class (post-C) |
 | -------------------------------------------------------------------------------------------------------------------------------- | -------- | ------------------------- | ------------------- |
 | `POST /v1/agents/sessions`                                                                                                       | PUBLIC   | SESSION_CREATE            | WORKSPACE_CREATE    |
 | `GET /v1/agents/sessions`                                                                                                        | PUBLIC   | SESSION_LIST              | READER              |
@@ -421,7 +448,7 @@ store route and a publication route.
 | `POST /v1/agents/sessions/{sessionId}/unarchive`                                                                                 | PUBLIC   | SESSION_UNARCHIVE         | OWNER               |
 | `DELETE /v1/agents/sessions/{sessionId}`                                                                                         | PUBLIC   | SESSION_DELETE            | OWNER               |
 | `GET /v1/agents/sessions/{sessionId}/operations/{operationId}`                                                                   | PUBLIC   | SESSION_OPERATION_GET     | READER              |
-| `POST /v1/agents/sessions/{sessionId}/cwd`                                                                                       | PUBLIC   | SESSION_CWD_CHANGE        | OWNER               |
+| `POST /v1/agents/sessions/{sessionId}/cwd`                                                                                       | PUBLIC   | SESSION_CWD_CHANGE        | OPERATOR            |
 | `POST /v1/agents/sessions/{sessionId}/events`                                                                                    | PUBLIC   | TURN_SUBMIT, TURN_CANCEL  | OPERATOR            |
 | `GET /v1/agents/sessions/{sessionId}/events`                                                                                     | PUBLIC   | TAIL_EVENTS               | READER              |
 | `GET /v1/agents/sessions/{sessionId}/items`                                                                                      | PUBLIC   | ITEM_LIST                 | READER              |
@@ -432,7 +459,7 @@ store route and a publication route.
 | `GET /v1/agents/sessions/{sessionId}/tasks/{taskId}/events`                                                                      | PUBLIC   | TASK_EVENT_LIST           | READER              |
 | `GET /v1/agents/sessions/{sessionId}/actions`                                                                                    | PUBLIC   | ACTION_LIST               | READER              |
 | `GET /v1/agents/sessions/{sessionId}/actions/{actionId}`                                                                         | PUBLIC   | ACTION_GET                | READER              |
-| `POST /v1/agents/sessions/{sessionId}/actions/{actionId}/responses`                                                              | PUBLIC   | ACTION_RESPOND            | OWNER               |
+| `POST /v1/agents/sessions/{sessionId}/actions/{actionId}/responses`                                                              | PUBLIC   | ACTION_RESPOND            | OPERATOR            |
 | `GET /v1/agents/sessions/{sessionId}/items/{itemId}/tool-result`                                                                 | PUBLIC   | TOOL_RESULT_GET           | READER_ACTOR        |
 | `GET /v1/agents/sessions/{sessionId}/artifacts`                                                                                  | PUBLIC   | ARTIFACT_LIST             | READER_ACTOR        |
 | `GET /v1/agents/sessions/{sessionId}/artifacts/{artifactId}`                                                                     | PUBLIC   | ARTIFACT_GET              | READER_ACTOR        |
@@ -444,6 +471,13 @@ store route and a publication route.
 | `POST /v1/agents`                                                                                                                | PUBLIC   | AGENT_DEFINITION_CREATE   | TENANT_SCOPED       |
 | `GET /v1/agents/{agentId}`                                                                                                       | PUBLIC   | AGENT_DEFINITION_GET      | TENANT_SCOPED       |
 | `POST /v1/agents/{agentId}`                                                                                                      | PUBLIC   | AGENT_DEFINITION_UPDATE   | TENANT_SCOPED       |
+| `POST /v1/agent-automations`                                                                                                     | PUBLIC   | AUTOMATION_CREATE         | OWNER               |
+| `GET /v1/agent-automations`                                                                                                      | PUBLIC   | AUTOMATION_LIST           | READER              |
+| `GET /v1/agent-automations/{automationId}`                                                                                       | PUBLIC   | AUTOMATION_GET            | READER              |
+| `POST /v1/agent-automations/{automationId}`                                                                                      | PUBLIC   | AUTOMATION_UPDATE         | OWNER               |
+| `DELETE /v1/agent-automations/{automationId}`                                                                                    | PUBLIC   | AUTOMATION_RETIRE         | OWNER               |
+| `POST /v1/agent-automations/{automationId}/runs`                                                                                 | PUBLIC   | AUTOMATION_RUN            | OWNER               |
+| `GET /v1/agent-automations/{automationId}/runs`                                                                                  | PUBLIC   | AUTOMATION_RUN_LIST       | READER              |
 | `POST /api/agent/web-shell/v1/tasks/query`                                                                                       | WEBSHELL | TASK_LIST                 | READER              |
 | `POST /api/agent/web-shell/v1/tasks/get`                                                                                         | WEBSHELL | TASK_GET                  | READER              |
 | `POST /api/agent/web-shell/v1/tasks/events/query`                                                                                | WEBSHELL | TASK_EVENT_LIST           | READER              |
@@ -459,17 +493,15 @@ store route and a publication route.
 | `POST /api/agent/web-shell/v1/sessions/delete`                                                                                   | WEBSHELL | SESSION_DELETE            | OWNER               |
 | `POST /api/agent/web-shell/v1/sessions/unarchive`                                                                                | WEBSHELL | SESSION_UNARCHIVE         | OWNER               |
 | `POST /api/agent/web-shell/v1/operations/query`                                                                                  | WEBSHELL | SESSION_OPERATION_GET     | READER              |
-| `POST /api/agent/web-shell/v1/sessions/cwd/change`                                                                               | WEBSHELL | SESSION_CWD_CHANGE        | OWNER               |
+| `POST /api/agent/web-shell/v1/sessions/cwd/change`                                                                               | WEBSHELL | SESSION_CWD_CHANGE        | OPERATOR            |
 | `POST /api/agent/web-shell/v1/actions/query`                                                                                     | WEBSHELL | ACTION_LIST               | READER              |
 | `POST /api/agent/web-shell/v1/actions/get`                                                                                       | WEBSHELL | ACTION_GET                | READER              |
-| `POST /api/agent/web-shell/v1/actions/respond`                                                                                   | WEBSHELL | ACTION_RESPOND            | OWNER               |
+| `POST /api/agent/web-shell/v1/actions/respond`                                                                                   | WEBSHELL | ACTION_RESPOND            | OPERATOR            |
 | `POST /api/agent/web-shell/v1/tool-results/get`                                                                                  | WEBSHELL | TOOL_RESULT_GET           | READER_ACTOR        |
 | `POST /api/agent/web-shell/v1/artifacts/get`                                                                                     | WEBSHELL | ARTIFACT_GET              | READER_ACTOR        |
 | `POST /api/agent/web-shell/v1/artifacts/query`                                                                                   | WEBSHELL | ARTIFACT_LIST             | READER_ACTOR        |
 | `POST /api/agent/web-shell/v1/workspaces/query`                                                                                  | WEBSHELL | WORKSPACE_LIST            | WORKSPACE_DISCOVERY |
 | `POST /api/agent/web-shell/v1/workspaces/get`                                                                                    | WEBSHELL | WORKSPACE_GET             | WORKSPACE_DISCOVERY |
-| `POST /internal/managed-session-store/v1/sessions/{sessionId}/execution:authorize`                                               | INTERNAL | STORE_EXECUTION_AUTHORIZE | INTERNAL_WRITER     |
-| `POST /internal/managed-session-store/v1/sessions/{sessionId}/lifecycle:authorize`                                               | INTERNAL | STORE_LIFECYCLE_AUTHORIZE | INTERNAL_WRITER     |
 | `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:acquire`                                                   | INTERNAL | STORE_WRITER_ACQUIRE      | INTERNAL_WRITER     |
 | `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:renew`                                                     | INTERNAL | STORE_WRITER_RENEW        | INTERNAL_WRITER     |
 | `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:seal`                                                      | INTERNAL | STORE_WRITER_SEAL         | INTERNAL_WRITER     |
