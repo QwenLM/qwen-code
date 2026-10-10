@@ -929,6 +929,48 @@ describe('createJavaManagedAgentProvider', () => {
     },
   );
 
+  it.each([true, false])(
+    'gates fresh Shell sending with foregroundShell=%s while retaining cancellation',
+    async (enabled) => {
+      const base = {
+        sessionId: 'shell-1',
+        status: 'ACTIVE',
+        createdAt: 1,
+        updatedAt: 2,
+        lastSequence: 5,
+        workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+        capabilities: {
+          tasks: true,
+          workspaceTurns: true,
+          foregroundShell: enabled,
+        },
+      };
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: vi
+          .fn<typeof fetch>()
+          .mockResolvedValueOnce(jsonResponse(base))
+          .mockResolvedValueOnce(
+            jsonResponse({
+              ...base,
+              activeTurn: {
+                turnId: 'turn-1',
+                sessionId: 'shell-1',
+                status: 'RUNNING',
+                submittedAt: 2,
+              },
+            }),
+          ),
+      });
+      expect(
+        (await provider.getSession('shell-1', { clientId: 'c' })).capabilities,
+      ).toEqual({ canSend: enabled, canCancel: false, workspaceTurns: true });
+      expect(
+        (await provider.getSession('shell-1', { clientId: 'c' })).capabilities,
+      ).toEqual({ canSend: false, canCancel: true, workspaceTurns: true });
+    },
+  );
+
   it('passes download cancellation through the host sink to the content fetch', async () => {
     const abort = new AbortController();
     const fetchImpl = vi

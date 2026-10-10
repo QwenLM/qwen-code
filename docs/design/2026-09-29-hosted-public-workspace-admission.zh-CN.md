@@ -4,6 +4,8 @@
 
 状态：已实现，审计中。属于 #12952 与 #12380。
 
+本文记录原始仅文件工具的 G0 切片。另行开启部署 Shell 开关时，[公开前台 Shell 准入](public-hosted-shell-admission.zh-CN.md)取代本文仅文件 profile/工具的边界。公开调用方仍不能选择 profile；创建输入仍由 Workspace 文件开关准入，既有 Session 保留其持久化 profile 和审批模式。
+
 ## 问题与范围
 
 Hosted Read/Write/Edit 已能经过生产 Broker 和 worker 执行，但目前只有私有集成测试把它接到持久 Workspace 会话。公开创建在 service 和 SQL store 两层拒绝初始输入；coordinator 也拒绝有绑定的会话。Java connector 不传工具 profile，所有 Session Store 连接均使用部署的全局 Workspace。

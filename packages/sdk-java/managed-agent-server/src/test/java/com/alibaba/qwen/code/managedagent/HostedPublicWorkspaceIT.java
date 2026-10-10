@@ -3,7 +3,11 @@ package com.alibaba.qwen.code.managedagent;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
+import com.alibaba.qwen.code.daemon.HarnessSessionRef;
+import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -26,12 +30,16 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.security.Principal;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -47,6 +55,7 @@ import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
 
 class HostedPublicWorkspaceIT {
     private static final String TOKEN = "g0-local-fixture";
@@ -68,7 +77,16 @@ class HostedPublicWorkspaceIT {
     private Path decoy;
     private String node;
     private boolean approvals;
+    private boolean shell;
+    private String shellDecision = "allow";
     private boolean durableClose;
+    private String shellFault;
+    private HttpServer storeRelay;
+    private ExecutorService relayExecutor;
+    private HostedShellOutputProbe shellProbe;
+    private Map<String, Object> faultSession;
+    private final List<byte[]> receiptRequests = new CopyOnWriteArrayList<>();
+    private final AtomicInteger receiptResponses = new AtomicInteger();
     private final java.util.Set<String> answered = new java.util.HashSet<>();
     // Sessions whose first approval was answered by the operator who is not
     // the Session owner, proving R1's second-operator handoff.
@@ -91,6 +109,155 @@ class HostedPublicWorkspaceIT {
         // approval answered by the non-owner OPERATOR — pin the handoff,
         // or the responder ternary can collapse to the owner unnoticed.
         assertThat(operatorAnswered).hasSize(2);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"allow", "deny"})
+    @Timeout(150)
+    void publicForegroundShellUsesMandatoryApprovalOnBothSurfaces(String decision) throws Exception {
+        shell = true;
+        approvals = true;
+        shellDecision = decision;
+        List<Path> roots = boot();
+        for (int index = 0; index < roots.size(); index++) {
+            boolean web = index == 1;
+            String workspace = "workspace-" + index;
+            register(workspace, "storage-" + index);
+            Map<String, Object> input = Map.of("type", "input_text", "text", "G0_SHELL");
+            String route = web ? "/api/agent/web-shell/v1/sessions/create" : "/v1/agents/sessions";
+            Map<String, Object> body = web
+                    ? Map.of("agentId", "qwen-code", "idempotencyKey", workspace, "input", List.of(),
+                            "workspace", Map.of("workspaceId", workspace, "cwdRelative", "child"))
+                    : Map.of("agent_id", "qwen-code", "input", List.of(input), "workspace",
+                            Map.of("workspace_id", workspace, "cwd_relative", "child"));
+            JsonNode created = request("POST", route, body, workspace, "actor", 202);
+            String session = created.path(web ? "sessionId" : "id").asText();
+            JsonNode supported = web ? request("POST", "/api/agent/web-shell/v1/sessions/get",
+                    Map.of("sessionId", session), null, "actor", 200) : created;
+            assertThat(supported.at(web ? "/capabilities/foregroundShell" : "/capabilities/foreground_shell").asBoolean()).isTrue();
+            assertThat(jdbc.queryForObject("SELECT tool_profile FROM managed_agent_session WHERE session_id = ?",
+                    String.class, session)).isEqualTo("hosted-workspace-shell/1");
+            assertThat(jdbc.queryForObject("SELECT approval_mode FROM managed_agent_session WHERE session_id = ?",
+                    String.class, session)).isEqualTo("deny".equals(decision) ? "auto-edit" : "default");
+            if (web) request("POST", "/api/agent/web-shell/v1/turns/submit",
+                    Map.of("sessionId", session, "idempotencyKey", "shell-turn", "input", List.of(input)),
+                    "shell-turn", "actor", 202);
+            await().atMost(Duration.ofSeconds(35)).failFast(() -> {
+                        if (modelFailure.get() != null) throw new AssertionError("Model fixture failed", modelFailure.get());
+                    }).untilAsserted(() -> {
+                        answerActions(session, web);
+                        assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_turn WHERE session_id = ?",
+                                String.class, session)).isEqualTo("COMPLETED");
+                    });
+            Path marker = roots.get(index).resolve("child/shell-proof.txt");
+            if ("allow".equals(decision)) assertThat(Files.readString(marker)).isEqualTo("once\n");
+            else assertThat(marker).doesNotExist();
+            assertThat(decoy.resolve("shell-proof.txt")).doesNotExist();
+            assertThat(roots.get(index).resolve("child/monitor-proof.txt")).doesNotExist();
+            assertThat(roots.get(index).resolve("child/background-proof.txt")).doesNotExist();
+            assertThat(request("POST", route, body, workspace, "actor", 202)
+                    .path(web ? "sessionId" : "id").asText()).isEqualTo(session);
+            for (String kind : List.of("close", "archive", "delete")) {
+                boolean restDelete = !web && "delete".equals(kind);
+                String lifecycle = web ? "/api/agent/web-shell/v1/sessions/" + kind
+                        : "/v1/agents/sessions/" + session + (restDelete ? "" : "/" + kind);
+                Object command = web ? Map.of("sessionId", session, "idempotencyKey", kind) : null;
+                assertUnavailable(request(restDelete ? "DELETE" : "POST", lifecycle, command, kind, "actor", 409));
+            }
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE session_id = ?"
+                    + " AND operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE')", Integer.class, session)).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_turn WHERE session_id = ?",
+                    Integer.class, session)).isEqualTo(1);
+            if ("allow".equals(decision)) assertThat(Files.readString(marker)).isEqualTo("once\n");
+            else assertThat(marker).doesNotExist();
+        }
+        assertThat(answered).hasSize(2);
+        assertThat(modelFailure.get()).isNull();
+        assertThat(modelRequests).hasSize(8);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"receipt-failure", "receipt-reply"})
+    @Timeout(150)
+    void publicShellReceiptFaultsNeverRepeatEffects(String fault) throws Exception {
+        assertThat(System.getProperty("mysql.url")).as("Public FG6f requires real MySQL").startsWith("jdbc:mysql:");
+        shell = true;
+        approvals = true;
+        shellFault = fault;
+        Path directory = boot().getFirst().resolve("child");
+        register("workspace-0", "storage-0");
+        Files.writeString(directory.resolve("proof.txt"), "x");
+        var body = Map.of("agent_id", "qwen-code", "input", List.of(), "workspace",
+                Map.of("workspace_id", "workspace-0", "cwd_relative", "child"));
+        String session = request("POST", "/v1/agents/sessions", body, "fault-create", "actor", 202).path("id").asText();
+        faultSession = Map.of("sessionId", session, "workspaceId", "workspace-0", "directory", directory.toString(), "fault", fault);
+        shellProbe = new HostedShellOutputProbe(jdbc, tenant, List.of(faultSession),
+                spring.getBean(EmbeddedRuntimeBroker.class), storeRelay);
+        String trigger = "public_shell_" + UUID.randomUUID().toString().replace("-", "");
+        if ("receipt-failure".equals(fault)) {
+            assertThat(tenant).matches("g0-[0-9a-f-]{36}");
+            assertThat(session).matches("[0-9a-f-]{36}");
+            jdbc.execute("CREATE TRIGGER " + trigger + " BEFORE INSERT ON qwen_managed_session_journal_tx FOR EACH ROW BEGIN IF"
+                    + " NEW.tenant_id = '" + tenant + "' AND NEW.session_id = '" + session + "'"
+                    + " AND NEW.operation = 'recordToolResult'"
+                    + " AND LOCATE('\"kind\":\"tool.receipt\"', CONVERT(NEW.record_bytes USING utf8mb4)) > 0"
+                    + " THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'PUBLIC_FG6F_receipt-failure'; END IF; END");
+        }
+        try {
+            var input = List.of(Map.of("type", "input_text", "text", "G0_SHELL_FAULT"));
+            String turn = request("POST", "/v1/agents/sessions/" + session + "/events", Map.of("type", "agent.session.input.message", "input", input),
+                    "fault-turn", "actor", 202).path("turn_id").asText();
+            await().atMost(Duration.ofSeconds(60)).failFast(() -> {
+                if (modelFailure.get() != null) throw new AssertionError("Fault fixture failed", modelFailure.get());
+            }).untilAsserted(() -> {
+                answerActions(session, false);
+                assertThat(receiptRequests).hasSize(3);
+                assertThat(jdbc.queryForList("SELECT execution_state FROM qwen_tool_execution WHERE harness_session_id = ?",
+                        String.class, session)).containsExactly("UNKNOWN");
+            });
+            var connector = spring.getBean(HarnessConnector.class);
+            var attachments = (Map<?, ?>) ReflectionTestUtils.getField(connector, "attachments");
+            var attached = attachments.values().stream().map(HarnessSessionRef.class::cast)
+                    .filter(ref -> session.equals(ref.getHarnessSessionId())).findFirst().orElseThrow();
+            var client = (HostedHarnessClient) ReflectionTestUtils.getField(connector, "client");
+            // The third request is counted before its handler finishes; wait for the
+            // producer's prompt and all receipt handlers before taking final evidence.
+            await().atMost(Duration.ofSeconds(15)).failFast(() -> {
+                if (modelFailure.get() != null) throw new AssertionError("Fault fixture failed", modelFailure.get());
+            }).untilAsserted(() -> {
+                var status = client.getStatus(attached);
+                assertThat(status.hasActivePrompt()).isFalse();
+                assertThat(status.getRaw().get("recoveryBlocked")).isEqualTo(true);
+                assertThat(receiptResponses.get()).isEqualTo(3);
+            });
+            assertThat(receiptRequests).hasSize(3);
+            assertThat(answered).hasSize(1);
+            assertThat(modelRequests).hasSize(1);
+            assertThat(jdbc.queryForObject("SELECT tool_profile FROM managed_agent_session WHERE session_id = ?",
+                    String.class, session)).isEqualTo("hosted-workspace-shell/1");
+            assertThat(jdbc.queryForObject("SELECT approval_mode FROM managed_agent_session WHERE session_id = ?",
+                    String.class, session)).isEqualTo("default");
+            var original = json.readTree(receiptRequests.getFirst());
+            for (byte[] retry : receiptRequests) assertThat(retry).isEqualTo(receiptRequests.getFirst());
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx WHERE tenant_id = ?"
+                    + " AND session_id = ? AND transaction_id = ?", Integer.class, tenant, session,
+                    original.path("transactionId").asText())).isEqualTo("receipt-reply".equals(fault) ? 1 : 0);
+            assertThat(jdbc.queryForObject("SELECT prompt_id FROM managed_agent_turn WHERE session_id = ? AND turn_id = ?",
+                    String.class, session, turn)).isEqualTo(jdbc.queryForObject(
+                            "SELECT turn_id FROM qwen_tool_execution WHERE harness_session_id = ?", String.class, session));
+            assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", Map.of("type", "agent.session.input.message", "input", input),
+                    "fault-turn", "actor", 202).path("turn_id").asText()).isEqualTo(turn);
+            shellProbe.assertPublicFault(faultSession);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_turn WHERE session_id = ?", Integer.class, session)).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_turn WHERE session_id = ?", String.class, session)).isNotEqualTo("COMPLETED");
+            assertThat(decoy.resolve("proof.txt")).doesNotExist();
+            assertThat(modelFailure.get()).isNull();
+            assertThat(receiptRequests).hasSize(3);
+            System.out.println("PUBLIC_FG6F " + fault + " session=" + session + " turn=" + turn
+                    + " receiptAttempts=" + receiptRequests.size() + " effect=once");
+        } finally {
+            if ("receipt-failure".equals(fault)) jdbc.execute("DROP TRIGGER " + trigger);
+        }
     }
 
     @ParameterizedTest
@@ -452,6 +619,13 @@ class HostedPublicWorkspaceIT {
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
+        if (shellFault != null) {
+            storeRelay = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            relayExecutor = Executors.newVirtualThreadPerTaskExecutor();
+            storeRelay.setExecutor(relayExecutor);
+            storeRelay.createContext("/internal/managed-session-store/", this::relayStore);
+            storeRelay.start();
+        }
         startSpring(cli, roots, harnessPort, brokerPort);
         startHarness(cli, harnessPort, brokerPort);
         return roots;
@@ -783,7 +957,8 @@ class HostedPublicWorkspaceIT {
                 "--spring.datasource.username=" + System.getProperty("mysql.user", "sa"),
                 "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
                 "--qwen.managed-agent.session-store.enabled=true",
-                "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + port,
+                "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:"
+                        + (storeRelay == null ? port : storeRelay.getAddress().getPort()),
                 "--qwen.managed-agent.session-store.workspace-id=unused-global-workspace",
                 "--qwen.managed-agent.harness.enabled=true",
                 "--qwen.managed-agent.harness.workspace-files-enabled=true",
@@ -801,7 +976,9 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + cli,
                 "--qwen.managed-agent.runtime-broker.cli-entry=" + cli));
-        if (approvals) arguments.add("--qwen.managed-agent.harness.approval-mode=default");
+        if (approvals) arguments.add("--qwen.managed-agent.harness.approval-mode="
+                + (shell && "deny".equals(shellDecision) ? "auto-edit" : "default"));
+        if (shell) arguments.add("--qwen.managed-agent.harness.workspace-shell-enabled=true");
         arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + durableClose);
         for (int i = 0; i < roots.size(); i++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + i + "].";
@@ -854,6 +1031,15 @@ class HostedPublicWorkspaceIT {
     }
 
     private void answerActions(String session, boolean web) throws Exception {
+        try {
+            doAnswerActions(session, web);
+        } catch (AssertionError error) {
+            // untilAsserted must not retry a one-shot response after its ID is deduped.
+            throw new IllegalStateException("Action response fixture failed", error);
+        }
+    }
+
+    private void doAnswerActions(String session, boolean web) throws Exception {
         JsonNode capability = request("GET", "/v1/agents/sessions/" + session, null, null, "actor", 200);
         assertThat(capability.at("/capabilities/actions").asBoolean()).isTrue();
         JsonNode page = web ? request("POST", "/api/agent/web-shell/v1/actions/query",
@@ -865,19 +1051,17 @@ class HostedPublicWorkspaceIT {
             if (!answered.add(id)) continue;
             String route = web ? "/api/agent/web-shell/v1/actions/respond"
                     : "/v1/agents/sessions/" + session + "/actions/" + id + "/responses";
-            Map<String, Object> response = web ? Map.of("kind", "permission", "optionId", "allow",
+            Map<String, Object> response = web ? Map.of("kind", "permission", "optionId", shellDecision,
                     "inputRevision", action.path("inputRevision").asLong(), "policyRevision", action.path("policyRevision").asText())
-                    : Map.of("kind", "permission", "option_id", "allow", "input_revision", action.path("input_revision").asLong(),
+                    : Map.of("kind", "permission", "option_id", shellDecision, "input_revision", action.path("input_revision").asLong(),
                             "policy_revision", action.path("policy_revision").asText());
             Map<String, Object> body = web ? Map.of("sessionId", session, "actionId", id, "idempotencyKey", id,
                     "requestId", "d6b-action", "response", response) : response;
             assertThat(request("POST", route, body, id, "reader", 403).at("/error/code").asText()).isEqualTo("action_forbidden");
-            // The first approval of each session is answered by a second
-            // OPERATOR who is not the Session owner (R1's handoff); the
-            // rest by the owner, so both responder paths stay covered. The
-            // set records ONLY the chosen responder, so collapsing the
-            // ternary to the owner empties it instead of staying full.
-            String responder = fixedAnswered.add(session) ? "operator2" : "actor";
+            // Files sessions answer the first approval as a second OPERATOR
+            // (R1's handoff) and the rest as the owner. A Shell answer runs
+            // a command, so only the recorded owner may answer it.
+            String responder = !shell && fixedAnswered.add(session) ? "operator2" : "actor";
             if ("operator2".equals(responder)) {
                 operatorAnswered.add(session);
             }
@@ -940,7 +1124,8 @@ class HostedPublicWorkspaceIT {
             modelRequests.add(body);
             List<String> tools = new ArrayList<>();
             body.path("tools").forEach(tool -> tools.add(tool.path("function").path("name").asText()));
-            assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit");
+            if (shell) assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "run_shell_command", "monitor");
+            else assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit");
             // Count only this Turn's tool results, after the latest fixture prompt, so a later
             // Turn in the same Session runs the same write, edit and read sequence. Other user
             // messages the Harness may add do not restart the count.
@@ -963,18 +1148,35 @@ class HostedPublicWorkspaceIT {
                 return;
             }
             int step = results.size();
-            if (step == 3) assertThat(results.get(2).toString()).contains("after");
+            if (!shell && step == 3) assertThat(results.get(2).toString()).contains("after");
+            if (shell && shellFault == null && step >= 1) assertThat(results.get(0).toString()).contains("Hosted Monitor is unavailable");
+            if (shell && shellFault == null && step >= 2) assertThat(results.get(1).toString()).contains("Hosted Shell requires a foreground command");
+            if (shell && shellFault == null && step >= 3 && "allow".equals(shellDecision)) {
+                assertThat(results.get(2).toString()).contains("G0_SHELL_STDOUT");
+            }
             var chunk = json.createObjectNode().put("id", "g0").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "g0-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);
             var delta = choice.putObject("delta").put("role", "assistant");
-            if (step < 3) {
-                String name = List.of("write_file", "edit", "read_file").get(step);
-                Map<String, String> args = switch (step) {
+            boolean toolCall = step < (shellFault == null ? 3 : 1);
+            if (toolCall) {
+                String name = shell ? (shellFault == null && step == 0 ? "monitor" : "run_shell_command")
+                        : List.of("write_file", "edit", "read_file").get(step);
+                Map<String, Object> args = shell ? switch (step) {
+                    case 0 -> Map.of("command", "printf 'monitor\\n' >> monitor-proof.txt");
+                    case 1 -> Map.of("command", "printf 'background\\n' >> background-proof.txt", "is_background", true);
+                    default -> Map.of("command", "printf 'once\\n' >> shell-proof.txt; pwd; printf 'G0_SHELL_STDOUT\\n'", "description", "Write a Shell proof");
+                } : switch (step) {
                     case 0 -> Map.of("file_path", "proof.txt", "content", "before");
                     case 1 -> Map.of("file_path", "proof.txt", "old_string", "before", "new_string", "after");
                     default -> Map.of("file_path", "proof.txt");
                 };
+                if (shellFault != null) {
+                    String producer = "const fs = require('fs'); fs.appendFileSync('proof.txt', 'x');"
+                            + " process.stdout.write(Buffer.alloc(1024 * 1024, 0x61), () => {"
+                            + " process.stdout.write('stdout-tail\\n'); process.stderr.write('stderr-tail\\n'); });";
+                    args = Map.of("command", shellQuote(node) + " -e " + shellQuote(producer), "timeout", 60000);
+                }
                 delta.putArray("tool_calls").addObject().put("index", 0).put("id", "g0-tool-" + step)
                         .put("type", "function").putObject("function").put("name", name)
                         .put("arguments", json.writeValueAsString(args));
@@ -982,7 +1184,7 @@ class HostedPublicWorkspaceIT {
             choice.putNull("finish_reason");
             String first = "data: " + json.writeValueAsString(chunk) + "\n\n";
             choice.putObject("delta");
-            choice.put("finish_reason", step < 3 ? "tool_calls" : "stop");
+            choice.put("finish_reason", toolCall ? "tool_calls" : "stop");
             byte[] response = (first + "data: " + json.writeValueAsString(chunk) + "\n\ndata: [DONE]\n\n")
                     .getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
@@ -993,6 +1195,55 @@ class HostedPublicWorkspaceIT {
         } finally {
             exchange.close();
         }
+    }
+
+    private void relayStore(HttpExchange exchange) throws IOException {
+        boolean receipt = false;
+        try {
+            byte[] body = exchange.getRequestBody().readAllBytes();
+            JsonNode fields = body.length == 0 ? json.createObjectNode() : json.readTree(body);
+            String records = fields.has("recordBytesBase64")
+                    ? new String(Base64.getDecoder().decode(fields.path("recordBytesBase64").asText()), StandardCharsets.UTF_8) : "";
+            receipt = records.lines().anyMatch(line -> {
+                try { return "tool.receipt".equals(json.readTree(line).path("managedSession").path("kind").asText()); }
+                catch (IOException error) { throw new IllegalStateException(error); }
+            });
+            if (receipt) {
+                receiptRequests.add(body);
+                assertThat(receiptRequests).as("Harness receipt retry budget").hasSizeLessThanOrEqualTo(3);
+            }
+            HttpRequest.Builder forwarded = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + exchange.getRequestURI()))
+                    .timeout(Duration.ofSeconds(15)).method(exchange.getRequestMethod(), body.length == 0
+                            ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofByteArray(body));
+            exchange.getRequestHeaders().forEach((name, values) -> {
+                if (!List.of("host", "connection", "content-length", "upgrade", "expect").contains(name.toLowerCase(java.util.Locale.ROOT)))
+                    values.forEach(value -> forwarded.header(name, value));
+            });
+            var response = http.send(forwarded.build(), HttpResponse.BodyHandlers.ofByteArray());
+            if (receipt) {
+                assertThat(response.statusCode()).isEqualTo("receipt-failure".equals(shellFault) ? 500 : 200);
+                if ("receipt-reply".equals(shellFault)) return;
+            } else if ("managed-tool-result-content".equals(fields.path("kind").asText()) && fields.path("byteLength").asInt() == 1024 * 1024) {
+                assertThat(response.statusCode()).as("%s: %s", exchange.getRequestURI(), new String(response.body(), StandardCharsets.UTF_8)).isEqualTo(200);
+                shellProbe.observePublicPrefix(faultSession);
+            }
+            response.headers().map().forEach((name, values) -> {
+                if (!List.of("connection", "content-length", "transfer-encoding").contains(name.toLowerCase(java.util.Locale.ROOT))) {
+                    exchange.getResponseHeaders().put(name, values);
+                }
+            });
+            exchange.sendResponseHeaders(response.statusCode(), response.body().length);
+            exchange.getResponseBody().write(response.body());
+        } catch (Exception | AssertionError error) {
+            modelFailure.compareAndSet(null, error);
+        } finally {
+            exchange.close();
+            if (receipt) receiptResponses.incrementAndGet();
+        }
+    }
+
+    private static String shellQuote(String value) {
+        return "'" + value.replace("'", "'\"'\"'") + "'";
     }
 
     private JsonNode request(String method, String path, Object body, String key, String actor, int expected)
@@ -1020,14 +1271,31 @@ class HostedPublicWorkspaceIT {
 
     @AfterEach
     void stop() throws Exception {
-        if (harness != null) {
-            harness.descendants().forEach(ProcessHandle::destroyForcibly);
-            harness.destroyForcibly();
-            harness.waitFor(10, TimeUnit.SECONDS);
+        Throwable failure = null;
+        List<org.junit.jupiter.api.function.Executable> cleanup = List.of(
+                () -> {
+                    if (harness != null) {
+                        harness.descendants().forEach(ProcessHandle::destroyForcibly);
+                        harness.destroyForcibly();
+                        harness.waitFor(10, TimeUnit.SECONDS);
+                    }
+                },
+                () -> { if (shellProbe != null) shellProbe.close(); },
+                () -> { if (spring != null) spring.close(); },
+                () -> { if (storeRelay != null) storeRelay.stop(0); },
+                () -> { if (relayExecutor != null) relayExecutor.close(); },
+                () -> { if (durableClose) stopDurableWorkers(); },
+                () -> { if (model != null) model.stop(0); });
+        for (var step : cleanup) {
+            try {
+                step.execute();
+            } catch (Throwable error) {
+                if (failure == null) failure = error;
+                else failure.addSuppressed(error);
+            }
         }
-        if (spring != null) spring.close();
-        if (durableClose) stopDurableWorkers();
-        if (model != null) model.stop(0);
+        if (failure instanceof Exception error) throw error;
+        if (failure instanceof Error error) throw error;
     }
 
     private void stopDurableWorkers() throws Exception {

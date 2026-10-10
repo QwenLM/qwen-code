@@ -25,6 +25,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
@@ -99,7 +100,8 @@ public class ManagedAgentService {
     }
 
     private boolean supportsClose(SessionRecord session) {
-        return session.workspace() == null || store.workspaceFilesEnabled()
+        return session.workspace() == null || !WorkspaceToolProfiles.isShell(session.toolProfile())
+                && store.workspaceFilesEnabled()
                 && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
                 && harness.supportsLifecycle();
     }
@@ -747,7 +749,8 @@ public class ManagedAgentService {
     private static boolean retention(SessionRecord session,
             Set<String> closed) {
         return session.workspace() == null
-                || closed.contains(session.sessionId());
+                || !WorkspaceToolProfiles.isShell(session.toolProfile())
+                        && closed.contains(session.sessionId());
     }
 
     private PublicSession publicSession(SessionRecord session) {
@@ -780,7 +783,8 @@ public class ManagedAgentService {
                         true,
                         session.workspace() == null,
                         true,
-                        hasActions(session), supportsClose(session), retention, retention, supportsDelete(session, retention)),
+                        hasActions(session), supportsClose(session), retention, retention, supportsDelete(session, retention),
+                        foregroundShell(session)),
                 publicWorkspace(session));
     }
 
@@ -869,12 +873,21 @@ public class ManagedAgentService {
                 // Stage H records its Session store holds (H0c).
                 new WebShellSessionCapabilities(true, hasArtifacts(session),
                         hasActions(session), maySubmit, supportsClose(session),
-                        retention, retention, supportsDelete(session, retention)));
+                        retention, retention, supportsDelete(session, retention), foregroundShell(session)));
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
-        return retention || session.workspace() != null && store.workspaceFilesEnabled()
+        return retention || session.workspace() != null && !WorkspaceToolProfiles.isShell(session.toolProfile())
+                && store.workspaceFilesEnabled()
                 && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle();
+    }
+
+    private Boolean foregroundShell(SessionRecord session) {
+        if (session.workspace() == null || !WorkspaceToolProfiles.isShell(session.toolProfile())) {
+            return null;
+        }
+        return store.workspaceFilesEnabled() && store.workspaceShellEnabled()
+                && WorkspaceToolProfiles.requiresApproval(session.approvalMode());
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {

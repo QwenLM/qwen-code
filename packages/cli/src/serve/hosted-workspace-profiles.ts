@@ -37,6 +37,14 @@ export function isHostedWorkspaceShellProfile(profile: unknown): boolean {
   );
 }
 
+/** Public Shell admission sets suppressChildAgents. Private Shell lanes omit it. */
+export function hostedShellLaneAttachesChildAgents(
+  shellLane: boolean,
+  suppressChildAgents: boolean,
+): boolean {
+  return shellLane && !suppressChildAgents;
+}
+
 export function isHostedWorkspaceSearchProfile(profile: unknown): boolean {
   return (
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||

@@ -352,7 +352,10 @@ function toSessionSummary(
     capabilities: {
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
       canSend:
-        sessionActive && !active && (!session.workspace || workspaceTurns),
+        sessionActive &&
+        !active &&
+        (!session.workspace ||
+          (workspaceTurns && session.capabilities?.foregroundShell !== false)),
       // The creator may cancel a running bound Turn after the Workspace stops
       // admitting new work, so cancel is not tied to workspaceTurns; the
       // server refuses anyone else.
