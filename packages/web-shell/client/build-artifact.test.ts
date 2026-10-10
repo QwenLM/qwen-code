@@ -404,13 +404,14 @@ describe('build artifact — transcript entry (#11031)', () => {
     // main grew the same entry in parallel — 1,309,207 at 1aba19c878, plus
     // 3,033 for table fullscreen and Shadow DOM keyboard handling, reaching
     // 1,312,240. Merging the two measures 1,320,366 in CI at d4304811. The
-    // ceiling leaves a small margin around that intentional UI;
+    // ru goal/goals catalog (#13391) adds 4,649 to 1,325,015. The ceiling
+    // leaves a small margin around that intentional UI;
     // re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_323_000);
+    expect(js.length).toBeLessThan(1_328_000);
   });
 
   it('carries no Live Voice strings and looks none up', () => {

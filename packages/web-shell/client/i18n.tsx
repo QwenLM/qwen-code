@@ -25,7 +25,7 @@ import {
   SETTINGS_MESSAGES_ZH,
 } from './settings/messages.js';
 
-export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
+export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN', 'ru'] as const;
 
 export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
 
@@ -40,6 +40,26 @@ function plural(count: string | number | undefined, noun: string): string {
   const value = typeof count === 'number' ? count : Number(count ?? 0);
   const safe = Number.isFinite(value) ? value : 0;
   return `${safe} ${noun}${safe === 1 ? '' : 's'}`;
+}
+
+/**
+ * Russian plural pick: 1 → `one`, 2–4 → `few`, otherwise → `many`, with the
+ * 11–14 exception per decade (ход/ходов, токен/токенов, цель/целей).
+ */
+function ruPlural(
+  count: string | number | undefined,
+  one: string,
+  few: string,
+  many: string,
+): string {
+  const value = typeof count === 'number' ? count : Number(count ?? 0);
+  const safe = Number.isFinite(value) ? value : 0;
+  const last = safe % 10;
+  const lastTwo = safe % 100;
+  if (lastTwo >= 11 && lastTwo <= 14) return many;
+  if (last === 1) return one;
+  if (last >= 2 && last <= 4) return few;
+  return many;
 }
 
 const EN: Messages = {
@@ -8338,14 +8358,108 @@ const ZH: Messages = {
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,
 };
 
+/**
+ * Russian catalog — intentionally partial: it covers the Goal card and the
+ * Goals dialog (#13391). `getTranslator` falls back to EN for every other
+ * key (`messages[key] ?? EN[key] ?? key`), which is the behaviour this locale
+ * has been running with since it was first introduced as an installer patch.
+ */
+const RU: Messages = {
+  'goal.aborted': 'Цель прервана',
+  'goal.blocked': 'Цель заблокирована',
+  'goal.usageLimited': 'Лимит использования цели',
+  'goal.paused': 'Цель на паузе',
+  'goal.achieved': 'Цель достигнута',
+  'goal.check': 'Проверка цели',
+  'goal.cleared': 'Цель снята',
+  'goal.failed': 'Цель не достигнута',
+  'goal.judge': 'Оценка',
+  'goal.label': 'Цель',
+  'goal.lastCheck': 'Последняя проверка',
+  'goal.notYetMet': 'условие не выполнено',
+  'goal.set': 'Цель задана',
+  'goal.statusActive': '/goal активен',
+  'goal.status.active': 'В работе',
+  'goal.status.paused': 'Пауза',
+  'goal.status.blocked': 'Заблокирована',
+  'goal.status.usage_limited': 'Лимит исчерпан',
+  'goal.status.complete': 'Выполнена',
+  'goal.activity.idle': 'Ожидание',
+  'goal.activity.running': 'Работает',
+  'goal.activity.verifying': 'Проверка',
+  'goal.edit': 'Изменить цель',
+  'goal.pause': 'Поставить на паузу',
+  'goal.resume': 'Продолжить',
+  'goal.turn': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'ход', 'хода', 'ходов')}`,
+  'goal.turnLabel': (v) => `ход ${v?.count ?? 0}`,
+  'goal.turns': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'ход', 'хода', 'ходов')}`,
+  'goal.turnsOfBudget': (v) =>
+    `${v?.count ?? 0} / ${v?.budget ?? 0} ${ruPlural(v?.budget, 'ход', 'хода', 'ходов')}`,
+  'goal.activeOfBudget': (v) => `${v?.used ?? ''} / ${v?.budget ?? ''}`,
+  'goal.tokens': (v) =>
+    `${v?.used ?? 0} ${ruPlural(v?.used, 'токен', 'токена', 'токенов')}`,
+  'goal.tokensOfBudget': (v) =>
+    `${v?.used ?? 0} / ${v?.budget ?? 0} ${ruPlural(v?.budget, 'токен', 'токена', 'токенов')}`,
+  'goals.title': 'Цели',
+  'goals.subtitle':
+    'Цель удерживает сессию в работе, пока условие не выполнено. Здесь видны только загруженные сейчас сессии — цель двигается, пока её сессия работает.',
+  'goals.loading': 'Загрузка целей…',
+  'goals.count': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'активная цель', 'активные цели', 'активных целей')}`,
+  'goals.empty': 'Нет активных целей. Задайте: /goal <условие>.',
+  'goals.refresh': 'Обновить',
+  'goals.new': 'Новая цель',
+  'goals.newHint':
+    'Цель запускается в новой сессии и работает, пока условие не выполняется. Жёсткий лимит по числу ходов или времени задаётся в чате: /config model.goalMaxTurns=20 или /config model.goalMaxActiveMinutes=30 (применяется после перезапуска демона, к целям, созданным позже).',
+  'goals.condition': 'Условие',
+  'goals.conditionPlaceholder':
+    'напр. `npm test` завершается с кодом 0 и `npm run lint` без предупреждений (вставить вывод); не менять тестовые файлы; как указание модели — остановиться как blocked после 20 ходов',
+  'goals.cancel': 'Отмена',
+  'goals.create': 'Задать цель',
+  'goals.creating': 'Запуск…',
+  'goals.saving': 'Сохранение…',
+  'goals.save': 'Сохранить',
+  'goals.edit': 'Изменить цель',
+  'goals.objective': 'Целевое условие',
+  'goals.clear': 'Снять цель',
+  'goals.clearConfirm': (v) => `Снять цель "${v?.condition ?? ''}"?`,
+  'goals.running': 'Работает',
+  'goals.idle': 'Ожидание',
+  'goals.dropped': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'сеанс', 'сеанса', 'сеансов')} не удалось достичь — цели, которые они выполняли, отсутствуют в этом списке.`,
+  'goals.notYetEvaluated': 'ещё не оценено',
+  'goals.openSessionHint': 'Открыть сессию этой цели',
+  'goals.error.emptyCondition': 'Введите условие для цели.',
+  'goals.error.clearKeyword': (v) =>
+    `"${v?.word ?? ''}" снимает цель, а не задаёт её. Опишите условие, к которому нужно работать.`,
+  'goals.error.createFailed': 'Не удалось запустить цель',
+  'goals.error.saveFailed': 'Не удалось сохранить цель',
+  'goals.error.goalUnavailable': 'Цель больше недоступна.',
+  'goals.error.requiresObjective': (v) =>
+    `/goal ${v?.keyword ?? 'set'} требует целевого условия.`,
+  'goals.error.invalidCommand': 'Некорректная команда /goal',
+  'goals.error.goalsUnavailable': 'Панель целей недоступна в этом интерфейсе.',
+  'goals.error.attachmentsUnsupported': 'Уберите вложения перед /goal.',
+  'goals.error.editFailed': 'Не удалось изменить цель',
+  'goals.error.pauseFailed': 'Не удалось поставить цель на паузу',
+  'goals.error.resumeFailed': 'Не удалось продолжить цель',
+  'goals.error.clearFailed': 'Не удалось снять цель',
+  'goals.error.controlBusy':
+    'Другое управление целью ещё выполняется. Повторите, когда оно завершится.',
+};
+
 const MESSAGES: Record<WebShellLanguage, Messages> = {
   en: EN,
   'zh-CN': ZH,
+  ru: RU,
 };
 
 const LANGUAGE_LABELS: Record<WebShellLanguage, string> = {
   en: 'English [en]',
   'zh-CN': '中文 [zh-CN]',
+  ru: 'Русский [ru]',
 };
 
 const Context = createContext<{
@@ -8363,6 +8477,12 @@ export function normalizeLanguage(
   if (!normalized) return 'en';
   if (normalized === 'zh' || normalized === 'zh-cn' || normalized === 'zh_cn') {
     return 'zh-CN';
+  }
+  // Prefix match: ru, region-qualified ru (ru-RU, ru-UA, ru-KZ, …) and the
+  // underscore form all resolve to the partial ru catalog — region-qualified
+  // Russian speakers must not fall through to en.
+  if (normalized.startsWith('ru') || normalized === 'русский') {
+    return 'ru';
   }
   return 'en';
 }
@@ -8385,6 +8505,11 @@ export function languageSettingToWebShellLanguage(
     normalized === '中文'
   ) {
     return 'zh-CN';
+  }
+  // Same prefix match as normalizeLanguage: region-qualified settings
+  // (ru-UA, …) map to the partial ru catalog instead of an unknown setting.
+  if (normalized.startsWith('ru') || normalized === 'русский') {
+    return 'ru';
   }
   if (
     normalized === 'en' ||
