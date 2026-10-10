@@ -518,6 +518,40 @@ describe('managed v3 background Shell', () => {
     expect(resumeSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('re-asserts the pause when a launcher-exit flush resumes the pipes', async () => {
+    // flushStdio resumes the paused pipes when the launcher exits; a writer
+    // that outlives its launcher would then balloon the queue, so the next
+    // delivered chunk must re-assert the pause.
+    const ctx = rig();
+    const stdout = ctx.process.child.stdout!;
+    const pauseSpy = vi.spyOn(stdout, 'pause');
+    pauseSpy.mockClear();
+
+    const deferred: Array<() => void> = [];
+    ctx.sink.write = async (id: 'stdout' | 'stderr', chunk: Buffer) => {
+      ctx.sink.writes.push([id, chunk.toString()]);
+      await new Promise<void>((resolve) => deferred.push(resolve));
+    };
+    await execute(ctx);
+
+    const spec = ctx.supervisor.start.mock.calls[0]![0] as unknown as {
+      onOutput: (stream: 'stdout' | 'stderr', chunk: Buffer) => unknown;
+    };
+    const oneMiB = Buffer.alloc(1024 * 1024, 0x61);
+    for (let count = 0; count < 17; count++) spec.onOutput('stdout', oneMiB);
+    expect(pauseSpy).toHaveBeenCalledTimes(1);
+
+    // The launcher exits: its exit flush resumes the pipe underneath the
+    // pause. The next delivered chunk must pause it again.
+    stdout.resume();
+    expect(stdout.isPaused()).toBe(false);
+    spec.onOutput('stdout', oneMiB);
+    expect(pauseSpy).toHaveBeenCalledTimes(2);
+    expect(stdout.isPaused()).toBe(true);
+
+    while (deferred.length > 0) deferred.shift()!();
+  });
+
   it('settles the start result and holds the Runtime until the process exits', async () => {
     const ctx = rig();
     const view = await execute(ctx);

@@ -77,10 +77,11 @@ function developmentCsp(requestUrl: string): string {
   const queryStart = requestUrl.indexOf('?');
   const raw = new URLSearchParams(
     queryStart === -1 ? '' : requestUrl.slice(queryStart + 1),
-  ).get('daemon');
-  const origin = getAllowedDaemonOrigin(raw || '');
+  );
   const connectOrigins: string[] = [];
-  if (origin) {
+  for (const value of [raw.get('daemon'), ...raw.getAll('fanout')]) {
+    const origin = getAllowedDaemonOrigin(value || '');
+    if (!origin || connectOrigins.includes(origin)) continue;
     const websocket = new URL(origin);
     websocket.protocol = websocket.protocol === 'https:' ? 'wss:' : 'ws:';
     connectOrigins.push(origin, websocket.origin);

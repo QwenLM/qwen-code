@@ -25,6 +25,7 @@ import {
   type HostedRecoveryTurn,
   type HostedRuntimeRecoveryOutcome,
 } from './hosted-runtime-recovery.js';
+import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
   commitHostedFileHistory,
   readHostedFileHistory,
@@ -283,8 +284,177 @@ describe('recoverHostedRuntimeTurn', () => {
     return session;
   }
 
+  /** Drives a fresh session to a parked await_agent checkpoint (#13708). */
+  async function parkAtAwaitAgent(consume = false): Promise<ManagedSession> {
+    const session = await open('boot-1', true, 'hosted-workspace-files/1');
+    const harness = createManagedHarnessHandle(session);
+    const authority = session.authority;
+    const contentRef = await session.resources.publish(
+      'managed-input',
+      Buffer.from(JSON.stringify([{ type: 'text', text: 'review the diff' }])),
+    );
+    const admissionRef = await session.resources.publish(
+      'managed-admission',
+      Buffer.from(JSON.stringify({ promptId: PROMPT_ID, digest: 'x' })),
+    );
+    await authority.submitInput(
+      {
+        operation: 'submitInput',
+        commandId: PROMPT_ID,
+        sessionKey: authority.sessionHeader.sessionKey,
+        contentDigest: DIGEST,
+      },
+      {
+        inputId: PROMPT_ID,
+        turnId: PROMPT_ID,
+        source: 'hosted-harness',
+        contentRef,
+        admissionRef,
+        deadline: null,
+        wakeReason: 'input',
+      },
+    );
+    await harness.ensureRunnable();
+    const children = new HostedChildAgentSession(
+      { authority, resources: session.resources },
+      authority.sessionHeader.sessionKey,
+    );
+    const launched = await children.admit({
+      childRunId: 'prompt:call-1',
+      ownerScopeId: SESSION_ID,
+      rootSessionId: SESSION_ID,
+      completion: 'tool',
+      description: 'audit the diff',
+      prompt: 'review the change',
+      definition: {
+        definitionId: 'hosted-agent/hosted-workspace-files/1',
+        definitionRevision: 1,
+        definitionDigest: authority.sessionHeader.definitionRef.digest,
+      },
+      workspaceMode: 'shared',
+      workingDirectory: '.',
+      executionCallId: 'prompt:call-1',
+    });
+    await harness.commitAwaitAgent(
+      [
+        {
+          childRunId: 'prompt:call-1',
+          functionCallId: 'call-1',
+          toolName: 'agent',
+          modelMessageId: 'message-1',
+          consumed: false,
+        },
+      ],
+      { turnId: PROMPT_ID, promptId: PROMPT_ID },
+      { attemptId: 'message-1', routeRef: launched.inputRef },
+    );
+    if (consume) await harness.resolveAwaitAgent('prompt:call-1');
+    await session.close();
+    resetManagedRuntimeDispatchGatesForTest();
+    return session;
+  }
+
   const brokerOptions = { baseUrl: 'http://127.0.0.1:1', token: 'test' };
 
+  it('classifies the parked agent wait without folding or acquiring', async () => {
+    const parked = await parkAtAwaitAgent();
+    const replacement = await open('boot-2', false);
+    try {
+      const before = replacement.authority.committedSequence;
+      const turn = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
+      // Classification only: the fold belongs to the continue route's
+      // resume arm, so the wait sees no new commit here.
+      expect(replacement.authority.committedSequence).toBe(before);
+      expect(turn.acquiredRuntime).toBe(false);
+      expect(turn.report).toMatchObject({
+        phase: 'await_agent',
+        checkpointId: parked.authority.latestCheckpoint?.checkpointId,
+        executions: [
+          {
+            functionCallId: 'call-1',
+            toolName: 'agent',
+            executionCallId: 'prompt:call-1',
+            outcome: 'known',
+            status: { state: 'executing' },
+          },
+        ],
+      });
+      // The wire field is required on every entry; this phase has no
+      // Runtime session to name, so the hosted runtime-session identity
+      // of the parked Turn rides it (R1-32).
+      expect(turn.report.executions[0]?.runtimeSessionId).toBe(
+        hostedRuntimeSessionId(PROMPT_ID),
+      );
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('reports the fully-consumed agent wait as settled, never model_start', async () => {
+    await parkAtAwaitAgent(true);
+    const replacement = await open('boot-2', false);
+    try {
+      const turn = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
+      expect(turn.report).toMatchObject({
+        phase: 'await_agent',
+        executions: [
+          {
+            executionCallId: 'prompt:call-1',
+            outcome: 'known',
+            status: { state: 'settled' },
+          },
+        ],
+      });
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('classifies the agent wait identically on a passive load', async () => {
+    await parkAtAwaitAgent();
+    const replacement = await open('boot-2', false);
+    try {
+      const turn = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      );
+      expect(turn.acquiredRuntime).toBe(false);
+      expect(turn.report.phase).toBe('await_agent');
+      expect(turn.report.executions[0]).toMatchObject({
+        outcome: 'known',
+        status: { state: 'executing' },
+      });
+      expect(turn.report.executions[0]?.runtimeSessionId).toBe(
+        hostedRuntimeSessionId(PROMPT_ID),
+      );
+    } finally {
+      await replacement.close();
+    }
+  });
   /**
    * Drives a fresh session to a parked await_action checkpoint: the model
    * answered with call-1, the approval is requested, and the owner died
