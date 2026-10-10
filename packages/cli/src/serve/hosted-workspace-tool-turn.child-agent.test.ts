@@ -20,9 +20,16 @@ import { managedExtensionRecordKey } from '@qwen-code/qwen-code-core/managed-run
 import { MANAGED_CHILD_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
+  HookEventName,
+  HookType,
+} from '@qwen-code/qwen-code-core/hooks/types.js';
+import type { ManagedHookDescriptor } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
+import { HostedHookSession } from './hosted-hook-session.js';
+import {
   HostedWorkspaceToolTurn,
   HOSTED_AGENT_TOOL,
   HOSTED_AGENT_WORKTREE_TOOL,
+  HOSTED_CHILD_MOUNT_REFUSALS,
   HOSTED_TEAM_AGENT_TOOL,
   HOSTED_TEAM_AGENT_WORKTREE_TOOL,
 } from './hosted-workspace-tool-turn.js';
@@ -46,11 +53,18 @@ const broker = vi.hoisted(() => ({
   release: vi.fn().mockResolvedValue(undefined),
   registerPublisher: vi.fn().mockResolvedValue('1'),
   acknowledge: vi.fn().mockResolvedValue(undefined),
+  hookControl: vi.fn(),
+  authorizeLifecycle: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
     readonly runtimeSessionId = 'prompt';
+    runtime = {
+      bindingId: 'binding',
+      generation: '1',
+      workspaceGeneration: '1',
+    };
     fileHistory = broker.fileHistory;
     warm = broker.warm;
     acquire = broker.acquire;
@@ -63,6 +77,8 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     release = broker.release;
     registerPublisher = broker.registerPublisher;
     acknowledge = broker.acknowledge;
+    hookControl = broker.hookControl;
+    authorizeLifecycle = broker.authorizeLifecycle;
   },
 }));
 
@@ -95,6 +111,7 @@ function createTurn(
   promptName = 'prompt',
   hooksMountHeld = false,
   childWorkspaces = false,
+  hooksSession?: HostedHookSession,
 ): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -159,6 +176,7 @@ function createTurn(
             } as unknown as import('./hosted-hook-session.js').HostedHookSession,
           }
         : {}),
+      ...(hooksSession ? { hooks: hooksSession } : {}),
     },
   );
 }
@@ -192,6 +210,7 @@ beforeEach(async () => {
     broker.cancel,
     broker.release,
     broker.acknowledge,
+    broker.authorizeLifecycle,
   ])
     method.mockResolvedValue(undefined);
   broker.registerPublisher.mockResolvedValue('1');
@@ -1144,7 +1163,7 @@ it('refuses a background agent while the Session owner holds the mount', async (
     }),
   )) as Part[];
   expect(JSON.stringify(responses)).toContain(
-    'Hook catalog or MCP owner holds the Workspace mount',
+    HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner,
   );
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     0,
@@ -1246,7 +1265,280 @@ it('admits a batch of only agent calls, foregrounded or queued', async () => {
   expect(broker.acquire).not.toHaveBeenCalled();
 });
 
-const mountRefusal = 'unavailable while this Turn holds the Workspace mount';
+const mountRefusal = HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner;
+
+async function restoredHooks(
+  descriptor: Pick<ManagedHookDescriptor, 'eventName' | 'config'> &
+    Partial<ManagedHookDescriptor>,
+): Promise<HostedHookSession> {
+  const pin = {
+    catalogId: 'deployment',
+    catalogRevision: 1,
+    definitionDigest: 'a'.repeat(64),
+  };
+  broker.hookControl.mockImplementation(async (operation) => ({
+    operationId: operation.operationId,
+    state: 'settled',
+    ...(operation.kind === 'hook-catalog'
+      ? {
+          catalog: {
+            ...pin,
+            hooks: [
+              {
+                hookId: 'result',
+                sequential: false,
+                async: false,
+                failClosed: true,
+                onceKey: null,
+                ...descriptor,
+              },
+            ],
+          },
+        }
+      : {
+          result: {
+            success: true,
+            outcome: 'success',
+            duration: 1,
+            output: {},
+          },
+        }),
+  }));
+  const options = { baseUrl: 'http://127.0.0.1:1', token: 'test' };
+  const initial = new HostedHookSession(options, session, pin);
+  await initial.ensureReady();
+  await initial.close();
+  const restored = new HostedHookSession(options, session, pin);
+  await restored.ensureReady();
+  expect(restored.mountHeld).toBe(false);
+  return restored;
+}
+
+const resultEvents = [
+  HookEventName.PostToolUse,
+  HookEventName.PostToolUseFailure,
+  HookEventName.PostToolBatch,
+];
+
+it.each(
+  resultEvents.flatMap((eventName) =>
+    [false, true].map((background) => ({ eventName, background })),
+  ),
+)(
+  'refuses restored $eventName command Hooks before child admission (background=$background)',
+  async ({ eventName, background }) => {
+    const hooks = await restoredHooks({
+      eventName,
+      config: { type: 'command' },
+    });
+    const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+    try {
+      const result = await executeAgent(
+        turn,
+        call({
+          description: 'audit',
+          prompt: 'review',
+          run_in_background: background,
+        }),
+      );
+      expect(JSON.stringify(result)).toContain(mountRefusal);
+      expect(JSON.stringify(result)).not.toContain('run it in the background');
+      expect(JSON.stringify(result)).not.toContain('fresh turn');
+      expect(
+        session.authority.extensionRecordsInDomain('child_run'),
+      ).toHaveLength(0);
+    } finally {
+      await turn.finish();
+      await hooks.close();
+    }
+  },
+);
+
+// The type/eligibility filter and the event filter are orthogonal, so the
+// controls exercise the five ineligible shapes on one event and the event
+// filter on the single off-event row. The refusal side above already sweeps
+// all three result events.
+const admissionControls: Array<
+  Pick<ManagedHookDescriptor, 'eventName' | 'config'> &
+    Partial<ManagedHookDescriptor>
+> = [
+  {
+    eventName: HookEventName.PostToolUse,
+    config: { type: 'http' as const },
+  },
+  {
+    eventName: HookEventName.PostToolUse,
+    config: { type: 'function' as const },
+  },
+  {
+    eventName: HookEventName.PostToolUse,
+    config: { type: HookType.Prompt, prompt: 'check' },
+  },
+  {
+    eventName: HookEventName.PostToolUse,
+    config: { type: 'command' as const },
+    enabled: false,
+  },
+  {
+    eventName: HookEventName.PostToolUse,
+    config: { type: 'command' as const },
+    sourceTrusted: false,
+  },
+  { eventName: HookEventName.Stop, config: { type: 'command' } },
+];
+
+it.each([false, true])(
+  'admits a child after restoring a consumed once Hook (background=%s)',
+  async (background) => {
+    const original = await restoredHooks({
+      eventName: HookEventName.PostToolUse,
+      config: { type: 'command' },
+      onceKey: 'result-once',
+    });
+    const hooks = new HostedHookSession(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      original.getCatalog()!,
+    );
+    const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+    try {
+      expect(original.hasMountableToolResultHooks).toBe(true);
+      await original.fire(
+        HookEventName.PostToolUse,
+        'seed-once',
+        { tool_name: 'agent', tool_use_id: 'seed-once' },
+        new AbortController().signal,
+      );
+      expect(
+        broker.hookControl.mock.calls.filter(
+          ([operation]) => operation.kind === 'hook-execute',
+        ),
+      ).toHaveLength(1);
+      await original.close();
+      await hooks.ensureReady();
+      expect(hooks.mountHeld).toBe(false);
+      const result = executeAgent(
+        turn,
+        call({
+          description: 'audit',
+          prompt: 'review',
+          run_in_background: background,
+        }),
+      );
+      if (!background) {
+        await vi.waitFor(() =>
+          expect(children.record('prompt:call-1')).toBeDefined(),
+        );
+        await children.settleFailed('prompt:call-1', {
+          stopReason: 'creation_failed',
+          reason: null,
+          started: false,
+        });
+      }
+      expect(JSON.stringify(await result)).not.toContain(mountRefusal);
+      expect(children.record('prompt:call-1')).toBeDefined();
+      expect(
+        broker.hookControl.mock.calls.filter(
+          ([operation]) => operation.kind === 'hook-execute',
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await turn.finish();
+      await original.close();
+      await hooks.close();
+    }
+  },
+);
+
+it.each(
+  admissionControls.flatMap((descriptor) =>
+    [false, true].map((background) => ({ descriptor, background })),
+  ),
+)(
+  'admits result-Hook controls %# (background=$background)',
+  async ({ descriptor, background }) => {
+    const hooks = await restoredHooks(descriptor);
+    const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+    turn.setPromptHookRunner(async (hookConfig, eventName) => ({
+      hookConfig,
+      eventName,
+      success: true,
+      duration: 1,
+      output: {},
+    }));
+    try {
+      const result = executeAgent(
+        turn,
+        call({
+          description: 'audit',
+          prompt: 'review',
+          run_in_background: background,
+        }),
+      );
+      if (!background) {
+        await vi.waitFor(() =>
+          expect(children.record('prompt:call-1')).toBeDefined(),
+        );
+        await children.settleFailed('prompt:call-1', {
+          stopReason: 'creation_failed',
+          reason: null,
+          started: false,
+        });
+      }
+      expect(JSON.stringify(await result)).not.toContain(mountRefusal);
+      expect(children.record('prompt:call-1')).toBeDefined();
+    } finally {
+      await turn.finish();
+      await hooks.close();
+    }
+  },
+);
+
+// The Turn-owned arm the Session-owner refusal must not swallow. A
+// Turn-owned mount releases at this Turn's finish, so its background and
+// fresh-turn advice is real, unlike the Session-scoped hold tested below.
+it('refuses a foreground agent call while this Turn holds the mount', async () => {
+  const turn = createTurn();
+  await turn.resumeCommittedResults(new AbortController().signal);
+  const refused = await executeAgent(
+    turn,
+    call({
+      description: 'audit the diff',
+      prompt: 'review the change',
+      run_in_background: false,
+    }),
+  );
+  expect(JSON.stringify(refused)).toContain(HOSTED_CHILD_MOUNT_REFUSALS.turn);
+  expect(JSON.stringify(refused)).not.toContain(mountRefusal);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
+// Pins the arm order the comment at the Turn-owned arm depends on. With both
+// holds live, the Session-scoped arm must answer: a Session-owned mount
+// survives the Turn, so the Turn arm's background and fresh-turn advice
+// cannot release it and would be dead advice. Swapping the arms keeps this
+// refusing, but with the wrong remedy.
+it('answers a foreground child with the Session refusal when both holds are live', async () => {
+  const turn = createTurnWithOwnerMount('hooks', true);
+  await turn.resumeCommittedResults(new AbortController().signal);
+  const refused = await executeAgent(
+    turn,
+    call({
+      description: 'audit the diff',
+      prompt: 'review the change',
+      run_in_background: false,
+    }),
+  );
+  expect(JSON.stringify(refused)).toContain(mountRefusal);
+  expect(JSON.stringify(refused)).not.toContain(
+    HOSTED_CHILD_MOUNT_REFUSALS.turn,
+  );
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
 
 // The 1292-refusal must key off the Session's actual mount owners, not
 // only the turn's own `acquired` flag: the Hook catalog or MCP owner can
