@@ -1095,6 +1095,9 @@ describe('Session', () => {
       getGoalRuntimeReady: vi.fn().mockResolvedValue(mockGoalRuntime),
       takePendingGoalProposal: vi.fn(),
       getGoalProposalHostSupported: vi.fn().mockReturnValue(false),
+      // The rich `_meta.qwenQuestions` path is the default these fixtures
+      // exercise; flattening is opted into per test.
+      getAskUserQuestionHostSupported: vi.fn().mockReturnValue(true),
       setGoalProposalTurnKey: vi.fn((turnKey: string | undefined) => {
         if (goalProposalTurnKey === turnKey) return false;
         goalProposalTurnKey = turnKey;
@@ -43658,6 +43661,29 @@ describe('Session', () => {
         'call-auq',
         trustedAnswerQuestions,
         { '0': 'Yes' },
+      );
+    });
+
+    it('flattens a lone question for a non-capable host and recovers the answer', async () => {
+      useBuiltinAskUserQuestionTool();
+      vi.mocked(mockConfig.getAskUserQuestionHostSupported).mockReturnValue(
+        false,
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'ask:q0:o1' },
+      });
+
+      await runAskUserQuestion();
+
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      const request = vi.mocked(mockClient.requestPermission).mock.calls[0]![0];
+      expect(
+        request.options.map((option: { optionId: string }) => option.optionId),
+      ).toEqual(['ask:q0:o0', 'ask:q0:o1', 'ask:q0:other', 'cancel']);
+      expect(mockLlmClient.recordTrustedUserAnswers).toHaveBeenCalledWith(
+        'call-auq',
+        trustedAnswerQuestions,
+        { '0': 'No' },
       );
     });
 

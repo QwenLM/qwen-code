@@ -672,7 +672,14 @@ export class AcpAdaptor implements BackendAdaptor {
     const racers: Array<Promise<unknown>> = [
       conn.initialize({
         protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: {},
+        clientCapabilities: {
+          // A Live vote is only allow/cancel and `respondPermission` takes
+          // the least-escalating proceed option, so per-choice question
+          // options would silently record the first choice. Keep the
+          // generic Submit/Cancel pair by declaring the structured-question
+          // capability (which opts out of the flat option list).
+          _meta: { 'qwen.askUserQuestion': true },
+        },
         clientInfo: { name: 'qwen-live', version: '0.1.0' },
       }),
       this.handshakeDeadline(initializeTimeoutMs),

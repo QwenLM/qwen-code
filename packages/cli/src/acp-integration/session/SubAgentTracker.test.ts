@@ -1048,6 +1048,57 @@ describe('SubAgentTracker', () => {
       });
     });
 
+    it('flattens a nested lone question and recovers the answer', async () => {
+      requestPermissionSpy.mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'ask:q0:o0' },
+      });
+      tracker = new SubAgentTracker(
+        mockContext,
+        mockClient,
+        'parent-call-123',
+        'test-subagent',
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const confirmationDetails = {
+        type: 'ask_user_question',
+        title: 'Question',
+        questions: [
+          {
+            question: 'Continue?',
+            header: 'Question',
+            options: [{ label: 'Yes', description: 'Proceed.' }],
+            multiSelect: false,
+          },
+        ],
+      } as unknown as AgentApprovalRequestEvent['confirmationDetails'];
+      const event = createApprovalEvent({
+        name: 'ask_user_question',
+        callId: 'call-ask',
+        confirmationDetails,
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(respondSpy).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.ProceedOnce,
+          { answers: { '0': 'Yes' } },
+        );
+      });
+      expect(
+        requestPermissionSpy.mock.calls[0]?.[0]?.options.map(
+          (option: { optionId: string }) => option.optionId,
+        ),
+      ).toEqual(['ask:q0:o0', 'ask:q0:other', 'cancel']);
+    });
+
     it('should use filePath over fileName for diff content path', async () => {
       tracker.setup(eventEmitter, abortController.signal);
 

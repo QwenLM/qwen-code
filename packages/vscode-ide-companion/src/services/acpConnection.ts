@@ -376,6 +376,10 @@ export class AcpConnection {
       wiredConnection.initialize({
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {
+          // This companion renders structured questions from the raw
+          // `questions` payload and answers through the private `answers`
+          // field, so it must keep the rich path instead of flat options.
+          _meta: { 'qwen.askUserQuestion': true },
           fs: {
             readTextFile: true,
             writeTextFile: true,

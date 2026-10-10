@@ -7,9 +7,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
 import {
+  ASK_USER_QUESTION_OTHER_ANSWER,
   buildPermissionRequestContent,
   interactionMetaFields,
   requestPermissionWithAbort,
+  resolveAskUserQuestionAnswers,
   resolvePermissionOutcome,
   toPermissionOptions,
 } from './permissionUtils.js';
@@ -234,6 +236,124 @@ describe('permissionUtils', () => {
           optionId: ToolConfirmationOutcome.Cancel,
           kind: 'reject_once',
         }),
+      ]);
+    });
+  });
+
+  describe('ask_user_question projection', () => {
+    const confirmation = () => ({
+      type: 'ask_user_question' as const,
+      title: 'Question',
+      questions: [
+        {
+          header: 'Library',
+          question: 'Which library should we use?',
+          options: [
+            { label: 'Alpha', description: 'First choice.' },
+            { label: 'Beta', description: 'Second choice.' },
+          ],
+        },
+      ],
+      onConfirm: async () => undefined,
+    });
+
+    it('keeps the generic Submit/Cancel pair for a capable host', () => {
+      expect(toPermissionOptions(confirmation())).toEqual([
+        {
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+          name: 'Submit',
+          kind: 'allow_once',
+        },
+        {
+          optionId: ToolConfirmationOutcome.Cancel,
+          name: 'Cancel',
+          kind: 'reject_once',
+        },
+      ]);
+    });
+
+    it('flattens a single question into one option per choice plus Other and Cancel', () => {
+      expect(
+        toPermissionOptions(confirmation(), false, undefined, true),
+      ).toEqual([
+        { optionId: 'ask:q0:o0', name: 'Alpha', kind: 'allow_once' },
+        { optionId: 'ask:q0:o1', name: 'Beta', kind: 'allow_once' },
+        { optionId: 'ask:q0:other', name: 'Other…', kind: 'allow_once' },
+        {
+          optionId: ToolConfirmationOutcome.Cancel,
+          name: 'Cancel',
+          kind: 'reject_once',
+        },
+      ]);
+    });
+
+    it('does not flatten a multi-question request', () => {
+      const multi = confirmation();
+      multi.questions.push({
+        header: 'Scope',
+        question: 'How far should this go?',
+        options: [
+          { label: 'Local', description: 'This repo only.' },
+          { label: 'Global', description: 'Everywhere.' },
+        ],
+      });
+      expect(toPermissionOptions(multi, false, undefined, true)).toEqual([
+        {
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+          name: 'Submit',
+          kind: 'allow_once',
+        },
+        {
+          optionId: ToolConfirmationOutcome.Cancel,
+          name: 'Cancel',
+          kind: 'reject_once',
+        },
+      ]);
+    });
+
+    it('recovers a choice or Other from the encoded option id', () => {
+      expect(
+        resolveAskUserQuestionAnswers(confirmation(), 'ask:q0:o1'),
+      ).toEqual({ '0': 'Beta' });
+      expect(
+        resolveAskUserQuestionAnswers(confirmation(), 'ask:q0:other'),
+      ).toEqual({ '0': ASK_USER_QUESTION_OTHER_ANSWER });
+      expect(
+        resolveAskUserQuestionAnswers(confirmation(), 'proceed_once'),
+      ).toBeUndefined();
+    });
+
+    it('accepts an encoded option id only when the caller allows it', () => {
+      const options = toPermissionOptions(
+        confirmation(),
+        false,
+        undefined,
+        true,
+      );
+      expect(
+        resolvePermissionOutcome(
+          { outcome: { outcome: 'selected', optionId: 'ask:q0:o1' } },
+          options,
+          true,
+        ),
+      ).toBe(ToolConfirmationOutcome.ProceedOnce);
+      expect(() =>
+        resolvePermissionOutcome(
+          { outcome: { outcome: 'selected', optionId: 'ask:q0:o1' } },
+          options,
+        ),
+      ).toThrow('invalid option');
+    });
+
+    it('projects every question and choice into the tool call content', () => {
+      expect(buildPermissionRequestContent(confirmation())).toEqual([
+        {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: 'Library\nWhich library should we use?\n• Alpha — First choice.\n• Beta — Second choice.',
+          },
+        },
       ]);
     });
   });
