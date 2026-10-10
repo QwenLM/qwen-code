@@ -205,12 +205,14 @@ export interface ManagedHarnessHandle {
    * pipeline and write no `tool.intent`, so without this checkpoint a
    * restarted Harness can only decline the parked Turn. Replay-safe: an
    * identical restated run set answers the same boundary, a conflicting set
-   * conflicts. With `turn`, the wait binds the turn exactly as
-   * `commitAwaitRuntimeBatch` does.
+   * conflicts. `turn` binds the wait exactly as `commitAwaitRuntimeBatch`
+   * does — it is required: skipping it skips both the turn-binding guard
+   * and the activation adoption. The batch entries must be unique on
+   * `childRunId` and on `functionCallId` and must not already be consumed.
    */
   commitAwaitAgent(
     runs: readonly HarnessAgentWaitRun[],
-    turn?: { readonly turnId: string; readonly promptId: string },
+    turn: { readonly turnId: string; readonly promptId: string },
     attempt?: {
       readonly attemptId: string;
       readonly routeRef: ManagedSessionDurableRef;
@@ -593,7 +595,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
 
   async commitAwaitAgent(
     runs: readonly HarnessAgentWaitRun[],
-    turn?: { readonly turnId: string; readonly promptId: string },
+    turn: { readonly turnId: string; readonly promptId: string },
     attempt?: {
       readonly attemptId: string;
       readonly routeRef: ManagedSessionDurableRef;
@@ -603,6 +605,28 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       throw new ManagedSessionConflictError(
         'Agent wait batch must contain at least one run.',
       );
+    }
+    // Boundary-side validation the parser keeps only on the read path:
+    // refuse here, or the duplicate / already-consumed batch becomes a
+    // checkpoint durable-blocked forever at the next read (R1-30).
+    const seenChildRuns = new Set<string>();
+    const seenCalls = new Set<string>();
+    for (const run of runs) {
+      if (
+        seenChildRuns.has(run.childRunId) ||
+        seenCalls.has(run.functionCallId)
+      ) {
+        throw new ManagedSessionConflictError(
+          'Agent wait batch entries must be unique on childRunId and functionCallId.',
+        );
+      }
+      seenChildRuns.add(run.childRunId);
+      seenCalls.add(run.functionCallId);
+      if (run.consumed) {
+        throw new ManagedSessionConflictError(
+          `Agent wait batch run ${run.childRunId} is already consumed.`,
+        );
+      }
     }
     return this.mutateCheckpoint(async () => {
       this.assertNotDetached();
@@ -654,7 +678,6 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         runnable.continuation.phase === 'before_model' ||
         runnable.continuation.phase === 'turn_settled';
       if (
-        turn &&
         (turn.turnId !== runnable.identity.turnId ||
           turn.promptId !== runnable.identity.promptId) &&
         !startsTurn
@@ -664,7 +687,6 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         );
       }
       if (
-        turn &&
         runnable.identity.activationId !== this.activation.activationId &&
         !startsTurn
       ) {
@@ -672,16 +694,14 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
           'an agent wait cannot continue a prior activation.',
         );
       }
-      const previous = turn
-        ? {
-            ...runnable,
-            identity: {
-              ...runnable.identity,
-              ...turn,
-              activationId: this.activation.activationId,
-            },
-          }
-        : runnable;
+      const previous = {
+        ...runnable,
+        identity: {
+          ...runnable.identity,
+          ...turn,
+          activationId: this.activation.activationId,
+        },
+      };
       const identity = this.nextCheckpointIdentity();
       const checkpoint = createAwaitAgentHarnessCheckpoint({
         previous,

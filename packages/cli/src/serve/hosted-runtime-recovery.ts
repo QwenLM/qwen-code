@@ -34,7 +34,7 @@ import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/m
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
-  HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
+  HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
   HOSTED_AGENT_WAIT_ABANDONED_TEXT,
   hostedAgentBackgroundStartedText,
   hostedChildRunIdFor,
@@ -404,12 +404,12 @@ async function answerAbandonedTurnCalls(input: {
   const records = (await input.session.sink.project()).filter(
     (entry) => entry.daemonPromptId === input.promptId,
   );
-  const answered = new Set(
-    records
-      .filter((entry) => entry.type === 'tool_result')
-      .flatMap((entry) => entry.message?.parts ?? [])
-      .map((part) => part.functionResponse?.id)
-      .filter((id): id is string => typeof id === 'string'),
+  // One authority for the exactly-once predicate: the same helper every
+  // replayed fold rides, fed the projection already in hand.
+  const answered = await journaledToolResultIds(
+    input.session,
+    input.promptId,
+    records,
   );
   const owed = new Map<string, { name: string; messageId: string }>();
   for (const record of records.filter((entry) => entry.type === 'assistant'))
@@ -508,13 +508,12 @@ export async function fillParkedRoundAgentGaps(input: {
   sessionId: string;
   promptId: string;
   cwd: string;
+  /** The never-admitted answer's wording: the cancel route and the
+   * recovery family (continue + funnel) name different causes, and the
+   * durable journal must not assert one that never happened. */
+  gapText: string;
   children?: HostedChildAgentSession;
   signal?: AbortSignal;
-  messageFitsInline?: (
-    type: 'assistant' | 'tool_result',
-    parts: Part[],
-    model: string,
-  ) => boolean;
   consume?: (childRunId: string) => void;
 }): Promise<number> {
   const authorization = await input.managed.authority
@@ -541,7 +540,14 @@ export async function fillParkedRoundAgentGaps(input: {
     )
     .at(-1);
   if (assistant === undefined) return 0;
-  const journaled = await journaledToolResultIds(input.managed, input.promptId);
+  // Reuse the projection already in hand: a second project() walks every
+  // committed event again, and nothing can change the journal between
+  // the two reads (the route holds the turn for the whole recovery).
+  const journaled = await journaledToolResultIds(
+    input.managed,
+    input.promptId,
+    projected,
+  );
   const writeFold = async (parts: Part[]): Promise<void> => {
     await input.managed.sink.write({
       uuid: randomUUID(),
@@ -558,7 +564,8 @@ export async function fillParkedRoundAgentGaps(input: {
   };
   // The fit predicate measures exactly this record shape (a uuid is always
   // 36 chars; the assistant parent is always 36; the timestamp is one ISO
-  // string) — never an estimate, or the inline bound would slip.
+  // string) — never an estimate, or the inline bound would slip. The same
+  // template, never a caller lambda: the exact shape is the predicate.
   const templateRecord = (parts: Part[]): Buffer =>
     Buffer.from(
       JSON.stringify({
@@ -575,14 +582,9 @@ export async function fillParkedRoundAgentGaps(input: {
       }),
       'utf8',
     );
-  // The same fit discipline as the live arm: a caller's lambda wins when
-  // present; otherwise the exact template above decides. Both predicates,
-  // never estimates.
   const fits = (parts: Part[]): boolean =>
-    input.messageFitsInline !== undefined
-      ? input.messageFitsInline('tool_result', parts, 'recovered')
-      : templateRecord(parts).byteLength <=
-        HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+    templateRecord(parts).byteLength <=
+    HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
   let filled = 0;
   for (const part of assistant.message?.parts ?? []) {
     const callId = part.functionCall?.id;
@@ -599,12 +601,7 @@ export async function fillParkedRoundAgentGaps(input: {
     if (children === undefined || admitted === undefined) {
       if (foldOwed) {
         await writeFold(
-          convertToFunctionErrorResponse(
-            name,
-            callId,
-            [],
-            HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
-          ),
+          convertToFunctionErrorResponse(name, callId, [], input.gapText),
         );
         filled += 1;
       }
@@ -850,6 +847,7 @@ export async function settleInterruptedTurnRuntime(input: {
         sessionId: input.sessionId,
         promptId: input.promptId,
         cwd: input.cwd,
+        gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
         children: input.children,
         consume: input.consume,
       });

@@ -41,7 +41,10 @@ import {
 } from './hosted-runtime-recovery.js';
 import { parkNeedsNoRuntimeSettlement } from './hosted-harness-session.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
-import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
+import {
+  HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+  HostedWorkspaceToolTurn,
+} from './hosted-workspace-tool-turn.js';
 // The Broker is mocked below purely so the ToolTurn's constructor warm-up
 // never dials out; the agent path never dispatches through it.
 import './hosted-workspace-broker.js';
@@ -545,6 +548,8 @@ describe('hosted child wait recovery (#13708)', () => {
           sessionId: SESSION_ID,
           promptId: PROMPT_ID,
           cwd: root,
+          gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+          children: childrenOf(replacement),
         }),
       ).resolves.toBe(1);
       const results = toolResultEntries(await replacement.sink.project());
@@ -624,6 +629,7 @@ describe('hosted child wait recovery (#13708)', () => {
         sessionId: SESSION_ID,
         promptId: PROMPT_ID,
         cwd: root,
+        gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
         children: childrenOf(replacement),
       });
       await driving;
@@ -683,6 +689,7 @@ describe('hosted child wait recovery (#13708)', () => {
         sessionId: SESSION_ID,
         promptId: PROMPT_ID,
         cwd: root,
+        gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
         children: childrenOf(replacement),
         signal: abort.signal,
       });
@@ -753,6 +760,7 @@ describe('hosted child wait recovery (#13708)', () => {
         sessionId: SESSION_ID,
         promptId: PROMPT_ID,
         cwd: root,
+        gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
         children,
       });
       expect(filled).toBe(1);
@@ -812,10 +820,11 @@ describe('hosted child wait recovery (#13708)', () => {
       });
       await children.attach(orphanRunId, 'child-session-2');
       await children.settleCompleted(orphanRunId, {
-        result: Buffer.from(
-          '{"review":"' + 'r'.repeat(8 * 1024) + '"}',
-          'utf8',
-        ),
+        // Under the 65536-byte child-result limit (65513) yet over the
+        // 64 KiB inline resource bound once wrapped in the record (~66000),
+        // so the exact template predicate — not a caller lambda (R1-7) —
+        // measures the fold that ships: halved down to fit with the marker.
+        result: Buffer.from('{"review":"' + 'r'.repeat(65500) + '"}', 'utf8'),
         receipt: Buffer.from('{"stopReason":"end_turn"}', 'utf8'),
       });
       await children.accept(orphanRunId);
@@ -824,9 +833,8 @@ describe('hosted child wait recovery (#13708)', () => {
         sessionId: SESSION_ID,
         promptId: PROMPT_ID,
         cwd: root,
+        gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
         children,
-        messageFitsInline: (_type, parts) =>
-          JSON.stringify(parts).length < 2048,
       });
       expect(filled).toBe(1);
       const projected = await replacement.sink.project();
@@ -861,6 +869,8 @@ describe('hosted child wait recovery (#13708)', () => {
         sessionId: SESSION_ID,
         promptId: PROMPT_ID,
         cwd: root,
+        gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+        children: childrenOf(replacement),
       });
       expect(filled).toBe(1);
       // A replayed fill is silent: the journaled set already carries both ids.
@@ -870,6 +880,8 @@ describe('hosted child wait recovery (#13708)', () => {
           sessionId: SESSION_ID,
           promptId: PROMPT_ID,
           cwd: root,
+          gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+          children: childrenOf(replacement),
         }),
       ).resolves.toBe(0);
       const projected = await replacement.sink.project();
@@ -880,8 +892,13 @@ describe('hosted child wait recovery (#13708)', () => {
           (part) => part.functionResponse?.id === 'call-2',
         ),
       );
+      // The recovery family's wording: nothing was cancelled — the owning
+      // turn was interrupted (R1-49).
       expect(JSON.stringify(callTwo?.message?.parts)).toContain(
-        'cancelled before this child agent was admitted',
+        'interrupted before this child agent was admitted',
+      );
+      expect(JSON.stringify(callTwo?.message?.parts)).not.toContain(
+        'cancelled',
       );
       expect(
         toolResultEntries(projected).map((entry) => entry.parentUuid),
@@ -994,6 +1011,7 @@ describe('hosted child wait recovery (#13708)', () => {
         sessionId: SESSION_ID,
         promptId: PROMPT_ID,
         cwd: root,
+        gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
         children: childrenOf(replacement),
       });
       expect(filled).toBe(1);
@@ -1042,7 +1060,7 @@ describe('hosted child wait recovery (#13708)', () => {
         ),
       );
       // call-1 meets the live arm's abandoned answer; call-2, never
-      // admitted, meets the live admission's own wording.
+      // admitted, meets the interruption's own wording (R1-49).
       expect(
         texts.some((text) =>
           text.includes('cancelled before the child agent finished'),
@@ -1050,7 +1068,7 @@ describe('hosted child wait recovery (#13708)', () => {
       ).toBe(true);
       expect(
         texts.some((text) =>
-          text.includes('cancelled before this child agent was admitted'),
+          text.includes('interrupted before this child agent was admitted'),
         ),
       ).toBe(true);
       const authorization =

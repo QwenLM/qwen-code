@@ -216,8 +216,9 @@ export interface HarnessApprovalGroup {
  * evidence is the run's ledger identity plus the call's journal identity —
  * the round a resume re-derives from the journal itself, so no call-site
  * position is carried. `consumed` marks the fold done; the run stays listed
- * until the Turn boundary so a second crash re-enters idempotently instead
- * of losing the consumption identity.
+ * — never filtered out — until a later all-consumed group is replaced by a
+ * new foreground wait or the Turn ends, so a second crash re-enters
+ * idempotently instead of losing the consumption identity.
  */
 export interface HarnessAgentWaitRun {
   readonly childRunId: string;
@@ -1320,6 +1321,13 @@ export function tryParseHarnessCheckpointV1(
 export function encodeHarnessCheckpointV1(
   checkpoint: HarnessCheckpointV1,
 ): Buffer {
+  // Mixed-version compat (#13708): a pre-`agentWait` reader rejects
+  // unknown root keys, and an absent key parses as null on both sides —
+  // so the key rides only the checkpoints that actually carry the group.
+  if (checkpoint.agentWait === null) {
+    const { agentWait: _omitted, ...rest } = checkpoint;
+    return Buffer.from(JSON.stringify(rest), 'utf8');
+  }
   return Buffer.from(JSON.stringify(checkpoint), 'utf8');
 }
 
@@ -1569,6 +1577,11 @@ export function createAwaitAgentHarnessCheckpoint(input: {
   const attempt = input.attempt ?? input.previous.attempt;
   if (attempt === null) {
     throw new ManagedSessionRecordError('await_agent requires the attempt.');
+  }
+  if (input.agentWait.runs.length === 0) {
+    throw new ManagedSessionRecordError(
+      'await_agent requires at least one run.',
+    );
   }
   return {
     identity: {
@@ -1931,6 +1944,15 @@ export function createModelOutputCommittedHarnessCheckpoint(input: {
   if (input.previous.attempt === null) {
     throw new ManagedSessionRecordError(
       'model_output_committed requires the waited attempt.',
+    );
+  }
+  // A carried group belongs only to the all-consumed advancement this
+  // same module mints — an unconsumed one would be a checkpoint its own
+  // assertPhaseShape refuses, durable-blocked at the next read.
+  const carried = input.previous.agentWait ?? null;
+  if (carried !== null && carried.runs.some((run) => !run.consumed)) {
+    throw new ManagedSessionRecordError(
+      'model_output_committed cannot carry an unconsumed agent wait.',
     );
   }
   return {

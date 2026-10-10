@@ -1568,13 +1568,80 @@ describe('agent wait', () => {
       turn,
     );
     // Cardinality matches and every restated run finds a mate — but the
-    // stored run-2 never restated. That is a conflict, never a replay.
+    // stored run-2 never restated. R1-30's boundary validation refuses the
+    // duplicate batch before the replay comparison can name the conflict:
+    // either refusal is correct, the batch is rejected either way.
     await expect(
       handle.commitAwaitAgent(
         [agentWaitRun('run-1'), agentWaitRun('run-1')],
         turn,
       ),
+    ).rejects.toThrow(/must be unique/);
+    await session.close();
+  });
+
+  it('refuses a restated batch that swaps one run for another', async () => {
+    const session = await open(await createWorkspace());
+    const { handle, turn } = await modelOutputCommittedTurn(session);
+    await handle.commitAwaitAgent(
+      [
+        agentWaitRun('run-1'),
+        agentWaitRun('run-2', { functionCallId: 'fc-2' }),
+      ],
+      turn,
+    );
+    // A well-formed restatement that names run-3 instead of run-2: the
+    // identical-set rule catches what the uniqueness rule cannot.
+    await expect(
+      handle.commitAwaitAgent(
+        [
+          agentWaitRun('run-1'),
+          agentWaitRun('run-3', { functionCallId: 'fc-3' }),
+        ],
+        turn,
+      ),
     ).rejects.toThrow(/different child runs/);
+    await session.close();
+  });
+
+  it('refuses an empty batch before any authorization (R1-13)', async () => {
+    const session = await open(await createWorkspace());
+    const { handle, turn } = await modelOutputCommittedTurn(session);
+    await expect(handle.commitAwaitAgent([], turn)).rejects.toThrow(
+      /at least one run/,
+    );
+    await session.close();
+  });
+
+  it('refuses duplicate ids and already-consumed runs at the boundary (R1-30)', async () => {
+    const session = await open(await createWorkspace());
+    const { handle, turn } = await modelOutputCommittedTurn(session);
+    // A duplicated childRunId: the parser's uniqueIds rule would brick the
+    // checkpoint at the next read — the boundary refuses first.
+    await expect(
+      handle.commitAwaitAgent(
+        [agentWaitRun('run-1'), agentWaitRun('run-1')],
+        turn,
+      ),
+    ).rejects.toThrow(/must be unique/);
+    // A duplicated functionCallId across different runs: same refusal.
+    await expect(
+      handle.commitAwaitAgent(
+        [
+          agentWaitRun('run-1'),
+          agentWaitRun('run-2', { functionCallId: 'fc-1' }),
+        ],
+        turn,
+      ),
+    ).rejects.toThrow(/must be unique/);
+    // A run that claims it is already consumed: the durable-wait boundary
+    // nothing could ever advance.
+    await expect(
+      handle.commitAwaitAgent(
+        [agentWaitRun('run-1', { consumed: true })],
+        turn,
+      ),
+    ).rejects.toThrow(/already consumed/);
     await session.close();
   });
 

@@ -445,24 +445,38 @@ export const HOSTED_AGENT_WAIT_ABANDONED_TEXT =
 
 /**
  * The never-admitted answer for a sibling call the dead batch never
- * reached: the live admission's own wording, also what the continue
- * route's gap fill writes for the parked round's remaining agent calls.
+ * reached: the live admission's own wording, also what the cancel
+ * route's settlement writes for the parked round's remaining agent
+ * calls.
  */
 export const HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT =
   'The turn was cancelled before this child agent was admitted.';
 
 /**
+ * The same never-admitted answer phrased for the recovery family — the
+ * continue route's gap fill and the interrupted-turn funnel, where
+ * nothing was cancelled: the answer must be honest about there being no
+ * ledger record without asserting a cause that never happened.
+ */
+export const HOSTED_AGENT_CALL_NOT_REACHED_TEXT =
+  'The owning turn was interrupted before this child agent was admitted; the call never ran.';
+
+/**
  * Which of this Turn's tool_result parts are already durable — the
  * exactly-once predicate every replayed fold rides (never the process):
  * keyed on the functionResponse id, so a replay skips only the commit
- * while the replays-safe marks still run.
+ * while the replays-safe marks still run. Pass `projected` when the
+ * caller already holds the same journal projection: one authority for
+ * the predicate, no second walk of every committed event.
  */
 export async function journaledToolResultIds(
   session: ManagedSession,
   promptId: string,
+  projected?: Awaited<ReturnType<ManagedSession['sink']['project']>>,
 ): Promise<Set<string>> {
+  const records = projected ?? (await session.sink.project());
   return new Set(
-    (await session.sink.project())
+    records
       .filter(
         (entry) =>
           entry.daemonPromptId === promptId && entry.type === 'tool_result',

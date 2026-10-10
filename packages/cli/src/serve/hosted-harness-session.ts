@@ -157,6 +157,8 @@ import {
 } from './hosted-runtime-recovery.js';
 import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import {
+  HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
+  HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
   HOSTED_WORKSPACE_FILE_PROFILE,
   HostedToolRecoveryRequiredError,
   hostedRuntimeSessionId,
@@ -5639,12 +5641,14 @@ export function registerHostedHarnessSessionRoutes(
             // all-consumed group) can strand sibling calls the dead loop
             // never reached — each of them still owes its model a response,
             // so the resume story answers them with the never-admitted fold.
-            // The fill is replay-safe: journaled ids are skipped.
+            // The fill is replay-safe: journaled ids are skipped. The
+            // answer names the interruption — nothing was cancelled here.
             const filled = await fillParkedRoundAgentGaps({
               managed: session.managed,
               sessionId,
               promptId,
               cwd: session.cwd,
+              gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
               children: session.childAgents,
               signal: abort.signal,
               consume: (childRunId) => session.childConsumption.add(childRunId),
@@ -5835,27 +5839,27 @@ export function registerHostedHarnessSessionRoutes(
     session.active = { promptId, digest: '', abort: new AbortController() };
     void (async () => {
       try {
-        // The agent wait (#13708): no Runtime executions exist to stop or
-        // settle — each outstanding run is folded as the abandoned answer
-        // the live arm itself would have written, and the resolve moves
-        // the checkpoint past the wait so the terminal record can land.
-        const agentRunsOutstanding =
-          cancelAuthorization.status === 'runnable'
-            ? (cancelAuthorization.checkpoint.agentWait?.runs.filter(
-                (run) => !run.consumed,
-              ) ?? [])
-            : [];
+        // The phase-shape invariants decide the two settlement shapes
+        // outright (R1-51): the agent wait's park names outstanding runs
+        // to fold, the carried all-consumed shape names none — either way
+        // the round pairs off — while no group means the Runtime park.
+        const agentWait = cancelAuthorization.checkpoint.agentWait;
         let broker: HostedWorkspaceBroker | undefined;
-        if (agentRunsOutstanding.length > 0) {
-          await settleCancelledAgentWaitRuns({
-            managed: session.managed,
-            sessionId,
-            promptId,
-            cwd: session.cwd,
-            runs: agentRunsOutstanding,
-          });
-        }
-        if (cancelAuthorization.checkpoint.agentWait !== null) {
+        if (agentWait !== null) {
+          // The agent wait (#13708): no Runtime executions exist to stop or
+          // settle — each outstanding run is folded as the abandoned answer
+          // the live arm itself would have written, and the resolve moves
+          // the checkpoint past the wait so the terminal record can land.
+          const outstanding = agentWait.runs.filter((run) => !run.consumed);
+          if (outstanding.length > 0) {
+            await settleCancelledAgentWaitRuns({
+              managed: session.managed,
+              sessionId,
+              promptId,
+              cwd: session.cwd,
+              runs: outstanding,
+            });
+          }
           // Outstanding or not: the round's never-reached calls pair off
           // the same way the Runtime family's cancellation settles its
           // pending items — no unpaired functionCall survives into a later
@@ -5866,15 +5870,12 @@ export function registerHostedHarnessSessionRoutes(
             sessionId,
             promptId,
             cwd: session.cwd,
+            gapText: HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
             children: session.childAgents,
             signal: session.active?.abort.signal,
             consume: (childRunId) => session.childConsumption.add(childRunId),
           });
-        }
-        if (
-          agentRunsOutstanding.length === 0 &&
-          cancelAuthorization.checkpoint.agentWait === null
-        ) {
+        } else {
           broker = await stopParkedRuntimeExecutions({
             session: session.managed,
             promptId,
