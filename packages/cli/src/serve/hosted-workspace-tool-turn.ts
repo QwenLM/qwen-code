@@ -87,7 +87,6 @@ import type { HostedTeamSession } from './hosted-team-session.js';
 import {
   HOSTED_AGENT_NAME_PROPERTY,
   HOSTED_TEAM_TOOLS,
-  hostedTeamCallCommitted,
   hostedTeammateArg,
   hostedTeamName,
   hostedTeamToolArgsError,
@@ -1077,6 +1076,9 @@ export class HostedWorkspaceToolTurn {
       }),
     );
     for (const [ordinal, call] of effective.entries()) {
+      const response = responses.find(
+        (part) => part.functionResponse?.id === call.callId,
+      )?.functionResponse?.response;
       const dispatched =
         this.agentDispatched.has(call.callId) ||
         // A resumed committed result never re-drives the launch, so the
@@ -1087,17 +1089,13 @@ export class HostedWorkspaceToolTurn {
         // otherwise read as a hybrid between the two before the third hop.
         this.childAgents?.record(this.childRunIdFor(call.callId)) !==
           undefined ||
-        // H4e-b1: a team call's evidence is the command it committed.
-        (this.teams !== undefined &&
-          hostedTeamCallCommitted(
-            this.teams,
-            call.name,
-            this.childRunIdFor(call.callId),
-          )) ||
+        // H4e-b1: a team call writes no intent; it ran exactly when it
+        // answered without an error, as the live arm marks it — a read
+        // (`task_list`) or a no-op update commits nothing to find.
+        (isHostedTeamTool(call.name) &&
+          response !== undefined &&
+          physicalToolStatus(response) === 'success') ||
         intents.some((entry) => entry.payload['ordinal'] === ordinal);
-      const response = responses.find(
-        (part) => part.functionResponse?.id === call.callId,
-      )?.functionResponse?.response;
       const preToolOutput = preToolOutputs.get(call.callId);
       const beforeContext = preToolOutput?.getAdditionalContext();
       if (

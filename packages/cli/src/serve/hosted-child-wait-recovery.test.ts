@@ -45,6 +45,7 @@ import {
 import { parkNeedsNoRuntimeSettlement } from './hosted-harness-session.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedTeamSession } from './hosted-team-session.js';
+import { teamLifecycleBody } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-operations.js';
 import {
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
   HostedWorkspaceToolTurn,
@@ -1401,6 +1402,13 @@ describe('hosted child wait recovery (#13708)', () => {
             args: { file_path: 'a.txt' },
           },
         },
+        {
+          functionCall: {
+            id: 'call-8',
+            name: 'agent',
+            args: { description: 'c', prompt: 'p', name: 'Bob' },
+          },
+        },
       ]);
       const teams = new HostedTeamSession(
         { authority: first.authority, resources: first.resources },
@@ -1415,7 +1423,7 @@ describe('hosted child wait recovery (#13708)', () => {
         activeForm: null,
         metadata: null,
       });
-      for (const callId of ['call-4', 'call-5'])
+      for (const callId of ['call-4', 'call-5', 'call-8'])
         await childrenOf(first).admit({
           childRunId: `${PROMPT_ID}:${callId}`,
           ownerScopeId: SESSION_ID,
@@ -1435,6 +1443,12 @@ describe('hosted child wait recovery (#13708)', () => {
       await teams.joinTeam(teamId, {
         name: 'alice',
         childRunId: `${PROMPT_ID}:call-4`,
+      });
+      // Bob launched, never joined, and the relay failed its run.
+      await childrenOf(first).settleFailed(`${PROMPT_ID}:call-8`, {
+        stopReason: 'creation_failed',
+        reason: null,
+        started: false,
       });
     } finally {
       await first.close();
@@ -1469,6 +1483,11 @@ describe('hosted child wait recovery (#13708)', () => {
       );
       expect(answers.get('call-5')).toContain('started in the background');
       expect(answers.get('call-5')).not.toContain('Teammate');
+      // A member that never joined and already failed sends no
+      // notification: its answer is that failure.
+      expect(answers.get('call-8')).toContain(
+        'Child agent run failed (creation_failed) before it could join the team as \\"bob\\"',
+      );
       // What committed nothing still never ran.
       expect(answers.get('call-6')).toContain('The tool call never ran');
       expect(answers.get('call-7')).toContain('The tool call never ran');
@@ -1478,6 +1497,145 @@ describe('hosted child wait recovery (#13708)', () => {
       await replacement.close();
     }
   }, 10_000);
+
+  // A batch of team calls parks nothing, so in yolo mode the checkpoint
+  // never binds the Turn: the settlement still answers what committed,
+  // and leaves the rest to the answer every other route gives.
+  it.each([false, true])(
+    'the interrupted-turn settlement answers committed team calls on a checkpoint the Turn never bound (deleted: %s)',
+    async (deleted) => {
+      const first = await open('boot-1', true);
+      try {
+        const contentRef = await first.resources.publish(
+          'managed-input',
+          Buffer.from(JSON.stringify([{ type: 'text', text: 'team up' }])),
+        );
+        const admissionRef = await first.resources.publish(
+          'managed-admission',
+          Buffer.from(JSON.stringify({ promptId: PROMPT_ID, digest: 'x' })),
+        );
+        await first.authority.submitInput(
+          {
+            operation: 'submitInput',
+            commandId: PROMPT_ID,
+            sessionKey,
+            contentDigest: DIGEST,
+          },
+          {
+            inputId: PROMPT_ID,
+            turnId: PROMPT_ID,
+            source: 'hosted-harness',
+            contentRef,
+            admissionRef,
+            deadline: null,
+            wakeReason: 'input',
+          },
+        );
+        await createManagedHarnessHandle(first).ensureRunnable();
+        const call = (id: string, name: string) => ({
+          functionCall: { id, name, args: {} },
+        });
+        await first.sink.write({
+          uuid: 'assistant-1',
+          parentUuid: null,
+          sessionId: SESSION_ID,
+          timestamp: new Date().toISOString(),
+          type: 'assistant',
+          cwd: root,
+          version: 'test',
+          daemonPromptId: PROMPT_ID,
+          message: {
+            role: 'model',
+            parts: [
+              call('call-2', 'team_create'),
+              call('call-3', 'task_create'),
+              call('call-4', 'task_update'),
+              call('call-5', 'team_delete'),
+              call('call-6', 'read_file'),
+            ],
+          },
+        });
+        const teams = new HostedTeamSession(
+          { authority: first.authority, resources: first.resources },
+          sessionKey,
+        );
+        const teamId = `${PROMPT_ID}:call-2`;
+        await teams.createTeam(teamId, 'review');
+        await teams.createTask(`${PROMPT_ID}:call-3`, {
+          teamId,
+          subject: 'Audit',
+          description: 'a',
+          activeForm: null,
+          metadata: null,
+        });
+        // The update's first step landed; the delete closed the team and,
+        // in one case, deleted it too.
+        await teams.updateTasks(`${PROMPT_ID}:call-4`, [
+          { taskId: `${teamId}#1`, change: { status: 'completed' } },
+        ]);
+        if (deleted) {
+          await teams.deleteTeam(`${PROMPT_ID}:call-5`, teamId);
+        } else {
+          await first.authority.commitExtensionRecord(
+            {
+              operation: 'closeTeam',
+              commandId: `${PROMPT_ID}:call-5:closing`,
+              sessionKey,
+              contentDigest: DIGEST,
+            },
+            {
+              domain: 'team_state',
+              record: teamLifecycleBody(teams.team(teamId)!, 'closing'),
+            },
+            { class: 'trusted_entry' },
+          );
+        }
+        const verdict = await first.authority.harnessRunAuthorization();
+        expect(
+          verdict.status === 'runnable'
+            ? verdict.checkpoint.identity.turnId
+            : null,
+        ).not.toBe(PROMPT_ID);
+      } finally {
+        await first.close();
+      }
+      resetManagedRuntimeDispatchGatesForTest();
+      const replacement = await open('boot-2', false);
+      try {
+        const settle = await settleInterruptedTurnRuntime({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions: undefined,
+          toolProfile: true,
+          children: childrenOf(replacement),
+        });
+        expect(settle.kind).toBe('ready');
+        const answers = new Map(
+          toolResultEntries(await replacement.sink.project()).flatMap((entry) =>
+            (entry.message?.parts ?? []).map((part) => [
+              part.functionResponse?.id,
+              JSON.stringify(part.functionResponse?.response),
+            ]),
+          ),
+        );
+        expect(answers.get('call-2')).toContain('Team \\"review\\" created.');
+        expect(answers.get('call-3')).toContain('Task #1 created');
+        expect(answers.get('call-4')).toContain('Read task_list');
+        expect(answers.get('call-5')).toContain(
+          deleted
+            ? 'Team \\"review\\" deleted.'
+            : 'Call team_delete again to finish the deletion.',
+        );
+        // A call that committed nothing keeps the answer its route gives.
+        expect(answers.has('call-6')).toBe(false);
+      } finally {
+        await replacement.close();
+      }
+    },
+    10_000,
+  );
 
   it('the interrupted-turn settlement does not wait on an admitted orphan (R3-1)', async () => {
     await parkWedged(true);

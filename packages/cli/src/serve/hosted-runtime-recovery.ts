@@ -47,9 +47,11 @@ import {
   hostedTeamCallRecoveredAnswer,
   hostedTeammateArg,
   hostedTeamName,
+  hostedTeammateRunEndedText,
   hostedTeammateStartedText,
   isHostedTeamTool,
 } from './hosted-team-tools.js';
+import type { ChildAgentRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import {
   HostedTeamSession,
   hostedTeamMemberOfRun,
@@ -400,18 +402,24 @@ export type HostedInterruptedTurnRuntime =
   | { readonly kind: 'held' };
 
 /**
- * The started answer a background launch the interruption left unanswered
- * owes: its admission committed, so the child runs and reports by
- * notification. H4e-b1: a named launch joined its team only if the join
- * committed — recovery never runs the call again, so the answer says which
- * and never joins on its own. The roster's name wins over the raw
- * argument, which a PreToolUse hook may have rewritten.
+ * The answer a background launch the interruption left unanswered owes:
+ * its admission committed, so the child runs and reports by notification.
+ * H4e-b1: a named launch joined its team only if the join committed —
+ * recovery never runs the call again, so the answer says which and never
+ * joins on its own. The roster's name wins over the raw argument, which a
+ * PreToolUse hook may have rewritten.
  */
-function recoveredBackgroundLaunchText(
+function recoveredBackgroundLaunchAnswer(
   managed: ManagedSession,
+  call: {
+    readonly name: string;
+    readonly callId: string;
+    readonly args: Record<string, unknown> | undefined;
+  },
+  run: ChildAgentRun,
   childRunId: string,
-  args: Record<string, unknown> | undefined,
-): string {
+): Part[] {
+  const { name, callId, args } = call;
   const taskId = managedTaskId(
     managedExtensionRecordKey(
       managed.authority.sessionHeader.sessionKey.sessionId,
@@ -424,15 +432,33 @@ function recoveredBackgroundLaunchText(
   const teammate =
     joined ??
     (asked === undefined ? undefined : hostedTeamName(asked, 'Teammate').name);
-  return teammate === undefined
-    ? hostedAgentBackgroundStartedText(taskId)
-    : hostedTeammateStartedText(
+  if (teammate === undefined)
+    return convertToFunctionResponse(name, callId, [
+      { text: hostedAgentBackgroundStartedText(taskId) },
+    ]);
+  // A member that never joined and whose run already failed sends no
+  // notification: the answer is that failure, as on the live arm.
+  if (
+    joined === undefined &&
+    (run.run.state === 'failed' || run.run.state === 'cancelled')
+  )
+    return convertToFunctionErrorResponse(
+      name,
+      callId,
+      [],
+      hostedTeammateRunEndedText(teammate, run),
+    );
+  return convertToFunctionResponse(name, callId, [
+    {
+      text: hostedTeammateStartedText(
         taskId,
         teammate,
         joined === undefined
           ? 'the turn was interrupted before the join.'
           : undefined,
-      );
+      ),
+    },
+  ]);
 }
 
 /**
@@ -444,16 +470,18 @@ function recoveredBackgroundLaunchText(
  * A call that did run before the interruption is never told it did not
  * (H4e-b1): a background launch whose admission committed answers its
  * started receipt, and a team call that committed answers from its
- * records — the model would otherwise redo it under a new call.
+ * records — the model would otherwise redo it under a new call. Without
+ * a `message`, only those committed calls are answered and every other
+ * owed call is left as it was.
  */
 async function answerAbandonedTurnCalls(input: {
   session: ManagedSession;
   sessionId: string;
   cwd: string;
   promptId: string;
-  message: string;
+  message?: string;
   children?: HostedChildAgentSession;
-}): Promise<void> {
+}): Promise<number> {
   const records = (await input.session.sink.project()).filter(
     (entry) => entry.daemonPromptId === input.promptId,
   );
@@ -486,6 +514,7 @@ async function answerAbandonedTurnCalls(input: {
     { authority: input.session.authority, resources: input.session.resources },
     input.session.authority.sessionHeader.sessionKey,
   );
+  let answeredNow = 0;
   for (const [functionCallId, call] of owed) {
     const callKey = hostedChildRunIdFor(input.promptId, functionCallId);
     const launched =
@@ -495,15 +524,12 @@ async function answerAbandonedTurnCalls(input: {
       : undefined;
     let parts: Part[];
     if (launched?.completion === 'sent') {
-      parts = convertToFunctionResponse(call.name, functionCallId, [
-        {
-          text: recoveredBackgroundLaunchText(
-            input.session,
-            launched.run.executionCallId ?? callKey,
-            call.args,
-          ),
-        },
-      ]);
+      parts = recoveredBackgroundLaunchAnswer(
+        input.session,
+        { name: call.name, callId: functionCallId, args: call.args },
+        launched,
+        launched.run.executionCallId ?? callKey,
+      );
     } else if (team !== undefined) {
       parts = team.error
         ? convertToFunctionErrorResponse(
@@ -515,6 +541,8 @@ async function answerAbandonedTurnCalls(input: {
         : convertToFunctionResponse(call.name, functionCallId, [
             { text: team.text },
           ]);
+    } else if (input.message === undefined) {
+      continue;
     } else {
       parts = convertToFunctionErrorResponse(
         call.name,
@@ -541,7 +569,29 @@ async function answerAbandonedTurnCalls(input: {
       daemonPromptId: input.promptId,
       message: { role: 'user', parts },
     });
+    answeredNow += 1;
   }
+  return answeredNow;
+}
+
+/**
+ * H4e-b1: answers, from their records, the calls an interrupted Turn
+ * committed but never answered — a team call's commands, a background
+ * launch's admission — and leaves every other owed call as it was. Every
+ * route that settles or resumes an interrupted Turn runs it before the
+ * model next reads that Turn: core's orphan repair would otherwise tell
+ * the model to retry such a call, and the retry redoes it under a new
+ * key (a second task, a second member). Idempotent, like the funnel's
+ * full answer; returns how many calls it answered.
+ */
+export function answerCommittedTurnCalls(input: {
+  session: ManagedSession;
+  sessionId: string;
+  cwd: string;
+  promptId: string;
+  children?: HostedChildAgentSession;
+}): Promise<number> {
+  return answerAbandonedTurnCalls(input);
 }
 
 /**
@@ -715,16 +765,13 @@ export async function fillParkedRoundAgentGaps(input: {
       // the wake pump — never to this fill.
       if (foldOwed) {
         await writeFold(
-          convertToFunctionResponse(name, callId, [
-            {
-              text: recoveredBackgroundLaunchText(
-                input.managed,
-                admitted.run.executionCallId ??
-                  hostedChildRunIdFor(input.promptId, callId),
-                part.functionCall?.args,
-              ),
-            },
-          ]),
+          recoveredBackgroundLaunchAnswer(
+            input.managed,
+            { name, callId, args: part.functionCall?.args },
+            admitted,
+            admitted.run.executionCallId ??
+              hostedChildRunIdFor(input.promptId, callId),
+          ),
         );
         filled += 1;
       }
@@ -976,6 +1023,17 @@ export async function settleInterruptedTurnRuntime(input: {
         action !== undefined && action.state !== 'requested'
           ? `the approval ended ${action.state} after the Harness that asked was interrupted`
           : 'the Harness that asked was interrupted',
+    });
+  } else {
+    // A Turn whose checkpoint never bound it (a batch of team calls and
+    // background launches parks nothing) still owes its committed calls
+    // their answers; core's orphan repair keeps answering the rest.
+    await answerCommittedTurnCalls({
+      session: input.session,
+      sessionId: input.sessionId,
+      cwd: input.cwd,
+      promptId: input.promptId,
+      children: input.children,
     });
   }
   // The handback owed for a taken Workspace survives a settlement split

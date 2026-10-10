@@ -144,6 +144,7 @@ import {
 } from './hosted-workspace-broker.js';
 import { HostedTextDeltaStream } from './hosted-text-deltas.js';
 import {
+  answerCommittedTurnCalls,
   fillParkedRoundAgentGaps,
   isDurableBlockedVerdict,
   originalRuntimeBroker,
@@ -842,6 +843,16 @@ export async function settleCrashedWakeTurnAftermath(params: {
         }
       }
     }
+    // H4e-b1: the calls the dead attempt committed but never answered get
+    // their answers from the records before the Turn settles; core's
+    // orphan repair would tell the next Turn's model to retry them.
+    await answerCommittedTurnCalls({
+      session: session.managed,
+      sessionId,
+      cwd,
+      promptId: turnId,
+      children: session.childAgents,
+    });
     // Consume the crashed input: until its turnId settles, every reload
     // re-classifies it as recovery and re-blocks the Session over the
     // same crash (the journal-filter rule in the history builders then
@@ -1176,6 +1187,17 @@ async function settleCancelledHarnessTurn(
         event.kind === 'turn.settled' && event.payload['turnId'] === promptId,
     );
   if (alreadySettled) return;
+  // H4e-b1: a Turn with no park can still have committed calls it never
+  // answered — a team call, a background launch. They get their answers
+  // from the records before the terminal: core's orphan repair would tell
+  // the next Turn's model to retry them, and the retry redoes the work.
+  await answerCommittedTurnCalls({
+    session: managed,
+    sessionId,
+    cwd: session.cwd,
+    promptId,
+    children: session.childAgents,
+  });
   await managed.sink.write(
     record(session, sessionId, 'system', null, {
       subtype: 'turn_result',
@@ -5697,6 +5719,22 @@ export function registerHostedHarnessSessionRoutes(
               ({ history, resumeParts } = deriveRound());
             }
           }
+          // H4e-b1: a sibling the Runtime reconciliation does not own (a
+          // team call, a background launch) that committed before the
+          // Harness died is answered from its records before the resumed
+          // round reads it — core's orphan repair would have the model
+          // retry it, and the retry redoes the work.
+          const answered = await answerCommittedTurnCalls({
+            session: session.managed,
+            sessionId,
+            cwd: session.cwd,
+            promptId,
+            children: session.childAgents,
+          });
+          if (answered > 0) {
+            projected = await session.managed.sink.project();
+            ({ history, resumeParts } = deriveRound());
+          }
           if (resumeParts.length === 0) {
             throw new Error(
               'Recovered Runtime turn has no journaled tool results.',
@@ -5958,6 +5996,17 @@ export function registerHostedHarnessSessionRoutes(
             promptId,
           });
         }
+        // A Runtime park's non-Runtime siblings (a team call, a background
+        // launch) that committed before the Harness died are answered from
+        // their records (H4e-b1); the settlements above answer only what
+        // they own.
+        await answerCommittedTurnCalls({
+          session: session.managed,
+          sessionId,
+          cwd: session.cwd,
+          promptId,
+          children: session.childAgents,
+        });
         // Whatever shape the wait was in, its round is fully answered now:
         // the folds above landed (or the journaled proof they were never
         // owed), so only the terminal record below settles the Turn.

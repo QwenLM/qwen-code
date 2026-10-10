@@ -742,6 +742,14 @@ it('treats a blank optional argument as not given, as Legacy does', async () => 
     ),
   ).toContain('Task #1 updated (status: pending)');
   expect(teams.task('prompt:team-1#1')!.subject).toBe('A');
+  // A null owner is not given; `""` stays the unassign.
+  await one('task_update', { taskId: '1', owner: 'leader' }, 'call-4b');
+  expect(
+    await one('task_update', { taskId: '1', owner: null }, 'call-4c'),
+  ).toContain('owner: leader');
+  expect(
+    await one('task_update', { taskId: '1', owner: '' }, 'call-4d'),
+  ).not.toContain('owner:');
   expect(
     await one('task_list', { owner: '', blockedBy: ' ', status: '' }, 'call-5'),
   ).toContain('#1 [pending] @unassigned — A');
@@ -797,7 +805,9 @@ it('caps a task at 64 blockers in either direction', async () => {
   ).toContain('Task #1 updated');
   expect(
     await one('task_update', { taskId: '1', addBlockedBy: ['66'] }, 'up-2'),
-  ).toContain('task #1 would be blocked by more than 64 tasks');
+  ).toContain(
+    'task #1 would be blocked by more than 64 tasks (completed and deleted blockers stay on a task and count).',
+  );
   expect(
     await one('task_update', { taskId: '67', addBlocks: ['1'] }, 'up-3'),
   ).toContain('task #1 would be blocked by more than 64 tasks');
@@ -851,7 +861,7 @@ it('admits at most ten teammates', async () => {
   );
 });
 
-it('fires PostToolUse on a resumed team result through the command it committed', async () => {
+it('fires PostToolUse on a resumed team result that answered without an error', async () => {
   await createTeam();
   const firstEvents: string[] = [];
   const created = call(
@@ -879,6 +889,44 @@ it('fires PostToolUse on a resumed team result through the command it committed'
     new AbortController().signal,
   );
   expect(recoveredEvents).toContain('PostToolUse');
+  // A read commits nothing: its error-free answer is the evidence.
+  const listed = call('task_list', {}, 'call-3');
+  const listing = await createTurn(0, []).execute(
+    [listed],
+    [{ functionCall: { id: 'call-3', name: 'task_list', args: {} } }],
+    'model',
+    new AbortController().signal,
+  );
+  const listEvents: string[] = [];
+  await createTurn(0, listEvents).resumeHookResults(
+    listing,
+    'model',
+    new AbortController().signal,
+  );
+  expect(listEvents).toContain('PostToolUse');
+  // A refused call never ran, so its resume fires no PostToolUse.
+  const refused = await createTurn(0, []).execute(
+    [call('task_update', { taskId: '9' }, 'call-4')],
+    [
+      {
+        functionCall: {
+          id: 'call-4',
+          name: 'task_update',
+          args: { taskId: '9' },
+        },
+      },
+    ],
+    'model',
+    new AbortController().signal,
+  );
+  const refusedEvents: string[] = [];
+  await createTurn(0, refusedEvents).resumeHookResults(
+    refused,
+    'model',
+    new AbortController().signal,
+  );
+  expect(refusedEvents).not.toContain('PostToolUse');
+  expect(refusedEvents).not.toContain('PostToolUseFailure');
 });
 
 it('answers a replayed task delete as deleted', async () => {
@@ -894,4 +942,42 @@ it('answers a replayed task delete as deleted', async () => {
   expect(await one('task_update', remove, 'call-4')).toContain(
     'Task #1 not found.',
   );
+});
+
+it('merges a metadata key named __proto__ as plain data', async () => {
+  await createTeam();
+  await one(
+    'task_create',
+    { subject: 'A', description: 'a', metadata: { a: 1 } },
+    'call-2',
+  );
+  await one(
+    'task_update',
+    { taskId: '1', metadata: JSON.parse('{"__proto__":{"x":1},"b":2}') },
+    'call-3',
+  );
+  const merged = await teams.readJson(
+    teams.task('prompt:team-1#1')!.metadataRef!,
+  );
+  expect(Object.keys(merged)).toEqual(['a', '__proto__', 'b']);
+  expect(Object.getPrototypeOf(merged)).toBe(Object.prototype);
+});
+
+it('answers a launch whose run was cancelled while it was joining with that end', async () => {
+  await createTeam();
+  const commit = session.authority.commitExtensionRecord.bind(
+    session.authority,
+  );
+  let raced = false;
+  vi.spyOn(session.authority, 'commitExtensionRecord').mockImplementation(
+    async (command, body, actor) => {
+      if (command.operation === 'joinTeam' && !raced) {
+        raced = true;
+        await children.settleCancelled('prompt:call-2', { started: false });
+      }
+      return commit(command, body, actor);
+    },
+  );
+  expect(await spawn('alice', 'call-2')).toContain('Child agent run cancelled');
+  expect(team()!.members).toEqual([]);
 });

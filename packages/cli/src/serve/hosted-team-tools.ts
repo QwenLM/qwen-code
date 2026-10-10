@@ -182,7 +182,8 @@ const TASK_ID = /^[1-9]\d*$/;
 /**
  * The optional arguments of each team tool. Legacy reads the blank
  * placeholder a model fills an optional parameter with (`null`, `""`) as
- * not given; `task_update`'s `owner` keeps `""`, which unassigns.
+ * not given; `task_update`'s `owner` keeps `""`, which unassigns, so only
+ * its `null` is not given.
  */
 const OPTIONAL_ARGS: Readonly<Record<HostedTeamToolName, readonly string[]>> = {
   team_create: [],
@@ -209,7 +210,10 @@ function withoutBlankOptionals(
   args: Record<string, unknown>,
 ): Record<string, unknown> {
   const present = Object.entries(args).filter(
-    ([key, value]) => !(OPTIONAL_ARGS[name].includes(key) && blank(value)),
+    ([key, value]) =>
+      !(OPTIONAL_ARGS[name].includes(key) && blank(value)) &&
+      // `owner: ""` unassigns, so only a null owner is not given.
+      !(name === 'task_update' && key === 'owner' && value === null),
   );
   return present.length === Object.keys(args).length
     ? args
@@ -729,7 +733,7 @@ async function taskUpdate(
   );
   if (crowded !== undefined)
     return refuse(
-      `Cannot update task #${number}: task #${all.find((each) => each.taskId === crowded)?.number ?? number} would be blocked by more than ${MANAGED_TEAM_LIMITS.maxBlockers} tasks.`,
+      `Cannot update task #${number}: task #${all.find((each) => each.taskId === crowded)?.number ?? number} would be blocked by more than ${MANAGED_TEAM_LIMITS.maxBlockers} tasks (completed and deleted blockers stay on a task and count).`,
     );
   if (blockedBy.length > 0)
     change.addBlockedBy = blockedBy.map((each) =>
@@ -740,16 +744,22 @@ async function taskUpdate(
       args['description'] as string,
     );
   if (args['metadata'] !== undefined) {
-    const merged =
-      current.metadataRef === null
-        ? {}
-        : await teams.readJson(current.metadataRef);
+    // A Map keeps every key a plain data key: an assignment would treat
+    // `__proto__` as the object's prototype and drop it silently.
+    const entries = new Map(
+      Object.entries(
+        current.metadataRef === null
+          ? {}
+          : await teams.readJson(current.metadataRef),
+      ),
+    );
     for (const [key, value] of Object.entries(
       args['metadata'] as Record<string, unknown>,
     )) {
-      if (value === null) delete merged[key];
-      else merged[key] = value;
+      if (value === null) entries.delete(key);
+      else entries.set(key, value);
     }
+    const merged = Object.fromEntries(entries);
     const tooLarge = metadataError(merged);
     if (Object.keys(merged).length > 0 && tooLarge) return refuse(tooLarge);
     change.metadataRef =
