@@ -55,8 +55,10 @@ public class ChildResultRelayStore {
         }
     }
 
-    // delivery_state is null on the shell kind, so a child_run row with a
-    // pending delivery is always a child_agent row; the ledger join
+    // delivery_state is null on the shell kind, and the relay drives only
+    // the child_agent kind: a workflow child's execution belongs to the
+    // workflow runtime, which does not exist yet (H4c registers the kind
+    // disabled), so its rows never reach this page; the ledger join
     // drops every row whose classification is terminal (delivered,
     // orphaned or given up), because the bounded discovery set is for
     // work still owed — accumulated terminal rows would otherwise starve
@@ -92,6 +94,7 @@ public class ChildResultRelayStore {
                     + " ON l.parent_session_id = r.session_id"
                     + " AND l.child_run_id = r.record_id"
                     + " WHERE r.domain = 'child_run'"
+                    + " AND r.task_kind = 'child_agent'"
                     + " AND ((r.delivery_state IN ('planned', 'accepting',"
                     + " 'unknown') AND (l.state IS NULL OR l.state NOT IN"
                     + " ('done', 'orphaned', 'unknown')))"
@@ -182,6 +185,66 @@ public class ChildResultRelayStore {
         return execution.textValue();
     }
 
+    /** The run's stop request and whether its run line has ended, as
+     * the latest committed body states them (H4f). */
+    public record StopState(boolean stopRequested, boolean ended) {
+    }
+
+    /** The committed stop state of one child run, or null when no record
+     * row exists; an unreadable body owes the caller a bounded retry. */
+    public StopState stopState(String tenantId, String parentSessionId,
+            String childRunId) {
+        // A primary-key read: the relay walks this on every heartbeat.
+        List<String> rows = jdbc.query(
+                "SELECT record_resource_id FROM"
+                        + " qwen_managed_session_extension_record"
+                        + " WHERE session_scope_key = ? AND record_key = ?"
+                        + " AND tenant_id = ? AND session_id = ?"
+                        + " AND domain = 'child_run' AND record_id = ?",
+                (result, row) -> result.getString("record_resource_id"),
+                ManagedSessionStore.sessionScopeKey(tenantId,
+                        parentSessionId),
+                ManagedExtensionProjection.recordKey(parentSessionId,
+                        "child_run", childRunId),
+                tenantId, parentSessionId, childRunId);
+        if (rows.isEmpty()) {
+            return null;
+        }
+        String text = readResource(tenantId, rows.getFirst());
+        JsonNode body;
+        try {
+            body = text == null ? null : MAPPER.readTree(text);
+        } catch (Exception error) {
+            throw new IllegalStateException("Child run " + childRunId
+                    + "'s committed record is unreadable", error);
+        }
+        if (body == null || !body.path("stopRequested").isBoolean()
+                || !body.path("run").path("state").isTextual()) {
+            throw new IllegalStateException("Child run " + childRunId
+                    + "'s committed record holds no stop line");
+        }
+        return new StopState(body.path("stopRequested").booleanValue(),
+                ManagedExtensionRecords.TERMINAL.contains(
+                        body.path("run").path("state").textValue()));
+    }
+
+    /**
+     * H4f: whether a cancel took effect on this Turn — the Turn moved to
+     * CANCELLING and {@code turn.cancel.requested} was appended in the same
+     * transaction. A cancel command admitted on a Turn that had already
+     * ended appends nothing, so a natural end that raced ahead of the stop
+     * is never read as the stop's outcome.
+     */
+    public boolean turnCancelRequested(String tenantId, String sessionId,
+            String turnId) {
+        return !jdbc.query("SELECT sequence_id FROM managed_agent_event"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND event_type = 'turn.cancel.requested'"
+                        + " AND turn_id = ? LIMIT 1",
+                (result, row) -> result.getLong("sequence_id"), tenantId,
+                sessionId, turnId).isEmpty();
+    }
+
     /** One inline resource's bytes, or null when it is not inline-held. */
     public String readResource(String tenantId, String resourceId) {
         List<byte[]> rows = jdbc.query(
@@ -203,7 +266,9 @@ public class ChildResultRelayStore {
     /**
      * The non-terminal child-agent runs of one Session, for the close
      * cascade: task projections say what is still alive; the bodies name
-     * the child Sessions (null when creation never attached).
+     * the child Sessions (null when creation never attached). Like the
+     * relay's discovery page, the cascade acts on the child_agent kind
+     * only until the workflow runtime exists.
      */
     public List<LiveScope> findLiveScopes(String tenantId,
             String parentSessionId) {
@@ -212,6 +277,7 @@ public class ChildResultRelayStore {
                         + " FROM qwen_managed_session_extension_record"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND domain = 'child_run' AND delivery_state IS NOT NULL"
+                        + " AND task_kind = 'child_agent'"
                         + " AND task_state NOT IN ('completed', 'failed',"
                         + " 'cancelled')"
                         + " ORDER BY created_at, record_id",

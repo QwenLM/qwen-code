@@ -48,7 +48,10 @@ import {
 } from '../hooks/useSessionSearchInput.js';
 import { toOriginalKey } from './key-map.js';
 import { isPrintableKeyInput } from './input-prompt-key.js';
+import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
+import { dialogAreaWidth } from './dialogs-shared.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { OpenTuiTranscriptView } from './transcript-view.js';
 import { resumeEventsFromSession } from './resume-session.js';
 import { foldLiveEvent, type LiveHistoryItem } from './live-session-model.js';
@@ -74,6 +77,13 @@ export interface OpenTuiSessionPickerProps {
   onConfirmMulti?: (sessionIds: string[]) => void;
   /** Rows the user may not check or Enter — the live session, for /delete. */
   disabledIds?: readonly string[];
+  /**
+   * The popup region's row budget. The visible window derives from it rather
+   * than the raw terminal height, so a row the region's clip takes is a row
+   * the window never offers — Enter and the checkboxes only address painted
+   * rows.
+   */
+  availableTerminalHeight?: number;
 }
 
 /** Header/search/list/footers/separators/borders, in ink's own accounting. */
@@ -128,13 +138,28 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
     enableMultiSelect = false,
     onConfirmMulti,
     disabledIds,
+    availableTerminalHeight,
   } = props;
 
   const { width, height } = useTerminalDimensions();
-  const boxWidth = Math.max(0, width - 4);
+  // The popup region is dialogAreaWidth wide (capped at 100 columns) and
+  // clips what overruns it, so the box must size from the same cap — the raw
+  // terminal width would lose the right border and every row's tail on a
+  // terminal wider than 104 columns.
+  const boxWidth = Math.max(0, dialogAreaWidth(width));
+  // The window sizes from the popup region the mount hands over, not the raw
+  // terminal height: the region is five rows shorter, so a raw-height window
+  // offers rows the clip takes — the last windowed session's title row,
+  // painted with the down-scroll marker on it, was Enter-committable without
+  // ever being shown.
+  const listRegionRows = clampDialogHeight(availableTerminalHeight) ?? height;
+  // The floor is zero rows, not one: a region shorter than the reserved
+  // chrome paints no session row, and a one-row floor kept Enter and Space
+  // committing a cursor row nothing painted (the zero-window refusals on
+  // those keys below are the other half of the invariant).
   const maxVisibleItems = Math.max(
-    1,
-    Math.floor((height - RESERVED_LINES) / ITEM_HEIGHT),
+    0,
+    Math.floor((listRegionRows - RESERVED_LINES) / ITEM_HEIGHT),
   );
 
   const hasInitialSessions = initialSessions !== undefined;
@@ -395,6 +420,7 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
         if (orderedIds.length > 0) onConfirmMulti(orderedIds);
         return;
       }
+      if (maxVisibleItems < 1) return;
       const session = filteredSessions[selectedIndexRef.current];
       if (session && !disabledIdSet.has(session.sessionId)) {
         onSelect(session.sessionId);
@@ -449,6 +475,7 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
     }
 
     if (name === 'space' || sequence === ' ') {
+      if (maxVisibleItems < 1) return;
       const session = filteredSessions[selectedIndexRef.current];
       if (!session) return;
       if (enableMultiSelect) toggleChecked(session.sessionId);
@@ -533,19 +560,18 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
   }${t('↑↓ to navigate · Type to search · Esc to cancel')}`;
 
   // ink returns a separate `SessionPreview` tree here rather than swapping the
-  // body of the list: the preview has no border and its transcript spans the
-  // full inner width. All picker state lives above, so the list comes back with
-  // the cursor, the checks and the query untouched.
+  // body of the list: the preview has no border, no top margin, and its
+  // transcript spans the full inner width. All picker state lives above, so the
+  // list comes back with the cursor, the checks and the query untouched.
   if (previewSessionId !== null) {
     return (
       <box
-        key="preview"
+        key={`preview-${boxWidth}-${height}`}
         flexDirection="column"
         width={boxWidth}
         height={Math.max(0, height - 1)}
         overflow="hidden"
-        marginTop={1}
-        flexShrink={0}
+        flexShrink={1}
       >
         <box paddingLeft={1} paddingRight={1}>
           <text fg={C.text} attributes={1}>
@@ -586,25 +612,44 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
   }
 
   const headerTitle = title ?? t('Resume Session');
+  // The row owns boxWidth - 4 columns: the border (2) and the row's own
+  // padding (2) come off first, and the suffix measures what the clipped
+  // title actually paid, in display columns rather than UTF-16 units.
+  const shownTitle = truncateToWidth(headerTitle, Math.max(0, boxWidth - 4));
 
   return (
+    // ink asks for `height - 1` here too and lets the popup region's fixed
+    // height press the box down. @opentui resolves flexShrink to 0 whenever a
+    // size is set explicitly (ink's Box always defaults to 1), so the shrink
+    // has to be asked for: refusing it pushes the composer out of the viewport
+    // instead of clipping the list. The size is folded into the key because
+    // the renderer's width/height setters clear an explicit flexShrink back
+    // to 0 and its reconciler never re-applies an unchanged prop — a resize
+    // would otherwise disable the shrink until the picker was reopened. The
+    // remount loses nothing: all picker state lives in the hooks above.
     <box
-      key="list"
+      key={`list-${boxWidth}-${height}`}
       flexDirection="column"
       borderStyle="rounded"
       borderColor={C.borderDefault}
       width={boxWidth}
       height={Math.max(0, height - 1)}
       overflow="hidden"
-      marginTop={1}
-      flexShrink={0}
+      flexShrink={1}
     >
       <box flexDirection="row" paddingLeft={1} paddingRight={1}>
         <text fg={C.text} attributes={1}>
-          {headerTitle}
+          {shownTitle}
           {headerSuffix ? ' ' : ''}
         </text>
-        {headerSuffix ? <text fg={C.dim}>{headerSuffix}</text> : null}
+        {headerSuffix ? (
+          <text fg={C.dim}>
+            {truncateToWidth(
+              headerSuffix,
+              Math.max(0, boxWidth - 4 - getCachedStringWidth(shownTitle) - 1),
+            )}
+          </text>
+        ) : null}
       </box>
 
       {/* Two states share this row at constant height so the visible-item
@@ -613,13 +658,26 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
         {isSearchActive ? (
           <text fg={C.dim}>
             {t('Search: ')}
-            <span fg={C.text}>{searchQuery}</span>
+            <span fg={C.text}>
+              {truncateToWidth(
+                searchQuery,
+                Math.max(
+                  0,
+                  boxWidth - 4 - getCachedStringWidth(t('Search: ')) - 1,
+                ),
+              )}
+            </span>
             <span fg={C.dim}>{'▌'}</span>
           </text>
         ) : searchQuery !== '' ? (
           <text fg={C.dim}>
             {t('Filter: ')}
-            <span fg={C.text}>{searchQuery}</span>
+            <span fg={C.text}>
+              {truncateToWidth(
+                searchQuery,
+                Math.max(0, boxWidth - 4 - getCachedStringWidth(t('Filter: '))),
+              )}
+            </span>
           </text>
         ) : (
           <text fg={C.dim}>{t('Press / to search')}</text>
@@ -665,6 +723,7 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
                 showScrollUp={showScrollUp}
                 showScrollDown={showScrollDown}
                 promptWidth={Math.max(1, maxPromptWidth - checkboxWidth)}
+                metaWidth={maxPromptWidth}
                 isChecked={
                   enableMultiSelect
                     ? checkedIds.has(session.sessionId)
@@ -687,7 +746,10 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
       <box flexDirection="row" paddingLeft={1} paddingRight={1}>
         {isSearchActive ? (
           <text fg={C.dim}>
-            {t('Type to search · Enter to commit · Esc to clear')}
+            {truncateToWidth(
+              t('Type to search · Enter to commit · Esc to clear'),
+              Math.max(0, boxWidth - 4),
+            )}
           </text>
         ) : (
           <text fg={C.dim}>
@@ -699,7 +761,10 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
                 {'Ctrl+B'}
               </span>
             ) : null}
-            {footerTail}
+            {truncateToWidth(
+              footerTail,
+              Math.max(0, boxWidth - 4 - (currentBranch ? 6 : 0)),
+            )}
           </text>
         )}
       </box>
@@ -731,6 +796,8 @@ interface SessionRowProps {
   showScrollUp: boolean;
   showScrollDown: boolean;
   promptWidth: number;
+  /** The meta line sits outside the checkbox column, so it gets the full budget. */
+  metaWidth: number;
   /** `undefined` renders no checkbox column at all. */
   isChecked?: boolean;
   isDisabled: boolean;
@@ -745,6 +812,7 @@ function SessionRow({
   showScrollUp,
   showScrollDown,
   promptWidth,
+  metaWidth,
   isChecked,
   isDisabled,
   disabledHint,
@@ -788,11 +856,19 @@ function SessionRow({
     typeof session.messageCount === 'number'
       ? formatMessageCount(session.messageCount)
       : undefined;
-  const meta = `${formatRelativeTime(session.mtime)}${
+  const metaLead = `${formatRelativeTime(session.mtime)}${
     messageText !== undefined ? ` · ${messageText}` : ''
-  }${session.gitBranch ? ` · ${session.gitBranch}` : ''}${
-    isDisabled && disabledHint ? ` · ${disabledHint}` : ''
-  }`;
+  }${session.gitBranch ? ` · ${session.gitBranch}` : ''}`;
+  // The clip below buys the one-physical-row guarantee; a disabled row's
+  // hint is its only on-screen explanation, so the hint survives the clip
+  // and the leading segments give way instead.
+  const meta =
+    isDisabled && disabledHint
+      ? `${truncateToWidth(
+          metaLead,
+          Math.max(0, metaWidth - getCachedStringWidth(disabledHint) - 3),
+        )} · ${disabledHint}`
+      : metaLead;
 
   return (
     <box flexDirection="column" marginBottom={isLast ? 0 : 1}>
@@ -822,7 +898,10 @@ function SessionRow({
         </box>
       </box>
       <box paddingLeft={2}>
-        <text fg={C.dim}>{meta}</text>
+        {/* The budget counts the meta as one physical row; an unclipped run
+            (a long branch name) wraps it into two, and the frame's last
+            painted row becomes one the budget never paid for. */}
+        <text fg={C.dim}>{truncateToWidth(meta, metaWidth)}</text>
       </box>
     </box>
   );

@@ -116,7 +116,16 @@ public final class ApiModels {
             @JsonProperty("receipt_id") String receiptId,
             boolean replayed,
             @JsonProperty("action_resolution") JsonNode actionResolution,
-            @JsonProperty("failure_code") String failureCode) {
+            @JsonProperty("failure_code") String failureCode,
+            @JsonProperty("task_id") String taskId) {
+        public PublicCommandOperation(String id, String sessionId,
+                String type, String status, String admissionStage,
+                String deliveryState, String receiptId, boolean replayed,
+                JsonNode actionResolution, String failureCode) {
+            this(id, sessionId, type, status, admissionStage, deliveryState,
+                    receiptId, replayed, actionResolution, failureCode, null);
+        }
+
         public PublicCommandOperation(
                 String id,
                 String sessionId,
@@ -294,7 +303,17 @@ public final class ApiModels {
             String receiptId,
             boolean replayed,
             JsonNode actionResolution,
-            String failureCode) {
+            String failureCode,
+            String taskId) {
+        public WebShellCommandOperation(String operationId, String sessionId,
+                String type, String status, String admissionStage,
+                String deliveryState, String receiptId, boolean replayed,
+                JsonNode actionResolution, String failureCode) {
+            this(operationId, sessionId, type, status, admissionStage,
+                    deliveryState, receiptId, replayed, actionResolution,
+                    failureCode, null);
+        }
+
         public WebShellCommandOperation(
                 String operationId,
                 String sessionId,
@@ -332,6 +351,31 @@ public final class ApiModels {
             WebShellSessionCapabilities capabilities) {
     }
 
+    /** H6b: the definition fields a create or revise request carries. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record AutomationDefinitionRequest(
+            @JsonProperty("session_id") String sessionId, String goal,
+            String cron, String timezone, String prompt,
+            @JsonProperty("session_mode") String sessionMode, String overlap,
+            @JsonProperty("catch_up") String catchUp,
+            @JsonProperty("catch_up_limit") Long catchUpLimit,
+            Boolean enabled) {
+    }
+
+    /** H6b: one automation definition at its current revision. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicAutomation(String id, String object,
+            @JsonProperty("session_id") String sessionId,
+            @JsonProperty("definition_revision") long definitionRevision,
+            String digest, String goal, String cron, String timezone,
+            @JsonProperty("session_mode") String sessionMode, String overlap,
+            @JsonProperty("catch_up") String catchUp,
+            @JsonProperty("catch_up_limit") Long catchUpLimit,
+            boolean enabled, String state,
+            @JsonProperty("created_at") long createdAt,
+            @JsonProperty("updated_at") long updatedAt) {
+    }
+
     /** H5c: one route binding of a channel connection (PublicChannelRoute). */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record PublicChannelRoute(
@@ -365,6 +409,18 @@ public final class ApiModels {
             int ordinal, String state,
             @JsonProperty("provider_receipt") String providerReceipt,
             @JsonProperty("created_at") long createdAt,
+            @JsonProperty("updated_at") long updatedAt) {
+    }
+
+    /** H6b: one occurrence decision of an automation, with its run's state. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicAutomationRun(String id, String object,
+            @JsonProperty("automation_id") String automationId,
+            @JsonProperty("session_id") String sessionId,
+            @JsonProperty("occurrence_key") String occurrenceKey, String slot,
+            String trigger, String outcome, String reason,
+            @JsonProperty("definition_revision") long definitionRevision,
+            String state, @JsonProperty("created_at") long createdAt,
             @JsonProperty("updated_at") long updatedAt) {
     }
 
@@ -493,6 +549,22 @@ public final class ApiModels {
 
     public record WebShellTaskGetRequest(@NotBlank String sessionId,
             @NotBlank String taskId) {
+    }
+
+    /**
+     * H4f: {@code requestId} is trace-only and stays out of the digest. A
+     * missing key is {@code 400 invalid_request}; a blank or overlong one
+     * reaches the service, whose check answers the contract's {@code 400
+     * invalid_idempotency_key}.
+     */
+    public record WebShellTaskCancelRequest(@Size(max = 128) String requestId,
+            @NotBlank String sessionId, @NotBlank @Size(max = 128) String taskId,
+            @NotNull String idempotencyKey) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException(
+                    "Unknown task cancel request field: " + name);
+        }
     }
 
     public record WebShellPage<T>(List<T> data, String nextCursor,

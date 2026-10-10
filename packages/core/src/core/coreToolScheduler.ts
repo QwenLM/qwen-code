@@ -1453,6 +1453,12 @@ function withPostToolBatchStop(
 }
 
 interface CoreToolSchedulerOptions {
+  onToolExecutionStarted?: (callId: string, startedAt: number) => void;
+  onToolExecutionSettled?: (
+    callId: string,
+    status: ToolExecutionStatus,
+    durationMs: number,
+  ) => void;
   config: Config;
   outputUpdateHandler?: OutputUpdateHandler;
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
@@ -3939,6 +3945,12 @@ export class CoreToolScheduler {
           // fallback state — otherwise every trivially safe tool would
           // force manual approval until the user toggles modes.
           let autoModeFallback: AutoModeFallbackConfirmation | undefined;
+          // Set when the fallback came from the deterministic destructive
+          // guard rather than the classifier. Tracked separately from
+          // `autoModeFallback` because that record is only built when the
+          // outcome carries a message, and because its `reason` is shared with
+          // the classifier escalation.
+          let autoModeFallbackRequiresHuman = false;
           if (
             !requiresUserInteraction &&
             !preToolUseAsk &&
@@ -4052,6 +4064,8 @@ export class CoreToolScheduler {
                 // pending dialog tells the user what's being asked;
                 // operators see recovery fallbacks in the debug log. A
                 // pmForcedAsk fallback isn't an audit-worthy event.
+                autoModeFallbackRequiresHuman =
+                  outcome.requiresHumanDecision === true;
                 if (
                   outcome.message &&
                   (isDenialFallbackReason(outcome.reason) ||
@@ -4248,7 +4262,13 @@ export class CoreToolScheduler {
             const isNonInteractiveDeny =
               !this.config.isInteractive() &&
               !this.config.getExperimentalZedIntegration() &&
-              this.config.getInputFormat() !== InputFormat.STREAM_JSON;
+              // STREAM_JSON is exempt because a host can answer
+              // `can_use_tool` — but that host is programmatic, so it cannot
+              // give the human-only confirmation the destructive guard
+              // escalated to. Deny here rather than hand it a dialog it is
+              // allowed to approve.
+              (this.config.getInputFormat() !== InputFormat.STREAM_JSON ||
+                autoModeFallbackRequiresHuman);
 
             if (isNonInteractiveDeny) {
               const errorMessage =
@@ -4317,12 +4337,14 @@ export class CoreToolScheduler {
               }
 
               // A deny always applies. An allow never replaces a confirmation
-              // the user must give (an interactive tool or a PreToolUse
-              // 'ask'); under an 'ask' it only has a replacement checked,
-              // which the user then confirms.
+              // the user must give (an interactive tool, a PreToolUse 'ask', or
+              // an escalation from the deterministic destructive guard); under
+              // an 'ask' it only has a replacement checked, which the user then
+              // confirms.
               const allowApplies =
                 hookResult.shouldAllow === true &&
                 !requiresUserInteraction &&
+                !autoModeFallbackRequiresHuman &&
                 (!preToolUseAsk ||
                   (hookResult.updatedInput !== undefined &&
                     planShellDecision.classification === 'not-applicable'));
@@ -5969,8 +5991,20 @@ export class CoreToolScheduler {
               callId,
             });
             executionStatus = 'error';
-            const execute = () =>
-              invocation.execute(
+            const execute = () => {
+              executionStartedAt = performance.now();
+              try {
+                this.schedulerOptions.onToolExecutionStarted?.(
+                  callId,
+                  Date.now(),
+                );
+              } catch (error) {
+                debugLogger.warn(
+                  'Tool lifecycle start observer failed:',
+                  error,
+                );
+              }
+              return invocation.execute(
                 execSignal,
                 liveOutputCallback,
                 shellExecutionConfig,
@@ -5978,6 +6012,7 @@ export class CoreToolScheduler {
                 setPromoteAbortControllerCallback,
                 canPromoteForegroundShell,
               );
+            };
             return runWithCodeModeAllowedNames(
               scheduledCall.request.codeModeAllowedToolNames,
               () =>
@@ -6018,12 +6053,25 @@ export class CoreToolScheduler {
               callId,
             });
             executionStatus = 'error';
-            const execute = () =>
-              invocation.execute(
+            const execute = () => {
+              executionStartedAt = performance.now();
+              try {
+                this.schedulerOptions.onToolExecutionStarted?.(
+                  callId,
+                  Date.now(),
+                );
+              } catch (error) {
+                debugLogger.warn(
+                  'Tool lifecycle start observer failed:',
+                  error,
+                );
+              }
+              return invocation.execute(
                 execSignal,
                 liveOutputCallback,
                 shellExecutionConfig,
               );
+            };
             return runWithCodeModeAllowedNames(
               scheduledCall.request.codeModeAllowedToolNames,
               () =>
@@ -6203,6 +6251,15 @@ export class CoreToolScheduler {
           ? 'error'
           : 'success';
       executionSettled = true;
+      try {
+        this.schedulerOptions.onToolExecutionSettled?.(
+          callId,
+          executionStatus,
+          elapsedExecutionMs() ?? 0,
+        );
+      } catch (error) {
+        debugLogger.warn('Tool lifecycle end observer failed:', error);
+      }
       if (execSpan) {
         const completedExecSpan = execSpan;
         execSpan = undefined;
@@ -7163,6 +7220,15 @@ export class CoreToolScheduler {
       if (executionThrew) {
         executionStatus = aborted ? 'cancelled' : 'error';
         executionSettled = true;
+        try {
+          this.schedulerOptions.onToolExecutionSettled?.(
+            callId,
+            executionStatus,
+            elapsedExecutionMs() ?? 0,
+          );
+        } catch (error) {
+          debugLogger.warn('Tool lifecycle end observer failed:', error);
+        }
       }
       const exceptionErrorType =
         explicitErrorType ??

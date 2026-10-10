@@ -252,10 +252,11 @@ describe('Hosted real-process gates', () => {
       (total, step) => total + (step['timeout-minutes'] ?? 0),
       0,
     );
-    // Step ceilings today (25 + 9x10 + 12); the uncapped setup steps need
+    // Step ceilings today (25 + 9x10 + 20); the uncapped setup steps need
     // their own allowance, which is exactly what the job comment claims.
-    expect(summed).toBe(127);
+    expect(summed).toBe(135);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 10);
+    expect(job['timeout-minutes']).toBe(148);
   });
 
   it.each([
@@ -296,7 +297,6 @@ describe('Hosted real-process gates', () => {
     ],
   ])('pins the %s arm into the Hosted MySQL job', (stepName, script, flags) => {
     const job = java.jobs['hosted-harness-mysql'];
-    expect(job['timeout-minutes']).toBe(140);
     const install = job.steps.find(
       (step) => step.name === 'Install MySQL binaries for the failover E2E',
     );
@@ -337,21 +337,57 @@ describe('Hosted real-process gates', () => {
     }
   });
 
-  it('keeps the Hosted verify step ceiling above its failsafe fork timeout', () => {
-    const run = java.jobs['hosted-harness-mysql'].steps.find(
-      (step) => step.name === 'Verify Hosted Java, Spring and MySQL processes',
-    );
+  it.each([
+    ['Verify Hosted Java, Spring and MySQL processes', 'hosted-harness-mysql'],
+    ['Verify O4 filesystem process and capacity gates', 'o4-mysql-gates'],
+  ])(
+    'keeps the %s step ceiling above its failsafe fork timeout',
+    (stepName, profile) => {
+      const run = java.jobs['hosted-harness-mysql'].steps.find(
+        (step) => step.name === stepName,
+      );
+      // Tie the asserted ceiling to the profile the step actually runs: a
+      // re-pointed -P flag must not leave the row reading the old profile.
+      expect(run.run).toContain(`-P${profile}`);
+      const forkSeconds = Number(
+        read('packages/sdk-java/managed-agent-server/pom.xml')
+          .split(`<id>${profile}</id>`)[1]
+          .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
+      );
+      // A step killed before its fork leaves no per-test failure lines, so
+      // the main-CI failure analyzer can only file an undiagnosable
+      // per-commit issue (#13503 for the Hosted verify step, #13684 for the
+      // O4 gates). The ceiling must cover the fork plus the wrapped
+      // compile/surefire/spotbugs/checkstyle work — 600 s is the wrap both
+      // steps actually carry, so a step trim or fork bump reddens this row.
+      expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
+        forkSeconds + 600,
+      );
+    },
+  );
+
+  it('keeps the HostedHarnessMySqlIT ceilings inside the shared fork budget', () => {
     const forkSeconds = Number(
       read('packages/sdk-java/managed-agent-server/pom.xml')
         .split('<id>hosted-harness-mysql</id>')[1]
         .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
     );
-    // A step killed before its fork leaves no per-test failure lines, so the
-    // main-CI failure analyzer can only file an undiagnosable per-commit
-    // issue (#13503). The ceiling must cover the fork plus the wrapped
-    // compile/surefire/spotbugs/checkstyle work.
-    expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      forkSeconds + 300,
+    const source = read(
+      'packages/sdk-java/managed-agent-server/src/test/java/' +
+        'com/alibaba/qwen/code/managedagent/HostedHarnessMySqlIT.java',
     );
+    const ceilings = [...source.matchAll(/@Timeout\((\d+)\)/g)].map((m) =>
+      Number(m[1]),
+    );
+    expect(ceilings.length).toBeGreaterThan(0);
+    // The Hosted*IT classes share one failsafe fork, so a method stalled to
+    // its full @Timeout must still leave the fork its healthy runtime: the
+    // sibling classes measure ~532s and the fork itself ~14s, covered by the
+    // same 600s allowance the step-ceiling row carries. A larger ceiling
+    // lets failsafe kill the fork mid-run, and the classes left unrun never
+    // report, failing the gate undiagnosably (#13780).
+    for (const ceiling of ceilings) {
+      expect(ceiling + 600).toBeLessThanOrEqual(forkSeconds);
+    }
   });
 });

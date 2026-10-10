@@ -22,6 +22,29 @@ public class ManagedArtifactConfiguration {
     }
 
     /**
+     * The automation scanner relays each fire to the Hosted Harness over
+     * blocking HTTP (up to the Harness request timeout per call), so it must
+     * not share the one-thread default pool with the message materializer
+     * and the dispatch and lifecycle recovery ticks.
+     */
+    @Bean
+    public ThreadPoolTaskScheduler managedAutomationScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("managed-automation-").build();
+    }
+
+    /**
+     * The replay-floor pass's own tick: a first pass after an operator opts
+     * in drains every Session with a Snapshot, which on a large deployment
+     * takes minutes, and on the shared one-thread default taskScheduler it
+     * would hold off the message materializer and every recovery tick for
+     * that long.
+     */
+    @Bean
+    public ThreadPoolTaskScheduler replayFloorScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("replay-floor-").build();
+    }
+
+    /**
      * The child result relay's own tick: the shared default taskScheduler
      * also runs every sibling recovery, and this page's sequential
      * harness calls would stall all of theirs behind one slow Session.
@@ -31,6 +54,16 @@ public class ManagedArtifactConfiguration {
     @Bean
     public ThreadPoolTaskScheduler childRelayScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("child-relay-").build();
+    }
+
+    /**
+     * The child Workspace scan's own tick (#13753 I1): its steps run Git
+     * for up to the Git timeout each, which must stall neither the relay
+     * nor the shared recoveries.
+     */
+    @Bean
+    public ThreadPoolTaskScheduler childWorkspaceScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("child-workspace-").build();
     }
 
     /**

@@ -111,7 +111,8 @@ class ManagedActionsTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"read_file", "write_file", "edit", "run_shell_command"})
+    @ValueSource(strings = {"read_file", "write_file", "edit", "run_shell_command",
+            "team_create", "task_create", "task_update"})
     void previewsExactInputOnPublicAndWebShellListsAndDetails(String tool) throws Exception {
         String tenant = tenant();
         String session = session(tenant);
@@ -120,6 +121,9 @@ class ManagedActionsTest {
             case "write_file" -> "{ \"file_path\" : \"notes.md\", \"content\" : \"\\u4e2d\\n\" }";
             case "edit" -> "{ \"file_path\" : \"notes.md\", \"old_string\" : \"a\", \"new_string\" : \"b\" }";
             case "run_shell_command" -> "{ \"command\" : \"printf 'text'\" }";
+            case "team_create" -> "{ \"team_name\" : \"review\" }";
+            case "task_create" -> "{ \"subject\" : \"Audit\", \"description\" : \"the diff\" }";
+            case "task_update" -> "{ \"taskId\" : \"1\", \"status\" : \"in_progress\", \"owner\" : \"alice\" }";
             default -> throw new AssertionError(tool);
         };
         String payload = " { \"toolName\" : \"" + tool + "\", \"input\" : " + arguments + " } ";

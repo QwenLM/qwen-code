@@ -109,7 +109,7 @@ describe('withChildAgentConsumption', () => {
       }),
       session,
     );
-    await expect(turn(TURN)).resolves.toBe('settled');
+    await expect(turn(TURN)).resolves.toBe('recovery');
     expect(session.blocked).toBe(true);
     expect(agents.markConsumed).not.toHaveBeenCalled();
   });
@@ -125,7 +125,7 @@ describe('withChildAgentConsumption', () => {
       }),
       session,
     );
-    await expect(turn(TURN)).resolves.toBe('settled');
+    await expect(turn(TURN)).resolves.toBe('recovery');
     expect(session.blocked).toBe(true);
     expect(agents.markConsumed).not.toHaveBeenCalled();
   });

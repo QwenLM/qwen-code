@@ -17,6 +17,7 @@ import {
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { managedExtensionRecordKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
+import { MANAGED_CHILD_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
   HostedWorkspaceToolTurn,
@@ -223,6 +224,10 @@ beforeEach(async () => {
     { authority: session.authority, resources: session.resources },
     sessionKey,
   );
+  // A live turn always holds the harness's before_model checkpoint from
+  // its start; commit it here so the tool arms meet the same durable
+  // basis the real driver provides.
+  await createManagedHarnessHandle(session).ensureCheckpoint();
   consumption = [];
 });
 
@@ -341,6 +346,292 @@ it('refuses a fifth concurrent launch with the count limit', async () => {
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     4,
   );
+});
+
+// #13708: two foreground calls in one batch wait in series — the second
+// wait replaces the first's all-consumed group instead of conflicting.
+it('waits two foreground calls in one batch in series', async () => {
+  const turn = createTurn();
+  const driving = (async () => {
+    for (const callId of ['call-1', 'call-2']) {
+      const childRunId = `prompt:${callId}`;
+      for (;;) {
+        if (children.record(childRunId) !== undefined) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      await children.dispatchStarted(childRunId, {
+        dispatchId: `dispatch-${callId}`,
+        runtime: { runtimeBindingId: `binding-${callId}`, generation: '1' },
+      });
+      await children.attach(
+        childRunId,
+        `550e8400-e29b-41d4-a716-4466554400${callId === 'call-1' ? '01' : '02'}`,
+      );
+      await children.settleCompleted(childRunId, {
+        result: Buffer.from(`answer for ${callId}`, 'utf8'),
+        receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+      });
+      await children.accept(childRunId);
+    }
+  })();
+  const responses = (
+    await Promise.all([
+      turn.execute(
+        [
+          call(
+            {
+              description: 'first audit',
+              prompt: 'review one',
+              run_in_background: false,
+            },
+            'call-1',
+          ),
+          call(
+            {
+              description: 'second audit',
+              prompt: 'review two',
+              run_in_background: false,
+            },
+            'call-2',
+          ),
+        ],
+        [
+          {
+            functionCall: {
+              id: 'call-1',
+              name: 'agent',
+              args: { description: 'first audit', prompt: 'review one' },
+            },
+          },
+          {
+            functionCall: {
+              id: 'call-2',
+              name: 'agent',
+              args: { description: 'second audit', prompt: 'review two' },
+            },
+          },
+        ],
+        'model',
+        new AbortController().signal,
+      ),
+      driving,
+    ])
+  )[0] as Part[];
+  expect(JSON.stringify(responses)).toContain('answer for call-1');
+  expect(JSON.stringify(responses)).toContain('answer for call-2');
+  const settled = await session.authority.harnessRunAuthorization();
+  expect(settled.status).toBe('runnable');
+  if (settled.status === 'runnable') {
+    expect(settled.checkpoint.continuation.phase).toBe(
+      'model_output_committed',
+    );
+    expect(settled.checkpoint.agentWait?.runs).toMatchObject([
+      { childRunId: 'prompt:call-2', consumed: true },
+    ]);
+  }
+});
+
+// A failed foreground child resolves its own wait — the sibling that
+// follows in the same batch must find a fresh wait, not a conflict.
+it('waits the sibling of a failed foreground child in the same batch', async () => {
+  const turn = createTurn();
+  const driving = (async () => {
+    for (;;) {
+      if (children.record('prompt:call-1') !== undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    await children.settleFailed('prompt:call-1', {
+      stopReason: 'creation_failed',
+      reason: null,
+      started: false,
+    });
+    for (;;) {
+      if (children.record('prompt:call-2') !== undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    await children.dispatchStarted('prompt:call-2', {
+      dispatchId: 'dispatch-2',
+      runtime: { runtimeBindingId: 'binding-2', generation: '1' },
+    });
+    await children.attach(
+      'prompt:call-2',
+      '550e8400-e29b-41d4-a716-446655440002',
+    );
+    await children.settleCompleted('prompt:call-2', {
+      result: Buffer.from('answer for call-2', 'utf8'),
+      receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+    });
+    await children.accept('prompt:call-2');
+  })();
+  const responses = (
+    await Promise.all([
+      turn.execute(
+        [
+          call(
+            {
+              description: 'doomed audit',
+              prompt: 'review one',
+              run_in_background: false,
+            },
+            'call-1',
+          ),
+          call(
+            {
+              description: 'surviving audit',
+              prompt: 'review two',
+              run_in_background: false,
+            },
+            'call-2',
+          ),
+        ],
+        [
+          {
+            functionCall: {
+              id: 'call-1',
+              name: 'agent',
+              args: { description: 'doomed audit', prompt: 'review one' },
+            },
+          },
+          {
+            functionCall: {
+              id: 'call-2',
+              name: 'agent',
+              args: { description: 'surviving audit', prompt: 'review two' },
+            },
+          },
+        ],
+        'model',
+        new AbortController().signal,
+      ),
+      driving,
+    ])
+  )[0] as Part[];
+  expect(JSON.stringify(responses)).toContain('creation_failed');
+  expect(JSON.stringify(responses)).toContain('answer for call-2');
+  const settled = await session.authority.harnessRunAuthorization();
+  expect(settled.status).toBe('runnable');
+  if (settled.status === 'runnable') {
+    expect(settled.checkpoint.continuation.phase).toBe(
+      'model_output_committed',
+    );
+    expect(settled.checkpoint.agentWait?.runs).toMatchObject([
+      { childRunId: 'prompt:call-2', consumed: true },
+    ]);
+  }
+});
+
+// #13708: the foreground admission must commit the durable wait in the
+// same breath as the launch intent — a restarted Harness classifies the
+// parked Turn from that checkpoint instead of declining it.
+it('commits the durable wait at foreground admission and advances it at the fold', async () => {
+  const turn = createTurn();
+  const childRunId = `prompt:call-1`;
+  const driving = (async () => {
+    for (;;) {
+      const parked = await session.authority.harnessRunAuthorization();
+      if (
+        parked.status === 'runnable' &&
+        parked.checkpoint.continuation.phase === 'await_agent'
+      ) {
+        expect(parked.checkpoint.agentWait?.runs).toMatchObject([
+          {
+            childRunId,
+            functionCallId: 'call-1',
+            toolName: 'agent',
+            consumed: false,
+          },
+        ]);
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(session.authority.latestCheckpoint?.boundary).toBe('durable_wait');
+    await children.dispatchStarted(childRunId, {
+      dispatchId: 'dispatch-1',
+      runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+    });
+    await children.attach(childRunId, '550e8400-e29b-41d4-a716-446655440001');
+    await children.settleCompleted(childRunId, {
+      result: Buffer.from('审阅通过,无阻断问题。', 'utf8'),
+      receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+    });
+    await children.accept(childRunId);
+  })();
+  const responses = (
+    await Promise.all([
+      executeAgent(
+        turn,
+        call({
+          description: 'audit the diff',
+          prompt: 'review the change',
+          run_in_background: false,
+        }),
+      ),
+      driving,
+    ])
+  )[0];
+  expect(JSON.stringify(responses)).toContain('审阅通过');
+  const advanced = await session.authority.harnessRunAuthorization();
+  expect(advanced.status).toBe('runnable');
+  if (advanced.status === 'runnable') {
+    expect(advanced.checkpoint.continuation.phase).toBe(
+      'model_output_committed',
+    );
+    expect(advanced.checkpoint.agentWait?.runs).toMatchObject([
+      { childRunId, consumed: true },
+    ]);
+  }
+});
+
+// H4c: the launch budget counts every child Session run the scope ever
+// committed, ended or not, so a spent budget refuses with no child active.
+// The refusal commits no record, and a re-driven batch re-derives it from
+// the same committed records.
+it('refuses a launch past the spent launch budget, replaying the refusal', async () => {
+  for (
+    let index = 0;
+    index < MANAGED_CHILD_LIMITS.maxLaunchesPerScope - 1;
+    index++
+  ) {
+    const childRunId = `prompt:seed-${index}`;
+    await children.admit({
+      childRunId,
+      ownerScopeId: sessionKey.sessionId,
+      rootSessionId: sessionKey.sessionId,
+      completion: 'sent',
+      description: `seed ${index}`,
+      prompt: 'seed',
+      definition: {
+        definitionId: 'hosted-agent/hosted-workspace-shell/1',
+        definitionRevision: 1,
+        definitionDigest: session.authority.sessionHeader.definitionRef.digest,
+      },
+      workingDirectory: '.',
+      executionCallId: childRunId,
+    });
+    await children.settleCancelled(childRunId, { started: false });
+  }
+  const last = await executeAgent(
+    createTurn(),
+    call({ description: 'last', prompt: 'work' }, 'call-last'),
+  );
+  expect(JSON.stringify(last)).toContain('started in the background');
+  const launched = MANAGED_CHILD_LIMITS.maxLaunchesPerScope;
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    launched,
+  );
+  await children.settleCancelled('prompt:call-last', { started: false });
+  expect(children.activeChildRunsOf(sessionKey.sessionId)).toHaveLength(0);
+  for (const turn of [createTurn(), createTurn()]) {
+    const refused = await executeAgent(
+      turn,
+      call({ description: 'one more', prompt: 'work' }, 'call-over'),
+    );
+    expect(JSON.stringify(refused)).toContain('budget_exhausted');
+    expect(
+      session.authority.extensionRecordsInDomain('child_run'),
+    ).toHaveLength(launched);
+  }
 });
 
 it('answers the tool arm from the committed acceptance, accepting it', async () => {

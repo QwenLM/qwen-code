@@ -25,12 +25,14 @@ import {
   type HostedRecoveryTurn,
   type HostedRuntimeRecoveryOutcome,
 } from './hosted-runtime-recovery.js';
+import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
   commitHostedFileHistory,
   readHostedFileHistory,
 } from './hosted-file-history.js';
 import { HARNESS_MODEL_START_PHASES } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import { hostedRuntimeSessionId } from './hosted-workspace-tool-turn.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
 const SESSION_ID = '22222222-2222-4222-8222-222222222222';
@@ -282,8 +284,176 @@ describe('recoverHostedRuntimeTurn', () => {
     return session;
   }
 
+  /** Drives a fresh session to a parked await_agent checkpoint (#13708). */
+  async function parkAtAwaitAgent(consume = false): Promise<ManagedSession> {
+    const session = await open('boot-1', true, 'hosted-workspace-files/1');
+    const harness = createManagedHarnessHandle(session);
+    const authority = session.authority;
+    const contentRef = await session.resources.publish(
+      'managed-input',
+      Buffer.from(JSON.stringify([{ type: 'text', text: 'review the diff' }])),
+    );
+    const admissionRef = await session.resources.publish(
+      'managed-admission',
+      Buffer.from(JSON.stringify({ promptId: PROMPT_ID, digest: 'x' })),
+    );
+    await authority.submitInput(
+      {
+        operation: 'submitInput',
+        commandId: PROMPT_ID,
+        sessionKey: authority.sessionHeader.sessionKey,
+        contentDigest: DIGEST,
+      },
+      {
+        inputId: PROMPT_ID,
+        turnId: PROMPT_ID,
+        source: 'hosted-harness',
+        contentRef,
+        admissionRef,
+        deadline: null,
+        wakeReason: 'input',
+      },
+    );
+    await harness.ensureRunnable();
+    const children = new HostedChildAgentSession(
+      { authority, resources: session.resources },
+      authority.sessionHeader.sessionKey,
+    );
+    const launched = await children.admit({
+      childRunId: 'prompt:call-1',
+      ownerScopeId: SESSION_ID,
+      rootSessionId: SESSION_ID,
+      completion: 'tool',
+      description: 'audit the diff',
+      prompt: 'review the change',
+      definition: {
+        definitionId: 'hosted-agent/hosted-workspace-files/1',
+        definitionRevision: 1,
+        definitionDigest: authority.sessionHeader.definitionRef.digest,
+      },
+      workingDirectory: '.',
+      executionCallId: 'prompt:call-1',
+    });
+    await harness.commitAwaitAgent(
+      [
+        {
+          childRunId: 'prompt:call-1',
+          functionCallId: 'call-1',
+          toolName: 'agent',
+          modelMessageId: 'message-1',
+          consumed: false,
+        },
+      ],
+      { turnId: PROMPT_ID, promptId: PROMPT_ID },
+      { attemptId: 'message-1', routeRef: launched.inputRef },
+    );
+    if (consume) await harness.resolveAwaitAgent('prompt:call-1');
+    await session.close();
+    resetManagedRuntimeDispatchGatesForTest();
+    return session;
+  }
+
   const brokerOptions = { baseUrl: 'http://127.0.0.1:1', token: 'test' };
 
+  it('classifies the parked agent wait without folding or acquiring', async () => {
+    const parked = await parkAtAwaitAgent();
+    const replacement = await open('boot-2', false);
+    try {
+      const before = replacement.authority.committedSequence;
+      const turn = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
+      // Classification only: the fold belongs to the continue route's
+      // resume arm, so the wait sees no new commit here.
+      expect(replacement.authority.committedSequence).toBe(before);
+      expect(turn.acquiredRuntime).toBe(false);
+      expect(turn.report).toMatchObject({
+        phase: 'await_agent',
+        checkpointId: parked.authority.latestCheckpoint?.checkpointId,
+        executions: [
+          {
+            functionCallId: 'call-1',
+            toolName: 'agent',
+            executionCallId: 'prompt:call-1',
+            outcome: 'known',
+            status: { state: 'executing' },
+          },
+        ],
+      });
+      // The wire field is required on every entry; this phase has no
+      // Runtime session to name, so the hosted runtime-session identity
+      // of the parked Turn rides it (R1-32).
+      expect(turn.report.executions[0]?.runtimeSessionId).toBe(
+        hostedRuntimeSessionId(PROMPT_ID),
+      );
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('reports the fully-consumed agent wait as settled, never model_start', async () => {
+    await parkAtAwaitAgent(true);
+    const replacement = await open('boot-2', false);
+    try {
+      const turn = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
+      expect(turn.report).toMatchObject({
+        phase: 'await_agent',
+        executions: [
+          {
+            executionCallId: 'prompt:call-1',
+            outcome: 'known',
+            status: { state: 'settled' },
+          },
+        ],
+      });
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('classifies the agent wait identically on a passive load', async () => {
+    await parkAtAwaitAgent();
+    const replacement = await open('boot-2', false);
+    try {
+      const turn = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      );
+      expect(turn.acquiredRuntime).toBe(false);
+      expect(turn.report.phase).toBe('await_agent');
+      expect(turn.report.executions[0]).toMatchObject({
+        outcome: 'known',
+        status: { state: 'executing' },
+      });
+      expect(turn.report.executions[0]?.runtimeSessionId).toBe(
+        hostedRuntimeSessionId(PROMPT_ID),
+      );
+    } finally {
+      await replacement.close();
+    }
+  });
   /**
    * Drives a fresh session to a parked await_action checkpoint: the model
    * answered with call-1, the approval is requested, and the owner died
@@ -1225,6 +1395,127 @@ describe('recoverHostedRuntimeTurn', () => {
       });
       expect(acquire).not.toHaveBeenCalled();
       expect(execute).not.toHaveBeenCalled();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('derives a parked Shell owner Broker identity under the mapped wake id', async () => {
+    // A shell-profile wake turn parks under a colon-bearing logical id:
+    // the owner its recovery Broker takes is the mapped path-safe id the
+    // tool turn acquired under, never the raw one.
+    const wakePromptId = 'arun_x:input';
+    const session = await open('boot-1', true, 'hosted-workspace-shell/1');
+    const harness = createManagedHarnessHandle(session);
+    const authority = session.authority;
+    const contentRef = await session.resources.publish(
+      'managed-input',
+      Buffer.from(JSON.stringify([{ type: 'text', text: 'run it' }])),
+    );
+    const admissionRef = await session.resources.publish(
+      'managed-admission',
+      Buffer.from('{}'),
+    );
+    await authority.submitInput(
+      {
+        operation: 'submitInput',
+        commandId: wakePromptId,
+        sessionKey: authority.sessionHeader.sessionKey,
+        contentDigest: DIGEST,
+      },
+      {
+        inputId: wakePromptId,
+        turnId: wakePromptId,
+        source: 'hosted-harness',
+        contentRef,
+        admissionRef,
+        deadline: null,
+        wakeReason: 'input',
+      },
+    );
+    await harness.ensureRunnable();
+    const definitionRef = await session.resources.publish(
+      'managed-tool-definition',
+      Buffer.from(JSON.stringify({ name: 'run_shell_command' })),
+    );
+    const activation = session.activation;
+    const argsRef = await session.resources.publish(
+      'managed-tool-args',
+      Buffer.from(
+        JSON.stringify({
+          toolName: 'run_shell_command',
+          input: { command: 'cat x' },
+        }),
+      ),
+    );
+    await authority.appendExecutionEvent(
+      {
+        operation: 'toolIntent',
+        commandId: `tool-intent:${EXECUTION_ID}`,
+        sessionKey: authority.sessionHeader.sessionKey,
+        contentDigest: argsRef.digest,
+      },
+      (sequence) => ({
+        v: 1,
+        sequence,
+        eventId: `tool-intent:${EXECUTION_ID}`,
+        sessionKey: authority.sessionHeader.sessionKey,
+        kind: 'tool.intent',
+        occurredAt: Date.now(),
+        subject: {
+          type: 'activation',
+          scopeId: activation.activationId,
+          ...activation,
+        },
+        payload: {
+          executionCallId: EXECUTION_ID,
+          batchId: 'batch-1',
+          ordinal: 0,
+          toolDefinitionRef: definitionRef,
+          argsRef,
+          outcomeSource: 'runtime',
+        },
+      }),
+      { class: 'harness', activation },
+    );
+    await harness.commitAwaitRuntimeBatch(
+      [
+        {
+          functionCallId: 'call-1',
+          toolName: 'run_shell_command',
+          executionCallId: EXECUTION_ID,
+          invocationBindingId: EXECUTION_ID,
+          capabilityVersion: 'workspace-capability/1',
+          policyVersion: 'preapproved-workspace-tools/1',
+          mediaVersion: null,
+          modelMessageId: 'message-1',
+          partIndex: 0,
+          ordinal: 0,
+          inputDigest: DIGEST,
+          progressCursor: null,
+          attemptId: 'attempt-1',
+          routeRef: argsRef,
+        },
+      ],
+      { turnId: wakePromptId, promptId: wakePromptId },
+    );
+    await session.close();
+    resetManagedRuntimeDispatchGatesForTest();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'settled',
+    } as never);
+    const replacement = await open('boot-2', false);
+    try {
+      const broker = await stopParkedRuntimeExecutions({
+        session: replacement,
+        promptId: wakePromptId,
+        brokerOptions,
+      });
+      expect(broker.runtimeSessionId).toBe(
+        hostedRuntimeSessionId(wakePromptId),
+      );
+      expect(broker.runtimeSessionId).toMatch(/^wake-[0-9a-f]{64}$/);
+      expect(broker.runtimeSessionId).not.toBe(wakePromptId);
     } finally {
       await replacement.close();
     }

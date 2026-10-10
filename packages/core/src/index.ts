@@ -980,3 +980,15 @@ export {
   runWithHookExecutionOwner,
 } from './hooks/hook-execution-context.js';
 export type { HookExecutionOwner } from './hooks/hook-execution-context.js';
+
+export type { RequestLifecycleEvent } from './telemetry/request-lifecycle.js';
+
+export {
+  createToolLifecycle,
+  TOOL_LIFECYCLE_DRAIN_MS,
+} from './telemetry/tool-lifecycle.js';
+export type {
+  ToolLifecycleEvent,
+  ToolLifecycleRecord,
+  ToolLifecycleOutcome,
+} from './telemetry/tool-lifecycle.js';

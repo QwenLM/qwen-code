@@ -10,6 +10,7 @@ import {
   runWithHookExecutionOwner,
 } from '../hooks/hook-execution-context.js';
 import type { SessionSourceService } from '../services/session-sources.js';
+import type { RequestLifecycleEvent } from '../telemetry/request-lifecycle.js';
 
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
 import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
@@ -3061,6 +3062,9 @@ export class Config {
   private goalTurnHostGeneration = 0;
   private readonly chatRecordingFailureListeners =
     new Set<ChatRecordingFailureListener>();
+  private readonly requestLifecycleListeners = new Set<
+    (event: RequestLifecycleEvent) => void
+  >();
   private fileCheckpointingEnabled: boolean;
   // Object state is intentionally shared by derived Configs through prototype
   // lookup so every agent contributes to the same session budget.
@@ -8007,6 +8011,7 @@ export class Config {
         await (earlyWriterClose ?? closeWriter());
       }
       this.chatRecordingFailureListeners.clear();
+      this.requestLifecycleListeners.clear();
       if (options?.shutdownTelemetry !== false && isTelemetrySdkInitialized()) {
         await shutdownTelemetry();
       }
@@ -11683,6 +11688,23 @@ export class Config {
     return () => {
       this.chatRecordingFailureListeners.delete(listener);
     };
+  }
+
+  onRequestLifecycle(
+    listener: (event: RequestLifecycleEvent) => void,
+  ): () => void {
+    this.requestLifecycleListeners.add(listener);
+    return () => this.requestLifecycleListeners.delete(listener);
+  }
+
+  notifyRequestLifecycle(event: RequestLifecycleEvent): void {
+    for (const listener of this.requestLifecycleListeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        this.debugLogger.warn('Request lifecycle listener failed:', error);
+      }
+    }
   }
 
   private createChatRecordingService(): ChatRecordingService {

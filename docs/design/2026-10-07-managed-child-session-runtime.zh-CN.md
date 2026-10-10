@@ -114,7 +114,7 @@ H4b 交付该流水线的 child-agent 部分:
 
 ## 开放问题
 
-1. **`unknown` delivery 的运维故事**留给 H4f(取消切片),由其决定运维如何关闭一条永久证不明的 delivery;本切片的台账持久记录 `unknown` 并拒绝猜断。
+1. **`unknown` delivery 的运维故事**留给 H4f(取消切片),由其决定运维如何关闭一条永久证不明的 delivery;本切片的台账持久记录 `unknown` 并拒绝猜断。已由 [H4f](2026-10-10-managed-task-cancel.zh-CN.md) 决策 7 回答:不新增动词——`unknown` delivery 属于已结算的 run,保持可见,并在父会话关闭时被归为 orphaned。
 2. **更大结果的暂存位置。** 256 KiB 复制界限会把大输出推向 Artifact 暂存(O 切片规则);`resultRef` 能否在后续 revision 引用 Artifact manifest,随 child 输出的跟进工作定,不在此处。
 3. **`"tool"` 臂的挂起等待者是否需要除已提交记录外的自有持久行**——现有证据(settled run + acceptance 恒足以应答)表明不需要;真实栈发现可以再加,不构成契约变更。
 4. **relay 表生命周期**:orphaned/已闭台账行的保留与删除,随 Session 归档/删除工作(#13135/#13194 跟进)处理;本切片只铸造与更新行。
@@ -143,11 +143,11 @@ H4b 交付该流水线的 child-agent 部分:
 
 ## 后续工作
 
-| 切片   | 范围                                                                                                                  |
-| ------ | --------------------------------------------------------------------------------------------------------------------- |
-| H4c    | `workflow` 记录体 kind 与 Workflow 工具作为 child run 的准入(definition pin 指名 workflow revision)。                 |
-| H4d    | `session_message` 记录体,`continueChildRun` 的第一个诚实生产者,以新链复活已完成 child。                               |
-| H4e    | team 各 domain 与七个 team 工具、plan 决议、成员关停、legacy 导入。                                                   |
-| H4f    | 公开任务取消路由,结清 #12847 A6/A7 与 B12;`unknown` delivery 的运维故事(开放问题 1)。                                 |
-| Detach | 把显式 detach 的 child 迁往独立 durable owner,跨父方关闭。                                                            |
-| 隔离   | `snapshot` 与 `worktree` 模式及其 Runtime 能力;depth > 1;与 D8b/D8c 协调的自定义定义应用;经 Artifact 暂存的更大结果。 |
+| 切片   | 范围                                                                                                                                                                                                                                                     |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| H4c    | 已完成:`workflow` 记录体 kind(禁用)、child launch 预算([设计](2026-10-09-managed-workflow-child-kind.zh-CN.md))。Workflow 工具准入:后续切片。                                                                                                            |
+| H4d    | 契约已完成:`session_message` 记录体与 `continueChildRun` 规则,二者均为 disabled([设计](2026-10-09-managed-session-messages.zh-CN.md))。运行时(H4d-b):managed `send_message`、消息 relay、`continueChildRun` 的第一个诚实生产者、以新链复活已完成 child。 |
+| H4e    | team 各 domain 与七个 team 工具、plan 决议、成员关停、legacy 导入。                                                                                                                                                                                      |
+| H4f    | 已为 `child_agent` 任务完成([设计](2026-10-10-managed-task-cancel.zh-CN.md)):公开任务取消路由,结清 #12847 A6/A7 与 B12;`unknown` delivery 的运维故事(开放问题 1)。                                                                                       |
+| Detach | 把显式 detach 的 child 迁往独立 durable owner,跨父方关闭。                                                                                                                                                                                               |
+| 隔离   | `snapshot` 与 `worktree` 模式及其 Runtime 能力;depth > 1;与 D8b/D8c 协调的自定义定义应用;经 Artifact 暂存的更大结果。                                                                                                                                    |

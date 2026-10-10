@@ -114,7 +114,7 @@ Each commit moves every state line at most one allowed step (the H0b successor r
 
 ## Open questions
 
-1. **The `unknown` delivery's operator story** stays with H4f (cancel slice), which decides how an operator closes a permanently unproven delivery; this slice's ledger records `unknown` durably and refuses to guess.
+1. **The `unknown` delivery's operator story** stays with H4f (cancel slice), which decides how an operator closes a permanently unproven delivery; this slice's ledger records `unknown` durably and refuses to guess. Answered by [H4f](2026-10-10-managed-task-cancel.md) decision 7: no new verb — an `unknown` delivery belongs to a settled run, stays visible and is orphaned by the parent's close.
 2. **Where larger results stage.** The 256 KiB copy bound pushes big outputs toward Artifact staging (O-slice rules); whether `resultRef` may cite an Artifact manifest in a later revision is decided with the child-output follow-up, not here.
 3. **Whether the `"tool"` arm's pending waiter needs its own durable row** beyond the committed records — current evidence (the settled run + acceptance always suffices to answer) says no; a real-stack finding could add one without a contract change.
 4. **Relay table lifecycle**: retention and deletion of orphaned/closed ledger rows rides the Session archive/delete work (#13135/#13194 follow-ups); this slice mints and updates rows only.
@@ -143,11 +143,11 @@ Each commit moves every state line at most one allowed step (the H0b successor r
 
 ## Follow-up work
 
-| Slice     | Scope                                                                                                                                                                    |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| H4c       | The `workflow` body kind and Workflow-tool admission as a child run (definition pin names the workflow revision).                                                        |
-| H4d       | `session_message` bodies, `continueChildRun`'s first honest producer, revive of completed children as new chains.                                                        |
-| H4e       | Team domains and the seven team tools, plan resolution, member shutdown, legacy import.                                                                                  |
-| H4f       | Public task cancel routes settling #12847 A6/A7 and B12; the `unknown`-delivery operator story (open question 1).                                                        |
-| Detach    | Migrating an explicitly detached child to an independent durable owner across parent close.                                                                              |
-| Isolation | `snapshot` and `worktree` modes with their Runtime capabilities; depth > 1; custom definition application coordinated with D8b/D8c; larger results via Artifact staging. |
+| Slice     | Scope                                                                                                                                                                                                                                                                                                 |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| H4c       | Done: `workflow` body kind (disabled), child launch budget ([design](2026-10-09-managed-workflow-child-kind.md)). Workflow-tool admission: later slice.                                                                                                                                               |
+| H4d       | Contract done: the `session_message` body and the `continueChildRun` rules, both disabled ([design](2026-10-09-managed-session-messages.md)). Runtime (H4d-b): the managed `send_message`, the message relay, `continueChildRun`'s first honest producer, revive of completed children as new chains. |
+| H4e       | Team domains and the seven team tools, plan resolution, member shutdown, legacy import.                                                                                                                                                                                                               |
+| H4f       | Done for `child_agent` tasks ([design](2026-10-10-managed-task-cancel.md)): public task cancel routes settling #12847 A6/A7 and B12; the `unknown`-delivery operator story (open question 1).                                                                                                         |
+| Detach    | Migrating an explicitly detached child to an independent durable owner across parent close.                                                                                                                                                                                                           |
+| Isolation | `snapshot` and `worktree` modes with their Runtime capabilities; depth > 1; custom definition application coordinated with D8b/D8c; larger results via Artifact staging.                                                                                                                              |
