@@ -336,6 +336,10 @@ public final class WorkspaceMigrationStore {
                 + " ON c.tenant_id = s.tenant_id AND c.session_id = s.session_id WHERE s.tenant_id = ?"
                 + " AND s.workspace_storage_id = ? AND c.command_status = 'PENDING'") == 0,
                 "migration_work_unsettled");
+        check(count("SELECT COUNT(*) FROM managed_agent_session s JOIN managed_session_rename_delivery r"
+                + " ON r.tenant_id = s.tenant_id AND r.session_id = s.session_id WHERE s.tenant_id = ?"
+                + " AND s.workspace_storage_id = ? AND r.delivery_state <> 'COMPLETED'") == 0,
+                "migration_work_unsettled");
         // A child Workspace's worktree records absolute paths of this root
         // (#13753 I1): it must be merged or discarded before the storage
         // moves. A conflicted one keeps only refs, which move with it.

@@ -1043,6 +1043,40 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void refusesVersionedTitleBeforeSendingToAnOlderHarness() {
+        createSessionRoute();
+        AtomicInteger writes = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/title", exchange -> {
+            writes.incrementAndGet();
+            sendSessionJson(exchange, 200, "{}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(DaemonProtocolException.class, () -> client.updateSessionTitle(session, "A", 1));
+        }
+        assertEquals(0, writes.get());
+    }
+
+    @Test
+    void sendsAndChecksTheDurableTitleRevision() {
+        createSessionRoute();
+        server.removeContext("/capabilities");
+        server.createContext("/capabilities", exchange -> sendJson(exchange, 200,
+                capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                        "\"hostedHarness\":{\"titleProtocolVersion\":1,"), false));
+        AtomicReference<String> body = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/title", exchange -> {
+            body.set(readBody(exchange));
+            sendSessionJson(exchange, 200, "{\"sessionId\":\"" + SESSION_ID
+                    + "\",\"persisted\":true,\"managedRenameRevision\":\"7\"}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            client.updateSessionTitle(createSession(client), "A", 7);
+        }
+        assertTrue(body.get().contains("\"managedRenameRevision\":\"7\""));
+    }
+
+    @Test
     void commitsSessionTitleThroughThePrivateHarnessRoute() {
         createSessionRoute();
         AtomicReference<String> titleBody = new AtomicReference<>();

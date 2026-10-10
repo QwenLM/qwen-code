@@ -21,6 +21,10 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Component
 public class ActionResponseCoordinator {
@@ -33,6 +37,17 @@ public class ActionResponseCoordinator {
     private final ManagedAgentProperties.Dispatch dispatch;
     private final String owner = UUID.randomUUID().toString();
     private final Set<String> active = ConcurrentHashMap.newKeySet();
+    private final ScheduledExecutorService renewals =
+            Executors.newSingleThreadScheduledExecutor(task -> {
+                Thread thread = new Thread(task, "action-response-renewal");
+                thread.setDaemon(true);
+                return thread;
+            });
+
+    @jakarta.annotation.PreDestroy
+    void stopRenewals() {
+        renewals.shutdownNow();
+    }
 
     public ActionResponseCoordinator(
             AgentStateStore sessions,
@@ -50,6 +65,10 @@ public class ActionResponseCoordinator {
     }
 
     public void dispatch(String tenant, String session, String operation) {
+        if (!harness.isAvailable()) {
+            LOG.debug("Action response delivery paused: Harness is disabled operation={}", operation);
+            return;
+        }
         if (!active.add(operation)) {
             return;
         }
@@ -65,6 +84,10 @@ public class ActionResponseCoordinator {
 
     @Scheduled(fixedDelayString = "${qwen.managed-agent.dispatch.scan-delay:1s}")
     public void recover() {
+        actions.settleEndedResponses(clock.millis());
+        if (!harness.isAvailable()) {
+            return;
+        }
         actions.deliverable(clock.millis())
                 .forEach(op -> dispatch(op.tenantId(), op.sessionId(), op.operationId()));
     }
@@ -77,9 +100,26 @@ public class ActionResponseCoordinator {
         if (op == null) {
             return;
         }
+        AtomicBoolean leaseLost = new AtomicBoolean();
+        long period = Math.max(1, Math.min(dispatch.getLeaseRenewInterval().toMillis(),
+                dispatch.getLeaseDuration().toMillis() / 3));
+        var renewal = renewals.scheduleWithFixedDelay(() -> {
+            try {
+                if (!sessions.renewLifecycleOperation(tenant, session, operation, owner,
+                        op.claimGeneration(), dispatch.getLeaseDuration())) {
+                    leaseLost.set(true);
+                }
+            } catch (RuntimeException error) {
+                leaseLost.set(true);
+                LOG.warn("Action response lease renewal failed operation={}", operation, error);
+            }
+        }, period, period, TimeUnit.MILLISECONDS);
         try {
             Response response = actions.response(tenant, session, operation);
             if (settled(op, response)) {
+                return;
+            }
+            if (leaseLost.get()) {
                 return;
             }
             try {
@@ -138,6 +178,8 @@ public class ActionResponseCoordinator {
                     "Action response will retry operation={} failure={}",
                     operation,
                     error.toString());
+        } finally {
+            renewal.cancel(false);
         }
     }
 

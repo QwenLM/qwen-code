@@ -320,6 +320,28 @@ class WorkspaceMigrationStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Long.class)).isZero();
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"PENDING", "RUNNING"})
+    void refusesUnfinishedTitleDeliveryEvenWithAFailedPublicReceipt(String state) {
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"
+                + " workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref,"
+                + " context_revision, workspace_config_ref, workspace_policy_ref)"
+                + " VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
+                WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        jdbc.update("INSERT INTO managed_agent_command (tenant_id, operation, idempotency_key, request_digest,"
+                + " session_id, created_at, updated_at, command_status)"
+                + " VALUES ('tenant', 'RENAME_SESSION', 'rename', 'digest', 'session', 1, 1, 'FAILED')");
+        jdbc.update("INSERT INTO managed_session_rename_delivery (tenant_id, session_id, revision, idempotency_key, title,"
+                + " delivery_state, available_at, lease_owner, lease_until)"
+                + " VALUES ('tenant', 'session', 1, 'rename', 'new title', ?, 0, 'lost-owner', 0)", state);
+        assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT command_status FROM managed_agent_command", String.class)).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT delivery_state FROM managed_session_rename_delivery", String.class)).isEqualTo(state);
+    }
+
     @Test
     void rejectsDescriptorDriftBeforeRetirementAndReusesTheNormalBindingReader() {
         jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"

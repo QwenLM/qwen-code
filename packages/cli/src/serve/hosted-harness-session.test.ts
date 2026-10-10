@@ -10808,6 +10808,62 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
+  it('fences an accepted delayed title and deduplicates a completed delivery', async () => {
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const send = (title: string, managedRenameRevision: string) =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/title`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({ title, managedRenameRevision });
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = LocalManagedSessionAuthority.prototype.commitDomainRecord;
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'commitDomainRecord',
+    ).mockImplementation(function (
+      this: LocalManagedSessionAuthority,
+      command,
+      request,
+      actor,
+    ) {
+      if (request.content['managedRenameRevision'] === '1') {
+        entered();
+        return held.then(() => original.call(this, command, request, actor));
+      }
+      return original.call(this, command, request, actor);
+    });
+    const older = send('A', '1').then((response) => response);
+    await waiting;
+    await send('B', '2')
+      .expect(200)
+      .expect((response) =>
+        expect(response.body.managedRenameRevision).toBe('2'),
+      );
+    release();
+    expect((await older).status).toBe(409);
+    const before = await readFile(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      'utf8',
+    );
+    await send('B', '2').expect(200);
+    expect(
+      await readFile(path.join(state.root, `${SESSION_ID}.jsonl`), 'utf8'),
+    ).toBe(before);
+    await send('A', '3').expect(200);
+  });
+
   it.each(['hosted-workspace-files/1', 'hosted-workspace-shell/1'])(
     'loads a renamed %s Session and verifies its retained title resources',
     async (toolProfile) => {

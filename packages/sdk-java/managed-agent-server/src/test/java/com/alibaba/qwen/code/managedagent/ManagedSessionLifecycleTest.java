@@ -2,15 +2,23 @@ package com.alibaba.qwen.code.managedagent;
 
 import org.springframework.http.HttpStatus;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import org.junit.jupiter.params.ParameterizedTest;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.never;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -415,14 +423,15 @@ class ManagedSessionLifecycleTest {
                     .andExpect(status().isConflict())
                     .andExpect(jsonPath("$.error.code")
                             .value("session_operation_active"));
-            mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
-                            .header(TENANT, tenant)
-                            .header("Idempotency-Key", "rename-closing")
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .content("{\"title\":\"blocked\"}"))
-                    .andExpect(status().isConflict())
-                    .andExpect(jsonPath("$.error.code")
-                            .value("session_operation_active"));
+            HarnessConnector available = mock(HarnessConnector.class, delegatesTo(harness));
+            doReturn(true).when(available).isAvailable();
+            ManagedAgentService subject = new ManagedAgentService(store,
+                    new RequestDigests(), null, available, null);
+            assertThatThrownBy(() -> subject.renameSession(tenant, null, "rename-closing", sessionId, "blocked"))
+                    .isInstanceOfSatisfying(ApiException.class, error -> {
+                        assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                        assertThat(error.getCode()).isEqualTo("session_operation_active");
+                    });
         } finally {
             harness.setAvailable(true);
         }
@@ -496,6 +505,183 @@ class ManagedSessionLifecycleTest {
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND event_type = 'session.updated'",
                 Integer.class, tenant, sessionId)).isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"\u00a0", "\ufeff", "\u2007", "\u202f"})
+    void refusesUnicodeBlankTitlesBeforeAdmission(String title) throws Exception {
+        String tenant = tenant();
+        String sessionId = emptySession(tenant);
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(java.util.Map.of("title", title))), tenant, "blank")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_title"));
+        assertThat(store.findCommand(tenant, "RENAME_SESSION", "blank")).isEmpty();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_session_rename_delivery"
+                + " WHERE tenant_id = ? AND session_id = ?", Integer.class, tenant, sessionId)).isZero();
+        assertThat(store.beginOperation(tenant, sessionId, OperationKind.CLOSE,
+                "", "close", "close-digest").replayed()).isFalse();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"409,session_mutation_superseded,409", "409,other_conflict,503",
+            "400,session_mutation_superseded,503"})
+    void preservesOnlyTheNamedSupersededTitleConflict(int privateStatus, String code, int expectedStatus)
+            throws Exception {
+        String tenant = tenant();
+        String sessionId = emptySession(tenant);
+        HarnessConnector controlled = mock(HarnessConnector.class);
+        doReturn(true).when(controlled).isAvailable();
+        doReturn(true).when(controlled).supportsFencedTitles();
+        doReturn(new HarnessConnector.Attachment("boot")).when(controlled)
+                .createOrLoad(anyString(), anyString(), anyBoolean(), anyBoolean());
+        DaemonHttpException refusal = mock(DaemonHttpException.class);
+        doReturn(privateStatus).when(refusal).getStatusCode();
+        doReturn(code).when(refusal).getErrorCode();
+        doThrow(refusal).when(controlled).rename(anyString(), anyString(), anyString(), anyLong());
+        ManagedAgentService subject = new ManagedAgentService(store,
+                new RequestDigests(), null, controlled, null);
+        harness.setAvailable(false);
+        try {
+            assertThatThrownBy(() -> subject.renameSession(tenant, null, "superseded", sessionId, "title"))
+                    .isInstanceOfSatisfying(ApiException.class, error -> {
+                        assertThat(error.getStatus().value()).isEqualTo(expectedStatus);
+                        assertThat(error.getCode()).isEqualTo(expectedStatus == 409
+                                ? "session_mutation_superseded" : "hosted_harness_unavailable");
+                    });
+        } finally {
+            harness.setAvailable(true);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void refusesUnavailableTitleProtocolBeforeCreatingADelivery(boolean disabled) throws Exception {
+        String tenant = tenant();
+        String sessionId = attachedSession(tenant);
+        HarnessConnector unavailable = mock(HarnessConnector.class);
+        doReturn(!disabled).when(unavailable).isAvailable();
+        ManagedAgentService subject = new ManagedAgentService(store,
+                new RequestDigests(), null, unavailable, null);
+        assertThatThrownBy(() -> subject.renameSession(tenant, null, "refused", sessionId, "new title"))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                    assertThat(error.getCode()).isEqualTo(disabled
+                            ? "hosted_harness_disabled" : "hosted_harness_unavailable");
+                });
+        assertThat(store.findCommand(tenant, "RENAME_SESSION", "refused")).isEmpty();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_session_rename_delivery"
+                + " WHERE tenant_id = ? AND session_id = ?", Integer.class, tenant, sessionId)).isZero();
+        verify(unavailable, never()).createOrLoad(anyString(), anyString(), anyBoolean(), anyBoolean());
+        assertThat(store.beginOperation(tenant, sessionId, OperationKind.CLOSE,
+                "", "close", "close-digest").replayed()).isFalse();
+    }
+
+    @Test
+    void inlineTitleDeliveryOwnsTheLeaseBeforeAnyRemoteIo() throws Exception {
+        String tenant = tenant();
+        String sessionId = attachedSession(tenant);
+        HarnessConnector controlled = mock(HarnessConnector.class, delegatesTo(harness));
+        ManagedAgentService subject = new ManagedAgentService(store,
+                new RequestDigests(), null, controlled, null);
+        doReturn(true).when(controlled).isAvailable();
+        harness.setAvailable(false);
+        try {
+            doAnswer(call -> {
+                var candidate = store.deliverableRenames(Long.MAX_VALUE).stream()
+                        .filter(delivery -> delivery.sessionId().equals(sessionId)).findFirst().orElseThrow();
+                assertThat(store.claimRename(candidate, "peer", Duration.ofMinutes(1))).isEmpty();
+                assertThatThrownBy(() -> subject.renameSession(tenant, null, "inline", sessionId, "new title"))
+                        .isInstanceOfSatisfying(ApiException.class, error ->
+                                assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE));
+                assertThat(store.findCommand(tenant, "RENAME_SESSION", "inline").orElseThrow().status()).isEqualTo("PENDING");
+                return new HarnessConnector.Attachment(FixtureHarness.BOOT_ID);
+            }).when(controlled).createOrLoad(anyString(), anyString(), anyBoolean(), anyBoolean());
+            assertThat(subject.renameSession(tenant, null, "inline", sessionId, "new title").body().metadata().get("title"))
+                    .isEqualTo("new title");
+            assertThat(store.findCommand(tenant, "RENAME_SESSION", "inline").orElseThrow().status()).isEqualTo("COMPLETED");
+        } finally {
+            harness.setAvailable(true);
+        }
+    }
+
+    @Test
+    void expiredTitleOwnerCannotRetireTheReplacementOwnersReceipt() throws Exception {
+        String tenant = tenant();
+        String sessionId = attachedSession(tenant);
+        harness.setAvailable(false);
+        try {
+            var command = store.beginSessionRename(tenant, "rename", "digest", sessionId, "new title");
+            var candidate = store.deliverableRenames(Long.MAX_VALUE).stream()
+                    .filter(delivery -> delivery.sessionId().equals(sessionId)).findFirst().orElseThrow();
+            store.claimRename(candidate, "old", Duration.ofMinutes(1)).orElseThrow();
+            store.abandonSessionRename(tenant, "rename", sessionId, command.renameRevision(), null);
+            assertThat(store.findCommand(tenant, "RENAME_SESSION", "rename").orElseThrow().status()).isEqualTo("PENDING");
+            jdbc.update("UPDATE managed_session_rename_delivery SET lease_until = 0"
+                    + " WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
+            store.abandonSessionRename(tenant, "rename", sessionId, command.renameRevision(), "old");
+            assertThat(store.findCommand(tenant, "RENAME_SESSION", "rename").orElseThrow().status()).isEqualTo("PENDING");
+            var current = store.claimRename(candidate, "new", Duration.ofMinutes(1)).orElseThrow();
+            var row = jdbc.queryForMap("SELECT * FROM managed_session_rename_delivery WHERE tenant_id = ? AND session_id = ?",
+                    tenant, sessionId);
+            store.abandonSessionRename(tenant, "rename", sessionId, command.renameRevision(), "old");
+            store.retryRename(candidate, "old", 0);
+            assertThat(jdbc.queryForMap("SELECT * FROM managed_session_rename_delivery WHERE tenant_id = ? AND session_id = ?",
+                    tenant, sessionId)).isEqualTo(row);
+            assertThat(store.beginSessionRename(tenant, "rename", "digest", sessionId, "new title").renameRevision())
+                    .isEqualTo(command.renameRevision());
+            store.abandonSessionRename(tenant, "rename", sessionId, current.revision(), "new");
+            assertThat(store.findCommand(tenant, "RENAME_SESSION", "rename").orElseThrow().status()).isEqualTo("FAILED");
+            store.completeSessionRename(tenant, "rename", sessionId, "new title", FixtureHarness.BOOT_ID, current.revision());
+            assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("new title");
+        } finally {
+            harness.setAvailable(true);
+        }
+    }
+
+    @Test
+    void renameDeliveriesFenceOldSiblingsAndKeepLatestLostReplyRecoverable() throws Exception {
+        String tenant = tenant();
+        String sessionId = attachedSession(tenant);
+        String boot = store.requireSession(tenant, sessionId).harnessBootId();
+        harness.setAvailable(false);
+        try {
+            var first = store.beginSessionRename(tenant, "k1", "digest-a", sessionId, "A");
+            assertThat(store.beginSessionRename(tenant, "k1", "digest-a", sessionId, "A").renameRevision())
+                    .isEqualTo(first.renameRevision());
+            var firstDelivery = store.deliverableRenames(Long.MAX_VALUE).stream()
+                    .filter(delivery -> delivery.sessionId().equals(sessionId)).findFirst().orElseThrow();
+            store.claimRename(firstDelivery, "first-owner", Duration.ofMinutes(1)).orElseThrow();
+            store.abandonSessionRename(tenant, "k1", sessionId, first.renameRevision(), "first-owner");
+            var second = store.beginSessionRename(tenant, "k2", "digest-b", sessionId, "B");
+            store.completeSessionRename(tenant, "k2", sessionId, "B", boot, second.renameRevision());
+            assertThatThrownBy(() -> store.completeSessionRename(tenant, "k1", sessionId, "A", boot, first.renameRevision()))
+                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("session_mutation_superseded"));
+            var latest = store.beginSessionRename(tenant, "k1", "digest-a", sessionId, "A");
+            assertThat(latest.renameRevision()).isGreaterThan(second.renameRevision());
+            store.abandonSessionRename(tenant, "k1", sessionId, first.renameRevision(), "first-owner");
+            assertThat(store.findCommand(tenant, "RENAME_SESSION", "k1").orElseThrow().status()).isEqualTo("PENDING");
+            var latestDelivery = store.deliverableRenames(Long.MAX_VALUE).stream()
+                    .filter(delivery -> delivery.sessionId().equals(sessionId)).findFirst().orElseThrow();
+            store.claimRename(latestDelivery, "latest-owner", Duration.ofMinutes(1)).orElseThrow();
+            store.abandonSessionRename(tenant, "k1", sessionId, latest.renameRevision(), "latest-owner");
+            store.retryRename(latestDelivery, "latest-owner", 0);
+            assertThatThrownBy(() -> store.beginOperation(tenant, sessionId, OperationKind.CLOSE,
+                    "", "close", "close-digest"))
+                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("session_operation_active"));
+            var candidate = store.deliverableRenames(Long.MAX_VALUE).stream()
+                    .filter(delivery -> delivery.sessionId().equals(sessionId)).findFirst().orElseThrow();
+            var claimed = store.claimRename(candidate, "replica-b", Duration.ofMinutes(1)).orElseThrow();
+            assertThat(store.claimRename(candidate, "replica-c", Duration.ofMinutes(1))).isEmpty();
+            // The last remote write can already have succeeded when its reply was lost.
+            store.completeSessionRename(tenant, "k1", sessionId, "A", boot, claimed.revision());
+            assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("A");
+            assertThat(store.deliverableRenames(Long.MAX_VALUE)).noneMatch(delivery -> delivery.sessionId().equals(sessionId));
+            assertThat(store.beginOperation(tenant, sessionId, OperationKind.CLOSE, "", "close", "close-digest").replayed()).isFalse();
+        } finally {
+            harness.setAvailable(true);
+        }
     }
 
     @ParameterizedTest
@@ -662,28 +848,32 @@ class ManagedSessionLifecycleTest {
             }).when(faulted).requireSession(tenant, sessionId);
         } else if ("completion".equals(phase)) {
             doThrow(new IllegalStateException("completion unavailable"))
-                    .when(faulted).completeSessionMutation(anyString(), anyString(),
-                            anyString(), anyString(), any(), anyString(), anyString());
+                    .when(faulted).completeSessionRename(anyString(), anyString(),
+                            anyString(), anyString(), anyString(), anyLong());
         } else {
             doThrow(new IllegalStateException("cleanup unavailable"))
-                    .when(faulted).abandonSessionMutation(tenant, "RENAME_SESSION",
-                            "key", sessionId);
+                    .when(faulted).abandonSessionRename(org.mockito.ArgumentMatchers.eq(tenant),
+                            org.mockito.ArgumentMatchers.eq("key"), org.mockito.ArgumentMatchers.eq(sessionId), anyLong(), anyString());
         }
         ManagedAgentService subject = new ManagedAgentService(faulted,
                 new RequestDigests(), null, harness, null);
-        harness.setAvailable(!"cleanup".equals(phase));
+        if ("cleanup".equals(phase)) {
+            harness.failNextRename();
+        }
         try {
             assertThatThrownBy(() -> subject.renameSession(tenant, null, "key",
                     sessionId, "renamed"))
                     .isInstanceOfSatisfying(ApiException.class, error -> {
                         assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
-                        assertThat(error.getCode()).isEqualTo("cleanup".equals(phase)
-                                ? "hosted_harness_disabled" : "hosted_harness_unavailable");
+                        assertThat(error.getCode()).isEqualTo("hosted_harness_unavailable");
                     });
         } finally {
             harness.setAvailable(true);
         }
-        if (!"cleanup".equals(phase)) {
+        if ("cleanup".equals(phase)) {
+            jdbc.update("UPDATE managed_session_rename_delivery SET lease_until = 0"
+                    + " WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
+        } else {
             assertThat(jdbc.queryForObject("SELECT command_status FROM"
                             + " managed_agent_command WHERE tenant_id = ?"
                             + " AND operation = 'RENAME_SESSION' AND idempotency_key = 'key'",

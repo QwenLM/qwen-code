@@ -243,13 +243,7 @@ different Session conflicts. A successful concurrent request can still complete
 the receipt, and a failing sibling cannot overwrite that completed outcome. It
 cannot complete a retired receipt once a later rename has completed either: that
 sibling answers `409 session_mutation_superseded` and the newer public SQL title stays.
-The Harness title was already written before this check; ordering overlapping
-Harness writes remains a follow-up tracked in #13269. A
-same-key request sent after the later rename is the newest request and still
-applies, including when a concurrent sibling retires its receipt again. Each
-new attempt records the Session's current journal sequence on its command row;
-existing receipts use their original requested event until they are retried.
-Retries do not re-append the original `requested` event. If the command store
+The latest title attempt is now a durable delivery with a monotonically increasing per-Session revision. The Harness checks this revision inside its journal commit and uses a stable command identity per attempt, so a late older versioned write cannot undo a newer versioned title and a lost reply can be replayed without another write. A failed same-key request retried after a later rename receives a new revision and can still win. Pending same-key retries keep their original revision. A recovery worker redelivers the latest unfinished title and completes its public receipt; older completion attempts cannot affect the newer delivery. Both inline requests and recovery workers claim before sending; failure cleanup requires the current unexpired owner. Fresh disabled or unsupported Harness requests are refused before admission. Workspace migration also refuses unfinished title delivery even when the public command is FAILED. Close, archive, delete and cwd changes wait for this delivery to settle, including when its public command is FAILED, so sealing cannot strand a title already accepted by the Harness. The Harness must advertise title protocol version 1 before the SDK sends a versioned title. Plain private SDK title writes remain supported and preserve the watermark. See [the concurrency design](../../../docs/design/2026-10-08-managed-session-rename-delivery.md). If the command store
 is unavailable during cleanup, the original API failure is preserved and the
 same key can resume its receipt when storage returns. Only an in-flight
 lifecycle change blocks another one. A retry with the same key from the same

@@ -89,7 +89,14 @@ public final class StoreModels {
     }
 
     public record SessionMutationCommand(String sessionId, String status,
-            boolean replayed) {
+            boolean replayed, long renameRevision) {
+        public SessionMutationCommand(String sessionId, String status, boolean replayed) {
+            this(sessionId, status, replayed, 0);
+        }
+    }
+
+    public record RenameDelivery(String tenantId, String sessionId,
+            String idempotencyKey, String title, long revision, int attemptCount) {
     }
 
     public record SessionMutation(SessionRecord session, boolean replayed) {
