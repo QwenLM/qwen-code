@@ -117,6 +117,13 @@ export interface ManagedEmailAdapterOptions {
 const CLAIM_BATCH = 16;
 const SUBMIT_RETRY_MS = 5_000;
 
+// The control plane's verdict for a missing channel-instance row — the
+// only 404 that is a poll-level registration claim. Its other 404s (a
+// route session or workspace gone under a live instance) are
+// per-message refusals, so the predicate keys on the code, never the
+// bare status.
+const CHANNEL_NOT_FOUND = 'channel_not_found';
+
 /**
  * The control plane carries an attachment as one base64 string bounded at
  * 2,000,000 characters — 1,500,000 decoded bytes — so an upload beyond
@@ -415,6 +422,10 @@ export class ManagedEmailAdapter {
         return;
       if (message.uid <= state.lastUid || message.uid > upper) continue;
       await this.admit(message.uid, message.size);
+      // A registration refusal reset the generation: no further submit
+      // converges this tick. Return — never break: lastUid must stay at
+      // the last admitted message so the next poll re-searches the rest.
+      if (this.registeredGeneration === 0) return;
     }
     if (this.running) {
       state.lastUid = batchEnd;
@@ -608,7 +619,7 @@ export class ManagedEmailAdapter {
     const status = (error as { status?: unknown }).status;
     const code = (error as { code?: unknown }).code;
     return (
-      status === 404 ||
+      (status === 404 && code === CHANNEL_NOT_FOUND) ||
       (status === 409 &&
         (code === 'channel_generation_unregistered' ||
           code === 'channel_disconnected'))
@@ -645,14 +656,16 @@ export class ManagedEmailAdapter {
       }
       if (
         typeof status === 'number' &&
-        (status === 400 || status === 403 || status === 409)
+        (status === 400 || status === 403 || status === 404 || status === 409)
       ) {
         // A deterministic refusal (a failing body, a closed actor scope, a
-        // dead route or generation): re-driving the identical event can
+        // dead route or generation, a route session or workspace gone
+        // under a live instance): re-driving the identical event can
         // never converge, and a claim that outlives the pending limit
         // would stall the whole mailbox, so the event is dropped visibly
-        // instead. Everything else — a lost answer, a reset listener — is
-        // re-driven.
+        // instead. The instance-gone 404 never reaches here — the
+        // registration claim above already took it. Everything else — a
+        // lost answer, a reset listener — is re-driven.
         this.log(
           `Managed email admission of ${event.platformEventId} was refused (${status}); the message is skipped.`,
         );
@@ -827,13 +840,8 @@ export class ManagedEmailAdapter {
         // claim the submit and claim routes arm. Keep the entry and reset
         // the generation: the next poll re-registers first, the re-driven
         // receipt then settles or meets the deterministic drop below, and
-        // this tick's pull still runs. delivery_not_found is excluded —
-        // that 404 comes from requireClaim, not requireInstance, and stays
-        // a drop.
-        if (
-          this.isRegistrationRefusal(error) &&
-          code !== 'delivery_not_found'
-        ) {
+        // this tick's pull still runs.
+        if (this.isRegistrationRefusal(error)) {
           this.registeredGeneration = 0;
           this.log(
             `Managed email receipt for ${entry.deliveryId} was refused as not registered (${String(status)} ${String(code)}); it re-drives after the next poll re-registers.`,

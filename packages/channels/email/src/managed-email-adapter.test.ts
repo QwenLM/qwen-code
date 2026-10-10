@@ -494,12 +494,16 @@ describe('managed email inbound', () => {
     plane.submitErrors = [
       { status: 409, code: 'channel_disconnected' },
       { status: 409, code: 'channel_disconnected' },
+      { status: 409, code: 'channel_disconnected' },
     ];
     append(raw('one', 'first'));
+    await adapter.tick();
+    // The backlog's second entry arrives on the next poll: the admit
+    // loop stopped with the first refusal, so it is searched again.
     append(raw('two', 'second'));
     await adapter.tick();
     expect(state(adapter).pending).toHaveLength(2);
-    expect(plane.submitAttempts).toBe(2);
+    expect(plane.submitAttempts).toBe(3);
     plane.submitErrors = [{ status: 409, code: 'channel_disconnected' }];
     const before = plane.submitAttempts;
     await adapter.tick();
@@ -522,6 +526,50 @@ describe('managed email inbound', () => {
     expect(state(adapter).pending).toEqual([]);
     expect(plane.registrations).toEqual([{ accountGeneration: 1 }]);
     expect(plane.events).toEqual([]);
+  });
+
+  it('drops a per-message 404 that is not a registration refusal, never freezing the mailbox (R3-1)', async () => {
+    // A 404 on submit can name a route session or workspace gone under a
+    // live, connected instance — a per-message verdict, not a poll-level
+    // registration claim. Treating it as one keeps the poison claim
+    // pending and re-registers every poll, and the dead-tick guard then
+    // freezes every later claim behind it.
+    const adapter = make();
+    await adapter.connect();
+    plane.submitErrors = [{ status: 404, code: 'workspace_not_found' }];
+    append(raw('one', 'first'));
+    append(raw('two', 'second'));
+    await adapter.tick();
+    await adapter.tick();
+    // The poison message is dropped visibly, the mail behind it flows in
+    // the same poll, and no re-register is ever armed.
+    expect(plane.events.map((event) => event.text)).toEqual(['second']);
+    expect(state(adapter).pending).toEqual([]);
+    expect(plane.registrations).toEqual([{ accountGeneration: 1 }]);
+  });
+
+  it('stops admitting new mail once a refusal resets registration, re-searching it next poll (R3-2)', async () => {
+    // The admit loop owns the same dead-tick invariant resubmitPending
+    // stops on: after a refusal, every later admit this tick is a
+    // guaranteed-refused submit carrying a full event body. The loop
+    // returns instead — the un-admitted mail is searched again once the
+    // next poll re-registers, so nothing is lost.
+    const adapter = make();
+    await adapter.connect();
+    plane.submitErrors = [{ status: 409, code: 'channel_disconnected' }];
+    const first = append(raw('one', 'first'));
+    append(raw('two', 'second'));
+    await adapter.tick();
+    expect(plane.submitAttempts).toBe(1);
+    expect(state(adapter).pending).toEqual([
+      { uid: first, eventId: `1:${first}` },
+    ]);
+    await adapter.tick();
+    expect(plane.events.map((event) => event.text)).toEqual([
+      'first',
+      'second',
+    ]);
+    expect(state(adapter).pending).toEqual([]);
   });
 
   it('truncates to the wire text bound even when the adapter setting is wider', async () => {
@@ -1038,6 +1086,26 @@ describe('managed email outbound', () => {
       'd-held',
     ]);
     expect(lines.some((line) => line.includes('not registered'))).toBe(true);
+  });
+
+  it('drops a held receipt whose delivery is gone, without arming a re-register (R3-1)', async () => {
+    // delivery_not_found names the claim, not the instance: the re-driven
+    // receipt meets the deterministic drop, and the poll-level
+    // registration claim stays disarmed.
+    const adapter = make();
+    await adapter.connect();
+    plane.outbox = [delivery('d-held')];
+    const original = plane.receipt.bind(plane);
+    plane.receipt = async () => {
+      throw new Error('answer lost');
+    };
+    await adapter.tick();
+    plane.receipt = original;
+    expect(state(adapter).outbound).toHaveLength(1);
+    plane.receiptErrors = [{ status: 404, code: 'delivery_not_found' }];
+    await adapter.tick();
+    expect(state(adapter).outbound).toEqual([]);
+    expect(plane.registrations).toEqual([{ accountGeneration: 1 }]);
   });
 
   it('rethrows a transport failure from the outbox claim (R3-3)', async () => {
