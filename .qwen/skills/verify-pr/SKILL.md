@@ -1178,10 +1178,12 @@ or contract version too.
   trigger filters even for web-shell-only changes; report _lane never ran_
   when untriggered, and name any Android behaviour left _Not covered_.
 - **Java-centred PRs** (`packages/sdk-java/`) in the CI lane: the
-  `node:22-bookworm` verify image ships no JDK. Measure `command -v java`
-  first. If it is absent, list the Java side under _Not covered_; when the
-  central claim lives in Java, the verdict is `inconclusive`, never
-  `merge-ready`. Measured example: a sandbox run with no JDK left roughly
+  optional JDK/Maven preparation is available only with `QWEN_VERIFY_JAVA=1`,
+  as described above. Measure `command -v java` and `command -v mvn` first.
+  If the flag is unset or either tool is absent, list the Java side under
+  _Not covered_; when the central claim lives in Java, the verdict is
+  `inconclusive`, never `merge-ready`. Historical example: a sandbox run
+  with no JDK left roughly
   900 Java lines unexecuted (SQL contention, stale release, settlement, a
   migration), and a later maintainer round had to cover them.
 
