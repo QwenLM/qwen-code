@@ -365,4 +365,29 @@ describe('Hosted real-process gates', () => {
       );
     },
   );
+
+  it('keeps the HostedHarnessMySqlIT ceilings inside the shared fork budget', () => {
+    const forkSeconds = Number(
+      read('packages/sdk-java/managed-agent-server/pom.xml')
+        .split('<id>hosted-harness-mysql</id>')[1]
+        .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
+    );
+    const source = read(
+      'packages/sdk-java/managed-agent-server/src/test/java/' +
+        'com/alibaba/qwen/code/managedagent/HostedHarnessMySqlIT.java',
+    );
+    const ceilings = [...source.matchAll(/@Timeout\((\d+)\)/g)].map((m) =>
+      Number(m[1]),
+    );
+    expect(ceilings.length).toBeGreaterThan(0);
+    // The Hosted*IT classes share one failsafe fork, so a method stalled to
+    // its full @Timeout must still leave the fork its healthy runtime: the
+    // sibling classes measure ~532s and the fork itself ~14s, covered by the
+    // same 600s allowance the step-ceiling row carries. A larger ceiling
+    // lets failsafe kill the fork mid-run, and the classes left unrun never
+    // report, failing the gate undiagnosably (#13780).
+    for (const ceiling of ceilings) {
+      expect(ceiling + 600).toBeLessThanOrEqual(forkSeconds);
+    }
+  });
 });
