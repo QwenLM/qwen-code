@@ -314,6 +314,26 @@ it('creates a team and spawns a named member without the Workspace mount', async
   expect(broker.acquire).not.toHaveBeenCalled();
 });
 
+// A recovered foreground wait (#13708) answers every sibling it never
+// reached as an agent call that never ran, so a foreground child keeps
+// sharing its batch with agent calls only, team tools included.
+it('keeps team tools out of a foreground child batch', async () => {
+  const turn = createTurn();
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  const answer = await execute(turn, [
+    call('task_list', {}, 'call-list'),
+    call(
+      'agent',
+      { description: 'audit', prompt: 'review', run_in_background: false },
+      'call-child',
+    ),
+  ]);
+  expect(answer).toContain('cannot share a batch with a non-agent tool');
+  expect(children.record('prompt:call-child')).toBeUndefined();
+});
+
 it('refuses a member without a team, committing nothing', async () => {
   const answer = await execute(createTurn(), [member('alice', 'call-1')]);
   expect(answer).toContain('Create one with team_create first');
