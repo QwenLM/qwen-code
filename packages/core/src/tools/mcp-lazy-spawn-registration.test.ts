@@ -40,9 +40,8 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('./mcp-client.js', async () => {
-  const actual = await vi.importActual<typeof import('./mcp-client.js')>(
-    './mcp-client.js',
-  );
+  const actual =
+    await vi.importActual<typeof import('./mcp-client.js')>('./mcp-client.js');
 
   class FakeMcpClient {
     readonly calls: string[] = [];
