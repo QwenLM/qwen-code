@@ -68,6 +68,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.introspect.BeanPropertyDefinition;
@@ -110,6 +111,8 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
         "spring.datasource.username=sa",
         "spring.datasource.password=",
         "qwen.managed-agent.harness.enabled=false",
+        "qwen.managed-agent.automation.enabled=true",
+        "qwen.managed-agent.session-store.enabled=true",
         "qwen.managed-agent.dispatch.scan-delay=50ms",
         "qwen.managed-agent.events.poll-interval=10ms",
         "qwen.managed-agent.events.materialize-interval=10ms"
@@ -171,7 +174,21 @@ class ManagedAgentApiContractTest {
                     entry(PublicList.class, List.of("PublicSessionList",
                             "PublicEventList", "PublicTaskList",
                             "PublicTaskEventList", "PublicTurnList",
-                            "PublicArtifactList")),
+                            "PublicArtifactList", "PublicAutomationList",
+                            "PublicAutomationRunList", "PublicChannelList",
+                            "PublicChannelDeliveryList")),
+                    entry(ApiModels.AutomationDefinitionRequest.class,
+                            List.of("AutomationDefinitionRequest")),
+                    entry(ApiModels.PublicAutomation.class,
+                            List.of("PublicAutomation")),
+                    entry(ApiModels.PublicAutomationRun.class,
+                            List.of("PublicAutomationRun")),
+                    entry(ApiModels.PublicChannel.class,
+                            List.of("PublicChannel")),
+                    entry(ApiModels.PublicChannelRoute.class,
+                            List.of("PublicChannelRoute")),
+                    entry(ApiModels.PublicChannelDelivery.class,
+                            List.of("PublicChannelDelivery")),
                     entry(PublicEvent.class, List.of("PublicEvent")),
                     entry(SessionResyncRequired.class,
                             List.of("SessionResyncRequired")),
@@ -256,6 +273,80 @@ class ManagedAgentApiContractTest {
     private RequestMappingHandlerMapping handlerMapping;
 
     @Test
+    void migrationRefusalsDeclareTheActualErrorCodeAndRetryability() throws Exception {
+        String tenant = "contract-migration-" + UUID.randomUUID();
+        var actor = actor(tenant);
+        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, display_name,"
+                + " workspace_generation, storage_id, config_ref, policy_ref, state)"
+                + " VALUES (?, 'workspace', 'Workspace', 1, 'storage', 'config', 'policy', 'ACTIVE')", tenant);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, actor.actorId().getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO qwen_runtime_storage_fence VALUES (?, ?, ?, 'storage', ?)",
+                JdbcRuntimeBindingRepository.storageFenceKey(tenant), JdbcRuntimeBindingRepository.storageFenceKey("storage"),
+                tenant, UUID.randomUUID().toString());
+        assertThat(CONTRACT.node("/components/schemas/ErrorEnvelope/properties/error/properties/retryable/type").asText())
+                .isEqualTo("boolean");
+        assertThat(CONTRACT.node("/components/responses/Conflict/description").asText())
+                .contains("workspace_unavailable", "retryable=false", "migration");
+        Map<String, String> drift = new TreeMap<>();
+        String publicBody = exchange(drift, "createSession", 409,
+                post("/v1/agents/sessions").header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "fenced-public"),
+                "{\"agent_id\":\"qwen-code\",\"input\":[],\"workspace\":{\"workspace_id\":\"workspace\"}}");
+        String webBody = exchange(drift, "webShellCreateSession", 409,
+                post(WEB_SHELL + "/sessions/create").header(TENANT, tenant).principal(actor),
+                "{\"agentId\":\"qwen-code\",\"idempotencyKey\":\"fenced-web\",\"input\":[],\"workspace\":{\"workspaceId\":\"workspace\"}}");
+        assertThat(drift).isEmpty();
+        for (String body : List.of(publicBody, webBody)) {
+            ObjectNode envelope = (ObjectNode) json(body);
+            assertThat(envelope.at("/error/code").asText()).isEqualTo("workspace_unavailable");
+            assertThat(envelope.at("/error/retryable").isBoolean()).isTrue();
+            assertThat(envelope.at("/error/retryable").booleanValue()).isFalse();
+            ((ObjectNode) envelope.required("error")).put("retryable", true);
+            assertThat(CONTRACT.validate("/components/schemas/ErrorEnvelope", envelope)).isEmpty();
+            ((ObjectNode) envelope.required("error")).put("retryable", "true");
+            assertThat(CONTRACT.validate("/components/schemas/ErrorEnvelope", envelope)).isNotEmpty();
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?", Long.class, tenant))
+                .isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ?", Long.class, tenant))
+                .isZero();
+    }
+
+    @Test
+    void publicAutomationRunStateValidatesAsLegallyNull() throws Exception {
+        ObjectNode run = (ObjectNode) json("""
+                {"id":"arun_x","object":"agent.automation.run",
+                 "automation_id":"asch_0123456789abcdef0123456789abcdef",
+                 "session_id":"session-00000000000000000000000000000001",
+                 "occurrence_key":"manual:k","trigger":"manual",
+                 "outcome":"firing","reason":null,"definition_revision":1,
+                 "state":null,"created_at":1,"updated_at":1}""");
+        assertThat(CONTRACT.validate("/components/schemas/PublicAutomationRun", run))
+                .isEmpty();
+        run.put("state", "running");
+        assertThat(CONTRACT.validate("/components/schemas/PublicAutomationRun", run))
+                .isEmpty();
+        run.put("state", "bogus");
+        assertThat(CONTRACT.validate("/components/schemas/PublicAutomationRun", run))
+                .isNotEmpty();
+    }
+
+    @Test
+    void theCreateRequestRequiresACatchUpLimitOnlyWhenBounded() throws Exception {
+        ObjectNode create = (ObjectNode) json("""
+                {"session_id":"s","goal":"g","cron":"0 2 * * *",
+                 "timezone":"UTC","prompt":"p","catch_up":"bounded"}""");
+        assertThat(CONTRACT.validate(
+                "/components/schemas/AutomationDefinitionCreateRequest",
+                create)).isNotEmpty();
+        create.put("catch_up_limit", 3);
+        assertThat(CONTRACT.validate(
+                "/components/schemas/AutomationDefinitionCreateRequest",
+                create)).isEmpty();
+    }
+
+    @Test
     void tenantFilteredRoutesDeclareAndReturnTheActorScopeRefusal() throws Exception {
         Map<String, String> drift = new TreeMap<>();
         for (Operation operation : CONTRACT.operations()) {
@@ -306,10 +397,13 @@ class ManagedAgentApiContractTest {
 
     @Test
     void theCreatorOnlyResponderContractNamesTheOwnerlessFallThrough() {
-        // ManagedActionStore.requireOwner admits any tenant caller on a
-        // Session with neither a recorded creator nor a create command.
-        // Enumerate the responder operations structurally so a reworded or
-        // newly added responder cannot escape the qualification.
+        // ManagedActionStore.admit answers through the create-command
+        // actor recorded for a bound Session without an owner record, or
+        // through the Workspace role arm, and admits a tenant caller on an
+        // unbound Session with neither. The contract phrasing keeps both
+        // halves: enumerate the responder operations structurally so a
+        // reworded or newly added responder cannot escape the
+        // qualification.
         Set<String> responderPaths = Set.of(
                 "/v1/agents/sessions/{sessionId}/actions/{actionId}/responses",
                 "/api/agent/web-shell/v1/actions/respond");
@@ -325,7 +419,10 @@ class ManagedAgentApiContractTest {
                 assertThat(description + "\n" + forbidden)
                         .as(operation.operationId())
                         .contains("no recorded creator and no recorded"
-                                + " create command");
+                                + " create command")
+                        .contains("answers through the create-command"
+                                + " actor recorded for it, or through the"
+                                + " Workspace role arm");
             }
             // action_forbidden is documented only where requireOwner can
             // fire, and a 403 sibling description overrides the shared
@@ -990,8 +1087,8 @@ class ManagedAgentApiContractTest {
                             + " 'ACTIVE')", workspaceTenant, workspaceId,
                     workspaceId);
             jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                            + " workspace_id, actor_id, can_read, can_create)"
-                            + " VALUES (?, ?, ?, TRUE, TRUE)", workspaceTenant,
+                            + " workspace_id, actor_id, role)"
+                            + " VALUES (?, ?, ?, 'OPERATOR')", workspaceTenant,
                     workspaceId, actor.actorId().getBytes(StandardCharsets.UTF_8));
         }
         jdbc.update("INSERT INTO managed_workspace_default"
@@ -1050,6 +1147,8 @@ class ManagedAgentApiContractTest {
                 .isEqualTo(1);
         assertThat(webBound.at("/workspace/state").asText())
                 .isEqualTo("ready");
+        exchangeAutomations(drift, workspaceTenant, otherTenant, actor,
+                publicBoundId);
         // W2 refuses the operation on this fixture's deployment: the
         // workspace-files opt-in is disabled, so a bound Session answers
         // workspace_unavailable; the operation-level behavior is exercised
@@ -1213,6 +1312,7 @@ class ManagedAgentApiContractTest {
                 get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId), null);
         exchangeTurns(drift, tenant, otherTenant);
         exchangeAgents(drift, tenant, otherTenant);
+        exchangeChannels(drift, tenant, otherTenant);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
@@ -1506,6 +1606,9 @@ class ManagedAgentApiContractTest {
                 .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "agent create"),
                 body);
         String changed = body.replace("Review code.", "Review code carefully.");
+        exchange(drift, "updateAgent", 400, post("/v1/agents/{id}", agentId)
+                .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "agent update"),
+                changed);
         JsonNode updated = json(exchange(drift, "updateAgent", 202,
                 post("/v1/agents/{id}", agentId).header(TENANT, tenant)
                         .header(IDEMPOTENCY_KEY, "agent-update"), changed));
@@ -1521,6 +1624,332 @@ class ManagedAgentApiContractTest {
                 .isEqualTo(created.path("digest").asText());
         exchange(drift, "getAgent", 404, get("/v1/agents/{id}", agentId)
                 .header(TENANT, otherTenant), null);
+    }
+
+    /**
+     * H6b: the automation resources over the fixture Harness's automation
+     * funnel — a definition created, read, revised and retired under the
+     * bound Session its creator owns, a manual run with its replay and the
+     * overlap refusal, and the occurrence list.
+     */
+    private void exchangeAutomations(Map<String, String> drift, String tenant,
+            String otherTenant, AuthenticatedTenantActor actor,
+            String sessionId) throws Exception {
+        String body = """
+                {"session_id":"%s","goal":"Nightly build","cron":"0 2 * * *",
+                 "timezone":"Asia/Shanghai","prompt":"Run the build."}
+                """.formatted(sessionId);
+        // The bound Session becomes ACTIVE when its creation operation has
+        // attached the fixture Harness; automation admission requires it.
+        await().atMost(Duration.ofSeconds(10)).until(() -> store
+                .findSession(tenant, sessionId)
+                .map(session -> "ACTIVE".equals(session.status()))
+                .orElse(false));
+        JsonNode created = json(exchange(drift, "createAgentAutomation", 202,
+                post("/v1/agent-automations").header(TENANT, tenant)
+                        .principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-create"), body));
+        String automationId = created.path("id").asText();
+        assertThat(automationId).startsWith("asch_");
+        assertThat(created.path("definition_revision").asLong()).isEqualTo(1);
+        assertThat(created.path("state").asText()).isEqualTo("live");
+        assertThat(created.path("session_id").asText()).isEqualTo(sessionId);
+        exchange(drift, "createAgentAutomation", 202,
+                post("/v1/agent-automations").header(TENANT, tenant)
+                        .principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-create"), body);
+        MockHttpServletResponse replay = mvc.perform(
+                post("/v1/agent-automations").header(TENANT, tenant)
+                        .principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-create")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andReturn().getResponse();
+        assertThat(replay.getStatus()).isEqualTo(202);
+        assertThat(replay.getHeader("X-Qwen-Idempotent-Replay"))
+                .isEqualTo("true");
+        assertThat(objectMapper.readTree(replay.getContentAsString())
+                .path("id").asText()).isEqualTo(automationId);
+        exchange(drift, "createAgentAutomation", 409,
+                post("/v1/agent-automations").header(TENANT, tenant)
+                        .principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-create"),
+                body.replace("Nightly build", "Weekly build"));
+        exchange(drift, "createAgentAutomation", 400,
+                post("/v1/agent-automations").header(TENANT, tenant)
+                        .principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-create-tz"),
+                body.replace("Asia/Shanghai", "Mars/Olympus_Mons"));
+        // Grammar-valid but over the declared mirror bound
+        // (cron VARCHAR(400), OpenAPI maxLength 400): the service refuses
+        // before the funnel commits, instead of answering 500 from the
+        // mirror INSERT with the Idempotency-Key already burned.
+        String longCron = String.join(",", java.util.Collections.nCopies(300, "0"))
+                + " 0 1 1 0";
+        JsonNode longCronRefusal = json(exchange(drift, "createAgentAutomation",
+                400, post("/v1/agent-automations").header(TENANT, tenant)
+                        .principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-create-long-cron"),
+                body.replace("\"cron\":\"0 2 * * *\"",
+                        "\"cron\":\"" + longCron + "\"")));
+        assertThat(longCronRefusal.path("error").path("code").asText())
+                .isEqualTo("invalid_automation");
+        exchange(drift, "createAgentAutomation", 409,
+                post("/v1/agent-automations").header(TENANT, tenant)
+                        .principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-create-mode"),
+                body.replace("\"prompt\"", "\"session_mode\":\"per_run\",\"prompt\""));
+        exchange(drift, "createAgentAutomation", 404,
+                post("/v1/agent-automations").header(TENANT, tenant)
+                        .principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-create-missing"),
+                body.replace(sessionId, UUID.randomUUID().toString()));
+        exchange(drift, "createAgentAutomation", 403,
+                post("/v1/agent-automations").header(TENANT, tenant)
+                        .principal(actor(otherTenant))
+                        .header(IDEMPOTENCY_KEY, "automation-create-foreign"),
+                body);
+        JsonNode list = json(exchange(drift, "listAgentAutomations", 200,
+                get("/v1/agent-automations").header(TENANT, tenant)
+                        .principal(actor).param("limit", "10"), null));
+        assertThat(list.path("data")).hasSize(1);
+        assertThat(list.path("data").get(0).path("id").asText())
+                .isEqualTo(automationId);
+        exchange(drift, "listAgentAutomations", 400,
+                get("/v1/agent-automations").header(TENANT, tenant)
+                        .principal(actor).param("cursor", "!!"), null);
+        exchange(drift, "listAgentAutomations", 400,
+                get("/v1/agent-automations").header(TENANT, tenant)
+                        .principal(actor).param("limit", "0"), null);
+        exchange(drift, "listAgentAutomations", 403,
+                get("/v1/agent-automations").header(TENANT, tenant)
+                        .principal(actor(otherTenant)), null);
+        String missing = "asch_" + "0".repeat(32);
+        exchange(drift, "getAgentAutomation", 200,
+                get("/v1/agent-automations/{id}", automationId)
+                        .header(TENANT, tenant).principal(actor), null);
+        exchange(drift, "getAgentAutomation", 404,
+                get("/v1/agent-automations/{id}", missing)
+                        .header(TENANT, tenant).principal(actor), null);
+        exchange(drift, "getAgentAutomation", 403,
+                get("/v1/agent-automations/{id}", automationId)
+                        .header(TENANT, tenant).principal(actor(otherTenant)),
+                null);
+        JsonNode revised = json(exchange(drift, "updateAgentAutomation", 202,
+                post("/v1/agent-automations/{id}", automationId)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-update"),
+                "{\"cron\":\"30 2 * * *\"}"));
+        assertThat(revised.path("definition_revision").asLong()).isEqualTo(2);
+        assertThat(revised.path("cron").asText()).isEqualTo("30 2 * * *");
+        assertThat(revised.path("goal").asText()).isEqualTo("Nightly build");
+        exchange(drift, "updateAgentAutomation", 400,
+                post("/v1/agent-automations/{id}", automationId)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-update-bad"),
+                "{\"cron\":\"0 25 * * *\"}");
+        exchange(drift, "updateAgentAutomation", 404,
+                post("/v1/agent-automations/{id}", missing)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-update-missing"),
+                "{\"cron\":\"30 2 * * *\"}");
+        exchange(drift, "updateAgentAutomation", 403,
+                post("/v1/agent-automations/{id}", automationId)
+                        .header(TENANT, tenant).principal(actor(otherTenant))
+                        .header(IDEMPOTENCY_KEY, "automation-update-foreign"),
+                "{\"cron\":\"30 2 * * *\"}");
+        JsonNode run = json(exchange(drift, "runAgentAutomation", 202,
+                post("/v1/agent-automations/{id}/runs", automationId)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-run-1"), null));
+        assertThat(run.path("outcome").asText()).isEqualTo("fired");
+        assertThat(run.path("trigger").asText()).isEqualTo("manual");
+        assertThat(run.path("occurrence_key").asText())
+                .isEqualTo("manual:automation-run-1");
+        assertThat(run.path("id").asText()).startsWith("arun_");
+        MockHttpServletResponse runReplay = mvc.perform(
+                post("/v1/agent-automations/{id}/runs", automationId)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-run-1"))
+                .andReturn().getResponse();
+        assertThat(runReplay.getStatus()).isEqualTo(202);
+        assertThat(runReplay.getHeader("X-Qwen-Idempotent-Replay"))
+                .isEqualTo("true");
+        assertThat(objectMapper.readTree(runReplay.getContentAsString())
+                .path("id").asText()).isEqualTo(run.path("id").asText());
+        // The first run has not settled, and the definition's overlap policy
+        // is skip: a second manual run is dropped and recorded.
+        exchange(drift, "runAgentAutomation", 409,
+                post("/v1/agent-automations/{id}/runs", automationId)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-run-2"), null);
+        exchange(drift, "runAgentAutomation", 404,
+                post("/v1/agent-automations/{id}/runs", missing)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-run-missing"),
+                null);
+        exchange(drift, "runAgentAutomation", 403,
+                post("/v1/agent-automations/{id}/runs", automationId)
+                        .header(TENANT, tenant).principal(actor(otherTenant))
+                        .header(IDEMPOTENCY_KEY, "automation-run-foreign"),
+                null);
+        JsonNode runs = json(exchange(drift, "listAgentAutomationRuns", 200,
+                get("/v1/agent-automations/{id}/runs", automationId)
+                        .header(TENANT, tenant).principal(actor), null));
+        assertThat(runs.path("data")).hasSize(2);
+        assertThat(runs.path("data").findValuesAsText("outcome"))
+                .containsExactlyInAnyOrder("fired", "skipped");
+        exchange(drift, "listAgentAutomationRuns", 400,
+                get("/v1/agent-automations/{id}/runs", automationId)
+                        .header(TENANT, tenant).principal(actor)
+                        .param("cursor", "!!"), null);
+        exchange(drift, "listAgentAutomationRuns", 404,
+                get("/v1/agent-automations/{id}/runs", missing)
+                        .header(TENANT, tenant).principal(actor), null);
+        exchange(drift, "listAgentAutomationRuns", 403,
+                get("/v1/agent-automations/{id}/runs", automationId)
+                        .header(TENANT, tenant).principal(actor(otherTenant)),
+                null);
+        JsonNode retired = json(exchange(drift, "retireAgentAutomation", 202,
+                delete("/v1/agent-automations/{id}", automationId)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-retire"), null));
+        assertThat(retired.path("state").asText()).isEqualTo("retired");
+        assertThat(retired.path("enabled").asBoolean()).isFalse();
+        exchange(drift, "retireAgentAutomation", 400,
+                delete("/v1/agent-automations/{id}", automationId)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "k".repeat(129)), null);
+        exchange(drift, "retireAgentAutomation", 404,
+                delete("/v1/agent-automations/{id}", missing)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-retire-missing"),
+                null);
+        exchange(drift, "retireAgentAutomation", 403,
+                delete("/v1/agent-automations/{id}", automationId)
+                        .header(TENANT, tenant).principal(actor(otherTenant))
+                        .header(IDEMPOTENCY_KEY, "automation-retire-foreign"),
+                null);
+        exchange(drift, "runAgentAutomation", 409,
+                post("/v1/agent-automations/{id}/runs", automationId)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-run-3"), null);
+        exchange(drift, "updateAgentAutomation", 409,
+                post("/v1/agent-automations/{id}", automationId)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-update-retired"),
+                "{\"cron\":\"0 3 * * *\"}");
+    }
+
+    /**
+     * H5c: the three channel resources, served over seeded rows exactly as
+     * the channel service writes them — a registered connection, an
+     * admitted ingress row and a delivered ledger row.
+     */
+    private void exchangeChannels(Map<String, String> drift, String tenant,
+            String otherTenant) throws Exception {
+        String channelTenant = tenant + "-channel";
+        AuthenticatedTenantActor reader = new AuthenticatedTenantActor() {
+            @Override
+            public String getName() {
+                return actorId();
+            }
+
+            @Override
+            public String tenantId() {
+                return channelTenant;
+            }
+
+            @Override
+            public String actorId() {
+                return "channel-reader";
+            }
+        };
+        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+                        + " workspace_id, workspace_generation, storage_id,"
+                        + " display_name, config_ref, policy_ref, state)"
+                        + " VALUES (?, 'ws-channel', 1, 'storage', 'Channel',"
+                        + " 'config', 'policy', 'ACTIVE')", channelTenant);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+                        + " workspace_id, actor_id, role)"
+                        + " VALUES (?, 'ws-channel', ?, 'OPERATOR')",
+                channelTenant,
+                reader.actorId().getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO qwen_managed_channel_instance (tenant_id,"
+                        + " channel_id, platform, account_id,"
+                        + " account_generation, state, actor_id, workspace_id,"
+                        + " cwd_relative, policy_json, created_at, updated_at)"
+                        + " VALUES (?, 'mail-1', 'email', 'agent@example.com',"
+                        + " 1, 'connected', 'channel-reader', 'ws-channel',"
+                        + " '.', '{}', 1000, 1000)", channelTenant);
+        String sessionId = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO qwen_managed_channel_route (tenant_id,"
+                        + " route_key, channel_instance_id,"
+                        + " account_generation, platform_event_id,"
+                        + " semantic_revision, session_id, sender_id, chat_id,"
+                        + " thread_id, state, input_id,"
+                        + " staged_attachment_refs_json, created_at,"
+                        + " updated_at) VALUES (?, ?, 'mail-1', 1, '1700:42',"
+                        + " 1, ?, 'alice@example.com', 'alice@example.com',"
+                        + " 'thread-1', 'admitted', ?, ?, 1000, 1000)",
+                channelTenant, "a".repeat(64), sessionId,
+                "chin-" + "a".repeat(64), "[\"sha256:" + "b".repeat(64)
+                        + "\"]");
+        jdbc.update("INSERT INTO qwen_managed_channel_delivery (tenant_id,"
+                        + " channel_instance_id, delivery_id, segment_id,"
+                        + " segment_ordinal, state, provider_receipt,"
+                        + " created_at, updated_at) VALUES (?, 'mail-1',"
+                        + " 'delivery-1', 'delivery-1:0', 0, 'delivered',"
+                        + " '<m1@example.com>', 1000, 1000)", channelTenant);
+        JsonNode channels = json(exchange(drift, "listAgentChannels", 200,
+                get("/v1/agent-channels").header(TENANT, channelTenant)
+                        .principal(reader).param("limit", "10"), null));
+        assertThat(channels.path("data")).hasSize(1);
+        assertThat(channels.path("data").get(0).path("routes")).hasSize(1);
+        assertThat(channels.path("data").get(0).path("routes").get(0)
+                .path("session_id").asText()).isEqualTo(sessionId);
+        exchange(drift, "listAgentChannels", 400,
+                get("/v1/agent-channels").header(TENANT, channelTenant)
+                        .principal(reader).param("cursor", "!!"), null);
+        exchange(drift, "listAgentChannels", 400,
+                get("/v1/agent-channels").header(TENANT, channelTenant)
+                        .principal(reader).param("limit", "0"), null);
+        exchange(drift, "listAgentChannels", 403,
+                get("/v1/agent-channels").header(TENANT, channelTenant)
+                        .principal(actor(otherTenant)), null);
+        JsonNode deliveries = json(exchange(drift,
+                "listAgentChannelDeliveries", 200,
+                get("/v1/agent-channels/{id}/deliveries", "mail-1")
+                        .header(TENANT, channelTenant).principal(reader),
+                null));
+        assertThat(deliveries.path("data")).hasSize(1);
+        assertThat(deliveries.path("data").get(0).path("state").asText())
+                .isEqualTo("delivered");
+        exchange(drift, "listAgentChannelDeliveries", 404,
+                get("/v1/agent-channels/{id}/deliveries", "missing")
+                        .header(TENANT, channelTenant).principal(reader),
+                null);
+        exchange(drift, "listAgentChannelDeliveries", 400,
+                get("/v1/agent-channels/{id}/deliveries", "mail-1")
+                        .header(TENANT, channelTenant).principal(reader)
+                        .param("cursor", "!!"), null);
+        exchange(drift, "listAgentChannelDeliveries", 403,
+                get("/v1/agent-channels/{id}/deliveries", "mail-1")
+                        .header(TENANT, channelTenant)
+                        .principal(actor(otherTenant)), null);
+        JsonNode delivery = json(exchange(drift, "getAgentChannelDelivery",
+                200, get("/v1/agent-channels/{id}/deliveries/{d}", "mail-1",
+                        "delivery-1").header(TENANT, channelTenant)
+                        .principal(reader), null));
+        assertThat(delivery.path("provider_receipt").asText())
+                .isEqualTo("<m1@example.com>");
+        exchange(drift, "getAgentChannelDelivery", 404,
+                get("/v1/agent-channels/{id}/deliveries/{d}", "mail-1",
+                        "missing").header(TENANT, channelTenant)
+                        .principal(reader), null);
+        exchange(drift, "getAgentChannelDelivery", 403,
+                get("/v1/agent-channels/{id}/deliveries/{d}", "mail-1",
+                        "delivery-1").header(TENANT, channelTenant)
+                        .principal(actor(otherTenant)), null);
     }
 
     private void exchangeTurns(Map<String, String> drift, String tenant,

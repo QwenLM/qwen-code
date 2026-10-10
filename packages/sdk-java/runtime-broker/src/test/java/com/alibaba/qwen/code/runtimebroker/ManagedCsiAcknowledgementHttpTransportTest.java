@@ -11,19 +11,29 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.sun.net.httpserver.HttpServer;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.Authenticator;
+import java.net.CookieHandler;
+import java.net.ProxySelector;
 import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLParameters;
 import org.junit.jupiter.api.Test;
 
 class ManagedCsiAcknowledgementHttpTransportTest {
@@ -198,12 +208,117 @@ class ManagedCsiAcknowledgementHttpTransportTest {
         }
     }
 
+    @Test
+    void deadlineFailureDoesNotWaitForTheExchangeCancel() throws Exception {
+        var fixture = fixtures();
+        var callerReturned = new CountDownLatch(1);
+        var cancelFinished = new CountDownLatch(1);
+        var cancelSawCallerReturn = new AtomicBoolean();
+        var client = new StalledExchangeClient(() -> {
+            try {
+                cancelSawCallerReturn.set(callerReturned.await(5, TimeUnit.SECONDS));
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            } finally {
+                cancelFinished.countDown();
+            }
+        });
+        var boot = map(fixture.get("boot"));
+        var transport = new HttpRuntimeTransport(client, Duration.ofMillis(200));
+        // The endpoint is never contacted: the stalled client answers nothing until the deadline fires.
+        var stage = transport.acknowledgeCsi(
+                ManagedCsiAcknowledgementProtocolTest.lease(boot, URI.create("http://127.0.0.1:9")),
+                ManagedCsiAcknowledgementProtocolTest.session(fixture), boot, map(fixture.get("expectedPod")),
+                map(fixture.get("request")), map(map(fixture.get("response")).get("captureIdentity")));
+        assertEquals("managed_runtime_unavailable", failure(() -> stage).getCode());
+        callerReturned.countDown();
+        assertTrue(cancelFinished.await(5, TimeUnit.SECONDS));
+        assertTrue(cancelSawCallerReturn.get(), "the deadline failure waited for the exchange cancel");
+    }
+
     private static RuntimeBrokerException failure(java.util.function.Supplier<CompletionStage<Map<String, Object>>> call) {
         return assertInstanceOf(RuntimeBrokerException.class,
                 assertThrows(CompletionException.class, () -> call.get().toCompletableFuture().join()).getCause());
     }
 
     private record Reply(int status, byte[] body, boolean headers, boolean encoded) {
+    }
+
+    /** Never answers a request; runs {@code onCancel} inside the exchange cancel, on the cancelling thread. */
+    private static final class StalledExchangeClient extends HttpClient {
+        private final Runnable onCancel;
+
+        StalledExchangeClient(Runnable onCancel) {
+            this.onCancel = onCancel;
+        }
+
+        @Override
+        public <T> CompletableFuture<HttpResponse<T>> sendAsync(HttpRequest request,
+                HttpResponse.BodyHandler<T> handler) {
+            return new CompletableFuture<>() {
+                @Override
+                public boolean cancel(boolean mayInterruptIfRunning) {
+                    onCancel.run();
+                    return super.cancel(mayInterruptIfRunning);
+                }
+            };
+        }
+
+        @Override
+        public <T> CompletableFuture<HttpResponse<T>> sendAsync(HttpRequest request,
+                HttpResponse.BodyHandler<T> handler, HttpResponse.PushPromiseHandler<T> pushPromiseHandler) {
+            return sendAsync(request, handler);
+        }
+
+        @Override
+        public <T> HttpResponse<T> send(HttpRequest request, HttpResponse.BodyHandler<T> handler) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public Redirect followRedirects() {
+            return Redirect.NEVER;
+        }
+
+        @Override
+        public Version version() {
+            return Version.HTTP_1_1;
+        }
+
+        @Override
+        public Optional<CookieHandler> cookieHandler() {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<Duration> connectTimeout() {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<ProxySelector> proxy() {
+            return Optional.empty();
+        }
+
+        @Override
+        public SSLContext sslContext() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public SSLParameters sslParameters() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public Optional<Authenticator> authenticator() {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<Executor> executor() {
+            return Optional.empty();
+        }
     }
 
     private static final class UnsupportedTransport implements RuntimeTransport {

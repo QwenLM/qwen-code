@@ -681,6 +681,9 @@ describe('SessionTranscriptReader', () => {
       getSessionId: () => sessionId,
       getProjectRoot: () => workspaceDir,
       getCliVersion: () => 'test',
+      getModel: () => 'test',
+      getAuthType: () => undefined,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
       getResumedSessionData: () => undefined,
     } as unknown as Config;
     const recorder = new ChatRecordingService(config, undefined, false);
@@ -1137,7 +1140,20 @@ describe('SessionTranscriptReader', () => {
       },
       sys('compression', 'a1', 'chat_compression', compressedTurn()),
       sys('telemetry', 'compression', 'ui_telemetry', { uiEvent }),
-      sys('attribution', 'telemetry', 'attribution_snapshot', {
+      sys('request-start', 'telemetry', 'ui_telemetry', {
+        uiEvent: {
+          'event.name': 'request_lifecycle',
+          v: 1,
+          kind: 'request',
+          phase: 'started',
+          executionId: 'execution',
+          sessionId,
+          promptId: `${sessionId}########3`,
+          model: 'model',
+          startedAt: 10,
+        },
+      }),
+      sys('attribution', 'request-start', 'attribution_snapshot', {
         snapshot: attributionSnapshot,
       }),
       sys('files', 'attribution', 'file_history_snapshot', {
@@ -1714,6 +1730,36 @@ describe('SessionTranscriptReader', () => {
     expect(projection?.runtime.recording.sessionApprovalMode).toEqual({
       mode: ApprovalMode.AUTO,
     });
+  });
+
+  it('preserves prompt snapshots through load and fork without changing restored state or model input', async () => {
+    const messages = chain(...TWO_TURNS);
+    const executionContext = {
+      modelId: 'recorded-prompt-model',
+      authType: 'openai',
+      approvalMode: ApprovalMode.YOLO,
+    };
+    messages[2].executionContext = executionContext;
+    await writeRecords(messages);
+    const service = svc();
+    const loaded = await service.loadSession(sessionId);
+    expect(loaded?.conversation.messages[0].executionContext).toBeUndefined();
+    expect(loaded?.conversation.messages[2].executionContext).toEqual(
+      executionContext,
+    );
+    const restored = await service.readRestoreProjection(sessionId, NONE);
+    expect(restored?.runtime.apiHistory).toEqual(
+      messages.map((message) => message.message),
+    );
+    expect(restored?.runtime.recording.sessionModel).toBeUndefined();
+    expect(restored?.runtime.recording.sessionApprovalMode).toBeUndefined();
+
+    await service.forkSession(sessionId, otherSessionId);
+    const fork = await service.loadSession(otherSessionId);
+    expect(fork?.conversation.messages[0].executionContext).toBeUndefined();
+    expect(fork?.conversation.messages[2].executionContext).toEqual(
+      executionContext,
+    );
   });
 
   it('captures lastAssistantModel when no session_model record exists', async () => {

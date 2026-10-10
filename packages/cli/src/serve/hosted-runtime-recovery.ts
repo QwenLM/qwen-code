@@ -9,10 +9,18 @@ import type { Part } from '@google/genai';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import type {
+  HarnessAgentWaitRun,
   HarnessRunAuthorization,
   HarnessToolItem,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
-import { HARNESS_MODEL_START_PHASES } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import {
+  HARNESS_MODEL_START_PHASES,
+  harnessCheckpointIsAgentWait,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import {
+  managedExtensionRecordKey,
+  managedTaskId,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import {
   assertManagedSessionStableId,
   type ManagedSessionDurableRef,
@@ -24,15 +32,33 @@ import {
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
-import { truncateHostedGlobResponse } from './hosted-workspace-tool-turn.js';
+import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import {
+  fitChildResultInline,
+  HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+  HOSTED_AGENT_WAIT_ABANDONED_TEXT,
+  hostedAgentBackgroundStartedText,
+  hostedChildRunIdFor,
+  hostedRuntimeSessionId,
+  journaledToolResultIds,
+  truncateHostedGlobResponse,
+} from './hosted-workspace-tool-turn.js';
+import {
+  endHostedAction,
+  readHostedActionOptions,
+} from './hosted-tool-approval.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
+import {
+  commitHostedFileHistory,
+  readHostedFileHistory,
+} from './hosted-file-history.js';
 import {
   HostedWorkspaceBroker,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
 
 /** The parked turn is not one this recovery can drive; the caller 409s. */
-class RecoveryDeclined extends Error {}
+export class RecoveryDeclined extends Error {}
 
 export interface HostedRuntimeRecoveryExecution {
   functionCallId: string;
@@ -44,7 +70,7 @@ export interface HostedRuntimeRecoveryExecution {
 }
 
 export interface HostedRuntimeRecoveryReport {
-  phase: 'await_runtime' | 'results_ready';
+  phase: 'await_runtime' | 'await_agent' | 'results_ready';
   checkpointId: string;
   activationId: string;
   executions: HostedRuntimeRecoveryExecution[];
@@ -134,7 +160,7 @@ function isTransientStoreBlock(
   );
 }
 
-async function originalRuntimeBroker(
+export async function originalRuntimeBroker(
   session: ManagedSession,
   promptId: string,
   items: readonly HarnessToolItem[],
@@ -169,7 +195,7 @@ async function originalRuntimeBroker(
       ) as { hookCatalog?: unknown; mcpServers?: unknown };
       if (definition.hookCatalog || definition.mcpServers)
         throw new RecoveryDeclined();
-      owners.add(promptId);
+      owners.add(hostedRuntimeSessionId(promptId));
       continue;
     }
     if (ref.kind !== 'managed-tool-input') throw new RecoveryDeclined();
@@ -262,17 +288,7 @@ export async function settleParkedTurnCancelled(input: {
   const harness = createManagedHarnessHandle(input.session);
   // A write-then-resolve crash window must not journal a tool_result twice
   // when the cancel retries: collect what is already durable.
-  const journaled = new Set(
-    (await input.session.sink.project())
-      .filter(
-        (entry) =>
-          entry.daemonPromptId === input.promptId &&
-          entry.type === 'tool_result',
-      )
-      .flatMap((entry) => entry.message?.parts ?? [])
-      .map((part) => part.functionResponse?.id)
-      .filter((id): id is string => typeof id === 'string'),
-  );
+  const journaled = await journaledToolResultIds(input.session, input.promptId);
   for (const item of pending) {
     const parts = convertToFunctionErrorResponse(
       item.toolName,
@@ -360,14 +376,548 @@ export async function stopParkedRuntimeExecutions(input: {
   return broker;
 }
 
+/** The Runtime-facing verdict for an interrupted Turn. */
+export type HostedInterruptedTurnRuntime =
+  /** Nothing left to stop or settle; the caller's terminal record may land. */
+  | { readonly kind: 'ready'; readonly broker?: HostedWorkspaceBroker }
+  /**
+   * A durable approval owns the wait. It outlives its owner only as long
+   * as its own resolve route stays usable, so the caller must neither
+   * settle the Turn over it nor block the Session — the parked approval
+   * decides it.
+   */
+  | { readonly kind: 'held' };
+
+/**
+ * Answers every functionCall the dead Turn still owes with a cancelled
+ * functionResponse: its assistant message is durable, and a resumed
+ * thread carrying a dangling call is a malformed request the provider
+ * rejects. Retry-safe — the answered set is re-derived from the journal
+ * on every attempt, exactly like the parked-Runtime counterpart above.
+ */
+async function answerAbandonedTurnCalls(input: {
+  session: ManagedSession;
+  sessionId: string;
+  cwd: string;
+  promptId: string;
+  message: string;
+}): Promise<void> {
+  const records = (await input.session.sink.project()).filter(
+    (entry) => entry.daemonPromptId === input.promptId,
+  );
+  // One authority for the exactly-once predicate: the same helper every
+  // replayed fold rides, fed the projection already in hand.
+  const answered = await journaledToolResultIds(
+    input.session,
+    input.promptId,
+    records,
+  );
+  const owed = new Map<string, { name: string; messageId: string }>();
+  for (const record of records.filter((entry) => entry.type === 'assistant'))
+    for (const part of record.message?.parts ?? []) {
+      const call = part.functionCall;
+      if (call?.id && call.name && !answered.has(call.id) && !owed.has(call.id))
+        owed.set(call.id, { name: call.name, messageId: record.uuid });
+    }
+  for (const [functionCallId, call] of owed) {
+    const parts = convertToFunctionErrorResponse(
+      call.name,
+      functionCallId,
+      [],
+      `The tool call never ran: ${input.message}.`,
+    );
+    const response = parts[0]?.functionResponse;
+    if (!response || parts.length !== 1)
+      throw new Error('Runtime result cannot be represented durably.');
+    response.response = {
+      ...response.response,
+      executionStatus: 'cancelled',
+    };
+    await input.session.sink.write({
+      uuid: randomUUID(),
+      parentUuid: call.messageId,
+      sessionId: input.sessionId,
+      timestamp: new Date().toISOString(),
+      type: 'tool_result',
+      cwd: input.cwd,
+      version: 'hosted-harness/1',
+      daemonPromptId: input.promptId,
+      message: { role: 'user', parts },
+    });
+  }
+}
+
+/**
+ * The agent wait's cancellation settlement (#13708): every outstanding
+ * wait run folds the live arm's own abandoned answer and the resolve
+ * moves the checkpoint past the wait, so the terminal record can land.
+ * The journaled set keeps a replayed cancel silent; the abandoned child
+ * is never revoked. Shared by the cancel route and the interrupted-turn
+ * funnel: both call the same code the wedge suite pins.
+ */
+export async function settleCancelledAgentWaitRuns(input: {
+  managed: ManagedSession;
+  sessionId: string;
+  promptId: string;
+  cwd: string;
+  runs: readonly HarnessAgentWaitRun[];
+}): Promise<void> {
+  const harness = createManagedHarnessHandle(input.managed);
+  const journaled = await journaledToolResultIds(input.managed, input.promptId);
+  for (const run of input.runs) {
+    const abandoned = convertToFunctionErrorResponse(
+      run.toolName,
+      run.functionCallId,
+      [],
+      HOSTED_AGENT_WAIT_ABANDONED_TEXT,
+    );
+    if (!journaled.has(run.functionCallId))
+      await input.managed.sink.write({
+        uuid: randomUUID(),
+        parentUuid: run.modelMessageId,
+        sessionId: input.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'tool_result',
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        daemonPromptId: input.promptId,
+        message: { role: 'user', parts: abandoned },
+      });
+    await harness.resolveAwaitAgent(run.childRunId);
+  }
+}
+
+/**
+ * The gap fill of a parked agent-wait round (#13708): a foreground batch
+ * parks with some later calls of its last assistant round never reached
+ * by the dead loop — the durable wait names only the admitted ones, so
+ * each remaining function call must still meet its functionResponse on
+ * the resume story, or the model request is malformed. Each fills with
+ * the live admission's own never-admitted answer, parented to that
+ * round's assistant record; the journaled set keeps a replayed fill
+ * silent, and the ledger keeps it honest: a call whose child was
+ * admitted in the gap between the last fold and its own wait commit is
+ * NOT "never admitted" — it drives to its own terminal through the same
+ * poll the live wait ran, and its answer folds truthfully (a fabricated
+ * cancellation must never be minted for a live child). A call with no
+ * run record fills the live admission's own never-admitted answer.
+ * Shared by the continue route, the cancel route, and the
+ * interrupted-turn funnel.
+ */
+export async function fillParkedRoundAgentGaps(input: {
+  managed: ManagedSession;
+  sessionId: string;
+  promptId: string;
+  cwd: string;
+  /** The never-admitted answer's wording: the cancel route and the
+   * recovery family (continue + funnel) name different causes, and the
+   * durable journal must not assert one that never happened. */
+  gapText: string;
+  children?: HostedChildAgentSession;
+  signal?: AbortSignal;
+  consume?: (childRunId: string) => void;
+}): Promise<number> {
+  const authorization = await input.managed.authority
+    .harnessRunAuthorization()
+    .catch(() => undefined);
+  const waitRuns =
+    authorization?.status === 'runnable'
+      ? (authorization.checkpoint.agentWait?.runs ?? [])
+      : [];
+  // The parked round is the one the wait names, never whatever assistant
+  // came later — a crash past the last fold can journal another round
+  // (a plain tool call whose Runtime wait was never committed), and
+  // filling THAT round writes a fabricated answer for a call with no
+  // agent story at all.
+  const namedRounds = new Set(waitRuns.map((run) => run.modelMessageId));
+  // The wait's own calls are never gaps either: their folds and their
+  // replay-safe marks belong to the wait-arm channel (settle / resume),
+  // and an admitted-but-unsettled wait run polled here would hang the
+  // fill forever.
+  const waitedCalls = new Set(waitRuns.map((run) => run.functionCallId));
+  const projected = await input.managed.sink.project();
+  const assistant = projected
+    .filter(
+      (entry) =>
+        entry.daemonPromptId === input.promptId &&
+        entry.type === 'assistant' &&
+        entry.message?.parts?.some((part) => part.functionCall) &&
+        namedRounds.has(entry.uuid),
+    )
+    .at(-1);
+  if (assistant === undefined) return 0;
+  // Reuse the projection already in hand: a second project() walks every
+  // committed event again, and nothing can change the journal between
+  // the two reads (the route holds the turn for the whole recovery).
+  const journaled = await journaledToolResultIds(
+    input.managed,
+    input.promptId,
+    projected,
+  );
+  const writeFold = async (parts: Part[]): Promise<void> => {
+    await input.managed.sink.write({
+      uuid: randomUUID(),
+      parentUuid: assistant.uuid,
+      sessionId: input.sessionId,
+      timestamp: new Date().toISOString(),
+      type: 'tool_result',
+      cwd: input.cwd,
+      version: 'hosted-harness/1',
+      model: 'recovered',
+      daemonPromptId: input.promptId,
+      message: { role: 'user', parts },
+    });
+  };
+  // The fit predicate measures exactly this record shape (a uuid is always
+  // 36 chars; the assistant parent is always 36; the timestamp is one ISO
+  // string) — never an estimate, or the inline bound would slip. The same
+  // template, never a caller lambda: the exact shape is the predicate.
+  const templateRecord = (parts: Part[]): Buffer =>
+    Buffer.from(
+      JSON.stringify({
+        uuid: '0'.repeat(36),
+        parentUuid: '0'.repeat(36),
+        sessionId: input.sessionId,
+        timestamp: '1970-01-01T00:00:00.000Z',
+        type: 'tool_result',
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        model: 'recovered',
+        daemonPromptId: input.promptId,
+        message: { role: 'user', parts },
+      }),
+      'utf8',
+    );
+  const fits = (parts: Part[]): boolean =>
+    templateRecord(parts).byteLength <=
+    HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+  let filled = 0;
+  for (const part of assistant.message?.parts ?? []) {
+    const callId = part.functionCall?.id;
+    const name = part.functionCall?.name;
+    if (typeof callId !== 'string' || typeof name !== 'string') continue;
+    if (waitedCalls.has(callId)) continue;
+    // The journaled set gates only the fold, never the replay-safe marks —
+    // both sibling arms in this diff document and follow the same rule.
+    const foldOwed = !journaled.has(callId);
+    const children = input.children;
+    const admitted =
+      children === undefined
+        ? undefined
+        : children.record(hostedChildRunIdFor(input.promptId, callId));
+    if (children === undefined || admitted === undefined) {
+      if (foldOwed) {
+        await writeFold(
+          convertToFunctionErrorResponse(name, callId, [], input.gapText),
+        );
+        filled += 1;
+      }
+    } else if (admitted.completion === 'sent') {
+      // A background delegation answered with the live arm's started
+      // receipt: no wait row exists for it, so its consumption belongs to
+      // the wake pump — never to this fill.
+      if (foldOwed) {
+        const taskId = managedTaskId(
+          managedExtensionRecordKey(
+            input.managed.authority.sessionHeader.sessionKey.sessionId,
+            'child_run',
+            admitted.run.executionCallId ??
+              hostedChildRunIdFor(input.promptId, callId),
+          ),
+        );
+        await writeFold(
+          convertToFunctionResponse(name, callId, [
+            { text: hostedAgentBackgroundStartedText(taskId) },
+          ]),
+        );
+        filled += 1;
+      }
+    } else {
+      const runId =
+        admitted.run.executionCallId ??
+        hostedChildRunIdFor(input.promptId, callId);
+      // Mirrors the live wait's own loop (sans the wait resolve — the
+      // orphan carries no wait row): poll the ledger to a terminal and
+      // fold what really happened, nothing fabricated.
+      for (;;) {
+        if (input.signal?.aborted === true) {
+          if (foldOwed) {
+            await writeFold(
+              convertToFunctionErrorResponse(
+                name,
+                callId,
+                [],
+                HOSTED_AGENT_WAIT_ABANDONED_TEXT,
+              ),
+            );
+            filled += 1;
+          }
+          break;
+        }
+        const record = children.record(runId);
+        if (
+          record !== undefined &&
+          (record.run.state === 'failed' || record.run.state === 'cancelled')
+        ) {
+          if (foldOwed) {
+            await writeFold(
+              convertToFunctionErrorResponse(
+                name,
+                callId,
+                [],
+                `Child agent run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).`,
+              ),
+            );
+            filled += 1;
+          }
+          break;
+        }
+        const acceptance = children.acceptance(runId);
+        if (acceptance !== undefined) {
+          const text = (
+            await input.managed.resources.read(acceptance.contentRef)
+          ).toString('utf8');
+          // One fit discipline with the live arm (R3-2): the answer still
+          // must land, folded to the inline bound with its marker instead
+          // of erroring the recovered Turn — the full bytes stay on the
+          // acceptance record, and the exact template measures the fold.
+          const fitted = fitChildResultInline(name, callId, text, fits);
+          if (foldOwed) {
+            await writeFold(fitted);
+            filled += 1;
+          }
+          // The replay-safe marks still run when the fold already landed.
+          await children.markAccepted(runId);
+          input.consume?.(runId);
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    journaled.add(callId);
+  }
+  return filled;
+}
+
+/**
+ * H5/F5 follow-up: the Runtime-facing settlement of an interrupted Turn
+ * ahead of its terminal record. A Turn that died inside a tool call parked
+ * its checkpoint in `await_runtime`, and a terminal record advances the
+ * checkpoint from a model-start phase alone — settling only the record
+ * wedges the Session on the next `requireModelStart`. Mirrors the takeover
+ * cancellation: prove the parked executions stopped, settle them cancelled
+ * (their functionCall must meet a functionResponse before the next model
+ * round), and drop the dead Turn's pending file-history obligation on
+ * every reachable checkpoint — a retry whose first attempt already left
+ * the wait included — or the terminal record strands the marker at
+ * `before_model`, where no load can ever clear it. A Turn parked in
+ * `await_action` is held while its approval stays `requested` and its
+ * deadline lives — the interrupted owner's expiry timer died with it, so
+ * an unanswered ask whose deadline passed is expired here before the same
+ * ending. A Turn parked at an agent wait (#13708) settles the same way the
+ * takeover cancellation does: its outstanding waits fold the live arm's
+ * abandoned answers, the resolve moves the checkpoint past the wait, and
+ * the round's never-reached calls pair off. Once the durable Action is
+ * final, the wait is advanced, the abandoned calls answered, and the
+ * turn's Workspace acquisition (its promptId-named runtime session) handed
+ * back with the verdict, or every later tool call in the Workspace waits
+ * behind a dead holder (F9). The returned Broker releases after the
+ * caller's terminal
+ * record is durable, never before. Throws with nothing settled when the
+ * stop cannot be proven, leaving the Turn to the recovery fleet; a
+ * checkpoint the authorization could not verify (a faulting Store read
+ * erases into `missing_state`) refuses the same way rather than being
+ * mistaken for "no Runtime wait to settle".
+ */
+export async function settleInterruptedTurnRuntime(input: {
+  session: ManagedSession;
+  sessionId: string;
+  cwd: string;
+  promptId: string;
+  brokerOptions: HostedWorkspaceBrokerOptions | undefined;
+  toolProfile: boolean;
+  /** The child ledger the agent-wait arm's gap fill polls — the same one
+   * the live arm drives, so an admitted orphan never meets a fabricated
+   * answer even here. */
+  children?: HostedChildAgentSession;
+  consume?: (childRunId: string) => void;
+}): Promise<HostedInterruptedTurnRuntime> {
+  const authorization = await input.session.authority.harnessRunAuthorization();
+  // Only a committed, readable checkpoint — or the durable absence of any
+  // — can prove what the interrupted Turn left parked. A durably blocked
+  // verdict names permanent damage and stays with the recovery fleet;
+  // a transient one (a faulting Store read erased into missing_state)
+  // refuses this attempt the same, but as an ordinary fault so the caller
+  // can retry — it is never evidence of no wait either way (R4/R6 P1).
+  if (authorization.status === 'blocked') {
+    if (!isDurableBlockedVerdict(authorization))
+      throw new Error(
+        `interrupted turn checkpoint could not be verified (blocked/${authorization.reason})`,
+      );
+    throw new RecoveryDeclined();
+  }
+  let broker: HostedWorkspaceBroker | undefined;
+  if (
+    authorization.status === 'runnable' &&
+    authorization.checkpoint.identity.turnId === input.promptId
+  ) {
+    const phase = authorization.checkpoint.continuation.phase;
+    if (phase === 'await_action') {
+      const requestId = authorization.checkpoint.approval?.requestId;
+      const action =
+        requestId === undefined
+          ? undefined
+          : input.session.authority.action(requestId);
+      if (action === undefined) return { kind: 'held' };
+      let finalState = action.state;
+      if (action.state === 'requested') {
+        // The interrupted owner's expiry timer died with it, so an
+        // unanswered ask must expire here — the pump's slow re-derive is
+        // then the owner that observes it. A still-live deadline holds.
+        const options = await readHostedActionOptions(input.session, action);
+        if (Date.now() < options.expiresAt) return { kind: 'held' };
+        await endHostedAction(
+          input.session,
+          action.requestId,
+          'expired',
+          () => !input.session.authority.writesStopped,
+        );
+        finalState =
+          input.session.authority.action(action.requestId)?.state ?? 'expired';
+      }
+      if (finalState === 'requested') return { kind: 'held' };
+      // The final Action outlives the owner that died asking: advance the
+      // wait the way the close path does, and let the common tail answer
+      // its abandoned calls — a dangling functionCall makes the resumed
+      // thread a malformed request the provider rejects.
+      await createManagedHarnessHandle(input.session).resolveDurableWait();
+    }
+    if (phase === 'await_runtime') {
+      // Symmetric with the continue/cancel routes: without the tool
+      // profile or the Broker there is no way to prove the parked
+      // executions stopped.
+      if (!input.toolProfile || input.brokerOptions === undefined)
+        throw new RecoveryDeclined();
+      broker = await stopParkedRuntimeExecutions({
+        session: input.session,
+        promptId: input.promptId,
+        brokerOptions: input.brokerOptions,
+      });
+      await settleParkedTurnCancelled({
+        session: input.session,
+        sessionId: input.sessionId,
+        cwd: input.cwd,
+        promptId: input.promptId,
+      });
+    }
+    if (harnessCheckpointIsAgentWait(authorization.checkpoint)) {
+      // The agent wait's own mirror (R1-3): no Runtime executions exist to
+      // stop — each outstanding run folds the live arm's abandoned answer,
+      // the resolve moves the checkpoint past the wait, and the round's
+      // never-reached calls pair off before the terminal record lands.
+      const outstanding = (
+        authorization.checkpoint.agentWait?.runs ?? []
+      ).filter((run) => !run.consumed);
+      if (outstanding.length > 0) {
+        await settleCancelledAgentWaitRuns({
+          managed: input.session,
+          sessionId: input.sessionId,
+          promptId: input.promptId,
+          cwd: input.cwd,
+          runs: outstanding,
+        });
+      }
+      // The funnel settles the way the takeover cancellation does — so it
+      // must never outlive its own settlement: an admitted orphan folds
+      // the abandoned answer at once, never a deadline-less poll that
+      // would hang the attach/redrive path it runs on (R3-1).
+      const settleFillAbort = new AbortController();
+      settleFillAbort.abort();
+      await fillParkedRoundAgentGaps({
+        managed: input.session,
+        sessionId: input.sessionId,
+        promptId: input.promptId,
+        cwd: input.cwd,
+        gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+        children: input.children,
+        signal: settleFillAbort.signal,
+        consume: input.consume,
+      });
+    }
+  }
+  // The dead Turn's pending file-history obligation dies with it: keep
+  // the snapshots, drop the marker, or every later load stays refused.
+  const savedHistory = await readHostedFileHistory(input.session);
+  if (savedHistory?.pendingTurn === input.promptId) {
+    await commitHostedFileHistory(input.session, {
+      schemaVersion: 1,
+      state: savedHistory.state,
+      pendingTurn: null,
+      pendingUndo: null,
+    });
+  }
+  if (
+    authorization.status === 'runnable' &&
+    authorization.checkpoint.identity.turnId === input.promptId
+  ) {
+    // Every call the dead Turn still owes is answered on every pass,
+    // identically idempotent: a settlement that split across attempts —
+    // its wait advanced, its answer write faulted — leaves the retry at a
+    // model-start phase with no wait left to detect, and a dangling
+    // functionCall would make the resumed thread malformed (R8 P1).
+    const approval = authorization.checkpoint.approval;
+    const action =
+      approval?.requestId === undefined
+        ? undefined
+        : input.session.authority.action(approval.requestId);
+    await answerAbandonedTurnCalls({
+      session: input.session,
+      sessionId: input.sessionId,
+      cwd: input.cwd,
+      promptId: input.promptId,
+      message:
+        action !== undefined && action.state !== 'requested'
+          ? `the approval ended ${action.state} after the Harness that asked was interrupted`
+          : 'the Harness that asked was interrupted',
+    });
+  }
+  // The handback owed for a taken Workspace survives a settlement split
+  // across attempts: a first attempt that advanced the checkpoint and
+  // died before answering, or a settle failure afterwards, leaves the
+  // retry at a model-start phase with no wait left to detect — yet the
+  // dead Turn's runtime session still holds the lease until something
+  // releases it. It also survives a Turn that acquired its Workspace
+  // before any checkpoint bound its identity — a release against a
+  // runtime session that never existed answers 404, which the caller's
+  // release already tolerates. Every ready verdict whose trace still
+  // names the interrupted Turn therefore hands that session back with
+  // it, not only the wait arm's first pass (F13's acquire-first window).
+  if (
+    broker === undefined &&
+    input.brokerOptions !== undefined &&
+    (authorization.status === 'initial' ||
+      (authorization.status === 'runnable' &&
+        (authorization.checkpoint.identity.turnId === null ||
+          authorization.checkpoint.identity.turnId === input.promptId)))
+  ) {
+    broker = new HostedWorkspaceBroker(
+      input.brokerOptions,
+      input.session.authority.sessionHeader.sessionKey,
+      input.promptId,
+    );
+  }
+  return broker === undefined ? { kind: 'ready' } : { kind: 'ready', broker };
+}
+
 /**
  * Reconciles a parked Runtime turn on a replacement Harness. A continuation
  * load (`passive: false`) re-dispatches every in-progress execution under its
  * original `executionCallId` — the Broker's durable record keeps that
  * exactly-once — commits the tool results and lets the checkpoint reach
  * `results_ready` before the caller answers. A passive load adopts the
- * dead owner's Runtime Session and reads execution states for the
- * cancellation path; it never dispatches.
+ * original Runtime Session and reads execution states for the cancellation
+ * path; it never dispatches. It reports that adoption before fallible reads,
+ * so the caller retains the lease even when no recovery report returns.
  *
  * A parked state that can be taken over answers `recovered`; one that is
  * deterministically unrecoverable answers `declined` with a typed reason.
@@ -389,6 +939,7 @@ export async function recoverHostedRuntimeTurn(input: {
   promptId: string;
   brokerOptions: HostedWorkspaceBrokerOptions;
   passive: boolean;
+  onPassiveRuntimeAcquired?: (runtimeSessionId: string) => void;
   /** Set when the calling Session already holds the Runtime lease from an
    * earlier recovery of the same parked Turn (a re-answered load whose
    * first reply was lost): a failed re-acquire then says nothing about
@@ -494,6 +1045,37 @@ export async function recoverHostedRuntimeTurn(input: {
         );
       }
     }
+    // The agent wait (#13708): the fold belongs to the continue/cancel
+    // route's resume arm — it owns the Turn's commit channel, the inline
+    // fit predicate and the consumption set — so recovery only classifies.
+    // The report mirrors the wait runs exactly: a consumed run reads as
+    // settled, an outstanding one as still executing. Their outcomes are
+    // always known: the relay ledger keeps a waiting child observable, and
+    // the coordinator's unknown-outcome gate must never fire on this phase.
+    // No Runtime lease is owed: the wait holds no Broker binding. The
+    // carried group on model_output_committed is the same wait a breath
+    // past its last fold (every run consumed, a model round owed) — a
+    // crash there must never fall back to model_start, or the settled
+    // work would be read as a false terminal.
+    if (harnessCheckpointIsAgentWait(checkpoint)) {
+      return recovered({
+        promptId,
+        acquiredRuntime: false,
+        report: {
+          phase: 'await_agent',
+          checkpointId: checkpoint.identity.checkpointId,
+          activationId: session.activation.activationId,
+          executions: (checkpoint.agentWait?.runs ?? []).map((run) => ({
+            functionCallId: run.functionCallId,
+            toolName: run.toolName,
+            executionCallId: run.childRunId,
+            runtimeSessionId: hostedRuntimeSessionId(promptId),
+            outcome: 'known',
+            status: { state: run.consumed ? 'settled' : 'executing' },
+          })),
+        },
+      });
+    }
     // Settled in the checkpoint while the journal never landed the settle:
     // it completed and must never be recorded as a failure — answering
     // inapplicable hands the load route the one case it DOES project
@@ -548,7 +1130,7 @@ export async function recoverHostedRuntimeTurn(input: {
     // The passive path never compensation-releases: a release persists the
     // record as RELEASED, every retried acquire of the same identity then
     // conflicts with 409 runtime_session_not_acquirable, and a load that
-    // throws leaves no harness-side record a route could hand back. The
+    // throws before registration leaves no owner a route could hand back. The
     // adoption instead stays owed to the retried takeover, which re-acquires
     // a READY session under the same identity idempotently server-side; a
     // load that reports successfully hands the lease to the cancel route.
@@ -557,6 +1139,7 @@ export async function recoverHostedRuntimeTurn(input: {
     // follow-up, not settled by this change.
     await broker.acquire();
     acquiredRuntime = true;
+    input.onPassiveRuntimeAcquired?.(broker.runtimeSessionId);
   }
   if (pending.length > 0) {
     if (passive) {
@@ -579,17 +1162,7 @@ export async function recoverHostedRuntimeTurn(input: {
         const harness = createManagedHarnessHandle(session);
         // A write-then-resolve crash window must not journal a tool_result
         // twice when the recovery retries: collect what is already durable.
-        const journaled = new Set(
-          (await session.sink.project())
-            .filter(
-              (entry) =>
-                entry.daemonPromptId === promptId &&
-                entry.type === 'tool_result',
-            )
-            .flatMap((entry) => entry.message?.parts ?? [])
-            .map((part) => part.functionResponse?.id)
-            .filter((id): id is string => typeof id === 'string'),
-        );
+        const journaled = await journaledToolResultIds(session, promptId);
         const intents = new Map(
           session.authority
             .eventsInSequenceRange(1, session.authority.committedSequence)

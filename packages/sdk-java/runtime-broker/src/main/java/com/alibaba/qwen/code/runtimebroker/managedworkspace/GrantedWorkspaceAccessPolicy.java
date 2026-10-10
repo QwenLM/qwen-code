@@ -50,7 +50,7 @@ public final class GrantedWorkspaceAccessPolicy
                             "workspaceId"));
             if (access == null || access == WorkspaceAccess.NONE) {
                 throw new IllegalArgumentException(
-                        "access must be READ or CREATE");
+                        "access must be READER, OPERATOR or OWNER");
             }
             if (grants.putIfAbsent(key, access) != null) {
                 throw new IllegalArgumentException(

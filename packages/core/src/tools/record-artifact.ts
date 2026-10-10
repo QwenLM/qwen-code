@@ -84,7 +84,12 @@ class RecordArtifactInvocation extends BaseToolInvocation<
   }
 
   override getDescription(): string {
-    return `Recording artifact ${this.params.title}`;
+    const workspacePath = this.params.workspacePath;
+    const filename =
+      typeof workspacePath === 'string'
+        ? workspacePath.split('/').at(-1)
+        : undefined;
+    return `Recording artifact ${filename || this.params.title}`;
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
@@ -109,15 +114,38 @@ class RecordArtifactInvocation extends BaseToolInvocation<
         return this.expandDirectoryLocator(locator);
       }
 
+      const callerTitle = this.params.title.trim();
+      const filename = path.posix.basename(locator.workspacePath);
+      // A filename can be 255 bytes; a stored title stops at 200 characters.
+      const title = isRecordableDerivedChild(filename, locator.workspacePath)
+        ? filename
+        : callerTitle;
+      const { derivedFromTitle: _callerMarker, ...callerMetadata } =
+        this.params.metadata ?? {};
+      const callerDescription = trimOptional(this.params.description);
+      const derivedDescription =
+        !callerDescription && callerTitle !== title ? callerTitle : undefined;
+      // The marker is extra JSON. A bag that already fills the store cap
+      // cannot carry it, and ingest would drop the record after success.
+      const markDerived =
+        derivedDescription !== undefined &&
+        !metadataExceedsBudget(callerMetadata, 'derivedFromTitle');
+      const description =
+        callerDescription || (markDerived ? derivedDescription : undefined);
+      const metadata = markDerived
+        ? { ...callerMetadata, derivedFromTitle: true }
+        : Object.keys(callerMetadata).length > 0
+          ? callerMetadata
+          : undefined;
       const artifact: ToolArtifact = {
-        title: this.params.title.trim(),
+        title,
         kind: this.params.kind,
         storage: 'workspace',
-        description: trimOptional(this.params.description),
+        ...(description ? { description } : {}),
         workspacePath: locator.workspacePath,
         mimeType: trimOptional(this.params.mimeType),
         sizeBytes: this.params.sizeBytes ?? locator.sizeBytes,
-        metadata: this.params.metadata,
+        metadata,
       };
       return {
         llmContent: formatWorkspaceSuccess(artifact.title, locator),
@@ -274,7 +302,8 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
         properties: {
           title: {
             type: 'string',
-            description: 'Concise title shown in the client artifact list.',
+            description:
+              'Concise title for a link or managed artifact. A workspace file is recorded and shown under its filename; if this title differs and description is empty, it is kept as the description.',
           },
           kind: {
             type: 'string',
@@ -767,8 +796,9 @@ function formatDirectoryExpansion(
 
 function metadataExceedsBudget(
   metadata: Record<string, string | number | boolean | null> | undefined,
+  key: 'expandedFromDirectory' | 'derivedFromTitle' = 'expandedFromDirectory',
 ): boolean {
-  const withMarker = { ...metadata, expandedFromDirectory: true };
+  const withMarker = { ...metadata, [key]: true };
   return Buffer.byteLength(JSON.stringify(withMarker), 'utf8') > 4096;
 }
 

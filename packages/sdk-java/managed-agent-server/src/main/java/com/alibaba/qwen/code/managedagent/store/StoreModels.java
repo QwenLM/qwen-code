@@ -61,7 +61,9 @@ public final class StoreModels {
     /**
      * Events at or below {@code floorSequence} may be pruned. A client that
      * falls below it reloads the Snapshot, which covers events through
-     * {@code snapshotThroughSequence}.
+     * {@code snapshotThroughSequence}. A stream reconciliation discards the
+     * Snapshot without lowering the floor, so the floor can exceed the
+     * coverage while the Items rebuild; the cursor is still served then.
      */
     public record ReplayWindow(long floorSequence,
             long snapshotThroughSequence) {
@@ -71,6 +73,14 @@ public final class StoreModels {
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String status, String sessionStatusBefore,
             long createdAt, long updatedAt) {
+    }
+
+    /**
+     * H4b: a child Session's ancestry (V54). v1 children run at depth 1;
+     * the tree root for a first-level child is the parent Session itself.
+     */
+    public record SessionLineage(String parentSessionId, String rootSessionId,
+            String parentChildRunId, int depth) {
     }
 
     public enum SessionMutationKind {
@@ -105,12 +115,38 @@ public final class StoreModels {
             String sessionStatusBefore, String receiptId, String leaseOwner,
             long claimGeneration, int attemptCount, String targetCwdRelative,
             Long expectedContextRevision, Long resultContextRevision,
-            String failureCode) {
+            String failureCode, int lifecycleProtocolVersion,
+            byte[] actorKey) {
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState, String sessionStatusBefore,
+                String receiptId, String leaseOwner, long claimGeneration, int attemptCount, String targetCwdRelative,
+                Long expectedContextRevision, Long resultContextRevision, String failureCode) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, targetCwdRelative,
+                    expectedContextRevision, resultContextRevision, failureCode, 0, null);
+        }
+
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState, String sessionStatusBefore,
+                String receiptId, String leaseOwner, long claimGeneration, int attemptCount, String failureCode,
+                int lifecycleProtocolVersion) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, null, null, null,
+                    failureCode, lifecycleProtocolVersion, null);
+        }
+
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState, String sessionStatusBefore,
+                String receiptId, String leaseOwner, long claimGeneration, int attemptCount, String failureCode) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, failureCode, 0);
+        }
+
         public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
                 String requestDigest, String state, String admissionStage, String deliveryState,
                 String sessionStatusBefore, String receiptId, String leaseOwner, long claimGeneration, int attemptCount) {
             this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
-                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, null, null, null, null);
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, null, 0);
         }
     }
 
@@ -163,6 +199,10 @@ public final class StoreModels {
 
     public record MaterializationResult(boolean advanced,
             long coveredSequence) {
+    }
+
+    /** A Session whose Snapshot covers more than its replay floor. */
+    public record ReplayFloorTarget(String tenantId, String sessionId) {
     }
 
     public record DispatchTarget(String tenantId, String sessionId,
