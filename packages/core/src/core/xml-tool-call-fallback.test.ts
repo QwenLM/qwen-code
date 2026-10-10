@@ -1299,7 +1299,7 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     });
   });
 
-  it('does not let a value-borne delimiter close a fence prose still closes', () => {
+  it('declines a following call when documented-value and prose fences disagree', () => {
     const quoted = invoke('read_file', param('file_path', 'x.txt'));
     const documented = invoke(
       'run_shell_command',
@@ -1312,9 +1312,11 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
       documented +
       '\n```\n' +
       invoke('read_file', param('file_path', 'b.ts'));
-    expect(extractXmlToolCalls(text)).toEqual([
-      { name: 'read_file', args: { file_path: 'b.ts' } },
-    ]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
   });
 
   it('keeps example documentation inert when prose has no usable closer', () => {
@@ -1496,6 +1498,51 @@ describe('live quoted-value masks', () => {
       expected.map((call) => expect.objectContaining(call)),
     );
     expect(result.remainingText).toBe('');
+  });
+});
+
+describe('ambiguous documentation fences', () => {
+  it('declines a suffix that documented values move out of a prose fence', () => {
+    const quoted = invoke('read_file', param('file_path', 'quoted-only.txt'));
+    const write = invoke(
+      'write_file',
+      param('content', `${quoted}\n\`\`\`\ntail`),
+    );
+    const shell = invoke(
+      'run_shell_command',
+      param('command', 'printf DOC_ONLY'),
+    );
+    const read = invoke('read_file', param('file_path', 'real.ts'));
+    const text = ['```', write, '```', shell, '```', read].join('\n');
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+});
+
+describe('refreshed documentation fences', () => {
+  it('checks a newly eligible suffix against documented-value ambiguity', () => {
+    const quoted = invoke('read_file', param('file_path', 'quoted-only.txt'));
+    const content = `${quoted}\n\`\`\`\ntail`;
+    const live = invoke('write_file', param('content', content));
+    const documented = invoke('write_file', param('content', content));
+    const shell = invoke(
+      'run_shell_command',
+      param('command', 'printf DOC_ONLY'),
+    );
+    const text = `${live}\n<example>\n${documented}\n</example>\n${shell}`;
+    const expected = [{ name: 'write_file', args: { content } }];
+    expect(extractXmlToolCalls(text)).toEqual(expected);
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(true);
+    expect(result.functionCallParts.map((part) => part.functionCall)).toEqual(
+      expected.map((call) => expect.objectContaining(call)),
+    );
+    expect(result.remainingText).toContain(shell);
+    expect(result.remainingText).toContain('<example>');
   });
 });
 

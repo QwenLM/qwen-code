@@ -342,6 +342,10 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     ]);
   }
 
+  const fenceGuardRanges: Array<[number, number]> = parameterRanges.map(
+    ([start, end]) => [start, end],
+  );
+
   // Regions a closed parameter value owns. A call matched inside one is markup
   // the value quotes rather than a call the model emitted, so it must not be
   // dispatched: documentation would otherwise execute. The block quoting it is
@@ -563,13 +567,38 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     );
   }
 
+  function passesFenceGuard({
+    start,
+    end,
+    parameterSpans,
+  }: ToolCallBlock): boolean {
+    return (
+      !positionInsideFence(text, start, fenceGuardRanges) &&
+      !positionInsideFence(
+        text,
+        end - 1,
+        fenceGuardRanges.concat(parameterSpans),
+      )
+    );
+  }
+
   const eligibleBlocks = blocks.filter(isEligibleBlock);
   let extendedMasks = false;
   // An eligible outer call owns its complete parameter values, including the
   // tail after a quoted call. That tail must not open prose documentation for
   // a following sibling. Establish eligibility before extending these masks.
-  for (const { parameterSpans } of eligibleBlocks) {
+  let recoveryEnd = text.length;
+  for (const block of eligibleBlocks) {
+    const { start, parameterSpans } = block;
+    // Documentation-owned values cannot certify a following call as outside
+    // a fence. Stop the ambiguous suffix; earlier eligible calls can still
+    // shield their own complete values in both views.
+    if (!passesFenceGuard(block)) {
+      recoveryEnd = start;
+      break;
+    }
     for (const [start, end] of parameterSpans) {
+      fenceGuardRanges.push([start, end]);
       if (!parameterRanges.some(([from, to]) => start >= from && end <= to)) {
         parameterRanges.push([start, end]);
         extendedMasks = true;
@@ -602,9 +631,19 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       exampleTagPositions(text, parameterRanges),
       [],
     );
-    return blocks.filter(isEligibleBlock);
+    return blocks.filter((block) => {
+      if (block.start >= recoveryEnd || !isEligibleBlock(block)) return false;
+      if (!passesFenceGuard(block)) {
+        recoveryEnd = block.start;
+        return false;
+      }
+      if (!eligibleBlocks.includes(block)) {
+        fenceGuardRanges.push(...block.parameterSpans);
+      }
+      return true;
+    });
   }
-  return eligibleBlocks;
+  return eligibleBlocks.filter(({ start }) => start < recoveryEnd);
 }
 
 export function extractXmlToolCalls(text: string): ExtractedToolCall[] {
