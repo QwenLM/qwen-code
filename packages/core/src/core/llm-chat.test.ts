@@ -9973,6 +9973,43 @@ describe('LlmChat', async () => {
     },
   );
 
+  it('strips a known reminder across an unsigned thought part (#10797)', async () => {
+    const record = vi.fn();
+    const target = chatWithRecorder(record);
+    const body =
+      'The current task still has unfinished todo items:\n- [ ] write tests';
+    injectReminders([body], target);
+    const thought = { text: 'Let me reconsider.', thought: true };
+    mockStreamsOnce(
+      streamOf(
+        textChunk('`<system-remi'),
+        modelChunk([thought]),
+        textChunk(`nder>\n${body}\n</system-reminder>\`\nAnswer`),
+        stopResponse([]),
+      ),
+    );
+    const delivered: Part[] = [];
+    for await (const event of await send(
+      'test',
+      'prompt-10797-thought-boundary',
+      target,
+    )) {
+      if (event.type === StreamEventType.CHUNK) {
+        delivered.push(
+          ...(event.value.candidates?.[0]?.content?.parts ?? []).map(
+            (part) => ({ ...part }),
+          ),
+        );
+      }
+    }
+    expect(delivered).toEqual([thought, { text: 'Answer' }]);
+    expect(target.getHistory().at(-1)?.parts).toEqual(delivered);
+    expect(record).toHaveBeenCalledWith(
+      expect.objectContaining({ message: delivered }),
+    );
+    expectStreamCalls(1);
+  });
+
   it('preserves signed text and its signature as one part (#10797)', async () => {
     injectReminders(['held']);
     const signedPart = {

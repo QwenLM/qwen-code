@@ -6194,10 +6194,12 @@ export class LlmChat {
             if (Object.keys(metadata).length > 0) released.push(metadata);
           }
         } else {
-          // Buffered text belongs before this part, including an indivisible
-          // signed part. Never move it across a tool call or signature.
-          const tail = systemReminderEchoFilter.finish();
-          if (tail) released.push({ text: tail });
+          if (!part.thought || part.functionCall || part.thoughtSignature) {
+            // Buffered text belongs before this part, including an indivisible
+            // signed part. Never move it across a tool call or signature.
+            const tail = systemReminderEchoFilter.finish();
+            if (tail) released.push({ text: tail });
+          }
           released.push(part);
         }
       }
