@@ -26,4 +26,4 @@
 
 完成根目录 build、typecheck、bundle 后，使用本地 Node 和 bundle 运行 `HostedPublicWorkspaceIT#workspaceCwdChangeSettlesThroughBothSurfaces`。验证 public/BFF 完成、幂等重放、上下文事件/revision、根目录切换、非法/不存在路径、旧 revision 和其他调用者拒绝。切换后下一次真实工具写入必须落在 B，A 的 sentinel 保持不变。本地用例使用真实 Java/Broker/Harness/worker 进程、H2 与确定性 HTTP 模型，不覆盖真实 MySQL 等价性或 #13564 规则门槛。
 
-发布验收还需在真实文件系统测试空格/中文与符号链接边界、执行中/待审批拒绝、双标签页 admission 竞争，以及上述同 attachment 规则场景。逐层记录实际证据；规则场景未完成时继续阻止启用。
+发布验收还需在真实文件系统测试空格/Unicode 与符号链接边界、执行中/待审批拒绝、双标签页 admission 竞争，以及上述同 attachment 规则场景。逐层记录实际证据；规则场景未完成时继续阻止启用。

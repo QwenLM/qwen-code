@@ -24,7 +24,7 @@ BFF 实现已预留的可选 `cwdChange`，依据部署执行开关、活跃 Ses
 
 打开弹窗时捕获 revision。提交前若已变化，展示新目录并要求明确确认后再采用新 revision。202 只表示受理，当前目录继续使用服务端已提交值。按 1、2、3 秒退避，其后每 3 秒查询。30 秒未结束或传输失败显示“结果待确认”和“继续确认”。未知结果不能当成失败，也不能生成替代 key。
 
-刷新后已知 operation 自动查询；只有请求意图时，点击“继续确认”才用原 key 和原 payload 重放。能力变为 false 时仍允许结果恢复。不提供会让用户误以为已取消的本地丢弃。明确拒绝释放意图，保留目标并说明原因——明确拒绝覆盖首次提交与重放：store 的按 actor 幂等查询先于角色、revision 与 busy 闸门，其后的拒绝即证明原始请求从未被记录；401 与查询前的读可见性 404 仍不算明确。revision 冲突刷新 summary，需要重新主动提交。
+刷新后已知 operation 自动查询；只有请求意图时，点击“继续确认”才用原 key 和原 payload 重放。能力变为 false 时仍允许结果恢复。不提供会让用户误以为已取消的本地丢弃。明确拒绝释放意图，保留目标并说明原因——明确拒绝覆盖首次提交与重放：store 的按 actor 幂等查询先于角色、revision 与 busy 闸门，其后的非瞬时拒绝即证明原始请求从未被记录。客户端将 401、所有 404、瞬时 408/429、网络失败和 5xx 响应保留为待确认。读可见性 404 与查询后的已删除 Session 404 使用相同的状态码、错误码和消息，客户端无法安全区分；已删除 Session 中未知 operation 的意图可能保留到当前标签页关闭，而该 Session 的发送已经禁用。查询已获接受的 operation 时发生失败，同样保留意图。revision 冲突刷新 summary，需要重新主动提交。
 
 completed 后刷新 summary，revision 达到 resultContextRevision 才清除意图。若已发生后续变更，可能目录不同，应展示最新目录而不是回写 operation 目标。仅路径相同不能证明完成。Session/账号切换时中止本地请求并忽略迟到响应。
 
@@ -34,9 +34,9 @@ completed 后刷新 summary，revision 达到 resultContextRevision 才清除意
 
 ## 交付与验收
 
-以一个 PR 一起交付前端 adapter/控件/恢复/事件与 BFF capability/OpenAPI/生成类型/测试。前端对缺能力的服务端不显示入口。整个合并后的 PR 保持 draft，在 #13564 的 cwd 缓存失效修复通过联合验收前不能合入或部署：同一 Hosted attachment 中 A→B 后，下一轮的文件写入与 QWEN.md/AGENTS.md 规则必须同步变化。[能力设计](2026-10-09-managed-workspace-w2-capability.zh-CN.md)详细说明服务端授权和查询预算。本切片不修 rewind 或规则编辑。
+以一个 PR 一起交付前端 adapter/控件/恢复/事件与 BFF capability/OpenAPI/生成类型/测试。前端对缺能力的服务端不显示入口。整个前端与 BFF 合并而成的 PR 保持 draft，在 #13564 的 cwd 缓存失效修复通过联合验收前不能合入或部署：同一 Hosted attachment 中 A→B 后，下一轮的文件写入与 QWEN.md/AGENTS.md 规则必须同步变化。[能力设计](2026-10-09-managed-workspace-w2-capability.zh-CN.md)详细说明服务端授权和查询预算。本切片不修 rewind 或规则编辑。
 
-Provider、hook、组件、事件以及 Java capability/查询预算测试覆盖丢 ACK、刷新、失败、权限、旧 revision、竞争、账号隔离、存储拒绝和旧服务端。浏览器验证 portal、焦点、草稿/历史保留。真实 Java/Hosted 验证根目录、空格/中文、非法/越界路径、忙时拒绝和切换后写入。完成 build/typecheck/bundle、聚焦测试和两次干净 self-audit。如联合门槛不可验证，明确记录，不提前启用。
+Provider、hook、组件、事件以及 Java capability/查询预算测试覆盖丢 ACK、刷新、失败、权限、旧 revision、竞争、账号隔离、存储拒绝和旧服务端。浏览器验证 portal、焦点、草稿/历史保留。真实 Java/Hosted 验证根目录、空格/非 ASCII、非法/越界路径、忙时拒绝和切换后写入。完成 build/typecheck/bundle、聚焦测试和两次干净 self-audit。如联合门槛不可验证，明确记录，不提前启用。
 
 ## 行为测试计划与证据
 
