@@ -26,6 +26,10 @@ Session 行为不变。不添加调用者 profile 选择、metadata 覆盖、数
 通道。既有准入在审批和 Broker 执行前拒绝 Monitor 与后台命令。真实公开测试主动
 尝试两种请求并断言零副作用；私有 H3 工具族保持不变。
 
+公开 Shell 的创建和加载会设置 `suppressChildAgents`。Harness 因此不挂 child-agent
+编排器，公开工具列表保持文件工具、前台 `run_shell_command` 和 Monitor。未带该
+标志的 Shell 车道仍声明 child agent 工具。
+
 ## 准入与持久化
 
 profile 与审批模式写入已有创建事务。它们是服务端决策，不纳入客户端请求摘要。
@@ -60,16 +64,19 @@ owner takeover。
 增加可选公开字段 `foreground_shell` 与 WebShell 字段 `foregroundShell`。
 files 和非绑定响应省略该字段，schema 不设置默认值。持久化 Shell Session 仅在强制审批及部署准入有效时
 返回 true，禁用时返回 false。显式 false 让客户端区分既有 Shell 与 files Session，
-无需开放 profile 选择。`workspaceTurns` 继续表达已有 creator/grant 权限；关闭
-Shell 准入时仍可为 true，不能单独证明 Turn 可提交。Shell 新发送还要求
-`foregroundShell=true`。仅关闭 Shell 时，满足上述前提的已接受取消仍受支持；
-files-off 或无效审批导致的 false 不保证取消可用。`actions` 能力同样不覆盖 attachment
-或响应守卫。保留上游与新创建授权分开的 creator-only
-取消规则，其独立缓存 attachment 路径执行同一持久化 Shell 审批校验。旧客户端由事务内门禁保护。
+无需开放 profile 选择。`workspaceTurns` 表达 OPERATOR 的提交和重命名能力，并要求
+Session 的 creator-keyed 执行事实仍成立。关闭 Shell 准入时它仍可为 true，不能单独
+证明 Turn 可提交。Shell 新发送还要求 `foregroundShell=true`。仅关闭 Shell 时，满足
+上述前提的已接受取消仍受支持；files-off 或无效审批导致的 false 不保证取消可用。
+`actions` 能力同样不覆盖 attachment 或响应守卫。取消由持有 OPERATOR、且 Session
+形状可执行的调用者发起，与新创建授权分开。其独立缓存 attachment 路径执行同一
+持久化 Shell 审批校验。旧客户端由事务内门禁保护。
 
-Shell 的 close、archive、unarchive、delete 能力均为 false。新的后端生命周期请求
-在创建 operation 或 command 前拒绝，包含人工构造的 CLOSED/ARCHIVED Shell
-记录。既有命令重放保留原结果。非 Shell 生命周期声明与 L2 行为不变，不据此证明
+Shell 的 close、archive、unarchive、delete 能力均为 false。新的公开生命周期请求，
+包括 protocol-0 关闭，在创建 operation 或 command 前拒绝，包含人工构造的
+CLOSED/ARCHIVED Shell 记录。内部 child 关闭走 8 参 `beginWorkspaceLifecycle`，
+不受这道 Shell 拒绝约束。公开 Shell 父会话仍然不能关闭。既有命令重放保留原结果。
+非 Shell 生命周期声明与 L2 行为不变，不据此证明
 files/2 的 L3 支持。Turn 取消与 Session 生命周期分开，保留其授权、attachment 和
 恢复守卫。
 

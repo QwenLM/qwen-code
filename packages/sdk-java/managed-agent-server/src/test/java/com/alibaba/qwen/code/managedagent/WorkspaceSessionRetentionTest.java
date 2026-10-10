@@ -148,6 +148,28 @@ class WorkspaceSessionRetentionTest {
         assertThat(runtime.calls.get(session)).isEqualTo(1);
     }
 
+    @Test
+    void internalChildCloseStillAdmitsShellSessionsThatPublicLifecycleRefuses() throws Exception {
+        String tenant = tenant();
+        String session = create(tenant);
+        jdbc.update("UPDATE managed_agent_session SET tool_profile = 'hosted-workspace-shell/1', approval_mode = 'default'"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        web("close", tenant, session, "owner", "shell-public-close")
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session)).isZero();
+        var admission = store.beginWorkspaceLifecycle(tenant, session, OperationKind.CLOSE, "owner",
+                "owner-digest", "child-close-run", "close-digest", true);
+        jdbc.update("UPDATE managed_agent_operation SET state = 'COMPLETED', delivery_state = 'CONFIRMED',"
+                + " available_at = available_at + 3600000 WHERE tenant_id = ? AND session_id = ? AND operation_id = ?",
+                tenant, session, admission.operation().operationId());
+        assertThat(admission.replayed()).isFalse();
+        assertThat(admission.operation().kind()).isEqualTo(OperationKind.CLOSE);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session)).isEqualTo(1);
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/2"})
     void archivesAndUnarchivesAcrossSurfacesWithoutReopeningOrRepeatingCleanup(String profile) throws Exception {

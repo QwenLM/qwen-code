@@ -31,6 +31,11 @@ rejects Monitor and background commands before approval or Broker execution.
 Real public tests exercise both refusals and assert zero side effects; the
 private H3 tool family is unchanged.
 
+Public Shell create and load set `suppressChildAgents`. The Harness then does
+not attach the child-agent orchestrator, so the public tool list stays the
+file tools plus foreground `run_shell_command` and Monitor. A Shell lane that
+omits the flag keeps the child agent tool.
+
 ## Admission and persistence
 
 Profile and approval mode are written in the existing creation transaction.
@@ -77,18 +82,24 @@ and unbound responses omit them, without a schema default. Stored Shell Sessions
 mandatory approval and deployment admission are valid; disabled Shell Sessions
 return false. This explicit false is necessary to distinguish an existing Shell
 Session from a files Session without exposing a caller-selectable profile.
-`workspaceTurns` continues to express the existing creator/grant permission;
-it can remain true when Shell admission is off and is not sufficient Turn
-admission. Shell fresh sending also requires `foregroundShell=true`. Disabling
-only Shell admission retains accepted cancellation under the prerequisites above;
-false caused by files-off or invalid approval does not guarantee cancellation.
-The `actions` capability likewise does not override attachment or response guards. Upstream creator-only cancellation remains independent of fresh-creation
-grants, and its dedicated cached attachment path performs the same persisted
-Shell approval validation. Older clients remain protected by the transactional admission gate.
+`workspaceTurns` expresses the OPERATOR submit and rename capability under the
+Session's creator-keyed execution facts. It can remain true when Shell
+admission is off and is not sufficient Turn admission. Shell fresh sending
+also requires `foregroundShell=true`. Disabling only Shell admission retains
+accepted cancellation under the prerequisites above; false caused by files-off
+or invalid approval does not guarantee cancellation. The `actions` capability
+likewise does not override attachment or response guards. Cancellation admits
+an OPERATOR caller on the Session's executable shape and remains independent
+of fresh-creation grants. Its dedicated cached attachment path performs the
+same persisted Shell approval validation. Older clients remain protected by
+the transactional admission gate.
 
-Shell close, archive, unarchive and delete capabilities are false. Fresh backend
-lifecycle requests are rejected before an operation or command is created,
-including seeded CLOSED/ARCHIVED Shell records. Existing command replay keeps
+Shell close, archive, unarchive and delete capabilities are false. Fresh public
+lifecycle requests, including protocol-0 close, are rejected before an
+operation or command is created. The internal child close uses the 8-argument
+`beginWorkspaceLifecycle` overload and is not subject to that Shell refusal.
+Public Shell parents stay uncloseable. The refusal includes seeded
+CLOSED/ARCHIVED Shell records. Existing command replay keeps
 its original result. Existing non-Shell lifecycle declarations and L2 behavior are unchanged;
 this does not certify files/2 L3 support. Turn cancellation is distinct from
 Session lifecycle and retains its authorization, attachment and recovery guards.

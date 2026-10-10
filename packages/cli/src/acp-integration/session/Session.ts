@@ -28,7 +28,6 @@ import type {
   Part,
 } from '@google/genai';
 import {
-  type AgentRunContext,
   type Config,
   type ContentGeneratorConfig,
   type LlmChat,
@@ -263,10 +262,6 @@ import {
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
   buildGoalContinuationParts,
-  runWithAgentRunContext,
-  requireAgentRunContext,
-  consumeAgentInput,
-  readThread,
   decideNotificationAdmission,
   DroppedNotificationTally,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
@@ -276,7 +271,6 @@ import {
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
-import { parsePromptAgentRun } from './agent-run-meta.js';
 import {
   CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_PROMPT_META_KEY,
@@ -313,7 +307,10 @@ import {
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
-import { createAgentRecordTranscriptUpdate } from '@qwen-code/acp-bridge/transcriptReplay';
+import {
+  createAgentRecordTranscriptUpdate,
+  createTranscriptExecutionLifecycleUpdate,
+} from '@qwen-code/acp-bridge/transcriptReplay';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   SERVE_CONTROL_EXT_METHODS,
@@ -1220,8 +1217,6 @@ type DrainedMidTurnMessage =
       content: ContentBlock[];
       displayText: string;
       attachmentReferences?: SessionAttachmentReference[];
-      messageId?: string;
-      agentRun?: AgentRunContext;
     };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1528,10 +1523,6 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
               willPersistReferences,
             ),
             ...(attachmentReferences ? { attachmentReferences } : {}),
-            ...(typeof item['messageId'] === 'string'
-              ? { messageId: item['messageId'] }
-              : {}),
-            agentRun: parsePromptAgentRun({ _meta: item['_meta'] }),
           },
         ];
       },
@@ -2332,6 +2323,9 @@ export class Session implements SessionContext {
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
   private unsubscribeApprovalModeChange?: () => void;
+  private unsubscribeRequestLifecycle?: () => void;
+  private requestLifecycleSessionId: string;
+  private readonly requestLifecycleExecutions = new Set<string>();
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
@@ -2480,6 +2474,7 @@ export class Session implements SessionContext {
     ) => boolean = () => false,
   ) {
     this.sessionId = id;
+    this.requestLifecycleSessionId = id;
     // Config releases the restore projection after this Session is created.
     this.restoredHistoryGaps = config.getSessionRestoreRuntime?.()?.historyGaps;
     this.workflowHistory = [...workflowHistory];
@@ -2546,6 +2541,31 @@ export class Session implements SessionContext {
     this.planEmitter = new PlanEmitter(this);
     this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
+    this.unsubscribeRequestLifecycle = this.config.onRequestLifecycle?.(
+      (event) => {
+        if (this.disposed) return;
+        const key = JSON.stringify([
+          event.sessionId,
+          event.subagentId ?? null,
+          event.executionId,
+        ]);
+        if (
+          event.sessionId !== this.requestLifecycleSessionId &&
+          !(event.phase === 'ended' && this.requestLifecycleExecutions.has(key))
+        )
+          return;
+        if (event.phase === 'started') {
+          this.requestLifecycleExecutions.add(key);
+        } else {
+          this.requestLifecycleExecutions.delete(key);
+        }
+        void this.sendUpdate(
+          createTranscriptExecutionLifecycleUpdate(event),
+        ).catch((error) =>
+          debugLogger.warn('Failed to send request lifecycle:', error),
+        );
+      },
+    );
 
     this.unsubscribeApprovalModeChange = this.config.onApprovalModeChange?.(
       (mode, prePlanMode) => {
@@ -2649,6 +2669,7 @@ export class Session implements SessionContext {
    */
   rebindGoalRuntimeForNewSession(): void {
     if (this.disposed || this.closing) return;
+    this.requestLifecycleSessionId = this.config.getSessionId();
     this.goalRuntimeUnsubscribe?.();
     this.goalRuntimeUnsubscribe = undefined;
     this.goalHostUnbind?.();
@@ -4657,6 +4678,9 @@ export class Session implements SessionContext {
     this.clearActiveTodoPlanRevision();
     this.unsubscribeApprovalModeChange?.();
     this.unsubscribeApprovalModeChange = undefined;
+    this.unsubscribeRequestLifecycle?.();
+    this.unsubscribeRequestLifecycle = undefined;
+    this.requestLifecycleExecutions.clear();
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
     this.resolveCloseGate?.();
@@ -5864,22 +5888,6 @@ export class Session implements SessionContext {
    * error here would propagate up through `prompt()` and break the
    * primary response path.
    */
-  /**
-   * Whether this daemon opted into workspace-agent collaboration.
-   *
-   * Guarded rather than called directly. This layer is handed Config-shaped
-   * objects that are not always a full Config — derived configs, shims and
-   * test doubles among them — and the same unguarded pattern in `acpAgent.ts`
-   * turned a missing method into a failed session. Absent means off, which is
-   * the safe reading: no run frame is established, and every consumer of one
-   * refuses in turn.
-   */
-  #collaborationEnabled(): boolean {
-    return typeof this.config.isAgentCollaborationEnabled === 'function'
-      ? this.config.isAgentCollaborationEnabled()
-      : false;
-  }
-
   #maybeEmitFollowupSuggestion(result: PromptResponse): void {
     if (result.stopReason !== 'end_turn') return;
     if (
@@ -5987,39 +5995,20 @@ export class Session implements SessionContext {
     // subprocesses (and hooks) read the CURRENT session's ID instead of
     // the process-global env slot, which in daemon mode only ever holds
     // the first session created in this process.
-    // Per turn, not per session. An agent session works many threads over its
-    // life, so a frame established once at spawn would bind the body to its
-    // first thread forever — the exact failure `runWithAgentRunContext`
-    // refuses to allow. Wrapping here means every prompt carries its own, and
-    // a prompt with no agent-run metadata (a person typing into the session)
-    // establishes none, so the thread tools correctly refuse.
-    // Belt and braces, not the only defence. The frame can only arrive on the
-    // trusted daemon channel, and with collaboration off the daemon never
-    // mounts the routes that dispatch, so in practice none is sent. Refusing to
-    // read one anyway means a daemon whose operator did not opt in cannot be
-    // talked into running an agent turn by a frame from any other source — and
-    // because every downstream consumer (mid-turn input, the thread tools)
-    // requires the frame this establishes, this one line shuts all of them.
-    const agentRun = this.#collaborationEnabled()
-      ? parsePromptAgentRun(params)
-      : undefined;
-    const execute = () => {
-      const inner = () =>
-        runWithInvocationContext(invocationContext, () =>
-          sessionIdContext.run(sessionId, () =>
-            this.#executePromptInner(
-              params,
-              pendingSend,
-              responseCapture,
-              modelPrompt,
-              rejectOnLoopDetected,
-              goalTurn,
-              channelTurn,
-            ),
+    const execute = () =>
+      runWithInvocationContext(invocationContext, () =>
+        sessionIdContext.run(sessionId, () =>
+          this.#executePromptInner(
+            params,
+            pendingSend,
+            responseCapture,
+            modelPrompt,
+            rejectOnLoopDetected,
+            goalTurn,
+            channelTurn,
           ),
-        );
-      return agentRun ? runWithAgentRunContext(agentRun, inner) : inner();
-    };
+        ),
+      );
     return goalTurn
       ? goalTurnContext.run(goalTurn.permit, execute)
       : goalTurnContext.exit(execute);
@@ -6376,41 +6365,6 @@ export class Session implements SessionContext {
                 promptId,
                 daemonPromptId,
               );
-              const agentRun = this.#collaborationEnabled()
-                ? parsePromptAgentRun(params)
-                : undefined;
-              if (agentRun) {
-                try {
-                  const thread = await readThread(
-                    this.config.getWorkingDir(),
-                    agentRun.threadId,
-                  );
-                  const delivered = thread?.messages.find(
-                    (message) =>
-                      message.sequence === agentRun.contextThroughSequence,
-                  );
-                  if (!delivered) {
-                    throw new Error(
-                      'Agent input requires a delivery watermark',
-                    );
-                  }
-                  // With chat recording off there is no transcript to flush;
-                  // the thread itself keeps the input.
-                  await recorder?.flush();
-                  await consumeAgentInput(
-                    this.config.getWorkingDir(),
-                    delivered.id,
-                    delivered.sequence,
-                  );
-                } catch (error) {
-                  // The model may run twice after a receipt failure; losing the
-                  // task would be worse than replaying its durable input.
-                  debugLogger.warn(
-                    'Agent input receipt failed; replay remains pending',
-                    error,
-                  );
-                }
-              }
             }
 
             if (
@@ -9852,16 +9806,6 @@ export class Session implements SessionContext {
     }
     const parts: Part[] = [];
     for (const message of messages) {
-      if (message.kind === 'structured' && message.agentRun) {
-        try {
-          requireAgentRunContext('mid-turn agent input');
-          // Refuse a different run before its text can enter this turn.
-          runWithAgentRunContext(message.agentRun, () => {});
-        } catch (error) {
-          debugLogger.warn('Rejected stale agent input', error);
-          continue;
-        }
-      }
       const displayText =
         message.kind === 'text' ? message.message : message.displayText;
       let rawParts: Part[];
@@ -9926,28 +9870,6 @@ export class Session implements SessionContext {
         }
       } else {
         recorder?.recordMidTurnUserMessage(built, displayText);
-      }
-      if (message.kind === 'structured' && message.agentRun) {
-        try {
-          if (
-            !message.messageId ||
-            message.agentRun.contextThroughSequence === undefined
-          ) {
-            throw new Error('Agent input requires a delivery watermark');
-          }
-          await recorder?.flush();
-          await consumeAgentInput(
-            this.config.getWorkingDir(),
-            message.messageId,
-            message.agentRun.contextThroughSequence,
-          );
-        } catch (error) {
-          // No receipt means durable replay; don't discard other built inputs.
-          debugLogger.warn(
-            'Agent input receipt failed; replay remains pending',
-            error,
-          );
-        }
       }
       parts.push(...built);
     }

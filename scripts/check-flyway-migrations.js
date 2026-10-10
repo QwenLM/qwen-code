@@ -17,6 +17,12 @@
 
 import { existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
+import {
+  LOCATIONS,
+  isMigrationFile,
+  migrationFiles,
+  migrationVersion,
+} from './flyway-migration-utils.js';
 import { escapeWorkflowCommand } from './release-script-utils.js';
 
 // A `::error::` command's data is runner-DECODED when the downloadable log
@@ -37,22 +43,6 @@ const boundWorkflowPath = (text) =>
     ),
   );
 
-// Both locations resolve into Flyway's classpath:db/migration, so their
-// versions share one namespace. Flyway scans each location AND its
-// subdirectories, and nowhere else — a versioned-migration file anywhere
-// else under the source root is invisible to it, so finding one there means
-// the location moved and the guard must say so instead of passing on what is
-// left. Everything below derives the db roots and source roots from this
-// table, so editing it cannot silently blind the probes.
-const LOCATIONS = [
-  { dir: ['src', 'main', 'resources', 'db', 'migration'], suffix: '.sql' },
-  { dir: ['src', 'main', 'java', 'db', 'migration'], suffix: '.java' },
-];
-
-// A versioned migration is V<version>__<description>; the version is numeric
-// segments joined by dots or underscores.
-const MIGRATION_NAME = /^V(\d+(?:[._]\d+)*)__/;
-
 const modules = [...new Set(process.argv.slice(2))];
 if (modules.length === 0) {
   console.error(
@@ -60,33 +50,6 @@ if (modules.length === 0) {
   );
   process.exit(2);
 }
-
-// Flyway compares versions numerically segment by segment, so V016 collides
-// with V16 and a trailing .0 segment carries no meaning.
-const normalize = (version) =>
-  version
-    .split(/[._]/)
-    .map((segment) => segment.replace(/^0+(?=\d)/, ''))
-    .join('.')
-    .replace(/(\.0)*$/, '');
-
-// Flyway matches the suffix case-insensitively — V1__b.SQL claims version 1
-// exactly like V1__a.sql does.
-const isMigrationFile = (name, suffix) =>
-  name.toLowerCase().endsWith(suffix) && MIGRATION_NAME.test(name);
-
-// Not readdirSync's `recursive`: a Node older than 18.17 ignores it (see
-// check-failsafe-reports.js). Flyway scans a location's subdirectories too.
-const migrationFiles = (dir, suffix) => {
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
-    entry.isDirectory()
-      ? migrationFiles(path.join(dir, entry.name), suffix)
-      : isMigrationFile(entry.name, suffix)
-        ? [path.join(dir, entry.name)]
-        : [],
-  );
-};
 
 // Files shaped like a versioned migration of this location's kind, anywhere
 // under the source root EXCEPT inside the configured location. A renamed
@@ -195,7 +158,7 @@ for (const module of modules) {
     }
     for (const file of files) {
       count += 1;
-      const version = normalize(MIGRATION_NAME.exec(path.basename(file))[1]);
+      const version = migrationVersion(path.basename(file));
       const group = claimants.get(version) ?? [];
       group.push({ module, file });
       claimants.set(version, group);

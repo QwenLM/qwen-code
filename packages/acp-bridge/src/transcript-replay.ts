@@ -556,6 +556,7 @@ export function createTranscriptUsageUpdate(
  * worse than one that shows none.
  */
 export interface TranscriptTimingMeta {
+  readonly executionId?: string;
   readonly kind: 'request' | 'tool';
   /**
    * Epoch ms. A request is logged when its stream ends, so its start time is
@@ -604,6 +605,109 @@ export function createTranscriptTimingUpdate(
     sessionUpdate: 'agent_message_chunk',
     content: { type: 'text', text: '' },
     _meta: meta,
+  } as SessionUpdate;
+}
+
+export type TranscriptExecutionLifecycle = {
+  readonly v: 1;
+  readonly kind: 'request';
+  readonly executionId: string;
+  readonly sessionId: string;
+  readonly promptId: string;
+  readonly model: string;
+  readonly startedAt: number;
+  readonly subagentId?: string;
+} & (
+  | { readonly phase: 'started' }
+  | {
+      readonly phase: 'ended';
+      readonly endedAt: number;
+      readonly durationMs: number;
+      readonly outcome: 'success' | 'error' | 'cancelled' | 'interrupted';
+      readonly reason?: 'consumer_closed';
+    }
+);
+
+export function parseExecutionLifecycle(
+  value: unknown,
+): TranscriptExecutionLifecycle | undefined {
+  if (
+    !isObjectRecord(value) ||
+    value['v'] !== 1 ||
+    value['kind'] !== 'request'
+  ) {
+    return undefined;
+  }
+  const strings: Record<string, string> = {};
+  for (const key of ['executionId', 'sessionId', 'promptId', 'model']) {
+    const entry = value[key];
+    if (typeof entry !== 'string' || !entry.trim()) return undefined;
+    strings[key] = entry;
+  }
+  const startedAt = finiteNumber(value['startedAt']);
+  if (startedAt === undefined || startedAt < 0) return undefined;
+  const subagentId = value['subagentId'];
+  if (
+    subagentId !== undefined &&
+    (typeof subagentId !== 'string' || !subagentId.trim())
+  ) {
+    return undefined;
+  }
+  const shared = {
+    v: 1 as const,
+    kind: 'request' as const,
+    executionId: strings['executionId']!,
+    sessionId: strings['sessionId']!,
+    promptId: strings['promptId']!,
+    model: strings['model']!,
+    startedAt,
+    ...(typeof subagentId === 'string' ? { subagentId } : {}),
+  };
+  if (value['phase'] === 'started') return { ...shared, phase: 'started' };
+  if (value['phase'] !== 'ended') return undefined;
+  const endedAt = finiteNumber(value['endedAt']);
+  const durationMs = finiteNumber(value['durationMs']);
+  const outcome = value['outcome'];
+  if (
+    endedAt === undefined ||
+    endedAt < startedAt ||
+    durationMs === undefined ||
+    durationMs < 0 ||
+    (outcome !== 'success' &&
+      outcome !== 'error' &&
+      outcome !== 'cancelled' &&
+      outcome !== 'interrupted')
+  ) {
+    return undefined;
+  }
+  if (
+    value['reason'] !== undefined &&
+    (value['reason'] !== 'consumer_closed' || outcome !== 'interrupted')
+  )
+    return undefined;
+  return {
+    ...shared,
+    phase: 'ended',
+    endedAt,
+    durationMs,
+    outcome,
+    ...(value['reason'] === 'consumer_closed'
+      ? { reason: 'consumer_closed' as const }
+      : {}),
+  };
+}
+
+export function createTranscriptExecutionLifecycleUpdate(
+  executionLifecycle: TranscriptExecutionLifecycle,
+  options: UpdateMetaOptions = {},
+): SessionUpdate {
+  return {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '' },
+    _meta: buildUpdateMeta({
+      ...options,
+      extra: { ...(options.extra ?? {}), executionLifecycle },
+    }),
   } as SessionUpdate;
 }
 
@@ -717,6 +821,9 @@ function parseTelemetryTiming(
   return {
     kind: 'request',
     ...shared,
+    ...(nonEmptyString(uiEvent['execution_id']) !== undefined
+      ? { executionId: nonEmptyString(uiEvent['execution_id']) }
+      : {}),
     ...(endMs !== undefined ? { startedAt: endMs - durationMs } : {}),
     status: eventName === EVENT_API_RESPONSE ? 'ok' : 'error',
     ...(ttftMs !== undefined && ttftMs >= 0 && ttftMs <= durationMs
@@ -1463,6 +1570,17 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       // with no carried state. Stateless frames survive any page split; the
       // client pairs them across its own contiguous event window.
       if (!this.options.includeTiming) return;
+      const payload = record.systemPayload;
+      const uiEvent = isObjectRecord(payload) ? payload['uiEvent'] : undefined;
+      if (
+        isObjectRecord(uiEvent) &&
+        uiEvent['event.name'] === 'request_lifecycle'
+      ) {
+        const lifecycle = parseExecutionLifecycle(uiEvent);
+        if (lifecycle)
+          yield emit(createTranscriptExecutionLifecycleUpdate(lifecycle, meta));
+        return;
+      }
       const timing = parseTelemetryTiming(record.systemPayload);
       if (!timing) return;
       yield emit(
