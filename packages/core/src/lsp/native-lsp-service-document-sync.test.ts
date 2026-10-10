@@ -2265,27 +2265,6 @@ describe('NativeLspService disk document synchronization', () => {
     );
 
     it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
-      'renders the stderr tail of a crashed server as its %s failure cause',
-      async (operation) => {
-        // attachRestartHandler marks a crashed server FAILED without setting
-        // handle.error; the stderr tail is the only recorded cause.
-        handle.status = 'FAILED';
-        handle.connection = undefined;
-        handle.processDiagnostics = {
-          stderrTail: 'clangd: unknown argument\n',
-        };
-        const result = await run(queryDiagnosticsTool(operation));
-        expect(result.error).toMatchObject({
-          type: ToolErrorType.EXECUTION_FAILED,
-        });
-        expect(result.error?.message).toContain(
-          'test is failed (clangd: unknown argument)',
-        );
-        expect(result.llmContent).not.toContain('No diagnostics found');
-      },
-    );
-
-    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
       'names a starting server as pending for %s instead of reporting clean',
       async (operation) => {
         handle.status = 'IN_PROGRESS';
@@ -2504,13 +2483,13 @@ describe('NativeLspService disk document synchronization', () => {
     );
 
     it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
-      'caps a huge stderr tail in the %s rejection when no server is ready',
+      'caps a huge cause in the %s rejection when no server is ready',
       async (operation) => {
-        // A crash-exhausted server is marked FAILED without `error` being
-        // assigned, so the only recorded cause is the subprocess stderr tail.
+        // A FAILED handle records its cause, and the render must bound it:
+        // 8 KB of message cannot reach the tool result verbatim.
         handle.status = 'FAILED';
-        handle.error = undefined;
-        handle.processDiagnostics = { stderrTail: 'y'.repeat(8192) };
+        handle.connection = undefined;
+        handle.error = new Error('y'.repeat(8192));
         const result = await run(queryDiagnosticsTool(operation));
         expect(result.error).toMatchObject({
           type: ToolErrorType.EXECUTION_FAILED,
@@ -2553,8 +2532,8 @@ describe('NativeLspService disk document synchronization', () => {
     it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
       'keeps the %s no-server-ready rejection bounded over many failed servers',
       async (operation) => {
-        // Thirty FAILED handles with crash tails: the skipped join answers to
-        // the same aggregate budget as the failures join.
+        // Thirty FAILED handles each carrying an 8 KB cause: the skipped
+        // join answers to the same aggregate budget as the failures join.
         withServers(
           Array.from({ length: 30 }, (_, i): [string, LspServerHandle] => [
             `down-${i}`,
@@ -2563,7 +2542,7 @@ describe('NativeLspService disk document synchronization', () => {
               config: { ...handle.config, name: `down-${i}` },
               status: 'FAILED',
               connection: undefined,
-              processDiagnostics: { stderrTail: 'y'.repeat(8192) },
+              error: new Error('y'.repeat(8192)),
             },
           ]),
         );
@@ -2577,17 +2556,17 @@ describe('NativeLspService disk document synchronization', () => {
     );
 
     it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
-      'caps a huge stderr tail rendered for a crashed server in %s',
+      'caps a huge cause rendered for a failed server in %s',
       async (operation) => {
         // The skipped arm renders the recorded cause next to the failures
-        // arm; a crash leaves only a stderr tail, bounded upstream at 8 KB.
+        // arm; an 8 KB message must not reach the tool result whole.
         mockDiagnosticsResponses(connection);
         const crashedHandle: LspServerHandle = {
           ...handle,
           config: { ...handle.config, name: 'crashed' },
           status: 'FAILED',
           connection: undefined,
-          processDiagnostics: { stderrTail: 'x'.repeat(8192) },
+          error: new Error('x'.repeat(8192)),
         };
         withServers([
           ['test', handle],
@@ -2927,10 +2906,11 @@ describe('NativeLspService disk document synchronization', () => {
     /** A connection that refuses every request with JSON-RPC error `code`. */
     function refusingConnection(
       code: number,
+      method = 'textDocument/diagnostic',
     ): ReturnType<typeof createConnection> {
       const target = createConnection();
       target.request.mockRejectedValue(
-        new LspJsonRpcError('Unhandled method textDocument/diagnostic', code),
+        new LspJsonRpcError(`Unhandled method ${method}`, code),
       );
       return target;
     }
@@ -2981,6 +2961,43 @@ describe('NativeLspService disk document synchronization', () => {
       });
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it('keeps a clean workspace report from the pull-capable of two servers', async () => {
+      // `workspace/diagnostic` is optional, so a push-only server answers
+      // -32601 for it; that refusal says nothing about the workspace and
+      // cannot veto its sibling's authoritative empty report.
+      const tsgo = createConnection();
+      mockDiagnosticsResponses(tsgo);
+      withServers([
+        ['tsgo', serverOn('tsgo', ['typescript'], tsgo)],
+        [
+          'tsls',
+          serverOn(
+            'tsls',
+            ['typescript'],
+            refusingConnection(-32601, 'workspace/diagnostic'),
+          ),
+        ],
+      ]);
+      await expect(workspaceDiagnostics()).resolves.toEqual([]);
+    });
+
+    it('does not treat a lone -32601 workspace refusal as a failed pull', async () => {
+      // With no other server there is nothing to veto: the workspace reads
+      // clean rather than as a tool error naming a server that was never
+      // asked a question it implements.
+      withServers([
+        [
+          'tsls',
+          serverOn(
+            'tsls',
+            ['typescript'],
+            refusingConnection(-32601, 'workspace/diagnostic'),
+          ),
+        ],
+      ]);
+      await expect(workspaceDiagnostics()).resolves.toEqual([]);
     });
 
     it('lets a -32601 refusal from the rust owner veto a non-owner empty answer', async () => {
@@ -3154,16 +3171,13 @@ describe('NativeLspService disk document synchronization', () => {
 
     it.each([
       // pyright proves it cannot own `.go` (its `py` is attributable), so the
-      // reason is coverage. kotlin's declaration holds no attributable
-      // extension at all, so its answer is relevance-backed and the reason
-      // says the answer simply could not be attributed.
+      // reason is coverage. kotlin's `kt` alias row makes its declaration
+      // placeable too, and none of its extensions is `.ts`, so its answer is
+      // irrelevant the same way and the reason is coverage as well — the
+      // attribution wording is reserved for a declaration no table row can
+      // place at all.
       ['pyright', 'python', 'main.go', 'no configured server covers'],
-      [
-        'kotlin',
-        'kotlin',
-        'main.ts',
-        'could not be attributed to the queried file',
-      ],
+      ['kotlin', 'kotlin', 'main.ts', 'no configured server covers'],
     ] as const)(
       'refuses an empty answer with no attributable owner from %s',
       async (name, language, fileName, reason) => {
@@ -3348,22 +3362,32 @@ describe('NativeLspService disk document synchronization', () => {
       expect(result.llmContent).not.toContain('No diagnostics found');
     });
 
-    it('still lets a -32601 workspace pull veto an empty workspace report', async () => {
-      // The workspace leg stays unqualified on purpose: with no queried file
-      // there is nothing to attribute, and a server that does not implement
-      // `workspace/diagnostic` leaves its whole slice of the workspace
-      // unexamined. Excusing it there would turn a refusal into a clean bill.
-      const healthy = createConnection();
-      mockDiagnosticsResponses(healthy);
+    it('names a -32601 workspace refusal beside the failure that did veto', async () => {
+      // A refusal is not a hard failure, but when the gate rejects for another
+      // reason the refusal still has to appear: it explains why that server
+      // said nothing, and dropping it would name only the sibling that
+      // crashed.
+      const dead = createConnection();
+      dead.request.mockRejectedValue(new Error('crash on startup'));
       withServers([
-        ['test', { ...handle, connection: healthy }],
-        ['gopls', serverOn('gopls', ['go'], refusingConnection(-32601))],
+        [
+          'gopls',
+          serverOn(
+            'gopls',
+            ['go'],
+            refusingConnection(-32601, 'workspace/diagnostic'),
+          ),
+        ],
+        ['pyright', serverOn('pyright', ['python'], dead)],
       ]);
       const result = await run(queryDiagnosticsTool('workspaceDiagnostics'));
       expect(result.error).toMatchObject({
         type: ToolErrorType.EXECUTION_FAILED,
       });
-      expect(result.error?.message).toContain('gopls');
+      expect(result.error?.message).toContain('pyright: crash on startup');
+      expect(result.error?.message).toContain(
+        'gopls: does not support pull diagnostics',
+      );
       expect(result.llmContent).not.toContain('No diagnostics found');
     });
 
@@ -3638,13 +3662,24 @@ describe('NativeLspService disk document synchronization', () => {
       expect(result.llmContent).toMatch(/^No diagnostics found/);
     });
 
-    it.each(['cpp', 'java', 'go'])(
+    it.each([
+      'python',
+      'cpp',
+      'java',
+      'go',
+      'javascript',
+      'javascriptreact',
+      'kotlin',
+    ])(
       'does not let a downed %s sibling veto a clean answer it cannot own',
       async (languageId) => {
-        // The token twin of the `['python']` case above with an
-        // identity-mapped language ID: `cpp` serves `.cpp` even though the
-        // mapping table omits it, so the downed sibling still provably cannot
-        // own main.ts and the ready server's empty report stands.
+        // The ready server holds the `.ts` answer, and each downed sibling
+        // provably cannot own it: `python` shows the excuse needs the queried
+        // URI (drop the third argument to `unreachableDiagnosticServers` and
+        // this row vetoes again), `cpp`, `java` and `go` are identity-mapped,
+        // `javascript`/`javascriptreact` serve no `.ts` at all while the
+        // family widening stays one-directional, and `kotlin` reaches `.kt`
+        // only through an alias row.
         mockDiagnosticsResponses(connection);
         const failedSibling: LspServerHandle = {
           ...handle,

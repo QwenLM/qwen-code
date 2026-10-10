@@ -82,17 +82,24 @@ incoming/outgoing 调用在预热前后及请求后进行验证。陈旧、缺�
   工具已有的失败提示，而不是声称结果干净或完整。成功的空诊断仍显示为干净。
   两个诊断拉取的错误结果设计现已落地：拉取失败与不可用响应（无响应，或报告的
   item 无一通过归一化）按服务器记录。`-32601` 拒绝不算失败：服务器从未实现该
-  拉取，因此记入单独的 `unsupported` 账本，且仅当拒绝方声明了被查扩展名、且
-  没有任何应答服务器负责该文件时，才能否决文档级答案。当查询一无所获、且存在
+  拉取，因此记入单独的 `unsupported` 账本，该账本在两条分支上都不否决。文档级
+  答案仅当拒绝方声明了被查扩展名、且没有任何应答服务器负责该文件时，才因它被拒。
+  工作区级查询没有被查文件，因而没有可供归属的扩展名：该拒绝既不否决兄弟服务器
+  的报告，也不豁免它，只会在闸门因其他原因已经必须拒绝时出现在拒绝信息中。当
+  查询一无所获、且存在
   属于未被查文件排除的服务器的失败记录、或某个声明方的拒绝无人背书、或某个
   可能负责被查文件的服务器不可达时，查询拒绝，工具以
   `ToolErrorType.EXECUTION_FAILED` 暴露该拒绝。权威空报告只有既相关、又在
   扩展名可被表定位时为正向拥有，才算干净；无法被任何表定位的扩展名
   （`.h`、`.mts`、无扩展名文件）没有可判定的归属，仅按相关性判定，与本变更
-  引入归属要求之前一致。拒绝信息会指明是哪一条件不成立：相关答案无法归属到
-  被查文件，或无任何已配置服务器覆盖它。不可能负责被查文件的服务器
-  不会否决文档级查询；工作区级查询在任一已配置服务器不可达时，拒绝给出无依据的
-  干净报告。相关性规则只能豁免一个服务器对*另一台*服务器答案的否决，绝不能豁免
+  引入归属要求之前一致。相关性判定会参照诊断表能定位的**全部**扩展名——语言 ID
+  映射表、诊断专属别名表，以及 ID 即扩展名的身份映射集合——且 JS/TS 家族扩展是
+  单向的：`typescript` 声明覆盖 JavaScript 一侧，而仅声明 `javascript` 的服务器
+  不能声称 `.ts` 或 `.tsx`。拒绝信息会指明是哪一条件不成立：取到了答案且确有
+  被查询服务器应答，但没有任何答案正向拥有被查扩展名；相关答案无法归属到
+  被查文件；或无任何已配置服务器覆盖它。不可能负责被查文件的服务器
+  不会否决文档级查询；工作区级查询在任一已配置服务器不可达、或任一拉取因拒绝
+  以外的原因失败时，拒绝给出无依据的干净报告。相关性规则只能豁免一个服务器对*另一台*服务器答案的否决，绝不能豁免
   唯一的答案本身：没有任何被查询服务器应答的文档级查询必须拒绝，即使所有已记录
   的失败都属于被查文件所排除的服务器。除调用层次来源处理外，其余请求/拉取及
   公共查询的捕获逻辑不变，可能
@@ -150,7 +157,19 @@ blame an irrelevant server whose pull resolved to nothing`）。归属拆分另�
 let a failed sibling veto a clean answer for a placeable extension`，且 `refuses an
 empty answer with no attributable owner from` 的 `pyright` 行会失去其覆盖性理由）；
 从干净答案闸门中去掉 attributable 项（`keeps a clean answer for an extension the
-tables cannot place`，三行全红）。
+tables cannot place`，三行全红）。工作区分支与归属表另增四项：工作区 catch 把
+`pullUnsupported` 重新并入 `failures`（`keeps a clean workspace report from the
+pull-capable of two servers`、`does not treat a lone -32601 workspace refusal as
+a failed pull`、`names a -32601 workspace refusal beside the failure that did
+veto`）；`serverDeclaredIrrelevant` 的归属谓词回退为
+`KNOWN_DIAGNOSTIC_EXTENSIONS` / `DIAGNOSTIC_LANGUAGE_IDS`（`does not let a
+downed kotlin sibling veto a clean answer it cannot own`，且 `refuses an empty
+answer with no attributable owner from` 的 `kotlin` 行会失去其覆盖性理由）；
+`declaredDiagnosticExtensions` 重新扩展全部四个 JS/TS 家族 ID（`does not let a
+downed javascript sibling veto a clean answer it cannot own` 及其
+`javascriptreact` 孪生用例）；文档分支的 `unreachableDiagnosticServers` 调用去掉
+被查 `uri`（`does not let a downed python sibling veto a clean answer it cannot
+own`，身份映射各行一同变红）。
 
 按照 AGENTS.md，涉及的服务、管理器及其相邻单元测试此前已重命名为 kebab-case。
 其聚合导出、原生客户端类型导入、集成测试和直接 E2E 测试框架导入已更新。公共类名

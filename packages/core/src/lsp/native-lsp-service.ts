@@ -61,27 +61,23 @@ import { globSync } from 'glob';
 const debugLogger = createDebugLogger('LSP');
 
 /**
- * Render one server a diagnostics query could not use, by name, state and —
- * where the manager recorded one — the cause. `handle.error` is set on only
- * some FAILED transitions and `processDiagnostics` is absent for crash paths,
- * so both are optional here. The cause goes through `getErrorMessage` like
- * the failures arm it is joined with, then is bounded to its last non-empty
- * line: a stderr tail or a stack-packed message must not flood the tool
- * result verbatim.
+ * Render one server a diagnostics query could not use, by name, state and the
+ * cause the manager recorded. Every reachable FAILED transition assigns
+ * `handle.error` in the same block that fails the handle, so the recorded
+ * error is the whole contract: a FAILED handle's stderr tail is vendor
+ * logging, not a cause, and is never rendered as one. The cause goes through
+ * `getErrorMessage` like the failures arm it is joined with, then is bounded
+ * to its last non-empty line (a stack-packed message must not flood the tool
+ * result verbatim).
  */
 function describeLspServerState(name: string, handle: LspServerHandle): string {
   if (handle.status === 'READY' && !handle.connection) {
     return `${name} has no active connection`;
   }
-  // Only a FAILED handle's stderr tail is a cause — on a starting server it
-  // is ordinary vendor logging. The tail is a suffix of everything the
-  // subprocess printed, so the cause sits at its END: take the last non-empty
-  // line before any head-bounded cap can cut the actionable line away.
-  const tail =
-    handle.status === 'FAILED'
-      ? handle.processDiagnostics?.stderrTail
-      : undefined;
-  const raw = handle.error ? getErrorMessage(handle.error) : tail?.trim();
+  // The recorded cause goes through `getErrorMessage` like the failures arm it
+  // is joined with; the last-line bound below then keeps a stack-packed
+  // message from flooding the tool result verbatim.
+  const raw = handle.error ? getErrorMessage(handle.error) : undefined;
   const lines = raw
     ?.split('\n')
     .map((line) => line.trim())
@@ -296,6 +292,15 @@ const JS_TS_FAMILY_LANGUAGE_IDS = [
 const JS_TS_FAMILY_EXTENSIONS = JS_TS_FAMILY_LANGUAGE_IDS.flatMap(
   (id) => LANGUAGE_ID_TO_EXTENSIONS[id] ?? [],
 );
+
+/**
+ * Declarations that cover the whole family, both for relevance and for
+ * ownership: a `typescript` server answers for `.js`/`.jsx` too, while a
+ * `javascript`-only declaration serves neither `.ts` nor `.tsx`, so widening
+ * the other direction would hold that server relevant to a file it can never
+ * own — and its absence would veto a healthy sibling's answer for it.
+ */
+const JS_FAMILY_WIDENING_LANGUAGE_IDS = ['typescript', 'typescriptreact'];
 
 const DEFAULT_EXCLUDE_PATTERNS = [
   '**/node_modules/**',
@@ -837,7 +842,12 @@ export class NativeLspService {
    * imply. Unlike `getWorkspaceSymbolExtensions` — a warmup-file chooser
    * that deliberately prefers the explicit mapping — a veto decision must
    * not let a partial user mapping (e.g. only `.tsx`) hide a declared
-   * language (`typescript` still owns `.ts`).
+   * language (`typescript` still owns `.ts`). The JS/TS family widens in one
+   * direction, exactly as `declaredOwnerExtensions` does: a `typescript`
+   * declaration covers the family's JavaScript side, while a
+   * `javascript`-only declaration serves no `.ts` at all, so it must not be
+   * held relevant to a file it can never own — its absence would otherwise
+   * veto a healthy sibling's answer for that file.
    */
   private declaredDiagnosticExtensions(handle: LspServerHandle): Set<string> {
     const owned = new Set(this.getWorkspaceSymbolExtensions(handle));
@@ -853,7 +863,7 @@ export class NativeLspService {
       // `.lsp.json` keys reach `languages` unnormalized, while every extension
       // this set is compared against is lowercase.
       const id = language.toLowerCase();
-      if (JS_TS_FAMILY_LANGUAGE_IDS.includes(id)) {
+      if (JS_FAMILY_WIDENING_LANGUAGE_IDS.includes(id)) {
         for (const ext of JS_TS_FAMILY_EXTENSIONS) {
           owned.add(ext);
         }
@@ -890,7 +900,7 @@ export class NativeLspService {
       const id = language.toLowerCase();
       if (
         widenTypescriptFamily &&
-        (id === 'typescript' || id === 'typescriptreact')
+        JS_FAMILY_WIDENING_LANGUAGE_IDS.includes(id)
       ) {
         for (const ext of JS_TS_FAMILY_EXTENSIONS) {
           owned.add(ext);
@@ -933,11 +943,11 @@ export class NativeLspService {
     // queried file — reading it as proof both excuses a downed server from
     // the veto and strips a ready one of its backing. An ID that names a
     // real language (`cpp`, `go`) is not such a guess, even though the
-    // mapping table omits it.
-    const attributed = [...owned].some(
-      (ext) =>
-        KNOWN_DIAGNOSTIC_EXTENSIONS.has(ext) ||
-        DIAGNOSTIC_LANGUAGE_IDS.has(ext),
+    // mapping table omits it, and neither is an alias row's extension
+    // (`kt`, `yml`, `hs`): the row is a real language fact the mapping and
+    // the ID list both omit, which is why all three sources answer here.
+    const attributed = [...owned].some((ext) =>
+      ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(ext),
     );
     return attributed && !owned.has(extension);
   }
@@ -2362,7 +2372,11 @@ export class NativeLspService {
   }
 
   /**
-   * Get diagnostics for all documents in the workspace
+   * Get diagnostics for all documents in the workspace. A pull that failed on
+   * a server which never implemented the optional `workspace/diagnostic`
+   * request (`-32601`) says nothing about the workspace and cannot veto a
+   * sibling's report; a failed pull from any other cause, and a configured
+   * server that was never queried, still can.
    */
   async workspaceDiagnostics(
     serverName?: string,
@@ -2371,6 +2385,7 @@ export class NativeLspService {
     const handles = this.getDiagnosticHandles(serverName);
     const results: LspFileDiagnostics[] = [];
     const failures: Array<{ name: string; error: unknown }> = [];
+    const unsupported: Array<{ name: string; error: unknown }> = [];
 
     for (const [name, handle] of handles) {
       const connection = handle.connection;
@@ -2511,9 +2526,16 @@ export class NativeLspService {
         }
       } catch (error) {
         // A failed pull is not a clean result: keep partial results from
-        // healthier servers, but reject when nothing was retrieved.
+        // healthier servers, but reject when nothing was retrieved. A server
+        // that answered `-32601` never implemented the optional request, so
+        // its refusal cannot veto a sibling's report — the document leg's
+        // bucket, on a query with no extension to attribute it to.
         debugLogger.warn(`LSP workspace/diagnostic failed for ${name}:`, error);
-        failures.push({ name, error });
+        if (pullUnsupported(error)) {
+          unsupported.push({ name, error: new Error(PULL_UNSUPPORTED_REASON) });
+        } else {
+          failures.push({ name, error });
+        }
       }
 
       if (results.length >= limit) {
@@ -2527,7 +2549,13 @@ export class NativeLspService {
         serverName,
       );
       if (failures.length > 0 || unreachable.length > 0) {
-        throw nothingRetrievedForDiagnostics(failures, unreachable);
+        // A workspace query covers every file, so no extension can attribute
+        // a refusal to one: every collected `-32601` refusal is named beside
+        // the failures and the unreachable servers, unfiltered.
+        throw nothingRetrievedForDiagnostics(
+          [...failures, ...unsupported],
+          unreachable,
+        );
       }
     }
     return results.slice(0, limit);

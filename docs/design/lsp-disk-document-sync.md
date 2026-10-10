@@ -123,8 +123,12 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   response, or reported items none of which survive normalization) are
   recorded per server. A `-32601` refusal is not a failure: the server never
   implemented the pull, so it is recorded on a separate `unsupported` ledger
-  and vetoes a document answer only when the refusing server declares the
-  queried extension and no answering server owns it. A document query that
+  that never vetoes on either leg. A document answer is refused for it only
+  when the refusing server declares the queried extension and no answering
+  server owns it. A workspace query has no queried file and so no extension to
+  attribute a refusal to: the refusal neither vetoes a sibling's report nor
+  excuses one, and appears only in a rejection the gate already owes to
+  another cause. A document query that
   retrieves nothing rejects when a recorded failure belongs to a server the
   queried file does not exclude, when a declared owner's refusal stands
   unbacked, or when a server that could own the queried file was unreachable;
@@ -133,12 +137,19 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   extension the tables can place, positively owned; a file whose extension no
   table can place (`.h`, `.mts`, an extensionless name) has no decidable owner
   and is judged on relevance alone, as it was before ownership became a
-  requirement. The rejection names which condition failed: a relevant answer
-  that could not be attributed to the queried file, or no configured server
-  covering it. A
+  requirement. Relevance is decided against every extension the diagnostics
+  tables can place — the language-ID mapping, the diagnostics-local alias rows
+  and the identity-mapped language IDs — and the JS/TS family widening is
+  one-directional: a `typescript` declaration covers the JavaScript side, while
+  a `javascript`-only declaration cannot claim `.ts` or `.tsx`. The rejection
+  names which condition failed: an answer was retrieved and a queried server
+  did answer, but no answer positively owns the queried extension; a relevant
+  answer could not be attributed to the queried file; or no configured server
+  covers it. A
   server that could never own the queried file does not veto a document query;
   a workspace query refuses an unbacked clean report while any configured
-  server is unreachable. That relevance rule excuses a server from vetoing
+  server is unreachable, and while any pull failed for a reason other than a
+  refusal. That relevance rule excuses a server from vetoing
   _another_ server's answer, never from being the only answer: a document
   query that no queried server answered rejects even when every recorded
   failure belongs to a server the queried file excludes. Other request/pull
@@ -219,7 +230,20 @@ split adds two more: reverting the `serverDeclaredIrrelevant` guard to
 answer for a placeable extension`, and the `pyright` row of `refuses an empty
 answer with no attributable owner from` loses its coverage reason); dropping
 the attributable term from the clean-answer gate (`keeps a clean answer for an
-extension the tables cannot place`, all three rows).
+extension the tables cannot place`, all three rows). The workspace leg and the
+attribution tables add four more: the workspace catch routes `pullUnsupported`
+back into `failures` (`keeps a clean workspace report from the pull-capable of
+two servers`, `does not treat a lone -32601 workspace refusal as a failed
+pull`, and `names a -32601 workspace refusal beside the failure that did
+veto`); `serverDeclaredIrrelevant`'s attribution predicate returns to
+`KNOWN_DIAGNOSTIC_EXTENSIONS` / `DIAGNOSTIC_LANGUAGE_IDS` (`does not let a
+downed kotlin sibling veto a clean answer it cannot own`, and the `kotlin` row
+of `refuses an empty answer with no attributable owner from` loses its coverage
+reason); `declaredDiagnosticExtensions` widens all four JS/TS family IDs again
+(`does not let a downed javascript sibling veto a clean answer it cannot own`
+and its `javascriptreact` twin); the document leg drops the queried `uri` from
+its `unreachableDiagnosticServers` call (`does not let a downed python sibling
+veto a clean answer it cannot own`, with the identity-mapped rows).
 
 The touched service and manager and their collocated unit tests were renamed to
 kebab-case per AGENTS.md. Their barrel exports, native client type imports,
