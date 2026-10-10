@@ -10,31 +10,15 @@ import type { MCPServerConfig, Config } from '../config/config.js';
 import type { ToolRegistry } from './tool-registry.js';
 
 /**
- * Issue #13796 — an HTTP MCP server that was down when the session started
- * gets brought up later by a `readResource` probe. The probe connects, but
- * the lazy-spawn branch of `McpClientManager.readResource()` never ran
- * `discover()`, so the session kept the server at CONNECTED with ZERO
- * registered tools for its whole lifetime (`qwen mcp list` still reports
- * "Connected", and `qwen mcp reconnect --all` runs in a separate process so
- * it cannot repair the live registry either).
- *
- * Mode pinned: LEGACY per-session (non-pooled). `POOLED_TRANSPORTS_DEFAULT`
- * is `{'stdio','websocket'}` (mcp-pool-key.ts), so an `httpUrl` server is
- * never in `pooledConnections` and `readResource()` cannot take the pooled
- * early-return — it always falls through to the lazy-spawn branch below.
- *
- * Only the transport boundary (`McpClient`) is replaced. The manager, its
- * `readResource()` code path, `MCPServerStatus` and the budget/slot
- * bookkeeping are the real production modules. The fake mirrors real
- * `McpClient.discover()` by registering its tools into the `ToolRegistry` it
- * was constructed with, so the assertion below is "did tools land in the
- * registry", not "did the manager call a method".
+ * Issue #13796 — a `readResource` probe lazily spawns an HTTP MCP server
+ * but never ran `discover()`, leaving the server CONNECTED with zero tools
+ * for the session's lifetime. An `httpUrl` server is never pooled, so the
+ * probe always takes the lazy-spawn branch pinned here. Only the transport
+ * (`McpClient`) is faked; the manager and registries are real.
  */
 const h = vi.hoisted(() => ({
   instances: [] as Array<{ readonly calls: string[] }>,
-  // A flag rather than a per-instance hook: `readResource()` builds its
-  // `Promise.race` array synchronously, so `client.connect()` is invoked
-  // before the caller can reach the freshly-constructed instance.
+  // A flag, not a hook: readResource() builds its Promise.race synchronously.
   failConnect: false,
   connectError: new Error('ECONNREFUSED 192.168.0.28:3939'),
 }));
@@ -67,8 +51,7 @@ vi.mock('./mcp-client.js', async () => {
 
     async discover() {
       this.calls.push('discover');
-      // Mirrors real `McpClient.discover()`: every tool the server advertises
-      // is pushed into the shared registry (mcp-client.ts:686-688).
+      // Mirrors the real discover(): advertised tools land in the registry.
       this.toolRegistry.registerTool({
         name: `mcp__${this.serverName}__echo`,
       } as never);
@@ -88,8 +71,7 @@ vi.mock('./mcp-client.js', async () => {
   return {
     ...actual,
     McpClient: FakeMcpClient,
-    // Identity: the manager only uses it to fold `mcpServerCommand` into the
-    // configured servers, which these fixtures do not rely on.
+    // Identity: these fixtures do not rely on mcpServerCommand folding.
     populateMcpServerCommand: vi.fn((servers: unknown) => servers),
   };
 });
@@ -150,16 +132,13 @@ describe('McpClientManager lazy-spawn tool registration (#13796)', () => {
 
     await manager.readResource('zoteus', 'mcp://zoteus/doc');
 
-    // The reporter's symptom: CONNECTED, but no `mcp__zoteus__*` tool exists
-    // for the rest of the session. Pre-fix this received 0 calls because the
-    // lazy-spawn branch connected without ever discovering.
+    // Pre-fix this got 0 calls: the lazy-spawn branch never discovered.
     expect(ctx.toolRegistry.registerTool).toHaveBeenCalledTimes(1);
     expect(ctx.toolRegistry.registerTool).toHaveBeenCalledWith({
       name: 'mcp__zoteus__echo',
     });
 
-    // Discovery must happen on the spawn, before the read is served — not as a
-    // detached background task that the caller cannot observe.
+    // Discovery happens on the spawn, before the read is served.
     expect(h.instances[0].calls).toEqual([
       'connect',
       'discover',
@@ -185,8 +164,7 @@ describe('McpClientManager lazy-spawn tool registration (#13796)', () => {
     await manager.readResource('zoteus', 'mcp://zoteus/a');
     await manager.readResource('zoteus', 'mcp://zoteus/b');
 
-    // Second read reuses the CONNECTED client, so the lazy-spawn branch (and
-    // therefore discovery) must not run again.
+    // The second read reuses the CONNECTED client; no re-discovery.
     expect(h.instances).toHaveLength(1);
     expect(h.instances[0].calls).toEqual([
       'connect',
@@ -206,15 +184,10 @@ describe('McpClientManager lazy-spawn tool registration (#13796)', () => {
     await expect(
       manager.readResource('zoteus', 'mcp://zoteus/doc'),
     ).rejects.toBe(boom);
-    // No tools registered for a server that never came up: the failure is
-    // surfaced to the caller instead of leaving a CONNECTED-with-zero-tools
-    // server behind.
+    // A server that never came up registers no tools.
     expect(ctx.toolRegistry.registerTool).not.toHaveBeenCalled();
-    // The `disconnect()` cleanup in this catch is gated on `weReservedSlot`,
-    // which is false under the default `off` budget mode (`tryReserveSlot`
-    // returns 'reserved' without recording it in `reservedSlots`). That is
-    // pre-existing slot bookkeeping, orthogonal to this fix, so it is not
-    // asserted here.
+    // The disconnect() cleanup is gated on `weReservedSlot`, false under the
+    // default `off` budget mode — pre-existing bookkeeping, not asserted here.
     expect(h.instances[0].calls).toEqual(['connect']);
   });
 });

@@ -2863,28 +2863,10 @@ export class McpClientManager {
         const timeoutMs = this.discoveryTimeoutFor(serverConfig);
         let timeoutId: NodeJS.Timeout | undefined;
         await Promise.race([
-          // `connect()` alone leaves the server CONNECTED with zero
-          // registered tools (#13796). The bulk (:1145) and per-server
-          // (:1430) paths both follow `connect()` with `discover()`; this
-          // lazy-spawn branch did not, so a server first brought up by a
-          // resource read never had its `tools/list` run. Nothing then
-          // self-healed: `connectedConfigKeys` (set just below) makes the
-          // next incremental pass treat the server as unchanged,
-          // `getFailedMcpServerNames()` filters on status so the startup
-          // warning goes quiet once CONNECTED, and
-          // `McpTool.attemptReconnect()` cannot fire because no
-          // `DiscoveredMCPTool` was ever created — only a session restart
-          // recovered.
-          //
-          // Discovery runs INSIDE the race so it shares the connect's
-          // bounded budget. Left outside, `discover()` would be unbounded
-          // here: `tools/list` defaults to `MCP_DEFAULT_TIMEOUT_MSEC`
-          // (10 minutes) under `retryWithBackoff`, reintroducing exactly
-          // the "blocks forever and permanently consumes a budget slot"
-          // hang this race exists to prevent. Wrapping connect+discover
-          // together also matches `runWithDiscoveryTimeout`, which wraps
-          // `discoverMcpToolsForServer` (connect then discover) on the
-          // bulk and incremental paths.
+          // A lazily spawned server must also be discovered: `connect()`
+          // alone leaves it CONNECTED with zero registered tools (#13796).
+          // Discovery runs INSIDE the race so `tools/list` shares the
+          // connect's bounded budget instead of its own unbounded default.
           (async () => {
             await client.connect();
             await client.discover(this.cliConfig);
