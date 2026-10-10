@@ -3827,6 +3827,43 @@ it.each(
   },
 );
 
+it.each([
+  {
+    name: 'run_shell_command',
+    args: { command: 'pwd', timeout: 0 },
+    error: 'Hosted Shell timeout must be an integer from 1 to 600000 ms.',
+  },
+  {
+    name: 'run_shell_command',
+    args: { command: 'pwd', description: 7 },
+    error: 'Hosted Shell description must be a string.',
+  },
+])(
+  'preserves the $name validation error beside malformed Unicode',
+  async ({ name, args, error }) => {
+    turn = createTurn(true);
+    const batch = [
+      { ...calls[0], name, args },
+      { ...calls[1], name: 'run_shell_command', args: { command: '\ud800' } },
+    ];
+    const responses = await turn.execute(
+      batch,
+      batch.map((call) => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      })),
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toContain(error);
+    expect(responses[1].functionResponse?.response?.['error']).toContain(
+      'unpaired UTF-16 surrogate',
+    );
+    expect((await session.sink.project())[1].message?.parts).toEqual(responses);
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
 it.each([false, true])(
   'replays a Unicode refusal with optional sibling args (omitted: %s)',
   async (omitted) => {
@@ -3855,7 +3892,7 @@ it.each([false, true])(
       'unpaired UTF-16 surrogate',
     );
     expect(responses[1].functionResponse?.response?.['error']).toContain(
-      'not executed',
+      'require file_path',
     );
     const restored = makeTurn();
     expect(
@@ -3874,47 +3911,80 @@ it.each([false, true])(
   },
 );
 
-it('rejects malformed Shell on an MCP turn before permission Hooks', async () => {
-  const fire = vi.fn<HostedHookSession['fire']>();
-  const mcp = {
-    broker: { ...broker, runtimeSessionId: 'prompt' },
-    ensureReady: async () => undefined,
-    refresh: async () => undefined,
-    tools: () => [],
-    toolInput: () => undefined,
-  };
-  turn = new HostedWorkspaceToolTurn(
-    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-    session,
-    harness,
-    'prompt',
-    commit,
-    messageFitsInline,
-    undefined,
-    undefined,
-    { settings: { mode: 'default', timeoutMs: 100 }, waiters },
-    {
-      hooks: hookSession(fire),
-      mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
-    },
-  );
-  const call = {
-    ...calls[0],
-    name: 'run_shell_command',
-    args: { command: '\ud800' },
-  };
-  await expect(
-    turn.execute(
-      [call],
-      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+it.each([false, true])(
+  'checks malformed Shell before permission Hooks on an MCP turn (declared: %s)',
+  async (declared) => {
+    const fire = vi.fn<HostedHookSession['fire']>();
+    const mcp = {
+      broker: { ...broker, runtimeSessionId: 'prompt' },
+      ensureReady: async () => undefined,
+      refresh: vi.fn(async () => undefined),
+      tools: () => [],
+      toolInput: () => undefined,
+    };
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      declared
+        ? {
+            resources: session.resources,
+            assertWritable: async () => undefined,
+          }
+        : undefined,
+      undefined,
+      { settings: { mode: 'default', timeoutMs: 100 }, waiters },
+      {
+        profile: declared
+          ? 'hosted-workspace-shell/1'
+          : 'hosted-workspace-files/1',
+        hooks: hookSession(fire),
+        mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      },
+    );
+    const call = {
+      ...calls[0],
+      name: 'run_shell_command',
+      args: { command: '\ud800' },
+    };
+    const batch = declared ? [call, calls[1]] : [call];
+    const execution = turn.execute(
+      batch,
+      batch.map((item) => ({
+        functionCall: { id: item.callId, name: item.name, args: item.args },
+      })),
       'model',
       new AbortController().signal,
-    ),
-  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
-  expect(fire).not.toHaveBeenCalled();
-  expect(broker.acquire).not.toHaveBeenCalled();
-  expect(await session.sink.project()).toEqual([]);
-});
+    );
+    if (declared) {
+      const responses = await execution;
+      expect(responses[0].functionResponse?.response?.['error']).toContain(
+        'unpaired UTF-16 surrogate',
+      );
+      expect(responses[1].functionResponse?.response?.['error']).toContain(
+        'not executed',
+      );
+      expect((await session.sink.project()).map((entry) => entry.type)).toEqual(
+        ['assistant', 'tool_result'],
+      );
+      await turn.finish();
+    } else {
+      await expect(execution).rejects.toThrow(
+        'Hosted Workspace profile refused a tool call.',
+      );
+      expect(await session.sink.project()).toEqual([]);
+    }
+    expect(mcp.refresh).toHaveBeenCalled();
+    expect(fire).not.toHaveBeenCalled();
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(broker.release).not.toHaveBeenCalled();
+  },
+);
 
 it.each(
   ['assistant', 'tool_result'].flatMap((failedType) =>
@@ -3970,20 +4040,21 @@ it.each(
 it.each<{
   event: HookEventName;
   deny: boolean;
-  contentBytes?: number;
   denySibling?: HookEventName;
   failResult?: boolean;
   bothEvents?: boolean;
+  unstartedSibling?: boolean;
+  bounded?: boolean;
 }>([
   { event: HookEventName.PermissionRequest, deny: false },
-  { event: HookEventName.PreToolUse, deny: false },
-  { event: HookEventName.PreToolUse, deny: true },
-  { event: HookEventName.PermissionRequest, deny: false, contentBytes: 1024 },
   {
     event: HookEventName.PermissionRequest,
     deny: false,
-    contentBytes: 60 * 1024,
+    unstartedSibling: true,
   },
+  { event: HookEventName.PreToolUse, deny: false, bounded: true },
+  { event: HookEventName.PreToolUse, deny: false },
+  { event: HookEventName.PreToolUse, deny: true },
   {
     event: HookEventName.PreToolUse,
     deny: false,
@@ -3997,14 +4068,15 @@ it.each<{
   { event: HookEventName.PreToolUse, deny: false, failResult: true },
   { event: HookEventName.PreToolUse, deny: false, bothEvents: true },
 ])(
-  'refuses a durable malformed $event rewrite for the entire batch (deny: $deny, bytes: $contentBytes, sibling: $denySibling, fault: $failResult, both: $bothEvents) across reconstruction',
+  'refuses a durable malformed $event rewrite for the entire batch (deny: $deny, sibling: $denySibling, fault: $failResult, concurrent marker reads: $bothEvents, unstarted sibling: $unstartedSibling, bounded: $bounded) across reconstruction',
   async ({
     event,
     deny,
-    contentBytes,
     denySibling,
     failResult,
     bothEvents,
+    unstartedSibling,
+    bounded,
   }) => {
     const pin = {
       catalogId: 'unicode',
@@ -4030,8 +4102,11 @@ it.each<{
                 ].map((eventName) => ({
                   hookId: eventName,
                   eventName,
-                  matcher: bothEvents ? undefined : 'run_shell_command',
-                  sequential: false,
+                  matcher:
+                    bothEvents || unstartedSibling
+                      ? undefined
+                      : 'run_shell_command',
+                  sequential: bounded ?? false,
                   async: false,
                   failClosed: true,
                   onceKey: null,
@@ -4044,40 +4119,50 @@ it.each<{
                 success: true,
                 outcome: 'success',
                 duration: 0,
-                output: {
-                  hookSpecificOutput:
-                    operation.kind === 'hook-execute' &&
-                    operation.hookId === HookEventName.PermissionRequest
-                      ? {
-                          decision: {
-                            behavior:
-                              denySibling &&
+                output: bounded
+                  ? {
+                      hookSpecificOutput: {
+                        tool_input: { description: '\ud800' },
+                        padding: 'x'.repeat(40 * 1024),
+                      },
+                    }
+                  : {
+                      hookSpecificOutput:
+                        operation.kind === 'hook-execute' &&
+                        operation.hookId === HookEventName.PermissionRequest
+                          ? {
+                              decision: {
+                                behavior:
+                                  denySibling &&
+                                  operation.kind === 'hook-execute' &&
+                                  'tool_use_id' in operation.input &&
+                                  operation.input.tool_use_id ===
+                                    'denied-sibling'
+                                    ? 'deny'
+                                    : 'allow',
+                                ...(event === HookEventName.PermissionRequest
+                                  ? { updatedInput: malformed }
+                                  : {}),
+                              },
+                            }
+                          : {
+                              ...(denySibling &&
                               operation.kind === 'hook-execute' &&
                               'tool_use_id' in operation.input &&
                               operation.input.tool_use_id === 'denied-sibling'
-                                ? 'deny'
-                                : 'allow',
-                            ...(event === HookEventName.PermissionRequest
-                              ? { updatedInput: malformed }
-                              : {}),
-                          },
-                        }
-                      : {
-                          ...(denySibling &&
-                          operation.kind === 'hook-execute' &&
-                          'tool_use_id' in operation.input &&
-                          operation.input.tool_use_id === 'denied-sibling'
-                            ? {
-                                permissionDecision: 'deny',
-                                permissionDecisionReason:
-                                  'recorded policy denial',
-                              }
-                            : {
-                                updatedInput: malformed,
-                                ...(deny ? { permissionDecision: 'deny' } : {}),
-                              }),
-                        },
-                },
+                                ? {
+                                    permissionDecision: 'deny',
+                                    permissionDecisionReason:
+                                      'recorded policy denial',
+                                  }
+                                : {
+                                    updatedInput: malformed,
+                                    ...(deny
+                                      ? { permissionDecision: 'deny' }
+                                      : {}),
+                                  }),
+                            },
+                    },
               },
             }),
       }),
@@ -4107,22 +4192,70 @@ it.each<{
           ? ('default' as const)
           : ('yolo' as const),
     };
-    turn = createTurn(true, approval, makeHooks());
+    const hooks = makeHooks();
+    turn = createTurn(true, approval, hooks);
     const shellCall = {
       ...calls[0],
       name: 'run_shell_command',
-      args: { command: 'echo valid' },
+      args: { command: bounded ? 'x'.repeat(40 * 1024) : 'echo valid' },
     };
-    const sibling = contentBytes
-      ? {
-          ...calls[1],
-          name: 'write_file',
-          args: { file_path: 'large.txt', content: 'x'.repeat(contentBytes) },
-        }
-      : calls[1];
     const batch = denySibling
       ? [{ ...shellCall, callId: 'denied-sibling' }, shellCall]
-      : [shellCall, sibling];
+      : [shellCall, calls[1]];
+    if (unstartedSibling) {
+      await hooks.ensureReady();
+      const sibling = batch[1];
+      const occurrenceId = hostedHookOccurrenceId(
+        HookEventName.PermissionRequest,
+        `prompt:${sibling.callId}`,
+      );
+      const original = session.authority.commitExtensionRecord.bind(
+        session.authority,
+      );
+      const crash = vi
+        .spyOn(session.authority, 'commitExtensionRecord')
+        .mockImplementation(async (...args) => {
+          const result = await original(...args);
+          const record = args[1].record as {
+            hookExecutionId?: string;
+            hookId?: string;
+            run: { execution: string };
+          };
+          if (
+            record.hookId === '__plan__' &&
+            record.hookExecutionId === occurrenceId &&
+            record.run.execution === 'intent'
+          )
+            throw new Error('crash after plan before dispatch');
+          return result;
+        });
+      try {
+        await expect(
+          hooks.fire(
+            HookEventName.PermissionRequest,
+            `prompt:${sibling.callId}`,
+            {
+              tool_name: sibling.name,
+              tool_input: sibling.args,
+              tool_use_id: sibling.callId,
+              prompt_id: 'prompt',
+            },
+            new AbortController().signal,
+          ),
+        ).rejects.toThrow('crash after plan');
+      } finally {
+        crash.mockRestore();
+      }
+      const marker = await hooks.status(occurrenceId, true);
+      expect(marker.resultRef).toBeNull();
+      expect(marker.run).toMatchObject({
+        state: 'cancelled',
+        execution: 'not_started_proven',
+      });
+    }
+    const publish = bounded
+      ? vi.spyOn(session.resources, 'publish')
+      : undefined;
     const originalCommit = commit;
     if (failResult)
       commit = async (...args) => {
@@ -4130,7 +4263,8 @@ it.each<{
           throw new Error('store unavailable while refusing rewrite');
         return originalCommit(...args);
       };
-    if (failResult) turn = createTurn(true, approval, makeHooks());
+    if (failResult) turn = createTurn(true, approval, hooks);
+    const settle = vi.spyOn(harness, 'settleConsumedRuntimeContinuation');
     const execution = turn.execute(
       batch,
       batch.map((call) => ({
@@ -4148,7 +4282,11 @@ it.each<{
       await expect(turn.finish()).rejects.toBeInstanceOf(
         HostedToolRecoveryRequiredError,
       );
-      expect(broker.release).not.toHaveBeenCalled();
+      expect(settle).not.toHaveBeenCalled();
+      expect(hooks.mountHeld).toBe(true);
+      expect((await session.sink.project()).map((entry) => entry.type)).toEqual(
+        ['assistant'],
+      );
       expect(broker.execute).not.toHaveBeenCalled();
       return;
     }
@@ -4166,6 +4304,24 @@ it.each<{
       expect(responses[1].functionResponse?.response?.['error']).toContain(
         'not executed',
       );
+    if (bounded) {
+      for (const [kind, bytes] of publish!.mock.calls)
+        if (kind === 'managed-hook-result')
+          expect(bytes.length).toBeLessThanOrEqual(60 * 1024);
+      const marker = session.authority.extensionRecord(
+        'hook_execution',
+        hostedHookOccurrenceId(event, `prompt:${shellCall.callId}`),
+      )!.record as { resultRef: ManagedSessionDurableRef };
+      const saved = JSON.parse(
+        (await session.resources.read(marker.resultRef)).toString(),
+      );
+      expect(saved.output).toMatchObject({
+        reason: expect.stringContaining('60 KiB'),
+        stopReason:
+          'Hosted Shell description contains an unpaired UTF-16 surrogate. Provide valid Unicode and retry.',
+      });
+      expect(saved.output.hookSpecificOutput).toBeUndefined();
+    }
     expect(broker.prepare).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
     const history = await session.sink.project();
@@ -4259,6 +4415,57 @@ it.each<{
     expect(hookControl).toHaveBeenCalledTimes(count);
     expect(await session.sink.project()).toEqual(history);
     await turn.finish();
+    if (event === HookEventName.PreToolUse) {
+      expect(settle).toHaveBeenCalledOnce();
+      expect((await harness.ensureRunnable()).continuation.phase).toBe(
+        'before_model',
+      );
+      expect(hooks.mountHeld).toBe(true);
+    }
+    if (unstartedSibling) {
+      const originalView = session.authority.extensionRecord.bind(
+        session.authority,
+      );
+      const blocked = vi
+        .spyOn(session.authority, 'extensionRecord')
+        .mockImplementation((domain, id) => {
+          const entry = originalView(domain, id);
+          if (
+            entry &&
+            domain === 'hook_execution' &&
+            id ===
+              hostedHookOccurrenceId(
+                HookEventName.PermissionRequest,
+                `prompt:${batch[1].callId}`,
+              )
+          ) {
+            const record = entry.record as { run: Record<string, unknown> };
+            return {
+              ...entry,
+              record: {
+                ...record,
+                run: {
+                  ...record.run,
+                  state: 'recovery_blocked',
+                  reason: 'handler_unavailable',
+                },
+              },
+            };
+          }
+          return entry;
+        });
+      try {
+        await expect(
+          createTurn(true, approval, makeHooks()).resumeHookResults(
+            responses,
+            'model',
+            new AbortController().signal,
+          ),
+        ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+      } finally {
+        blocked.mockRestore();
+      }
+    }
     await restored.close();
   },
 );
@@ -4701,6 +4908,15 @@ it.each<{
       );
     const responses = await running;
     if (ordered) {
+      expect(
+        hookControl.mock.calls.find(
+          ([operation]) =>
+            operation.kind === 'hook-execute' &&
+            operation.hookId === HookEventName.PreToolUse,
+        )?.[0],
+      ).toMatchObject({
+        input: { tool_input: { file_path: 'permission.txt' } },
+      });
       expect(
         hookControl.mock.calls
           .filter(([operation]) => operation.kind === 'hook-execute')

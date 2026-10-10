@@ -2561,6 +2561,8 @@ it.each([false, true])(
     ).toMatchObject({
       decision: 'block',
       reason: expect.stringContaining('60 KiB'),
+      stopReason:
+        'Hosted Shell description contains an unpaired UTF-16 surrogate. Provide valid Unicode and retry.',
     });
     expect(restored.hasPendingOperations).toBe(false);
     expect(

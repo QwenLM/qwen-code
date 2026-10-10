@@ -6,7 +6,10 @@
 
 import { expect, it } from 'vitest';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
-import { hostedShellInputError } from './hosted-shell-input.js';
+import {
+  hostedShellHookInputError,
+  hostedShellInputError,
+} from './hosted-shell-input.js';
 
 it.each(['command', 'description'])(
   'rejects unpaired code units in %s without echoing input',
@@ -63,4 +66,21 @@ it('leaves other tools and argument shapes to their existing validators', () => 
     { command: 'pwd' },
   ])
     expect(hostedShellInputError('run_shell_command', input)).toBeUndefined();
+});
+
+it('recognizes a bounded Unicode refusal without accepting unrelated stop reasons', () => {
+  const error = hostedShellInputError('run_shell_command', {
+    description: '\ud800',
+  })!;
+  const output = { continue: false, stopReason: error };
+  expect(hostedShellHookInputError('run_shell_command', output)).toBe(error);
+  expect(hostedShellHookInputError('read_file', output)).toBeUndefined();
+  expect(
+    hostedShellHookInputError('run_shell_command', {
+      stopReason: 'policy stop',
+    }),
+  ).toBeUndefined();
+  expect(
+    hostedShellHookInputError('run_shell_command', undefined),
+  ).toBeUndefined();
 });

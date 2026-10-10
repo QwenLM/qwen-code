@@ -71,7 +71,10 @@ import {
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
-import { hostedShellInputError } from './hosted-shell-input.js';
+import {
+  hostedShellHookInputError,
+  hostedShellInputError,
+} from './hosted-shell-input.js';
 import { MANAGED_WORKSPACE_CONTEXT_FILES } from './managed-runtime-provider-protocol.js';
 import type { HostedMcpSession } from './hosted-mcp-session.js';
 import type {
@@ -917,7 +920,13 @@ export class HostedWorkspaceToolTurn {
                   record.run.state === 'settled' &&
                   record.run.execution === 'settled';
               }
-              if (!record.resultRef || !matches) completeEvidence = false;
+              if (
+                (!record.resultRef &&
+                  record.run.execution !== 'not_started_proven') ||
+                record.run.state === 'recovery_blocked' ||
+                !matches
+              )
+                completeEvidence = false;
               return { event, original, saved };
             },
           ),
@@ -937,7 +946,11 @@ export class HostedWorkspaceToolTurn {
                   | undefined)) ??
             original.tool_input ??
             args;
-          if (hostedShellInputError(call.name, args)) unicodeRefused = true;
+          if (
+            hostedShellInputError(call.name, args) ||
+            hostedShellHookInputError(call.name, saved?.output)
+          )
+            unicodeRefused = true;
           if (event === HookEventName.PreToolUse && saved?.output)
             preToolOutputs.set(
               call.callId,
@@ -1514,10 +1527,18 @@ export class HostedWorkspaceToolTurn {
     );
     if (unicodeErrors.some((error) => error !== undefined)) {
       // Profile, duplicate-id and truncated-input hard refusals still win.
-      prepareRequests(calls);
-      return this.refuseBatch(calls, unicodeErrors, parts, model);
+      const requests = prepareRequests(calls);
+      return this.refuseBatch(
+        calls,
+        requests.map(
+          (request, index) => unicodeErrors[index] ?? request.validationError,
+        ),
+        parts,
+        model,
+      );
     }
     this.hookPermission.clear();
+    const permissionUnicodeErrors = new Map<string, string>();
     if (this.hooks && this.approval) {
       calls = await Promise.all(
         calls.map(async (call) => {
@@ -1539,6 +1560,9 @@ export class HostedWorkspaceToolTurn {
             signal,
             this.promptHookRunner,
           );
+          const unicodeError = hostedShellHookInputError(call.name, output);
+          if (unicodeError)
+            permissionUnicodeErrors.set(call.callId, unicodeError);
           const decision = output?.hookSpecificOutput?.['decision'] as
             | {
                 behavior?: 'allow' | 'deny';
@@ -1559,7 +1583,12 @@ export class HostedWorkspaceToolTurn {
         }),
       );
     }
-    let requests = prepareRequests(calls);
+    let requests = prepareRequests(calls).map((request) => ({
+      ...request,
+      validationError:
+        permissionUnicodeErrors.get(request.call.callId) ??
+        request.validationError,
+    }));
     if (!this.messageFitsInline('assistant', parts, model))
       throw new Error(
         'Hosted assistant record exceeds the inline Session Store limit.',
@@ -1690,10 +1719,9 @@ export class HostedWorkspaceToolTurn {
             this.promptHookRunner,
           );
           const candidate = output?.hookSpecificOutput?.['updatedInput'];
-          const unicodeError = hostedShellInputError(
-            request.call.name,
-            candidate,
-          );
+          const unicodeError =
+            hostedShellInputError(request.call.name, candidate) ??
+            hostedShellHookInputError(request.call.name, output);
           if (unicodeError) {
             const errors = requests.map((_, ordinal) =>
               ordinal === index ? unicodeError : refusals[ordinal],

@@ -148,7 +148,11 @@ function shellRefusalOutput(
   input: HookInput,
   event: HookEventName,
 ): HookOutput | undefined {
-  if (!('tool_input' in input) || !malformedShellInput(input, event))
+  if (
+    !('tool_name' in input) ||
+    !('tool_input' in input) ||
+    !malformedShellInput(input, event)
+  )
     return output;
   const specific = { ...output?.hookSpecificOutput };
   delete specific['tool_input'];
@@ -170,7 +174,13 @@ function shellRefusalOutput(
     },
   };
   return exceedsHookResourceLimit({ output: refusal })
-    ? byteLimitOutput(event)
+    ? {
+        ...byteLimitOutput(event),
+        stopReason: hostedShellInputError(
+          input['tool_name'],
+          input['tool_input'],
+        ),
+      }
     : refusal;
 }
 
