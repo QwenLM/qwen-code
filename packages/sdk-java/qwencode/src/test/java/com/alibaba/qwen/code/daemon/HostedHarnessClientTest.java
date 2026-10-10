@@ -685,6 +685,32 @@ class HostedHarnessClientTest {
                 "\"cancellationTakeover\":true"));
     }
 
+    // #13753 I2: the child Workspace capability describes the host, so it
+    // rides every create and load, survives the lifecycle copy, and is
+    // absent unless the control plane serves child Workspaces.
+    @Test
+    void carriesTheChildWorkspaceCapabilityOnlyWhenEnabled() {
+        CreateHarnessSession.Builder create = CreateHarnessSession.builder()
+                .harnessSessionId(SESSION_ID)
+                .approvalMode(DaemonApprovalMode.DEFAULT);
+        assertFalse(create.build().toJson().containsKey("childWorkspaces"));
+        assertEquals(Boolean.TRUE,
+                create.childWorkspaces(true).build().toJson().get("childWorkspaces"));
+        LoadHarnessSession load = new LoadHarnessSession(SESSION_ID, null, true);
+        assertFalse(load.toJson().containsKey("childWorkspaces"));
+        assertFalse(load.withChildWorkspaces(false).toJson().containsKey("childWorkspaces"));
+        LoadHarnessSession enabled = load.withChildWorkspaces(true);
+        assertEquals(Boolean.TRUE, enabled.toJson().get("childWorkspaces"));
+        assertEquals(Boolean.TRUE, enabled.toJson().get("passiveManagedRuntimeRecovery"));
+        Map<String, Object> lifecycle = enabled.forLifecycle("op-1", 3).toJson();
+        assertEquals(Boolean.TRUE, lifecycle.get("childWorkspaces"));
+        assertNotNull(lifecycle.get("lifecycleAuthority"));
+        Map<String, Object> reversed = load.forLifecycle("op-1", 3)
+                .withChildWorkspaces(true).toJson();
+        assertEquals(Boolean.TRUE, reversed.get("childWorkspaces"));
+        assertEquals(lifecycle.get("lifecycleAuthority"), reversed.get("lifecycleAuthority"));
+    }
+
     @Test
     void parsesAnAgentWaitRuntimeRecovery() {
         server.createContext("/session/" + SESSION_ID + "/load",

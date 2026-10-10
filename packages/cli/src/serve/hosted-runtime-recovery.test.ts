@@ -332,6 +332,7 @@ describe('recoverHostedRuntimeTurn', () => {
         definitionRevision: 1,
         definitionDigest: authority.sessionHeader.definitionRef.digest,
       },
+      workspaceMode: 'shared',
       workingDirectory: '.',
       executionCallId: 'prompt:call-1',
     });

@@ -844,7 +844,12 @@ export class QwenAgentManager {
               uiEvent?: Record<string, unknown>;
             }
           ).uiEvent as Record<string, unknown>;
-          if (uiEvent['event.name'] === 'request_lifecycle') continue;
+          if (
+            uiEvent['event.name'] === 'request_lifecycle' ||
+            uiEvent['event.name'] === 'tool_lifecycle'
+          ) {
+            continue;
+          }
           let telemetryText = '';
 
           if (

@@ -182,6 +182,30 @@ public class ChildWorkspaceStore {
         return jdbc.update(sql.toString(), args.toArray()) == 1;
     }
 
+    /**
+     * Starts the finish a claimed ready row owes: moves it to {@code
+     * toState} only while its finish request is still {@code finish}, so a
+     * discard that replaced an unstarted merge is never overrun by the
+     * merge it replaced.
+     */
+    public boolean startFinish(Row claimed, String owner, String toState, String finish, long now) {
+        return jdbc.update("UPDATE qwen_managed_child_workspace SET state = ?, attempts = 0,"
+                        + " next_retry_at = 0, last_error = NULL, updated_at = ? WHERE parent_session_id = ?"
+                        + " AND child_run_id = ?"
+                        + " AND tenant_id = ? AND state = ? AND claim_generation = ? AND claimed_by = ?"
+                        + " AND finish_request = ?",
+                toState, now, claimed.parentSessionId(), claimed.childRunId(), claimed.tenantId(),
+                claimed.state(), claimed.claimGeneration(), owner, finish) == 1;
+    }
+
+    /** Whether every child Session bound to the row's run is closed (or there is none). */
+    public boolean childSessionsClosed(Row row) {
+        return jdbc.queryForList("SELECT status FROM managed_agent_session WHERE tenant_id = ?"
+                        + " AND parent_session_id = ? AND parent_child_run_id = ?", String.class,
+                row.tenantId(), row.parentSessionId(), row.childRunId()).stream()
+                .allMatch(SETTLED_SESSION_STATES::contains);
+    }
+
     /** Parks a claimed row until {@code nextRetryAt}, counting the attempt when asked. */
     public boolean retry(Row claimed, String owner, boolean countAttempt, long nextRetryAt,
             String error, long now) {
@@ -214,11 +238,13 @@ public class ChildWorkspaceStore {
 
     /**
      * Records the finish request of decision 8. The same request answers
-     * the row; a different one is refused, except a discard after a merge
-     * that ended conflicted or blocked. A merge needs a ready row. No
-     * finish is admitted while a child Session bound to this run is not
-     * closed: both reads lock, so a creation and a finish never pass each
-     * other.
+     * the row; a different one is refused, except a discard that replaces
+     * a merge not yet started (the row is still ready) or one that ended
+     * conflicted or blocked. A merge needs a ready row. The request may be
+     * recorded while a child Session bound to this run is open: the row
+     * runs it only once every such Session is closed (#13753 I2), and the
+     * row lock it takes is the one a creation takes, so a creation never
+     * binds to a row whose finish was requested.
      */
     public Row requestFinish(String tenantId, String parentSessionId, String childRunId,
             String finish, long now) {
@@ -235,13 +261,6 @@ public class ChildWorkspaceStore {
             Row row = rows.getFirst();
             if (finish.equals(row.finishRequest())) {
                 return row;
-            }
-            List<String> statuses = jdbc.queryForList("SELECT status FROM managed_agent_session"
-                    + " WHERE tenant_id = ? AND parent_session_id = ? AND parent_child_run_id = ?"
-                    + " FOR UPDATE", String.class, tenantId, parentSessionId, childRunId);
-            if (statuses.stream().anyMatch(state -> !SETTLED_SESSION_STATES.contains(state))) {
-                throw new ApiException(HttpStatus.CONFLICT, "child_workspace_in_use",
-                        "The child Session bound to this Workspace is not closed.");
             }
             if (MERGE.equals(finish)) {
                 if (row.finishRequest() != null) {
@@ -260,9 +279,9 @@ public class ChildWorkspaceStore {
                 if (DISCARDED.equals(row.state())) {
                     return row;
                 }
-                if (MERGING.equals(row.state()) || APPLYING.equals(row.state()) || APPLIED.equals(row.state())
-                        || MERGE.equals(row.finishRequest())
-                                && !CONFLICTED.equals(row.state()) && !BLOCKED.equals(row.state())) {
+                // A merge not yet started (the row is still ready) yields to
+                // the discard; one that started runs to its end.
+                if (MERGING.equals(row.state()) || APPLYING.equals(row.state()) || APPLIED.equals(row.state())) {
                     throw new ApiException(HttpStatus.CONFLICT, "child_workspace_finishing",
                             "The child Workspace is being merged.");
                 }
