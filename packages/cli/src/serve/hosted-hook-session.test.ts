@@ -1471,35 +1471,38 @@ it('skips a restore that replaces an unrestored Hook operation activation', asyn
   expect(released()).toEqual([hooks.broker.runtimeSessionId]);
 });
 
-it.each([
-  ['after its install', false],
-  ['after the Hook operation activation it renews is released', true],
-])('skips an activation renewal recorded %s', async (_, late) => {
+it('lands an activation renewal after its install and skips one queued behind a committing release', async () => {
   const { authority } = session;
-  const append = authority.appendExecutionEvent.bind(authority);
   const renewals: Array<Promise<unknown>> = [];
-  if (late)
-    vi.spyOn(authority, 'appendExecutionEvent').mockImplementation(
-      (command, event, actor) => {
-        const pending = append(command, event, actor);
-        // The renewal timer can fire while the release is still committing.
-        if (
-          command.operation === 'releaseActivation' &&
-          authority.currentActivationSubject?.type === 'hook_operation'
-        )
-          renewals.push(authority.renewActivation({ leaseDurationMs: 60_000 }));
-        return pending;
-      },
-    );
+  // The renewal timer can fire while a release is still committing; inject at
+  // the level every activation transition funnels through.
+  const committable = authority as unknown as {
+    commitActivation(input: { operation: string }): Promise<unknown>;
+  };
+  const commitActivation = committable.commitActivation.bind(authority);
+  vi.spyOn(committable, 'commitActivation').mockImplementation((input) => {
+    const pending = commitActivation(input);
+    if (input.operation === 'releaseActivation') {
+      renewals.push(authority.renewActivation({ leaseDurationMs: 60_000 }));
+    }
+    return pending;
+  });
   await operate(session, hooks, 'a');
-  if (!late) await authority.renewActivation({ leaseDurationMs: 60_000 });
-  await Promise.all(renewals);
+  await authority.renewActivation({ leaseDurationMs: 60_000 });
+  await hooks.close();
+  // The renewal fired while the release was mid-flight is dropped inside the
+  // serial queue, resolving to no renewal at all.
+  expect(renewals.length).toBeGreaterThan(0);
+  for (const renewal of renewals) {
+    await expect(renewal).resolves.toBeUndefined();
+  }
   const changes = authority
     .eventsInSequenceRange(1, authority.committedSequence)
     .filter((event) => event.kind === 'activation.changed');
-  // A late renewal is possible only because renewActivation checks the phase
-  // outside the authority's serial queue. Once that race is closed, the late
-  // case can no longer be produced and should be removed.
+  // The install-time renewal commits; the late one is dropped inside the
+  // serial queue rather than reviving the released activation — a renewal
+  // must never record an 'active' phase after the 'released' it outlived.
+  expect(changes.some((event) => event.payload['renewalSeq'] === 1)).toBe(true);
   expect(
     changes.some(
       (event, index) =>
@@ -1508,8 +1511,7 @@ it.each([
         changes[index - 1].payload['activationId'] ===
           event.payload['activationId'],
     ),
-  ).toBe(late);
-  await hooks.close();
+  ).toBe(false);
   expect(released()).toEqual([hooks.broker.runtimeSessionId]);
 });
 

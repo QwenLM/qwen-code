@@ -824,18 +824,11 @@ export function isSinglePathSegment(value: string): boolean {
   );
 }
 
-const MANAGED_HEADER_MARKER = '"subtype":"managed_session_header_v1"';
+const MANAGED_HEADER_SUBTYPE = 'managed_session_header_v1';
+const MANAGED_HEADER_MARKER = `"subtype":"${MANAGED_HEADER_SUBTYPE}"`;
 const EXECUTION_ENGINE_SUBTYPE = 'session_execution_engine';
 const MANAGED_METADATA_MARKER = '"domain":"session_metadata"';
 const MANAGED_SOURCE_MARKER = '"domain":"session_source"';
-
-function lastLineContaining(text: string, marker: string): string | undefined {
-  const lines = text.split('\n');
-  for (let index = lines.length - 1; index >= 0; index--) {
-    if (lines[index].includes(marker)) return lines[index];
-  }
-  return undefined;
-}
 
 function lastCommittedDomainLine(
   text: string,
@@ -889,16 +882,49 @@ function lastCommittedDomainLine(
  * A positive identification, unlike the execution-engine reader, which reports
  * `unavailable` for any transcript with a completeness diagnostic and so cannot
  * gate legacy-only operations without regressing legacy sessions.
+ *
+ * The header must parse as a record of its own subtype: literal marker text
+ * left in a legacy line by an interrupted or glued append does not make the
+ * transcript Managed.
  */
 export function isManagedSessionTranscriptSync(
   filePath: string,
   scratchBuffer?: Buffer,
 ): boolean {
-  return (
-    readTranscriptHeadSync(filePath, scratchBuffer)?.includes(
-      MANAGED_HEADER_MARKER,
-    ) === true
-  );
+  const head = readTranscriptHeadSync(filePath, scratchBuffer);
+  return head !== undefined && headCarriesManagedHeader(head, filePath);
+}
+
+/** True for a parsed record that is itself the Managed Session header. */
+function isManagedHeaderRecord(record: unknown): boolean {
+  if (!record || typeof record !== 'object') return false;
+  const { type, subtype } = record as Record<string, unknown>;
+  return type === 'system' && subtype === MANAGED_HEADER_SUBTYPE;
+}
+
+/**
+ * The first Managed header record of the head, when one parses. Lines are
+ * parsed the way the owner reader parses them — a `\u`-spelled marker
+ * counts, raw marker text inside an unparseable or glued line does not.
+ */
+function findManagedHeaderRecord(
+  head: string,
+  filePath: string,
+): Record<string, unknown> | undefined {
+  for (const line of head.split('\n')) {
+    if (!line.includes(MANAGED_HEADER_MARKER) && !line.includes('\\u')) {
+      continue;
+    }
+    const record = parseLineTolerantWithIntegrity(line, filePath).records.find(
+      isManagedHeaderRecord,
+    );
+    if (record !== undefined) return record as Record<string, unknown>;
+  }
+  return undefined;
+}
+
+function headCarriesManagedHeader(head: string, filePath: string): boolean {
+  return findManagedHeaderRecord(head, filePath) !== undefined;
 }
 
 /**
@@ -937,18 +963,22 @@ export function readManagedExecutionEvidenceSync(
       ? false
       : undefined;
   }
-  return (
-    head.includes(MANAGED_HEADER_MARKER) ||
-    head
-      .split('\n')
-      .some(
-        (line) =>
-          (line.includes(EXECUTION_ENGINE_SUBTYPE) || line.includes('\\u')) &&
-          parseLineTolerantWithIntegrity(line, filePath).records.some(
-            isManagedOwnerRecord,
-          ),
-      )
-  );
+  // One parse pass serves both gates; a line is parsed only when it could
+  // name the header subtype (the wrapped marker) or the owner subtype (the
+  // bare string), literally or through a `\u` escape.
+  return head.split('\n').some((line) => {
+    if (
+      !line.includes(MANAGED_HEADER_MARKER) &&
+      !line.includes(EXECUTION_ENGINE_SUBTYPE) &&
+      !line.includes('\\u')
+    ) {
+      return false;
+    }
+    const { records } = parseLineTolerantWithIntegrity(line, filePath);
+    return (
+      records.some(isManagedHeaderRecord) || records.some(isManagedOwnerRecord)
+    );
+  });
 }
 
 /**
@@ -1119,14 +1149,15 @@ function readManagedDomainBodySync(
     const headLength = Math.min(fileSize, LITE_READ_BUF_SIZE);
     const headBytes = fs.readSync(fd, buffer, 0, headLength, 0);
     const headText = buffer.toString('utf-8', 0, headBytes);
-    const headerLine = lastLineContaining(headText, MANAGED_HEADER_MARKER);
-    if (headerLine === undefined) return undefined;
+    // Classify the way the header gates do: a parsed header record, not raw
+    // marker text a glued legacy line may carry.
+    const header = findManagedHeaderRecord(headText, filePath) as
+      | { managedSession?: { sessionKey?: { sessionId?: unknown } } }
+      | undefined;
+    if (header === undefined) return undefined;
 
     /* The recorded identity, not the file name, decides where the resources
        live. */
-    const header = JSON.parse(headerLine) as {
-      managedSession?: { sessionKey?: { sessionId?: unknown } };
-    };
     const recordedId = header.managedSession?.sessionKey?.sessionId;
     if (typeof recordedId !== 'string' || recordedId.length === 0) return {};
     const resourceRoot = managedSessionResourceRoot(runtimeBaseDir, recordedId);

@@ -26,8 +26,12 @@ import {
 import type { McpConfiguration } from './managed-mcp-record.js';
 import type { HookExecution, HookRegistration } from './managed-hook-record.js';
 import {
+  MANAGED_SESSION_EVENT_SUBTYPE,
+  MANAGED_SESSION_HEADER_SUBTYPE,
+  managedSessionEventRefs,
   managedSessionEventsDigest,
   parseManagedSessionEvent,
+  parseManagedSessionHeader,
 } from './managed-session-records.js';
 import { ManagedSessionCommitRejectedError } from './managed-session-storage.js';
 import type {
@@ -38,6 +42,7 @@ import {
   createInitialHarnessCheckpoint,
   encodeHarnessCheckpointV1,
 } from './managed-harness-checkpoint.js';
+import { MANAGED_TOOL_RESULT_KINDS } from './managed-tool-result.js';
 
 // monitor_run is enabled by H3; the Stage H case below runs ahead of it.
 vi.mock('./managed-session-records.js', async (importOriginal) => {
@@ -178,6 +183,22 @@ describe('HTTP Managed Session store', () => {
     });
     return { stores, session };
   }
+
+  // A committed message body must be the reader-facing record the cold
+  // projection will replay: the commit-time fence refuses anything else.
+  const MESSAGE_BODY = Buffer.from(
+    JSON.stringify({
+      uuid: 'rec-message-1',
+      parentUuid: null,
+      sessionId: SESSION_KEY.sessionId,
+      timestamp: '2026-09-01T10:00:00.000Z',
+      type: 'user',
+      cwd: '/workspace',
+      version: 'test',
+      message: { role: 'user', parts: [{ text: 'hi' }] },
+    }),
+    'utf8',
+  );
 
   async function appendMessage(
     session: Awaited<ReturnType<typeof openManagedSession>>,
@@ -1341,6 +1362,31 @@ describe('HTTP Managed Session store', () => {
     expect(
       committedResources.map(({ resourceId }) => resourceId).sort(),
     ).toEqual([checkpointRef.resourceId, historyRef.resourceId].sort());
+    // The turn.settled fence reads the result body back, so the event must
+    // carry a genuine reader-facing record; the old checkpoint rides in
+    // pendingOwnersRef to prove a later commit ships a previously committed
+    // resource.
+    const turnResultRef = await first.resources.publish(
+      'managed-turn-result',
+      Buffer.from(
+        JSON.stringify({
+          uuid: 'record-turn-old-root',
+          parentUuid: null,
+          sessionId: SESSION_KEY.sessionId,
+          timestamp: '2026-09-22T00:00:01.000Z',
+          type: 'system',
+          subtype: 'turn_result',
+          cwd: '/workspace',
+          version: 'test',
+          systemPayload: {
+            promptId: 'old-root',
+            state: 'completed',
+            stopReason: 'end_turn',
+          },
+        }),
+        'utf8',
+      ),
+    );
     await first.authority.appendExecutionEvent(
       {
         operation: 'referenceOldCheckpoint',
@@ -1364,18 +1410,19 @@ describe('HTTP Managed Session store', () => {
           turnId: 'old-root',
           outcome: 'completed',
           stopReason: 'end_turn',
-          resultRef: checkpointRef,
+          resultRef: turnResultRef,
           usageRef: null,
-          pendingOwnersRef: null,
+          pendingOwnersRef: checkpointRef,
         },
       }),
       { class: 'harness', activation: first.activation },
     );
-    expect(server.commits.at(-1)!['resources']).toEqual([
-      {
-        ...checkpointRef,
-      },
-    ]);
+    const referencedResources = server.commits.at(-1)!['resources'] as Array<{
+      resourceId: string;
+    }>;
+    expect(
+      referencedResources.map(({ resourceId }) => resourceId).sort(),
+    ).toEqual([checkpointRef.resourceId, turnResultRef.resourceId].sort());
     const snapshotResources = new Map<
       string,
       {
@@ -2522,6 +2569,39 @@ describe('HTTP Managed Session store', () => {
         },
         { class: 'trusted_entry' },
       );
+      vi.setSystemTime(1_790_000_002_000);
+      // A free-form cancel target names the five ref fields in a json
+      // position: the writer must not collect it, and the oracle below
+      // answers from the writer's own contract, so the two cannot drift.
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'requestCancel',
+          commandId: 'cancel-1',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'e'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'cancel:req-1',
+          sessionKey: SESSION_KEY,
+          kind: 'cancel.requested',
+          occurredAt: 1_790_000_002_000,
+          payload: {
+            requestId: 'req-1',
+            target: {
+              resourceId: 'not-a-ref',
+              kind: 'not-a-ref-kind',
+              schemaVersion: 1,
+              byteLength: 2,
+              digest: 'not-a-digest',
+            },
+            reason: 'user asked',
+            requestedBy: 'test',
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
       const written = {
         contractVersion: 1,
         sessionKey: SESSION_KEY,
@@ -2533,10 +2613,282 @@ describe('HTTP Managed Session store', () => {
       if (process.env['QWEN_WRITE_GOLDEN'] === '1') {
         writeFileSync(fixture, `${JSON.stringify(written, null, 2)}\n`);
       }
+      // Every ref a commit's own records declare must ship in that commit's
+      // resources. This reads the writer's output rather than the fixture, so
+      // regenerating the golden cannot launder a ref-collection regression
+      // into a pass. One-directional by design: resources also carries the
+      // transitive closure of refs nested inside resource bodies.
+      for (const commit of written.commits) {
+        const declared = refsDeclaredBy(String(commit['recordBytesBase64']));
+        const shipped = new Set(
+          (commit['resources'] as ManagedSessionDurableRef[]).map(
+            (ref) => ref.resourceId,
+          ),
+        );
+        for (const ref of declared) {
+          expect(shipped.has(ref.resourceId)).toBe(true);
+        }
+      }
       expect(written).toEqual(JSON.parse(readFileSync(fixture, 'utf8')));
     } finally {
       ids.fixed = false;
       vi.useRealTimers();
+    }
+  });
+
+  it('commits a cancel.requested whose free-form target names the five ref fields', async () => {
+    const server = new FakeManagedSessionStore();
+    const { session } = await bootStoresAndSession(server);
+    try {
+      // The target is a well-formed ref in a free-form json position: only a
+      // harvester that collects refs beyond the schema-declared positions
+      // would ship it, and this assertion fails on exactly that widening.
+      const outcomeRef = await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}', 'utf8'),
+      );
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'requestCancel',
+          commandId: 'cancel-1',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'd'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'cancel:req-1',
+          sessionKey: SESSION_KEY,
+          kind: 'cancel.requested',
+          occurredAt: 1,
+          payload: {
+            requestId: 'req-1',
+            target: { ...outcomeRef },
+            reason: 'user asked',
+            requestedBy: 'test',
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      const commit = server.commits.at(-1);
+      expect(commit).toMatchObject({ operation: 'requestCancel' });
+      expect(commit?.['resources']).toEqual([]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('commits the base transcript proof a reopen-over-existing-transcript header names', async () => {
+    const server = new FakeManagedSessionStore();
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    try {
+      const definitionRef = await stores.resourceStore.publish(
+        'managed-session-definition',
+        Buffer.from('{}', 'utf8'),
+      );
+      const rootSnapshotRef = await stores.resourceStore.publish(
+        'managed-session-root-snapshot',
+        Buffer.from('{}', 'utf8'),
+      );
+      const proofRef = await stores.resourceStore.publish(
+        'managed-transcript-proof',
+        Buffer.from('proof', 'utf8'),
+      );
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      // A replacement writer adopting a sealed session reopens over the base
+      // transcript and its header names the proof; no writer in this repo
+      // emits one yet, so the genesis records are written by hand.
+      await journal.appendTransaction([
+        {
+          uuid: 'record-engine',
+          parentUuid: null,
+          sessionId: SESSION_KEY.sessionId,
+          timestamp: '2026-09-22T00:00:00.000Z',
+          type: 'system',
+          subtype: 'session_execution_engine',
+          cwd: '/workspace',
+          version: 'test',
+          systemPayload: { version: 1, engine: 'managed' },
+        },
+        {
+          uuid: 'record-header',
+          parentUuid: 'record-engine',
+          sessionId: SESSION_KEY.sessionId,
+          timestamp: '2026-09-22T00:00:00.000Z',
+          type: 'system',
+          subtype: 'managed_session_header_v1',
+          cwd: '/workspace',
+          version: 'test',
+          managedSession: {
+            formatVersion: 1,
+            minimumReader: 'managed-session/1',
+            sessionKey: SESSION_KEY,
+            engine: 'managed',
+            definitionRef,
+            rootSnapshotRef,
+            createdBy: 'test',
+            baseTranscriptProof: proofRef,
+          },
+        },
+      ]);
+      expect(server.commits).toHaveLength(1);
+      expect(server.commits[0]).toMatchObject({ operation: 'session.create' });
+      const resources = server.commits[0]?.['resources'] as Array<
+        Record<string, unknown>
+      >;
+      expect(resources).toHaveLength(3);
+      expect(resources.map((resource) => resource['resourceId'])).toEqual(
+        expect.arrayContaining([
+          definitionRef.resourceId,
+          rootSnapshotRef.resourceId,
+          proofRef.resourceId,
+        ]),
+      );
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('commits the manifest a blocked tool receipt carries only in its resources', async () => {
+    const server = new FakeManagedSessionStore();
+    const { session } = await bootStoresAndSession(server);
+    try {
+      // A blocked Shell capture commits its receipt with resultRef null, so
+      // the manifest reaches the store only through the receipt's resources.
+      const outcomeRef = await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}', 'utf8'),
+      );
+      const manifestRef = await session.resources.publish(
+        MANAGED_TOOL_RESULT_KINDS.manifest,
+        Buffer.from('{}', 'utf8'),
+      );
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: 'receipt-blocked',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'a'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'receipt:blocked',
+          sessionKey: SESSION_KEY,
+          kind: 'tool.receipt',
+          occurredAt: 1,
+          payload: {
+            executionCallId: 'execution-blocked',
+            toolOutcomeRef: outcomeRef,
+            resultRef: null,
+            resources: [manifestRef],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      const commit = server.commits.at(-1);
+      expect(commit).toMatchObject({ operation: 'recordToolResult' });
+      expect(
+        (commit?.['resources'] as Array<Record<string, unknown>>).map(
+          (resource) => resource['resourceId'],
+        ),
+      ).toContain(manifestRef.resourceId);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("rejects a restore head regressed below the writer's committed position", async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      // The honest head reads fine, then the server forgets a commit.
+      await expect(journal.read()).resolves.toBeDefined();
+      server.headOverrides['journalRevision'] = 0;
+      server.headOverrides['committedSequence'] = 0;
+      await expect(journal.read()).rejects.toThrow(/restore head regressed/);
+      // The grant is not re-baselined onto a regressed head.
+      await expect(journal.read()).rejects.toThrow(/restore head regressed/);
+      expect(server.transactionReads).toBe(1);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it.each(['journalRevision', 'committedSequence'] as const)(
+    'rejects a restore head regressed only in %s',
+    async (override) => {
+      const server = new FakeManagedSessionStore();
+      const { stores, session } = await bootStoresAndSession(server);
+      try {
+        const journal = await stores.journalStore.open({
+          sessionKey: SESSION_KEY,
+        });
+        // The honest head reads fine, then the server regresses one counter.
+        await expect(journal.read()).resolves.toBeDefined();
+        server.headOverrides[override] = 0;
+        await expect(journal.read()).rejects.toThrow(/restore head regressed/);
+      } finally {
+        await session.close();
+      }
+    },
+  );
+
+  it('does not re-baseline the grant onto a self-consistent regressed head', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      const messageRef = await stores.resourceStore.publish(
+        'managed-message',
+        MESSAGE_BODY,
+      );
+      await appendMessage(session, 1, messageRef);
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await expect(journal.read()).resolves.toBeDefined();
+
+      // Roll the server back to the create commit, consistently: page and
+      // head agree on the prefix, so no digest or contiguity check can
+      // refuse it — only the writer's own committed position can.
+      const first = server.storedTransactions[0]!;
+      server.pageOverrides['transactions'] = [first];
+      server.pageOverrides['nextRevision'] = 1;
+      server.pageOverrides['hasMore'] = false;
+      server.headOverrides['journalRevision'] = first['journalRevision'];
+      server.headOverrides['committedSequence'] = first['lastSequence'];
+      server.headOverrides['lastCommitDigest'] = first['commitDigest'];
+      server.headOverrides['activationEpoch'] = first['activationEpoch'];
+
+      await expect(journal.read()).rejects.toThrow(/restore head regressed/);
+      // A refusal that re-baselined the grant anyway would let the same
+      // consistent head read through on the retry; the position must hold.
+      await expect(journal.read()).rejects.toThrow(/restore head regressed/);
+      expect(server.transactionReads).toBe(1);
+
+      delete server.pageOverrides['transactions'];
+      delete server.pageOverrides['nextRevision'];
+      delete server.pageOverrides['hasMore'];
+      delete server.headOverrides['journalRevision'];
+      delete server.headOverrides['committedSequence'];
+      delete server.headOverrides['lastCommitDigest'];
+      delete server.headOverrides['activationEpoch'];
+      await expect(journal.read()).resolves.toBeDefined();
+    } finally {
+      await session.close();
     }
   });
 
@@ -2545,7 +2897,7 @@ describe('HTTP Managed Session store', () => {
     const { stores, session } = await bootStoresAndSession(server);
     const messageRef = await stores.resourceStore.publish(
       'managed-message',
-      Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
+      MESSAGE_BODY,
     );
     for (let index = 1; index <= 105; index++) {
       await appendMessage(session, index, messageRef);
@@ -2642,10 +2994,7 @@ describe('HTTP Managed Session store', () => {
     await appendMessage(
       session,
       1,
-      await stores.resourceStore.publish(
-        'managed-message',
-        Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
-      ),
+      await stores.resourceStore.publish('managed-message', MESSAGE_BODY),
     );
     const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
     // A real (non-empty) page that claims to end the journal while the head
@@ -2684,7 +3033,7 @@ describe('HTTP Managed Session store', () => {
     server.receiptOverrides['journalRevision'] = 42;
     const messageRef = await stores.resourceStore.publish(
       'managed-message',
-      Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
+      MESSAGE_BODY,
     );
     await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
       /receipt does not match/,
@@ -2734,7 +3083,7 @@ describe('HTTP Managed Session store', () => {
       });
       const messageRef = await stores.resourceStore.publish(
         'managed-message',
-        Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
+        MESSAGE_BODY,
       );
       // The refusal is a rollbackable non-commit, never the write failure
       // that latches the authority's log shut behind it.
@@ -3044,6 +3393,11 @@ class FakeManagedSessionStore {
     Object.assign(this.transactions[index]!, patch);
   }
 
+  /** The stored transaction records, for a test that rebuilds a page. */
+  get storedTransactions(): ReadonlyArray<Record<string, unknown>> {
+    return this.transactions;
+  }
+
   readonly fetch = vi.fn<typeof fetch>(async (input, init) => {
     const url = new URL(requestUrl(input));
     const headers = new Headers(init?.headers);
@@ -3262,6 +3616,35 @@ class FakeManagedSessionStore {
       replayed: false,
     };
   }
+}
+
+// Declared refs are the writer's contract, not a shape guess: the header's
+// own fields for the genesis commit, and the schema-declared positions of
+// each event after it. A ref-shaped value in a free-form json position (like
+// a cancel target) is deliberately not declared — a harvester widened to
+// collect it changes what the writer ships, and this oracle moves with it.
+function refsDeclaredBy(recordBytesBase64: string): ManagedSessionDurableRef[] {
+  const refs: ManagedSessionDurableRef[] = [];
+  for (const line of Buffer.from(recordBytesBase64, 'base64')
+    .toString('utf8')
+    .trimEnd()
+    .split('\n')) {
+    const record = JSON.parse(line) as Record<string, unknown>;
+    if (record['subtype'] === MANAGED_SESSION_HEADER_SUBTYPE) {
+      const header = parseManagedSessionHeader(record['managedSession']);
+      refs.push(header.definitionRef, header.rootSnapshotRef);
+      if (header.baseTranscriptProof !== undefined) {
+        refs.push(header.baseTranscriptProof);
+      }
+    } else if (record['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE) {
+      refs.push(
+        ...managedSessionEventRefs(
+          parseManagedSessionEvent(record['managedSession']),
+        ),
+      );
+    }
+  }
+  return refs;
 }
 
 function requestUrl(input: URL | RequestInfo): string {

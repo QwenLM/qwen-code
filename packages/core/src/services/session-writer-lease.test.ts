@@ -2364,6 +2364,53 @@ describe('SessionWriterLease', () => {
       await replacement.release();
     });
 
+    it('refuses an unsupported managed lock format version at acquire', async () => {
+      const fixture = await createFixture('managed-format-guard-session');
+      await expect(
+        SessionWriterLease.acquire({
+          ...fixture.options,
+          lockSchema: { schemaVersion: 3, formatVersion: 0 },
+        }),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      // No wedging: nothing was installed, so a baseline acquire resolves.
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      await lease.release();
+    });
+
+    it('blocks a certified takeover that would downgrade the sealed format', async () => {
+      const fixture = await createFixture('managed-format-takeover-session');
+      const first = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: { schemaVersion: 3, formatVersion: 2 },
+      });
+      await first.appendJsonLine({ record: 'sealed' });
+      await first.sealForHandoff(commitProof);
+
+      await expect(
+        SessionWriterLease.acquire({
+          ...fixture.options,
+          takeoverPolicy: 'certified',
+          lockSchema: managedSchema,
+        }),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
+        state: 'sealed',
+        format_version: 2,
+      });
+
+      const replacement = await SessionWriterLease.acquire({
+        ...fixture.options,
+        takeoverPolicy: 'certified',
+        lockSchema: { schemaVersion: 3, formatVersion: 2 },
+      });
+      expect(replacement.takeoverCommitProof).toEqual(commitProof);
+      await replacement.release();
+    });
+
     it('rebuilds the transcript proof after discarding an uncommitted tail', async () => {
       const fixture = await createFixture('managed-truncate-session');
       const lease = await SessionWriterLease.acquire({
@@ -2429,6 +2476,69 @@ describe('SessionWriterLease', () => {
         lockSchema: managedSchema,
       });
       await managed.release();
+    });
+
+    it('does not reclaim a stale active lock from a newer managed format', async () => {
+      const fixture = await createFixture('managed-stale-format-session');
+      const owner = startLeaseProcess();
+      expect(
+        await requestChild(owner, {
+          type: 'acquire',
+          options: {
+            ...fixture.options,
+            lockSchema: { schemaVersion: 3, formatVersion: 2 },
+          },
+        }),
+      ).toMatchObject({ ok: true });
+      owner.kill('SIGKILL');
+      await waitForClose(owner);
+
+      await expect(
+        SessionWriterLease.acquire({
+          ...fixture.options,
+          lockSchema: managedSchema,
+        }),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      expect(
+        JSON.parse(await fs.readFile(fixture.lockPath, 'utf8')),
+      ).toMatchObject({
+        state: 'active',
+        format_version: 2,
+      });
+
+      // The barrier only refuses the older binary: a same-format acquirer
+      // reclaims the stale lock as before.
+      const newer = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: { schemaVersion: 3, formatVersion: 2 },
+      });
+      await newer.release();
+    });
+
+    it('lets a newer managed format take over an older sealed lock', async () => {
+      const fixture = await createFixture('managed-format-upgrade-session');
+      const first = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      await first.appendJsonLine({ record: 'sealed' });
+      await first.sealForHandoff(commitProof);
+
+      const replacement = await SessionWriterLease.acquire({
+        ...fixture.options,
+        takeoverPolicy: 'certified',
+        lockSchema: { schemaVersion: 3, formatVersion: 2 },
+      });
+      expect(replacement.ownerId).not.toBe(first.ownerId);
+      expect(replacement.takeoverCommitProof).toEqual(commitProof);
+      expect(
+        JSON.parse(await fs.readFile(fixture.lockPath, 'utf8')),
+      ).toMatchObject({
+        schema_version: 3,
+        state: 'active',
+        format_version: 2,
+      });
+      await replacement.release();
     });
   });
 

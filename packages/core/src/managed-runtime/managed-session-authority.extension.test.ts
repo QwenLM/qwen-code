@@ -336,6 +336,21 @@ function command(commandId: string, digest = 'd') {
   };
 }
 
+/** The record a goal_state envelope carries for the reader-facing fence. */
+function goalRecord(goalId: string, title: string) {
+  return {
+    uuid: `rec-${goalId}`,
+    parentUuid: null,
+    sessionId,
+    timestamp: '2026-09-01T10:00:00.000Z',
+    type: 'system',
+    subtype: 'goal_state',
+    cwd: '/workspace',
+    version: 'test',
+    systemPayload: { goalId, title },
+  };
+}
+
 const TRUSTED = { class: 'trusted_entry' } as const;
 
 async function commitLife(
@@ -868,7 +883,7 @@ describe('managed session authority Stage H records', () => {
         command('rename:goal'),
         {
           domain: 'goal_state',
-          content: { goalId: 'goal-1', title: 'grown' },
+          content: { record: goalRecord('goal-1', 'grown') },
         },
         TRUSTED,
       );
@@ -915,7 +930,7 @@ describe('managed session authority Stage H records', () => {
         command('rename:goal'),
         {
           domain: 'goal_state',
-          content: { goalId: 'goal-1', title: 'pre-body' },
+          content: { record: goalRecord('goal-1', 'pre-body') },
         },
         TRUSTED,
       );

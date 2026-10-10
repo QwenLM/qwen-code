@@ -53,15 +53,19 @@ import {
   assertManagedSessionDomainEnabled,
   assertManagedSessionScheduleSessionModeEnabled,
   assertManagedSessionEventActor,
+  assertManagedSessionDurableRef,
   assertManagedSessionStableId,
   assertManagedSessionTransaction,
   boundedString,
+  managedSessionDomainCarriesRecord,
   managedSessionEventsDigest,
   managedSessionKeysEqual,
+  managedSessionReaderFacingBody,
   parseManagedSessionCommitMarker,
   parseManagedSessionEvent,
   parseManagedSessionHeader,
   parseManagedSessionRecordJson,
+  validateManagedReaderFacingRecord,
   type ManagedSessionActorClass,
   type ManagedSessionDomain,
   type ManagedSessionCommitMarker,
@@ -73,6 +77,7 @@ import {
   type ManagedSessionSubject,
 } from './managed-session-records.js';
 import { readManagedBranchCheckpoint } from './managed-session-resources.js';
+import { readManagedMessageBody } from './managed-message-chunks.js';
 import {
   parseMcpConfiguration,
   parseMcpOperation,
@@ -1417,16 +1422,32 @@ export class LocalManagedSessionAuthority {
       // Refused before publishing, so a retry loop leaves no body behind.
       this.assertCommandWritable(command);
       this.assertExpectedSequence(command);
+      if (managedSessionDomainCarriesRecord(request.domain)) {
+        // The fence in commit() stays the backstop for the event channels;
+        // validating the record here keeps a refused domain commit from
+        // leaving a published envelope no event will ever reference.
+        const validated = validateManagedReaderFacingRecord(
+          request.content['record'],
+          this.sessionKey.sessionId,
+        );
+        if ('error' in validated) {
+          throw new ManagedSessionRecordError(
+            `${request.domain} record contains an invalid reader-facing record: ${validated.error}`,
+          );
+        }
+      }
       const previous = this.domainRecords.get(request.domain);
       const revision = (previous?.revision ?? 0) + 1;
       const recordRef = await store.publish(
         `managed-${request.domain}`,
         Buffer.from(
+          // The envelope comes last so a content key can never overwrite the
+          // operationId/revision/previousRecordRef this method composes.
           JSON.stringify({
+            ...request.content,
             operationId: command.commandId,
             revision,
             previousRecordRef: previous?.recordRef ?? null,
-            ...request.content,
           }),
           'utf8',
         ),
@@ -2998,6 +3019,10 @@ export class LocalManagedSessionAuthority {
       );
     }
 
+    for (const event of events) {
+      await this.assertReaderFacingBody(event);
+    }
+
     const branches = await this.validateRecoveryFacts(events);
 
     // Events first, marker last: a crash before the marker leaves the
@@ -3113,6 +3138,12 @@ export class LocalManagedSessionAuthority {
       operation: 'installActivation',
       subject: input.subject,
     });
+    if (receipt === undefined) {
+      // Unreachable: install passes no in-queue hold.
+      throw new ManagedSessionRecordError(
+        'the activation install was not committed.',
+      );
+    }
     if (receipt.replayed) {
       throw activationAlreadyInstalledError(input.activationId);
     }
@@ -3143,7 +3174,7 @@ export class LocalManagedSessionAuthority {
       return undefined;
     }
     const renewalSeq = current.renewalSeq + 1;
-    await this.commitActivation({
+    const receipt = await this.commitActivation({
       activationId: current.activationId,
       epoch: current.epoch,
       workerId: current.workerId,
@@ -3155,8 +3186,19 @@ export class LocalManagedSessionAuthority {
       operation: 'renewActivation',
       subject: this.currentActivationSubject,
       renewalSeq,
+      // The checks above ran before this renewal waited its turn, so a
+      // release, a recovery block, or another renewal can have landed
+      // meanwhile; a same-epoch 'active' event here would revive the
+      // activation the release just ended or write behind the block.
+      hold: (live) =>
+        !this.recoveryBlocked &&
+        live !== undefined &&
+        live.phase === 'active' &&
+        live.activationId === current.activationId &&
+        live.epoch === current.epoch &&
+        live.renewalSeq === current.renewalSeq,
     });
-    return this.activation;
+    return receipt === undefined ? undefined : this.activation;
   }
 
   /**
@@ -3197,6 +3239,17 @@ export class LocalManagedSessionAuthority {
       boundaryRef,
       operation: 'releaseActivation',
       subject: this.currentActivationSubject,
+      // The pre-queue check ran before the boundary publish awaited, so a
+      // recovery block or a successor install can have landed meanwhile; a
+      // release that lost the queue to either is skipped, not rejected —
+      // there is nothing left of this activation to fence. Identity-only
+      // conjuncts keep a same-identity release admissible, so the double
+      // release in stopAdvancing still resolves via the replay path.
+      hold: (live) =>
+        !this.recoveryBlocked &&
+        live !== undefined &&
+        live.activationId === current.activationId &&
+        live.epoch === current.epoch,
     });
   }
 
@@ -3231,48 +3284,127 @@ export class LocalManagedSessionAuthority {
     readonly operation: string;
     readonly renewalSeq?: number;
     readonly subject?: ManagedSessionSubject;
-  }): Promise<ManagedSessionCommitReceipt> {
+    /**
+     * Re-checked inside the serial queue against the live activation before
+     * any append; a false verdict writes nothing and resolves undefined.
+     */
+    readonly hold?: (
+      current: ManagedSessionActivationState | undefined,
+    ) => boolean;
+  }): Promise<ManagedSessionCommitReceipt | undefined> {
     // A renewal repeats the install's phase under the same activation, so it
     // needs its own command and event identity or the log's idempotency and
     // event-id uniqueness would reject it as a duplicate of the install.
     const renewalSuffix =
       input.renewalSeq === undefined ? '' : `:renewal:${input.renewalSeq}`;
-    return this.appendExecutionEvent(
-      {
-        operation: input.operation,
-        commandId: `${input.activationId}:${input.phase}${renewalSuffix}`,
-        sessionKey: this.sessionKey,
-        contentDigest: this.header.definitionRef.digest,
-      },
-      (sequence) => ({
-        v: MANAGED_SESSION_FORMAT_VERSION,
-        sequence,
-        eventId: `activation:${input.activationId}:${input.phase}${renewalSuffix}`,
-        sessionKey: this.sessionKey,
-        kind: 'activation.changed',
-        occurredAt: this.now(),
-        payload: {
-          activationId: input.activationId,
-          epoch: input.epoch,
-          workerId: input.workerId,
-          subject: input.subject ?? {
-            type: 'activation',
-            scopeId: input.activationId,
-            activationId: input.activationId,
-            epoch: input.epoch,
-          },
-          phase: input.phase,
-          leaseDurationMs: input.leaseDurationMs,
-          expiresAt: input.expiresAt,
-          installRef: input.installRef,
-          boundaryRef: input.boundaryRef,
-          ...(input.renewalSeq === undefined
-            ? {}
-            : { renewalSeq: input.renewalSeq }),
+    return this.runSerial(async () => {
+      if (input.hold !== undefined && !input.hold(this.activation)) {
+        return undefined;
+      }
+      return this.commit(
+        {
+          operation: input.operation,
+          commandId: `${input.activationId}:${input.phase}${renewalSuffix}`,
+          sessionKey: this.sessionKey,
+          contentDigest: this.header.definitionRef.digest,
         },
-      }),
-      { class: 'coordinator' },
+        [
+          {
+            v: MANAGED_SESSION_FORMAT_VERSION,
+            sequence: this.committed + 1,
+            eventId: `activation:${input.activationId}:${input.phase}${renewalSuffix}`,
+            sessionKey: this.sessionKey,
+            kind: 'activation.changed',
+            occurredAt: this.now(),
+            payload: {
+              activationId: input.activationId,
+              epoch: input.epoch,
+              workerId: input.workerId,
+              subject: input.subject ?? {
+                type: 'activation',
+                scopeId: input.activationId,
+                activationId: input.activationId,
+                epoch: input.epoch,
+              },
+              phase: input.phase,
+              leaseDurationMs: input.leaseDurationMs,
+              expiresAt: input.expiresAt,
+              installRef: input.installRef,
+              boundaryRef: input.boundaryRef,
+              ...(input.renewalSeq === undefined
+                ? {}
+                : { renewalSeq: input.renewalSeq }),
+            },
+          },
+        ],
+        [{ class: 'coordinator' }],
+      );
+    });
+  }
+
+  /**
+   * Reads back the record an event's reader-facing channel commits, the way
+   * the cold projection will read it: a body that is not a reader-facing
+   * record fails the whole session at restore, so no writer of the event may
+   * commit one. The channel list and the acceptance predicate are the
+   * projection's own, so a channel the reader learns is fenced here the same
+   * day and the two cannot drift.
+   */
+  private async assertReaderFacingBody(
+    event: ManagedSessionEvent,
+  ): Promise<void> {
+    const carried = managedSessionReaderFacingBody(event);
+    if (carried === undefined) return;
+    const noun =
+      event.kind === 'turn.settled' ? 'turn result' : `${event.kind} record`;
+    const store = this.resources;
+    if (store === undefined) {
+      throw new ManagedSessionRecordError(
+        `a resource store is required to commit ${event.kind}.`,
+      );
+    }
+    if (carried.ref === null) {
+      throw new ManagedSessionRecordError(
+        `a ${noun} resource reference is required to commit ${event.kind}.`,
+      );
+    }
+    const ref = assertManagedSessionDurableRef(
+      carried.ref,
+      `${event.kind} event ${event.eventId} ref`,
     );
+    const body = await readManagedMessageBody(
+      (bodyRef) => store.read(bodyRef),
+      ref,
+    ).catch((cause: unknown) => {
+      throw new ManagedSessionRecordError(
+        `${noun} is unreadable: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    });
+    let value: unknown;
+    try {
+      // Decode the way the cold reader does: plain JSON.parse, with no wire
+      // strictness the reader lacks. A fence stricter than its reader
+      // refuses a body the reader accepts, and the refusal latches the
+      // session writer off.
+      value = JSON.parse(body.toString('utf8'));
+    } catch {
+      throw new ManagedSessionRecordError(
+        `${noun} resource ${ref.resourceId} contains an invalid reader-facing record: record is not valid JSON.`,
+      );
+    }
+    const validated = validateManagedReaderFacingRecord(
+      carried.inDomainEnvelope
+        ? value !== null && typeof value === 'object'
+          ? (value as { readonly record?: unknown }).record
+          : undefined
+        : value,
+      this.sessionKey.sessionId,
+    );
+    if ('error' in validated) {
+      throw new ManagedSessionRecordError(
+        `${noun} resource ${ref.resourceId} contains an invalid reader-facing record: ${validated.error}`,
+      );
+    }
   }
 
   /**

@@ -225,6 +225,374 @@ describe('EmbeddedHarnessScheduler', () => {
     expect(recovered.get(item)?.outcome).toBe('completed');
   });
 
+  it('keeps the recovery wake armed when the pump exits memory-blocked', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let now = 0;
+    const original = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const item = activation('a1');
+    await original.enqueue(item, { maxQueued: 10, maxQueuedPerTenant: 10 });
+    await original.claim(item, 'dead-worker', 10);
+
+    now = 5;
+    const store = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const hasMemoryHeadroom = vi.fn(() => false);
+    const handled: string[] = [];
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'replacement-worker',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 30_000,
+      hasMemoryHeadroom,
+      handler: async (activation) => {
+        handled.push(activation.activationId);
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.start();
+    const consulted = () => hasMemoryHeadroom.mock.calls.length;
+
+    // The idle exit armed the wake for the dead worker's lease expiring at
+    // t=10; a memory-blocked pump must not drop it.
+    now = 9;
+    await scheduler.submit(activation('a2', { sessionId: 'session-a2' }));
+    const before = consulted();
+
+    now = 10;
+    await vi.advanceTimersByTimeAsync(1);
+    await waitUntil(() => consulted() > before);
+
+    hasMemoryHeadroom.mockReturnValue(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await waitUntil(() => handled.includes('a1') && handled.includes('a2'));
+  });
+
+  it('polls on a bounded cadence while the pump stays memory-blocked', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let now = 0;
+    const original = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const item = activation('a1');
+    await original.enqueue(item, { maxQueued: 10, maxQueuedPerTenant: 10 });
+    await original.claim(item, 'dead-worker', 10);
+
+    now = 5;
+    const store = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const hasMemoryHeadroom = vi.fn(() => false);
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'replacement-worker',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 30_000,
+      hasMemoryHeadroom,
+      handler: async () => {},
+    });
+    schedulers.push(scheduler);
+    await scheduler.start();
+    const consulted = () => hasMemoryHeadroom.mock.calls.length;
+
+    // The lease expired at t=10; a blocked pump must re-arm the wake on the
+    // poll cadence, never on a zero delay that spins the macrotask queue.
+    now = 10;
+    await vi.advanceTimersByTimeAsync(5);
+    await waitUntil(() => consulted() > 0);
+    const before = consulted();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(consulted() - before).toBeGreaterThan(0);
+    expect(consulted() - before).toBeLessThanOrEqual(120);
+
+    // The cadence backs off within one blocked episode (1s, doubling to a
+    // 30s cap): ten minutes cost tens of consults, not hundreds.
+    await vi.advanceTimersByTimeAsync(9 * 60_000);
+    expect(consulted() - before).toBeLessThanOrEqual(30);
+  });
+
+  it('polls for headroom while queued-only work waits behind the memory gate', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const store = await FileManagedActivationStore.open(filePath);
+    const hasMemoryHeadroom = vi.fn(() => false);
+    const handled: string[] = [];
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 30_000,
+      hasMemoryHeadroom,
+      handler: async (item) => {
+        handled.push(item.activationId);
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(activation('a1'));
+    await scheduler.start();
+    expect(scheduler.isMemoryBlocked).toBe(true);
+    const consulted = () => hasMemoryHeadroom.mock.calls.length;
+
+    // A submission mid-episode restarts the poll cadence instead of spending
+    // the backoff it did not cause: without the reset this submit's pump arms
+    // the wake 2s out, and the 1s advance below leaves the queue unhandled.
+    await scheduler.submit(activation('a2'));
+    await waitUntil(() => consulted() === 2);
+
+    // No lease is pending to wake for and notifyCapacityChanged is never
+    // called: the blocked pump must notice the headroom return on its own.
+    hasMemoryHeadroom.mockReturnValue(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await waitUntil(() => handled.includes('a1') && handled.includes('a2'));
+  });
+
+  it('restarts the blocked cadence when an external capacity signal arrives', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const store = await FileManagedActivationStore.open(filePath);
+    const hasMemoryHeadroom = vi.fn(() => false);
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 30_000,
+      hasMemoryHeadroom,
+      handler: async () => {},
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(activation('a1'));
+    await scheduler.start();
+    expect(scheduler.isMemoryBlocked).toBe(true);
+    const consulted = () => hasMemoryHeadroom.mock.calls.length;
+
+    // Grow the backoff: timer polls at 1s, 2s and 4s leave the wake 8s out.
+    await vi.advanceTimersByTimeAsync(7_000);
+    const grown = consulted();
+
+    // The capacity signal's pump consults once and, still blocked, re-arms
+    // the wake at the 1s base rather than the grown backoff.
+    scheduler.notifyCapacityChanged();
+    await waitUntil(() => consulted() === grown + 1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(consulted()).toBe(grown + 2);
+  });
+
+  it('handles queued work within a second of a capacity-signal burst', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const store = await FileManagedActivationStore.open(filePath);
+    const hasMemoryHeadroom = vi.fn(() => false);
+    const handled: string[] = [];
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 30_000,
+      hasMemoryHeadroom,
+      handler: async (item) => {
+        handled.push(item.activationId);
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(activation('a1'));
+    await scheduler.start();
+    expect(scheduler.isMemoryBlocked).toBe(true);
+    const consulted = () => hasMemoryHeadroom.mock.calls.length;
+
+    // Six signals in one macrotask queue six pumps behind the one running;
+    // the restart intent rides each of them, so the wake they leave behind
+    // is the 1s base, not a backoff the burst itself kept doubling.
+    scheduler.notifyCapacityChanged();
+    scheduler.notifyCapacityChanged();
+    scheduler.notifyCapacityChanged();
+    scheduler.notifyCapacityChanged();
+    scheduler.notifyCapacityChanged();
+    scheduler.notifyCapacityChanged();
+    await waitUntil(() => consulted() === 7);
+
+    hasMemoryHeadroom.mockReturnValue(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await waitUntil(() => handled.includes('a1'));
+    expect(handled).toEqual(['a1']);
+  });
+
+  it('lets the backoff reach its cap across a stream of idempotent re-submits', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const store = await FileManagedActivationStore.open(filePath);
+    const hasMemoryHeadroom = vi.fn(() => false);
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 30_000,
+      hasMemoryHeadroom,
+      handler: async () => {},
+    });
+    schedulers.push(scheduler);
+    const item = activation('a1');
+    await scheduler.submit(item);
+    await scheduler.start();
+    expect(scheduler.isMemoryBlocked).toBe(true);
+    const consulted = () => hasMemoryHeadroom.mock.calls.length;
+
+    // Three minutes of 1 Hz re-submits of the already-queued activation:
+    // each is idempotent (created: false) and consults once, but none may
+    // restart the backoff it did not cause.
+    for (let elapsed = 0; elapsed < 3 * 60_000; elapsed += 1_000) {
+      await expect(scheduler.submit(item)).resolves.toMatchObject({
+        created: false,
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+
+    // At the 30s cap the armed wake survives a 25s silence untouched and
+    // fires exactly once in the seconds after it; a cadence the stream kept
+    // resetting to the 1s base would consult throughout the silence.
+    const settled = consulted();
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(consulted()).toBe(settled);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(consulted()).toBe(settled + 1);
+  });
+
+  it('clears the memory block when the queued work is cancelled', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const store = await FileManagedActivationStore.open(filePath);
+    const hasMemoryHeadroom = vi.fn(() => false);
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 30_000,
+      hasMemoryHeadroom,
+      handler: async () => {},
+    });
+    schedulers.push(scheduler);
+    const item = activation('a1');
+    await scheduler.submit(item);
+    await scheduler.start();
+    expect(scheduler.isMemoryBlocked).toBe(true);
+    const consulted = () => hasMemoryHeadroom.mock.calls.length;
+
+    // With nothing left to claim, the next poll tick must drop the blocked
+    // flag and stop polling rather than re-arming against an empty queue.
+    await store.cancelQueued(item);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await waitUntil(() => !scheduler.isMemoryBlocked);
+
+    const before = consulted();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(consulted()).toBe(before);
+  });
+
+  it('keeps the blocked cadence bounded while a live foreign lease renews inside the poll window', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let now = 0;
+    const store = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const foreign = activation('foreign-1');
+    await store.enqueue(foreign, { maxQueued: 10, maxQueuedPerTenant: 10 });
+    let foreignLease = await store.claim(foreign, 'other-worker', 3_000);
+
+    const hasMemoryHeadroom = vi.fn(() => false);
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 30_000,
+      hasMemoryHeadroom,
+      handler: async () => {},
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(activation('a1'));
+    await scheduler.start();
+    expect(scheduler.isMemoryBlocked).toBe(true);
+    const consulted = () => hasMemoryHeadroom.mock.calls.length;
+
+    // Ten minutes behind a lease its owner renews every second: the expiry
+    // stays above the 1s base interval (so the guarded code keeps its own
+    // cadence) but never lapses, and following it would poll at the fleet's
+    // renewal rate — hundreds of consults, not tens — instead of the bounded
+    // cadence.
+    const before = consulted();
+    for (let elapsed = 0; elapsed < 10 * 60_000; elapsed += 1_000) {
+      now += 1_000;
+      foreignLease = await store.renew(foreignLease!, 3_000);
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    expect(foreignLease).toBeDefined();
+    expect(consulted() - before).toBeLessThanOrEqual(30);
+  });
+
+  it('restarts the blocked cadence when a later episode begins', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let now = 0;
+    const store = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const foreign = activation('foreign-1');
+    await store.enqueue(foreign, { maxQueued: 10, maxQueuedPerTenant: 10 });
+    await store.claim(foreign, 'dead-worker', 300_000);
+
+    const hasMemoryHeadroom = vi.fn(() => false);
+    const handled: string[] = [];
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 30_000,
+      hasMemoryHeadroom,
+      handler: async (item) => {
+        handled.push(item.activationId);
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(activation('a1'));
+    await scheduler.start();
+    expect(scheduler.isMemoryBlocked).toBe(true);
+    const consulted = () => hasMemoryHeadroom.mock.calls.length;
+
+    // Episode 1 backs the cadence off to its 30s cap, then headroom returns
+    // and the queue drains.
+    now += 31_000;
+    await vi.advanceTimersByTimeAsync(31_000);
+    hasMemoryHeadroom.mockReturnValue(true);
+    now += 30_000;
+    await vi.advanceTimersByTimeAsync(30_000);
+    await waitUntil(() => handled.includes('a1'));
+    await waitUntil(() => scheduler.activeSlotCount === 0);
+
+    // Episode 2 begins with the foreign lease's expiry wake, not a
+    // submission: the first headroom consult of the new episode must land on
+    // the 1s base cadence, not on the 30s cap episode 1 ended at.
+    hasMemoryHeadroom.mockReturnValue(false);
+    now = 300_000;
+    await vi.advanceTimersByTimeAsync(239_000);
+    await waitUntil(() => scheduler.isMemoryBlocked);
+    const before = consulted();
+    now += 2_000;
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(consulted() - before).toBeGreaterThan(0);
+  });
+
   it('renews the lease while a handler remains active', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let now = 100;

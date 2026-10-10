@@ -1913,6 +1913,16 @@ export class SessionWriterLease {
     const processStartIdentity = await readProcessStartIdentity(process.pid);
     const pidNamespaceId = readPidNamespaceId();
     const lockSchema = normalizedOptions.lockSchema;
+    if (
+      lockSchema !== undefined &&
+      !isManagedFormatVersion(lockSchema.formatVersion)
+    ) {
+      throw new SessionWriterUnavailableError({
+        cause: new Error(
+          `Managed lock schema formatVersion ${lockSchema.formatVersion} is not a supported log format`,
+        ),
+      });
+    }
     const lockRecord: ActiveLockRecord = {
       ...(lockSchema === undefined
         ? { schema_version: LOCK_SCHEMA_VERSION }
@@ -1983,6 +1993,21 @@ export class SessionWriterLease {
         throw new SessionWriterUnavailableError({
           cause: new Error(
             'Session writer lock uses a schema this acquire cannot continue',
+          ),
+        });
+      }
+      // The format barrier is two-directional here as it is for a sealed
+      // takeover: reclaiming a stale active lock from a newer format would
+      // rewrite the durable record at this binary's lower format and append
+      // records the newer binary's reader then refuses.
+      if (
+        isManagedLockRecord(state.record) &&
+        normalizedOptions.lockSchema !== undefined &&
+        normalizedOptions.lockSchema.formatVersion < state.record.format_version
+      ) {
+        throw new SessionWriterUnavailableError({
+          cause: new Error(
+            `Stale session writer lock format ${state.record.format_version} is newer than this binary's format ${normalizedOptions.lockSchema.formatVersion}`,
           ),
         });
       }
@@ -2082,6 +2107,21 @@ export class SessionWriterLease {
       throw new SessionWriterUnavailableError({
         cause: new Error(
           'Sealed session writer lock uses a schema this acquire cannot continue',
+        ),
+      });
+    }
+    // The barrier is two-directional: an older binary must not adopt a seal
+    // from a newer format and downgrade the record (the newer binary would
+    // then fail reading its own log and an aborted takeover deletes the
+    // lock entirely). A newer acquirer continues an older seal fine.
+    if (
+      isManagedLockRecord(observed.record) &&
+      options.lockSchema !== undefined &&
+      options.lockSchema.formatVersion < observed.record.format_version
+    ) {
+      throw new SessionWriterUnavailableError({
+        cause: new Error(
+          `Sealed session writer lock format ${observed.record.format_version} is newer than this binary's format ${options.lockSchema.formatVersion}`,
         ),
       });
     }
