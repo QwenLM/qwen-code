@@ -71,22 +71,51 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it.each(['test', 'daemon-e2e'])(
+  it.each(['test', 'mysql-integration', 'daemon-e2e'])(
     'keeps setup-java Maven files job-local in the %s job',
     (name) => {
       const block = job(name);
       expect(block).toContain(
         "settings-path: '${{ runner.temp }}/setup-java-m2'",
       );
-      expect(
-        block.match(
-          /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
-        ),
-      ).toHaveLength(name === 'test' ? 6 : 1);
+      // Two tail-anchored forms, no prefix match: mysql-integration appends
+      // a job-local -Dmaven.repo.local to two of its three MAVEN_ARGS
+      // (pinned by the 'installs and verifies against one job-local Maven
+      // repository' test); the other jobs must carry no suffix at all — an
+      // appended -DskipTests would be word-split live by the mvn launcher.
+      const exact = block.match(
+        /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
+      );
+      const jobLocal = block.match(
+        /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml -Dmaven\.repo\.local=\$\{\{ runner\.temp \}\}\/m2-repo'/g,
+      );
+      expect((exact?.length ?? 0) + (jobLocal?.length ?? 0)).toBe(
+        { test: 6, 'mysql-integration': 3, 'daemon-e2e': 1 }[name],
+      );
+      if (name !== 'mysql-integration') expect(jobLocal).toBeNull();
       expect(block).not.toContain('Drop shared Maven toolchains.xml');
       expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
     },
   );
+
+  it('keeps the self-hosted Maven bootstrap byte-identical across pool jobs', () => {
+    // A step copied between jobs and later fixed in only one is the #13506
+    // drift class; the checksum gate in this body is the security-relevant
+    // part, so pin the whole body equal — not just the step name.
+    const parsed = parse(workflow);
+    const bodies = ['test', 'mysql-integration', 'daemon-e2e'].map((name) => {
+      const s = parsed.jobs[name].steps.find(
+        (candidate) => candidate.name === 'Set up Maven (self-hosted)',
+      );
+      expect(s, name).toBeDefined();
+      expect(s.if, name).toBe("${{ runner.environment == 'self-hosted' }}");
+      return s.run;
+    });
+    expect(bodies[1]).toBe(bodies[0]);
+    expect(bodies[2]).toBe(bodies[0]);
+    expect(bodies[0]).toContain('sha512sum --check');
+    expect(bodies[0]).toContain('>> "${GITHUB_PATH}"');
+  });
 });
 
 // #12940: the duplicate-version guard is the fast lane for a collision two
@@ -282,6 +311,158 @@ describe('SDK Java Flyway re-check of open PRs', () => {
   });
 });
 
+// #13623: three main runs lost their GitHub-hosted lanes to runner-queue
+// starvation — every failed job recorded zero steps and no assigned runner
+// while the pool legs passed. The MariaDB lane is pool-safe (per-job service
+// container, no host installs), so its trusted runs route to the ECS pool the
+// way the flyway guard's do; untrusted fork PRs stay hosted.
+describe('SDK Java MariaDB lane on the ECS pool', () => {
+  it('routes trusted mysql-integration runs to the pool', () => {
+    const block = job('mysql-integration');
+    for (const fragment of [
+      "github.repository == ''QwenLM/qwen-code''",
+      "vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true''",
+      "github.event_name != ''pull_request''",
+      'github.event.pull_request.head.repo.full_name == github.repository',
+      'contains(fromJSON(\'\'["OWNER","MEMBER","COLLABORATOR"]\'\'), github.event.pull_request.author_association)',
+      'fromJSON(\'\'["self-hosted", "linux", "x64", "ecs-qwen"]\'\')',
+      "fromJSON(''[\"ubuntu-latest\"]'')",
+    ]) {
+      expect(block).toContain(fragment);
+    }
+    // The lane stays character-identical to the flyway guard's, which the
+    // evaluated routing inventory (.github/scripts/ci-runner-routing.test.mjs)
+    // covers: a restructured expression (e.g. a flipped connective, invisible
+    // to the fragment pins above) breaks the tie and turns this red.
+    expect(parse(workflow).jobs['mysql-integration']['runs-on']).toBe(
+      parse(workflow).jobs['flyway-migrations']['runs-on'],
+    );
+    // The default merge-ref checkout is deliberate (recorded at the job's
+    // Checkout step): never the refs/pull/N/head the build lanes use.
+    expect(block).toContain('actions/checkout@');
+    expect(block).not.toContain('refs/pull/');
+  });
+
+  it('keeps the MariaDB service on a random host port', () => {
+    // A fixed 3306:3306 mapping collides between jobs sharing one pool host;
+    // the steps read the mapped port from job.services.mariadb.ports.
+    const parsed = parse(workflow);
+    expect(parsed.jobs['mysql-integration'].services.mariadb.ports).toEqual([
+      '3306/tcp',
+    ]);
+    const block = job('mysql-integration');
+    expect(block).not.toContain('3306:3306');
+    expect(block).not.toContain('127.0.0.1:3306');
+    expect(
+      block.match(
+        /MYSQL_PORT: "\$\{\{ job\.services\.mariadb\.ports\['3306'\] \}\}"/g,
+      ),
+    ).toHaveLength(2);
+    // The consumer is the link that carries the random port into the tests:
+    // both mvn lines must interpolate ${MYSQL_PORT}, or the declaration is
+    // dead and the fixed-port collision returns. hosted-harness-mysql's two
+    // -Dmysql.url lines read job.services.mysql and live outside this block.
+    expect(
+      block.match(
+        /-Dmysql\.url="jdbc:mysql:\/\/127\.0\.0\.1:\$\{MYSQL_PORT\}\//g,
+      ),
+    ).toHaveLength(2);
+  });
+
+  it('holds the per-host sdk-java lock around every Maven run', () => {
+    // Derived from the parsed steps, not a string count: every Maven-bearing
+    // step must open the test job's per-host lock — the shared path pinned
+    // for the test job above is what makes the two jobs mutually exclusive
+    // on one ECS host — and wait on it with the pinned literal.
+    const parsed = parse(workflow);
+    const mavenSteps = parsed.jobs['mysql-integration'].steps.filter(
+      (s) => typeof s.run === 'string' && s.run.includes('mvn '),
+    );
+    expect(mavenSteps.map((s) => s.name)).toEqual([
+      'Run Runtime Broker MySQL integration tests',
+      'Install Managed Agent dependencies',
+      'Run Managed Agent tests, Checkstyle, and MySQL integration',
+    ]);
+    for (const s of mavenSteps) {
+      expect(s.run, s.name).toContain(
+        'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
+      );
+      expect(s.run, s.name).toContain('flock --wait 1200 9');
+    }
+    // The ceiling must absorb one full lock wait per acquisition — this job
+    // takes the lock once per Maven step — plus the ~14 minutes of measured
+    // Maven work: pool run 37743332082 recorded 1193 s of waits and 818 s of
+    // holds, and 25 minutes already cancelled this lane once (run
+    // 37692037879). Derived from the step count so a fourth locked step
+    // turns this red instead of silently over-drawing the budget.
+    expect(
+      parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
+    ).toBeGreaterThanOrEqual(mavenSteps.length * 1200 + 14 * 60);
+    // The sibling test job shares the same per-host lock: its ceiling must
+    // cover one full wait plus its own measured locked work (~5 minutes on
+    // the Java 21 leg of run 37743332082) — this job's holds now consume
+    // part of that wait budget, and nothing else asserts the headroom.
+    expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
+      1200 + 5 * 60,
+    );
+  });
+
+  it('installs and verifies against one job-local Maven repository', () => {
+    // The per-step lock releases at each step boundary, so the fixed
+    // 0.1.0-alpha release coordinates must not round-trip through the
+    // host-shared ~/.m2: the install step and the verify step resolve from
+    // the same job-local repo, seeded from the shared cache inside the lock.
+    const steps = parse(workflow).jobs['mysql-integration'].steps;
+    const install = steps.find(
+      (s) => s.name === 'Install Managed Agent dependencies',
+    );
+    const verify = steps.find(
+      (s) =>
+        s.name === 'Run Managed Agent tests, Checkstyle, and MySQL integration',
+    );
+    for (const s of [install, verify]) {
+      expect(s?.env?.MAVEN_ARGS, s?.name).toContain(
+        '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
+      );
+    }
+    // The runtime-broker step must not join them: Maven creates the
+    // job-local directory the moment any goal runs with the override, so the
+    // seed's cp -aln would hit an existing destination and nest one level
+    // down (m2-repo/repository/…), and the write-back would extract that
+    // bogus tree into the host-shared repo. The per-job count pin above is
+    // invariant under moving the override between this job's steps, so pin
+    // the step.
+    const broker = steps.find(
+      (s) => s.name === 'Run Runtime Broker MySQL integration tests',
+    );
+    expect(broker?.env?.MAVEN_ARGS, broker?.name).not.toContain(
+      '-Dmaven.repo.local',
+    );
+    expect(install.run).toContain(
+      'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
+    );
+    // The write-back closes the cache: 'maven' loop — the seed above only
+    // reads the cache-saved ~/.m2, so without it a pom key rotation saves a
+    // thin entry that never recaptures the managed-agent-server tree. The
+    // excludes name the three in-house fixed release coordinates, not the
+    // whole com/alibaba group, so third-party artifacts under it (druid)
+    // still recapture. The pipeline is best-effort like the seed: the
+    // warning arm keeps a copy failure from reddening the gate after mvn
+    // has already passed, and pipefail keeps a failing left-hand tar from
+    // being masked by the extractor's exit 0.
+    expect(verify.run).toContain('set -o pipefail');
+    expect(verify.run).toContain(
+      'tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-runtime-broker --exclude=./com/alibaba/qwen-managed-agent-server -cf - .',
+    );
+    expect(verify.run).toContain(
+      'tar -C "${HOME}/.m2/repository" --skip-old-files -xf -',
+    );
+    expect(verify.run).toContain(
+      '|| echo "::warning::Maven cache write-back failed; the gate result above is unaffected"',
+    );
+  });
+});
+
 // #13804: the advance check above sees each pull request against the base
 // branch of the moment it ran. This workflow re-checks every open PR when
 // main gains a contract change, from the API's file lists and the claiming
@@ -384,6 +565,7 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
   const poolJobs = [
     ['sdk-java.yml', 'test'],
     ['sdk-java.yml', 'flyway-migrations'],
+    ['sdk-java.yml', 'mysql-integration'],
     ['sdk-java.yml', 'daemon-e2e'],
     ['sdk-java-flyway-open-prs.yml', 'recheck'],
     ['sdk-java-contract-open-prs.yml', 'recheck'],
