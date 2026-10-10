@@ -201,6 +201,27 @@ export function assertManagedSessionChildRunKindEnabled(kind: string): void {
 }
 
 /**
+ * Whether a child Session run may continue a completed one (H4d). Both
+ * languages validate continuations and the rules they obey, but submission
+ * waits for the runtime that revives a child with its history: H4b's relay
+ * would run a committed continuation as a fresh child.
+ */
+export const MANAGED_SESSION_CHILD_CONTINUATIONS_ENABLED = false;
+
+/**
+ * The continuation gate. This stands beside {@link
+ * assertManagedSessionChildRunKindEnabled}: a continuation is a `child_run`
+ * of an enabled kind, so the kind gate alone would admit it.
+ */
+export function assertManagedSessionChildContinuationEnabled(): void {
+  if (!MANAGED_SESSION_CHILD_CONTINUATIONS_ENABLED) {
+    throw new ManagedSessionRecordError(
+      'child_run continuations are registered but not enabled for submission.',
+    );
+  }
+}
+
+/**
  * The channel adapters whose routes a Session may actually commit today
  * (H5b/H5c). `channel_route` and `channel_delivery` are enabled as domains,
  * but a route's committed policy names the adapter that produced it, and
