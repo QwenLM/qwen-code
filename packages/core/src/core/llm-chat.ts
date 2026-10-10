@@ -3205,15 +3205,65 @@ export class LlmChat {
               toolOutputBudget = aggregateBudget;
           }
         }
-        const guarded = await finalizeToolResponses(
-          this.config,
+        const preview = enforceFunctionResponseBudget(
           entries,
-          undefined,
-          false,
-          false,
           toolOutputBudget,
-          false,
+          true,
         );
+        const cutResults = preview.flatMap((entry, index) => {
+          const before = entries[index].responseParts[0].functionResponse;
+          const after = entry.responseParts[0].functionResponse;
+          return typeof before?.response?.['output'] === 'string' &&
+            before.response['output'] !== after?.response?.['output']
+            ? [before]
+            : [];
+        });
+        const paths: string[] = [];
+        let unresolvedRead = false;
+        for (const result of cutResults) {
+          const calls = result.id
+            ? this.history.flatMap((content) =>
+                (content.parts ?? []).flatMap((part) =>
+                  part.functionCall && part.functionCall.id === result.id
+                    ? [part.functionCall]
+                    : [],
+                ),
+              )
+            : [];
+          const responseName = canonicalToolName(result.name ?? '');
+          if (
+            !calls.length &&
+            (responseName === ToolNames.READ_FILE ||
+              responseName === ToolNames.TOOL_CALL)
+          )
+            unresolvedRead = true;
+          for (const call of calls) {
+            const identity = getFunctionCallIdentity(call);
+            if (!identity) {
+              unresolvedRead = true;
+              continue;
+            }
+            if (identity.name !== ToolNames.READ_FILE) continue;
+            const filePath = identity.args['file_path'];
+            if (typeof filePath !== 'string' || !filePath)
+              unresolvedRead = true;
+            else paths.push(resolvePath(this.config.getTargetDir(), filePath));
+          }
+        }
+        // Keep unresolvable reads resident by preserving their actual text;
+        // normal compaction owns this batch before any recovery artifact is written.
+        const guarded =
+          unresolvedRead && !this.isForkedChat
+            ? entries
+            : await finalizeToolResponses(
+                this.config,
+                entries,
+                undefined,
+                false,
+                false,
+                toolOutputBudget,
+                false,
+              );
         if (guarded !== entries) {
           debugLogger.warn(
             `Tool response send guard reduced an unfinalized batch to ${toolOutputBudget} characters.`,
@@ -3228,47 +3278,6 @@ export class LlmChat {
           // parent's cache and skill tracking while holding only a copy of a
           // history slice, so this send-boundary cut must not clear either.
           if (!this.isForkedChat) {
-            const cutResults = guarded.flatMap((entry, index) => {
-              const before = entries[index].responseParts[0].functionResponse;
-              const after = entry.responseParts[0].functionResponse;
-              return typeof before?.response?.['output'] === 'string' &&
-                before.response['output'] !== after?.response?.['output']
-                ? [before]
-                : [];
-            });
-            const paths: string[] = [];
-            let unresolvedRead = false;
-            for (const result of cutResults) {
-              const calls = result.id
-                ? this.history.flatMap((content) =>
-                    (content.parts ?? []).flatMap((part) =>
-                      part.functionCall && part.functionCall.id === result.id
-                        ? [part.functionCall]
-                        : [],
-                    ),
-                  )
-                : [];
-              const responseName = canonicalToolName(result.name ?? '');
-              if (
-                !calls.length &&
-                (responseName === ToolNames.READ_FILE ||
-                  responseName === ToolNames.TOOL_CALL)
-              )
-                unresolvedRead = true;
-              for (const call of calls) {
-                const identity = getFunctionCallIdentity(call);
-                if (!identity) {
-                  unresolvedRead = true;
-                  continue;
-                }
-                if (identity.name !== ToolNames.READ_FILE) continue;
-                const filePath = identity.args['file_path'];
-                if (typeof filePath !== 'string' || !filePath)
-                  unresolvedRead = true;
-                else
-                  paths.push(resolvePath(this.config.getTargetDir(), filePath));
-              }
-            }
             if (paths.length || unresolvedRead) {
               const fileReadCache = this.config.getFileReadCache();
               const stats = await Promise.all(

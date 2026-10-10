@@ -12072,7 +12072,23 @@ describe('LlmChat', async () => {
     });
 
     it('charges media before sharing the remaining headroom between previews', async () => {
-      await reportUsage(NEAR_AUTO);
+      const stat = { dev: 1, ino: 100 } as Stats;
+      vi.mocked(fsPromises.stat).mockResolvedValue(stat);
+      const markReadEvictedFromHistory = vi.fn().mockReturnValue(true);
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        markReadEvictedFromHistory,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+      mockStreamsOnce(
+        streamOf(
+          modelChunk(
+            [fnCall('read_file', { file_path: 'media.png' }, 'media-result')],
+            undefined,
+            { promptTokenCount: NEAR_AUTO, totalTokenCount: NEAR_AUTO + 10 },
+          ),
+        ),
+        textStream('done'),
+      );
+      await sendDrain('read', 'first');
       await sendDrain(
         [
           {
@@ -12089,6 +12105,7 @@ describe('LlmChat', async () => {
         ],
         'second',
       );
+      expect(markReadEvictedFromHistory).toHaveBeenCalledWith(stat);
       expect(resultChars(1)).toBeLessThan(8_000);
       expect(resultOutputs(1).every((output) => output.length < 4_000)).toBe(
         true,
@@ -12143,7 +12160,7 @@ describe('LlmChat', async () => {
       expect(clear).not.toHaveBeenCalled();
     });
 
-    it('disarms a bridged cut read by inode and falls back for an unknown parallel read', async () => {
+    it('disarms a resolved bridged cut read without clearing prior-read rights', async () => {
       const stat = { dev: 1, ino: 100 } as Stats;
       vi.mocked(fsPromises.stat).mockResolvedValue(stat);
       const markReadEvictedFromHistory = vi.fn().mockReturnValue(true);
@@ -12172,17 +12189,58 @@ describe('LlmChat', async () => {
       );
       await sendDrain('read', 'first');
       await sendDrain(
-        [
-          fnResponse('tool_call', { output: 'x'.repeat(20_000) }, 'read-cut'),
-          fnResponse('read_file', { output: 'y'.repeat(20_000) }, 'unknown'),
-        ],
+        [fnResponse('tool_call', { output: 'x'.repeat(20_000) }, 'read-cut')],
         'second',
       );
       expect(resultChars(1)).toBeLessThan(12_000);
       expect(markReadEvictedFromHistory).toHaveBeenCalledWith(stat);
-      expect(markAllReadsEvictedFromHistory).toHaveBeenCalledOnce();
+      expect(markAllReadsEvictedFromHistory).not.toHaveBeenCalled();
       expect(clear).not.toHaveBeenCalled();
     });
+
+    it.each([
+      ['pressure', 200_000],
+      ['aggregate', 1_000],
+    ])(
+      'preserves a batch whose historical read arguments lack a path under %s budget',
+      async (_kind, budget) => {
+        mockConfig.getToolOutputBatchBudget = () => budget;
+        const markAllReadsEvictedFromHistory = vi.fn();
+        vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+          markAllReadsEvictedFromHistory,
+        } as unknown as ReturnType<Config['getFileReadCache']>);
+        mockStreamsOnce(
+          streamOf(
+            modelChunk([fnCall('read_file', {}, 'repaired-read')], undefined, {
+              promptTokenCount: NEAR_AUTO,
+              totalTokenCount: NEAR_AUTO + 10,
+            }),
+          ),
+          textStream('done'),
+        );
+        await sendDrain('read', 'first');
+        await sendDrain(
+          [
+            fnResponse(
+              'read_file',
+              { output: 'x'.repeat(20_000) },
+              'repaired-read',
+            ),
+            result('parallel-shell', 'y'),
+          ],
+          'second',
+        );
+        expect(resultOutputs(1)).toEqual([
+          'x'.repeat(20_000),
+          'y'.repeat(20_000),
+        ]);
+        expect(markAllReadsEvictedFromHistory).not.toHaveBeenCalled();
+        expect(
+          vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
+            ?.precomputedEffectiveTokens,
+        ).toBeGreaterThanOrEqual(850_000);
+      },
+    );
 
     it('charges the protected plan lifecycle prefix before shrinking appended hook text', async () => {
       const reminder = getPlanModeSystemReminder(false);
