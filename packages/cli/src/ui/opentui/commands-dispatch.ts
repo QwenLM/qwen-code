@@ -170,6 +170,7 @@ interface RunOptions {
   oneTimeShellAllowlist?: Set<string>;
   overwriteConfirmed?: boolean;
   existingInvocationItemId?: number;
+  wasIdleBeforeDispatch?: boolean;
 }
 
 /**
@@ -478,6 +479,10 @@ export class OpenTuiSlashDispatcher {
       return this.host.addItem(item, timestamp);
     };
 
+    // Read before setIsProcessing(true), which makes host.isIdle() false.
+    // A confirmed re-run inherits the outer snapshot.
+    const wasIdleBeforeDispatch =
+      options.wasIdleBeforeDispatch ?? this.host.isIdle();
     this.host.setIsProcessing(true);
     const abortController = new AbortController();
     this.activeAbortController = abortController;
@@ -663,6 +668,7 @@ export class OpenTuiSlashDispatcher {
           const baseContext = createOpenTuiCommandContext(
             this.host,
             this.services,
+            { wasIdleBeforeDispatch },
           );
           const fullCommandContext: CommandContext = {
             ...baseContext,
@@ -755,7 +761,8 @@ export class OpenTuiSlashDispatcher {
               }
               case 'goal_control': {
                 const rendersHere =
-                  result.cause === undefined || this.host.isIdle();
+                  result.cause === undefined ||
+                  fullCommandContext.ui.isIdleRef.current;
                 if (rendersHere) {
                   const snapshot = result.response.snapshot;
                   if (snapshot.goal || result.cause === 'clear') {
@@ -888,6 +895,7 @@ export class OpenTuiSlashDispatcher {
                   // Approved commands are a one-time grant for this execution.
                   oneTimeShellAllowlist: new Set(approvedCommands),
                   existingInvocationItemId: invocationItemId,
+                  wasIdleBeforeDispatch,
                 });
               }
               case 'confirm_action': {
@@ -907,6 +915,7 @@ export class OpenTuiSlashDispatcher {
                 return await this.run(result.originalInvocation.raw, {
                   overwriteConfirmed: true,
                   existingInvocationItemId: invocationItemId,
+                  wasIdleBeforeDispatch,
                 });
               }
               case 'stream_messages': {

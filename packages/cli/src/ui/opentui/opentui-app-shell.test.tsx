@@ -56,6 +56,8 @@ import type { LoadedSettings } from '../../config/settings.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { OpenTuiDispatchOutcome } from './commands-dispatch.js';
+import { createOpenTuiCommandContext } from './commands-context.js';
+import type { OpenTuiAppHost } from './opentui-host.js';
 
 const mocks = vi.hoisted(() => {
   const state = {
@@ -936,6 +938,47 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.inputProps?.['streaming']).toBe(true);
     (mocks.state.inputProps?.['onInterrupt'] as () => void)();
     expect(onInterrupt).toHaveBeenCalled();
+  });
+
+  // A command's isIdleRef reads host.isStreaming() live, and the shell's
+  // mirror is its only writer: it must follow the prop, never the dispatch.
+  it('mirrors only the streaming prop onto the host a command reads', async () => {
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+    };
+    const view = render(<OpenTuiApp {...props} streaming={false} />);
+    await settle();
+    const rerender = (streaming: boolean) =>
+      act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={streaming} />);
+        await Promise.resolve();
+      });
+    const host = mocks.state.host as OpenTuiAppHost;
+
+    // The dispatcher samples idle, then marks itself processing.
+    const context = createOpenTuiCommandContext(
+      host,
+      { config: CONFIG, settings: SETTINGS, logger: null },
+      { wasIdleBeforeDispatch: host.isIdle() },
+    );
+    await act(async () => {
+      host.setIsProcessing(true);
+    });
+    expect(host.isIdle()).toBe(false);
+    expect(host.isStreaming()).toBe(false);
+    expect(context.ui.isIdleRef.current).toBe(true);
+
+    await rerender(true);
+    expect(host.isStreaming()).toBe(true);
+    expect(context.ui.isIdleRef.current).toBe(false);
+
+    await rerender(false);
+    expect(host.isStreaming()).toBe(false);
+    expect(context.ui.isIdleRef.current).toBe(true);
   });
 
   it('passes the follow-up suggestion and its dismiss through (U-7)', async () => {
