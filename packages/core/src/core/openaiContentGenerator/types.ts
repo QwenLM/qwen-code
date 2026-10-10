@@ -18,6 +18,7 @@ import type { OpenAICompatibleProvider } from './provider/index.js';
 import type { OpenAIResponseParsingOptions } from './responseParsingOptions.js';
 import type { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { TaggedThinkingParser } from './taggedThinkingParser.js';
+import type { TrailingThinkingTagFilter } from './trailing-thinking-tag-filter.js';
 
 export interface StreamingTextDeltaState {
   /**
@@ -90,6 +91,7 @@ export interface RequestContext {
    * reused across requests — stale state will silently corrupt text output.
    */
   textDeltaState?: StreamingTextDeltaState;
+  trailingThinkingTagFilter?: TrailingThinkingTagFilter;
   /**
    * Same as textDeltaState but for the reasoning/thinking content channel.
    * The two channels are tracked independently so interleaved chunks on each

@@ -52,6 +52,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final RuntimeBrokerHttpServer server;
     private final RuntimeRecoveryCoordinator recovery;
     private final WorkspaceRuntimeResolver workspaces;
+    private final ChildWorkspaceProvider childWorkspaces;
     private final Set<String> retired = ConcurrentHashMap.newKeySet();
 
     public EmbeddedRuntimeBroker(AgentStateStore store,
@@ -103,38 +104,56 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         this.workspaces = workspaceExecutionStore == null ? null
                 : new WorkspaceRuntimeResolver(store, workspaceExecutionStore, properties);
         WorkspaceRuntimeResolver workspaces = this.workspaces;
+        this.childWorkspaces = broker.isChildWorkspacesEnabled()
+                ? childWorkspaces(workspaces, broker) : null;
         RuntimeTransport transport = workspaces == null ? http
                 : new WorkspaceRuntimeTransport(http, workspaces, workspaceExecutionStore,
                         bindingRepository, sessionRepository);
         RuntimeProvisioner baseProvisioner = provisioner(broker, http);
         RuntimeProvisioner provisioner = workspaces == null ? baseProvisioner
                 : new WorkspaceRuntimeProvisioner(baseProvisioner, workspaces, workspaceExecutionStore);
-        HarnessSessionResolver resolver = sessionId -> {
-            SessionRecord session = store.findSessionById(sessionId)
-                    .orElse(null);
-            if (session == null) {
-                CompletableFuture<RuntimeScope> failed =
-                        new CompletableFuture<>();
-                failed.completeExceptionally(new IllegalArgumentException(
-                        "Session is not owned by this service"));
-                return failed;
+        HarnessSessionResolver resolver = new HarnessSessionResolver() {
+            @Override
+            public java.util.concurrent.CompletionStage<String> resolveTenant(String sessionId) {
+                return store.findSessionById(sessionId).map(session ->
+                        CompletableFuture.completedFuture(session.tenantId())).orElseGet(() ->
+                        CompletableFuture.failedFuture(new IllegalArgumentException("Session is not owned by this service")));
             }
-            if (session.workspace() != null) {
-                if (workspaces != null) {
-                    return CompletableFuture.completedFuture(workspaces.resolve(sessionId).scope());
+
+            @Override
+            public CompletionStage<RuntimeScope> resolve(String sessionId) {
+                return resolve(sessionId, null);
+            }
+
+            @Override
+            public CompletionStage<RuntimeScope> resolve(String sessionId,
+                    com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+                SessionRecord session = store.findSessionById(sessionId)
+                        .orElse(null);
+                if (session == null) {
+                    CompletableFuture<RuntimeScope> failed =
+                            new CompletableFuture<>();
+                    failed.completeExceptionally(new IllegalArgumentException(
+                            "Session is not owned by this service"));
+                    return failed;
                 }
-                return CompletableFuture.failedFuture(
-                        new RuntimeBrokerException(409,
-                                "workspace_unavailable",
-                                "Hosted Workspace execution is not available.",
-                                false));
+                if (session.workspace() != null) {
+                    if (workspaces != null) {
+                        return CompletableFuture.completedFuture(workspaces.resolve(sessionId, authority).scope());
+                    }
+                    return CompletableFuture.failedFuture(
+                            new RuntimeBrokerException(409,
+                                    "workspace_unavailable",
+                                    "Hosted Workspace execution is not available.",
+                                    false));
+                }
+                return CompletableFuture.completedFuture(new RuntimeScope(
+                        session.tenantId(), workspaceId,
+                        broker.getWorkspaceGeneration(),
+                        workspaceCwd,
+                        properties.getHarness().getCapabilityDigest(),
+                        broker.getIsolationClass()));
             }
-            return CompletableFuture.completedFuture(new RuntimeScope(
-                    session.tenantId(), workspaceId,
-                    broker.getWorkspaceGeneration(),
-                    workspaceCwd,
-                    properties.getHarness().getCapabilityDigest(),
-                    broker.getIsolationClass()));
         };
         ObjectMapper mapper = new ObjectMapper();
         RuntimePublicationVerifier verifier = publications == null || publicationData == null
@@ -233,6 +252,37 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     }
 
     @Override
+    public ChildWorkspaceProvider childWorkspaces() {
+        return childWorkspaces;
+    }
+
+    private static ChildWorkspaceProvider childWorkspaces(WorkspaceRuntimeResolver workspaces,
+            ManagedAgentProperties.RuntimeBroker broker) {
+        if (workspaces == null) {
+            throw new IllegalStateException("Child Workspaces require Workspace mounts");
+        }
+        ChildWorktreeGit git = new ChildWorktreeGit(broker.getChildWorkspaceGit(),
+                broker.getChildWorkspaceGitTimeout());
+        try {
+            LOG.info("Child Workspaces enabled with {}", git.requireSupportedVersion());
+        } catch (RuntimeException error) {
+            git.close();
+            throw error;
+        }
+        return new ChildWorkspaceProvider() {
+            @Override
+            public java.nio.file.Path storageRoot(ContextBinding binding) {
+                return workspaces.storageRoot(binding);
+            }
+
+            @Override
+            public ChildWorktreeGit git() {
+                return git;
+            }
+        };
+    }
+
+    @Override
     public void verifyWorkspaceCwdTarget(ContextBinding binding,
             String targetCwdRelative) {
         if (workspaces == null) {
@@ -253,12 +303,25 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         }
     }
 
+    /**
+     * The owned Runtime Broker Service, exposed for the child result relay
+     * and the close cascade's binding probe at registration time. The
+     * closing lifecycle stays with this Broker alone — the wiring uses
+     * {@code destroyMethod = ""} so Spring never closes it twice.
+     */
+    public RuntimeBrokerService service() {
+        return service;
+    }
+
     @Override
     public void close() {
         if (recovery != null) {
             recovery.close();
         }
         server.close();
+        if (childWorkspaces != null) {
+            childWorkspaces.git().close();
+        }
     }
 
     private static RuntimeProvisioner provisioner(

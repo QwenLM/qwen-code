@@ -206,7 +206,12 @@ public final class JdbcRuntimeBindingRepository
             RuntimeBindingRecord binding = selectById(connection,
                     candidate.getBindingId(), true);
             if (binding != null) {
-                requireHarnessAdmission(connection, binding.getRequest());
+                if (binding.getRequest().getStorageId() != null && storageFence(connection,
+                        binding.getRequest().getScope().getTenantId(), binding.getRequest().getStorageId()) != null) {
+                    throw new RuntimeBrokerException(409, "workspace_migrating", "Storage is under maintenance.", false);
+                }
+                requireHarnessAdmission(connection, candidate.getSession().getScope(), candidate.getSession().getHarnessSessionId(),
+                        candidate.getSession().getScope().getLifecycleAuthority());
             }
             RuntimeAdmission.requireReady(binding, candidate.getRuntimeGeneration());
             RuntimeScope scope = candidate.getSession().getScope();
@@ -285,7 +290,7 @@ public final class JdbcRuntimeBindingRepository
             lockPlacementDomain(connection, tenantId);
             try (PreparedStatement statement = connection.prepareStatement(
                     "INSERT INTO qwen_runtime_harness_drain (tenant_key, harness_key, tenant_id, harness_session_id) VALUES (?, ?, ?, ?)"
-                    + " ON DUPLICATE KEY UPDATE harness_session_id = harness_session_id")) {
+                    + " ON DUPLICATE KEY UPDATE phase = 'DRAINING', claim_lease_until = NULL")) {
                 statement.setString(1, JdbcRepositorySupport.valueKey(tenantId));
                 statement.setString(2, JdbcRepositorySupport.valueKey(harnessSessionId));
                 statement.setString(3, tenantId);
@@ -296,8 +301,26 @@ public final class JdbcRuntimeBindingRepository
         });
     }
 
+    public static String harnessDrainKey(String value) {
+        return JdbcRepositorySupport.valueKey(value);
+    }
+
     @Override
     public boolean isHarnessDraining(String tenantId, String harnessSessionId) {
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            try (PreparedStatement statement = connection.prepareStatement("SELECT phase FROM qwen_runtime_harness_drain"
+                    + " WHERE tenant_key = ? AND harness_key = ?")) {
+                statement.setString(1, JdbcRepositorySupport.valueKey(tenantId));
+                statement.setString(2, JdbcRepositorySupport.valueKey(harnessSessionId));
+                try (ResultSet row = statement.executeQuery()) {
+                    return row.next() && "DRAINING".equals(row.getString(1));
+                }
+            }
+        });
+    }
+
+    @Override
+    public boolean isHarnessAdmissionClosed(String tenantId, String harnessSessionId) {
         return JdbcRepositorySupport.read(dataSource, connection -> hasHarnessDrain(connection, tenantId, harnessSessionId));
     }
 
@@ -322,10 +345,172 @@ public final class JdbcRuntimeBindingRepository
 
     private static void requireHarnessAdmission(Connection connection, RuntimeProvisionRequest request)
             throws SQLException {
-        if ("session".equals(request.getScope().getIsolationClass())
-                && hasHarnessDrain(connection, request.getScope().getTenantId(), request.getIsolationKey())) {
-            throw new RuntimeBrokerException(409, "runtime_admission_closed", "Session is draining.", false);
+        if (request.getStorageId() != null && storageFence(connection,
+                request.getScope().getTenantId(), request.getStorageId()) != null) {
+            throw new RuntimeBrokerException(409, "workspace_migrating", "Storage is under maintenance.", false);
         }
+        requireHarnessAdmission(connection, request.getScope(), request.getIsolationKey(),
+                request.getScope().getLifecycleAuthority());
+    }
+
+    @Override
+    public void requireHarnessAdmission(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        JdbcRepositorySupport.transaction(dataSource, connection -> {
+            lockPlacementDomain(connection, scope.getTenantId());
+            requireHarnessAdmission(connection, scope, harnessSessionId, authority);
+            return null;
+        });
+    }
+
+    @Override
+    public void requireHookAdmission(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        JdbcRepositorySupport.transaction(dataSource, connection -> {
+            lockPlacementDomain(connection, scope.getTenantId());
+            requireHarnessAdmission(connection, scope, harnessSessionId, authority, true);
+            return null;
+        });
+    }
+
+    public static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
+            String harnessSessionId, RuntimeLifecycleAuthority authority) throws SQLException {
+        requireHarnessAdmission(connection, scope, harnessSessionId, authority, false);
+    }
+
+    private static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
+            String harnessSessionId, RuntimeLifecycleAuthority authority, boolean legacyHook) throws SQLException {
+        if (!"session".equals(scope.getIsolationClass())) {
+            if (authority != null) {
+                throw admissionClosed();
+            }
+            return;
+        }
+        try (PreparedStatement statement = connection.prepareStatement("SELECT tenant_id, harness_session_id, phase,"
+                + " operation_id, claim_generation, claim_lease_until FROM qwen_runtime_harness_drain"
+                + " WHERE tenant_key = ? AND harness_key = ?")) {
+            statement.setString(1, JdbcRepositorySupport.valueKey(scope.getTenantId()));
+            statement.setString(2, JdbcRepositorySupport.valueKey(harnessSessionId));
+            try (ResultSet row = statement.executeQuery()) {
+                if (!row.next()) {
+                    if (authority != null) {
+                        throw admissionClosed();
+                    }
+                    return;
+                }
+                if (!scope.getTenantId().equals(row.getString("tenant_id"))
+                        || !harnessSessionId.equals(row.getString("harness_session_id"))) {
+                    throw admissionClosed();
+                }
+                if (legacyHook && authority == null && "DRAINING".equals(row.getString("phase"))
+                        && row.getString("operation_id") == null) {
+                    return;
+                }
+                if (authority == null || !"LIFECYCLE_ONLY".equals(row.getString("phase"))
+                        || !authority.operationId().equals(row.getString("operation_id"))
+                        || authority.claimGeneration() != row.getLong("claim_generation")
+                        || row.getLong("claim_lease_until") <= JdbcRepositorySupport.databaseNowPrecise(connection).toEpochMilli()) {
+                    throw admissionClosed();
+                }
+            }
+        }
+    }
+
+    public static void beginHarnessLifecycle(Connection connection, String tenantId, String sessionId, String operationId)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("INSERT INTO qwen_runtime_harness_drain"
+                + " (tenant_key, harness_key, tenant_id, harness_session_id, phase, operation_id)"
+                + " VALUES (?, ?, ?, ?, 'LIFECYCLE_ONLY', ?)")) {
+            statement.setString(1, JdbcRepositorySupport.valueKey(tenantId));
+            statement.setString(2, JdbcRepositorySupport.valueKey(sessionId));
+            statement.setString(3, tenantId);
+            statement.setString(4, sessionId);
+            statement.setString(5, operationId);
+            statement.executeUpdate();
+        }
+    }
+
+    private static RuntimeBrokerException admissionClosed() {
+        return new RuntimeBrokerException(409, "runtime_admission_closed", "Session admission is closed", false);
+    }
+
+    @Override
+    public void requestStorageFence(String tenantId, String storageId, String operationId) {
+        BrokerValues.requireId(tenantId, "tenantId");
+        BrokerValues.requireId(storageId, "storageId");
+        BrokerValues.requireId(operationId, "operationId");
+        JdbcRepositorySupport.transaction(dataSource, connection -> {
+            lockPlacementDomain(connection, tenantId);
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "INSERT INTO qwen_runtime_storage_fence (tenant_key, storage_key, tenant_id, storage_id, operation_id)"
+                    + " VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE operation_id = operation_id")) {
+                statement.setString(1, storageFenceKey(tenantId));
+                statement.setString(2, storageFenceKey(storageId));
+                statement.setString(3, tenantId);
+                statement.setString(4, storageId);
+                statement.setString(5, operationId);
+                statement.executeUpdate();
+            }
+            if (!operationId.equals(storageFence(connection, tenantId, storageId))) {
+                throw new RuntimeBrokerException(409, "migration_conflict", "Storage migration is already owned.", false);
+            }
+            return null;
+        });
+    }
+
+    @Override
+    public boolean isStorageFenced(String tenantId, String storageId, String operationId) {
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            String owner = storageFence(connection, tenantId, storageId);
+            return owner != null && (operationId == null || operationId.equals(owner));
+        });
+    }
+
+    public static String storageFenceKey(String value) {
+        return JdbcRepositorySupport.valueKey(value);
+    }
+
+    private static String storageFence(Connection connection, String tenantId, String storageId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT tenant_id, storage_id, operation_id"
+                + " FROM qwen_runtime_storage_fence WHERE tenant_key = ? AND storage_key = ?")) {
+            statement.setString(1, storageFenceKey(tenantId));
+            statement.setString(2, storageFenceKey(storageId));
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) {
+                    return null;
+                }
+                if (!tenantId.equals(rows.getString("tenant_id")) || !storageId.equals(rows.getString("storage_id"))) {
+                    throw new IllegalStateException("Storage fence hash collision");
+                }
+                return rows.getString("operation_id");
+            }
+        }
+    }
+
+    @Override
+    public List<RuntimeBindingRecord> findByStorage(String tenantId, String storageId, String afterBindingId, int limit) {
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Storage batch must contain 1-100 bindings");
+        }
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            List<RuntimeBindingRecord> values = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement("SELECT " + BINDING_COLUMNS
+                    + " FROM qwen_runtime_binding WHERE tenant_id = ? AND storage_id = ?"
+                    + " AND CAST(tenant_id AS BINARY(2048)) = CAST(? AS BINARY(2048))"
+                    + " AND CAST(storage_id AS BINARY(2048)) = CAST(? AS BINARY(2048))"
+                    + " AND binding_id > ? ORDER BY binding_id LIMIT ?")) {
+                statement.setString(1, tenantId);
+                statement.setString(2, storageId);
+                statement.setString(3, tenantId);
+                statement.setString(4, storageId);
+                statement.setString(5, afterBindingId == null ? "" : afterBindingId);
+                statement.setInt(6, limit);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        values.add(mapBinding(rows));
+                    }
+                }
+            }
+            return List.copyOf(values);
+        });
     }
 
     @Override
@@ -355,6 +540,45 @@ public final class JdbcRuntimeBindingRepository
             }
             return List.copyOf(result);
         });
+    }
+
+    @Override
+    public void verifyHarnessStopped(Connection connection, String tenantId, String harnessSessionId) throws SQLException {
+        lockPlacementDomain(connection, tenantId);
+        try (PreparedStatement fence = connection.prepareStatement("SELECT tenant_id, harness_session_id, phase"
+                + " FROM qwen_runtime_harness_drain WHERE tenant_key = ? AND harness_key = ? FOR UPDATE")) {
+            fence.setString(1, JdbcRepositorySupport.valueKey(tenantId));
+            fence.setString(2, JdbcRepositorySupport.valueKey(harnessSessionId));
+            try (ResultSet row = fence.executeQuery()) {
+                if (!row.next() || !tenantId.equals(row.getString(1)) || !harnessSessionId.equals(row.getString(2))
+                        || !"DRAINING".equals(row.getString(3))) {
+                    throw admissionClosed();
+                }
+            }
+        }
+        try (PreparedStatement statement = connection.prepareStatement("SELECT " + BINDING_COLUMNS
+                + " FROM qwen_runtime_binding WHERE tenant_id = ? AND isolation_class = 'session'"
+                + " AND isolation_key = ? ORDER BY binding_id FOR UPDATE")) {
+            statement.setString(1, tenantId);
+            statement.setString(2, harnessSessionId);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    RuntimeBindingRecord record = mapBinding(rows);
+                    if (!tenantId.equals(record.getRequest().getScope().getTenantId())
+                            || !harnessSessionId.equals(record.getRequest().getIsolationKey())) {
+                        continue;
+                    }
+                    if (record.getState() != RuntimeBindingRecord.State.RELEASED
+                            || record.getDrainReceipt() == null && !record.hasStoppedWriters()) {
+                        throw new RuntimeBrokerException(409, "workspace_close_identity_unverified", "Original stop proof is missing", false);
+                    }
+                    if (JdbcRuntimeSessionRepository.hasActiveByBinding(connection, record)
+                            || JdbcToolExecutionRepository.hasActiveByBinding(connection, record.getBindingId(), record.getGeneration())) {
+                        throw new RuntimeBrokerException(409, "workspace_close_execution_unsettled", "Original resources remain active", false);
+                    }
+                }
+            }
+        }
     }
 
     @Override
@@ -403,6 +627,9 @@ public final class JdbcRuntimeBindingRepository
                 return active;
             }
 
+            if (request.getScope().getLifecycleAuthority() != null && slot.lastGeneration != 0) {
+                throw new RuntimeBrokerException(409, "workspace_close_identity_unverified", "Lifecycle cannot replace an original Runtime", false);
+            }
             requireRecoverablePlacement(connection, request);
             long generation = slot.lastGeneration + 1;
             String bindingId = BrokerValues.requireId(idSupplier.get(),

@@ -20,10 +20,14 @@ import org.springframework.beans.factory.annotation.Autowired;
 
 /**
  * Admits the durable close, archive and delete operations and reads them
- * back. {@link SessionLifecycleCoordinator} delivers a close or a delete.
+ * back, with every other operation kind the shared table holds.
+ * {@link SessionLifecycleCoordinator} delivers a close or a delete;
+ * {@link TaskCancelCoordinator} a task cancel.
  */
 @Service
 public class SessionLifecycleService {
+    static final String LIFECYCLE_TOOL_PROFILE = "hosted-workspace-files/1";
+
     // The command names that archive and delete digests used before V17, so
     // a retry of an operation that V17 migrated still matches.
     private static final Map<OperationKind, String> DIGEST_NAMES = Map.of(
@@ -190,6 +194,18 @@ public class SessionLifecycleService {
         };
     }
 
+    // Protocol 1 settles through the Harness `/lifecycle` route and its
+    // effects receipt, both of which accept only the Files profile; any
+    // other Workspace profile (the Shell lane, and with it every H4b
+    // parent) keeps the protocol-0 close, whose child cascade runs under
+    // ordinary authorization.
+    static boolean usesLifecycleProtocol(SessionRecord session,
+            OperationKind kind) {
+        return "ACTIVE".equals(session.status())
+                && (kind == OperationKind.CLOSE || kind == OperationKind.DELETE)
+                && LIFECYCLE_TOOL_PROFILE.equals(session.toolProfile());
+    }
+
     private OperationAdmission admit(String tenantId, String actorId,
             String idempotencyKey, String sessionId, OperationKind kind) {
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);
@@ -198,8 +214,11 @@ public class SessionLifecycleService {
         String digest = sessions.lifecycleDigest(sessionId, DIGEST_NAMES.get(kind));
         OperationAdmission admission;
         if (session.workspace() != null) {
+            boolean activeLifecycle = usesLifecycleProtocol(session, kind);
             admission = store.beginWorkspaceLifecycle(tenantId, sessionId, kind, actorId, actorDigest(actorId),
-                    idempotencyKey, digest, kind == OperationKind.CLOSE && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose());
+                    idempotencyKey, digest, activeLifecycle ? coordinator.supportsWorkspaceLifecycle()
+                            : kind == OperationKind.CLOSE && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose(),
+                    activeLifecycle ? 1 : 0);
         } else {
             sessions.requireLegacyWorkspace(tenantId, actorId, sessionId);
             admission = store.beginOperation(tenantId, sessionId, kind, actorDigest(actorId), idempotencyKey, digest);
@@ -242,7 +261,7 @@ public class SessionLifecycleService {
                 operation.sessionId(), lower(operation.kind().name()),
                 lower(operation.state()), lower(operation.admissionStage()),
                 lower(operation.deliveryState()), operation.receiptId(),
-                replayed, null, operation.failureCode());
+                replayed, null, operation.failureCode(), operation.taskId());
     }
 
     public WebShellCommandOperation webShellOperation(OperationRecord operation, boolean replayed) {
@@ -253,7 +272,7 @@ public class SessionLifecycleService {
                 operation.sessionId(), lower(operation.kind().name()),
                 lower(operation.state()), lower(operation.admissionStage()),
                 lower(operation.deliveryState()), operation.receiptId(),
-                replayed, null, operation.failureCode());
+                replayed, null, operation.failureCode(), operation.taskId());
     }
 
     private static String lower(String value) {

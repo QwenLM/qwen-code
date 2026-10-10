@@ -61,9 +61,27 @@ final class WorkspaceRuntimeResolver {
     }
 
     Resolved resolve(String sessionId) {
+        return resolve(sessionId, null);
+    }
+
+    Resolved resolve(String sessionId, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycle) {
+        return resolve(sessionId, lifecycle, false);
+    }
+
+    Resolved resolveHook(String sessionId, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycle) {
+        return resolve(sessionId, lifecycle, true);
+    }
+
+    private Resolved resolve(String sessionId, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycle, boolean hook) {
         SessionRecord session = sessions.findSessionById(sessionId)
                 .orElseThrow(WorkspaceExecutionStore::unavailable);
-        authority.authorize(session);
+        if (lifecycle == null && hook && "CLOSING".equals(session.status())) {
+            authority.authorizeLegacyClose(session);
+        } else if (lifecycle == null) {
+            authority.authorize(session);
+        } else {
+            authority.authorizeLifecycle(session, lifecycle);
+        }
         ContextBinding binding = session.workspace();
         Mount mount = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
         if (mount == null) {
@@ -72,7 +90,7 @@ final class WorkspaceRuntimeResolver {
         verifyMountIntact(mount);
         return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
                 Long.toString(binding.getWorkspaceGeneration()), mount.root().toString(),
-                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session"));
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session").withLifecycleAuthority(lifecycle));
     }
 
     /**
@@ -106,6 +124,20 @@ final class WorkspaceRuntimeResolver {
                 .WorkspaceException error) {
             throw WorkspaceExecutionStore.unavailable();
         }
+    }
+
+    /**
+     * The child Workspace provider's storage root (#13753 I1): the
+     * administrator mount of the binding's storage, held to the same
+     * continuity check as an acquisition.
+     */
+    java.nio.file.Path storageRoot(ContextBinding binding) {
+        Mount mount = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
+        if (mount == null) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        verifyMountIntact(mount);
+        return mount.root();
     }
 
     // The acquire-path mount check: every I/O anomaly is the terminal

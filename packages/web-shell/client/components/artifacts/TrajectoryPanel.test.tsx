@@ -19,6 +19,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
 import { TrajectoryPanel } from './TrajectoryPanel';
+import styles from './TrajectoryPanel.module.css';
 import type {
   TrajectoryPageLoader,
   TrajectoryPageResult,
@@ -474,6 +475,28 @@ describe('TrajectoryPanel', () => {
     ).not.toContain('7.8s');
   });
 
+  it.each(['cancelled', 'canceled'])('mutes a %s tool row', async (status) => {
+    const container = await render(async () =>
+      page([
+        {
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'cancel-call',
+            title: 'Cancelled operation',
+            status,
+          },
+        } as unknown as DaemonEvent,
+      ]),
+    );
+    const badge = container.querySelector(
+      '[data-testid="trajectory-row-tool"] .' + styles.badge,
+    )!;
+    expect(badge).not.toBeNull();
+    expect(badge.classList.contains(styles.toneMuted)).toBe(true);
+  });
+
   it('marks a failed request', async () => {
     const container = await render(async () =>
       page([
@@ -551,9 +574,9 @@ describe('TrajectoryPanel', () => {
   it('renders an empty session without a grid', async () => {
     const container = await render(async () => page([]));
 
-    expect(text(container.querySelector('[role="status"]'))).toContain(
-      'No records',
-    );
+    expect(
+      text(container.querySelector(`.${styles.placeholder}[role="status"]`)),
+    ).toContain('No records');
     expect(container.querySelector('[role="grid"]')).toBeNull();
   });
 
@@ -1154,16 +1177,16 @@ describe('TrajectoryPanel', () => {
     expect(container.textContent).not.toContain('shell_output');
   });
 
-  it('says the page left history out, outside the scrolled rows', async () => {
+  it('explains a missing history cursor outside the scrolled rows', async () => {
     const container = await render(async () =>
       page(REAL_EVENTS, { hasMore: true }),
     );
     const scroll = container.querySelector('[role="grid"]') as HTMLElement;
     const notice = container.querySelector(
-      '[data-testid="trajectory-truncated"]',
+      '[data-testid="trajectory-older-failed"]',
     );
 
-    expect(text(notice)).toContain('most recent records');
+    expect(text(notice)).toContain('page cursor did not advance');
     // Inside the scrolled box its height would offset every virtual row from
     // the coordinates the virtualizer hands out.
     expect(scroll.contains(notice)).toBe(false);
@@ -1296,16 +1319,16 @@ describe('TrajectoryPanel', () => {
     });
 
     it('does not start a second walk while one is under way', async () => {
-      let releaseNewest: ((value: TrajectoryPageResult) => void) | undefined;
+      let releaseOlder: ((value: TrajectoryPageResult) => void) | undefined;
       let reads = 0;
       const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
         reads += 1;
-        if (cursor) throw new Error('down');
-        if (reads === 1) {
+        if (cursor && reads === 2) throw new Error('down');
+        if (!cursor) {
           return page(prompts('newer', 1), { hasMore: true, nextCursor: 'c1' });
         }
         return new Promise<TrajectoryPageResult>((resolve) => {
-          releaseNewest = resolve;
+          releaseOlder = resolve;
         });
       });
       const container = await render(loadPage);
@@ -1326,7 +1349,7 @@ describe('TrajectoryPanel', () => {
       expect(loadPage.mock.calls.length).toBe(during);
 
       await act(async () => {
-        releaseNewest?.(page(prompts('newer', 1)));
+        releaseOlder?.(page(prompts('newer', 1)));
       });
     });
   });
@@ -1589,3 +1612,576 @@ describe('collapsible trajectory', () => {
     expect(fold(container).getAttribute('aria-expanded')).toBe('true');
   });
 });
+
+describe('trajectory diagnostic filters', () => {
+  const events = () => [
+    userText('Check configuration', 'search-user'),
+    timingFrame(
+      {
+        kind: 'request',
+        durationMs: 1000,
+        startedAt: 1760000000000,
+        model: 'qwen-search',
+        status: 'ok',
+      },
+      'search-request',
+    ),
+    toolCall('search-call', 'read_file', 'Unique needle', 'search-tool'),
+    toolCall('other-call', 'run_shell', 'Another operation', 'other-tool'),
+  ];
+  const inputOf = (container: HTMLElement) =>
+    container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  const typeQuery = async (container: HTMLElement, value: string) => {
+    const input = inputOf(container);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  };
+  const button = (container: HTMLElement, name: string) =>
+    Array.from(container.querySelectorAll('button')).find(
+      (element) => element.textContent === name,
+    )!;
+  const fold = (container: HTMLElement) =>
+    container.querySelector<HTMLButtonElement>(
+      '[data-testid="trajectory-row-request"] button',
+    )!;
+
+  it('does not report results or navigate when no diagnostic filter is applied', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () => fold(container).click());
+    const filters = container.querySelector('[data-trajectory-filters]')!;
+    expect(filters.textContent).not.toContain('matching records');
+    expect(button(container, 'Next').disabled).toBe(true);
+    expect(button(container, 'Previous').disabled).toBe(true);
+    const input = inputOf(container);
+    await act(async () => {
+      button(container, 'Next').click();
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+    await typeQuery(container, 'needle');
+    await act(async () => button(container, 'Clear filters').click());
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+    expect(filters.textContent).not.toContain('Result');
+  });
+
+  it('does not offer folding when a matching request has no visible descendants', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () => fold(container).click());
+    await typeQuery(container, 'qwen-search');
+    const request = container.querySelector(
+      '[data-testid="trajectory-row-request"]',
+    )!;
+    expect(request.textContent).not.toContain('0 records collapsed');
+    expect(request.querySelector('button')).toBeNull();
+    await act(async () => button(container, 'Clear filters').click());
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it.each(['ArrowLeft', 'ArrowRight'])(
+    'ignores %s on a matching request without visible descendants',
+    async (key) => {
+      const container = await render(async () => page(events()));
+      const initiallyCollapsed = key === 'ArrowRight';
+      if (initiallyCollapsed) await act(async () => fold(container).click());
+      await typeQuery(container, 'qwen-search');
+      const request = container.querySelector<HTMLElement>(
+        '[data-testid="trajectory-row-request"]',
+      )!;
+      expect(request.querySelector('button')).toBeNull();
+      await act(async () => request.click());
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      await act(async () =>
+        container.querySelector('[role="grid"]')!.dispatchEvent(event),
+      );
+      expect(event.defaultPrevented).toBe(false);
+      await act(async () => button(container, 'Clear filters').click());
+      expect(fold(container).getAttribute('aria-expanded')).toBe(
+        String(!initiallyCollapsed),
+      );
+    },
+  );
+
+  it('drops temporary folds when the query changes directly', async () => {
+    const container = await render(async () => page(events()));
+    await typeQuery(container, 'needle');
+    await act(async () => fold(container).click());
+    await typeQuery(container, 'Unique');
+    expect(
+      container.querySelector('[data-testid="trajectory-range-status"]')
+        ?.textContent,
+    ).toContain('including context');
+    expect(fold(container).getAttribute('aria-expanded')).toBe('true');
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(1);
+    await act(async () => button(container, 'Clear filters').click());
+    expect(
+      container.querySelector('[data-testid="trajectory-range-status"]'),
+    ).toBeNull();
+  });
+
+  it('clears filters from the inspector notice and retains the selected tool', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-tool"]')!
+        .click(),
+    );
+    await act(async () => button(container, 'View details').click());
+    await typeQuery(container, 'qwen-search');
+    const inspector = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-inspector"]',
+    )!;
+    expect(inspector.textContent).toContain('Unique needle');
+    await act(async () => button(inspector, 'Clear filters').click());
+    expect(inputOf(container).value).toBe('');
+    expect(inspector.textContent).toContain('Unique needle');
+    expect(inspector.textContent).not.toContain('does not match');
+    expect(
+      container.querySelector(
+        '[data-testid="trajectory-row-tool"][data-selected="true"]',
+      )?.textContent,
+    ).toContain('Unique needle');
+  });
+
+  it('wraps two direct matches and retains manual folds in the same query', async () => {
+    const container = await render(async () =>
+      page([
+        ...events(),
+        userText('Second turn', 'search-user-2'),
+        timingFrame(
+          {
+            kind: 'request',
+            durationMs: 500,
+            model: 'qwen-second',
+            status: 'ok',
+          },
+          'search-request-2',
+        ),
+        toolCall(
+          'search-call-2',
+          'read_file',
+          'Second needle',
+          'search-tool-2',
+        ),
+      ]),
+    );
+    await typeQuery(container, 'needle');
+    await act(async () => button(container, 'Next').click());
+    expect(container.textContent).toContain('Result 1 / 2');
+    await act(async () => fold(container).click());
+    await act(async () => button(container, 'Next').click());
+    expect(container.textContent).toContain('Result 2 / 2');
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+    await act(async () => button(container, 'Next').click());
+    expect(container.textContent).toContain('Result 1 / 2');
+    expect(fold(container).getAttribute('aria-expanded')).toBe('true');
+    await act(async () => button(container, 'Previous').click());
+    expect(container.textContent).toContain('Result 2 / 2');
+  });
+
+  it('keeps a coverage slot mounted when refresh crosses the body budget', async () => {
+    let large = false;
+    const container = await render(async () =>
+      page([
+        userText(large ? 'x'.repeat(8193) : 'short', 'coverage-user'),
+        ...events(),
+      ]),
+    );
+    const filters = container.querySelector('[data-trajectory-filters]')!;
+    const children = filters.children.length;
+    expect(filters.textContent).not.toContain('excluded from search');
+    large = true;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(filters.children.length).toBe(children);
+    expect(filters.textContent).toContain('excluded from search (1 record)');
+  });
+
+  it('keeps request context, restores base folding and does not resurrect temporary overrides', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () => fold(container).click());
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(0);
+    await typeQuery(container, 'needle');
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(1);
+    expect(
+      container
+        .querySelector('[data-testid="trajectory-row-request"]')
+        ?.getAttribute('data-context'),
+    ).toBe('true');
+    expect(container.textContent).toContain('1 matching record');
+    await act(async () => fold(container).click());
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(0);
+    expect(container.textContent).toContain('1 matching record');
+    await act(async () => button(container, 'Clear filters').click());
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+    await typeQuery(container, 'needle');
+    expect(fold(container).getAttribute('aria-expanded')).toBe('true');
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(1);
+  });
+
+  it('keeps hidden inspector identity and copy content, then reveals from overview', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-tool"]')!
+        .click(),
+    );
+    await act(async () => button(container, 'View details').click());
+    const inspector = () =>
+      container.querySelector('[data-testid="trajectory-inspector"]')!;
+    await typeQuery(container, 'qwen-search');
+    expect(inspector().textContent).toContain('Unique needle');
+    expect(inspector().textContent).toContain(
+      'This record does not match the current filters.',
+    );
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(0);
+    const span = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-span"][data-row-key="req:search-request"]',
+    )!;
+    expect(span).not.toBeNull();
+    // The request is itself a match, so selecting it preserves the query.
+    await act(async () => {
+      span.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 0 }),
+      );
+      span.dispatchEvent(
+        new MouseEvent('pointerup', { bubbles: true, button: 0, clientX: 0 }),
+      );
+    });
+    expect(inputOf(container).value).toBe('qwen-search');
+    await act(async () => button(container, 'Clear filters').click());
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(2);
+  });
+
+  it('navigates only direct matches, retains input focus and expands temporarily folded hits', async () => {
+    const container = await render(async () => page(events()));
+    await typeQuery(container, 'needle');
+    await act(async () => fold(container).click());
+    const input = inputOf(container);
+    input.focus();
+    await act(async () =>
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      ),
+    );
+    expect(document.activeElement).toBe(input);
+    expect(
+      container.querySelector(
+        '[data-testid="trajectory-row-tool"][data-selected="true"]',
+      )?.textContent,
+    ).toContain('Unique needle');
+    expect(
+      container
+        .querySelector('[data-testid="trajectory-row-request"]')
+        ?.getAttribute('data-selected'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]'),
+    ).toBeNull();
+    expect(container.textContent).toContain('Result 1 / 1');
+    await typeQuery(container, 'no such text');
+    expect(
+      container.querySelector('[data-testid="trajectory-filter-empty"]'),
+    ).not.toBeNull();
+    expect(button(container, 'Next').disabled).toBe(true);
+  });
+
+  it('preserves filters across refresh and clears them immediately on loader change', async () => {
+    let fail = false;
+    const container = await render(async () =>
+      fail ? page([], { replayError: 'offline' }) : page(events()),
+    );
+    await typeQuery(container, 'needle');
+    fail = true;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(inputOf(container).value).toBe('needle');
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(1);
+    fail = false;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(inputOf(container).value).toBe('needle');
+    await act(async () =>
+      mounted.at(-1)!.root.render(
+        <I18nProvider language="en">
+          <TrajectoryPanel loadPage={async () => page(events())} />
+        </I18nProvider>,
+      ),
+    );
+    expect(inputOf(container).value).toBe('');
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(2);
+  });
+});
+
+it('reveals a request when its independent filter and time contexts have an empty intersection', async () => {
+  const container = await render(async () =>
+    page([
+      userText('Inspect', 'intersection-user'),
+      timingFrame(
+        {
+          kind: 'request',
+          durationMs: 1000,
+          startedAt: 1760000000000,
+          model: 'intersection-model',
+          status: 'ok',
+        },
+        'intersection-request',
+      ),
+      toolCall(
+        'intersection-call',
+        'read_file',
+        'intersection-needle',
+        'intersection-tool',
+      ),
+      timingFrame(
+        {
+          kind: 'tool',
+          durationMs: 1000,
+          startedAt: 1760000002000,
+          callId: 'intersection-call',
+          toolName: 'read_file',
+          toolStatus: 'success',
+        },
+        'intersection-timing',
+      ),
+    ]),
+  );
+  await act(async () =>
+    container
+      .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
+      .click(),
+  );
+  await act(async () =>
+    [...container.querySelectorAll('button')]
+      .find((button) => button.textContent === 'View details')!
+      .click(),
+  );
+  const input = container.querySelector<HTMLInputElement>(
+    'input[type="search"]',
+  )!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'intersection-needle');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const plot = container.querySelector<HTMLElement>(
+    '[data-testid="trajectory-plot"]',
+  )!;
+  const rect = vi
+    .spyOn(plot, 'getBoundingClientRect')
+    .mockReturnValue({ left: 0, right: 1000, width: 1000 } as DOMRect);
+  await act(async () => {
+    plot.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 100 }),
+    );
+    plot.dispatchEvent(
+      new MouseEvent('pointermove', { bubbles: true, clientX: 400 }),
+    );
+    plot.dispatchEvent(
+      new MouseEvent('pointerup', { bubbles: true, button: 0, clientX: 400 }),
+    );
+  });
+  expect(
+    container.querySelector('[data-testid="trajectory-filter-empty"]'),
+  ).not.toBeNull();
+  expect(
+    container.querySelector('[data-trajectory-filters]')?.textContent,
+  ).toContain('0 matching records');
+  expect(
+    [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Next',
+    )?.disabled,
+  ).toBe(true);
+  const inspector = container.querySelector(
+    '[data-testid="trajectory-inspector"]',
+  )!;
+  expect(inspector.textContent).toContain('does not match the current filters');
+  expect(inspector.textContent).not.toContain('outside the selected time');
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'intersection');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  expect(
+    container.querySelector('[data-trajectory-filters] [role="status"]')
+      ?.textContent,
+  ).toBe('Result 1 / 1');
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'intersection-needle');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const span = container.querySelector<HTMLElement>(
+    '[data-testid="trajectory-span"][data-row-key="req:intersection-request"]',
+  )!;
+  await act(async () => {
+    span.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 100 }),
+    );
+    span.dispatchEvent(
+      new MouseEvent('pointerup', { bubbles: true, button: 0, clientX: 100 }),
+    );
+  });
+  expect(input.value).toBe('');
+  expect(
+    container.querySelector(
+      '[data-testid="trajectory-row-request"][data-selected="true"]',
+    ),
+  ).not.toBeNull();
+  expect(
+    container.querySelector('[data-testid="trajectory-range-status"]'),
+  ).not.toBeNull();
+  rect.mockRestore();
+});
+
+it('retains filters when overview reveals a context request hidden only by a collapsed turn', async () => {
+  const container = await render(async () =>
+    page([
+      userText('Inspect', 'context-user'),
+      timingFrame(
+        {
+          kind: 'request',
+          durationMs: 1000,
+          startedAt: 1760000000000,
+          model: 'context-model',
+          status: 'ok',
+        },
+        'context-request',
+      ),
+      toolCall(
+        'context-call',
+        'Only child matches',
+        'Only child matches',
+        'context-tool',
+      ),
+    ]),
+  );
+  const input = container.querySelector<HTMLInputElement>(
+    'input[type="search"]',
+  )!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'Only child matches');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="trajectory-turn"] button',
+      )!
+      .click(),
+  );
+  expect(
+    container.querySelector('[data-testid="trajectory-row-request"]'),
+  ).toBeNull();
+  const span = container.querySelector<HTMLElement>(
+    '[data-testid="trajectory-span"][data-row-key="req:context-request"]',
+  )!;
+  await act(async () => {
+    span.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 0 }),
+    );
+    span.dispatchEvent(
+      new MouseEvent('pointerup', { bubbles: true, button: 0, clientX: 0 }),
+    );
+  });
+  expect(input.value).toBe('Only child matches');
+  expect(
+    container.querySelector(
+      '[data-testid="trajectory-row-request"][data-selected="true"]',
+    ),
+  ).not.toBeNull();
+});
+
+it.each([false, true])(
+  'retries the failed cursor when the initial prefix has no visible rows (filtered=%s)',
+  async (filtered) => {
+    let olderFails = true;
+    const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+      if (!cursor) {
+        return page(filtered ? REAL_EVENTS : [], {
+          hasMore: true,
+          nextCursor: 'c1',
+        });
+      }
+      if (olderFails) throw new Error('socket hang up');
+      return page([userText('Recovered older row', 'recovered-row')]);
+    });
+    const container = await render(loadPage);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    );
+    if (filtered) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(input, 'no-such-trajectory-text');
+        input!.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    }
+    expect(container.querySelector('[role="grid"]')).toBeNull();
+    const retry = container.querySelector<HTMLButtonElement>(
+      '[data-testid="trajectory-older-retry"]',
+    )!;
+    expect(retry).not.toBeNull();
+    expect(retry.getAttribute('aria-disabled')).toBe('false');
+    olderFails = false;
+    await act(async () => retry.click());
+    expect(loadPage.mock.calls.map(([request]) => request.cursor)).toEqual([
+      undefined,
+      'c1',
+      'c1',
+    ]);
+    expect(
+      container.querySelector('[data-testid="trajectory-older-retry"]'),
+    ).toBeNull();
+    if (filtered) expect(input!.value).toBe('no-such-trajectory-text');
+    else expect(container.querySelector('[role="grid"]')).not.toBeNull();
+  },
+);

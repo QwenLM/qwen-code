@@ -6,8 +6,11 @@ import java.util.Map;
 import org.springframework.http.HttpStatus;
 
 /**
- * A replay cursor below the Session's replay floor. JSON reads answer it with
- * {@code 409 cursor_expired}; streams send one resync frame instead.
+ * A replay cursor below the Session's replay floor while the Snapshot backs
+ * the floor; a stream reconciliation discards the Snapshot without lowering
+ * the floor, and during the rebuild such a cursor is still served. JSON reads
+ * answer it with {@code 409 cursor_expired}; streams send one resync frame
+ * instead.
  */
 public final class ReplayCursorExpired extends ApiException {
     private final transient ReplayWindow window;
