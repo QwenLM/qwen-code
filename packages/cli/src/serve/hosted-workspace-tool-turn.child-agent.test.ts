@@ -27,6 +27,7 @@ import { HostedHookSession } from './hosted-hook-session.js';
 import {
   HostedWorkspaceToolTurn,
   HOSTED_AGENT_TOOL,
+  HOSTED_CHILD_MOUNT_REFUSALS,
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
@@ -648,7 +649,7 @@ it('refuses a background agent while the Session owner holds the mount', async (
     }),
   )) as Part[];
   expect(JSON.stringify(responses)).toContain(
-    'Hook catalog or MCP owner holds or will acquire the Workspace mount',
+    HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner,
   );
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     0,
@@ -750,8 +751,7 @@ it('admits a batch of only agent calls, foregrounded or queued', async () => {
   expect(broker.acquire).not.toHaveBeenCalled();
 });
 
-const mountRefusal =
-  'Hook catalog or MCP owner holds or will acquire the Workspace mount';
+const mountRefusal = HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner;
 
 async function restoredHooks(
   descriptor: Pick<ManagedHookDescriptor, 'eventName' | 'config'> &
@@ -840,17 +840,36 @@ it.each(
   },
 );
 
+// The type/eligibility filter and the event filter are orthogonal, so the
+// controls exercise the five ineligible shapes on one event and the event
+// filter on the single off-event row. The refusal side above already sweeps
+// all three result events.
 const admissionControls: Array<
   Pick<ManagedHookDescriptor, 'eventName' | 'config'> &
     Partial<ManagedHookDescriptor>
 > = [
-  ...resultEvents.flatMap((eventName) => [
-    { eventName, config: { type: 'http' as const } },
-    { eventName, config: { type: 'function' as const } },
-    { eventName, config: { type: HookType.Prompt, prompt: 'check' } },
-    { eventName, config: { type: 'command' as const }, enabled: false },
-    { eventName, config: { type: 'command' as const }, sourceTrusted: false },
-  ]),
+  {
+    eventName: HookEventName.PostToolUse,
+    config: { type: 'http' as const },
+  },
+  {
+    eventName: HookEventName.PostToolUse,
+    config: { type: 'function' as const },
+  },
+  {
+    eventName: HookEventName.PostToolUse,
+    config: { type: HookType.Prompt, prompt: 'check' },
+  },
+  {
+    eventName: HookEventName.PostToolUse,
+    config: { type: 'command' as const },
+    enabled: false,
+  },
+  {
+    eventName: HookEventName.PostToolUse,
+    config: { type: 'command' as const },
+    sourceTrusted: false,
+  },
   { eventName: HookEventName.Stop, config: { type: 'command' } },
 ];
 
@@ -961,6 +980,27 @@ it.each(
   },
 );
 
+// The Turn-owned arm the Session-owner refusal must not swallow. A
+// Turn-owned mount releases at this Turn's finish, so its background and
+// fresh-turn advice is real, unlike the Session-scoped hold tested below.
+it('refuses a foreground agent call while this Turn holds the mount', async () => {
+  const turn = createTurn();
+  await turn.resumeCommittedResults(new AbortController().signal);
+  const refused = await executeAgent(
+    turn,
+    call({
+      description: 'audit the diff',
+      prompt: 'review the change',
+      run_in_background: false,
+    }),
+  );
+  expect(JSON.stringify(refused)).toContain(HOSTED_CHILD_MOUNT_REFUSALS.turn);
+  expect(JSON.stringify(refused)).not.toContain(mountRefusal);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
 // The 1292-refusal must key off the Session's actual mount owners, not
 // only the turn's own `acquired` flag: the Hook catalog or MCP owner can
 // retain the mount until their Session-scoped close, and an agent-only
@@ -1010,6 +1050,27 @@ it('refuses a foreground agent call while a Session owner holds the mount', asyn
     ])
   )[0];
   expect(JSON.stringify(admitted)).not.toContain(mountRefusal);
+});
+
+// The Turn-owned arm below the Session-owner refusal: a foreground child
+// cannot borrow the mount its own parent turn already holds. This turn
+// took the mount through resume (not a Session owner), so the Session
+// arm is false and the ordering here is what pins the surviving branch.
+it('refuses a foreground agent while this Turn holds the mount', async () => {
+  const turn = createTurn();
+  await turn.resumeCommittedResults(new AbortController().signal);
+  const refused = await executeAgent(
+    turn,
+    call({
+      description: 'audit the diff',
+      prompt: 'review the change',
+      run_in_background: false,
+    }),
+  );
+  expect(JSON.stringify(refused)).toContain(HOSTED_CHILD_MOUNT_REFUSALS.turn);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
 });
 
 // R1-62: an admitted agent launch dispatches like any executed call —

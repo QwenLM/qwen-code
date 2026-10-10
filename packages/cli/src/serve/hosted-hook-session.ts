@@ -392,6 +392,21 @@ export class HostedHookSession {
     return this.acquired;
   }
 
+  /**
+   * Whether this Session's Hook catalog holds an eligible command Hook on a
+   * tool-result event. Such a Hook acquires the Session-owned mount when its
+   * results complete — possibly after child-agent admission — so a child
+   * must not be admitted while one exists.
+   *
+   * Scans the catalog without the `matcher` predicate dispatch applies, and
+   * that breadth is the intent. A foreground child cannot share a batch with
+   * a non-agent tool, so the only PostToolUse its parent fires that turn
+   * carries `tool_name: 'agent'` and a narrower matcher could never match;
+   * but a background child outlives the turn and later tools can match it.
+   *
+   * The `null` agent id matches this path's `hooks.fire(...)` payloads, which
+   * never carry `agent_id`, so an agent-scoped Hook never counts here.
+   */
   get hasMountableToolResultHooks(): boolean {
     const usedOnce = new Set(this.executions().map((entry) => entry.onceKey));
     return (
@@ -409,7 +424,7 @@ export class HostedHookSession {
   private isHookEligible(
     hook: ManagedHookDescriptor,
     usedOnce: ReadonlySet<string | null>,
-    agentId: unknown,
+    agentId: string | null,
   ): boolean {
     return (
       hook.enabled !== false &&
@@ -701,7 +716,11 @@ export class HostedHookSession {
       const hooks = this.catalog!.hooks.filter(
         (hook) =>
           hook.eventName === event &&
-          this.isHookEligible(hook, usedOnce, fields['agent_id'] ?? null) &&
+          this.isHookEligible(
+            hook,
+            usedOnce,
+            (fields['agent_id'] as string | undefined) ?? null,
+          ) &&
           (!hook.matcher ||
             !target?.target ||
             matchesHookPattern(

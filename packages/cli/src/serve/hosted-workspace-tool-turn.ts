@@ -240,6 +240,15 @@ const APPROVAL_REFUSALS = {
     'An earlier approval request in this turn expired unanswered, so this tool call was not asked about or run.',
 } as const;
 
+// H4b: the two mount refusals a child agent answers with. Exported so
+// admission binds its assertions to the marker, not to prose a reword may
+// change without changing behaviour.
+export const HOSTED_CHILD_MOUNT_REFUSALS = {
+  sessionOwner:
+    "the Session's Hook catalog or MCP owner holds or will acquire the Workspace mount",
+  turn: 'this Turn holds the Workspace mount',
+} as const;
+
 const pathProperty = {
   type: 'string',
   description:
@@ -1316,11 +1325,14 @@ export class HostedWorkspaceToolTurn {
             validationError =
               'Hosted child agent run_in_background must be a boolean.';
           } else if (this.sessionOwnerMayHoldMount()) {
-            validationError = `Hosted child agent run_in_background=${agentBackground} is unavailable while the Session's Hook catalog or MCP owner holds or will acquire the Workspace mount; use a Session without that owner hold or enabled result command Hooks.`;
+            validationError = `Hosted child agent is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; use a Session without that owner hold or enabled result command Hooks.`;
           } else if (!agentBackground && this.acquired) {
             // A foreground child cannot borrow its waiting parent's mount.
-            validationError =
-              'Hosted child agent run_in_background=false is unavailable while this Turn holds the Workspace mount; run it in the background or let the current tool work finish first in a fresh turn.';
+            // Ordered after the Session-owner arm: a Session-scoped mount
+            // outlives this Turn, so the background and fresh-turn advice
+            // here would not release it. Swapping the two arms hands a
+            // Session-owned hold advice that cannot act on it.
+            validationError = `Hosted child agent run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
           } else if (
             !agentBackground &&
             calls.some((other) => other.name !== 'agent')
