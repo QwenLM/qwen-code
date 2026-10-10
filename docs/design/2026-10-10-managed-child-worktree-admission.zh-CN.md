@@ -40,7 +40,7 @@ I1 交付了能力，但没有调用方。本变更把唯一的生产方——ho
 
    冲突路径是 child 选定的名字：每个先以 JSON 加引号（换行保持为转义，不会自成一行），再剥离显示控制字符，JSON 不转义的行分隔符与段分隔符也被转义，列表在 4 KiB 处截止并以 `and N more` 结尾（计入回执省略的路径）。后台通知在 `<status>` 旁的 `<workspace>` 元素中携带同一句话。两者都读取 acceptance 所指的回执；`shared` run 不增加任何内容。
 
-8. **失败或被取消的 worktree child 被丢弃。** relay 的 fail 分支（失败或被取消的 Turn、没有已完成 Turn 的放弃，见决策 5）在其 `fail` 提交之前请求丢弃；已请求的合并保持其位置，所以 child 之后失败的 Turn 不会取代它。已完成的 child 的工作从不会在未 pin 的情况下被丢弃：超出上限的回答以 `quota_exceeded` settle，并请求合并。记录按时 settle，丢弃在 child 关闭后执行（决策 4）。relay 自身处理父已不再活跃的路径也会请求丢弃，所以在父开始关闭时、级联查看之后才被承认的行不会被遗留。表示行已 settle 的拒绝不算欠账；没有行的 run（所有 `shared` run）只做一次查询。relay 从不等待丢弃完成。
+8. **失败或被取消的 worktree child 被丢弃。** relay 的 fail 分支（失败或被取消的 Turn、没有已完成 Turn 的放弃，见决策 5）在其 `fail` 提交之前请求丢弃；记录按时 settle，丢弃在 child 关闭后执行（决策 4）。已请求的合并保持其位置，所以 child 之后失败的 Turn 不会取代它，relay 也从不在未 pin 的情况下丢弃已完成 child 的工作：超出上限的回答以 `quota_exceeded` settle，并请求合并。只有在该合并开始之前就关闭的父仍会丢弃它（决策 9）。relay 自身处理父已不再活跃的路径也会请求丢弃，所以在父开始关闭时、级联查看之后才被承认的行不会被遗留。表示行已 settle 的拒绝不算欠账；没有行的 run（所有 `shared` run）只做一次查询。relay 从不等待丢弃完成。
 9. **关闭级联只丢弃，不等待。** 级联在停止请求之后请求丢弃 `worktree` run。表示行已 settle 的拒绝（`merged`、`discarded`、合并已在执行）不是失败：正在执行的合并会落地。请求的任何其他失败会像级联其他欠下的步骤一样让父的关闭重新排期，并保持该 run 的 scope 打开（不提交 `close_scope`），这样重新排期的关闭会再次找到这个 run 并再次请求。父的关闭从不等待丢弃执行，所以无法完成的丢弃不会卡住关闭；由行自身的重试与 `blocked` 终态（I1）承接。
 10. **兄弟按完成顺序合并。** 每个 child 的合并在该 child 完成时执行，处于 storage 的维护 hold 之下（I1 决策 10），并以当时父的树为准计算，其中包括更早兄弟的合并。之后编辑了相同行的兄弟以 `conflicted` 结束，带上其路径，其工作被 pin 住；除此之外不对兄弟排序。
 11. **lease 规则保持 H4b 的设定。** child Workspace 位于父的 storage 中，所以现有守卫原样适用：Turn 持有挂载时拒绝前台 child，只含 agent 的批次不占用挂载。准备与合并遇到被持有的 storage 时得到 `workspace_busy`，再看一次，不消耗尝试次数。
