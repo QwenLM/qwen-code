@@ -1003,7 +1003,6 @@ try {
               QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY: runtimeState,
               QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY: cliBundle,
               QWEN_MANAGED_AGENT_NODE_EXECUTABLE: process.execPath,
-              QWEN_MANAGED_AGENT_CLI_ENTRY: cliBundle,
               QWEN_MANAGED_AGENT_WORKSPACE_CWD: workspace,
             }
           : {
@@ -1020,7 +1019,6 @@ try {
               QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
               QWEN_MANAGED_AGENT_NODE_EXECUTABLE:
                 runtimeDelayMs === 0 ? process.execPath : delayedNode,
-              QWEN_MANAGED_AGENT_CLI_ENTRY: cliBundle,
               QWEN_MANAGED_AGENT_WORKSPACE_CWD: workspace,
             }),
       },
@@ -1471,7 +1469,6 @@ try {
             QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY: runtimeState,
             QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY: cliBundle,
             QWEN_MANAGED_AGENT_NODE_EXECUTABLE: process.execPath,
-            QWEN_MANAGED_AGENT_CLI_ENTRY: cliBundle,
             QWEN_MANAGED_AGENT_WORKSPACE_CWD: workspace,
           },
         },

@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -19,8 +18,10 @@ public class MessageMaterializer {
         this.store = store;
     }
 
-    @Scheduled(fixedDelayString =
-            "${qwen.managed-agent.events.materialize-interval:100ms}")
+    // Driven by ManagedArtifactConfiguration.messageMaterializerTask on the
+    // dedicated single-thread scheduler at
+    // ManagedAgentProperties.Events.materializeInterval (bound from
+    // application.yml's materialize-interval, 100 ms by default).
     public void materialize() {
         for (MaterializationTarget target :
                 store.findMaterializationTargets(TARGET_LIMIT)) {

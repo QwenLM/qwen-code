@@ -1,6 +1,9 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
+import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
+import java.util.concurrent.ScheduledFuture;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -74,6 +77,31 @@ public class ManagedArtifactConfiguration {
     @Bean
     public ThreadPoolTaskScheduler childWorkspaceScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("child-workspace-").build();
+    }
+
+    /**
+     * The 100 ms materialize pass runs sequential JDBC transactions; sharing
+     * the one-thread default scheduler would delay turn recovery by a whole
+     * pass whenever a materialization stalls.
+     */
+    @Bean
+    public ThreadPoolTaskScheduler messageMaterializerScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("message-materialize-").build();
+    }
+
+    // The cadence is the typed Events.materializeInterval field, bound from
+    // qwen.managed-agent.events.materialize-interval (application.yml ships
+    // '100ms') with a 100 ms field default for property-less boots — one
+    // driving source, no annotation placeholder to drift from.
+    @Bean(destroyMethod = "cancel")
+    public ScheduledFuture<?> messageMaterializerTask(
+            @Qualifier("messageMaterializerScheduler")
+                    ThreadPoolTaskScheduler messageMaterializerScheduler,
+            MessageMaterializer materializer,
+            ManagedAgentProperties properties) {
+        return messageMaterializerScheduler.scheduleWithFixedDelay(
+                materializer::materialize,
+                properties.getEvents().getMaterializeInterval());
     }
 
     /**

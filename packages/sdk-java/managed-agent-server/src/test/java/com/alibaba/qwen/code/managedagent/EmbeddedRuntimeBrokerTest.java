@@ -76,7 +76,6 @@ class EmbeddedRuntimeBrokerTest {
         config.setDurableLocalProcess(true);
         config.setNodeExecutable("node");
         config.setWorkerEntry("worker.js");
-        config.setCliEntry("cli.js");
         Path storage = managed ? java.nio.file.Files.createDirectory(root.resolve("storage")).toRealPath() : workspace;
         if (managed) {
             config.setWorkspaceMounts(java.util.List.of(new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
@@ -216,9 +215,9 @@ class EmbeddedRuntimeBrokerTest {
 
     @Test
     void refusesAV3ResultWindowBelowThePollFloor() throws Exception {
-        // An absent value binds as null and a suffix-less one as
-        // milliseconds; every shape below the floor must be refused here
-        // rather than degrade each v3 execution later.
+        // An absent value binds as null and a suffix-less one as seconds;
+        // every shape below the floor must be refused here rather than
+        // degrade each v3 execution later.
         for (java.time.Duration window : new java.time.Duration[] {
                 null, java.time.Duration.ZERO, java.time.Duration.ofMillis(-1),
                 java.time.Duration.ofMillis(999)}) {
@@ -308,7 +307,6 @@ class EmbeddedRuntimeBrokerTest {
         config.setDurableLocalProcess(false);
         config.setNodeExecutable("node");
         config.setWorkerEntry("worker.js");
-        config.setCliEntry("cli.js");
         config.setWorkspaceMounts(java.util.List.of(new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
                 "tenant", "storage", storage.toString())));
         config.setChildWorkspacesEnabled(true);

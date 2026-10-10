@@ -14,6 +14,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
@@ -26,6 +27,7 @@ import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.managedagent.service.SessionEventHub;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
@@ -55,6 +57,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -781,6 +784,11 @@ class ManagedAgentServerIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"sessionId\":\"" + sessionId + "\"}"))
                 .andExpect(status().isOk())
+                // The sibling title field, not metadata.title, is the
+                // Session's title surface: pinned positively here because
+                // @JsonInclude(NON_NULL) would otherwise make a dropped
+                // title indistinguishable from an ignored one.
+                .andExpect(jsonPath("$.title").value("web"))
                 .andExpect(jsonPath("$.activeTurn.status")
                         .value("completed"))
                 .andExpect(jsonPath("$.environment.state").value("failed"))
@@ -1768,6 +1776,158 @@ class ManagedAgentServerIntegrationTest {
                                 + " 'turn.cancelled')]").isNotEmpty()));
     }
 
+    @Test
+    void rejectsInputBeyondTheAggregateCharacterBudget() throws Exception {
+        String tenant = "tenant-input-budget-" + UUID.randomUUID();
+        String sessionId = objectMapper.readTree(mvc.perform(post(
+                        "/api/agent/web-shell/v1/sessions/create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"idempotencyKey":"budget-create",
+                                 "agentId":"qwen-code","input":[]}
+                                """))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString())
+                .get("sessionId").asText();
+        String chunk = "x".repeat(1_000_000);
+        StringBuilder oversized = new StringBuilder(
+                "{\"idempotencyKey\":\"budget-submit\",\"sessionId\":\""
+                        + sessionId + "\",\"input\":[");
+        StringBuilder okay = new StringBuilder(
+                "{\"idempotencyKey\":\"budget-okay\",\"sessionId\":\""
+                        + sessionId + "\",\"input\":[");
+        for (int index = 0; index < 5; index++) {
+            String block = "{\"type\":\"text\",\"text\":\"" + chunk + "\"}";
+            oversized.append(block);
+            if (index < 4) {
+                oversized.append(",");
+                okay.append(block).append(index < 3 ? "," : "");
+            }
+        }
+        oversized.append("]}");
+        okay.append("]}");
+
+        // 5 × 1M chars passes the per-block caps yet must fail the
+        // aggregate budget; 4 × 1M remains admitted.
+        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(oversized.toString()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_input"));
+        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(okay.toString()))
+                .andExpect(status().isAccepted());
+    }
+
+    @Test
+    void acceptsWebShellMetadataWithoutAClientIdOnlyContract()
+            throws Exception {
+        String tenant = "tenant-metadata-" + UUID.randomUUID();
+        // The WebShell handlers forward no metadata at all (the controller
+        // passes null), so anything a client sends here is accepted and
+        // ignored — neither validated and dropped, nor persisted: a
+        // metadata title does not become the Session's title.
+        MvcResult created = mvc.perform(
+                post("/api/agent/web-shell/v1/sessions/create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"idempotencyKey":"metadata-create",
+                                 "agentId":"qwen-code","input":[],
+                                 "metadata":{"clientId":"client-1",
+                                             "other":"trace",
+                                             "title":"metadata-title"}}
+                                """))
+                .andExpect(status().isAccepted())
+                .andReturn();
+        String sessionId = objectMapper.readTree(
+                created.getResponse().getContentAsString())
+                .get("sessionId").asText();
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + sessionId + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.title").doesNotExist());
+        // Same widened acceptance on the submit handler: a non-clientId
+        // metadata body must not be refused by the (deleted) validator;
+        // the request fails later, on the unknown Session lookup. The body
+        // is otherwise exactly what the published WebShellSubmitRequest
+        // schema allows — ManagedAgentApiContractTest pins that shape.
+        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"sessionId":"00000000-0000-4000-8000-000000000000",
+                                 "idempotencyKey":"metadata-submit",
+                                 "input":[{"type":"input_text","text":"hi"}],
+                                 "metadata":{"clientId":"client-1",
+                                             "other":"trace"}}
+                                """))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void anOversizedDurableRecordIsAdmittedThenRejectedByTheHarness()
+            throws Exception {
+        // The 4M aggregate is an admission ceiling only: a command whose
+        // serialized prompt or durable Session-store record exceeds the
+        // Hosted Harness's 64 KiB durable-record limit is accepted and
+        // persisted, then fails the Turn when the Harness refuses it
+        // (413 -> hosted_harness_rejected).
+        String tenant = "tenant-oversized-" + UUID.randomUUID();
+        // Prompt arm: the serialized prompt itself is over the limit.
+        assertHarnessRejectsOversizedCommand(tenant, "prompt",
+                "x".repeat(100_000));
+        // Record arm: the serialized prompt stays under the limit (the
+        // single-block wrapper adds 27 bytes), but the durable record's
+        // envelope pushes it over, so the Turn still fails. A fake
+        // checking only the serialized prompt admits this command.
+        assertHarnessRejectsOversizedCommand(tenant, "record",
+                "x".repeat(ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES
+                        - 100));
+    }
+
+    private void assertHarnessRejectsOversizedCommand(String tenant,
+            String arm, String text) throws Exception {
+        String sessionId = objectMapper.readTree(mvc.perform(post(
+                        "/api/agent/web-shell/v1/sessions/create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"idempotencyKey\":\"oversized-create-"
+                                + arm + "\",\"agentId\":\"qwen-code\","
+                                + "\"input\":[]}"))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString())
+                .get("sessionId").asText();
+        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"idempotencyKey\":\"oversized-submit-"
+                                + arm + "\",\"sessionId\":\"" + sessionId
+                                + "\",\"input\":[{\"type\":\"input_text\","
+                                + "\"text\":\"" + text + "\"}]}"))
+                .andExpect(status().isAccepted());
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"sessionId\":\"" + sessionId
+                                        + "\"}"))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$.activeTurn.status")
+                                .value("failed"))
+                        .andExpect(jsonPath("$.activeTurn.errorCode")
+                                .value("hosted_harness_rejected")));
+        assertThat(harness.lastRejectionArm.get())
+                .as("the %s arm is the one that fired", arm)
+                .isEqualTo(arm);
+    }
+
     private ResultActions lifecycle(MockHttpServletRequestBuilder request,
             String tenant, String idempotencyKey) throws Exception {
         return mvc.perform(request.header(TenantContextFilter.HEADER, tenant)
@@ -1832,6 +1992,8 @@ class ManagedAgentServerIntegrationTest {
                 new ConcurrentHashMap<>();
         private final Set<String> uncertainRetries =
                 ConcurrentHashMap.newKeySet();
+        private final AtomicReference<String> lastRejectionArm =
+                new AtomicReference<>();
         private volatile boolean available = true;
         private volatile String closeAnswer = BOOT_ID;
         private final Map<String, HarnessRuntimeRecovery>
@@ -1870,6 +2032,52 @@ class ManagedAgentServerIntegrationTest {
         public Admission submit(String tenantId, String sessionId,
                 String promptId,
                 List<Map<String, Object>> input, String payloadDigest) {
+            // The real Hosted Harness refuses with a 413 when EITHER the
+            // serialized prompt OR its durable Session-store record exceeds
+            // the inline limit; mirror both arms so the
+            // admission-vs-delivery gap is observable. The record arm wraps
+            // the joined block texts in the envelope the real record()
+            // adds; the fields the fake cannot know (uuid, parentUuid,
+            // timestamp, cwd) take fixed-size stand-ins.
+            var mapper = new ObjectMapper();
+            String text = input.stream()
+                    .map(block -> String.valueOf(block.get("text")))
+                    .collect(java.util.stream.Collectors.joining("\n"));
+            Map<String, Object> record = Map.of(
+                    "uuid", "00000000-0000-4000-8000-000000000000",
+                    "parentUuid", "00000000-0000-4000-8000-000000000000",
+                    "sessionId", sessionId,
+                    "timestamp", "2000-01-01T00:00:00.000Z",
+                    "type", "user",
+                    "cwd", ".",
+                    "version", "hosted-harness/1",
+                    "daemonPromptId", promptId,
+                    "message", Map.of("role", "user",
+                            "parts", List.of(Map.of("text", text))));
+            try {
+                // Keep the real harness's check order — serialized prompt
+                // first, durable record second — and record which arm
+                // fired: the record arm only discriminates while the
+                // prompt stays under the limit, and nothing else would
+                // notice the prompt arm shadowing it.
+                boolean promptOversized = mapper.writeValueAsBytes(input)
+                        .length
+                        > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES;
+                boolean recordOversized = !promptOversized
+                        && mapper.writeValueAsBytes(record).length
+                        > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES;
+                if (promptOversized || recordOversized) {
+                    lastRejectionArm.set(
+                            promptOversized ? "prompt" : "record");
+                    DaemonHttpException tooLarge =
+                            mock(DaemonHttpException.class);
+                    when(tooLarge.getStatusCode()).thenReturn(413);
+                    throw tooLarge;
+                }
+            } catch (com.fasterxml.jackson.core.JsonProcessingException
+                    error) {
+                throw new IllegalStateException(error);
+            }
             promptIds.put(sessionId, promptId);
             boolean held = input.stream().anyMatch(block ->
                     "hold".equals(block.get("text")));

@@ -1,12 +1,16 @@
 package com.alibaba.qwen.code.managedagent;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.ManagedArtifactConfiguration;
 import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
@@ -20,6 +24,7 @@ import org.springframework.boot.autoconfigure.task.TaskSchedulingAutoConfigurati
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -68,9 +73,9 @@ class ManagedArtifactSchedulingTest {
         context.register(
                 SchedulingHarness.class,
                 TaskSchedulingAutoConfiguration.class,
-                com.alibaba.qwen.code.managedagent.config.ManagedArtifactConfiguration.class);
+                ManagedArtifactConfiguration.class);
         context.registerBean(
-                com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class,
+                ManagedAgentProperties.class,
                 fixture::properties);
         context.registerBean(
                 com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy.class,
@@ -99,6 +104,82 @@ class ManagedArtifactSchedulingTest {
         } finally {
             release.countDown();
             context.close();
+        }
+    }
+
+    @Test
+    void messageMaterializerTaskSchedulesAtTheTypedInterval() {
+        // The typed property, not a hardcoded constant, is the cadence:
+        // mutating messageMaterializerTask to schedule with a literal
+        // Duration turns this red.
+        var properties = new ManagedAgentProperties();
+        properties.getEvents().setMaterializeInterval(
+                java.time.Duration.ofMillis(10));
+        ThreadPoolTaskScheduler scheduler = mock(ThreadPoolTaskScheduler.class);
+        new ManagedArtifactConfiguration().messageMaterializerTask(
+                scheduler,
+                new MessageMaterializer(mock(AgentStateStore.class)),
+                properties);
+        verify(scheduler).scheduleWithFixedDelay(any(Runnable.class),
+                eq(java.time.Duration.ofMillis(10)));
+    }
+
+    // Parks Boot's shared one-thread scheduler with a long-running
+    // @Scheduled sibling: the materialize pass must keep firing on its own
+    // pool. This is the arm the publication/preview parking tests cannot
+    // see — their slow sibling lives on another dedicated scheduler.
+    @Test
+    void materializerKeepsPassingWhileTheSharedDefaultPoolIsParked()
+            throws Exception {
+        var state = mock(AgentStateStore.class);
+        AtomicInteger materialized = new AtomicInteger();
+        when(state.findMaterializationTargets(anyInt()))
+                .thenReturn(List.of(new MaterializationTarget("tenant-1",
+                        "session-1")));
+        doAnswer(invocation -> {
+            materialized.incrementAndGet();
+            return null;
+        }).when(state).materializeNextBatch(eq("tenant-1"), eq("session-1"),
+                anyInt());
+        DefaultPoolHog.parked = new CountDownLatch(1);
+        DefaultPoolHog.release = new CountDownLatch(1);
+        var context = new AnnotationConfigApplicationContext();
+        context.register(SchedulingHarness.class,
+                TaskSchedulingAutoConfiguration.class,
+                ManagedArtifactConfiguration.class);
+        context.registerBean(ManagedAgentProperties.class,
+                ManagedAgentProperties::new);
+        context.registerBean("materializer", MessageMaterializer.class,
+                () -> new MessageMaterializer(state));
+        context.registerBean("defaultPoolHog", DefaultPoolHog.class,
+                DefaultPoolHog::new);
+        try {
+            context.refresh();
+            assertThat(DefaultPoolHog.parked.await(5, TimeUnit.SECONDS))
+                    .isTrue();
+            int before = materialized.get();
+            Thread.sleep(500);
+            // Sample while the hog still parks the shared pool: reading
+            // after the release races with the freed thread running the
+            // overdue pass.
+            int after = materialized.get();
+            DefaultPoolHog.release.countDown();
+            assertThat(after).isGreaterThan(before);
+        } finally {
+            DefaultPoolHog.release.countDown();
+            context.close();
+        }
+    }
+
+    static class DefaultPoolHog {
+        static volatile CountDownLatch parked;
+        static volatile CountDownLatch release;
+
+        @org.springframework.scheduling.annotation.Scheduled(
+                fixedDelay = 50)
+        void hog() throws InterruptedException {
+            parked.countDown();
+            release.await(30, TimeUnit.SECONDS);
         }
     }
 }

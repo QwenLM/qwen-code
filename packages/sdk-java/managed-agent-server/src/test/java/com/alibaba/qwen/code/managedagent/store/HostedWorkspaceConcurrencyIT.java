@@ -266,7 +266,6 @@ class HostedWorkspaceConcurrencyIT {
         broker.setNodeExecutable(System.getProperty("node.executable", "node"));
         String bundle = Path.of(System.getProperty("qwen.cli.entry", "../../../dist/cli.js")).toAbsolutePath().toString();
         broker.setWorkerEntry(bundle);
-        broker.setCliEntry(bundle);
         broker.setVerifiedWorkspaceRecoveryEnabled(true);
         broker.setWorkspaceMounts(List.of(new WorkspaceMount(tenant, "storage", root.toString())));
         return properties;
