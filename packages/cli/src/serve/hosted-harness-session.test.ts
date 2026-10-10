@@ -18547,4 +18547,309 @@ describe('Hosted Harness Runtime turn takeover', () => {
     },
     30_000,
   );
+
+  // H4e-b1: the bare load's resume reads only the round's journaled results.
+  // A sibling the Runtime does not own that committed before the Harness
+  // died — a task, a launch, a member before or after its join — must be
+  // answered from its records before the resume, or core's orphan repair
+  // has the model retry it and the retry redoes it.
+  it.each([
+    [
+      'task_create',
+      'The turn was interrupted after this call committed. Task #1 created',
+    ],
+    ['agent', 'Teammate \\"alice\\" started in the background'],
+    [
+      'agent-before-join',
+      'did not join the team as \\"alice\\": the turn was interrupted before the join.',
+    ],
+    ['agent-unnamed', 'started in the background'],
+  ] as const)(
+    'answers a committed %s sibling before the bare-load resume of a publication Session',
+    async (sibling, expected) => {
+      domainEnablement.childRun = true;
+      domainEnablement.teams = true;
+      try {
+        const key = {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        };
+        const resources = LocalManagedSessionResourceStore.create({
+          runtimeBaseDir: state.root,
+          sessionKey: key,
+        });
+        const manifest = await resources.publish(
+          'managed-tool-result-manifest',
+          Buffer.from(
+            JSON.stringify({
+              toolResult: 'managed-tool-result/1',
+              type: 'manifest',
+              tenantId: key.tenantId,
+              sessionId: SESSION_ID,
+              turnId: PROMPT_ID,
+              executionCallId: 'shell-execution',
+              callId: 'model-shell-call',
+              invocationDigest: 'digest',
+              bindingGeneration: '1',
+              captureId: randomUUID(),
+              revision: 1,
+              executionStatus: 'success',
+              exitCode: 0,
+              signal: null,
+              captureScope: 'process_pipes',
+              capturePolicy: 'complete_required',
+              captureStatus: 'complete',
+              captureReason: null,
+              upstreamTruncated: false,
+              contents: ['stdout', 'stderr'].map((streamId) => ({
+                streamId,
+                role: streamId,
+                mimeType: 'application/octet-stream',
+                state: 'sealed',
+                byteLength: 0,
+                digest: createHash('sha256').update('').digest('hex'),
+                missingRanges: [],
+                body: { pages: [] },
+              })),
+            }),
+          ),
+        );
+        const envelope = {
+          executionStatus: 'success' as const,
+          responseParts: [{ text: 'hi' }],
+          capture: {
+            manifest,
+            captureStatus: 'complete' as const,
+            captureReason: null,
+            previewTruncated: false,
+            deliveryStatus: 'pending' as const,
+          },
+        };
+        vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+        vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+          async function (this: HostedWorkspaceBroker) {
+            this.runtime = {
+              bindingId: 'binding-1',
+              generation: '1',
+              workspaceGeneration: '1',
+            };
+          },
+        );
+        vi.spyOn(
+          HostedWorkspaceBroker.prototype,
+          'prepareV3',
+        ).mockResolvedValue({
+          executionCallId: 'shell-execution',
+          runtimeBindingId: 'binding-1',
+          bindingGeneration: '1',
+        });
+        vi.spyOn(
+          HostedWorkspaceBroker.prototype,
+          'executeV3',
+        ).mockResolvedValue(envelope);
+        vi.spyOn(
+          HostedWorkspaceBroker.prototype,
+          'acknowledgeV3',
+        ).mockResolvedValue();
+        vi.spyOn(
+          HostedWorkspaceBroker.prototype,
+          'registerPublisher',
+        ).mockResolvedValue('1');
+        vi.spyOn(
+          HostedWorkspaceBroker.prototype,
+          'release',
+        ).mockResolvedValue();
+        state.publicationRequest.mockImplementation(
+          async (
+            resourceStore: LocalManagedSessionResourceStore,
+            route: string,
+            body: unknown,
+          ) => {
+            if (route === '/grants') return { state: 'OPEN' };
+            if (route === '/receipts/verify') return body;
+            if (route.endsWith('/finished')) return { result: envelope };
+            if (route.endsWith('/admissions/prepare'))
+              return resourceStore.publish(
+                'managed-tool-outcome',
+                Buffer.from(JSON.stringify(body)),
+              );
+            throw new Error('Unexpected publication route ' + route);
+          },
+        );
+        const first = await app(true);
+        const created = await headers(supertest(first).post('/session')).send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-shell/1',
+          captureBytes: 1024 * 1024,
+        });
+        expect(created.status).toBe(200);
+        const clientId = created.body.clientId as string;
+        const originalWrite = ManagedSessionRecordSink.prototype.write;
+        let killed = false;
+        if (sibling === 'agent-before-join')
+          vi.spyOn(
+            HostedTeamSession.prototype,
+            'joinTeam',
+          ).mockImplementationOnce(async () => {
+            killed = true;
+            throw new Error('Harness killed');
+          });
+        vi.spyOn(
+          ManagedSessionRecordSink.prototype,
+          'write',
+        ).mockImplementation(async function (
+          this: ManagedSessionRecordSink,
+          item,
+        ) {
+          if (
+            sibling !== 'agent-before-join' &&
+            !killed &&
+            item.type === 'tool_result' &&
+            JSON.stringify(item.message).includes(
+              `"${sibling === 'agent-unnamed' ? 'agent' : sibling}"`,
+            )
+          ) {
+            killed = true;
+            throw new Error('Harness killed');
+          }
+          return originalWrite.call(this, item);
+        });
+        const teamCall = [
+          {
+            name: 'team_create',
+            callId: 'call-0',
+            args: { team_name: 'review' },
+            isClientInitiated: false,
+            prompt_id: PROMPT_ID,
+          },
+        ];
+        const siblingCall =
+          sibling === 'task_create'
+            ? {
+                name: 'task_create',
+                callId: 'call-2',
+                args: { subject: 'Audit the auth module', description: 'd' },
+                isClientInitiated: false,
+                prompt_id: PROMPT_ID,
+              }
+            : {
+                name: 'agent',
+                callId: 'call-2',
+                args: {
+                  description: 'audit auth',
+                  prompt: 'audit the auth module',
+                  ...(sibling === 'agent-unnamed' ? {} : { name: 'alice' }),
+                },
+                isClientInitiated: false,
+                prompt_id: PROMPT_ID,
+              };
+        const batch = [
+          {
+            name: 'run_shell_command',
+            callId: 'model-shell-call',
+            args: { command: 'printf hi' },
+            isClientInitiated: false,
+            prompt_id: PROMPT_ID,
+          },
+          siblingCall,
+        ];
+        state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+          await toolTurn!.declarations(signal);
+          await toolTurn!.execute(
+            teamCall,
+            teamCall.map((call) => ({
+              functionCall: {
+                id: call.callId,
+                name: call.name,
+                args: call.args,
+              },
+            })),
+            'test-model',
+            signal,
+          );
+          const answers = await toolTurn!.execute(
+            batch,
+            batch.map((call) => ({
+              functionCall: {
+                id: call.callId,
+                name: call.name,
+                args: call.args,
+              },
+            })),
+            'test-model',
+            signal,
+          );
+          void answers;
+          return { text: 'done', model: 'test-model' };
+        });
+        const prompt = [{ type: 'text', text: 'shell then sibling' }];
+        await headers(supertest(first).post(`/session/${SESSION_ID}/prompt`))
+          .set('X-Qwen-Client-Id', clientId)
+          .send({
+            prompt,
+            promptId: PROMPT_ID,
+            payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          })
+          .expect(202);
+        await vi.waitFor(
+          async () => {
+            const status = await headers(
+              supertest(first).get(`/session/${SESSION_ID}/status`),
+            ).set('X-Qwen-Client-Id', clientId);
+            expect(status.body.hasActivePrompt).toBe(false);
+            expect(status.body.recoveryBlocked).toBe(true);
+          },
+          { timeout: 10_000 },
+        );
+        expect(killed).toBe(true);
+        vi.mocked(ManagedSessionRecordSink.prototype.write).mockRestore();
+        await headers(supertest(first).delete(`/session/${SESSION_ID}`));
+        let resumed: Part[] | undefined;
+        state.model.mockImplementationOnce(async (input) => {
+          resumed = [
+            ...((input as { resumeFromToolResults?: Part[] })
+              .resumeFromToolResults ?? []),
+          ];
+          return { text: 'resumed', model: 'test-model' };
+        });
+        const second = await app(true);
+        const loaded = await headers(
+          supertest(second).post(`/session/${SESSION_ID}/load`),
+        ).send({ managedSessionStore: store() });
+        expect(loaded.status).toBe(200);
+        await vi.waitFor(() => expect(resumed).toBeDefined(), {
+          timeout: 10_000,
+        });
+        const answer = JSON.stringify(
+          resumed!.find((part) => part.functionResponse?.id === 'call-2')
+            ?.functionResponse?.response,
+        );
+        expect(answer).toContain(expected);
+        if (sibling === 'agent-unnamed')
+          expect(answer).not.toContain('Teammate');
+        expect(
+          resumed!.some(
+            (part) => part.functionResponse?.id === 'model-shell-call',
+          ),
+        ).toBe(true);
+        await vi.waitFor(
+          async () => {
+            const status = await headers(
+              supertest(second).get(`/session/${SESSION_ID}/status`),
+            ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+            expect(status.body.hasActivePrompt).toBe(false);
+          },
+          { timeout: 10_000 },
+        );
+        await headers(supertest(second).delete(`/session/${SESSION_ID}`));
+      } finally {
+        domainEnablement.teams = false;
+        domainEnablement.childRun = false;
+      }
+    },
+    30_000,
+  );
 });

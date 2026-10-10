@@ -3898,6 +3898,19 @@ export function registerHostedHarnessSessionRoutes(
           authorization.status === 'runnable'
             ? authorization.checkpoint.identity.promptId
             : null);
+        // H4e-b1: the resume below reads only the round's journaled
+        // results. A sibling the Runtime does not own (a team call, a
+        // background launch) that committed before the Harness died is
+        // answered from its records first; core's orphan repair would
+        // otherwise have the model retry it, and the retry redoes it.
+        if (promptId)
+          await answerCommittedTurnCalls({
+            session: managed,
+            sessionId,
+            cwd,
+            promptId,
+            children: session.childAgents,
+          });
         const projected = await managed.sink.project();
         const current = projected.filter(
           (item) => item.daemonPromptId === promptId,
