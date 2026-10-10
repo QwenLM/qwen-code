@@ -105,6 +105,7 @@ async function withPinnedClock(body: () => Promise<void>): Promise<void> {
 async function mount(
   node: ReactNode,
   stdout: NodeJS.WriteStream,
+  options: { debug?: boolean } = {},
 ): Promise<Instance> {
   let app!: Instance;
   await act(async () => {
@@ -113,6 +114,7 @@ async function mount(
       interactive: true,
       maxFps: 1_000,
       patchConsole: false,
+      ...options,
     });
     // Register before the flush so a mount that throws out of the commit phase
     // is still unmounted by `afterEach`.
@@ -492,17 +494,24 @@ describe('ink useBoxMetrics loop guard', () => {
         }}
       />,
       stdout,
+      // Debug mode defeats the 1ms render throttle, so every cascade commit
+      // writes its own frame and the last non-blank frame is `fallback` under
+      // either freeze parity. On the throttled path the whole synchronous
+      // cascade coalesces into a leading and a trailing write, so a freeze on
+      // the detached-ref commit leaves only its blank frame written and the
+      // frame assertion below flakes (#12585 verification gate).
+      { debug: true },
     );
 
     // What the frame pins is the arming's existence, and only that: this fixture
     // detaches its measured element every other commit, so it is unsubscribed
-    // for those commits and, whichever of its two states the cascade freezes in,
-    // the last non-blank frame is the `fallback` render. The commit count is
-    // what makes this a depth assertion - 32 commits at this head, the
-    // detached-ref doubling of a budget of 16 - and, unlike the frame, it does
-    // not depend on that parity. React's own cap is 50 commits, and a budget
-    // raised to 23 or 26 takes this cascade to 46 or 52 while the suite stays
-    // green without the bound below.
+    // for those commits and - because the debug mount above writes every frame -
+    // the last non-blank frame is the `fallback` render whichever of its two
+    // states the cascade freezes in. The commit count is what makes this a
+    // depth assertion - 32 commits at this head, the detached-ref doubling of a
+    // budget of 16 - and, unlike the frame, it does not depend on that parity.
+    // React's own cap is 50 commits, and a budget raised to 23 or 26 takes this
+    // cascade to 46 or 52 while the suite stays green without the bound below.
     expect(lastFrame()).toContain('fallback');
     // The floor is the budget: the cascade spends all 16 charged commits, so a
     // hook that settles early passes the ceiling below without ever reaching it.

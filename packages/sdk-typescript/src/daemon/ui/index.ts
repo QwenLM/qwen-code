@@ -86,6 +86,7 @@ export type {
   DaemonInputReference,
   DaemonInputReferenceAnnotation,
   DaemonResourceLink,
+  DaemonEmbeddedResource,
   DaemonTextTranscriptBlock,
   DaemonTextDeltaMeta,
   DaemonToolPreview,
@@ -122,6 +123,7 @@ export type {
   DaemonUiStatusEvent,
   DaemonUiTextEvent,
   DaemonUiUserResourceLinkEvent,
+  DaemonUiUserResourceEvent,
   DaemonUiToolUpdateEvent,
   DaemonUiToolProvenance,
   // Session-meta events

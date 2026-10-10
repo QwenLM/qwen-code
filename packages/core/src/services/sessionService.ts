@@ -572,6 +572,16 @@ function joinTextParts(parts: readonly unknown[]): string {
  */
 const TAIL_READ_SIZE = 64 * 1024;
 
+/**
+ * Hard ceiling on readLastRecordUuid's widening tail window. Must stay above
+ * the largest single record the writers can legitimately journal (journaled
+ * embedded resources plus the record's own message parts) or the
+ * oversized-record recovery regresses; without it a corrupt tail with no
+ * uuid-bearing line escalates into a whole-file read that re-parses every
+ * line at every doubling.
+ */
+const MAX_TAIL_WINDOW_SIZE = 4 * 1024 * 1024;
+
 const readGoalStateObjective: MatchingRecordFieldReader = (record) => {
   if (typeof record !== 'object' || record === null) {
     return { matched: false, value: undefined };
@@ -2228,7 +2238,8 @@ export class SessionService {
 
   /**
    * Reads the UUID of the last record in a session JSONL file.
-   * Uses a tail-read strategy for efficiency.
+   * Uses a tail-read strategy for efficiency, doubling the window from EOF
+   * when no complete record fits inside it, up to MAX_TAIL_WINDOW_SIZE.
    *
    * Each physical line is routed through `jsonl.parseLineTolerant` so a
    * `}{`-glued tail line (#3606 corruption shape) still yields its records
@@ -2237,17 +2248,24 @@ export class SessionService {
    * truncate the chain on resume.
    */
   private readLastRecordUuid(filePath: string): string | null {
+    let fd: number | undefined;
     try {
       const stats = fs.statSync(filePath);
       const fileSize = stats.size;
-      const readStart = Math.max(0, fileSize - TAIL_READ_SIZE);
-      const readLength = Math.min(fileSize, TAIL_READ_SIZE);
-
-      const fd = fs.openSync(filePath, 'r');
-      let buffer: Buffer;
-      let firstSegmentIsPartial = false;
-      try {
-        buffer = Buffer.alloc(readLength);
+      fd = fs.openSync(filePath, 'r');
+      // A single record can outgrow TAIL_READ_SIZE (a journaled embedded
+      // resource or a long attachment-reference list rides on the user
+      // record's line), and a window that opens inside such a record holds
+      // no complete line — returning null then makes renameSession anchor
+      // custom_title.parentUuid at null and severs the chain on resume.
+      // Double the window from EOF until a complete record fits, giving up
+      // at MAX_TAIL_WINDOW_SIZE rather than escalating into a whole-file
+      // re-parse.
+      let windowSize = TAIL_READ_SIZE;
+      while (true) {
+        const readStart = Math.max(0, fileSize - windowSize);
+        const readLength = Math.min(fileSize, windowSize);
+        const buffer = Buffer.alloc(readLength);
         fs.readSync(fd, buffer, 0, readLength, readStart);
 
         // The first split segment is partial only when the tail window
@@ -2257,46 +2275,75 @@ export class SessionService {
         // 64-KiB-aligned case where `prev\n<exactly-64KiB-record>\n`
         // would otherwise drop the only readable record. Peek that byte
         // before deciding to shift.
+        let firstSegmentIsPartial = false;
         if (readStart > 0) {
           const peek = Buffer.alloc(1);
           fs.readSync(fd, peek, 0, 1, readStart - 1);
           firstSegmentIsPartial = peek[0] !== 0x0a; // 0x0a = '\n'
         }
-      } finally {
-        fs.closeSync(fd);
-      }
 
-      const tail = buffer.toString('utf-8');
-      const lines = tail.split('\n');
+        const tail = buffer.toString('utf-8');
+        const lines = tail.split('\n');
 
-      // Discard the first segment ONLY when it's a true partial fragment.
-      // Running tolerant recovery on a partial would surface a balanced
-      // inner `{ "uuid": ... }` object from inside the record's payload as
-      // if it were a top-level uuid — `renameSession` would then anchor
-      // `custom_title.parentUuid` at payload data and break the parent
-      // chain. Complete physical lines (including a boundary-aligned
-      // first segment) are safe to recover.
-      if (firstSegmentIsPartial) {
-        lines.shift();
-      }
+        // Discard the first segment ONLY when it's a true partial fragment.
+        // Running tolerant recovery on a partial would surface a balanced
+        // inner `{ "uuid": ... }` object from inside the record's payload as
+        // if it were a top-level uuid — `renameSession` would then anchor
+        // `custom_title.parentUuid` at payload data and break the parent
+        // chain. Complete physical lines (including a boundary-aligned
+        // first segment) are safe to recover.
+        if (firstSegmentIsPartial) {
+          lines.shift();
+        }
 
-      // Walk physical lines bottom-up; on each line walk recovered records
-      // bottom-up too, so a `}{`-glued tail returns the *latest* record.
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const trimmed = lines[i].trim();
-        if (!trimmed) continue;
-        const records = jsonl.parseLineTolerant<ChatRecord>(trimmed, filePath);
-        for (let j = records.length - 1; j >= 0; j--) {
-          const record = records[j];
-          if (record.uuid) {
-            return record.uuid;
+        // Walk physical lines bottom-up; on each line walk recovered records
+        // bottom-up too, so a `}{`-glued tail returns the *latest* record.
+        let found: string | null = null;
+        for (let i = lines.length - 1; i >= 0 && found === null; i--) {
+          const trimmed = lines[i].trim();
+          if (!trimmed) continue;
+          const records = jsonl.parseLineTolerant<ChatRecord>(
+            trimmed,
+            filePath,
+          );
+          for (let j = records.length - 1; j >= 0; j--) {
+            const record = records[j];
+            if (record.uuid) {
+              found = record.uuid;
+              break;
+            }
           }
         }
+        if (found !== null) {
+          return found;
+        }
+        if (readStart === 0 || windowSize >= MAX_TAIL_WINDOW_SIZE) {
+          // renameSession writes custom_title.parentUuid from this value, so
+          // name which give-up path produced the null (window exhausted to
+          // the file start vs ceiling hit) — a severed chain is otherwise
+          // indistinguishable from an empty file.
+          debugLogger.warn(
+            `readLastRecordUuid: no uuid-bearing record in ${filePath} ` +
+              `(fileSize=${fileSize}, windowSize=${windowSize}, ` +
+              `reachedFileStart=${readStart === 0}); caller will anchor at null`,
+          );
+          return null;
+        }
+        windowSize *= 2;
       }
-
+    } catch (error) {
+      debugLogger.warn(
+        `readLastRecordUuid: failed to read ${filePath}: ${error}`,
+      );
       return null;
-    } catch {
-      return null;
+    } finally {
+      if (fd !== undefined) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // Best-effort: the read result has already been decided.
+        }
+      }
     }
   }
 

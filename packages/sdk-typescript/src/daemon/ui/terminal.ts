@@ -246,6 +246,8 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
       return `[file: ${sanitizeTerminalText(event.name)}]`;
     case 'user.resource_link.delta':
       return `[file: ${sanitizeTerminalText(event.resourceLink.name)}]`;
+    case 'user.resource.delta':
+      return `[resource: ${sanitizeTerminalText(event.resource.resource.uri)}]`;
     default:
       return assertNever(event);
   }
@@ -261,6 +263,10 @@ export function transcriptBlockToTerminalText(
         [
           block.text,
           ...(block.resourceLinks ?? []).map((link) => `[file: ${link.name}]`),
+          ...(block.embeddedResources ?? []).map(
+            (resource) =>
+              `[resource: ${sanitizeTerminalText(resource.resource.uri)}]`,
+          ),
         ]
           .filter(Boolean)
           .join('\n'),
