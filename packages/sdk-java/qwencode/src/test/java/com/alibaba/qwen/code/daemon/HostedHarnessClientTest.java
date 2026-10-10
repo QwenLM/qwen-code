@@ -686,6 +686,63 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void parsesAnAgentWaitRuntimeRecovery() {
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendSessionJson(exchange, 200,
+                        sessionJsonWithAgentWaitRuntimeRecovery()));
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = client.loadSession(
+                    new LoadHarnessSession(SESSION_ID));
+            HarnessRuntimeRecovery recovery = session.getRuntimeRecovery();
+            assertNotNull(recovery);
+            assertEquals("await_agent", recovery.getPhase());
+            // Every wait run is observable through the relay ledger, so the
+            // predicates the coordinator gates on hold for this phase.
+            assertFalse(recovery.hasUnknownOutcome());
+            assertTrue(recovery.isContinuationReady());
+            assertTrue(recovery.isCancellationReady());
+            assertEquals("run-1", recovery.getExecutions().get(0)
+                    .getExecutionCallId());
+            assertEquals("agent", recovery.getExecutions().get(0)
+                    .getToolName());
+            assertEquals("executing", recovery.getExecutions().get(0)
+                    .getStatus().get("state"));
+            assertEquals("settled", recovery.getExecutions().get(1)
+                    .getStatus().get("state"));
+        }
+    }
+
+    @Test
+    void agentWaitWithoutExecutionsIsNotReady() {
+        // The wire parser already enforces 1-1024 executions; the predicate
+        // keeps the same floor so an empty wait never readies a continuation
+        // or a cancellation — the daemon's no-results guard would error the
+        // turn instead of failing loudly at admission.
+        HarnessRuntimeRecovery recovery = new HarnessRuntimeRecovery(
+                "await_agent", "checkpoint-4", "activation-4", List.of());
+        assertFalse(recovery.isContinuationReady());
+        assertFalse(recovery.isCancellationReady());
+    }
+
+    @Test
+    void agentWaitWithUnknownOutcomeIsNotReady() {
+        // A wait run the relay can no longer observe reports unknown: the
+        // all-known conjunct must keep the gates shut, or the coordinator
+        // would re-enter a wait it cannot observe (R1-15).
+        HarnessRuntimeRecovery recovery = new HarnessRuntimeRecovery(
+                "await_agent", "checkpoint-4", "activation-4", List.of(
+                        new HarnessRuntimeExecutionRecovery("call-1", "agent",
+                                "execution-1", "runtime-session", null,
+                                "known", Map.of("state", "executing")),
+                        new HarnessRuntimeExecutionRecovery("call-2", "agent",
+                                "execution-2", "runtime-session", null,
+                                "unknown", Map.of("state", "executing"))));
+        assertTrue(recovery.hasUnknownOutcome());
+        assertFalse(recovery.isContinuationReady());
+        assertFalse(recovery.isCancellationReady());
+    }
+
+    @Test
     void parsesAResultsReadyRuntimeRecovery() {
         AtomicReference<String> continuationBody = new AtomicReference<>();
         server.createContext("/session/" + SESSION_ID + "/load",
@@ -1411,6 +1468,30 @@ class HostedHarnessClientTest {
                 + "\"executionCallId\":\"execution-1\","
                 + "\"runtimeSessionId\":\"runtime-1\","
                 + "\"progressCursor\":null,\"outcome\":\"unknown\"}]}}}";
+    }
+
+    private static String sessionJsonWithAgentWaitRuntimeRecovery() {
+        return "{\"sessionId\":\"" + SESSION_ID
+                + "\",\"workspaceCwd\":\"/control\","
+                + "\"attached\":true,\"clientId\":\"" + CLIENT_ID
+                + "\",\"lastEventId\":0,\"eventEpoch\":\""
+                + EVENT_EPOCH
+                + "\",\"_meta\":{\"qwen.daemon.managedRuntimeRecovery\":{"
+                + "\"phase\":\"await_agent\","
+                + "\"checkpointId\":\"checkpoint-3\","
+                + "\"activationId\":\"activation-3\",\"executions\":[{"
+                + "\"functionCallId\":\"function-1\","
+                + "\"toolName\":\"agent\","
+                + "\"executionCallId\":\"run-1\","
+                + "\"runtimeSessionId\":\"prompt-1\","
+                + "\"outcome\":\"known\","
+                + "\"status\":{\"state\":\"executing\"}},{"
+                + "\"functionCallId\":\"function-2\","
+                + "\"toolName\":\"agent\","
+                + "\"executionCallId\":\"run-2\","
+                + "\"runtimeSessionId\":\"prompt-1\","
+                + "\"outcome\":\"known\","
+                + "\"status\":{\"state\":\"settled\"}}]}}}";
     }
 
     private static String sessionJsonWithResultsReadyRuntimeRecovery() {

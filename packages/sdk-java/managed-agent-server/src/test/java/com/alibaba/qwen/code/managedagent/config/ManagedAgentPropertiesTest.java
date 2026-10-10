@@ -278,4 +278,49 @@ class ManagedAgentPropertiesTest {
         off.getAutomation().setMaxSlotsPerTick(0);
         assertThatCode(off::validateWorkspaceFiles).doesNotThrowAnyException();
     }
+
+    @Test
+    void childWorkspacesAreOffByDefaultAndNeedTheMountingBroker() {
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().isChildWorkspacesEnabled()).isFalse();
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().getChildWorkspaceGitTimeout())
+                .isEqualTo(java.time.Duration.ofMinutes(2));
+        List<Consumer<ManagedAgentProperties>> invalid = List.of(
+                p -> p.getRuntimeBroker().setEnabled(false),
+                p -> p.getRuntimeBroker().setProvisioner("kubernetes"),
+                p -> p.getRuntimeBroker().setIsolationClass("workspace"),
+                p -> p.getRuntimeBroker().setWorkspaceMounts(List.of()));
+        for (Consumer<ManagedAgentProperties> change : invalid) {
+            ManagedAgentProperties properties = new ManagedAgentProperties();
+            properties.getRuntimeBroker().setEnabled(true);
+            properties.getRuntimeBroker().setChildWorkspacesEnabled(true);
+            properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                    new ManagedAgentProperties.RuntimeBroker.WorkspaceMount("tenant", "storage", "/workspace")));
+            if (ManagedAgentProperties.childWorkspacesSupportedOn(System.getProperty("os.name"))
+                    && ManagedAgentProperties.utf8FileNames(System.getProperty("sun.jnu.encoding"))) {
+                assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+            } else {
+                assertThatThrownBy(properties::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class);
+            }
+            change.accept(properties);
+            assertThatThrownBy(properties::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Child Workspaces require");
+        }
+        for (java.time.Duration timeout : List.of(java.time.Duration.ofMillis(30),
+                java.time.Duration.ofMillis(999), java.time.Duration.ofHours(2))) {
+            ManagedAgentProperties properties = new ManagedAgentProperties();
+            properties.getRuntimeBroker().setEnabled(true);
+            properties.getRuntimeBroker().setChildWorkspacesEnabled(true);
+            properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                    new ManagedAgentProperties.RuntimeBroker.WorkspaceMount("tenant", "storage", "/workspace")));
+            properties.getRuntimeBroker().setChildWorkspaceGitTimeout(timeout);
+            assertThatThrownBy(properties::validateWorkspaceFiles).as(timeout.toString())
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("child-workspace-git-timeout");
+        }
+        assertThat(ManagedAgentProperties.childWorkspacesSupportedOn("Linux")).isTrue();
+        assertThat(ManagedAgentProperties.childWorkspacesSupportedOn("Mac OS X")).isTrue();
+        assertThat(ManagedAgentProperties.childWorkspacesSupportedOn("Windows Server 2022")).isFalse();
+        assertThat(ManagedAgentProperties.utf8FileNames("UTF-8")).isTrue();
+        assertThat(ManagedAgentProperties.utf8FileNames("ANSI_X3.4-1968")).isFalse();
+    }
 }
