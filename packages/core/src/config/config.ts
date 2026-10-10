@@ -1395,8 +1395,8 @@ export interface ConfigParameters {
   todoWriteEnabled?: boolean;
   agentTeamEnabled?: boolean;
   /**
-   * Opt-in for persistent workspace Agents collaborating on shared threads.
-   * Separate from `agentTeamEnabled`: neither implies the other.
+   * Opt-in for persistent workspace Agents answering @-mentions in chat
+   * sessions. Separate from `agentTeamEnabled`: neither implies the other.
    */
   agentCollaborationEnabled?: boolean;
   workflowsEnabled?: boolean;
@@ -2889,7 +2889,7 @@ export class Config {
   private workspaceAgentDisallowedTools: readonly string[] | undefined;
   /**
    * Set when this `agent` session was started by the session-agents
-   * orchestrator rather than the thread dispatcher. See
+   * orchestrator (a persisted binding names it). See
    * {@link markSessionAgentSession}.
    */
   private sessionAgentSession = false;
@@ -6216,15 +6216,14 @@ export class Config {
 
   /**
    * Marks this agent session as one the session-agents orchestrator drives
-   * (an agent answering @-mentions in a chat session), not a thread run.
+   * (an agent answering @-mentions in a chat session).
    *
-   * Must be called before `initialize()`: it decides whether the thread tools
-   * are registered at all. The caller sets it only after finding a persisted
-   * session-agents binding that names this session for this agent, so it is
-   * a server-side decision, never a client claim.
+   * Must be called before `initialize()`. The caller sets it only after
+   * finding a persisted session-agents binding that names this session for
+   * this agent, so it is a server-side decision, never a client claim.
    *
-   * Effects (product decision 2026-10-05, session-multi-agent design §8-1): no thread tools, and no
-   * read-only ceiling — every tool is available and writes / command
+   * Effects (product decision 2026-10-05, session-multi-agent design §8-1):
+   * no read-only ceiling — every tool is available and writes / command
    * execution go through the session's ordinary approval flow, which the
    * orchestrator relays to the chat session. That flow is the only gate, so
    * the session is pinned to `default` approval whatever the settings say,
@@ -10195,7 +10194,8 @@ export class Config {
   }
 
   /**
-   * Whether persistent workspace Agents may collaborate on shared threads.
+   * Whether persistent workspace Agents may answer @-mentions in chat
+   * sessions.
    *
    * Independent of {@link isAgentTeamEnabled}: neither flag implies the other,
    * and enabling this one permits collaboration without opening any Agent to
@@ -12295,7 +12295,7 @@ export class Config {
 
   /**
    * Whether this session carries a workspace-agent persona. This is the source
-   * of truth for collaboration tools and skill side effects.
+   * of truth for the agent tool guard and skill side effects.
    */
   isWorkspaceAgentSession(): boolean {
     return (
@@ -12321,6 +12321,9 @@ export class Config {
         this.workspaceAgentDisallowedTools,
       );
     }
+    // An `agent` session no session-agents binding claims cannot get this far
+    // (acpAgent refuses it at creation); the read-only ceiling is the
+    // fail-closed default should one ever run.
     return this.isWorkspaceAgentSession()
       ? createAgentToolInvocationGuard(
           this.toolInvocationGuard,
@@ -12995,51 +12998,6 @@ export class Config {
     // Same helper as the bare-mode branch above to keep the registration
     // shape and permission gating in sync between the two paths.
     await registerStructuredOutputIfRequested();
-
-    // The six thread tools are the collaboration surface, so they are gated
-    // on the collaboration opt-in — not merely on being a subagent or on a
-    // session calling itself an agent. `sourceType` is attribution, not
-    // authorization: a client can set it when creating a session, so the
-    // opt-in, plus the server-binding check the dispatcher applies, are what
-    // decide whether these tools exist. The flag alone is not enough.
-    //
-    // Deliberately NOT `|| options?.forSubAgent`. A subagent runs on a
-    // `deriveConfig` child, and that is `Object.create(parent)`, so an agent's
-    // own subagent reads `sourceType === 'agent'` straight off the prototype
-    // chain and lands here anyway. Adding `forSubAgent` only widened the gate
-    // to subagents of *ordinary* conversations, which have no agent run frame
-    // — every one of these tools would have thrown "requires an active agent
-    // run context" on first use. Observed both ways with the six-combination
-    // probe: dropping the clause takes the plain-subagent row from six tools
-    // to zero and leaves the agent-subagent row at six.
-    // A session-agents session has no thread behind it; its thread tools
-    // would only ever throw "requires an active agent run context".
-    if (this.isWorkspaceAgentSession() && !this.isSessionAgentSession()) {
-      await registerLazy(ToolNames.THREAD_POST, async () => {
-        const { ThreadPostTool } = await import('../tools/thread-tools.js');
-        return new ThreadPostTool(this);
-      });
-      await registerLazy(ToolNames.THREAD_WAIT, async () => {
-        const { ThreadWaitTool } = await import('../tools/thread-tools.js');
-        return new ThreadWaitTool(this);
-      });
-      await registerLazy(ToolNames.THREAD_BLOCK, async () => {
-        const { ThreadBlockTool } = await import('../tools/thread-tools.js');
-        return new ThreadBlockTool(this);
-      });
-      await registerLazy(ToolNames.THREAD_REVIEW, async () => {
-        const { ThreadReviewTool } = await import('../tools/thread-tools.js');
-        return new ThreadReviewTool(this);
-      });
-      await registerLazy(ToolNames.THREAD_CREATE, async () => {
-        const { ThreadCreateTool } = await import('../tools/thread-tools.js');
-        return new ThreadCreateTool(this);
-      });
-      await registerLazy(ToolNames.THREAD_READ, async () => {
-        const { ThreadReadTool } = await import('../tools/thread-tools.js');
-        return new ThreadReadTool(this);
-      });
-    }
 
     // Register cron tools unless disabled
     if (this.isCronEnabled()) {

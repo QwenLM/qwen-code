@@ -1000,9 +1000,6 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     try {
       const serveOptions = {
         managedExtensions: argv['managed-extensions'],
-        // A joined runtime is a worker: it runs turns for the coordinator. It
-        // may still coordinate its own workspace if that workspace opts in.
-        agentHostWorker: Boolean(argv['agent-host-server'] || argv['join']),
         port: argv.port,
         hostname: argv.hostname,
         profile: argv.profile,
