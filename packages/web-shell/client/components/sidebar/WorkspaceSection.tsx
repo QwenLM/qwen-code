@@ -123,6 +123,14 @@ export interface WorkspaceHeaderActionsContext {
 
 interface WorkspaceSectionProps {
   workspace: DaemonWorkspaceCapability;
+  /**
+   * localStorage seed for the expansion/collapsed-group preferences,
+   * defaulting to the workspace id. Multi-host renderers pass an
+   * origin-prefixed id so two daemons hosting the same workspace id
+   * never share a preference; single-host callers leave it unset and
+   * keep the keys they always had.
+   */
+  storageKey?: string;
   remote?: boolean;
   renderHeader?: (expanded: boolean) => ReactNode;
   hideHeader?: boolean;
@@ -237,6 +245,7 @@ interface WorkspaceSectionProps {
 
 export function WorkspaceSection({
   workspace,
+  storageKey,
   remote = false,
   renderHeader,
   hideHeader = false,
@@ -288,11 +297,12 @@ export function WorkspaceSection({
     catalog: DaemonChannelTypeCatalog;
     snapshot: DaemonChannelsSnapshot;
   }>();
+  const storageId = storageKey ?? workspace.id;
   const [internalExpanded, setInternalExpanded] = useState(() =>
-    readWorkspaceExpanded(workspace.id),
+    readWorkspaceExpanded(storageId),
   );
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(() =>
-    readWorkspaceCollapsedGroupIds(workspace.id),
+    readWorkspaceCollapsedGroupIds(storageId),
   );
   const [actionsVisible, setActionsVisible] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -309,9 +319,9 @@ export function WorkspaceSection({
   // Uncontrolled workspace rows restore the user's last choice.
   useEffect(() => {
     if (controlledExpanded === undefined) {
-      setInternalExpanded(readWorkspaceExpanded(workspace.id));
+      setInternalExpanded(readWorkspaceExpanded(storageId));
     }
-  }, [controlledExpanded, workspace.id]);
+  }, [controlledExpanded, storageId]);
 
   useEffect(() => {
     // The five-row preview is scoped per source; reset the one-shot
@@ -322,18 +332,18 @@ export function WorkspaceSection({
   // The render site keys this component by workspace id, so an id change
   // always remounts and the lazy useState initializer re-reads storage.
   useEffect(() => {
-    writeWorkspaceCollapsedGroupIds(workspace.id, collapsedGroupIds);
-  }, [collapsedGroupIds, workspace.id]);
+    writeWorkspaceCollapsedGroupIds(storageId, collapsedGroupIds);
+  }, [collapsedGroupIds, storageId]);
 
   useEffect(() => {
     if (
       controlledExpanded === undefined &&
       autoExpandKey &&
-      (forceAutoExpand || !hasWorkspaceExpansionPreference(workspace.id))
+      (forceAutoExpand || !hasWorkspaceExpansionPreference(storageId))
     ) {
       setInternalExpanded(true);
     }
-  }, [autoExpandKey, controlledExpanded, forceAutoExpand, workspace.id]);
+  }, [autoExpandKey, controlledExpanded, forceAutoExpand, storageId]);
 
   const sessionsEnabled = renderSessions && !disabled;
   const sessionsVisible = expanded || Boolean(searchQuery.trim());
@@ -795,7 +805,7 @@ export function WorkspaceSection({
     const nextExpanded = !expanded;
     setInternalExpanded(nextExpanded);
     if (controlledExpanded === undefined) {
-      writeWorkspaceExpanded(workspace.id, nextExpanded);
+      writeWorkspaceExpanded(storageId, nextExpanded);
     }
     onExpandedChange?.(nextExpanded);
   };

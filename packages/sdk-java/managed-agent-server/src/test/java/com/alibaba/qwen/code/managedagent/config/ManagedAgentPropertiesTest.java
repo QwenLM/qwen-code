@@ -474,7 +474,8 @@ class ManagedAgentPropertiesTest {
                 "child-relay.scan-delay",
                 "child-workspace.scan-delay",
                 "dispatch.scan-delay",
-                "events.replay-floor-interval");
+                "events.replay-floor-interval",
+                "message-relay.scan-delay");
         var placeholderOnly = new java.util.TreeSet<String>();
         for (String key : swept) {
             if (!hasTypedField(key)) {
@@ -483,6 +484,20 @@ class ManagedAgentPropertiesTest {
         }
         assertThat(readmeNamedCadences())
                 .containsExactlyInAnyOrderElementsOf(placeholderOnly);
+    }
+
+    @Test
+    void theReadmeNamesEveryMillisBoundSetting() throws Exception {
+        // The unit rule's millisecond exceptions are only true while the
+        // sentence names every MILLIS-bound field, so derive the expected
+        // set from the properties graph instead of pinning names: dropping
+        // `automation.lookback` from the sentence, annotating a ninth field
+        // MILLIS without documenting it, or naming a seconds-bound key in
+        // the span all turn this red.
+        var millisKeys = new java.util.TreeSet<String>();
+        collectMillisKeys(ManagedAgentProperties.class, "", millisKeys);
+        assertThat(readmeNamedMillisSettings())
+                .containsExactlyInAnyOrderElementsOf(millisKeys);
     }
 
     private static List<Class<?>> moduleClasses() throws Exception {
@@ -541,8 +556,70 @@ class ManagedAgentPropertiesTest {
         return true;
     }
 
-    private static java.util.Set<String> readmeNamedCadences()
-            throws java.io.IOException {
+    private static void collectMillisKeys(Class<?> type, String prefix,
+            java.util.Set<String> millisKeys) {
+        // Field-path walk, not getDeclaredClasses: the README names property
+        // keys, so the path of fields is the key's source — a depth-2 group
+        // such as RuntimeBroker.WorkspaceMount binds under its field's name.
+        // everyDurationFieldDeclaresABindingUnit already pins the full
+        // inventory and each field's declared unit; this collects the
+        // MILLIS-declared keys only.
+        for (java.lang.reflect.Field field : type.getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
+                continue;
+            }
+            if (field.getType() == java.time.Duration.class) {
+                var unit = field.getAnnotation(
+                        org.springframework.boot.convert.DurationUnit.class);
+                if (unit != null
+                        && unit.value()
+                                == java.time.temporal.ChronoUnit.MILLIS) {
+                    millisKeys.add(prefix + kebab(field.getName()));
+                }
+                continue;
+            }
+            Class<?> group = null;
+            if (isNestedInProperties(field.getType())) {
+                group = field.getType();
+            } else if (field.getGenericType()
+                            instanceof java.lang.reflect.ParameterizedType list
+                    && list.getActualTypeArguments()[0]
+                            instanceof Class<?> element
+                    && isNestedInProperties(element)) {
+                group = element;
+            }
+            if (group != null) {
+                collectMillisKeys(group,
+                        prefix + kebab(field.getName()) + ".", millisKeys);
+            }
+        }
+    }
+
+    private static boolean isNestedInProperties(Class<?> candidate) {
+        for (Class<?> enclosing = candidate.getEnclosingClass();
+                enclosing != null;
+                enclosing = enclosing.getEnclosingClass()) {
+            if (enclosing == ManagedAgentProperties.class) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String kebab(String camel) {
+        var out = new StringBuilder();
+        for (int i = 0; i < camel.length(); i++) {
+            char c = camel.charAt(i);
+            if (Character.isUpperCase(c)) {
+                out.append('-').append(Character.toLowerCase(c));
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
+    }
+
+    private static String readmeText() throws java.io.IOException {
         // Surefire runs from the module directory; an IDE run from the
         // repository root needs the module path spelled out.
         var path = java.nio.file.Path.of("README.md");
@@ -552,17 +629,38 @@ class ManagedAgentPropertiesTest {
         }
         // Whitespace-normalized: the sentence wraps mid-list, so a raw
         // indexOf would miss a phrase split across lines.
-        var text = java.nio.file.Files.readString(path)
+        return java.nio.file.Files.readString(path)
                 .replaceAll("\\s+", " ");
+    }
+
+    private static java.util.Set<String> readmeNamedCadences()
+            throws java.io.IOException {
+        var text = readmeText();
         int start = text.indexOf("Cadences bound through");
         int end = text.indexOf("also read", start);
         assertThat(start).isGreaterThanOrEqualTo(0);
         assertThat(end).isGreaterThan(start);
+        return readmeBacktickedKeys(text, start, end);
+    }
+
+    private static java.util.Set<String> readmeNamedMillisSettings()
+            throws java.io.IOException {
+        var text = readmeText();
+        int start = text.indexOf("Millisecond-bound settings");
+        int end = text.indexOf(
+                "bind a suffix-less number as milliseconds", start);
+        assertThat(start).isGreaterThanOrEqualTo(0);
+        assertThat(end).isGreaterThan(start);
+        return readmeBacktickedKeys(text, start, end);
+    }
+
+    private static java.util.Set<String> readmeBacktickedKeys(String text,
+            int start, int end) {
         var named = new java.util.TreeSet<String>();
         var backtick = java.util.regex.Pattern.compile("`([^`]+)`")
                 .matcher(text.substring(start, end));
         while (backtick.find()) {
-            // "@Scheduled" carries no dot; the cadence keys all do.
+            // "@Scheduled" carries no dot; the setting keys all do.
             if (backtick.group(1).contains(".")) {
                 named.add(backtick.group(1));
             }
@@ -812,6 +910,8 @@ class ManagedAgentPropertiesTest {
                 p -> p.getRuntimeBroker().setEnabled(false),
                 p -> p.getRuntimeBroker().setProvisioner("kubernetes"),
                 p -> p.getRuntimeBroker().setIsolationClass("workspace"),
+                // A merge waits for the child's close, which only a durable Broker runs.
+                p -> p.getRuntimeBroker().setDurableLocalProcess(false),
                 p -> p.getRuntimeBroker().setWorkspaceMounts(List.of()));
         for (Consumer<ManagedAgentProperties> change : invalid) {
             ManagedAgentProperties properties = new ManagedAgentProperties();

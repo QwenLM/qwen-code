@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellStreamRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSubmitRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTask;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskCancelRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEventQueryRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskGetRequest;
@@ -24,6 +25,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscriptRequest;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.ManagedEventStreamService;
+import com.alibaba.qwen.code.managedagent.service.ManagedTaskCancelService;
 import com.alibaba.qwen.code.managedagent.service.ManagedTaskService;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleService;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
@@ -46,14 +48,17 @@ public class WebShellAgentController {
     private final ManagedEventStreamService streams;
     private final SessionLifecycleService lifecycle;
     private final ManagedTaskService tasks;
+    private final ManagedTaskCancelService taskCancels;
 
     public WebShellAgentController(ManagedAgentService service,
             ManagedEventStreamService streams,
-            SessionLifecycleService lifecycle, ManagedTaskService tasks) {
+            SessionLifecycleService lifecycle, ManagedTaskService tasks,
+            ManagedTaskCancelService taskCancels) {
         this.service = service;
         this.streams = streams;
         this.lifecycle = lifecycle;
         this.tasks = tasks;
+        this.taskCancels = taskCancels;
     }
 
     @PostMapping("/tasks/query")
@@ -78,6 +83,18 @@ public class WebShellAgentController {
                 tenant.actorId(), request.sessionId(), request.taskId(),
                 request.after(),
                 request.limit() == null ? 20 : request.limit());
+    }
+
+    @PostMapping("/tasks/cancel")
+    public ResponseEntity<WebShellCommandOperation> cancelTask(
+            TenantContext tenant,
+            @Valid @RequestBody WebShellTaskCancelRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse,
+                request.requestId());
+        return ResponseEntity.accepted().body(taskCancels.cancelWebShell(
+                tenant.tenantId(), tenant.actorId(), request.idempotencyKey(),
+                request.sessionId(), request.taskId()));
     }
 
     @PostMapping("/sessions/query")

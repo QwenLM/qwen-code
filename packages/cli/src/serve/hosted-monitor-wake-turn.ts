@@ -59,6 +59,9 @@ export function createMonitorWakeRunTurn(params: {
     abort: AbortController,
   ) => Promise<unknown>;
   readonly busy: () => boolean;
+  /** A turn its source no longer runs (H4d-b: a stopped run's message),
+   * re-read with the busy verdict right before the turn starts. */
+  readonly held?: (turn: HostedMonitorWakeTurn) => boolean;
   /**
    * The recovery-required classification. It is injected because the three
    * RecoveryRequiredError classes must be matched by type — their
@@ -145,7 +148,7 @@ export function createMonitorWakeRunTurn(params: {
     // The busy verdict must be re-read after every journal read: a prompt
     // route's own claim in this window would otherwise be cleared here,
     // losing its turn instead of queuing this one.
-    if (params.busy() || session.blocked) return 'busy';
+    if (params.busy() || session.blocked || params.held?.(turn)) return 'busy';
     const abort = new AbortController();
     session.active = { promptId: turn.turnId, digest: '', abort };
     let turnResult: { systemPayload?: Record<string, unknown> } | null;
