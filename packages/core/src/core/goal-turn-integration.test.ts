@@ -84,6 +84,7 @@ describe('Goal turn evidence propagation', () => {
         model: string,
         stream: AsyncGenerator<GenerateContentResponse>,
         routeKey: string,
+        fixedInputVersion: number,
         goalContext?: GoalTurnPermit,
       ) => AsyncGenerator<GenerateContentResponse>;
       pendingPartialAssistantRecord:
@@ -105,6 +106,7 @@ describe('Goal turn evidence propagation', () => {
       'test-model',
       normalStream,
       'test-route',
+      0,
       permit,
     )) {
       // Consume the persisted normal assistant attempt.
@@ -140,6 +142,7 @@ describe('Goal turn evidence propagation', () => {
           'test-model',
           partialStream,
           'test-route',
+          0,
           permit,
         )) {
           // Consume until the deferred partial attempt is staged.

@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type OpenAI from 'openai';
+import { promises as fsPromises, type Stats } from 'node:fs';
 import type {
   Content,
   GenerateContentConfig,
@@ -15,6 +16,7 @@ import type {
 } from '@google/genai';
 import { ApiError } from '@google/genai';
 import { AuthType, type ContentGenerator } from './contentGenerator.js';
+import { getPlanModeSystemReminder } from './prompts.js';
 import {
   LlmChat,
   InvalidStreamError,
@@ -107,6 +109,7 @@ vi.mock('node:fs', () => {
     }),
     existsSync: vi.fn((path: string) => mockFileSystem.has(path)),
     appendFileSync: vi.fn(),
+    promises: { stat: vi.fn() },
   };
 
   return {
@@ -308,7 +311,10 @@ describe('LlmChat', async () => {
       getApprovalMode: vi.fn().mockReturnValue('default'),
       takePendingManualPlanExitNotice: vi.fn().mockReturnValue(undefined),
       restorePendingManualPlanExitNotice: vi.fn(),
-      getFileReadCache: vi.fn().mockReturnValue({ clear: vi.fn() }),
+      getFileReadCache: vi.fn().mockReturnValue({
+        clear: vi.fn(),
+        markAllReadsEvictedFromHistory: vi.fn(),
+      }),
       getRestoreAskUserQuestion: vi.fn().mockReturnValue(false),
     } as unknown as Config;
     setSimulate429(false);
@@ -11882,6 +11888,521 @@ describe('LlmChat', async () => {
   // #9454: API counts describe the serialization of the route (model + auth
   // + endpoint) that produced them. /model keeps this LlmChat, so the old
   // route's counts must not anchor admission, clamp or compression.
+  describe('pressure-aware tool submission (#2566)', () => {
+    // 1M window: auto-compaction triggers at 850_000 tokens. A seeded report
+    // just below it leaves (850_000 - 846_010 - new) / 1.5 ≈ 2.6k tokens of
+    // headroom, i.e. a ~10k-char budget, under the 25k static default.
+    const NEAR_AUTO = 846_000;
+    beforeEach(() => {
+      mockConfig.getTruncateToolOutputThreshold = () => 25_000;
+      mockConfig.isTruncateToolOutputThresholdExplicit = () => false;
+      mockConfig.getToolOutputBatchBudget = () => 200_000;
+      mockGeneratorConfig({ contextWindowSize: 1_000_000 });
+      vi.spyOn(chat, 'tryCompress').mockResolvedValue({
+        compressionStatus: CompressionStatus.NOOP,
+        originalTokenCount: 0,
+        newTokenCount: 0,
+      });
+    });
+    const result = (id = 'anonymous-result', fill = 'x') =>
+      fnResponse('shell', { output: fill.repeat(20_000) }, id);
+    /** The characters of the `field` slot across the `index`th request. */
+    const slotChars = (index: number, field: 'output' | 'error') =>
+      (requestAt(index).contents as Content[])
+        .flatMap((entry) => entry.parts ?? [])
+        .map((part) => part.functionResponse?.response?.[field])
+        .reduce<number>(
+          (total, text) => total + (typeof text === 'string' ? text.length : 0),
+          0,
+        );
+    const resultChars = (index: number) => slotChars(index, 'output');
+    /** The string outputs of the `index`th request's function responses. */
+    const resultOutputs = (index: number) =>
+      (requestAt(index).contents as Content[])
+        .flatMap((entry) => entry.parts ?? [])
+        .map((part) => part.functionResponse?.response?.['output'])
+        .filter((output): output is string => typeof output === 'string');
+    /** A per-tool-layer spill envelope whose recovery pointer sits at the front. */
+    const spillEnvelope = (n: number) =>
+      `<persisted-output>\nOutput too large (512 KB). Full output saved to: /home/runner/.qwen/tmp/project-temp-dir/shell_${'a'.repeat(12)}${n}.log\nFull output sha256: ${'f'.repeat(64)}\nNote: this file may be cleaned up after 24 hours.\n\nPreview (up to 2100 chars):\n${'p'.repeat(1_900)}\n</persisted-output>`;
+    const reportUsage = async (promptTokenCount: number, target = chat) => {
+      mockStreamsOnce(
+        textStream('ok', {
+          promptTokenCount,
+          totalTokenCount: promptTokenCount + 10,
+        }),
+        textStream('done'),
+      );
+      await sendDrain('start', 'first', target);
+    };
+
+    it('shrinks results to the headroom left before auto-compaction', async () => {
+      await reportUsage(NEAR_AUTO);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBeLessThan(20_000);
+      expect(resultChars(1)).toBeLessThan(12_000);
+      expect(
+        vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
+          ?.precomputedEffectiveTokens,
+      ).toBeLessThan(850_000);
+    });
+
+    const fixedInputSetters = [
+      [
+        'system instruction',
+        (changed: boolean) =>
+          chat.setSystemInstruction(changed ? 'x'.repeat(20_000) : 'base'),
+      ],
+      [
+        'session-start context',
+        (changed: boolean) =>
+          chat.setSessionStartContext(changed ? 'x'.repeat(20_000) : 'base'),
+      ],
+      [
+        'tool declarations',
+        (changed: boolean) =>
+          chat.setTools([
+            {
+              functionDeclarations: [
+                {
+                  description: changed ? 'x'.repeat(20_000) : 'base',
+                  name: 'inspect',
+                },
+              ],
+            },
+          ]),
+      ],
+    ] as const;
+
+    it.each(fixedInputSetters)(
+      'falls back after changed %s without clearing token counters',
+      async (_name, rebind) => {
+        rebind(false);
+        await reportUsage(NEAR_AUTO);
+        const counters = [
+          chat.getLastPromptTokenCount(),
+          chat.getLastOutputTokenCount(),
+          chat.getLastCachedContentTokenCount(),
+        ];
+        rebind(true);
+        expect([
+          chat.getLastPromptTokenCount(),
+          chat.getLastOutputTokenCount(),
+          chat.getLastCachedContentTokenCount(),
+        ]).toEqual(counters);
+        await sendDrain([result()], 'second');
+        expect(resultChars(1)).toBe(20_000);
+      },
+    );
+
+    it.each(fixedInputSetters)(
+      'retains pressure headroom after equivalent %s',
+      async (_name, rebind) => {
+        rebind(false);
+        chat.setTools([
+          { functionDeclarations: [{ name: 'inspect', description: 'base' }] },
+        ]);
+        await reportUsage(NEAR_AUTO);
+        rebind(false);
+        await sendDrain([result()], 'second');
+        expect(resultChars(1)).toBeLessThan(12_000);
+      },
+    );
+
+    it('does not reanchor an old response after tools change in flight', async () => {
+      const pendingResponse = async function* () {
+        chat.setTools([
+          {
+            functionDeclarations: [
+              { name: 'new_tool', description: 'x'.repeat(20_000) },
+            ],
+          },
+        ]);
+        yield* textStream('ok', {
+          promptTokenCount: NEAR_AUTO,
+          totalTokenCount: NEAR_AUTO + 10,
+        });
+      };
+      mockStreamsOnce(pendingResponse(), textStream('done'));
+      await sendDrain('start', 'first');
+      expect(chat.getLastPromptTokenCount()).toBe(NEAR_AUTO);
+      expect(chat.getLastOutputTokenCount()).toBe(10);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBe(20_000);
+    });
+
+    it('leaves results alone when the session is far from auto-compaction', async () => {
+      await reportUsage(500_000);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBe(20_000);
+    });
+
+    it('does not shrink once usage is past auto-compaction, which owns that case', async () => {
+      // A budget computed from non-positive headroom used to floor at 1 char
+      // and replace every result with a one-character stub.
+      await reportUsage(900_000);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBe(20_000);
+    });
+
+    it('shares the budget across parallel results and keeps user steering', async () => {
+      await reportUsage(NEAR_AUTO);
+      await sendDrain(
+        [
+          result('first-result'),
+          result('second-result', 'y'),
+          { text: 'Preserve this user instruction.' },
+        ],
+        'second',
+      );
+      expect(resultChars(1)).toBeLessThan(12_000);
+      expect(
+        (requestAt(1).contents as Content[])
+          .flatMap((entry) => entry.parts ?? [])
+          .some((part) => part.text === 'Preserve this user instruction.'),
+      ).toBe(true);
+    });
+
+    it('shrinks a batch whose total exceeds the headroom, not just one result', async () => {
+      await reportUsage(840_000);
+      await sendDrain(
+        [0, 1, 2, 3].map((n) =>
+          fnResponse('shell', { output: 'x'.repeat(24_000) }, `big-${n}`),
+        ),
+        'second',
+      );
+      expect(resultChars(1)).toBeLessThanOrEqual(30_000);
+    });
+
+    it('keeps parallel previews below the real compaction gate without a per-result floor', async () => {
+      await reportUsage(849_500);
+      vi.mocked(chat.tryCompress).mockRestore();
+      const firePreCompactEvent = vi
+        .fn()
+        .mockRejectedValue(new Error('unexpected real PreCompact admission'));
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        firePreCompactEvent,
+        isManaged: () => true,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+      const compress = vi.spyOn(ChatCompressionService.prototype, 'compress');
+      await sendDrain(
+        Array.from({ length: 8 }, (_, n) =>
+          fnResponse(
+            'shell',
+            { output: `${spillEnvelope(n)}${'x'.repeat(18_000)}` },
+            `spilled-${n}`,
+          ),
+        ),
+        'second',
+      );
+      const pending = compress.mock.calls.at(-1)?.[1];
+      expect(pending?.precomputedEffectiveTokens).toBeLessThan(850_000);
+      expect(firePreCompactEvent).not.toHaveBeenCalled();
+      expect(resultChars(1)).toBeLessThanOrEqual(1_333);
+    });
+
+    it('charges media before sharing the remaining headroom between previews', async () => {
+      const stat = { dev: 1, ino: 100 } as Stats;
+      vi.mocked(fsPromises.stat).mockResolvedValue(stat);
+      const markReadEvictedFromHistory = vi.fn().mockReturnValue(true);
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        markReadEvictedFromHistory,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+      mockStreamsOnce(
+        streamOf(
+          modelChunk(
+            [fnCall('read_file', { file_path: 'media.png' }, 'media-result')],
+            undefined,
+            { promptTokenCount: NEAR_AUTO, totalTokenCount: NEAR_AUTO + 10 },
+          ),
+        ),
+        textStream('done'),
+      );
+      await sendDrain('read', 'first');
+      await sendDrain(
+        [
+          {
+            functionResponse: {
+              id: 'media-result',
+              name: 'read_file',
+              response: { output: 'x'.repeat(20_000) },
+              parts: [
+                { inlineData: { mimeType: 'image/png', data: 'BASE64' } },
+              ],
+            },
+          },
+          result(),
+        ],
+        'second',
+      );
+      expect(markReadEvictedFromHistory).toHaveBeenCalledWith(stat);
+      expect(resultChars(1)).toBeLessThan(8_000);
+      expect(resultOutputs(1).every((output) => output.length < 4_000)).toBe(
+        true,
+      );
+      expect(
+        vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
+          ?.precomputedEffectiveTokens,
+      ).toBeLessThan(850_000);
+    });
+
+    it('keeps a small-window send below auto instead of restoring the static output', async () => {
+      mockGeneratorConfig({ contextWindowSize: 32_768 });
+      await reportUsage(27_000);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBeLessThan(4_000);
+      expect(
+        vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
+          ?.precomputedEffectiveTokens,
+      ).toBeLessThan(27_852.8);
+    });
+
+    it('leaves tool output for compaction when positive headroom is less than one character', async () => {
+      mockGeneratorConfig({ contextWindowSize: 1_000_013 });
+      await reportUsage(849_977);
+      await sendDrain([result()], 'second');
+      expect(resultOutputs(1)).toEqual(['x'.repeat(20_000)]);
+      expect(
+        vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
+          ?.precomputedEffectiveTokens,
+      ).toBeGreaterThanOrEqual(850_011.05);
+    });
+
+    it.each([Number.POSITIVE_INFINITY, 0])(
+      'keeps a disabled aggregate budget unchanged when adaptive headroom rounds to zero (%s)',
+      async (batchBudget) => {
+        mockGeneratorConfig({ contextWindowSize: 1_000_013 });
+        mockConfig.getToolOutputBatchBudget = () => batchBudget;
+        await reportUsage(849_977);
+        await sendDrain([result()], 'second');
+        expect(resultChars(1)).toBe(20_000);
+      },
+    );
+
+    it('preserves file read rights when the send guard cuts shell output', async () => {
+      const clear = vi.fn();
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        clear,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+      await reportUsage(NEAR_AUTO);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBeLessThan(20_000);
+      expect(clear).not.toHaveBeenCalled();
+    });
+
+    it('disarms a resolved bridged cut read without clearing prior-read rights', async () => {
+      const stat = { dev: 1, ino: 100 } as Stats;
+      vi.mocked(fsPromises.stat).mockResolvedValue(stat);
+      const markReadEvictedFromHistory = vi.fn().mockReturnValue(true);
+      const markAllReadsEvictedFromHistory = vi.fn();
+      const clear = vi.fn();
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        clear,
+        markReadEvictedFromHistory,
+        markAllReadsEvictedFromHistory,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+      mockStreamsOnce(
+        streamOf(
+          modelChunk(
+            [
+              fnCall(
+                'tool_call',
+                { name: 'read_file', arguments: { file_path: 'cut.txt' } },
+                'read-cut',
+              ),
+            ],
+            undefined,
+            { promptTokenCount: NEAR_AUTO, totalTokenCount: NEAR_AUTO + 10 },
+          ),
+        ),
+        textStream('done'),
+      );
+      await sendDrain('read', 'first');
+      await sendDrain(
+        [fnResponse('tool_call', { output: 'x'.repeat(20_000) }, 'read-cut')],
+        'second',
+      );
+      expect(resultChars(1)).toBeLessThan(12_000);
+      expect(markReadEvictedFromHistory).toHaveBeenCalledWith(stat);
+      expect(markAllReadsEvictedFromHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['pressure', 200_000],
+      ['aggregate', 1_000],
+    ])(
+      'preserves a batch whose historical read arguments lack a path under %s budget',
+      async (_kind, budget) => {
+        mockConfig.getToolOutputBatchBudget = () => budget;
+        const markAllReadsEvictedFromHistory = vi.fn();
+        vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+          markAllReadsEvictedFromHistory,
+        } as unknown as ReturnType<Config['getFileReadCache']>);
+        mockStreamsOnce(
+          streamOf(
+            modelChunk([fnCall('read_file', {}, 'repaired-read')], undefined, {
+              promptTokenCount: NEAR_AUTO,
+              totalTokenCount: NEAR_AUTO + 10,
+            }),
+          ),
+          textStream('done'),
+        );
+        await sendDrain('read', 'first');
+        await sendDrain(
+          [
+            fnResponse(
+              'read_file',
+              { output: 'x'.repeat(20_000) },
+              'repaired-read',
+            ),
+            result('parallel-shell', 'y'),
+          ],
+          'second',
+        );
+        expect(resultOutputs(1)).toEqual([
+          'x'.repeat(20_000),
+          'y'.repeat(20_000),
+        ]);
+        expect(markAllReadsEvictedFromHistory).not.toHaveBeenCalled();
+        expect(
+          vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
+            ?.precomputedEffectiveTokens,
+        ).toBeGreaterThanOrEqual(850_000);
+      },
+    );
+
+    it('charges the protected plan lifecycle prefix before shrinking appended hook text', async () => {
+      const reminder = getPlanModeSystemReminder(false);
+      await reportUsage(NEAR_AUTO);
+      await sendDrain(
+        [
+          fnResponse(
+            'enter_plan_mode',
+            { output: `${reminder}\n\n${'h'.repeat(20_000)}` },
+            'plan',
+          ),
+        ],
+        'second',
+      );
+      expect(resultOutputs(1)[0]).toMatch(reminder);
+      expect(resultChars(1)).toBeLessThanOrEqual(10_640);
+      expect(
+        vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
+          ?.precomputedEffectiveTokens,
+      ).toBeLessThan(850_000);
+    });
+
+    it('leaves the file read cache alone when the guard cuts nothing', async () => {
+      const clear = vi.fn();
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        clear,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+      await reportUsage(500_000);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBe(20_000);
+      expect(clear).not.toHaveBeenCalled();
+    });
+
+    it('charges exempt tool output to the headroom instead of shrinking around it', async () => {
+      await reportUsage(NEAR_AUTO);
+      await sendDrain(
+        [
+          fnResponse('search_memory', { output: 'm'.repeat(48_000) }, 'mem'),
+          result(),
+        ],
+        'second',
+      );
+      // The exempt text alone exceeds the headroom by far more than the
+      // conservative factor, so nothing is shrunk and the memory result travels
+      // whole on top of the budget.
+      expect(resultChars(1)).toBe(68_000);
+    });
+
+    it('budgets an exempt tool error like a plain result instead of cutting it twice', async () => {
+      await reportUsage(NEAR_AUTO);
+      await sendDrain(
+        [
+          fnResponse('search_memory', { error: 'e'.repeat(8_000) }, 'mem'),
+          result(),
+        ],
+        'second',
+      );
+      // Only `output` is exempt-protected, so the error text is charged to the
+      // same shared batch budget as a plain 8k result: it is neither held
+      // out of the headroom estimate (which would make the budget 4,000 and
+      // stub both parts to 2,000) nor left whole.
+      expect(resultChars(1)).toBe(slotChars(1, 'error'));
+      expect(resultChars(1) + slotChars(1, 'error')).toBeLessThanOrEqual(
+        10_640,
+      );
+      expect(
+        vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
+          ?.precomputedEffectiveTokens,
+      ).toBeLessThan(850_000);
+    });
+
+    it('keeps the tighter of the aggregate budget and the headroom', async () => {
+      mockConfig.getToolOutputBatchBudget = () => 5_000;
+      await reportUsage(NEAR_AUTO);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBeLessThanOrEqual(5_000);
+    });
+
+    it('leaves results whole when the aggregate budget is disabled', async () => {
+      mockConfig.getToolOutputBatchBudget = () => Number.POSITIVE_INFINITY;
+      await reportUsage(NEAR_AUTO);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBe(20_000);
+    });
+
+    it('applies the default window when the route reports none', async () => {
+      mockGeneratorConfig();
+      await reportUsage(163_000);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBeLessThan(20_000);
+    });
+
+    it.each(['explicit', 'estimated', 'restored', 'foreign', 'other-chat'])(
+      'keeps static output for %s ownership',
+      async (mode) => {
+        await reportUsage(NEAR_AUTO);
+        let target = chat;
+        if (mode === 'explicit')
+          mockConfig.isTruncateToolOutputThresholdExplicit = () => true;
+        if (mode === 'estimated') chat.setLastPromptTokenCount(NEAR_AUTO, true);
+        if (mode === 'restored') chat.setHistory(chat.getHistory());
+        if (mode === 'foreign')
+          vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
+            'other-route',
+          );
+        if (mode === 'other-chat') {
+          target = newChat();
+          vi.spyOn(target, 'tryCompress').mockResolvedValue({
+            compressionStatus: CompressionStatus.NOOP,
+            originalTokenCount: 0,
+            newTokenCount: 0,
+          });
+        }
+        await sendDrain([result()], 'second', target);
+        expect(resultChars(1)).toBe(20_000);
+      },
+    );
+
+    it('does not reuse a report once a later request was dispatched', async () => {
+      await reportUsage(NEAR_AUTO);
+      // Cancel the follow-up before it accepts a turn, so the anchor can only be
+      // cleared by the dispatch itself: a completing response would clear it too
+      // and hide a missing dispatch-time clear.
+      const followUp = await send('follow-up', 'second');
+      await followUp.next();
+      await followUp.return(undefined);
+      mockStreamsOnce(textStream('done'));
+      await sendDrain([result()], 'third');
+      expect(resultChars(2)).toBe(20_000);
+    });
+  });
+
   describe('route-scoped token counts (#9454)', () => {
     const switchRoute = (routeKey: string) => {
       vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(routeKey);

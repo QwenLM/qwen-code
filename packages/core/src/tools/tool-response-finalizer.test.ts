@@ -12,6 +12,7 @@ import { ToolNames } from './tool-names.js';
 import {
   enforceFunctionResponseBudget,
   finalizeToolResponses,
+  isBudgetShrinkablePart,
   toolResponseTextLength,
   type ToolResponseBudgetEntry,
 } from './tool-response-finalizer.js';
@@ -94,6 +95,45 @@ describe('tool response finalization', () => {
       1000,
     );
     expect(JSON.stringify(result[0].responseParts)).not.toContain('Persisted');
+  });
+
+  it('persists only shortened tool text at the send boundary and keeps steering and exempt output', async () => {
+    const output = `HEAD${'x'.repeat(8000)}MIDDLE${'y'.repeat(8000)}TAIL`;
+    const entries = [
+      entry('cut', [fnResponse('shell', { output }, 'cut')]),
+      entry('user', [{ text: 'Keep this user instruction.' }]),
+      {
+        ...entry('memory', [
+          fnResponse('search_memory', { output: 'memory' }, 'memory'),
+        ]),
+        toolName: 'search_memory',
+      },
+    ];
+    const result = await finalizeToolResponses(
+      config(200_000),
+      entries,
+      undefined,
+      false,
+      false,
+      500,
+      false,
+    );
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(persist).toHaveBeenCalledWith(
+      'cut',
+      'shell',
+      output,
+      expect.anything(),
+    );
+    const preview = result[0].responseParts[0].functionResponse?.response?.[
+      'output'
+    ] as string;
+    expect(preview.length).toBeLessThanOrEqual(500);
+    expect(preview).toContain('/tmp/cut.txt');
+    expect(preview).not.toContain('MIDDLE');
+    expect(result[1]).toEqual(entries[1]);
+    expect(result[2]).toEqual(entries[2]);
+    expect(boundaryObserveMock).not.toHaveBeenCalled();
   });
 
   it('leaves a batch within budget unchanged', async () => {
@@ -715,6 +755,66 @@ describe('tool response finalization', () => {
     expect((output as string).length).toBeLessThanOrEqual(100);
   });
 
+  it.each([0, 12])(
+    'leaves tool diagnostics for compaction at a %s-character send budget',
+    async (budget) => {
+      const userText = 'Keep this instruction.';
+      const entries = [
+        entry('send', [
+          { text: userText },
+          fnResponse(
+            'shell',
+            { output: 'original output', error: 'FAILED_TOOL diagnostic' },
+            'send',
+          ),
+        ]),
+      ];
+
+      expect(enforceFunctionResponseBudget(entries, 0)).toBe(entries);
+      const result = await finalizeToolResponses(
+        config(200_000),
+        entries,
+        undefined,
+        false,
+        false,
+        budget,
+        false,
+      );
+      expect(result).toBe(entries);
+      expect(persist).not.toHaveBeenCalled();
+      expect(result[0].responseParts[0].text).toBe(userText);
+      expect(result[0].responseParts[1].functionResponse?.response).toEqual({
+        output: 'original output',
+        error: 'FAILED_TOOL diagnostic',
+      });
+    },
+  );
+
+  it('omits an artifact pointer when the full path cannot fit', async () => {
+    const artifact = `/tmp/${'anonymous-directory/'.repeat(12)}output.txt`;
+    const result = await finalizeToolResponses(
+      config(200_000),
+      [
+        entry(
+          'send',
+          [fnResponse('shell', { output: 'x'.repeat(1000) }, 'send')],
+          [artifact],
+        ),
+      ],
+      undefined,
+      false,
+      false,
+      220,
+      false,
+    );
+
+    expect(
+      result[0].responseParts[0].functionResponse?.response?.['output'],
+    ).toBe('Tool output truncated.');
+    expect(result[0].persistedOutputFiles).toEqual([artifact]);
+    expect(persist).not.toHaveBeenCalled();
+  });
+
   it('the send guard preserves an enter_plan_mode lifecycle response', () => {
     const reminder = getPlanModeSystemReminder(false);
     const entries: ToolResponseBudgetEntry[] = [
@@ -757,5 +857,69 @@ describe('tool response finalization', () => {
 
     expect(output.startsWith(reminder)).toBe(true);
     expect(output.length).toBeLessThanOrEqual(reminder.length + 2 + 100);
+  });
+
+  it('treats nested media as part of a result the budget still shortens', () => {
+    // `collectTextSlots` budgets the `output` string beside nested media, so a
+    // caller charging a batch against a token headroom must not classify that
+    // text as unshrinkable while the budget cuts it anyway.
+    const mediaResult: Part = {
+      functionResponse: {
+        id: 'media-result',
+        name: 'read_file',
+        response: { output: 'x'.repeat(20_000) },
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'BASE64' } }],
+      },
+    };
+
+    expect(isBudgetShrinkablePart(mediaResult)).toBe(true);
+    expect(
+      isBudgetShrinkablePart(
+        fnResponse('search_memory', { output: 'm'.repeat(100) }, 'mem'),
+      ),
+    ).toBe(false);
+    expect(
+      isBudgetShrinkablePart(fnResponse('shell', { output: '' }, 'empty')),
+    ).toBe(false);
+
+    const [guarded] = enforceFunctionResponseBudget(
+      [
+        {
+          callId: 'send-boundary',
+          toolName: 'tool-response-batch',
+          responseParts: [mediaResult],
+        },
+      ],
+      1_000,
+    );
+    const output = guarded.responseParts[0].functionResponse?.response?.[
+      'output'
+    ] as string;
+
+    expect(output.length).toBe(1_000);
+    expect(guarded.responseParts[0].functionResponse?.parts).toHaveLength(1);
+  });
+
+  it('treats a lifecycle-only response as text the budget cannot shorten', () => {
+    // `collectTextSlots` strips the plan-mode prefix before it decides whether
+    // to budget a slot, so a response that is nothing but the reminder yields
+    // no slot and travels whole (see the lifecycle case above). A caller
+    // measuring what the budget can shorten has to agree, or it charges the
+    // headroom for text the cut never reaches.
+    const reminderOnly = fnResponse(
+      ToolNames.ENTER_PLAN_MODE,
+      { output: getPlanModeSystemReminder(false) },
+      'enter-plan',
+    );
+    const entries: ToolResponseBudgetEntry[] = [
+      {
+        callId: 'send-boundary',
+        toolName: 'tool-response-batch',
+        responseParts: [reminderOnly],
+      },
+    ];
+
+    expect(enforceFunctionResponseBudget(entries, 1)).toBe(entries);
+    expect(isBudgetShrinkablePart(reminderOnly)).toBe(false);
   });
 });
