@@ -333,6 +333,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/tasks/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cancelWebShellTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/tool-results/get": {
         parameters: {
             query?: never;
@@ -763,6 +779,8 @@ export interface components {
             sessionId: string;
             /** @enum {unknown} */
             type: "create_session" | "submit_input" | "cancel" | "action_response" | "close" | "archive" | "delete" | "task_cancel";
+            /** @description Task that a task_cancel operation targets. */
+            taskId?: string;
             /** @enum {unknown} */
             status: "pending" | "running" | "completed" | "failed" | "cancelled" | "recovery_blocked";
             /** @enum {unknown} */
@@ -771,10 +789,10 @@ export interface components {
             deliveryState: "pending" | "leased" | "confirmed" | "blocked";
             receiptId?: string;
             actionResolution?: components["schemas"]["WebShellActionResolution"];
-            /** @description Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Workspace close recovery_blocked reports original resource identity or unsettled execution; the Session remains closing. */
+            /** @description Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Task cancel failures are task_already_settled (the run ended before the stop request was recorded), task_action_unavailable and task_not_found; a recovery_blocked task cancel reports task_cancel_unconfirmed. Workspace close recovery_blocked reports original resource identity or unsettled execution; the Session remains closing. */
             failureCode?: string;
             replayed: boolean;
-        } & (unknown & unknown & unknown & unknown);
+        } & (unknown & unknown & unknown & unknown & unknown);
         WebShellQuestionAction: {
             actionId: string;
             /** Format: uuid */
@@ -898,7 +916,7 @@ export interface components {
          */
         TaskRuntimeState: "unbound" | "provisioning" | "ready" | "draining" | "lost";
         /**
-         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task; whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
+         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task (since 1.40, child_agent tasks in pending, running, waiting or degraded, in an active Session); whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
          * @enum {string}
          */
         TaskActionCapability: "cancel" | "send_input" | "read_output";
@@ -986,6 +1004,14 @@ export interface components {
             after?: string;
             /** @default 20 */
             limit?: number;
+        };
+        WebShellTaskCancelRequest: {
+            /** @description Trace correlation only; excluded from the request digest, so a retry with another requestId still replays. A header-safe value (1 to 128 visible ASCII characters) is echoed as X-Request-Id; any other value is replaced by a server-chosen id. */
+            requestId?: string | null;
+            /** Format: uuid */
+            sessionId: string;
+            taskId: string;
+            idempotencyKey: string;
         };
         /** @description state_changed, output or artifact. The set is open: a later minor version may add types and optional fields. Clients ignore unknown optional fields and unknown types, while still checkpointing event cursors; strict validation against an older minor response schema is not supported. Existing fields forbidden for a known type cannot be repurposed on that type. */
         TaskEventType: string;
@@ -1749,6 +1775,37 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["TaskCursorExpired"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    cancelWebShellTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellTaskCancelRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized task cancellation semantics as the public API: key validation, current access, idempotent replay, then new-request capability, Session, task and storage-migration checks (409 workspace_unavailable under a migration fence). Replay returns the same operation and latest durable state. 202 is durable admission, completed is authority acceptance, and neither proves physical stop. Admission requires no other open operation on the Session (409 session_operation_active), as on the lifecycle routes. A requestId in the body becomes the response's X-Request-Id and stays out of the request digest. */
+            202: {
+                headers: {
+                    "X-Request-Id": components["headers"]["RequestId"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellCommandOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
             413: components["responses"]["PayloadTooLarge"];
         };
     };
