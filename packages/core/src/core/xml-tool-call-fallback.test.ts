@@ -1354,7 +1354,7 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     }
   });
 
-  it('keeps the single lexer pass length-preserving when a value quotes calls', () => {
+  it('keeps lexer passes length-preserving when a live value extends its mask', () => {
     const spy = vi.spyOn(Lexer, 'lexInline');
     try {
       const quoted = invoke('read_file', param('file_path', 'x.txt'));
@@ -1372,7 +1372,7 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
           args: { content: `Usage:\n${quoted}`, file_path: 'd.md' },
         },
       ]);
-      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledTimes(2);
       for (const call of spy.mock.calls) {
         expect(String(call[0]).length).toBe(text.length);
       }
@@ -1412,7 +1412,7 @@ describe('reviewed XML ownership and documentation regressions', () => {
     {
       id: 'R4-1',
       text: '<invoke name="write_file"><parameter name="content"><invoke name="b"><parameter name="p">w</parameter></invoke>\n```\ntail</parameter></invoke>\n```\n<invoke name="read_file"><parameter name="file_path">real.ts</parameter></invoke>',
-      expected: ['write_file', 'read_file'],
+      expected: ['write_file'],
     },
   ];
   it.each(cases)(
@@ -1436,9 +1436,9 @@ describe('reviewed XML ownership and documentation regressions', () => {
           content:
             '<invoke name="b"><parameter name="p">w</parameter></invoke>\n```\ntail',
         });
-        expect(result.functionCallParts[1]?.functionCall?.args).toEqual({
-          file_path: 'real.ts',
-        });
+        expect(result.remainingText).toContain(
+          invoke('read_file', param('file_path', 'real.ts')),
+        );
       } else {
         expect(result.functionCallParts[0]?.functionCall?.args).toEqual({
           file_path: 'real.ts',
@@ -1461,7 +1461,7 @@ describe('reviewed XML ownership and documentation regressions', () => {
     expect(result.remainingText).toBe(witness);
   });
 
-  it('leaves a following call inert when the flat prose context has an unclosed fence', () => {
+  it('recovers a following call after balanced prose fences beside a quoted value', () => {
     const content =
       '<invoke name="b"><parameter name="p">w</parameter></invoke>\n```\ntail';
     const write = invoke('write_file', param('content', content));
@@ -1469,8 +1469,33 @@ describe('reviewed XML ownership and documentation regressions', () => {
     const text = `${write}\n\`\`\`\nDocumentation\n\`\`\`\n${read}`;
     expect(extractXmlToolCalls(text)).toEqual([
       { name: 'write_file', args: { content } },
+      { name: 'read_file', args: { file_path: 'real.ts' } },
     ]);
-    expect(tryRecoverXmlToolCalls(text).remainingText).toContain(read);
+    expect(tryRecoverXmlToolCalls(text).remainingText).not.toContain(read);
+  });
+});
+
+describe('live quoted-value masks', () => {
+  it.each([
+    ['example', '<example>literal value tail'],
+    ['fence', '```\nDocumentation\n~~~\ntail'],
+  ])('keeps a value-only %s from hiding a genuine sibling', (_kind, tail) => {
+    const quoted = invoke('read_file', param('file_path', 'quoted-only.txt'));
+    const content = `${quoted}\n${tail}`;
+    const write = invoke('write_file', param('content', content));
+    const read = invoke('read_file', param('file_path', 'real.ts'));
+    const text = `${write}\n${read}`;
+    const expected = [
+      { name: 'write_file', args: { content } },
+      { name: 'read_file', args: { file_path: 'real.ts' } },
+    ];
+    expect(extractXmlToolCalls(text)).toEqual(expected);
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(true);
+    expect(result.functionCallParts.map((part) => part.functionCall)).toEqual(
+      expected.map((call) => expect.objectContaining(call)),
+    );
+    expect(result.remainingText).toBe('');
   });
 });
 

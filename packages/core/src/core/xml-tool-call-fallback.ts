@@ -378,30 +378,12 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     }
   }
   const tagPositions = exampleTagPositions(text, parameterRanges);
-  const exampleRanges = computeExampleRanges(
+  let exampleRanges = computeExampleRanges(
     text,
     parameterRanges,
     tagPositions,
     quotedValueRanges,
   );
-  // Documentation spans are appended out of text order and overlap the flat
-  // matches they extend, so restore the ordered, disjoint sequence the mask
-  // below needs: it blanks these ranges with a single forward cursor, which is
-  // only length-preserving while no range starts behind that cursor. Example
-  // tag offsets are read back against the unmasked text, and the lexer cap is
-  // measured on text.length, so a mask that grows breaks both.
-  parameterRanges.sort(([startA], [startB]) => startA - startB);
-  let rangeCount = 0;
-  for (let index = 0; index < parameterRanges.length; index++) {
-    const current = parameterRanges[index];
-    const previous = parameterRanges[rangeCount - 1];
-    if (previous && current[0] <= previous[1]) {
-      previous[1] = Math.max(previous[1], current[1]);
-    } else {
-      parameterRanges[rangeCount++] = current;
-    }
-  }
-  parameterRanges.length = rangeCount;
 
   TOOL_CALL_PATTERN.lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -557,8 +539,12 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     }
   }
 
-  return blocks.filter(
-    ({ start, end, parameterSpans }) =>
+  function isEligibleBlock({
+    start,
+    end,
+    parameterSpans,
+  }: ToolCallBlock): boolean {
+    return (
       !positionInsideFence(text, start, parameterRanges) &&
       !positionInsideFence(
         text,
@@ -573,8 +559,52 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
             !parameterSpans.some(
               ([from, to]) => exampleStart >= from && exampleStart < to,
             )),
-      ),
-  );
+      )
+    );
+  }
+
+  const eligibleBlocks = blocks.filter(isEligibleBlock);
+  let extendedMasks = false;
+  // An eligible outer call owns its complete parameter values, including the
+  // tail after a quoted call. That tail must not open prose documentation for
+  // a following sibling. Establish eligibility before extending these masks.
+  for (const { parameterSpans } of eligibleBlocks) {
+    for (const [start, end] of parameterSpans) {
+      if (!parameterRanges.some(([from, to]) => start >= from && end <= to)) {
+        parameterRanges.push([start, end]);
+        extendedMasks = true;
+      }
+    }
+  }
+  // Documentation spans are appended out of text order and overlap the flat
+  // matches they extend, so restore the ordered, disjoint sequence the mask
+  // below needs: it blanks these ranges with a single forward cursor, which is
+  // only length-preserving while no range starts behind that cursor. Example
+  // tag offsets are read back against the unmasked text, and the lexer cap is
+  // measured on text.length, so a mask that grows breaks both.
+  parameterRanges.sort(([startA], [startB]) => startA - startB);
+  let rangeCount = 0;
+  for (let index = 0; index < parameterRanges.length; index++) {
+    const current = parameterRanges[index];
+    const previous = parameterRanges[rangeCount - 1];
+    if (previous && current[0] <= previous[1]) {
+      previous[1] = Math.max(previous[1], current[1]);
+    } else {
+      parameterRanges[rangeCount++] = current;
+    }
+  }
+  parameterRanges.length = rangeCount;
+
+  if (extendedMasks) {
+    exampleRanges = computeExampleRanges(
+      text,
+      parameterRanges,
+      exampleTagPositions(text, parameterRanges),
+      [],
+    );
+    return blocks.filter(isEligibleBlock);
+  }
+  return eligibleBlocks;
 }
 
 export function extractXmlToolCalls(text: string): ExtractedToolCall[] {
