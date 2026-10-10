@@ -6,7 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { McpClientManager } from './mcp-client-manager.js';
-import type { MCPServerConfig, type Config } from '../config/config.js';
+import type { MCPServerConfig, Config } from '../config/config.js';
 import type { ToolRegistry } from './tool-registry.js';
 
 /**
