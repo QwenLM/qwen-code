@@ -409,8 +409,11 @@ public final class InMemoryToolExecutionRepository
             return false;
         }
         Object capture = result.get("capture");
-        return capture instanceof Map<?, ?> map
-                && "pending".equals(map.get("deliveryStatus"));
+        if (!(capture instanceof Map<?, ?> map)) {
+            return false;
+        }
+        Object status = map.get("deliveryStatus");
+        return "pending".equals(status) || "blocked".equals(status);
     }
 
     @Override

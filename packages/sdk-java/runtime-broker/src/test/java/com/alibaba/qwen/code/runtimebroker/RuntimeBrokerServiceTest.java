@@ -386,6 +386,12 @@ class RuntimeBrokerServiceTest {
     @Test
     void mountReleaseStaysBusyBehindAnExecutionWhoseDeliveryIsStillOpen()
             throws Exception {
+        assertDeliveryPendingKeepsTheMount("pending");
+        assertDeliveryPendingKeepsTheMount("blocked");
+    }
+
+    private void assertDeliveryPendingKeepsTheMount(String deliveryStatus)
+            throws Exception {
         String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
         String digest = "sha256:" + HexFormat.of().formatHex(
                 MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
@@ -394,7 +400,7 @@ class RuntimeBrokerServiceTest {
         capture.put("captureReason", null);
         capture.put("manifest", null);
         capture.put("previewTruncated", false);
-        capture.put("deliveryStatus", "pending");
+        capture.put("deliveryStatus", deliveryStatus);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("executionStatus", "success");
         result.put("responseParts", java.util.List.of(Map.of("text", "done")));
@@ -434,11 +440,12 @@ class RuntimeBrokerServiceTest {
                     fixture.executionRepository,
                     prepared.getExecutionCallId(),
                     ToolExecutionRecord.State.SETTLED);
-            assertEquals("pending", ((Map<?, ?>) settled.getResult()
+            assertEquals(deliveryStatus, ((Map<?, ?>) settled.getResult()
                     .get("capture")).get("deliveryStatus").toString());
-            // The tool work discharged, but its publication evidence is
-            // not closed: the operator-recovery family needs the mount
-            // held until then, busy exactly like an unsettled execution.
+            // 'pending' (undelivered) or 'blocked' (close not confirmed):
+            // the effect is discharged but the publication evidence is not
+            // closed — the operator-recovery family needs the mount held
+            // until then, busy exactly like an unsettled execution.
             RuntimeBrokerException busy = failure(
                     fixture.service.releaseMount("holder", "holder"));
             assertEquals("runtime_session_busy", busy.getCode());
