@@ -12531,6 +12531,119 @@ describe('Hosted Harness no-tool session', () => {
     }
   });
 
+  it('clears the keepalive timer when backpressure stops the stream', async () => {
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'hello' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      });
+    await vi.waitFor(async () => {
+      const transcript = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/transcript`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(transcript.body.events.length).toBeGreaterThan(2);
+    });
+
+    // Record every interval the route arms so the assertion can name the
+    // keepalive one (15s) rather than the pump one (250ms). The end() spy
+    // is a no-op so the response stays open and no 'close' event fires —
+    // the leak shape from the finding: stop() is the only teardown that
+    // runs, so it must clear both timers.
+    const armed: Array<{ handle: unknown; timeout: number | undefined }> = [];
+    const originalSetInterval = globalThis.setInterval;
+    const intervalSpy = vi
+      .spyOn(globalThis, 'setInterval')
+      .mockImplementation(function (
+        this: unknown,
+        ...args: Parameters<typeof setInterval>
+      ) {
+        const handle = originalSetInterval.apply(this, args);
+        armed.push({ handle, timeout: args[1] });
+        return handle;
+      } as typeof setInterval);
+    const clearSpy = vi.spyOn(globalThis, 'clearInterval');
+    const originalWrite = ServerResponse.prototype.write;
+    const write = vi
+      .spyOn(ServerResponse.prototype, 'write')
+      .mockImplementation(function (
+        this: ServerResponse,
+        ...args: Parameters<ServerResponse['write']>
+      ) {
+        if (typeof args[0] === 'string' && args[0].startsWith('id: ')) {
+          originalWrite.apply(this, args);
+          return false;
+        }
+        return originalWrite.apply(this, args);
+      });
+    const end = vi
+      .spyOn(ServerResponse.prototype, 'end')
+      .mockImplementation(function (this: ServerResponse) {
+        return this;
+      });
+    const listener = server;
+    const abort = new AbortController();
+    try {
+      const address = listener.address();
+      if (!address || typeof address === 'string') throw new Error('No port');
+      const stream = await fetch(
+        `http://127.0.0.1:${address.port}/session/${SESSION_ID}/events`,
+        {
+          headers: {
+            'X-Qwen-Harness-Protocol-Version': '1',
+            'X-Qwen-Harness-Boot-Id': BOOT_ID,
+            'X-Qwen-Client-Id': clientId,
+          },
+          signal: abort.signal,
+        },
+      );
+      expect(stream.status).toBe(200);
+      expect(stream.headers.get('x-accel-buffering')).toBe('no');
+      await vi.waitFor(() => {
+        expect(end).toHaveBeenCalledTimes(1);
+      });
+      const keepalive = armed.filter((entry) => entry.timeout === 15_000);
+      expect(keepalive).toHaveLength(1);
+      expect(clearSpy.mock.calls.flat()).toContain(keepalive[0]!.handle);
+    } finally {
+      write.mockRestore();
+      end.mockRestore();
+      intervalSpy.mockRestore();
+      clearSpy.mockRestore();
+      abort.abort();
+      listener.closeAllConnections();
+      // Settle the turn this test started before tearing down: while
+      // session.active is set the DELETE below answers 409
+      // hosted_turn_active and cannot close the session, so a late
+      // resource write from the still-draining turn would race
+      // afterEach's recursive rm of the scratch tree. The poll runs only
+      // after end() is restored — while the spy swallows it, a status
+      // response could never complete.
+      const settleDeadline = Date.now() + 10_000;
+      for (;;) {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        if (status.body.hasActivePrompt === false) break;
+        if (Date.now() > settleDeadline) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
+    }
+  });
+
   it('logs the failure cause while keeping the public turn error generic', async () => {
     const log = vi
       .spyOn(stdio, 'writeStderrLineSafe')
