@@ -14,9 +14,24 @@ public final class LoadHarnessSession {
     private Map<String, Object> lifecycleAuthority;
     private Map<String, Object> agentDefinition;
 
+    /**
+     * #13753 I2: a copy that tells the Hosted side this control plane
+     * serves child Workspaces (see {@link CreateHarnessSession.Builder#childWorkspaces}).
+     */
+    private boolean childWorkspaces;
+
     public LoadHarnessSession withAgentDefinition(Map<String, Object> value) {
         this.agentDefinition = value == null ? null : Map.copyOf(value);
         return this;
+    }
+
+    public LoadHarnessSession withChildWorkspaces(boolean value) {
+        LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
+                passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover);
+        copy.agentDefinition = agentDefinition;
+        copy.lifecycleAuthority = lifecycleAuthority;
+        copy.childWorkspaces = value;
+        return copy;
     }
 
     public LoadHarnessSession forLifecycle(String operationId, long claimGeneration) {
@@ -27,6 +42,7 @@ public final class LoadHarnessSession {
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover);
         copy.agentDefinition = agentDefinition;
         copy.lifecycleAuthority = Map.of("operationId", operationId, "claimGeneration", claimGeneration);
+        copy.childWorkspaces = childWorkspaces;
         return copy;
     }
 
@@ -109,6 +125,9 @@ public final class LoadHarnessSession {
         }
         if (agentDefinition != null) {
             result.put("agentDefinition", agentDefinition);
+        }
+        if (childWorkspaces) {
+            result.put("childWorkspaces", true);
         }
         return result;
     }

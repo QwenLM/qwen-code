@@ -11,7 +11,11 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.RelayRow;
@@ -59,6 +63,7 @@ public class ChildResultRelay {
     private final HarnessConnector harness;
     private final ObjectMapper mapper;
     private final ChildLifecycleAdmissions childCloses;
+    private final ChildWorkspaceService childWorkspaces;
     private final Supplier<Long> clock;
     private final String owner = "child-relay-" + UUID.randomUUID();
 
@@ -67,9 +72,10 @@ public class ChildResultRelay {
             ManagedAgentService sessions,
             org.springframework.beans.factory.ObjectProvider<RuntimeBrokerService> broker,
             HarnessConnector harness, ObjectMapper mapper,
-            ChildLifecycleAdmissions childCloses) {
+            ChildLifecycleAdmissions childCloses,
+            ChildWorkspaceService childWorkspaces) {
         this(relayStore, sessions, broker, harness, mapper, childCloses,
-                System::currentTimeMillis);
+                childWorkspaces, System::currentTimeMillis);
     }
 
     ChildResultRelay(ChildResultRelayStore relayStore,
@@ -77,6 +83,7 @@ public class ChildResultRelay {
             org.springframework.beans.factory.ObjectProvider<RuntimeBrokerService> broker,
             HarnessConnector harness, ObjectMapper mapper,
             ChildLifecycleAdmissions childCloses,
+            ChildWorkspaceService childWorkspaces,
             Supplier<Long> clock) {
         this.relayStore = relayStore;
         this.sessions = sessions;
@@ -84,6 +91,7 @@ public class ChildResultRelay {
         this.harness = harness;
         this.mapper = mapper;
         this.childCloses = childCloses;
+        this.childWorkspaces = childWorkspaces;
         this.clock = clock;
     }
 
@@ -158,6 +166,9 @@ public class ChildResultRelay {
         // debt arm runs before the orphaned early-out could erase it.
         if (!"ACTIVE".equals(parentStatus)
                 && !"close_debt".equals(row.state())) {
+            // A child Workspace admitted while the parent began closing
+            // can postdate the cascade's look: it is discarded here too.
+            discardChildWorkspace(row);
             // Whichever side of the parent-first race lands next, a standing
             // child always keeps its one discoverable holder: `orphaned`
             // now only closes out children that no longer stand (null or
@@ -351,12 +362,167 @@ public class ChildResultRelay {
                 "child launch envelope");
         String description = envelope.required("description").asText();
         String prompt = envelope.required("prompt").asText();
-        var admission = sessions.createChildSession(pending.tenantId(),
-                pending.parentSessionId(), pending.childRunId(), description,
-                prompt);
+        boolean isolated = worktree(body);
+        if (isolated && !childWorkspaceReady(row, now)) {
+            return;
+        }
+        CommandAdmission admission;
+        try {
+            admission = sessions.createChildSession(pending.tenantId(),
+                    pending.parentSessionId(), pending.childRunId(),
+                    description, prompt, isolated);
+        } catch (ApiException refused) {
+            // A new child only (a replay answers before this check): the
+            // row moved off the parent's binding or was asked to finish
+            // since it read ready, and it never becomes ready again.
+            if (!isolated
+                    || !"child_workspace_not_ready".equals(refused.getCode())) {
+                throw refused;
+            }
+            failCreation(row, refused.getCode(), now);
+            return;
+        }
         relayStore.advance(row, owner, "binding", admission.sessionId(), 0,
                 null, now + LEASE_MS, now);
     }
+
+    /** #13753 I2: the run's fixed `workspaceMode` names a child Workspace. */
+    private static boolean worktree(JsonNode body) {
+        return "worktree".equals(body.path("workspaceMode").asText());
+    }
+
+    /**
+     * A worktree run's child Workspace before its child exists (#13753 I2):
+     * the preparation is requested, never run here — the child Workspace
+     * scan runs its Git — and looked at again on the heartbeat at no cost.
+     * A ready Workspace lets the creation go on. One that can never become
+     * ready (a refused layout, a blocked preparation, a host without the
+     * capability, a parent without a binding) settles the run as a
+     * creation that never started, and its row is asked to discard.
+     */
+    private boolean childWorkspaceReady(RelayRow row, long now) {
+        ChildWorkspaceStore.Row workspace;
+        try {
+            workspace = childWorkspaces.request(row.tenantId(),
+                    row.parentSessionId(), row.childRunId());
+        } catch (ApiException refused) {
+            if (!"child_workspace_unsupported".equals(refused.getCode())
+                    && !"child_parent_unavailable".equals(refused.getCode())) {
+                throw refused;
+            }
+            // A row an earlier attempt admitted still owes its discard,
+            // which needs no capability to record (failCreation asks).
+            failCreation(row, refused.getCode(), now);
+            return false;
+        }
+        switch (workspace.state()) {
+            case ChildWorkspaceStore.READY -> {
+                if (workspace.finishRequest() == null) {
+                    return true;
+                }
+                // A creation never binds a row whose finish was asked; a
+                // merge asked first yields to the discard.
+                failCreation(row, "child Workspace finish requested before"
+                        + " its child", now);
+                return false;
+            }
+            case ChildWorkspaceStore.PREPARING -> {
+                relayStore.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                        now + LEASE_MS, now);
+                return false;
+            }
+            default -> {
+                failCreation(row, workspace.outcomeCode() == null
+                        ? "child Workspace " + workspace.state()
+                        : workspace.outcomeCode(), now);
+                return false;
+            }
+        }
+    }
+
+    /**
+     * The run never started: no child exists, so nothing is owed a close,
+     * and its child Workspace is asked to discard. A child whose creation
+     * answer was lost is not that: the ordinary retries and the give-up
+     * chain settle it as started.
+     */
+    private void failCreation(RelayRow row, String reason, long now) {
+        if (relayStore.findLineageChild(row.tenantId(), row.parentSessionId(),
+                row.childRunId()) != null) {
+            throw new RelayRetry("a child exists for a creation judged"
+                    + " unable to start");
+        }
+        discardChildWorkspace(row);
+        Map<String, Object> fail = new LinkedHashMap<>();
+        fail.put("operationId", UUID.randomUUID().toString());
+        fail.put("kind", "fail");
+        fail.put("childRunId", row.childRunId());
+        fail.put("stopReason", "creation_failed");
+        fail.put("started", false);
+        harness.runChildOperation(row.tenantId(), row.parentSessionId(), fail);
+        relayStore.classify(row, owner, "done",
+                "child Workspace not prepared: " + reason, now);
+    }
+
+    /**
+     * Asks the run's child Workspace, if it has one, to discard (#13753
+     * I2). The request is durable and runs once the child Session is
+     * closed; a refusal meaning the row already settled — merged,
+     * discarded, a merge already running, no row at all — is not owed.
+     */
+    private void discardChildWorkspace(RelayRow row) {
+        if (childWorkspaces.find(row.tenantId(), row.parentSessionId(),
+                row.childRunId()) == null) {
+            return;
+        }
+        try {
+            childWorkspaces.requestFinish(row.tenantId(), row.parentSessionId(),
+                    row.childRunId(), ChildWorkspaceStore.DISCARD);
+        } catch (ApiException refused) {
+            if (!SETTLED_FINISH_REFUSALS.contains(refused.getCode())) {
+                throw refused;
+            }
+        }
+    }
+
+    /** The receipt's conflict paths, JSON-encoded, stay within this. */
+    static final int MAX_RECEIPT_PATH_BYTES = 16 * 1024;
+
+    private int jsonBytes(String text) {
+        try {
+            return mapper.writeValueAsBytes(text).length;
+        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+            throw new IllegalStateException("A conflict path is not serializable", error);
+        }
+    }
+
+    /**
+     * Settles a finished run's child Workspace (#13753 I2): a merge already
+     * asked keeps its place, a child that completed a Turn has its work
+     * merged (as a shared child's writes would stay), and any other end
+     * discards. Refusals meaning the row already settled are not owed.
+     */
+    private void finishChildWorkspace(RelayRow row, boolean completed) {
+        ChildWorkspaceStore.Row workspace = childWorkspaces.find(
+                row.tenantId(), row.parentSessionId(), row.childRunId());
+        if (workspace == null
+                || ChildWorkspaceStore.MERGE.equals(workspace.finishRequest())) {
+            return;
+        }
+        try {
+            childWorkspaces.requestFinish(row.tenantId(), row.parentSessionId(),
+                    row.childRunId(), completed ? ChildWorkspaceStore.MERGE
+                            : ChildWorkspaceStore.DISCARD);
+        } catch (ApiException refused) {
+            if (!SETTLED_FINISH_REFUSALS.contains(refused.getCode())) {
+                throw refused;
+            }
+        }
+    }
+
+    private static final java.util.Set<String> SETTLED_FINISH_REFUSALS =
+            java.util.Set.of("child_workspace_conflict",
+                    "child_workspace_finishing", "child_workspace_not_found");
 
     private void bind(RelayRow row, long now) {
         if (row.childSessionId() == null) {
@@ -416,6 +582,7 @@ public class ChildResultRelay {
                 // close capability at all settles on time and keeps the
                 // debt as close_debt instead.
                 boolean closed = closeFinishedChild(row, now);
+                finishChildWorkspace(row, false);
                 Map<String, Object> fail = new LinkedHashMap<>();
                 fail.put("operationId", UUID.randomUUID().toString());
                 fail.put("kind", "fail");
@@ -450,6 +617,9 @@ public class ChildResultRelay {
             // moves delivery to `cancelled` — so a faltered admission can
             // never strand the child Session behind a terminal row.
             boolean closed = closeFinishedChild(row, now);
+            // The child completed: an over-bound answer is no reason to
+            // lose its work.
+            finishChildWorkspace(row, true);
             Map<String, Object> quota = new LinkedHashMap<>();
             quota.put("operationId", UUID.randomUUID().toString());
             quota.put("kind", "fail");
@@ -463,12 +633,21 @@ public class ChildResultRelay {
                     "child result exceeds the copy bound", now);
             return;
         }
-        JsonNode receiptJson = mapper.createObjectNode()
+        JsonNode body = readJson(relayStore.readResource(pending.tenantId(),
+                pending.recordResourceId()), "child run body");
+        ObjectNode receiptJson = mapper.createObjectNode()
                 .put("childSessionId", row.childSessionId())
                 .put("turnId", turn.turnId())
                 .put("status", turn.status())
                 .put("completedAt",
                         turn.completedAt() == null ? 0L : turn.completedAt());
+        if (worktree(body)) {
+            JsonNode workspace = mergedChildWorkspace(row, now);
+            if (workspace == null) {
+                return;
+            }
+            receiptJson.set("workspace", workspace);
+        }
         String receipt = receiptJson.toString();
         Map<String, Object> commit = new LinkedHashMap<>();
         commit.put("operationId", UUID.randomUUID().toString());
@@ -482,8 +661,6 @@ public class ChildResultRelay {
         // child wakes the parent with a durable notification input; a
         // foreground child's acceptance commits alone and its answer
         // arrives through the original tool result, never a second wake.
-        JsonNode body = readJson(relayStore.readResource(pending.tenantId(),
-                pending.recordResourceId()), "child run body");
         boolean background = "sent"
                 .equals(body.required("completion").asText());
         Map<String, Object> accept = new LinkedHashMap<>();
@@ -504,6 +681,81 @@ public class ChildResultRelay {
                 accept);
         relayStore.advance(row, owner, "delivering", row.childSessionId(), 0,
                 null, now + LEASE_MS, now);
+    }
+
+    /**
+     * A completed worktree child merges before its result is committed
+     * (#13753 I2): the merge is requested and the child's close admitted —
+     * the merge runs once the child is closed — and the relay looks again
+     * on the heartbeat, at no cost, until the row records an outcome. That
+     * outcome becomes the receipt's `workspace`, built only from fields a
+     * later discard leaves alone, so a replayed commit is byte-equal.
+     * Answers null while the outcome is still owed. A host that lost its
+     * close capability waits at the close-debt cadence: its merge cannot
+     * run, and a result committed without it would hide the child's work.
+     */
+    private JsonNode mergedChildWorkspace(RelayRow row, long now) {
+        ChildWorkspaceStore.Row workspace = childWorkspaces.find(
+                row.tenantId(), row.parentSessionId(), row.childRunId());
+        if (workspace == null) {
+            throw new RelayRetry("worktree child has no child Workspace row");
+        }
+        if (workspace.outcomeCode() == null) {
+            if (!childCloses.closeSupported()) {
+                relayStore.scheduleRetry(row, owner, now + CLOSE_DEBT_IDLE_MS,
+                        now + LEASE_MS, now);
+                return null;
+            }
+            try {
+                childWorkspaces.requestFinish(row.tenantId(),
+                        row.parentSessionId(), row.childRunId(),
+                        ChildWorkspaceStore.MERGE);
+            } catch (ApiException refused) {
+                // A discard asked first (the parent closing) keeps its
+                // place: the row then reports `discarded`.
+                if (!"child_workspace_conflict".equals(refused.getCode())) {
+                    throw refused;
+                }
+            }
+            closeFinishedChild(row, now);
+            relayStore.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                    now + LEASE_MS, now);
+            return null;
+        }
+        String code = workspace.outcomeCode();
+        String outcome = switch (code) {
+            case "merged", "conflicted", "discarded" -> code;
+            default -> "blocked";
+        };
+        ObjectNode receipt = mapper.createObjectNode()
+                .put("mode", "worktree")
+                .put("childWorkspaceId", workspace.childWorkspaceId())
+                .put("outcome", outcome)
+                .put("code", code);
+        if ("conflicted".equals(outcome)) {
+            // The paths are names the child chose: their bytes are bounded
+            // so the receipt always fits the parent's inline resource.
+            var paths = receipt.putArray("conflictPaths");
+            int bytes = 0;
+            int omitted = 0;
+            for (String path : workspace.conflictPaths()) {
+                int size = jsonBytes(path) + 1;
+                if (omitted > 0 || bytes + size > MAX_RECEIPT_PATH_BYTES) {
+                    omitted++;
+                    continue;
+                }
+                bytes += size;
+                paths.add(path);
+            }
+            if (omitted > 0) {
+                receipt.put("omittedConflictPaths", omitted);
+            }
+        }
+        if (!"merged".equals(outcome) && workspace.resultCommit() != null) {
+            receipt.put("resultRef", ChildWorktreeGit.PIN_PREFIX
+                    + workspace.childWorkspaceId() + "/result");
+        }
+        return receipt;
     }
 
     private void deliver(RelayRow row, long now) {
@@ -687,6 +939,12 @@ public class ChildResultRelay {
                 childCloses.admitChildClose(row.tenantId(),
                         row.parentSessionId(), child, row.childRunId());
             }
+            // Giving up on the result never discards a completed child's
+            // work: it lands as a shared child's writes would.
+            ChildResultRelayStore.TurnLine last = child == null ? null
+                    : relayStore.latestTurn(row.tenantId(), child);
+            finishChildWorkspace(row, last != null
+                    && "COMPLETED".equals(last.status()));
             Map<String, Object> fail = new LinkedHashMap<>();
             fail.put("operationId", UUID.randomUUID().toString());
             fail.put("kind", "fail");

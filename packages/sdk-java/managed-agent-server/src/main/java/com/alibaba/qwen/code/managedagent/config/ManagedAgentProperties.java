@@ -151,12 +151,15 @@ public class ManagedAgentProperties {
         // control plane against an administrator mount, so it needs the
         // local-process Broker that mounts the storage here.
         if (runtimeBroker.isChildWorkspacesEnabled()) {
+            // A merge runs once the child Session is closed (#13753 I2), and
+            // only a durable local-process Broker can close one.
             if (!runtimeBroker.isEnabled()
                     || !"local-process".equals(runtimeBroker.getProvisioner())
                     || !"session".equals(runtimeBroker.getIsolationClass())
+                    || !runtimeBroker.isDurableLocalProcess()
                     || runtimeBroker.getWorkspaceMounts().isEmpty()) {
                 throw new IllegalStateException("Child Workspaces require a Session-isolated"
-                        + " local-process Broker with Workspace mounts");
+                        + " durable local-process Broker with Workspace mounts");
             }
             // A suffix-less number binds as milliseconds: refuse it here,
             // naming the key, rather than time out every Git command.
