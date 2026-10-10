@@ -74,6 +74,7 @@ const MockedLlmClientClass = vi.hoisted(() =>
     this.addHistory = vi.fn();
     this.consumePendingMemoryTaskPromises = vi.fn().mockReturnValue([]);
     this.recordCompletedToolCall = vi.fn();
+    this.acceptCompletedToolResults = vi.fn();
     // Default to the fast-path accessor returning an empty Set so the
     // dedup dispatcher in `handleCompletedTools` takes the
     // `getHistoryFunctionResponseIds` branch by default (matching
@@ -9419,6 +9420,7 @@ describe('useLlmStream', () => {
       responseSubmittedToLlm: false,
       response: {
         callId: 'call_race_A',
+        executionStatus: 'success',
         responseParts: [
           {
             functionResponse: {
@@ -9529,14 +9531,14 @@ describe('useLlmStream', () => {
       expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['call_race_A']);
     });
 
-    // The deduped tool DID run locally — `recordCompletedToolCall` must
-    // still fire so toolCallCount / skillsModifiedInSession reflect it,
-    // even though the wire-side submission is dropped. Regression guard:
-    // an earlier version filtered deduped tools out of `llmTools`
-    // without recording, skipping the metric increment.
-    expect(client.recordCompletedToolCall).toHaveBeenCalledWith('read_file', {
-      path: '/tmp/x.txt',
-    });
+    // Keep local completion bookkeeping for skill-modification protection,
+    // but do not accept the real result that was dropped from history.
+    expect(client.acceptCompletedToolResults).not.toHaveBeenCalled();
+    expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+      'read_file',
+      { path: '/tmp/x.txt' },
+      lateRealResult.response,
+    );
 
     // No follow-up submission: the synthetic in history already closes
     // the tool_use ↔ tool_result pair.
@@ -10106,17 +10108,18 @@ describe('useLlmStream', () => {
       responseSubmittedToLlm: false,
       response: {
         callId: 'call_mixed_deduped',
+        executionStatus: 'error',
         responseParts: [
           {
             functionResponse: {
               id: 'call_mixed_deduped',
               name: 'read_file',
-              response: { output: 'late real for deduped' },
+              response: { error: 'late failure' },
             },
           },
         ],
         resultDisplay: undefined,
-        error: undefined,
+        error: new Error('late failure'),
         errorType: undefined,
       },
       tool: {
@@ -10142,6 +10145,7 @@ describe('useLlmStream', () => {
       responseSubmittedToLlm: false,
       response: {
         callId: 'call_mixed_fresh',
+        executionStatus: 'success',
         responseParts: [
           {
             functionResponse: {
@@ -10273,6 +10277,10 @@ describe('useLlmStream', () => {
     ).mock.calls.map((call) => (call[1] as { path: string }).path);
     expect(recordedCallIds.filter((p) => p === '/tmp/d.txt').length).toBe(1);
     expect(recordedCallIds.filter((p) => p === '/tmp/f.txt').length).toBe(1);
+    expect(client.acceptCompletedToolResults).not.toHaveBeenCalled();
+    expect(mockSendMessageStream.mock.calls[0][0]).toEqual(
+      freshTool.response.responseParts,
+    );
 
     // (c) The fresh tool's real result reaches sendMessageStream —
     // dedup didn't accidentally suppress it.

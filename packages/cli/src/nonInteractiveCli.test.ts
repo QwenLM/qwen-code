@@ -3527,6 +3527,7 @@ describe('runNonInteractive', () => {
     };
     const toolResponse: Part[] = [{ text: 'Tool response' }];
     mockCoreExecuteToolCall.mockResolvedValue({
+      callId: 'tool-1',
       responseParts: toolResponse,
       executionStatus: 'success',
     });
@@ -3585,6 +3586,7 @@ describe('runNonInteractive', () => {
     expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
       'testTool',
       { arg1: 'value1' },
+      expect.objectContaining({ callId: 'tool-1', executionStatus: 'success' }),
     );
     // Verify consumePendingMemoryTaskPromises is called at the end of the session.
     expect(mockLlmClient.consumePendingMemoryTaskPromises).toHaveBeenCalled();
@@ -4321,6 +4323,8 @@ describe('runNonInteractive', () => {
           if (started === total) openGate();
           await gate;
           const response = {
+            callId: request.callId,
+            executionStatus: 'success' as const,
             responseParts: [
               {
                 functionResponse: {
@@ -4387,10 +4391,12 @@ describe('runNonInteractive', () => {
       expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
         targetName,
         { path: 'bridge-1' },
+        expect.objectContaining({ callId: 'bridge-1' }),
       );
       expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
         targetName,
         { path: 'bridge-2' },
+        expect.objectContaining({ callId: 'bridge-2' }),
       );
     });
 

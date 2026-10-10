@@ -439,6 +439,7 @@ import type {
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
+import { userContentPushSnapshotKey } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result-boundary-diagnostics.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
@@ -9007,12 +9008,27 @@ export class Session implements SessionContext {
       },
     };
     const goalPermit = goalTurnContext.getStore();
+    let experienceInputRecorded = false;
+    const recordAcceptedToolResults = () => {
+      const snapshot = (message as unknown as Record<PropertyKey, unknown>)[
+        userContentPushSnapshotKey
+      ];
+      if (
+        !experienceInputRecorded &&
+        typeof snapshot === 'number' &&
+        chat.getUserContentPushCount() > snapshot
+      ) {
+        experienceInputRecorded = true;
+        llmClient.acceptCompletedToolResults(message);
+      }
+    };
     let sourceStream: AsyncGenerator<StreamEvent>;
     try {
       sourceStream = goalPermit
         ? await chat.sendMessageStream(model, request, promptId, goalPermit)
         : await chat.sendMessageStream(model, request, promptId);
     } catch (error) {
+      recordAcceptedToolResults();
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
       throw error;
     }
@@ -9033,6 +9049,7 @@ export class Session implements SessionContext {
       };
       try {
         for await (const event of sourceStream) {
+          recordAcceptedToolResults();
           if (event.type === StreamEventType.CHUNK) {
             receivedChunk = true;
           } else if (event.type === StreamEventType.COMPRESSED) {
@@ -9050,6 +9067,7 @@ export class Session implements SessionContext {
           commitMemoryDelivery();
         }
       } finally {
+        recordAcceptedToolResults();
         if (!committed && receivedChunk && abortSignal.aborted) {
           commitMemoryDelivery();
         }
@@ -13810,6 +13828,7 @@ export class Session implements SessionContext {
     };
     let producerObserved = false;
     let terminalStatus: 'success' | 'error' | 'cancelled' | undefined;
+    let completedResultDisplay: ToolResultDisplay | undefined;
     // Released when the call ends, however it ends, as the core scheduler does.
     let builtInvocation: { release?: () => Promise<void> } | undefined;
     let toolType: 'native' | 'mcp' = 'native';
@@ -16626,6 +16645,7 @@ export class Session implements SessionContext {
             );
           }
 
+          completedResultDisplay = toolResult.returnDisplay;
           const modelResponseParts = withHookContext(responseParts, status);
           queueToolResultRecord?.(fc, {
             callId,
@@ -16797,7 +16817,16 @@ export class Session implements SessionContext {
           });
       }
       if (terminalStatus && terminalStatus !== 'cancelled') {
-        this.config.getLlmClient().recordCompletedToolCall(toolName, args);
+        this.config.getLlmClient().recordCompletedToolCall(toolName, args, {
+          callId,
+          executionStatus,
+          error:
+            terminalStatus === 'error'
+              ? new Error(spanError ?? 'Tool execution failed')
+              : undefined,
+          errorType: executionErrorType,
+          resultDisplay: completedResultDisplay,
+        });
       }
       if (terminalStatus === 'cancelled') {
         endToolSpan(toolSpan, { success: false, cancelled: true });
