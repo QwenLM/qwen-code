@@ -215,6 +215,7 @@ function childLife(refs: Refs, childRunId = 'run-1'): ChildAgentRun[] {
     rootSessionId: sessionId,
     completion: 'sent',
     inputRef: refs.input,
+    workspaceMode: 'shared',
     workingDirectory: '.',
     executionCallId: `call-${childRunId}`,
     definition: DEFINITION,

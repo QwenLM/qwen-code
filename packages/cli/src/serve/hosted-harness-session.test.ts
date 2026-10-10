@@ -4459,6 +4459,7 @@ describe('Hosted Harness no-tool session', () => {
           definitionDigest:
             managed.authority.sessionHeader.definitionRef.digest,
         },
+        workspaceMode: 'shared',
         workingDirectory: '.',
         executionCallId: 'run-1',
       });
@@ -5254,6 +5255,7 @@ describe('Hosted Harness no-tool session', () => {
             managed.authority.sessionHeader.definitionRef.digest,
         },
         workingDirectory: '.',
+        workspaceMode: 'shared',
         executionCallId: 'run-1',
       });
       await children.dispatchStarted('run-1', {
@@ -5870,6 +5872,7 @@ describe('Hosted Harness no-tool session', () => {
             definitionDigest:
               managed.authority.sessionHeader.definitionRef.digest,
           },
+          workspaceMode: 'shared',
           workingDirectory: '.',
           executionCallId: 'run-1',
         });
@@ -9954,6 +9957,92 @@ describe('Hosted Harness no-tool session', () => {
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
       loaded.body.clientId as string,
+    );
+  });
+
+  // #13753 I2: `childWorkspaces` describes the host, not the Session: the
+  // create that carries it advertises isolation, and a later load answers
+  // whatever that load restates, since nothing persists it.
+  it('advertises worktree isolation only while the create or load restates the host capability', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    const server = await app(true);
+    const isolationOf = async (clientId: string): Promise<boolean> => {
+      let declared: boolean | undefined;
+      state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+        const agent = (await toolTurn!.declarations(signal)).find(
+          (tool) => tool.name === 'agent',
+        );
+        declared =
+          'isolation' in
+          ((agent?.parametersJsonSchema as { properties?: object })
+            ?.properties ?? {});
+        return { text: 'ok', model: 'test-model' };
+      });
+      const prompt = [{ type: 'text', text: randomUUID() }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: randomUUID(),
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
+      expect(declared).toBeDefined();
+      return declared!;
+    };
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+      childWorkspaces: true,
+    });
+    expect(created.status).toBe(200);
+    expect(await isolationOf(created.body.clientId as string)).toBe(true);
+    // A load re-answered from the resident Session restates it too.
+    for (const childWorkspaces of [false, true]) {
+      const resident = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: store(),
+        passiveManagedRuntimeRecovery: true,
+        ...(childWorkspaces ? { childWorkspaces } : {}),
+      });
+      expect(resident.status).toBe(200);
+      expect(resident.body.clientId).toBe(created.body.clientId);
+      expect(await isolationOf(resident.body.clientId as string)).toBe(
+        childWorkspaces,
+      );
+    }
+    let clientId = created.body.clientId as string;
+    for (const childWorkspaces of [undefined, 'true', true]) {
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: store(),
+        ...(childWorkspaces === undefined ? {} : { childWorkspaces }),
+      });
+      expect(loaded.status).toBe(200);
+      clientId = loaded.body.clientId as string;
+      expect(await isolationOf(clientId)).toBe(childWorkspaces === true);
+    }
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
     );
   });
 
@@ -14865,6 +14954,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         description: 'first audit',
         prompt: 'review one',
         definition,
+        workspaceMode: 'shared',
         workingDirectory: '.',
         executionCallId: fg1,
       });
@@ -14948,6 +15038,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           description: 'second audit',
           prompt: 'review two',
           definition,
+          workspaceMode: 'shared',
           workingDirectory: '.',
           executionCallId: fg2,
         });

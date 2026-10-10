@@ -121,6 +121,7 @@ async function launch(
     prompt: 'review the change',
     definition: DEFINITION,
     workingDirectory: '.',
+    workspaceMode: 'shared',
     executionCallId: childRunId,
   });
 }
@@ -308,6 +309,44 @@ describe('send_message to a child task (H4d-b)', () => {
       childRunId: 'run-1',
     });
     expect(parent.children.messagesTo('run-1')).toHaveLength(10);
+  });
+
+  // #13753 I2: a continuation is a launch, and a worktree run needs a host
+  // that serves child Workspaces exactly as its first launch did.
+  it('continues a completed worktree child only on a host that serves child Workspaces', async () => {
+    const parent = await side(PARENT);
+    await parent.children.admit({
+      childRunId: 'run-1',
+      ownerScopeId: PARENT,
+      rootSessionId: PARENT,
+      completion: 'sent',
+      description: 'audit the diff',
+      prompt: 'review the change',
+      definition: DEFINITION,
+      workingDirectory: '.',
+      workspaceMode: 'worktree',
+      executionCallId: 'run-1',
+    });
+    await attach(parent.children);
+    await complete(parent.children);
+    const continuation = (childWorkspaces: boolean, call: string) =>
+      parent.children.sendToChild({
+        taskId: parent.children.taskIdOf('run-1'),
+        text: 'now check the tests',
+        messageId: `msg_${call}`,
+        continuationRunId: `prompt:${call}`,
+        executionCallId: `prompt:${call}`,
+        closing: false,
+        childWorkspaces,
+      });
+    const refused = await continuation(false, 'call-1');
+    expect(refused).toMatchObject({ kind: 'refused' });
+    expect(parent.children.record('prompt:call-1')).toBeUndefined();
+    const continued = await continuation(true, 'call-2');
+    expect(continued).toMatchObject({ kind: 'continuation' });
+    expect(parent.children.record('prompt:call-2')?.workspaceMode).toBe(
+      'worktree',
+    );
   });
 
   it('continues a completed child with the message as its next prompt', async () => {

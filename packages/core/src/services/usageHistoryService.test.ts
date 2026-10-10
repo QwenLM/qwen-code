@@ -804,15 +804,27 @@ describe('persistUsageBeforeTranscriptDeletion (issue #7384)', () => {
     expect(fs.existsSync(usagePath())).toBe(false);
   });
 
-  it.each([false, true])(
-    'ignores lifecycle frames during usage rebuild and salvage (metrics: %s)',
-    async (withMetrics) => {
+  it.each([
+    [false, 'request_lifecycle'],
+    [true, 'request_lifecycle'],
+    [false, 'tool_lifecycle'],
+    [true, 'tool_lifecycle'],
+  ] as const)(
+    'ignores lifecycle frames during usage rebuild and salvage (metrics: %s, event: %s)',
+    async (withMetrics, eventName) => {
       const sessionId = `sess-lifecycle-${withMetrics}`;
       const filePath = plantTranscript(sessionId, withMetrics);
       const started = {
-        'event.name': 'request_lifecycle',
+        'event.name': eventName,
         v: 1,
-        kind: 'request',
+        kind: eventName === 'tool_lifecycle' ? 'tool' : 'request',
+        ...(eventName === 'tool_lifecycle'
+          ? {
+              callId: 'call',
+              toolName: 'read_file',
+              executionStatus: 'running',
+            }
+          : {}),
         executionId: 'execution',
         sessionId,
         promptId: `${sessionId}########1`,
@@ -830,6 +842,9 @@ describe('persistUsageBeforeTranscriptDeletion (issue #7384)', () => {
             endedAt: 120,
             durationMs: 20,
             outcome: 'cancelled',
+            ...(eventName === 'tool_lifecycle'
+              ? { executionStatus: 'cancelled', executionDurationMs: 20 }
+              : {}),
           },
         ]
           .map((uiEvent, i) =>

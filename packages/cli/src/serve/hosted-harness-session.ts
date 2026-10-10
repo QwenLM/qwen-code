@@ -281,6 +281,12 @@ interface HostedSession {
   messagesStopped?: boolean;
   /** H4e-b1: the lead's team funnel, beside its child orchestrator. */
   teams?: HostedTeamSession;
+  /**
+   * #13753 I2: the control plane serves child Workspaces, so the Agent
+   * tool admits `isolation: "worktree"`. It describes the host, not the
+   * Session: every create or load restates it and nothing persists it.
+   */
+  childWorkspaces?: boolean;
   /** Depth of this Session in its child tree; absent or 0 is the root. */
   childDepth?: number;
   /** Tool-arm results answered by a turn; flushed at that turn's settle. */
@@ -560,6 +566,23 @@ function record(
     version: 'hosted-harness/1',
     ...fields,
   };
+}
+
+/**
+ * The child orchestration a Turn of this Session gets, the same for an
+ * ordinary Turn and a recovered one: its funnel, its depth, whether the
+ * host serves child Workspaces (#13753 I2), and the consumption queue.
+ */
+function childAgentsOf(session: HostedSession) {
+  return (
+    session.childAgents && {
+      funnel: session.childAgents,
+      depth: session.childDepth ?? 0,
+      childWorkspaces: session.childWorkspaces === true,
+      queueConsumption: (childRunId: string) =>
+        session.childConsumption.add(childRunId),
+    }
+  );
 }
 
 function hasAcceptedInput(session: HostedSession, promptId: string): boolean {
@@ -2313,12 +2336,7 @@ async function executeHostedTurn(
                   childRuns: session.childRuns,
                   monitors: session.monitors,
                   backgroundLane: session.backgroundLane,
-                  childAgents: session.childAgents && {
-                    funnel: session.childAgents,
-                    depth: session.childDepth ?? 0,
-                    queueConsumption: (childRunId) =>
-                      session.childConsumption.add(childRunId),
-                  },
+                  childAgents: childAgentsOf(session),
                   messages: session.messages,
                   teams: session.teams,
                 },
@@ -2625,6 +2643,7 @@ export function registerHostedHarnessSessionRoutes(
     // its wake pump starts none of its message inputs, not even the first
     // pass this load kicks before the stop itself arrives.
     const stopMessages = body?.['stopMessages'] === true;
+    const childWorkspaces = body?.['childWorkspaces'] === true;
     const passiveRecovery = body?.['passiveManagedRuntimeRecovery'] === true;
     const driveRecovery = body?.['driveRuntimeRecovery'] === true;
     const takeoverFlags = passiveRecovery || driveRecovery;
@@ -2731,6 +2750,9 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 409, 'hosted_session_store_mismatch');
         return;
       }
+      // The owner proven above restates the host's capability; a later
+      // Turn reads it, never a stale one from the first attach.
+      resident.childWorkspaces = childWorkspaces;
       // The cancellation signal pays identically on an attached re-answer
       // (R9-2): the settle separation lived only on the first-load branch,
       // so a cancellation takeover forced onto an attached Session fell
@@ -3158,6 +3180,7 @@ export function registerHostedHarnessSessionRoutes(
         stores,
         storeDescriptor: store,
         lifecycle,
+        ...(childWorkspaces ? { childWorkspaces: true } : {}),
         ...(toolProfile ? { toolProfile } : {}),
         ...(isHostedWorkspaceShellProfile(toolProfile) &&
         captureBytes !== undefined
@@ -6002,12 +6025,7 @@ export function registerHostedHarnessSessionRoutes(
             childRuns: session.childRuns,
             monitors: session.monitors,
             backgroundLane: session.backgroundLane,
-            childAgents: session.childAgents && {
-              funnel: session.childAgents,
-              depth: session.childDepth ?? 0,
-              queueConsumption: (childRunId) =>
-                session.childConsumption.add(childRunId),
-            },
+            childAgents: childAgentsOf(session),
             messages: session.messages,
             teams: session.teams,
           },

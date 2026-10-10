@@ -32,7 +32,10 @@ import {
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
-import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import {
+  childWorkspaceAnswerSuffix,
+  type HostedChildAgentSession,
+} from './hosted-child-agent-session.js';
 import type { HostedSessionMessageSession } from './hosted-session-message-session.js';
 import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
 import {
@@ -869,7 +872,16 @@ export async function fillParkedRoundAgentGaps(input: {
           // must land, folded to the inline bound with its marker instead
           // of erroring the recovered Turn — the full bytes stay on the
           // acceptance record, and the exact template measures the fold.
-          const fitted = fitChildResultInline(name, callId, text, fits);
+          // A worktree child's merge outcome follows, as on the live arm.
+          const fitted = fitChildResultInline(
+            name,
+            callId,
+            text,
+            fits,
+            await childWorkspaceAnswerSuffix(record, acceptance, (ref) =>
+              input.managed.resources.read(ref),
+            ),
+          );
           if (foldOwed) {
             await writeFold(fitted);
             filled += 1;

@@ -230,6 +230,7 @@ async function launchChild(childRunId = 'prompt:call-0'): Promise<string> {
       definitionDigest: session.authority.sessionHeader.definitionRef.digest,
     },
     workingDirectory: '.',
+    workspaceMode: 'shared',
     executionCallId: childRunId,
   });
   return children.taskIdOf(childRunId);
