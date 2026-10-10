@@ -32,6 +32,8 @@ import type {
   ManagedSessionSubject,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { managedHookRestoreActivationId } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { ExtensionRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
   parseHookExecution,
@@ -178,9 +180,30 @@ function executionUnavailable(response: ManagedHookOperationView): boolean {
   );
 }
 
+/**
+ * A release the Broker refuses because the owner still holds unfinished work —
+ * the shape an operation whose module evaluation was abandoned answers with
+ * when its Runtime certified the cancellation as settled; a current Runtime
+ * fences such an evaluation as outcome_unknown before any release is
+ * attempted. The producers name that one condition with a dedicated code:
+ * every other 409 stays a plain refusal, because the class defaults are
+ * catch-alls an identity mismatch or any unexpected provider error shares —
+ * absorbing those as fences wedged close() into a recovery-required error
+ * for a Session holding no Hook work at all.
+ */
+function holdFencedRelease(cause: unknown): boolean {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    cause.status === 409 &&
+    cause.code === 'managed_runtime_owner_hold_pending'
+  );
+}
+
 function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
+
+const debugLogger = createDebugLogger('HOSTED_HOOK_SESSION');
 
 // Committed record revisions are immutable objects, so each is validated
 // once however often the Session's history is scanned.
@@ -242,6 +265,8 @@ export class HostedHookSession {
   >();
   private readonly recoveredBrokers = new Map<string, HostedWorkspaceBroker>();
   private readonly releasedOwners = new Set<string>();
+  private readonly fencedOwners = new Set<string>();
+  private retrying?: Promise<void>;
   private readonly occurrences = new Map<
     string,
     {
@@ -311,7 +336,12 @@ export class HostedHookSession {
   }
 
   async acquire(): Promise<void> {
-    if (this.acquired) return;
+    if (this.acquired) {
+      // A release absorbed on an earlier turn is retried here, so a fenced
+      // owner does not stay attached for the rest of this instance's life.
+      await this.retryFencedOwners();
+      return;
+    }
     // Parallel Hooks share one acquisition, so each earlier owner is
     // released once.
     this.acquiring ??= (async () => {
@@ -365,22 +395,82 @@ export class HostedHookSession {
     }
     for (const [id, settled] of owners) {
       if (!settled) continue;
-      const broker =
-        this.recoveredBrokers.get(id) ??
-        new HostedWorkspaceBroker(this.options, this.key, id);
-      try {
-        await broker.release();
-      } catch (cause) {
-        if (
-          !(cause instanceof HostedWorkspaceBrokerRejection) ||
-          cause.status !== 404 ||
-          cause.code !== 'runtime_session_not_found'
-        )
-          throw cause;
-      }
-      this.recoveredBrokers.delete(id);
-      this.releasedOwners.add(id);
+      await this.releaseOwner(id);
     }
+  }
+
+  /**
+   * Releases one earlier owner, absorbing the two refusals that are not
+   * failures. A hold-fenced owner is kept in `fencedOwners` so a later turn
+   * retries it: booking it released here would strand the Runtime owner for
+   * the worker's lifetime, which is what blocks tools in the whole Workspace.
+   */
+  private async releaseOwner(id: string): Promise<void> {
+    if (this.releasedOwners.has(id)) return;
+    const broker =
+      this.recoveredBrokers.get(id) ??
+      new HostedWorkspaceBroker(this.options, this.key, id);
+    try {
+      await broker.release();
+    } catch (cause) {
+      const absent =
+        cause instanceof HostedWorkspaceBrokerRejection &&
+        cause.status === 404 &&
+        cause.code === 'runtime_session_not_found';
+      const holdFenced = holdFencedRelease(cause);
+      if (!absent && !holdFenced) throw cause;
+      const refusal =
+        cause instanceof HostedWorkspaceBrokerRejection
+          ? `${cause.status} ${cause.code}`
+          : String(cause);
+      this.recoveredBrokers.delete(id);
+      if (holdFenced) {
+        // The class defaults are the catch-alls an identity mismatch or any
+        // unexpected provider error also answers with, so only the dedicated
+        // hold code is absorbed as a fence. It keeps the Runtime owner
+        // attached — the one outcome worth a line on the daemon's default
+        // channel, where a debug logger is silent without --debug.
+        writeStderrLineSafe(
+          `qwen serve: earlier Hook owner release refused (left attached, retried on a later turn): ${id} ${refusal}`,
+        );
+        this.fencedOwners.add(id);
+        return;
+      }
+      // An absent owner is the routine, self-healing outcome — every
+      // reconstructed Session re-walks its whole activation history — so it
+      // stays off the daemon's default channel.
+      debugLogger.debug(
+        `qwen serve: earlier Hook owner release refused (owner absent, booked released): ${id} ${refusal}`,
+      );
+    }
+    this.recoveredBrokers.delete(id);
+    this.fencedOwners.delete(id);
+    this.releasedOwners.add(id);
+  }
+
+  private async retryFencedOwners(): Promise<void> {
+    if (this.fencedOwners.size === 0) return;
+    // Parallel Hooks share one retry pass, and releasedOwners still guards
+    // against releasing an owner twice. A refusal here must not escape: this
+    // runs on an already-acquired Session, so failing the turn would let a
+    // stale earlier owner break a healthy live one. Absorb, report, and leave
+    // the owner fenced for the next turn.
+    this.retrying ??= (async () => {
+      try {
+        for (const id of [...this.fencedOwners]) {
+          try {
+            await this.releaseOwner(id);
+          } catch (cause) {
+            writeStderrLineSafe(
+              `qwen serve: earlier Hook owner release retry failed, left attached: ${id} ${String(cause)}`,
+            );
+          }
+        }
+      } finally {
+        this.retrying = undefined;
+      }
+    })();
+    await this.retrying;
   }
 
   /**
@@ -393,7 +483,11 @@ export class HostedHookSession {
   }
 
   get hasPendingOperations(): boolean {
-    return this.executions().some((record) => {
+    return this.pendingRecords().length > 0;
+  }
+
+  private pendingRecords(): HookExecution[] {
+    return this.executions().filter((record) => {
       if (record.run.state === 'recovery_blocked') return true;
       if (record.resultRef || record.run.execution === 'not_started_proven')
         return false;
@@ -404,6 +498,29 @@ export class HostedHookSession {
       );
       return !marker || savedExecution(marker.record).resultRef === null;
     });
+  }
+
+  /**
+   * One non-cancelling status poll for exactly the records the pending gate
+   * counts — never the wider unsettled set, since a failed lookup commits and
+   * an acknowledged async Hook whose marker already carries its result must
+   * not be tombstoned by an unrelated fence's reconciliation. A child whose
+   * own occurrence marker is pending is reached through the marker's fan-out
+   * rather than polled again here. Poll only: a fenced occurrence is never
+   * re-dispatched.
+   */
+  async reconcileUnsettled(signal?: AbortSignal): Promise<void> {
+    const pending = this.pendingRecords();
+    const markers = new Set(
+      pending
+        .filter((record) => record.hookId === '__plan__')
+        .map((record) => record.hookExecutionId),
+    );
+    for (const record of pending) {
+      if (record.hookId !== '__plan__' && markers.has(record.occurrenceId))
+        continue;
+      await waitForTurn(this.status(record.hookExecutionId), signal);
+    }
   }
 
   get hasUnsettledExecutions(): boolean {
@@ -642,8 +759,26 @@ export class HostedHookSession {
         return (await this.read<{ output?: HookOutput }>(marker.resultRef))
           .output;
     } else {
-      if (this.hasPendingOperations)
-        throw new HostedHookRecoveryRequiredError();
+      if (this.hasPendingOperations) {
+        // A recovery fence is not terminal: once an abandoned module
+        // evaluation definitively ends, the Runtime republishes its receipt,
+        // so give every pending record one status poll before refusing.
+        // Otherwise a live Session would reject every later turn until a
+        // DELETE-path drain reconciled it.
+        try {
+          await this.reconcileUnsettled(signal);
+        } catch (cause) {
+          if (signal.aborted) throw cause;
+          // A failed poll is not a definite turn error: the re-check below
+          // is the fence, and only its typed refusal may reach the caller
+          // while a record's outcome is still unknown.
+          writeStderrLineSafe(
+            `qwen serve: Hook reconcile before dispatch failed: ${String(cause)}`,
+          );
+        }
+        if (this.hasPendingOperations)
+          throw new HostedHookRecoveryRequiredError();
+      }
       const { messages: suppliedMessages, ...eventFields } = fields;
       const input: HookInput = {
         ...eventFields,
@@ -1562,10 +1697,47 @@ export class HostedHookSession {
   async close(): Promise<void> {
     await this.drain();
     await this.releaseEarlierOwners();
-    for (const broker of this.recoveredBrokers.values()) await broker.release();
+    // A recovered earlier owner goes through the same absorbing release as
+    // any other: its hold fence is recorded, not thrown, so one refused
+    // release neither escapes close() as a raw Broker refusal nor strands
+    // every owner behind it in the map.
+    for (const id of [...this.recoveredBrokers.keys()])
+      await this.releaseOwner(id);
     this.recoveredBrokers.clear();
+    // The clear above empties the state a DELETE retry would release from,
+    // so the recorded fences are retried before they are named: without this
+    // pass the next close finds no recovered broker and throws off the
+    // still-fenced owner again without attempting any release. The retry
+    // absorbs every per-id refusal, so a fence it cannot clear is still
+    // named by the check below.
+    await this.retryFencedOwners();
+    // An earlier owner still fenced keeps its Runtime owner attached, so a
+    // DELETE that answered 204 here would drop the only state that could ever
+    // retry that release. The check sits below the loop and the retry: a
+    // fence recorded by either must still be named. Report recovery required
+    // before releasing the Session's own owner: the Session stays attached
+    // with it, so a later turn can still run and retry the fenced release.
+    if (this.fencedOwners.size > 0) throw new HostedHookRecoveryRequiredError();
     if (this.ownsBroker && this.broker.runtime) {
-      await this.broker.release();
+      try {
+        await this.broker.release();
+      } catch (cause) {
+        // A Runtime that settled an abandoned module evaluation as cancelled
+        // lets drain() pass while the evaluation still runs, so this release
+        // can be hold-fenced. Name that condition instead of letting a bare
+        // Broker refusal reach the route.
+        if (!holdFencedRelease(cause)) throw cause;
+        writeStderrLineSafe(
+          `qwen serve: Hook owner release held by unfinished work: ${
+            this.broker.runtimeSessionId
+          } ${
+            cause instanceof HostedWorkspaceBrokerRejection
+              ? `${cause.status} ${cause.code}`
+              : String(cause)
+          }`,
+        );
+        throw new HostedHookRecoveryRequiredError();
+      }
       this.acquired = false;
     }
   }

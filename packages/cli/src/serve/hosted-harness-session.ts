@@ -128,7 +128,10 @@ import {
 } from './hosted-monitor-wake-turn.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
-import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
+import {
+  parseHookExecution,
+  type HookExecution,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { runHostedHookOperation } from './hosted-hook-model.js';
 import type { ManagedHookCatalogPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 import { HookEventName } from '@qwen-code/qwen-code-core/hooks/types.js';
@@ -211,6 +214,14 @@ const debugLogger = createDebugLogger('HOSTED_HARNESS_SESSION');
 const HOSTED_TURN_DEADLINE = new Error(
   'The Hosted Harness Turn deadline expired.',
 );
+
+/**
+ * One prompt-gate Hook reconcile pass gets the grace a single broker poll
+ * gets: each status round-trip is itself bounded by the broker's fetch
+ * timeout, and a stalled Runtime must not multiply that bound by every
+ * pending record while the route waits.
+ */
+const HOSTED_HOOK_RECONCILE_BUDGET_MS = 30_000;
 
 /**
  * The terminal classification of a turn whose runner threw. A deadline
@@ -944,10 +955,65 @@ function unsettledPromptId(session: HostedSession): string | undefined {
   return unsettled.size === 1 ? [...unsettled][0] : undefined;
 }
 
+/**
+ * A Hook record the Runtime's own reconcile proved never ran its callback:
+ * either the record shows the dispatch never started, or the receipt carries
+ * the Runtime's `notStarted` marker, stamped only where the callback
+ * provably never ran — the republish of a definitively-ended evaluation (the
+ * abandoned arm reconciles to a cancelled record, the over-budget arm to a
+ * settled record carrying the timeout outcome) and the pre-dispatch aborts.
+ * A measured duration cannot stand in for the marker: it is millisecond wall
+ * clock, so a callback dispatched and cancelled or timed out inside its own
+ * starting millisecond publishes a receipt byte-identical to a republish,
+ * and that receipt must keep certifying real work, not a fence.
+ */
+async function isSettledHookFence(
+  session: HostedSession,
+  execution: HookExecution,
+): Promise<boolean> {
+  if (
+    execution.run.state === 'cancelled' &&
+    execution.run.execution === 'not_started_proven'
+  )
+    return true;
+  if (execution.resultRef === null || execution.run.execution !== 'settled')
+    return false;
+  // A result that cannot be read or parsed is no fence: treat it as real
+  // work, or one corrupt historical record would fail every recovery pass.
+  try {
+    const result = object(
+      JSON.parse(
+        (await session.managed.resources.read(execution.resultRef)).toString(),
+      ),
+    );
+    return result?.['notStarted'] === true;
+  } catch {
+    return false;
+  }
+}
+
+// An input that cannot be read or parsed proves nothing about its record:
+// skip it — one corrupt resource must not reject the whole pass, and a
+// skipped record never counts as a fence, so the fail-closed direction is
+// unchanged.
+async function readHookInput(
+  session: HostedSession,
+  ref: ManagedSessionDurableRef,
+): Promise<Record<string, unknown> | null> {
+  try {
+    return object(
+      JSON.parse((await session.managed.resources.read(ref)).toString()),
+    );
+  } catch {
+    return null;
+  }
+}
+
 async function recoverCancelledPreToolHook(
   session: HostedSession,
   promptId: string,
   events: readonly ManagedSessionEvent[],
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const { authority, sink } = session.managed;
   const attempts = new Map<string, unknown>();
@@ -1017,24 +1083,40 @@ async function recoverCancelledPreToolHook(
       responded.add(response.id);
     }
   }
+  // The occurrence match below is pure arithmetic and decides whether a
+  // record can matter at all, so run it before any durable read — otherwise
+  // a long-lived Session pays one resources.read per historical settled
+  // record on every recovery pass.
+  const expected = new Set(
+    calls.map((call) =>
+      hostedHookOccurrenceId(
+        HookEventName.PreToolUse,
+        `${promptId}:${call.id}`,
+      ),
+    ),
+  );
   let cancelled = false;
   for (const { record } of authority.extensionRecordsInDomain(
     'hook_execution',
   )) {
+    signal?.throwIfAborted();
     const execution = parseHookExecution(record);
     if (
       execution.eventName !== HookEventName.PreToolUse ||
       execution.hookId === '__plan__' ||
-      !execution.cancelRequested ||
-      execution.run.state !== 'cancelled' ||
-      execution.run.execution !== 'not_started_proven'
+      !expected.has(execution.occurrenceId)
     )
       continue;
-    const input = object(
-      JSON.parse(
-        (await session.managed.resources.read(execution.inputRef)).toString(),
-      ),
-    );
+    if (
+      !(
+        execution.cancelRequested &&
+        execution.run.state === 'cancelled' &&
+        execution.run.execution === 'not_started_proven'
+      ) &&
+      !(await isSettledHookFence(session, execution))
+    )
+      continue;
+    const input = await readHookInput(session, execution.inputRef);
     if (
       input?.['prompt_id'] === promptId &&
       calls.some(
@@ -1047,8 +1129,10 @@ async function recoverCancelledPreToolHook(
               `${promptId}:${call.id}`,
             ),
       )
-    )
+    ) {
       cancelled = true;
+      break;
+    }
   }
   if (!cancelled) return false;
   const missing = calls.filter((call) => !responded.has(call.id!));
@@ -1220,6 +1304,7 @@ async function parkNeedsNoRuntimeSettlement(
 
 export async function settleCancelledHookTurn(
   session: HostedSession,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (
     !session.blocked ||
@@ -1276,40 +1361,54 @@ export async function settleCancelledHookTurn(
         `session-start:${authority.sessionHeader.sessionKey.sessionId}`,
       ),
     ]);
+    // A republished InstructionsLoaded evaluation fence can never carry
+    // cancelRequested — status() returns a terminal record before the flag
+    // could be set — and its occurrence id digests the turn's native fields,
+    // which cannot be recomputed here. What identifies it arithmetically is
+    // the event log: a record's creation commit carries the record id as its
+    // operationId (revisions commit as `${id}:${revision}`), and the fence
+    // that parked this turn was created after its input.accepted. Records
+    // from earlier turns are excluded before any durable read, so a
+    // long-lived Session's historical InstructionsLoaded receipts stay
+    // behind the same pre-filter the occurrence match provides.
+    const createdInTurn = new Set<string>();
+    for (const event of turnEvents) {
+      if (
+        event.kind !== 'domain.committed' ||
+        event.payload['domain'] !== 'hook_execution'
+      )
+        continue;
+      const operationId = event.payload['operationId'];
+      if (typeof operationId === 'string' && !operationId.includes(':'))
+        createdInTurn.add(operationId);
+    }
     let cancelled = false;
     if (preModel)
       for (const { record } of authority.extensionRecordsInDomain(
         'hook_execution',
       )) {
+        signal?.throwIfAborted();
         const execution = parseHookExecution(record);
-        const cancelledInstructions =
+        const instructionsFence =
           execution.eventName === HookEventName.InstructionsLoaded &&
           execution.hookId !== '__plan__' &&
-          execution.cancelRequested;
+          createdInTurn.has(execution.hookExecutionId);
         if (
-          (!occurrenceIds.has(execution.occurrenceId) &&
-            !cancelledInstructions) ||
-          execution.run.state !== 'cancelled' ||
-          execution.run.execution !== 'not_started_proven'
+          (!occurrenceIds.has(execution.occurrenceId) && !instructionsFence) ||
+          !(await isSettledHookFence(session, execution))
         )
           continue;
-        const input = object(
-          JSON.parse(
-            (
-              await session.managed.resources.read(execution.inputRef)
-            ).toString(),
-          ),
-        );
-        if (input?.['prompt_id'] === promptId) {
-          cancelled = true;
-          break;
-        }
+        const input = await readHookInput(session, execution.inputRef);
+        if (input?.['prompt_id'] !== promptId) continue;
+        cancelled = true;
+        break;
       }
     if (!preModel)
       cancelled = await recoverCancelledPreToolHook(
         session,
         promptId,
         turnEvents,
+        signal,
       );
     if (!cancelled) return;
     await session.managed.sink.write(
@@ -4241,7 +4340,11 @@ export function registerHostedHarnessSessionRoutes(
     }
   });
 
-  app.post('/session/:id/prompt', async (req, res) => {
+  const admitPrompt = async (
+    req: Request,
+    res: Response,
+    reconciled = false,
+  ): Promise<void> => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
@@ -4302,6 +4405,66 @@ export function registerHostedHarnessSessionRoutes(
         lastEventId: existing.lastEventId,
         eventEpoch: epoch,
       });
+      return;
+    }
+    if (session.active) return error(res, 409, 'hosted_turn_active');
+    // A Hook recovery fence is not terminal: reconcile the pending records
+    // once — a non-cancelling poll, so no fenced occurrence re-dispatches —
+    // and settle the turn the fence parked before the admission gate reads
+    // either, or a Session whose cancel landed mid-evaluation stays blocked
+    // for life. The gate re-arms while the Session stays blocked, not only
+    // while records are pending: a pass can drain the last record and still
+    // miss the settle — the budget or a client disconnect aborts the shared
+    // signal between the two, and a concurrent cancel's settle declines
+    // while hooksBusy is held — and blocked is written false only inside
+    // settleCancelledHookTurn, so the next prompt must retry it. Only a
+    // request that passed body validation and missed the idempotent replay
+    // pays for the pass, and the pass is bounded and dies with the client,
+    // so a stalled Runtime cannot hold the route open. hooksBusy holds a
+    // concurrent prompt at the gate for the duration and is released
+    // straight into the settle, which re-takes it before its first await.
+    if (
+      !reconciled &&
+      session.hooks &&
+      (session.hooks.hasPendingOperations || session.blocked)
+    ) {
+      const reconcileAbort = new AbortController();
+      const budget = setTimeout(
+        () =>
+          reconcileAbort.abort(
+            new Error('The Hook reconciliation deadline expired.'),
+          ),
+        HOSTED_HOOK_RECONCILE_BUDGET_MS,
+      );
+      budget.unref();
+      const disconnected = () => {
+        if (!res.writableEnded)
+          reconcileAbort.abort(new Error('The prompting client disconnected.'));
+      };
+      res.once('close', disconnected);
+      void (async () => {
+        try {
+          // A blocked Session with nothing pending has nothing to
+          // reconcile — only a dropped settle to retry.
+          if (session.hooks!.hasPendingOperations) {
+            session.hooksBusy = true;
+            try {
+              await session.hooks!.reconcileUnsettled(reconcileAbort.signal);
+            } finally {
+              session.hooksBusy = false;
+            }
+          }
+          await settleCancelledHookTurn(session, reconcileAbort.signal);
+        } catch (cause) {
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${req.params['id']} Hook reconciliation failed: ${String(cause)}`,
+          );
+        } finally {
+          clearTimeout(budget);
+          res.off('close', disconnected);
+        }
+        void admitPrompt(req, res, true);
+      })();
       return;
     }
     // Every latch that guards the turn slot, re-runnable as one
@@ -4552,7 +4715,8 @@ export function registerHostedHarnessSessionRoutes(
         session.active = undefined;
       }
     })();
-  });
+  };
+  app.post('/session/:id/prompt', (req, res) => admitPrompt(req, res));
 
   app.get('/session/:id/hooks', (req, res) => {
     const session = identity(req, sessions);
@@ -6267,9 +6431,6 @@ export function registerHostedHarnessSessionRoutes(
           return ordinaryAuthorizationError(res, cause);
         }
       }
-      // No wake turn may start once the authorized Session is draining;
-      // a rejected close leaves its scheduler available for later wakes.
-      session.monitorWake?.close();
       if (req.method === 'DELETE' && session.hooks) {
         session.hooksBusy = true;
         try {
@@ -6291,6 +6452,11 @@ export function registerHostedHarnessSessionRoutes(
         }
       }
       await session.hooks?.close();
+      // Deferred until the close is known terminal: a Hook fence refusal
+      // above keeps the Session attached and retryable, and its wake pump
+      // with it. wakeBusy() holds mcpClosing for the whole drain, so no
+      // wake turn can start meanwhile; pending notifications settle below.
+      session.monitorWake?.close();
       // A lease a recovery load acquired must go back with the Session, or
       // the Workspace stays pinned after every later route is gone.
       await releaseLeaseNow(session);
@@ -6354,7 +6520,13 @@ export function registerHostedHarnessSessionRoutes(
       writeStderrLineSafe(
         `qwen serve: Hosted Session ${req.params['id']} close failed: ${String(cause)}`,
       );
-      error(res, 503, 'managed_session_close_failed');
+      // A Hook Session that owns its Runtime owner and still holds unfinished
+      // work keeps the Session attached; name that rather than reporting a
+      // generic close failure. A Hook Session sharing the MCP owner is released
+      // by that session instead and still reports the generic code.
+      if (cause instanceof HostedHookRecoveryRequiredError)
+        error(res, 503, 'hosted_hook_recovery_required');
+      else error(res, 503, 'managed_session_close_failed');
     } finally {
       session.mcpClosing = !!session.lifecycle;
       session.mcpBusy = false;

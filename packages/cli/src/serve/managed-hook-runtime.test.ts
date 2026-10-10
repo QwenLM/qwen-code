@@ -7,6 +7,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   HookEventName,
@@ -19,6 +20,7 @@ import type {
   ManagedHookExecute,
   ManagedHookOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
+import { MANAGED_HOOK_MAX_RUNNING } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 import {
   ManagedHookRuntime,
   parseManagedHookControl,
@@ -985,7 +987,9 @@ describe('ManagedHookRuntime', () => {
         expect(await readFile(path.join(directory, 'counter'), 'utf8')).toBe(
           'started\n',
         );
-        const module = (await import(modulePath)) as { release: () => void };
+        const module = (await import(pathToFileURL(modulePath).href)) as {
+          release: () => void;
+        };
         module.release();
         await vi.waitFor(async () => {
           expect(await readFile(path.join(directory, 'counter'), 'utf8')).toBe(
@@ -1001,6 +1005,10 @@ describe('ManagedHookRuntime', () => {
               behavior === 'finish-after-timeout' ? 'timeout' : 'cancelled',
           },
         });
+        if (behavior === 'finish-after-timeout')
+          // The callback-phase timeout is a real result, not an evaluation
+          // failure receipt: pins that the import floor let evaluation finish.
+          expect(receipt.error?.code).toBeUndefined();
         expect(instance.hasHolds('runtime-session')).toBe(false);
         expect(await instance.control('runtime-session', call)).toEqual(
           receipt,
@@ -1011,6 +1019,523 @@ describe('ManagedHookRuntime', () => {
       }
     },
   );
+
+  it('fails a function handler whose module never settles within its timeout', async () => {
+    const modulePath = path.join(directory, 'stuck-handler.mjs');
+    await writeFile(
+      modulePath,
+      `await new Promise(() => {});
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 50 },
+        handler: {
+          handlerId: 'stuck',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    const startedAt = Date.now();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    // Bounds receipt latency: this case's operative budget is the 500ms floor,
+    // so it only catches budgets over 2s; the manifest-timeout direction above
+    // the floor is pinned by the 'manifest timeout governs' case below.
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    // An abandoned evaluation is not a failed import and must not produce the
+    // not_started_proven certification.
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_module_evaluation_timeout' },
+    });
+    // The evaluation is still live and never settles, so the hold stays.
+    expect(instance.hasHolds('runtime-session')).toBe(true);
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+  });
+  it('keeps admitting operations after abandoned evaluations release their slots', async () => {
+    const modulePath = path.join(directory, 'stuck-admission-handler.mjs');
+    await writeFile(
+      modulePath,
+      `await new Promise(() => {});
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 10 },
+        handler: {
+          handlerId: 'stuck',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const stuck = Array.from({ length: MANAGED_HOOK_MAX_RUNNING }, (_, index) =>
+      request(`stuck-${index}`),
+    );
+    await Promise.all(
+      stuck.map((call) => instance.control('runtime-session', call)),
+    );
+    for (const call of stuck) {
+      expect(await settled(instance, call.operationId)).toMatchObject({
+        state: 'settled',
+        error: { code: 'managed_hook_module_evaluation_timeout' },
+      });
+    }
+    // All evaluations are abandoned but still live, so the holds are all
+    // retained while the admission slots are free again.
+    expect(instance.hasHolds('runtime-session')).toBe(true);
+    const next = request('after-fences');
+    await instance.control('runtime-session', next);
+    const receipt = await settled(instance, next.operationId);
+    // Widening the admission filter to count held evaluations turns this into
+    // the quota refusal, which answers with a result and no error code.
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_module_evaluation_timeout' },
+    });
+    expect(receipt.result).toBeUndefined();
+  });
+  it('fails fast when the handler module itself rejects', async () => {
+    const modulePath = path.join(directory, 'broken-handler.mjs');
+    await writeFile(
+      modulePath,
+      `throw new Error('boom');
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 60_000 },
+        handler: {
+          handlerId: 'broken',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    const startedAt = Date.now();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_handler_unavailable' },
+    });
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+  });
+  it('settles a handler module that rejects with a non-Error value', async () => {
+    const modulePath = path.join(directory, 'null-reject-handler.mjs');
+    await writeFile(
+      modulePath,
+      `throw Object.create(null);
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 10 },
+        handler: {
+          handlerId: 'null-reject',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    // The serve path installs no process-level unhandledRejection handler, so
+    // record them here: without a total settle path and a terminal handler on
+    // the import's derived promise, this rejection escapes and Node exits.
+    const rejections: unknown[] = [];
+    const recordRejection = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', recordRejection);
+    try {
+      const call = request();
+      await instance.control('runtime-session', call);
+      const receipt = await settled(instance);
+      expect(receipt).toMatchObject({
+        state: 'settled',
+        error: { code: 'managed_hook_handler_unavailable' },
+      });
+      expect(instance.hasHolds('runtime-session')).toBe(false);
+      expect(await instance.control('runtime-session', call)).toEqual(receipt);
+      expect(rejections).toEqual([]);
+    } finally {
+      process.removeListener('unhandledRejection', recordRejection);
+    }
+  });
+  it('lets a slow-but-finite module evaluation finish inside its floor', async () => {
+    const modulePath = path.join(directory, 'slow-handler.mjs');
+    await writeFile(
+      modulePath,
+      `await new Promise((resolve) => setTimeout(resolve, 30));
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 10 },
+        handler: {
+          handlerId: 'slow',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    expect(receipt.error?.code).toBeUndefined();
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      result: { success: true },
+    });
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+  });
+  it('lets the manifest timeout govern evaluation above the floor', async () => {
+    const modulePath = path.join(directory, 'cold-handler.mjs');
+    await writeFile(
+      modulePath,
+      `await new Promise((resolve) => setTimeout(resolve, 1500));
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 5000 },
+        handler: {
+          handlerId: 'cold',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    // Evaluation lands between the floor and the manifest timeout, so a bare
+    // floor at the budget site turns this red.
+    expect(receipt.error?.code).toBeUndefined();
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      result: { success: true },
+    });
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+  });
+  it('releases the hold once an over-budget evaluation finishes', async () => {
+    const modulePath = path.join(directory, 'over-budget-handler.mjs');
+    await writeFile(
+      modulePath,
+      `import { appendFileSync } from 'node:fs';
+       await new Promise((resolve) => setTimeout(resolve, 900));
+       export const registered = { handlerRevision: 1, callback: async (input) => {
+         appendFileSync(input.cwd + '/counter', 'ran\\n');
+         return { continue: true };
+       } };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 10 },
+        handler: {
+          handlerId: 'over',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_module_evaluation_timeout' },
+    });
+    expect(instance.hasHolds('runtime-session')).toBe(true);
+    // The fence is not terminal: once the evaluation definitively ends the
+    // receipt republishes what is then provable — the callback never ran —
+    // as a timeout outcome, so the Harness can reconcile the record instead
+    // of tombstoning the Session for the worker's lifetime.
+    await vi.waitFor(
+      async () => {
+        expect(await instance.control('runtime-session', call)).toMatchObject({
+          state: 'settled',
+          result: {
+            success: false,
+            outcome: 'timeout',
+            duration: 0,
+            notStarted: true,
+          },
+        });
+      },
+      { timeout: 3000 },
+    );
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+    // An evaluation that finishes late never dispatches its callback into a
+    // settled occurrence.
+    await expect(
+      readFile(path.join(directory, 'counter'), 'utf8'),
+    ).rejects.toThrow();
+  });
+  it('republishes an over-budget evaluation that later rejects as handler unavailable', async () => {
+    const modulePath = path.join(directory, 'late-reject-handler.mjs');
+    await writeFile(
+      modulePath,
+      `await new Promise((resolve) => setTimeout(resolve, 900));
+       throw new Error('boom');
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 10 },
+        handler: {
+          handlerId: 'late-reject',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_module_evaluation_timeout' },
+    });
+    expect(receipt.result).toBeUndefined();
+    expect(instance.hasHolds('runtime-session')).toBe(true);
+    // The reject arm republishes the one thing then provable — the handler is
+    // unavailable — instead of keeping the stale evaluation-timeout fence for
+    // the worker's lifetime. hasHolds cannot witness this: it clears either
+    // way, so the republished receipt's code is the discriminator.
+    await vi.waitFor(
+      async () => {
+        expect(await instance.control('runtime-session', call)).toMatchObject({
+          state: 'settled',
+          error: { code: 'managed_hook_handler_unavailable' },
+        });
+      },
+      { timeout: 3000 },
+    );
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+  });
+  it('fences a stuck module evaluation cancelled mid-evaluation without wedging close', async () => {
+    const modulePath = path.join(directory, 'stuck-cancel-handler.mjs');
+    await writeFile(
+      modulePath,
+      `await new Promise(() => {});
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 60_000 },
+        handler: {
+          handlerId: 'stuck',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    await vi.waitFor(async () => {
+      const view = await instance.control('runtime-session', {
+        kind: 'hook-status',
+        sessionKey: key,
+        operationId: 'probe',
+        targetOperationId: call.operationId,
+      });
+      expect(view.state).toBe('running');
+    });
+    await instance.control('runtime-session', {
+      kind: 'hook-cancel',
+      sessionKey: key,
+      operationId: 'cancel',
+      targetOperationId: call.operationId,
+    });
+    const receipt = await settled(instance);
+    // The cancel abandoned a module evaluation that is still running, so the
+    // abort is not completion evidence: the receipt carries no result and the
+    // host fences the execution as outcome_unknown instead of committing a
+    // definite cancellation.
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_module_evaluation_abandoned' },
+    });
+    expect(receipt.result).toBeUndefined();
+    // The abandoned evaluation never finishes, so the hold stays reported
+    // rather than released.
+    expect(instance.hasHolds('runtime-session')).toBe(true);
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+    await instance.close();
+  });
+
+  it('clears an abandoned-evaluation fence once the module finishes loading', async () => {
+    const modulePath = path.join(directory, 'cold-cancel-handler.mjs');
+    await writeFile(
+      modulePath,
+      `import { appendFileSync } from 'node:fs';
+       await new Promise((resolve) => setTimeout(resolve, 300));
+       export const registered = { handlerRevision: 1, callback: async (input) => {
+         appendFileSync(input.cwd + '/counter', 'ran\\n');
+         return { continue: true };
+       } };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 60_000 },
+        handler: {
+          handlerId: 'cold',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    await vi.waitFor(async () => {
+      const view = await instance.control('runtime-session', {
+        kind: 'hook-status',
+        sessionKey: key,
+        operationId: 'probe',
+        targetOperationId: call.operationId,
+      });
+      expect(view.state).toBe('running');
+    });
+    await instance.control('runtime-session', {
+      kind: 'hook-cancel',
+      sessionKey: key,
+      operationId: 'cancel',
+      targetOperationId: call.operationId,
+    });
+    // The cancel lands while the module is still evaluating, so the receipt is
+    // fenced rather than certified, and the hold stays.
+    const fenced = await settled(instance);
+    expect(fenced).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_module_evaluation_abandoned' },
+    });
+    expect(fenced.result).toBeUndefined();
+    expect(instance.hasHolds('runtime-session')).toBe(true);
+    // The fence is not terminal. Once the evaluation definitively ends the
+    // receipt republishes what is then provable — the callback never ran — so
+    // the Harness can reconcile the record instead of tombstoning the Session
+    // for the worker's lifetime.
+    await vi.waitFor(
+      async () => {
+        expect(await instance.control('runtime-session', call)).toMatchObject({
+          state: 'settled',
+          result: { outcome: 'cancelled', duration: 0, notStarted: true },
+        });
+      },
+      { timeout: 3000 },
+    );
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+    await expect(
+      readFile(path.join(directory, 'counter'), 'utf8'),
+    ).rejects.toThrow();
+    await instance.close();
+  });
+
+  it('marks a pre-dispatch cancel as a proven non-execution', async () => {
+    const modulePath = path.join(directory, 'pre-dispatch-handler.mjs');
+    await writeFile(
+      modulePath,
+      `import { appendFileSync } from 'node:fs';
+       export const registered = { handlerRevision: 1, callback: async (input) => {
+         appendFileSync(input.cwd + '/counter', 'ran\\n');
+         return { continue: true };
+       } };`,
+    );
+    // Park the execution after the module has evaluated: the second
+    // sessionDirectory read is the last await before the dispatch check.
+    let releaseDirectory: ((value: string) => void) | undefined;
+    let directories = 0;
+    const instance = new ManagedHookRuntime(
+      { ...key, workspaceGeneration: '1' },
+      (id) => {
+        directories++;
+        if (directories === 2)
+          return new Promise<string>((resolve) => {
+            releaseDirectory = resolve;
+          });
+        return Promise.resolve(
+          id === 'runtime-session' ? directory : undefined,
+        );
+      },
+      {
+        version: 1,
+        catalogs: [
+          {
+            ...pin,
+            tenantId: key.tenantId,
+            workspaceId: key.workspaceId,
+            hooks: [
+              {
+                ...definition(),
+                config: { type: 'function', timeout: 5000 },
+                handler: {
+                  handlerId: 'pre-dispatch',
+                  handlerRevision: 1,
+                  modulePath,
+                  exportName: 'registered',
+                },
+              },
+            ],
+          },
+        ],
+      },
+    );
+    runtimes.push(instance);
+    const call = request();
+    await instance.control('runtime-session', call);
+    // Parked at the post-import directory read: the module has evaluated
+    // and the callback wrapper is built, but nothing has dispatched.
+    await vi.waitFor(() => expect(releaseDirectory).toBeDefined());
+    await instance.control('runtime-session', {
+      kind: 'hook-cancel',
+      sessionKey: key,
+      operationId: 'cancel',
+      targetOperationId: call.operationId,
+    });
+    releaseDirectory!(directory);
+    // The callback provably never dispatched, so the receipt carries the
+    // notStarted marker the Harness fence classifier requires.
+    expect(await settled(instance)).toMatchObject({
+      state: 'settled',
+      result: {
+        success: false,
+        outcome: 'cancelled',
+        duration: 0,
+        notStarted: true,
+      },
+    });
+    await expect(
+      readFile(path.join(directory, 'counter'), 'utf8'),
+    ).rejects.toThrow();
+  });
 
   it('keeps oversized output as a bounded failure receipt without replay', async () => {
     const modulePath = path.join(directory, 'large-handler.mjs');
