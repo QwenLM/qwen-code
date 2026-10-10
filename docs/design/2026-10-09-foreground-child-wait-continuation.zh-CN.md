@@ -59,7 +59,7 @@ Hosted Workspace Turn 里的**前台** child-agent 调用会跳过 Runtime reser
   }
   ```
 
-  `HarnessCheckpointV1.agentWait: HarnessAgentWaitGroup | null`,加入 `ROOT_KEYS` 与解析器。所有既有构造器显式设置 `agentWait`(仅在相邻 checkpoint 间允许等待存续时结转,否则为 `null`)——该组绝不被静默传播。(早期草案还携带 `partIndex`/`ordinal`/`inputDigest`;resume 的完整回合是从 journal 自身重推的,因此记录只保留有活消费者的字段——schema 在合并前已收紧;该组由本 PR 新建,任何已存字节都不可能携带它们。)
+  `HarnessCheckpointV1.agentWait: HarnessAgentWaitGroup | null`,加入 `ROOT_KEYS` 与解析器。所有既有构造器显式设置 `agentWait`(仅在相邻 checkpoint 间允许等待存续时结转,否则为 `null`)——**唯一例外**是 `createHookStoppedRuntimeHarnessCheckpoint`:它通过展开 `previous` 结转——这是安全的,因为其 `results_ready` 前置相位不可能携带该组(`assertPhaseShape` 对携带组的 `results_ready` 判失败),展开只会看到 `null`——该组绝不被静默传播。编码时凡不携带组的 checkpoint 一律省略该键:两台解析器都把「缺键」读作 `null`,因此旧版 daemon 仍能打开全部不含组的 checkpoint,只有真正携带组的 checkpoint 才对旧读者不可读。(早期草案还携带 `partIndex`/`ordinal`/`inputDigest`;resume 的完整回合是从 journal 自身重推的,因此记录只保留有活消费者的字段——schema 在合并前已收紧;该组由本 PR 新建,任何已存字节都不可能携带它们。)
 
 - 新构造器 `createAwaitAgentHarnessCheckpoint`:相位 `await_agent`,`approval: null`,`tools`/`runtime` 从上一 checkpoint 结转,`agentWait` 设置。requested 审批存活或 `await_runtime` 批次存活时拒绝提交(同一时刻只有一个持久等待域——与 `commitDurableWait` vs `commitAwaitRuntimeBatch` 的既有纪律相同)。
 
@@ -67,7 +67,7 @@ Hosted Workspace Turn 里的**前台** child-agent 调用会跳过 Runtime reser
 
 `packages/core/src/managed-runtime/managed-harness-factory.ts`:
 
-- `commitAwaitAgent(runs, { turnId, promptId })` 以与 `commitAwaitRuntimeBatch` 相同的事务纪律提交等待(`HARNESS_DURABLE_WAIT_BOUNDARY` 下单次 `commitHarnessCheckpoint`;turn-binding 规则相同)。重放安全:对已存在的 `await_agent` 等待重述相同 run 集合回答同一边界;冲突集合判冲突,绝不改写。
+- `commitAwaitAgent(runs, { turnId, promptId })` 以与 `commitAwaitRuntimeBatch` 相同的事务纪律提交等待(`HARNESS_DURABLE_WAIT_BOUNDARY` 下单次 `commitHarnessCheckpoint`;turn-binding 规则相同)。`turn` 为必传——缺省分支会同时跳过绑定守卫与激活收养。边界侧校验与解析器同规:重复的 `childRunId`/`functionCallId` 与已 `consumed` 的 run 在调用处直接拒绝,而不是在下一次读取时落成 durable-blocked checkpoint。重放安全:对已存在的 `await_agent` 等待重述相同 run 集合回答同一边界;冲突集合判冲突,绝不改写。
 - `resolveAwaitAgent(childRunId)` 把一个 run 标记为 `consumed`。它**不**移除 run:仍有 run 时相位保持 `await_agent`,全部 run consumed 后相位推进到 `model_output_committed` 并**携带**全部 consumed 的组——已折叠的结果欠下一轮模型,而携带的组让等待对二次崩溃仍可重入:§4 的分支正好分类这个形状,绝不把已结算的工作读成 `model_start`。
 
 ### 3. Turn 臂:admission 时提交,折叠后 resolve(cli)
@@ -83,7 +83,7 @@ Hosted Workspace Turn 里的**前台** child-agent 调用会跳过 Runtime reser
 
 - 从 `checkpoint.agentWait` 读出等待的 runs;分类仅由 checkpoint 供证——`consumed` 读作 `settled`,未结算读作 `executing`。relay 台账只被 §5 的 resume 臂轮询,分类器绝不查询。
 - **只分类——折叠归 §5**。recovery 同时服务普通 attach 与 takeover 两条路径,但只有路由的 resume 臂持有 Turn 的提交通道、inline 上限断言与消费集合。recovery 在该分支决不提交任何记录。
-- **报告仍然挂起的部分(中断点 1)**:未 settled 也未折叠的 run 保持挂起。报告用 `phase: 'await_agent'`;每个 run 映射为一条 execution:等待中 `{ executionCallId: childRunId, functionCallId, toolName, outcome: 'known', status: { state: 'executing' } }`,已折叠 `{ ..., status: { state: 'settled' } }`。outcome 永远 `known`:relay 台账让等待中的 child 是可观察事实,绝不是未知结局——coordinator 的 `managed_runtime_recovery_blocked` 闸在该相位上不可能触发。
+- **报告仍然挂起的部分(中断点 1)**:未 settled 也未折叠的 run 保持挂起。报告用 `phase: 'await_agent'`;每个 run 映射为一条 execution:等待中 `{ executionCallId: childRunId, functionCallId, toolName, outcome: 'known', status: { state: 'executing' } }`,已折叠 `{ ..., status: { state: 'settled' } }`。outcome 永远 `known`:relay 台账让等待中的 child 是可观察事实,绝不是未知结局——coordinator 的 `managed_runtime_recovery_blocked` 闸在该相位上不可能触发。每条 execution 还带 `runtimeSessionId`——线路上它是必填——填 `hostedRuntimeSessionId(promptId)`:本相位没有 Runtime session,用停驻 Turn 的 hosted runtime-session 身份填充,目前没有任何消费者读取它。
 - **结转组关闭二次死亡窗口**:该分支同样分类仍携带 `agentWait` 组的 `model_output_committed` checkpoint——按相位形状不变量,该组必然全 consumed(欠一轮模型),因此用同一 `await_agent` 报告形状(全部 run `settled`)把 takeover 引入 continue 臂,绝不让已结算的工作落回 `model_start`。
 - 被动 load 回答同样的分类但不折叠(无提交权),使 coordinator 在只读 attach 上也能得知真相。
 
@@ -93,6 +93,7 @@ daemon 的 `continueManagedRuntime` 路由(coordinator 现在已对 `results_rea
 
 - 路由承认前的相位闸放宽为三种可续形状:`results_ready`、`await_agent`、以及携带 `agentWait` 组的 `model_output_committed`(即上次折叠刚完成的同一个等待)。
 - 该臂以 resume 模式实例化新的 `HostedWorkspaceToolTurn`,执行其 agent-wait 重建(`resumeAgentWaitRuns`):对每个未消费的 run,以新 authority 视图重建的 `children` 跑与存活臂相同的 `awaitChildToolResult` 轮询,把每个终局折叠回原 tool call。**恰好一次靠 journal 而不是进程**:臂从本 Turn 已提交的 `tool_result` id 构建 journaled 集合;重放的 resume 只跳过 commit,`markAccepted` 与 `resolveAwaitAgent` 仍照常(两者本就重放安全)。折叠后路由重新投影 journal,使恢复请求(`resumeFromToolResults`)带上这次折叠产生的 tool_result,进入下一轮模型。
+- **缺口填充(`fillParkedRoundAgentGaps`)**:前台批次停车时,其最后一个 assistant 回合里部分靠后的调用是已死循环从未到达的——持久等待只记录已 admitted 的那些。填充的输入是 checkpoint 的 `agentWait.runs`(取自实时 run 授权:回合由等待的 `modelMessageId` 集合指认,绝不取后来才出现的 assistant 记录)、本 Turn 的 assistant 记录、已 journal 的 `tool_result` id 集合、以及会话的 child 台账;它把余下的每个 function call 配上回答,使 resume 请求合法。三种回答形态,各由 journaled 集守护恰好一次(它只闸折叠——重放安全的标记照跑):没有台账记录的调用填「未被 admitted」答案(按族区分措辞:continue 路由与被中断 Turn funnel 措辞为「被中断」,cancel 路由措辞为「被取消」,持久 journal 绝不记录从未发生的原因);在 admit→commit 间隙内已 admitted 的孤儿按与存活等待相同的轮询驱动到自身终局,按真相折叠(后台 delegation 记录则折叠存活臂的 started 回执,而不是被轮询);等待自身结转组里的调用不算缺口——它的标记归等待臂。同一填充也跑在 cancel 路由与被中断 Turn funnel 的结算里。
 - 取消(`CANCELLING` takeover + `cancelManagedRuntime`)把 `await_agent` 等待确定性地结算:每个未消费 run 折叠一条 cancelled `tool_result`(「The turn was cancelled before the child agent finished; the child keeps running and its committed result is retained.」——存活臂自己的措辞)并 `resolveAwaitAgent`,由同一 journaled 去重守护;Turn 按 cancelled 结算。被遗弃的 child 不撤销;它的台账行归 relay 所有。
 
 ### 6. 线路协议(Java,qwencode + managed-agent-server)
@@ -123,21 +124,23 @@ daemon 的 `continueManagedRuntime` 路由(coordinator 现在已对 `results_rea
 
 ## 风险
 
-- **线路校验漂移**:若还有其他 Java 消费者按恢复相位集合做模式匹配,`await_agent` 不得静默落入失败分支。缓解:对 `packages/sdk-java` 全量 grep 相位字符串(已做:`HostedHarnessClient`、`HarnessRuntimeRecovery`、`HarnessCoordinator`、`ToolPublicationStore`——处置如上),并以 coordinator 测试钉死新谓词。
+- **线路校验漂移**:若还有其他 Java 消费者按恢复相位集合做模式匹配,`await_agent` 不得静默落入失败分支。缓解:对 `packages/sdk-java` 全量 grep 相位字符串(已做:`HostedHarnessClient`、`HarnessRuntimeRecovery`、`HarnessCoordinator`、`ToolPublicationStore`——处置如上),并以**谓词级**测试钉死新行为(`HostedHarnessClientTest` 的 `await_agent` 线路往返与 unknown-outcome 负向)——`HarnessCoordinatorTest` 在每个恢复点都桩掉报告对象,保证在谓词层而不在 coordinator 套件。
 - **重复折叠**:重折叠必须挺过「`tool_result` 已提交而 `resolveAwaitAgent` 未及」的崩溃。缓解:journaled 集合去重与 `settleParkedTurnCancelled` 依赖的机制相同,且 acceptance/consumption 记录本身幂等。
 - **resume 模式 ToolTurn 漂移**:重建不得重跑 agent 等待以外的任何工具。缓解:resume 入口只从 checkpoint 取 run 清单,其余一概不碰;套件断言恰好只发生折叠提交。
 
 ## 验证计划
 
-- **core(单元)**:checkpoint 解析器对 `await_agent` + `agentWait` 的往返、未知相位与未知字段拒绝;构造器守卫(持久等待互斥);`commitAwaitAgent` 重放安全与 turn-binding 规则;`resolveAwaitAgent` 标记。
-- **recovery(单元,真 local authority)**:`await_agent` 分支——点 1 分类(等待 run 报 `executing`、报告相位 `await_agent`)、点 2 恰好一次折叠(预置 journal 的 `tool_result` 绝不重写)、failed/cancelled 折叠、混合批次、被动分类。
-- **Turn 臂(单元)**:admission 提交等待(顺序:先 admit 后 checkpoint),每个终局折叠都 resolve。
+- **core(单元)**:checkpoint 解析器对 `await_agent` + `agentWait` 的往返、未知相位与未知字段拒绝;构造器守卫(持久等待互斥);`commitAwaitAgent` 重放安全、turn-binding 规则与边界校验(重复 id、已 consumed 运行、空批次);`resolveAwaitAgent` 标记外加推进折叠时对 takeover 激活的收养。混合版本编码形状一并钉住:不携带组时 `agentWait` 键不出现,解析仍读作 `null`。
+- **recovery(单元,真 local authority)**:只覆盖分类,与 §4 自身宪章一致——`await_agent` 分支把点 1 的 run 报 `executing`,结转的全 consumed 组报 `settled`,两种 load 同形分类,且每条 execution 的 `runtimeSessionId` 为 `hostedRuntimeSessionId(promptId)`。折叠覆盖不属于这一层:§4 禁止本层折叠。
+- **Turn 臂(单元)**:admission 提交等待(顺序:先 admit 后 checkpoint),每个终局折叠都 resolve,resume/consumption 标记在 journaled 闸外照常。
+- **路由(集成,真 daemon)**:楔死由生产 admission 本身铸造(execute → admit → `commitAwaitAgent`);continue 路由承认该停车(闸回退即回答 409),cancel 路由完成 takeover 结算:abandoned 折叠落账、checkpoint 前进越过等待,恰好一次。
 - **专项端到端套件**(新建,`hosted-child-wait-recovery` 风格,真 local authority + 同一 store 上的重启 authority):
   1. 点 1 楔死 → 重启 → takeover load 可 attach → continue 重进等待 → child 结算 → 父 Turn 完成。
   2. 点 2 楔死(acceptance 已提交、tool result 未提交)→ 重启 → takeover 把已提交答案恰好一次折回原 tool call(journal 计数)→ 父 Turn 完成。
-  3. 点 1 楔死 → close 父会话 →(此前卡死 `CLOSING`)到达 `CLOSED` → `DELETE` 成功。
-  4. 对楔死 Turn 的取消 takeover 将其按 cancelled 结算,child 台账行保留。
-- **Java**:`HostedHarnessClientTest` 接受新相位——线路往返外加一条谓词级负向(空 executions 的 `await_agent` 既非 continuation-ready 也非 cancellation-ready;线路解析器独立地把 executions 下限钉在 1–1024)。coordinator 的 recovery 准入机制本就相位无关,由其既有的 mock 驱动套件覆盖(`HarnessCoordinatorTest` mock 谓词);相位相关行为在谓词内,由线路测试钉死。
+  3. 点 1 楔死 → close 父会话 →(此前卡死 `CLOSING`)到达 `CLOSED` → `DELETE` 成功。_面向 rig_:目前没有任何套件驱动真实 close/delete;本条与验收标准 3 是合并后真栈 rig 的探针,不是已交付证据。
+  4. 对楔死 Turn 的取消 takeover 将其按 cancelled 结算,child 台账行保留(路由级与库级均已覆盖)。
+  5. 二次死亡与孤儿形态:最后折叠之后崩溃分类到结转组;缺口填充回答从未到达的兄弟调用(按族措辞「未被 admitted」);已 admitted 的孤儿折叠其自身结局(完成、失败/取消、后台回执、超限带截断标记);被中断 Turn funnel 按与 takeover cancel 相同的方式结算。
+- **Java**:`HostedHarnessClientTest` 接受新相位——线路往返外加两条谓词级负向(空 executions 或任一 outcome 为 `unknown` 的 `await_agent` 均既非 continuation-ready 也非 cancellation-ready;线路解析器独立地把 executions 下限钉在 1–1024)。coordinator 的 recovery 准入机制本就相位无关,由其既有的 mock 驱动套件覆盖(`HarnessCoordinatorTest` mock 谓词);相位相关行为在谓词内,由线路测试钉死。
 - **变异见证**:每个新机制配一个见证,先对未变异代码证 RED(如去掉 `commitAwaitAgent` → 点 1 探针保持楔死;去掉 journaled 去重 → 点 2 探针双重折叠),再字节一致地还原后才提交。
 - **复现记录回填 `.qwen/issues/issue-13708.md`**:新套件对修复前代码的红色状态作为可执行的复现报告,绿色状态作为验证报告。
 
@@ -145,7 +148,7 @@ daemon 的 `continueManagedRuntime` 路由(coordinator 现在已对 `results_rea
 
 1. #13708 探针 1 通过:点 1 楔死的父会话重进等待,其后的 Turn 完成。
 2. 探针 2 通过:点 2 后恢复的父会话把已提交 child 答案恰好一次折回原 tool call。
-3. 探针 3 通过:点 1 楔死的父会话 close/delete 到达 `CLOSED` / `DELETED`。
+3. 探针 3(面向 rig):点 1 楔死的父会话 close/delete 到达 `CLOSED` / `DELETED`——合并后真栈探针;本 PR 已交付证据见上文各层配套,该条在 rig 报告转绿时成立。
 4. rig 的两个 TypeScript 前台恢复期望转绿。
 5. 既有 recovery、coordinator、publication、线路校验套件无回归。
 

@@ -109,10 +109,17 @@ results_ready | turn_settled`. Durable waits exist for approvals
   `HarnessCheckpointV1.agentWait: HarnessAgentWaitGroup | null`, added to
   `ROOT_KEYS` and the parser. Every existing constructor sets `agentWait`
   explicitly (carried over only where a wait may persist across an adjacent
-  checkpoint; otherwise `null`), so the group is never silently propagated.
-  (Earlier drafts also carried `partIndex`/`ordinal`/`inputDigest`; the round
-  a resume re-derives from the journal itself, so the record keeps only
-  fields with a live consumer — the schema was trimmed before merge, and
+  checkpoint; otherwise `null`) **except**
+  `createHookStoppedRuntimeHarnessCheckpoint`, which spreads `previous` —
+  sound because its `results_ready` precondition cannot carry a group
+  (`assertPhaseShape` fails any `results_ready` that does), so the spread can
+  only ever see `null`. The encode omits the key whenever no group rides the
+  checkpoint: an absent key parses as `null` on both reader generations, so a
+  pre-`agentWait` daemon can still open every non-agent checkpoint, and only
+  checkpoints that actually carry the group become unreadable to an older
+  reader. (Earlier drafts also carried `partIndex`/`ordinal`/`inputDigest`;
+  the round a resume re-derives from the journal itself, so the record keeps
+  only fields with a live consumer — the schema was trimmed before merge, and
   since the group is new in this PR no stored bytes can carry them.)
 
 - New constructor `createAwaitAgentHarnessCheckpoint`: phase `await_agent`,
@@ -128,9 +135,13 @@ results_ready | turn_settled`. Durable waits exist for approvals
 - `commitAwaitAgent(runs, { turnId, promptId })` commits the wait with the
   same transaction discipline as `commitAwaitRuntimeBatch` (one
   `commitHarnessCheckpoint` under `HARNESS_DURABLE_WAIT_BOUNDARY`; turn-binding
-  rules identical). Replay-safe: restating the identical run set against an
-  existing `await_agent` wait answers the same boundary; a conflicting set
-  conflicts, never rewrites.
+  rules identical). `turn` is required — the absent branch would skip both
+  the binding guard and the activation adoption. Boundary-side validation
+  mirrors the parser: duplicate `childRunId`/`functionCallId` and
+  already-`consumed` runs are refused at the call instead of becoming a
+  durable-blocked checkpoint at the next read. Replay-safe: restating the
+  identical run set against an existing `await_agent` wait answers the same
+  boundary; a conflicting set conflicts, never rewrites.
 - `resolveAwaitAgent(childRunId)` marks one run `consumed`. It does **not**
   remove the run; while runs remain the phase stays `await_agent`, and with
   every run consumed the continuation advances to `model_output_committed`
@@ -183,7 +194,11 @@ status: { state: 'executing' } }` when waiting and
   `{ ..., status: { state: 'settled' } }` when folded. Outcomes are always
   `known`: the relay ledger makes a waiting child an observable fact, never an
   unknown outcome, so the coordinator's `managed_runtime_recovery_blocked`
-  gate cannot fire on this phase.
+  gate cannot fire on this phase. Each entry also carries
+  `runtimeSessionId` — required on the wire for every execution entry — filled
+  with `hostedRuntimeSessionId(promptId)`: this phase holds no Runtime
+  session, the hosted runtime-session identity of the parked Turn rides the
+  field, and no consumer reads it today.
 - **The carried group closes the second-death window:** the branch also
   classifies `model_output_committed` checkpoints that still carry an
   `agentWait` group — by the phase-shape invariant that group is fully
@@ -212,6 +227,26 @@ issues for `results_ready`) gains an `await_agent` arm:
   both are replay-safe. After folding, the route re-projects the journal so
   the resume request (`resumeFromToolResults`) carries the fold's own
   tool result into the next model round.
+- **The gap fill (`fillParkedRoundAgentGaps`):** a foreground batch parks
+  with some later calls of its last assistant round never reached by the
+  dead loop — the durable wait names only the admitted ones. The fill takes
+  the checkpoint's `agentWait.runs` (fresh from the run authorization: the
+  round is the one the wait's `modelMessageId`s name, never whatever
+  assistant record came later), the Turn's assistant record, the journaled
+  `tool_result` id set, and the session's child ledger; it answers each
+  remaining function call so the resume request is well-formed. Three
+  answer shapes, exactly once each behind the journaled set (which gates
+  the fold only — the replay-safe marks still run): a call with no ledger
+  record fills the never-admitted answer (per-family wording: the continue
+  route and the interrupted-turn funnel name the interruption, the cancel
+  route names the cancellation, so the durable journal never asserts a
+  cause that never happened); a call whose child was admitted in the
+  admit→commit gap drives to its own terminal through the same poll the
+  live wait ran and folds what really happened (a background-completion
+  record folds the live arm's started receipt instead of being polled);
+  and a leftover from the wait's own carried group is not a gap at all —
+  its marks belong to the wait arm. The same fill runs on the cancel
+  route and from the interrupted-turn funnel's settlement.
 - Cancellation (`CANCELLING` takeover + `cancelManagedRuntime`) settles an
   `await_agent` wait deterministically: each unconsumed run gets a cancelled
   `tool_result` fold ("The turn was cancelled before the child agent
@@ -268,9 +303,9 @@ DELETED` end-to-end after a wedge at interruption point 1.
   group is always fully consumed), so the worst case of a second crash is
   an idempotent no-op re-entry and a re-driven model round.
 - **Waiting runs report `executing`, never `unknown`:** the coordinator fails
-  a Turn on any `unknown` outcome. A waiting child is fully observed (ledger
-  - relay), so `known`/`executing` is the honest encoding and needs no new
-    wire vocabulary.
+  a Turn on any `unknown` outcome. A waiting child is fully observed through
+  the ledger-relay pair, so `known`/`executing` is the honest encoding and
+  needs no new wire vocabulary.
 - **Crashes between `admit` and `commitAwaitAgent` stay bounded and honest:**
   pre-wait crashes keep the `model_start` verdict outright; crashes past a
   consumed wait leave the carried group, and the resume's ledger-honest fill
@@ -303,7 +338,11 @@ DELETED` end-to-end after a wedge at interruption point 1.
   branch. Mitigation: `grep` audit of the phase strings across
   `packages/sdk-java` (done: `HostedHarnessClient`,
   `HarnessRuntimeRecovery`, `HarnessCoordinator`, `ToolPublicationStore` —
-  dispositions above) plus coordinator tests pinning the new predicate.
+  dispositions above) plus the predicate-level tests pinning the new
+  behavior (`HostedHarnessClientTest`'s `await_agent` wire round-trip and
+  its unknown-outcome negative) — `HarnessCoordinatorTest` stubs the
+  recovery report at every site, so the guarantee lives with the
+  predicates, not the coordinator suite.
 - **Duplicate fold:** the re-fold must survive a crash after committing
   `tool_result` but before `resolveAwaitAgent`. Mitigation: the journaled-set
   dedupe is the same mechanism `settleParkedTurnCancelled` already relies on,
@@ -317,15 +356,26 @@ DELETED` end-to-end after a wedge at interruption point 1.
 
 - **Core (unit):** checkpoint parser round-trip for `await_agent` +
   `agentWait`, unknown-phase and unknown-field refusals; constructor guard
-  (durable-wait exclusivity); `commitAwaitAgent` replay-safety and
-  turn-binding rules; `resolveAwaitAgent` marking.
-- **Recovery (unit, real local authority):** the `await_agent` branch —
-  point-1 classification (waiting runs reported `executing`, report phase
-  `await_agent`), point-2 fold exactly-once (pre-journaled `tool_result`
-  never rewritten), failed/cancelled folds, mixed batches, passive
-  classification.
+  (durable-wait exclusivity); `commitAwaitAgent` replay-safety, turn-binding
+  rules and boundary validation (duplicate ids, already-consumed runs, empty
+  batch); `resolveAwaitAgent` marking plus takeover-activation adoption on
+  the advancing fold. The encode's mixed-version shape is pinned too:
+  `agentWait` is absent whenever no group rides the checkpoint and the parse
+  still reads `null`.
+- **Recovery (unit, real local authority):** classification only, matching
+  §4's own charter — the `await_agent` branch reports point-1 runs
+  `executing`, the carried all-consumed group reports `settled`, both load
+  shapes classify identically, and each execution entry's
+  `runtimeSessionId` is `hostedRuntimeSessionId(promptId)`. No fold coverage
+  belongs here: §4 bars this layer from folding.
 - **Turn arm (unit):** admission commits the wait (ordering: admit then
-  checkpoint), every terminal fold resolves.
+  checkpoint), every terminal fold resolves, and the resume/consumption
+  marks run outside the journaled gate.
+- **Routes (integration, real daemon):** the wedge is minted through the
+  production admission (execute → admit → `commitAwaitAgent`); the continue
+  route admits the parked wait (the gate's reversion answers 409), and the
+  cancel route settles the takeover with the abandoned fold journaled and
+  the checkpoint advanced past the wait exactly once.
 - **Dedicated end-to-end suite** (new, `hosted-child-wait-recovery`-style,
   real local authority + restarted authority over the same store):
   1. Wedge at interruption point 1 → restart → takeover load attaches →
@@ -334,16 +384,26 @@ DELETED` end-to-end after a wedge at interruption point 1.
      → restart → takeover folds the committed answer into the original tool
      call exactly once (journal counted) → parent Turn completes.
   3. Wedge at point 1 → close parent → (previously stuck `CLOSING`) reaches
-     `CLOSED`, then `DELETE` succeeds.
+     `CLOSED`, then `DELETE` succeeds. _Rig-facing:_ no suite drives a real
+     close/delete today; this and acceptance criterion 3 are the post-merge
+     real-stack rig's probes, not shipped evidence.
   4. Cancellation takeover of the wedged Turn settles it cancelled and the
-     child keeps its ledger line.
+     child keeps its ledger line (covered at the route level above and at
+     the library level here).
+  5. Second-death and orphan shapes: a crash past the last fold classifies
+     the carried group, the gap fill answers never-reached sibling calls
+     (never-admitted wording by family), an admitted orphan folds its own
+     outcome (completed, failed/cancelled, background receipt, oversized
+     with the truncation marker), and the interrupted-turn funnel settles
+     the same way the takeover cancel does.
 - **Java:** `HostedHarnessClientTest` accepts the new phase — the wire
-  round-trip plus the predicate-level negative (`await_agent` with empty
-  executions is neither continuation- nor cancellation-ready; the wire
-  parser independently floors executions at 1–1024). The coordinator's
-  recovery-admission mechanism is phase-generic by its existing mock-driven
-  suites (`HarnessCoordinatorTest` mocks the predicates); the phase-specific
-  behavior lives in the predicates, which the wire tests pin.
+  round-trip plus the predicate-level negatives (`await_agent` with empty
+  executions or any `unknown` outcome is neither continuation- nor
+  cancellation-ready; the wire parser independently floors executions at
+  1–1024). The coordinator's recovery-admission mechanism is phase-generic
+  by its existing mock-driven suites (`HarnessCoordinatorTest` mocks the
+  predicates); the phase-specific behavior lives in the predicates, which
+  the wire tests pin.
 - **Mutation witnesses:** each new mechanism gets a witness proven RED
   against the unmutated expectation (e.g. drop the `commitAwaitAgent` call →
   point-1 probe stays wedged; drop the journaled dedupe → point-2 probe
@@ -358,8 +418,10 @@ DELETED` end-to-end after a wedge at interruption point 1.
    the wait and its later Turns complete.
 2. Probe 2 passes: parent recovered after interruption point 2 folds the
    committed child answer into the original tool call exactly once.
-3. Probe 3 passes: close/delete of a parent wedged at point 1 reaches
-   `CLOSED` / `DELETED`.
+3. Probe 3 (rig-facing): close/delete of a parent wedged at point 1 reaches
+   `CLOSED` / `DELETED` — a post-merge real-stack probe; this PR's shipped
+   evidence is the companion section above, and the criterion is met when
+   the rig reports green.
 4. The rig's two TypeScript foreground-recovery expectations turn green.
 5. No regression in the existing recovery, coordinator, publication, and
    wire-validation suites.

@@ -875,6 +875,11 @@ describe('harness checkpoint v1', () => {
     ]);
     // The carried advance is the exact shape §4's branch classifies: a
     // crash here classifies the wait instead of declining model_start.
+    // (R1-58: this case pins the constructor's contract — production
+    // delivers the carry through createConsumedAgentWaitHarnessCheckpoint
+    // above; createModelOutputCommitted's sole production caller,
+    // resolveDurableWait, can never see a non-null group, and the guard's
+    // legal-carry side keeps exactly this case alive.)
     expect(parseHarnessCheckpointV1(bytesOf(round))).toEqual(round);
   });
 

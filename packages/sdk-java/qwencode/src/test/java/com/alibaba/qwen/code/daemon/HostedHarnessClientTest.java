@@ -725,6 +725,24 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void agentWaitWithUnknownOutcomeIsNotReady() {
+        // A wait run the relay can no longer observe reports unknown: the
+        // all-known conjunct must keep the gates shut, or the coordinator
+        // would re-enter a wait it cannot observe (R1-15).
+        HarnessRuntimeRecovery recovery = new HarnessRuntimeRecovery(
+                "await_agent", "checkpoint-4", "activation-4", List.of(
+                        new HarnessRuntimeExecutionRecovery("call-1", "agent",
+                                "execution-1", "runtime-session", null,
+                                "known", Map.of("state", "executing")),
+                        new HarnessRuntimeExecutionRecovery("call-2", "agent",
+                                "execution-2", "runtime-session", null,
+                                "unknown", Map.of("state", "executing"))));
+        assertTrue(recovery.hasUnknownOutcome());
+        assertFalse(recovery.isContinuationReady());
+        assertFalse(recovery.isCancellationReady());
+    }
+
+    @Test
     void parsesAResultsReadyRuntimeRecovery() {
         AtomicReference<String> continuationBody = new AtomicReference<>();
         server.createContext("/session/" + SESSION_ID + "/load",
