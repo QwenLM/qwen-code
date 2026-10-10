@@ -7,7 +7,7 @@
 import type { CommandModule } from 'yargs';
 import type { ModValidationReport } from '@qwen-code/qwen-code-core/mods/mod-types.js';
 import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
-import { ignoreBrokenPipe, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 interface ValidateModsArgs {
   path: string;
@@ -50,7 +50,10 @@ export function formatModReport(report: ModValidationReport): string {
 export async function handleValidateMods(
   args: ValidateModsArgs,
 ): Promise<void> {
-  ignoreBrokenPipe();
+  process.stdout.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code === 'EPIPE') process.stdout.destroy();
+    else throw error;
+  });
   const { validateMods } = await import(
     '@qwen-code/qwen-code-core/mods/mod-validation.js'
   );

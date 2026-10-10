@@ -1047,6 +1047,71 @@ describe('validateMods', () => {
     });
   });
 
+  it.each([
+    "const key = 'constructor'; const F = [][key][key]; F('return 1')();",
+    "const key = 'constructor'; const alias = key; const F = [][alias][alias]; F('return 1')();",
+    "const key = '__proto__'; const F = [][key].constructor; F('return 1')();",
+    "const key = 'constructor'; { const alias = key; const F = [][alias][alias]; F('return 1')(); }",
+    "const alias = 'constructor'; { const key = 'safe'; const F = [][alias][alias]; F('return 1')(); }",
+    "const key = 'getPrototypeOf'; const F = Object[key]([]).constructor; F('return 1')();",
+    "const key = 'constructor'; const alias = key; function read() { const key = 'length'; const F = [][alias][alias]; F('return 1')(); }",
+  ])('does not certify reflective constant property keys: %s', async (body) => {
+    await source(`export function register(on) { ${body} }`);
+    const result = await validateMods(root);
+    expect(result.static).toEqual({ status: 'incomplete', complete: false });
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'MOD_ANALYSIS_INCOMPLETE' }),
+    );
+  });
+
+  it.each([
+    "const key = 'constructor'; { const key = 'length'; const size = [][key]; }",
+    "const key = 'constructor'; function read(key) { return [][key]; } read(0);",
+    "const key = 'constructor'; function read(key = [][key]) {}",
+    "const key = 'length'; const alias = key; const size = [][alias];",
+    "const key = 'constructor'; try {} catch (key) { const data = [][key]; }",
+    "const key = 'constructor'; const object = { read(key) { const data = [][key]; } };",
+    "const key = 'constructor'; { const key = 'length'; const alias = key; const size = [][alias]; }",
+  ])(
+    'respects property-key shadowing and ordinary data reads: %s',
+    async (body) => {
+      await source(`export function register(on) { ${body} }`);
+      expect((await validateMods(root)).static).toEqual({
+        status: 'valid',
+        complete: true,
+      });
+    },
+  );
+
+  it('recognizes erased wrappers around reflective constant keys', async () => {
+    await fs.writeFile(
+      path.join(root, 'hooks/hooks.json'),
+      JSON.stringify({ modules: ['./register.ts'] }),
+    );
+    await source(
+      "export function register(on) { const key = 'constructor' as const; const alias = key!; const F = [][alias as string][key]; F('return 1')(); }",
+      'hooks/register.ts',
+    );
+    expect((await validateMods(root)).static).toEqual({
+      status: 'incomplete',
+      complete: false,
+    });
+  });
+
+  it('bounds property-key constant alias chains', async () => {
+    const aliases = Array.from(
+      { length: 129 },
+      (_, index) => `const key${index + 1} = key${index};`,
+    );
+    await source(`const key0 = 'constructor'; ${aliases.join('\n')}
+      export function register(on) { const F = [][key129]; }`);
+    const result = await validateMods(root);
+    expect(result.static).toEqual({ status: 'incomplete', complete: false });
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'MOD_ANALYSIS_LIMIT' }),
+    );
+  });
+
   it('inventories every direct catch handler', async () => {
     await source(
       "export function register(on) { on('tool.call', () => {}).catch(() => {}).catch((ctx) => ctx.fs.write('/x','y')); }",

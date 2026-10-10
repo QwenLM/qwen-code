@@ -6,8 +6,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { spawn, spawnSync } from 'node:child_process';
 import {
+  closeSync,
   mkdtempSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -60,6 +62,63 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 describe('built CLI Mod validation', () => {
+  it('fails visibly when the report cannot be written to stdout', () => {
+    write('hooks/hooks.json', JSON.stringify({ modules: ['./register.mjs'] }));
+    write(
+      'hooks/register.mjs',
+      'while (true) {} export function register(on) {}',
+    );
+    const normal = run([plugin, '--json']);
+    expect(normal.error).toBeUndefined();
+    expect(normal.status).toBe(0);
+    expect(JSON.parse(normal.stdout).static).toEqual({
+      status: 'valid',
+      complete: true,
+    });
+    const output = join(root, 'readonly-output');
+    writeFileSync(output, '');
+    const descriptor = openSync(output, 'r');
+    const before = snapshot(root);
+    try {
+      const failed = spawnSync(
+        process.execPath,
+        [cli, 'extensions', 'validate-mods', plugin, '--json'],
+        {
+          cwd: root,
+          timeout: 15000,
+          encoding: 'utf8',
+          stdio: ['ignore', descriptor, 'pipe'],
+          env: { ...process.env, QWEN_HOME: home, QWEN_RUNTIME_DIR: home },
+        },
+      );
+      expect(failed.error).toBeUndefined();
+      expect(failed.status).toBe(1);
+      expect(failed.stderr).toContain('EBADF');
+      expect(readFileSync(output).length).toBe(0);
+      expect(snapshot(root)).toEqual(before);
+    } finally {
+      closeSync(descriptor);
+    }
+  });
+
+  it('reports reflective constant keys as incomplete without executing source', () => {
+    write('hooks/hooks.json', JSON.stringify({ modules: ['./register.mjs'] }));
+    write(
+      'hooks/register.mjs',
+      "while (true) {} export function register(on) { const key = 'constructor'; const F = [][key][key]; F('return 1')(); }",
+    );
+    const before = snapshot(root);
+    const result = run([plugin, '--json']);
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      static: { status: 'incomplete', complete: false },
+      runtime: 'unavailable',
+    });
+    expect(snapshot(root)).toEqual(before);
+  });
+
   it.each([
     ['extensions', 'validate-mods', '-h'],
     ['extensions', 'validate-mods', '-h', 'plugin'],

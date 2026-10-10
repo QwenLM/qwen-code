@@ -57,6 +57,7 @@ afterEach(() => {
   }
   vi.clearAllMocks();
   vi.restoreAllMocks();
+  vi.useRealTimers();
   process.exitCode = 0;
 });
 
@@ -167,6 +168,16 @@ describe('validate-mods command', () => {
     await expect(
       handleValidateMods({ path: './uninstalled', json: true }),
     ).rejects.toBe(error);
+  });
+  it('does not swallow a delayed non-EPIPE output error', async () => {
+    vi.useFakeTimers();
+    const error = Object.assign(new Error('output failed'), { code: 'ENOSPC' });
+    mocks.output.mockImplementationOnce(() => {
+      setTimeout(() => process.stdout.emit('error', error), 1);
+    });
+    mocks.validateMods.mockResolvedValue(report('valid'));
+    await handleValidateMods({ path: './uninstalled', json: true });
+    expect(() => vi.runAllTimers()).toThrow(error);
   });
   it.each([
     ['valid', 0],

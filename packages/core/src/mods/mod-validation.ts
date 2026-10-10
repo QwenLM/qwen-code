@@ -25,6 +25,7 @@ const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_TOTAL_BYTES = 8 * MAX_FILE_BYTES;
 const MAX_DIAGNOSTICS = 100;
 const MAX_REQUIREMENTS = 4096;
+const MAX_CONSTANT_CHAIN = 128;
 const BLOCK_SCOPES = new Set([
   'BlockStatement',
   'TSModuleBlock',
@@ -152,6 +153,7 @@ type Scope = {
   varScope?: boolean;
   bindings: Map<string, 'on' | '$' | 'local'>;
   functions: Map<string, Node>;
+  constants?: Map<string, Node>;
 };
 
 function node(value: unknown): Node | undefined {
@@ -247,6 +249,16 @@ function bindLocals(value: Node, scope: Scope): void {
     return;
   }
   if (isFunction(value) || value.type === 'ClassExpression') return;
+  if (value.type === 'VariableDeclaration' && value.kind === 'const') {
+    for (const variable of children(value)) {
+      const name = identifier(variable.id);
+      const init = node(variable.init);
+      if (name && init) {
+        scope.constants ??= new Map();
+        scope.constants.set(name, init);
+      }
+    }
+  }
   if (value.type === 'VariableDeclarator') {
     for (const name of names(node(value.id))) scope.bindings.set(name, 'local');
     const name = identifier(value.id);
@@ -296,6 +308,25 @@ function binding(scope: Scope, name: string): 'on' | '$' | 'local' | undefined {
 function helper(scope: Scope, name: string): Node | undefined {
   if (scope.bindings.has(name)) return scope.functions.get(name);
   return scope.parent ? helper(scope.parent, name) : undefined;
+}
+
+function constantString(value: unknown, scope: Scope): string | undefined {
+  let expression = runtimeExpression(value);
+  const seen = new Set<Node>();
+  while (expression) {
+    const literal = stringLiteral(expression);
+    if (literal !== undefined) return literal;
+    const name = identifier(expression);
+    if (!name) return undefined;
+    while (!scope.bindings.has(name) && scope.parent) scope = scope.parent;
+    const init = scope.constants?.get(name);
+    if (!init || seen.has(init)) return undefined;
+    if (seen.size >= MAX_CONSTANT_CHAIN)
+      throw new RangeError('Constant key limit.');
+    seen.add(init);
+    expression = runtimeExpression(init);
+  }
+  return undefined;
 }
 
 function registerFunction(program: Node): Node | undefined {
@@ -780,7 +811,7 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
         ['MemberExpression', 'OptionalMemberExpression'].includes(value.type)
       ) {
         const property = value.computed
-          ? stringLiteral(value.property)
+          ? constantString(value.property, scope)
           : identifier(value.property);
         const receiver = identifier(runtimeExpression(value.object));
         if (
@@ -825,7 +856,7 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
         !binding(scope, 'globalThis')
       ) {
         const property = value.computed
-          ? stringLiteral(value.property)
+          ? constantString(value.property, scope)
           : identifier(value.property);
         if (['require', 'eval', 'Function'].includes(property ?? '')) {
           diagnostic(
