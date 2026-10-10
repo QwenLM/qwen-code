@@ -2796,9 +2796,6 @@ export function registerHostedHarnessSessionRoutes(
       error(res, 409, 'hosted_session_already_attached');
       return;
     }
-    // Only a load that passed the identity and admission checks above may
-    // stop a resident Session's messages: a refused one changes nothing.
-    if (resident && stopMessages) resident.messagesStopped = true;
     // A continuation load redriven after a lost reply is answered from the
     // Session it already attached: the writer fence above proves this load
     // targets this generation, and no continue/cancel can have been admitted
@@ -2818,6 +2815,7 @@ export function registerHostedHarnessSessionRoutes(
         // No single parked Turn: the first load's answer still holds, so the
         // redrive gets the same attachment restated — including a blocked
         // Session, whose recoveryRequired the coordinator already handles.
+        if (stopMessages) resident.messagesStopped = true;
         refusedAdoptions.delete(sessionId);
         sendAttachment(res, sessionId, resident);
         return;
@@ -2826,6 +2824,9 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 409, 'hosted_session_already_attached');
         return;
       }
+      // Only a load this resident Session admits may stop its messages,
+      // and before the recovery it drives can start one.
+      if (stopMessages) resident.messagesStopped = true;
       if (resident.toolProfile === undefined || !brokerOptions) {
         recoveryDeclined(res, 'model_start');
         return;
@@ -2901,6 +2902,9 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 409, 'hosted_tool_profile_conflict');
         return;
       }
+      // Only a load this resident Session admits may stop its messages: an
+      // identity, admission or profile refusal above changes nothing.
+      if (stopMessages) resident.messagesStopped = true;
       try {
         // Reuse the live owner without reopening its writer or driving work.
         // A lost passive-load reply must still report a parked Runtime Turn.

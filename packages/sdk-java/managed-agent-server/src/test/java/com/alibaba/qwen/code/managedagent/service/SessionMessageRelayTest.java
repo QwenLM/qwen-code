@@ -359,9 +359,17 @@ class SessionMessageRelayTest {
                 .isEqualTo("to_parent");
     }
 
-    // H4f: a stopped run's child is wound down by the child relay; none of
-    // its own outbox steps may attach (and so load) it, and its entry
-    // classifies once it closes.
+    /** The child still owes message work, which its stop is settling. */
+    private void childOwesMessageWork(int pendingInputs) {
+        when(records.hasSessionMessages(TENANT, CHILD)).thenReturn(true);
+        when(records.journalTurns(TENANT, CHILD)).thenReturn(
+                new ChildResultRelayStore.JournalTurns(pendingInputs,
+                        java.util.Set.of("msg_in:message"), 0L, null));
+    }
+
+    // H4f: while a stopped run's child still owes message work, none of its
+    // own outbox steps may attach (and so load) it: they wait, and the
+    // entry classifies once the stop closes the child.
     @Test
     void leavesAStoppedChildsOwnMessageToItsClose() {
         row.set(new MessageRow(TENANT, CHILD, MESSAGE, null, "relaying",
@@ -372,6 +380,7 @@ class SessionMessageRelayTest {
         when(store.lineage(TENANT, CHILD))
                 .thenReturn(new Lineage(PARENT, "run-1"));
         childRun("running", CHILD, true);
+        childOwesMessageWork(1);
         relay.scan();
         assertThat(harness.calls).isEmpty();
         assertThat(row.get().attempts()).isZero();
@@ -379,6 +388,25 @@ class SessionMessageRelayTest {
         relay.scan();
         assertThat(harness.calls).isEmpty();
         assertThat(row.get().state()).isEqualTo("orphaned");
+    }
+
+    // A stop that met a natural end owes no message work: the child relay
+    // then waits on this very entry to settle the run, so the entry must go
+    // on, never wait for a close that waits for it.
+    @Test
+    void handsOverAStoppedChildsMessageOnceNoMessageWorkIsOwed() {
+        row.set(new MessageRow(TENANT, CHILD, MESSAGE, null, "relaying",
+                "owner", 31_000L, 0, 0, null));
+        pending.set(new PendingMessage(TENANT, CHILD, MESSAGE, "planned",
+                "resource-message"));
+        body("to_parent", CHILD, null);
+        when(store.lineage(TENANT, CHILD))
+                .thenReturn(new Lineage(PARENT, "run-1"));
+        childRun("completed", CHILD, true);
+        childOwesMessageWork(0);
+        relay.scan();
+        assertThat(kinds()).containsExactly("handover", "receive",
+                "accepted");
     }
 
     // The consume reconciliation would reload a stopped run's child and
@@ -391,6 +419,7 @@ class SessionMessageRelayTest {
         when(store.deliveryState(TENANT, CHILD, MESSAGE))
                 .thenReturn("accepted");
         childRun("running", CHILD, true);
+        childOwesMessageWork(1);
         relay.scan();
         assertThat(harness.calls).isEmpty();
         assertThat(row.get().attempts()).isZero();

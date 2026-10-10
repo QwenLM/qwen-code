@@ -5587,8 +5587,9 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(204);
   });
 
-  // A load refused by the resident Session's identity checks stops
-  // nothing; one that passes them stops its messages from then on.
+  // A load the resident Session refuses — its identity, its Store or its
+  // tool profile — stops nothing; one it admits stops its messages from
+  // then on.
   it("stops a resident Session's messages only by a load it admits", async () => {
     const { server, receive } = await loadMessageParent();
     const load = (descriptor: Record<string, unknown>) =>
@@ -5605,6 +5606,16 @@ describe('Hosted Harness no-tool session', () => {
     });
     expect(wrongStore.status).toBe(409);
     expect(wrongStore.body.code).toBe('hosted_session_store_mismatch');
+    const wrongProfile = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-files/1',
+      passiveManagedRuntimeRecovery: true,
+      stopMessages: true,
+    });
+    expect(wrongProfile.status).toBe(409);
+    expect(wrongProfile.body.code).toBe('hosted_tool_profile_conflict');
     expect((await receive('msg_runs')).status).toBe(202);
     await vi.waitFor(
       async () =>

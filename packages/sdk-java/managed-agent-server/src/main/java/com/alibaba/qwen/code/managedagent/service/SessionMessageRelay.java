@@ -138,11 +138,14 @@ public class SessionMessageRelay {
                 return;
             }
             if ("to_parent".equals(body.required("route").asText())
-                    && childRunStopped(row, body)) {
-                // H4f: a stopped run's child is the child relay's to wind
-                // down. Its own outbox steps would attach it, and a load
-                // could start a message the stop is settling, so the entry
-                // waits for that child to close and then classifies above.
+                    && stopStillSettling(row, body, row.senderSessionId())) {
+                // H4f: while a stopped run's child still owes message work,
+                // the child relay's stop is settling it. The child's own
+                // outbox steps would attach it, and a load could start a
+                // message the stop is about to cancel, so they wait for
+                // that work to be settled; after it a load starts nothing,
+                // and the entry proceeds, so the run's settlement, which
+                // waits on this entry, is never left waiting on it.
                 store.scheduleRetry(row, owner, now + HEARTBEAT_MS,
                         now + LEASE_MS, now);
                 return;
@@ -157,6 +160,18 @@ public class SessionMessageRelay {
         } catch (RuntimeException error) {
             defer(row, error, now);
         }
+    }
+
+    /** Whether the message's child run carries a committed stop request
+     * and its child still owes message work the stop is settling. */
+    private boolean stopStillSettling(MessageRow row, JsonNode body,
+            String child) {
+        if (!childRunStopped(row, body)
+                || !records.hasSessionMessages(row.tenantId(), child)) {
+            return false;
+        }
+        return records.journalTurns(row.tenantId(), child)
+                .pendingMessageInputs() > 0;
     }
 
     /** Whether the message's child run carries a committed stop request. */
@@ -368,10 +383,10 @@ public class SessionMessageRelay {
             return;
         }
         if ("to_child".equals(body.required("route").asText())
-                && childRunStopped(row, body)) {
+                && stopStillSettling(row, body, target)) {
             // H4f: the consume would reload a child the Harness dropped and
-            // start the message its stop is settling; the child's close
-            // classifies the entry instead.
+            // start the message its stop is settling: it waits until that
+            // work is settled, after which the reconciliation is harmless.
             store.scheduleRetry(row, owner, now + AWAIT_MS, now + LEASE_MS,
                     now);
             return;
