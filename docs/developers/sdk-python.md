@@ -28,6 +28,9 @@ pip install --pre qwen-code-sdk
 ```
 
 If `qwen` is not on `PATH`, pass `path_to_qwen_executable` explicitly.
+On Windows, the SDK automatically discovers npm's `qwen.cmd` shim on `PATH`.
+You can override the lookup path through the `env` option; Windows environment
+variable names are case-insensitive, so `PATH`, `Path`, and `path` are equivalent.
 
 Before writing SDK code, make sure the CLI works in the same shell:
 

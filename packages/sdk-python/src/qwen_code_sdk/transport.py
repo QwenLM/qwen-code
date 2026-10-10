@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import AsyncIterator
@@ -70,6 +71,14 @@ class ProcessTransport:
             return
 
         spawn_info = prepare_spawn_info(self._options.path_to_qwen_executable)
+        env = {**os.environ, **(self._options.env or {})}
+        command = spawn_info.command
+        if sys.platform == "win32":
+            env = {key.upper(): value for key, value in os.environ.items()}
+            env.update(
+                {key.upper(): value for key, value in (self._options.env or {}).items()}
+            )
+            command = shutil.which(command, path=env.get("PATH")) or command
         args = [*spawn_info.args, *build_cli_arguments(self._options)]
         stderr_target = (
             asyncio.subprocess.PIPE
@@ -78,10 +87,10 @@ class ProcessTransport:
         )
 
         self._process = await asyncio.create_subprocess_exec(
-            spawn_info.command,
+            command,
             *args,
             cwd=self._options.cwd,
-            env={**os.environ, **(self._options.env or {})},
+            env=env,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=stderr_target,

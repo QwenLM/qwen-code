@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from qwen_code_sdk.transport import build_cli_arguments, prepare_spawn_info
+from qwen_code_sdk.transport import (
+    ProcessTransport,
+    build_cli_arguments,
+    prepare_spawn_info,
+)
 from qwen_code_sdk.types import QueryOptions, TimeoutOptions
 
 VALID_UUID = "123e4567-e89b-12d3-a456-426614174000"
@@ -153,6 +157,75 @@ def test_prepare_spawn_info_uses_node_for_javascript_files(tmp_path: Path) -> No
 
     assert spawn_info.command == "node"
     assert spawn_info.args == [str(script_path.resolve())]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows command shim discovery")
+@pytest.mark.parametrize("executable", [None, "qwen", "qwen.cmd", "absolute"])
+@pytest.mark.parametrize(
+    "path_source", ["inherited", "PATH", "Path", "path", "PATH+Path", "Path+PATH"]
+)
+@pytest.mark.asyncio
+async def test_transport_starts_windows_command_shim_on_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    executable: str | None,
+    path_source: str,
+) -> None:
+    bin_dir = tmp_path / "npm prefix with spaces"
+    bin_dir.mkdir()
+    script_path = bin_dir / "fake_cli.py"
+    script_path.write_text(
+        "import json, os, sys\n"
+        "print(json.dumps({'args': sys.argv[1:], 'path': os.environ['PATH']}))\n",
+        encoding="utf-8",
+    )
+    shim_path = bin_dir / "qwen.cmd"
+    shim_path.write_text(
+        f'@echo off\n"{sys.executable}" "{script_path}" %*\n',
+        encoding="utf-8",
+    )
+    cli_path = str(bin_dir)
+    if executable == "absolute":
+        executable = str(shim_path)
+    env = None
+    if path_source == "inherited":
+        monkeypatch.setenv("PATH", cli_path)
+    else:
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        if "+" in path_source:
+            first_key, last_key = path_source.split("+")
+            env = {first_key: str(tmp_path / "empty"), last_key: cli_path}
+        else:
+            env = {path_source: cli_path}
+
+    transport = ProcessTransport(
+        QueryOptions(path_to_qwen_executable=executable, env=env, model="model name")
+    )
+    try:
+        await transport.start()
+        messages = await asyncio.wait_for(
+            _collect_transport_messages(transport), timeout=10
+        )
+    finally:
+        await transport.close()
+
+    assert messages == [
+        {"args": build_cli_arguments(QueryOptions(model="model name")), "path": cli_path}
+    ]
+
+
+async def _collect_transport_messages(transport: ProcessTransport) -> list[Any]:
+    return [message async for message in transport.read_messages()]
+
+
+@pytest.mark.asyncio
+async def test_transport_preserves_missing_executable_error(tmp_path: Path) -> None:
+    transport = ProcessTransport(
+        QueryOptions(path_to_qwen_executable=str(tmp_path / "missing-qwen"))
+    )
+
+    with pytest.raises(FileNotFoundError):
+        await transport.start()
 
 
 @pytest.mark.asyncio
