@@ -440,9 +440,13 @@ export function registerManagedContextRoutes(
         const directory = await siblingDirectory(mount, binding.cwdRelative);
         // A binding that cannot be located at all cannot prove the outside
         // target is shared — and it cannot veto the caller's own estate
-        // either, which is the caller's business by the test above.
+        // either, which is the caller's business by the test above. The
+        // exemption holds only while the root that granted it is still the
+        // live one: a mount that fenced between the read above and this
+        // sibling's resolution made the sibling unlocatable, and excusing it
+        // then would flip the veto from deny to allow.
         if (directory === undefined) {
-          if (ownEstate) continue;
+          if (ownEstate && (await mount.rootDirectory()) === root) continue;
           return true;
         }
         // Only a binding AT the mount root exempts: the shared Workspace

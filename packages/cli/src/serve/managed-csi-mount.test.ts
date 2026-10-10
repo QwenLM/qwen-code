@@ -292,6 +292,7 @@ describe.runIf(process.platform !== 'win32')(
         path.join(owned.root, 'sub', 'secret.txt'),
         'sibling-secret',
       );
+      await fs.writeFile(path.join(owned.root, 'own.txt'), 'own-content');
       await owned.mount.observe();
       const fixture = JSON.parse(
         await fs.readFile(
@@ -377,7 +378,7 @@ describe.runIf(process.platform !== 'win32')(
             ).status,
           ).toBe(200);
       }
-      const read = async (callId: string) => {
+      const read = async (callId: string, file = 'sub/secret.txt') => {
         const response = await post('/internal/managed-runtime/v2/execute', {
           protocolVersion: 2,
           reference: {
@@ -387,13 +388,21 @@ describe.runIf(process.platform !== 'win32')(
             argsDigest: `digest-${callId}`,
           },
           toolName: 'read_file',
-          input: { file_path: 'sub/secret.txt' },
+          input: { file_path: file },
         });
         expect(response.status).toBe(200);
         return response.json();
       };
       const control = await read('control');
       expect(control.result.executionStatus).toBe('error');
+      expect(control.result.error.message).toBe(
+        "Path 'sub/secret.txt' is not within the Session working directory.",
+      );
+      // Positive control: the caller's own file reads fine, so a wholesale
+      // execute-path failure cannot satisfy the refusal assertions.
+      const own = await read('own', 'own.txt');
+      expect(own.result.executionStatus).toBe('success');
+      expect(JSON.stringify(own)).toContain('own-content');
       const nativeRoot = owned.mount.rootDirectory.bind(owned.mount);
       vi.spyOn(owned.mount, 'rootDirectory').mockImplementation(async () => {
         await fs.writeFile(owned.serial, 'changed-serial\n');
@@ -402,6 +411,147 @@ describe.runIf(process.platform !== 'win32')(
       const fenced = await read('fenced');
       expect(owned.mount.isAvailable).toBe(false);
       expect(fenced.result.executionStatus).toBe('error');
+      expect(fenced.result.error.message).toBe(
+        "Path 'sub/secret.txt' is not within the Session working directory.",
+      );
+      expect(JSON.stringify(fenced)).not.toContain('sibling-secret');
+    });
+
+    it('keeps sibling reads refused when the mount fences inside the sibling loop', async () => {
+      // The caller at `a` reads `a/b/secret.txt` while a sibling owns `a/b`.
+      // The root is still known when the ownership callback reads it, and the
+      // mount fences only inside the sibling's `resolve('a/b')` — the stale
+      // `ownEstate` must not excuse the sibling that the fence made
+      // unlocatable.
+      const owned = await observationFixture();
+      await fs.mkdir(path.join(owned.root, 'a', 'b'), { recursive: true });
+      await fs.writeFile(
+        path.join(owned.root, 'a', 'b', 'secret.txt'),
+        'sibling-secret',
+      );
+      await owned.mount.observe();
+      const fixture = JSON.parse(
+        await fs.readFile(
+          new URL(
+            './contracts/managed-context-v1.fixtures.json',
+            import.meta.url,
+          ),
+          'utf8',
+        ),
+      ) as { boot: ManagedContextBoot };
+      const boot = {
+        ...fixture.boot,
+        mountRoot: owned.root,
+        capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+      };
+      const app = express();
+      const executor = registerManagedContextRoutes(
+        app,
+        boot,
+        undefined,
+        undefined,
+        owned.mount,
+      );
+      const server = app.listen(0, '127.0.0.1');
+      onTestFinished(async () => {
+        await executor.close();
+        await new Promise<void>((resolve) => {
+          server.close(() => resolve());
+          server.closeAllConnections();
+        });
+      });
+      await once(server, 'listening');
+      const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const post = (route: string, body: unknown) =>
+        fetch(`${origin}${route}`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${boot.token}`,
+            'cache-control': 'no-store',
+            'content-type': 'application/json',
+            'x-qwen-managed-lease-id': boot.leaseId,
+            'x-qwen-managed-lease-epoch': String(boot.epoch),
+          },
+          body: JSON.stringify(body),
+        });
+      for (const [sessionId, cwdRelative] of [
+        ['caller', 'a'],
+        ['sibling', 'a/b'],
+      ]) {
+        const binding = {
+          tenantId: boot.tenantId,
+          workspaceId: boot.workspaceId,
+          workspaceGeneration: boot.workspaceGeneration,
+          storageId: boot.storageId,
+          cwdRelative,
+          contextConfigRef: WORKSPACE_CONTEXT_CONFIG_REF,
+          contextRevision: '1',
+        };
+        const contextDigest = computeManagedContextDigest(binding);
+        expect(
+          (
+            await post('/internal/managed-runtime/v3/context', {
+              protocolVersion: 3,
+              managedContext: boot.managedContext,
+              operationId: `install-${sessionId}`,
+              sessionId,
+              binding,
+              contextDigest,
+            })
+          ).status,
+        ).toBe(200);
+        if (sessionId === 'caller')
+          expect(
+            (
+              await post(WORKSPACE_ACTIVATION_ROUTE.path, {
+                protocolVersion: 1,
+                operation: 'activate',
+                sessionId,
+                contextDigest,
+                contextConfigRef: WORKSPACE_CONTEXT_CONFIG_REF,
+                profile: WORKSPACE_EXECUTION_PROFILE,
+              })
+            ).status,
+          ).toBe(200);
+      }
+      const read = async (callId: string) => {
+        const response = await post('/internal/managed-runtime/v2/execute', {
+          protocolVersion: 2,
+          reference: {
+            sessionId: 'caller',
+            promptId: 'prompt-1',
+            callId,
+            argsDigest: `digest-${callId}`,
+          },
+          toolName: 'read_file',
+          input: { file_path: 'b/secret.txt' },
+        });
+        expect(response.status).toBe(200);
+        return response.json();
+      };
+      const control = await read('control');
+      expect(control.result.executionStatus).toBe('error');
+      expect(control.result.error.message).toBe(
+        "Path 'b/secret.txt' is not within the Session working directory.",
+      );
+      // Fence the mount at the instant the sibling loop resolves 'a/b'; the
+      // caller's own resolve('a') and the callback's first rootDirectory()
+      // still see the trusted serial.
+      const nativeResolve = owned.mount.resolve.bind(owned.mount);
+      vi.spyOn(owned.mount, 'resolve').mockImplementation(
+        async (cwdRelative) => {
+          if (cwdRelative === 'a/b') {
+            await fs.writeFile(owned.serial, 'changed-serial\n');
+          }
+          return nativeResolve(cwdRelative);
+        },
+      );
+      const fenced = await read('fenced');
+      expect(owned.mount.isAvailable).toBe(false);
+      expect(fenced.result.executionStatus).toBe('error');
+      expect(fenced.result.error.message).toBe(
+        "Path 'b/secret.txt' is not within the Session working directory.",
+      );
       expect(JSON.stringify(fenced)).not.toContain('sibling-secret');
     });
 
@@ -531,6 +681,36 @@ describe.runIf(process.platform !== 'win32')(
         const handle = await fixtureOpen(...args);
         if (isChild(args[0]))
           vi.spyOn(handle, 'stat').mockResolvedValue(foreign);
+        return handle;
+      });
+      expect(await owned.mount.resolve('foreign')).toBeUndefined();
+      expect(owned.mount.isAvailable).toBe(true);
+      expect(owned.handles.filter((handle) => handle.fd !== -1)).toEqual([
+        owned.rootHandle,
+      ]);
+    });
+
+    it('refuses a child whose descriptor device differs from its named device', async () => {
+      // The named lstat keeps the root device, so the root-device arm cannot
+      // decide here — only the descriptor-vs-named device comparison can.
+      // Inode numbers are per-filesystem, so a foreign-device directory with
+      // a colliding inode is exactly what this arm exists to refuse.
+      const owned = await observationFixture();
+      await fs.mkdir(path.join(owned.root, 'foreign'));
+      const descriptorStats = await fs.lstat(path.join(owned.root, 'foreign'), {
+        bigint: true,
+      });
+      Object.defineProperty(descriptorStats, 'dev', {
+        value: owned.stats.dev + 1n,
+      });
+      const fixtureOpen = fs.open;
+      vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+        const handle = await fixtureOpen(...args);
+        if (
+          typeof args[0] === 'string' &&
+          /^\/proc\/self\/fd\/\d+\/foreign$/.test(args[0])
+        )
+          vi.spyOn(handle, 'stat').mockResolvedValue(descriptorStats);
         return handle;
       });
       expect(await owned.mount.resolve('foreign')).toBeUndefined();
