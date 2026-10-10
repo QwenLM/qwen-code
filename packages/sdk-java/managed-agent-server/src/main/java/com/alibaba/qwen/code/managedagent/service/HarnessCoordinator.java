@@ -62,6 +62,14 @@ public class HarnessCoordinator {
     // anyway, so an entry could never change an outcome.
     private static final Set<String> LEASE_BOUNDED_409_CODES =
             Set.of("managed_session_writer_conflict");
+    // `hosted_turn_recovery_in_progress` is the ONLY refusal the daemon
+    // provably clears under its own recovery channel: the wake pump
+    // settles the park the prompt route still sees. A user Turn arriving
+    // in that window must outlive the park, whatever the shared budget
+    // already bought on durable refusals — the durable meaning stays on
+    // `hosted_turn_recovery_required` and still meets the budget.
+    private static final Set<String> TRANSIENT_RECOVERY_WINDOW_409_CODES =
+            Set.of("hosted_turn_recovery_in_progress");
     private static final Logger LOG = LoggerFactory.getLogger(
             HarnessCoordinator.class);
     private final AgentStateStore store;
@@ -274,13 +282,18 @@ public class HarnessCoordinator {
                         submissionAttempted.get()
                                 && !"hosted_prompt_recovery_required"
                                         .equals(errorCode)
-                                && !("hosted_turn_recovery_required"
-                                                .equals(errorCode)
+                                && !(("hosted_turn_recovery_required"
+                                                        .equals(errorCode)
+                                                || "hosted_turn_recovery_in_progress"
+                                                        .equals(errorCode))
                                         && claimed.harnessEventEpoch()
                                                 == null),
                         error,
-                        recoveryPath.get() && errorCode != null
-                                && LEASE_BOUNDED_409_CODES.contains(errorCode));
+                        (recoveryPath.get() && errorCode != null
+                                && LEASE_BOUNDED_409_CODES.contains(
+                                        errorCode))
+                                || "hosted_turn_recovery_in_progress"
+                                        .equals(errorCode));
             }
         } catch (RuntimeBrokerException error) {
             terminal = !submissionAttempted.get() && !error.isRetryable()

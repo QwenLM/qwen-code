@@ -328,6 +328,35 @@ class ManagedAgentWorkspaceReplayTest {
                 "fresh-submit-bound-noncreator", bound, input));
     }
 
+    // A caller with no Workspace grant must not learn whether a key is
+    // live: against a tombstoned bound Session, an Idempotency-Key already
+    // recorded under a different SUBMIT_TURN digest answers the same 404 as
+    // a fresh key — the read grant runs above the replay, so the digest
+    // mismatch never reaches the 409 the replay branch would answer.
+    @Test
+    void aReusedKeyAgainstADeletedSessionAnswers404ToAGrantlessActor() {
+        freshDatabase();
+        String tenant = "tenant-" + UUID.randomUUID();
+        ManagedAgentService service = service(new AtomicBoolean(true));
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+        String bound = boundSession(tenant);
+
+        transaction.executeWithoutResult(status -> assertThat(
+                service.submitTurn(tenant, "actor-a", "submit", bound, input)
+                        .replayed()).isFalse());
+        jdbc.update("UPDATE managed_agent_session SET status = 'DELETED',"
+                        + " deleted_at = 1, updated_at = 1, version ="
+                        + " version + 1 WHERE tenant_id = ? AND session_id"
+                        + " = ?",
+                tenant, bound);
+
+        // actor-z holds no grant row at all.
+        assertNotFound(() -> service.submitTurn(tenant, "actor-z", "submit",
+                bound, List.of(new InputBlock("text", "other"))));
+        assertNotFound(() -> service.submitTurn(tenant, "actor-z",
+                "fresh-submit", bound, input));
+    }
+
     private void assertNotFound(ThrowableAssert.ThrowingCallable call) {
         transaction.executeWithoutResult(status -> assertThatThrownBy(call)
                 .isInstanceOfSatisfying(ApiException.class, error -> {

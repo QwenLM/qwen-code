@@ -84,6 +84,18 @@ public interface HarnessConnector extends AutoCloseable {
     void cancel(String tenantId, String sessionId);
 
     /**
+     * H6b/H6c: one automation operation onto the Session's journal, from the
+     * control plane's automation service and scanner (define_schedule,
+     * retire_schedule, fire_run). The Hosted side settles it before
+     * answering, and the answer carries the operation's result.
+     */
+    default Map<String, Object> runAutomationOperation(String tenantId,
+            String sessionId, Map<String, Object> body) {
+        throw new UnsupportedOperationException(
+                "Automation operations are unavailable");
+    }
+
+    /**
      * H4b: one child operation onto the Session's journal, from the
      * control plane's relay (dispatch/attach/result/accept/cancel/
      * close-scope). The Hosted side settles it before answering.

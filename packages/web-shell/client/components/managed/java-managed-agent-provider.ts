@@ -415,7 +415,14 @@ function toPhase(
 }
 
 function titleFor(text: string): string {
-  const title = text.trim().replace(/\s+/g, ' ');
+  // The server refuses C0 control characters and DEL in a title; pasted
+  // terminal output carries ANSI escapes verbatim, so fold them to spaces
+  // beside the whitespace collapse instead of failing the Session create.
+  const title = text
+    // eslint-disable-next-line no-control-regex
+    .replace(/[ -]/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
   return title.length <= 80 ? title : `${title.slice(0, 77)}...`;
 }
 

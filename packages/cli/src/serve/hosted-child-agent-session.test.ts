@@ -18,13 +18,17 @@ import {
   HostedChildAgentSession,
   type ChildAgentLaunchParams,
 } from './hosted-child-agent-session.js';
+import { HostedChildRunSession } from './hosted-child-run-session.js';
 
 // The H4b gates are real: the kind gate admits `child_agent` and
 // `child_acceptance` sits in the plain enabled list, so this suite drives
 // the hosted orchestrator with no enablement mock. One H4c case plants a
-// `workflow` record ahead of that kind's enablement; the flag lifts the
-// kind gate for that planting only.
-const enablement = vi.hoisted(() => ({ workflowKind: false }));
+// `workflow` record ahead of that kind's enablement and one plants an H3
+// background Shell; each flag lifts the kind gate for its planting only.
+const enablement = vi.hoisted(() => ({
+  workflowKind: false,
+  shellKind: false,
+}));
 
 vi.mock(
   '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
@@ -36,7 +40,10 @@ vi.mock(
     return {
       ...actual,
       assertManagedSessionChildRunKindEnabled: (kind: string) => {
-        if (kind !== 'workflow' || !enablement.workflowKind) {
+        if (
+          !(kind === 'workflow' && enablement.workflowKind) &&
+          !(kind === 'shell' && enablement.shellKind)
+        ) {
           actual.assertManagedSessionChildRunKindEnabled(kind);
         }
       },
@@ -65,6 +72,7 @@ const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
   enablement.workflowKind = false;
+  enablement.shellKind = false;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -575,6 +583,30 @@ describe('hosted child agent session (H4b)', () => {
       ]);
       expect(children.activeChildRunsOf('scope-main')).toHaveLength(2);
       expect(children.record('workflow-1')).toBeUndefined();
+    });
+  });
+
+  // The hosted turn keys a background Shell and a child Session by the same
+  // owner scope, the Session, yet a Shell is no child Session: it spends
+  // neither the concurrency cap nor the launch budget.
+  it('leaves a background Shell of the same scope out of the quotas', async () => {
+    enablement.shellKind = true;
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const store = { authority, resources: harness.store };
+      const children = new HostedChildAgentSession(store, sessionKey);
+      await children.admit(launchParams());
+      await new HostedChildRunSession(store, sessionKey).admit({
+        shellId: 'shell-1',
+        ownerScopeId: 'scope-main',
+        executionCallId: 'call-shell',
+        args: { command: 'sleep 60', is_background: true },
+      });
+      expect(authority.extensionRecordsInDomain('child_run')).toHaveLength(2);
+      expect(
+        children.launchedChildRunsOf('scope-main').map((run) => run.childRunId),
+      ).toEqual(['run-1']);
+      expect(children.activeChildRunsOf('scope-main')).toHaveLength(1);
     });
   });
 

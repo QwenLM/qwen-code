@@ -824,6 +824,59 @@ class ManagedWorkspaceAdmissionTest {
                 Integer.class, tenant)).isZero();
     }
 
+    // An out-of-enum stored role — reachable only by an out-of-band write
+    // past V53's CHECK — fails closed at the unfiltered role reads: the
+    // plain access read answers NONE (the invisible-404 shape a caller
+    // already meets below a valid role) and creation keeps its domain
+    // 404, instead of a valueOf IllegalArgumentException surfacing a 500.
+    @Test
+    void anOutOfEnumStoredRoleFailsClosedAtEveryRoleRead() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a");
+        grant(tenant, "ws-a", "actor-a", true);
+        String digest = "sha256:" + "a".repeat(64);
+        store.insertWorkspaceSessionCommand(tenant, "actor-a", "create",
+                digest, "qwen-code", null, null, List.of(), null,
+                new WorkspaceSelection("ws-a", "."));
+        jdbc.update("ALTER TABLE managed_workspace_access"
+                + " DROP CONSTRAINT managed_workspace_access_role");
+        jdbc.update("UPDATE managed_workspace_access SET role = 'BROKEN'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws-a'"
+                + " AND actor_id = ?", tenant,
+                "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertThat(registry.accessOf(tenant, "actor-a", "ws-a"))
+                .isEqualTo(com.alibaba.qwen.code.runtimebroker
+                        .managedworkspace.WorkspaceAccess.NONE);
+        assertThat(registry.canRead(tenant, "actor-a", "ws-a")).isFalse();
+        assertRefused(() -> store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create-2", digest, "qwen-code", null, null,
+                List.of(), null, new WorkspaceSelection("ws-a", ".")),
+                "workspace_not_found");
+    }
+
+    // The pre-V40 fallback: a bound Session whose owner and creator
+    // columns are both NULL (the state the V53 backfill leaves rows it
+    // cannot attribute) is owned through its create-command record alone.
+    @Test
+    void aPreV40BoundSessionFallsBackToTheCreateCommandOwner() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a");
+        grant(tenant, "ws-a", "actor-a", true);
+        grant(tenant, "ws-a", "actor-b", true);
+        String digest = "sha256:" + "a".repeat(64);
+        String sessionId = store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create", digest, "qwen-code", null, null,
+                List.of(), null, new WorkspaceSelection("ws-a", "."))
+                .sessionId();
+        jdbc.update("UPDATE managed_agent_session SET owner_actor_key ="
+                + " NULL, creator_actor_key = NULL WHERE tenant_id = ?"
+                + " AND session_id = ?", tenant, sessionId);
+        assertThat(registry.isSessionOwner(tenant, "actor-a", sessionId))
+                .isTrue();
+        assertThat(registry.isSessionOwner(tenant, "actor-b", sessionId))
+                .isFalse();
+    }
+
     @Test
     void enabledStoreAdmitsALaterTurnForTheBoundSessionCreator() {
         String tenant = "tenant-" + UUID.randomUUID();
@@ -1405,37 +1458,82 @@ class ManagedWorkspaceAdmissionTest {
                 + " WHERE tenant_id = ?", Integer.class, tenant)).isZero();
     }
 
+    // The widening and its creator-keyed limit in one witness: while the
+    // creator keeps OPERATOR, a second operator submits; once only the
+    // creator drops, submit and rename meet the family's domain 409 — and
+    // cancel, exempt from the facts, still aborts that live Turn.
     @Test
-    void creatorCancelsWithoutTheGrantsThatAdmitNewWork() {
+    void aSecondOperatorSubmitsUntilTheCreatorsFactsFail() {
         String tenant = "tenant-" + UUID.randomUUID();
         String sessionId = boundSession(tenant);
-        grant(tenant, "ws-a", "actor-b", false);
+        grant(tenant, "ws-a", "operator2", true);
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+
+        CommandAdmission admitted = service.submitTurn(tenant, "operator2",
+                "submit-1", sessionId, input);
+        assertThat(admitted.replayed()).isFalse();
+        assertThat(service.getWebShellSession(tenant, "operator2", sessionId)
+                .capabilities().workspaceTurns()).isTrue();
+
+        jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws-a'"
+                + " AND actor_id = ?", tenant,
+                "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertThat(service.getWebShellSession(tenant, "operator2", sessionId)
+                .capabilities().workspaceTurns()).isFalse();
+        assertRefused(() -> service.submitTurn(tenant, "operator2",
+                "submit-2", sessionId, input), "workspace_unavailable");
+        assertRefused(() -> service.renameSession(tenant, "operator2",
+                "rename-1", sessionId, "still other title"),
+                "workspace_unavailable");
+        // Cancel is the exception that needs no facts: admission reaches
+        // the Turn lookup for the operator even after the creator falls.
+        assertRefused(() -> service.cancelTurn(tenant, "operator2",
+                "cancel-1", sessionId, "turn_missing"), "turn_not_found");
+    }
+
+    @Test
+    void cancellationNeedsOnlyTheRoleWhileNewWorkNeedsTheFacts() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        grant(tenant, "ws-a", "actor-b", true);
         ManagedAgentService enabled = boundService(true);
         ManagedAgentService optedOut = boundService(false);
         assertThat(enabled.getWebShellSession(tenant, "actor-a", sessionId)
                 .capabilities().workspaceTurns()).isTrue();
-        // The opt-in clause: the same creator and Session without it.
+        // The opt-in clause: the same caller and Session without it.
         assertThat(optedOut.getWebShellSession(tenant, "actor-a", sessionId)
                 .capabilities().workspaceTurns()).isFalse();
 
+        // Only the creator drops; actor-b keeps OPERATOR and the Workspace
+        // drains, so the Session's creator-keyed facts fail while the
+        // second operator's own role is intact.
         jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
-                + " WHERE tenant_id = ?", tenant);
+                + " WHERE tenant_id = ? AND workspace_id = 'ws-a'"
+                + " AND actor_id = ?", tenant,
+                "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         jdbc.update("UPDATE managed_workspace_registry SET state = 'DRAINING'"
                 + " WHERE tenant_id = ?", tenant);
         assertThat(enabled.getWebShellSession(tenant, "actor-a", sessionId)
                 .capabilities().workspaceTurns()).isFalse();
+        assertThat(enabled.getWebShellSession(tenant, "actor-b", sessionId)
+                .capabilities().workspaceTurns()).isFalse();
+        // New work splits the readable-below-OPERATOR 403 from the
+        // admitted-OPERATOR 409 domain refusal.
         assertRefused(() -> enabled.submitTurn(tenant, "actor-a", "submit",
                 sessionId, List.of(new InputBlock("text", "go"))),
+                "session_operation_forbidden");
+        assertRefused(() -> enabled.submitTurn(tenant, "actor-b",
+                "submit-b", sessionId, List.of(new InputBlock("text", "go"))),
                 "workspace_unavailable");
-        // Cancel admission passes for the creator; the refusal comes from the
-        // missing Turn, after admission.
-        assertRefused(() -> enabled.cancelTurn(tenant, "actor-a", "cancel",
-                sessionId, "turn_missing"), "turn_not_found");
-        // A reader who did not create the Session keeps the refusal, and so
-        // does the creator without the opt-in.
+        // Cancelling aborts work already running and needs role and shape
+        // alone: the OPERATOR passes admission and meets the missing Turn.
         assertRefused(() -> enabled.cancelTurn(tenant, "actor-b", "cancel-b",
-                sessionId, "turn_missing"), "workspace_unavailable");
-        assertRefused(() -> optedOut.cancelTurn(tenant, "actor-a",
+                sessionId, "turn_missing"), "turn_not_found");
+        assertRefused(() -> enabled.cancelTurn(tenant, "actor-a", "cancel",
+                sessionId, "turn_missing"), "session_operation_forbidden");
+        assertRefused(() -> optedOut.cancelTurn(tenant, "actor-b",
                 "cancel-off", sessionId, "turn_missing"),
                 "workspace_unavailable");
     }
@@ -1506,27 +1604,35 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     @Test
-    void sameKeyReplayAnswersOnlyTheCreator() {
+    void sameKeyReplayStaysBehindTheRoleGate() {
         String tenant = "tenant-" + UUID.randomUUID();
         String sessionId = boundSession(tenant);
         grant(tenant, "ws-a", "actor-b", false);
         ManagedAgentService service = boundServiceWithWorkingHarness();
         List<InputBlock> input = List.of(new InputBlock("text", "go"));
-        service.submitTurn(tenant, "actor-a", "submit-1", sessionId, input);
+        CommandAdmission first = service.submitTurn(tenant, "actor-a",
+                "submit-1", sessionId, input);
+        assertThat(first.replayed()).isFalse();
         service.renameSession(tenant, "actor-a", "rename-1", sessionId,
                 "renamed title");
 
-        // A reader who did not create the Session neither replays the
-        // creator's admissions nor learns which keys exist.
+        // The submitter family's command replay is not actor-scoped, so the
+        // role gate runs before any recorded key is honoured: a READER
+        // retrying another caller's key with identical content is refused
+        // 403, and the OPERATOR's own retry replays its recorded admission.
         assertRefused(() -> service.submitTurn(tenant, "actor-b",
-                "submit-1", sessionId, input), "workspace_unavailable");
+                "submit-1", sessionId, input), "session_operation_forbidden");
         assertRefused(() -> service.submitTurn(tenant, "actor-b",
                 "submit-1", sessionId,
                 List.of(new InputBlock("text", "other"))),
-                "workspace_unavailable");
+                "session_operation_forbidden");
         assertRefused(() -> service.renameSession(tenant, "actor-b",
                 "rename-1", sessionId, "renamed title"),
-                "workspace_unavailable");
+                "session_operation_forbidden");
+        CommandAdmission replay = service.submitTurn(tenant, "actor-a",
+                "submit-1", sessionId, input);
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.turnId()).isEqualTo(first.turnId());
     }
 
     @Test

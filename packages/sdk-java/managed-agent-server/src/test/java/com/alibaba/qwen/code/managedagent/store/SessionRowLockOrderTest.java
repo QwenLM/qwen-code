@@ -28,6 +28,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -100,9 +101,10 @@ class SessionRowLockOrderTest {
             "ManagedSessionStore.java", "ManagedToolResultStore.java",
             "WorkspaceLifecycleStore.java");
     private static final Set<String> SIBLING_TURN_READERS = Set.of(
-            "ChildResultRelayStore.java", "ManagedActionStore.java",
-            "ManagedToolResultProjector.java", "WorkspaceExecutionStore.java",
-            "WorkspaceMigrationStore.java", "WorkspaceRecoveryStore.java");
+            "AutomationLedgerStore.java", "ChildResultRelayStore.java",
+            "ManagedActionStore.java", "ManagedToolResultProjector.java",
+            "WorkspaceExecutionStore.java", "WorkspaceMigrationStore.java",
+            "WorkspaceRecoveryStore.java");
 
     // The package's unresolvable-but-benign references, pinned exactly per
     // file: calls on receivers whose type the parse cannot see (a
@@ -216,8 +218,8 @@ class SessionRowLockOrderTest {
 
     private record Audit(List<String> members, Set<String> lockers,
             List<String> violations, Set<String> lockersWithoutTurnAccess,
-            Set<String> exemptions, boolean locksSessionRow,
-            boolean touchesTurnRow) { }
+            Set<String> turnRowAccessors, Set<String> exemptions,
+            boolean locksSessionRow, boolean touchesTurnRow) { }
 
     @Test
     void mutationEntriesAcquireTheSessionRowLockBeforeAnyTurnRowAccess()
@@ -256,6 +258,32 @@ class SessionRowLockOrderTest {
                         "appendPublicEventIfAbsent", "beginSessionMutation",
                         "completeOperation", "completeSessionMutation",
                         "unarchiveWorkspaceSession");
+        // The turn-row population, pinned exactly like the locker set: a
+        // member that reaches the turn row without taking the session lock
+        // never enters `lockers`, so this assertion — not the violation
+        // check — is what fails loudly when one appears.
+        assertThat(audit.turnRowAccessors())
+                .containsExactlyInAnyOrder("beginCwdChangeOperation",
+                        "beginLifecycle", "beginOperation",
+                        "beginWorkspaceClose", "beginWorkspaceLifecycle",
+                        "bindHarness", "bindRecoveredHarness",
+                        "cancelBeforeAdmission", "claimTurn",
+                        "completeCwdChangeOperation", "completeHarnessTurn",
+                        "deferTurnRetry", "failTurn", "findActiveTurns",
+                        "findDispatchable", "findLatestTurns", "findTurn",
+                        "findTurnSummary", "hasActiveTurn",
+                        "insertCancelCommand", "insertChildSessionCommand",
+                        "insertSession", "insertSessionCommand", "insertTurn",
+                        "insertTurnCommand", "insertWorkspaceSessionCommand",
+                        "listTurns", "markSubmissionAttempted",
+                        "materializeEvent", "materializeInput",
+                        "materializeNextBatch", "recordAdmission",
+                        "recordHarnessEvents", "recordRecoveryAdmission",
+                        "releaseTurnLease", "renewTurn", "requireTurn",
+                        "requireTurnForUpdate", "retractContinuationOutput",
+                        "retractHarnessTurnOutput", "scheduleTurnRetry",
+                        "updateHarnessCursor", "validateOperationStart",
+                        "withdrawSubmissionAttempted");
         // The reference the parse cannot resolve to one member —
         // ItemRow.toRecord behind the lambda parameter at the item read —
         // is pinned exactly: a new unresolvable reference fails here, and
@@ -356,6 +384,73 @@ class SessionRowLockOrderTest {
                 """;
         assertThat(audit(synthetic).violations()).containsExactly(
                 "badWriter");
+    }
+
+    // SQL keywords are case-insensitive: a lowercase `for update` takes the
+    // same session-row lock, so the writer that reaches the turn row first
+    // violates and enters the locker set — the spelling the audit once
+    // passed unaudited.
+    @Test
+    void theAuditReadsALowercaseForUpdateAsTheSessionLock() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void newWriter(String tenantId, String sessionId) {
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'RUNNING'");
+                        requireSessionForUpdate(tenantId, sessionId);
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session for update");
+                    }
+                }
+                """;
+        Audit audit = audit(synthetic);
+        assertThat(audit.violations()).containsExactly("newWriter");
+        assertThat(audit.lockers()).containsExactly("newWriter");
+    }
+
+    // A member that reaches the turn row without taking the session lock
+    // never enters the locker set — violations and lockers are identical to
+    // the baseline without it — so the turn-row population is what reports
+    // it: the synthetic writer lands there, and on the real store the exact
+    // pin fails loudly.
+    @Test
+    void theAuditPlacesATurnOnlyWriterInTheTurnRowPopulation() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void existingWriter(String tenantId,
+                            String sessionId) {
+                        requireSessionForUpdate(tenantId, sessionId);
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'RUNNING'");
+                    }
+
+                    @Transactional
+                    public void turnOnlyWriter(String tenantId,
+                            String sessionId) {
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'FAILED'");
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        Audit audit = audit(synthetic);
+        assertThat(audit.violations()).isEmpty();
+        assertThat(audit.lockers()).containsExactly("existingWriter");
+        assertThat(audit.turnRowAccessors()).containsExactlyInAnyOrder(
+                "existingWriter", "turnOnlyWriter");
     }
 
     // A comment that names the lock helper is prose, not a lock: comments
@@ -1098,6 +1193,13 @@ class SessionRowLockOrderTest {
             }
             exemptions.add(reference.handle());
         }
+        // The turn-row population, pinned as exactly as the locker set: a
+        // member that reaches the turn row without taking the session lock
+        // never enters `lockers`, so only this set fails loudly when one
+        // appears.
+        Set<String> turnRowAccessors = turnReaching.stream()
+                .map(Key::name)
+                .collect(Collectors.toCollection(TreeSet::new));
         Set<String> lockers = new TreeSet<>();
         Set<String> lockersWithoutTurnAccess = new TreeSet<>();
         List<String> violations = new ArrayList<>();
@@ -1126,7 +1228,7 @@ class SessionRowLockOrderTest {
                         + key.arity())
                 .sorted().collect(Collectors.toCollection(ArrayList::new));
         return new Audit(members, lockers, violations,
-                lockersWithoutTurnAccess, exemptions,
+                lockersWithoutTurnAccess, turnRowAccessors, exemptions,
                 events.values().stream().flatMap(List::stream)
                         .anyMatch(Event::lock),
                 events.values().stream().flatMap(List::stream)
@@ -1436,11 +1538,17 @@ class SessionRowLockOrderTest {
 
     private static void addSpelling(String lockText, String turnText,
             List<Event> events) {
-        boolean lock = lockText.contains("INSERT INTO " + SESSION_TABLE)
-                || lockText.contains("UPDATE " + SESSION_TABLE)
-                || (lockText.contains(SESSION_TABLE)
-                        && lockText.contains(LOCK_MODE));
-        boolean turn = turnText.contains(TURN_TABLE);
+        // SQL keywords are case-insensitive, so the spelling and the
+        // needles fold once before matching: a lowercase `for update`
+        // takes the same lock the canary exists to order.
+        String lockFolded = lockText.toLowerCase(Locale.ROOT);
+        String turnFolded = turnText.toLowerCase(Locale.ROOT);
+        boolean lock = lockFolded.contains("insert into " + SESSION_TABLE)
+                || lockFolded.contains("update " + SESSION_TABLE)
+                || (lockFolded.contains(SESSION_TABLE)
+                        && lockFolded.contains(
+                                LOCK_MODE.toLowerCase(Locale.ROOT)));
+        boolean turn = turnFolded.contains(TURN_TABLE);
         if (lock || turn) {
             events.add(new Event(lock, turn, null));
         }

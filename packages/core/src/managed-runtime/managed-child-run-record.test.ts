@@ -13,8 +13,10 @@ import {
 import {
   CHILD_AGENT_STOP_REASONS,
   CHILD_RUN_STOP_REASONS,
+  isChildSessionRun,
   parseChildRun,
   parseChildShellRun,
+  type AnyChildRun,
 } from './managed-child-run-record.js';
 import {
   MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS,
@@ -223,6 +225,26 @@ describe('managed-child-run-record/1 shared contract', () => {
         merge(template, fixture.after),
       ),
     ).toBe(fixture.valid);
+  });
+
+  it('classifies each child Session kind by name', () => {
+    expect(
+      isChildSessionRun(parseChildRun(fixtures.templates['child_agent'])),
+    ).toBe(true);
+    expect(
+      isChildSessionRun(parseChildRun(fixtures.templates['workflow'])),
+    ).toBe(true);
+    expect(
+      isChildSessionRun(parseChildRun(fixtures.templates['child_run'])),
+    ).toBe(false);
+    // The parse refuses any other kind before this runs; past it, an
+    // unlisted kind still joins no child Session rule by default.
+    expect(
+      isChildSessionRun({
+        ...parseChildRun(fixtures.templates['child_agent']),
+        kind: 'unregistered',
+      } as unknown as AnyChildRun),
+    ).toBe(false);
   });
 
   it('refuses a child Session body at the shell-only entry point', () => {
