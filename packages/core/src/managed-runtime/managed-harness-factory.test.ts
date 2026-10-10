@@ -1614,6 +1614,44 @@ describe('agent wait', () => {
     await session.close();
   });
 
+  it('adopts the takeover activation when the wait advances past the last fold', async () => {
+    const session = await open(await createWorkspace());
+    const { handle, turn } = await modelOutputCommittedTurn(session);
+    await handle.commitAwaitAgent([agentWaitRun('run-1')], turn);
+    const previousActivation = session.activation;
+    const takeover = await session.replaceActivation();
+    expect(takeover.activationId).not.toBe(previousActivation.activationId);
+    const successor = createManagedHarnessHandle(session);
+    const advanced = await successor.resolveAwaitAgent('run-1');
+    expect(advanced?.continuation.phase).toBe('model_output_committed');
+    // The advance carries the takeover's identity, or the next tool batch
+    // dies as work of the dead owner's activation.
+    expect(advanced?.identity.activationId).toBe(takeover.activationId);
+    const batch = await successor.commitAwaitRuntimeBatch([
+      await runtimeCommit(session),
+    ]);
+    expect(batch.kind).toBe('durable_wait');
+    await session.close();
+  });
+
+  it('keeps the parking activation for a partial fold inside the wait', async () => {
+    const session = await open(await createWorkspace());
+    const { handle, turn } = await modelOutputCommittedTurn(session);
+    await handle.commitAwaitAgent(
+      [
+        agentWaitRun('run-1'),
+        agentWaitRun('run-2', { functionCallId: 'fc-2' }),
+      ],
+      turn,
+    );
+    const takeover = await session.replaceActivation();
+    const successor = createManagedHarnessHandle(session);
+    const partial = await successor.resolveAwaitAgent('run-1');
+    expect(partial?.continuation.phase).toBe('await_agent');
+    expect(partial?.identity.activationId).not.toBe(takeover.activationId);
+    await session.close();
+  });
+
   it('resolves nothing outside the agent wait', async () => {
     const session = await open(await createWorkspace());
     const { handle } = await modelOutputCommittedTurn(session);

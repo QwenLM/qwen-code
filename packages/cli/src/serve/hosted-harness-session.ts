@@ -17,17 +17,13 @@ import { parseHostedFileHistoryState } from './hosted-file-history-protocol.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
-import {
-  convertToFunctionErrorResponse,
-  convertToFunctionResponse,
-} from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { Application, Request, Response } from 'express';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { parseBridgeManagedSessionStore } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   parseHarnessCheckpointV1,
   harnessCheckpointIsAgentWait,
-  type HarnessAgentWaitRun,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { MANAGED_MCP_MAX_CONNECTIONS } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
@@ -147,10 +143,12 @@ import {
 } from './hosted-workspace-broker.js';
 import { HostedTextDeltaStream } from './hosted-text-deltas.js';
 import {
+  fillParkedRoundAgentGaps,
   isDurableBlockedVerdict,
   originalRuntimeBroker,
   RecoveryDeclined,
   recoverHostedRuntimeTurn,
+  settleCancelledAgentWaitRuns,
   settleInterruptedTurnRuntime,
   settleParkedTurnCancelled,
   stopParkedRuntimeExecutions,
@@ -167,10 +165,6 @@ import {
   isHostedWorkspaceShellProfile,
   isRetryableWorkspaceAcquisition,
   touchesWorkspaceContext,
-  HOSTED_AGENT_WAIT_ABANDONED_TEXT,
-  HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
-  hostedChildRunIdFor,
-  journaledToolResultIds,
   type HostedWorkspaceContextSlot,
   type HostedWorkspaceToolProfile,
   type HostedShellTurnOptions,
@@ -506,231 +500,6 @@ function recoveryDeclined(
     code: 'hosted_turn_recovery_declined',
     reason,
   });
-}
-
-/**
- * The cancel route's settlement (#13708): every outstanding wait run folds
- * the live arm's own abandoned answer and the resolve moves the checkpoint
- * past the wait, so the terminal record can land. The journaled set keeps
- * a replayed cancel silent; the abandoned child is never revoked. Exported
- * for the wedge suite: the route's call site is the same code.
- */
-export async function settleCancelledAgentWaitRuns(input: {
-  managed: ManagedSession;
-  sessionId: string;
-  promptId: string;
-  cwd: string;
-  runs: readonly HarnessAgentWaitRun[];
-}): Promise<void> {
-  const harness = createManagedHarnessHandle(input.managed);
-  const journaled = await journaledToolResultIds(input.managed, input.promptId);
-  for (const run of input.runs) {
-    const abandoned = convertToFunctionErrorResponse(
-      run.toolName,
-      run.functionCallId,
-      [],
-      HOSTED_AGENT_WAIT_ABANDONED_TEXT,
-    );
-    if (!journaled.has(run.functionCallId))
-      await input.managed.sink.write({
-        uuid: randomUUID(),
-        parentUuid: run.modelMessageId,
-        sessionId: input.sessionId,
-        timestamp: new Date().toISOString(),
-        type: 'tool_result',
-        cwd: input.cwd,
-        version: 'hosted-harness/1',
-        daemonPromptId: input.promptId,
-        message: { role: 'user', parts: abandoned },
-      });
-    await harness.resolveAwaitAgent(run.childRunId);
-  }
-}
-
-/**
- * The continue route's gap fill (#13708): a foreground batch parks with
- * some later calls of its last assistant round never reached by the dead
- * loop — the durable wait names only the admitted ones, so each remaining
- * function call must still meet its functionResponse on the resume
- * story, or the model request is malformed. Each fills with the live
- * admission's own never-admitted answer, parented to that round's
- * assistant record; the journaled set keeps a replayed fill silent, and
- * the ledger keeps it honest: a call whose child was admitted in the gap
- * between the last fold and its own wait commit is NOT "never admitted" —
- * it drives to its own terminal through the same poll the live wait ran,
- * and its answer folds truthfully (a fabricated cancellation must never be
- * minted for a live child). A call with no run record fills the live
- * admission's own never-admitted answer. Exported for the wedge suite:
- * the route's call site is the deciding line.
- */
-export async function fillParkedRoundAgentGaps(input: {
-  managed: ManagedSession;
-  sessionId: string;
-  promptId: string;
-  cwd: string;
-  children?: HostedChildAgentSession;
-  signal?: AbortSignal;
-  messageFitsInline?: (
-    type: 'assistant' | 'tool_result',
-    parts: Part[],
-    model: string,
-  ) => boolean;
-  consume?: (childRunId: string) => void;
-}): Promise<number> {
-  const projected = await input.managed.sink.project();
-  const assistant = projected
-    .filter(
-      (entry) =>
-        entry.daemonPromptId === input.promptId &&
-        entry.type === 'assistant' &&
-        entry.message?.parts?.some((part) => part.functionCall),
-    )
-    .at(-1);
-  if (assistant === undefined) return 0;
-  const journaled = await journaledToolResultIds(input.managed, input.promptId);
-  const writeFold = async (parts: Part[]): Promise<void> => {
-    await input.managed.sink.write({
-      uuid: randomUUID(),
-      parentUuid: assistant.uuid,
-      sessionId: input.sessionId,
-      timestamp: new Date().toISOString(),
-      type: 'tool_result',
-      cwd: input.cwd,
-      version: 'hosted-harness/1',
-      model: 'recovered',
-      daemonPromptId: input.promptId,
-      message: { role: 'user', parts },
-    });
-  };
-  // The fit predicate measures exactly this record shape (a uuid is always
-  // 36 chars; the assistant parent is always 36; the timestamp is one ISO
-  // string) — never an estimate, or the inline bound would slip.
-  const templateRecord = (parts: Part[]): Buffer =>
-    Buffer.from(
-      JSON.stringify({
-        uuid: '0'.repeat(36),
-        parentUuid: '0'.repeat(36),
-        sessionId: input.sessionId,
-        timestamp: '1970-01-01T00:00:00.000Z',
-        type: 'tool_result',
-        cwd: input.cwd,
-        version: 'hosted-harness/1',
-        model: 'recovered',
-        daemonPromptId: input.promptId,
-        message: { role: 'user', parts },
-      }),
-      'utf8',
-    );
-  // The same fit discipline as the live arm: a caller's lambda wins when
-  // present; otherwise the exact template above decides. Both predicates,
-  // never estimates.
-  const fits = (parts: Part[]): boolean =>
-    input.messageFitsInline !== undefined
-      ? input.messageFitsInline('tool_result', parts, 'recovered')
-      : templateRecord(parts).byteLength <=
-        HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
-  let filled = 0;
-  for (const part of assistant.message?.parts ?? []) {
-    const callId = part.functionCall?.id;
-    const name = part.functionCall?.name;
-    if (
-      typeof callId !== 'string' ||
-      typeof name !== 'string' ||
-      journaled.has(callId)
-    )
-      continue;
-    const children = input.children;
-    const admitted =
-      children === undefined
-        ? undefined
-        : children.record(hostedChildRunIdFor(input.promptId, callId));
-    if (children === undefined || admitted === undefined) {
-      await writeFold(
-        convertToFunctionErrorResponse(
-          name,
-          callId,
-          [],
-          HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
-        ),
-      );
-    } else {
-      const runId =
-        admitted.run.executionCallId ??
-        hostedChildRunIdFor(input.promptId, callId);
-      // Mirrors the live wait's own loop (sans the wait resolve — the
-      // orphan carries no wait row): poll the ledger to a terminal and
-      // fold what really happened, nothing fabricated.
-      for (;;) {
-        if (input.signal?.aborted === true) {
-          await writeFold(
-            convertToFunctionErrorResponse(
-              name,
-              callId,
-              [],
-              HOSTED_AGENT_WAIT_ABANDONED_TEXT,
-            ),
-          );
-          break;
-        }
-        const record = children.record(runId);
-        if (
-          record !== undefined &&
-          (record.run.state === 'failed' || record.run.state === 'cancelled')
-        ) {
-          await writeFold(
-            convertToFunctionErrorResponse(
-              name,
-              callId,
-              [],
-              `Child agent run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).`,
-            ),
-          );
-          break;
-        }
-        const acceptance = children.acceptance(runId);
-        if (acceptance !== undefined) {
-          const text = (
-            await input.managed.resources.read(acceptance.contentRef)
-          ).toString('utf8');
-          const whole = convertToFunctionResponse(name, callId, [{ text }]);
-          // The same fit discipline as the live arm: the answer still must
-          // land, folded to the inline bound with its marker instead of
-          // erroring the recovered Turn — the full bytes stay on the
-          // acceptance record, and the fit predicate, not an estimate,
-          // measures the fold.
-          let fitted: Part[] | undefined;
-          if (fits(whole)) {
-            fitted = whole;
-          } else {
-            const marker =
-              '\n… (truncated: the full result is on the acceptance record)';
-            for (
-              let head = Math.floor(text.length / 2);
-              head > 0 && fitted === undefined;
-              head = Math.floor(head / 2)
-            ) {
-              const folded = convertToFunctionResponse(name, callId, [
-                { text: text.slice(0, head) + marker },
-              ]);
-              if (fits(folded)) fitted = folded;
-            }
-          }
-          if (fitted === undefined)
-            throw new Error(
-              'Admitted child agent result cannot be recorded inline.',
-            );
-          await writeFold(fitted);
-          await children.markAccepted(runId);
-          input.consume?.(runId);
-          break;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      }
-    }
-    journaled.add(callId);
-    filled += 1;
-  }
-  return filled;
 }
 
 function identity(
@@ -1425,15 +1194,19 @@ async function settleCancelledHarnessTurn(
 // settled and were consumed owes nothing to a cancelled Turn that never
 // reached a tool call (R9). A Turn with executions in flight answers
 // false: its faithful cancel settlement is the recovery-cancel of the
-// kernel's report, not here.
-async function parkNeedsNoRuntimeSettlement(
-  session: HostedSession,
+// kernel's report, not here. Exported for the wedge suite (#13708): the
+// agent-wait arm is its deciding line.
+export async function parkNeedsNoRuntimeSettlement(
   managed: ManagedSession,
 ): Promise<boolean> {
   const authorization = await managed.authority.harnessRunAuthorization();
   if (authorization.status === 'initial') return true;
   if (authorization.status !== 'runnable') return false;
   const checkpoint = authorization.checkpoint;
+  // A dying Turn parked at an agent wait owes the child runs their
+  // settlement: the faithful cancel is the abandoned-wait fold, never a
+  // settle that would orphan the ledger.
+  if (harnessCheckpointIsAgentWait(checkpoint)) return false;
   if (
     !(checkpoint.tools?.items ?? []).every(
       (item) => item.state === 'settled' && item.consumed,
@@ -1445,7 +1218,7 @@ async function parkNeedsNoRuntimeSettlement(
     // live wait stays out of the separation (the resolve route keeps
     // paying it); any resolved wait only has a cancelled-wait answer on a
     // CANCELLING takeover, decisions included.
-    const actionState = session.managed.authority.action(
+    const actionState = managed.authority.action(
       checkpoint.approval.requestId,
     )?.state;
     if (actionState === undefined || actionState === 'requested') return false;
@@ -2915,7 +2688,7 @@ export function registerHostedHarnessSessionRoutes(
           parkedForCancellation !== undefined &&
           (resident.toolProfile === undefined ||
             !brokerOptions ||
-            (await parkNeedsNoRuntimeSettlement(resident, resident.managed)))
+            (await parkNeedsNoRuntimeSettlement(resident.managed)))
         ) {
           if (resident.active !== undefined) {
             error(res, 409, 'hosted_session_already_attached');
@@ -3570,6 +3343,9 @@ export function registerHostedHarnessSessionRoutes(
                     promptId: turn.turnId,
                     brokerOptions,
                     toolProfile: session.toolProfile !== undefined,
+                    children: session.childAgents,
+                    consume: (childRunId) =>
+                      session.childConsumption.add(childRunId),
                   });
                 } catch (cause) {
                   // R6 P1: a durable decline freezes for the fleet, but a
@@ -3932,7 +3708,7 @@ export function registerHostedHarnessSessionRoutes(
           body?.['cancellationTakeover'] === true &&
           (toolProfile === undefined ||
             !brokerOptions ||
-            (await parkNeedsNoRuntimeSettlement(session, managed)))
+            (await parkNeedsNoRuntimeSettlement(managed)))
         ) {
           try {
             await settleCancelledHarnessTurn(

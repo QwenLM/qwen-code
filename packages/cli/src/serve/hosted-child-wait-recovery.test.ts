@@ -33,11 +33,13 @@ import {
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { resetManagedRuntimeDispatchGatesForTest } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-dispatch-gate.js';
 import type { HarnessAgentWaitRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
-import { recoverHostedRuntimeTurn } from './hosted-runtime-recovery.js';
 import {
   fillParkedRoundAgentGaps,
+  recoverHostedRuntimeTurn,
   settleCancelledAgentWaitRuns,
-} from './hosted-harness-session.js';
+  settleInterruptedTurnRuntime,
+} from './hosted-runtime-recovery.js';
+import { parkNeedsNoRuntimeSettlement } from './hosted-harness-session.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 // The Broker is mocked below purely so the ToolTurn's constructor warm-up
@@ -216,7 +218,10 @@ describe('hosted child wait recovery (#13708)', () => {
     childRunId: CHILD_RUN_ID,
     functionCallId: 'call-1',
     toolName: 'agent',
-    modelMessageId: 'message-1',
+    // The commit-returned uuid of the assistant message that carries the
+    // wait's call — production passes it as `modelMessageId`, so the round
+    // selector keys on it.
+    modelMessageId: 'assistant-1',
     consumed: false,
   };
 
@@ -224,82 +229,91 @@ describe('hosted child wait recovery (#13708)', () => {
   async function parkWedged(withAssistantRound = false): Promise<void> {
     const session = await open('boot-1', true);
     try {
-      const harness = createManagedHarnessHandle(session);
-      const authority = session.authority;
-      const contentRef = await session.resources.publish(
-        'managed-input',
-        Buffer.from(
-          JSON.stringify([{ type: 'text', text: 'review the diff' }]),
-        ),
-      );
-      const admissionRef = await session.resources.publish(
-        'managed-admission',
-        Buffer.from(JSON.stringify({ promptId: PROMPT_ID, digest: 'x' })),
-      );
-      await authority.submitInput(
-        {
-          operation: 'submitInput',
-          commandId: PROMPT_ID,
-          sessionKey,
-          contentDigest: DIGEST,
-        },
-        {
-          inputId: PROMPT_ID,
-          turnId: PROMPT_ID,
-          source: 'hosted-harness',
-          contentRef,
-          admissionRef,
-          deadline: null,
-          wakeReason: 'input',
-        },
-      );
-      await harness.ensureRunnable();
-      const launched = await childrenOf(session).admit({
-        childRunId: CHILD_RUN_ID,
-        ownerScopeId: SESSION_ID,
-        rootSessionId: SESSION_ID,
-        completion: 'tool',
-        description: 'audit the diff',
-        prompt: 'review the change',
-        definition: {
-          definitionId: 'hosted-agent/hosted-workspace-files/1',
-          definitionRevision: 1,
-          definitionDigest: authority.sessionHeader.definitionRef.digest,
-        },
-        workingDirectory: '.',
-        executionCallId: CHILD_RUN_ID,
-      });
-      await harness.commitAwaitAgent(
-        [waitRun],
-        { turnId: PROMPT_ID, promptId: PROMPT_ID },
-        { attemptId: 'message-1', routeRef: launched.inputRef },
-      );
-      if (withAssistantRound) {
-        // The wedged batch's own round: the dead loop reached call-1's wait
-        // but never the sibling call-2 — the durable journal records the
-        // assistant message the resume story must account for.
-        await session.sink.write({
-          uuid: 'assistant-1',
-          parentUuid: null,
-          sessionId: SESSION_ID,
-          timestamp: new Date().toISOString(),
-          type: 'assistant',
-          cwd: root,
-          version: 'test',
-          daemonPromptId: PROMPT_ID,
-          message: {
-            role: 'model',
-            parts: [
-              { functionCall: { id: 'call-1', name: 'agent', args: {} } },
-              { functionCall: { id: 'call-2', name: 'agent', args: {} } },
-            ],
-          },
-        });
-      }
+      await park(session, withAssistantRound);
     } finally {
       await session.close();
     }
     resetManagedRuntimeDispatchGatesForTest();
+  }
+
+  /** The wedge's durable record on an already-open owner: input, runnable,
+   * one admitted child, the durable wait, and (optionally) the round the
+   * dead loop journaled. The RUNNING child must keep its ledger so the
+   * comeback can drive it — no terminal event here. */
+  async function park(
+    session: ManagedSession,
+    withAssistantRound: boolean,
+  ): Promise<void> {
+    const harness = createManagedHarnessHandle(session);
+    const authority = session.authority;
+    const contentRef = await session.resources.publish(
+      'managed-input',
+      Buffer.from(JSON.stringify([{ type: 'text', text: 'review the diff' }])),
+    );
+    const admissionRef = await session.resources.publish(
+      'managed-admission',
+      Buffer.from(JSON.stringify({ promptId: PROMPT_ID, digest: 'x' })),
+    );
+    await authority.submitInput(
+      {
+        operation: 'submitInput',
+        commandId: PROMPT_ID,
+        sessionKey,
+        contentDigest: DIGEST,
+      },
+      {
+        inputId: PROMPT_ID,
+        turnId: PROMPT_ID,
+        source: 'hosted-harness',
+        contentRef,
+        admissionRef,
+        deadline: null,
+        wakeReason: 'input',
+      },
+    );
+    await harness.ensureRunnable();
+    const launched = await childrenOf(session).admit({
+      childRunId: CHILD_RUN_ID,
+      ownerScopeId: SESSION_ID,
+      rootSessionId: SESSION_ID,
+      completion: 'tool',
+      description: 'audit the diff',
+      prompt: 'review the change',
+      definition: {
+        definitionId: 'hosted-agent/hosted-workspace-files/1',
+        definitionRevision: 1,
+        definitionDigest: authority.sessionHeader.definitionRef.digest,
+      },
+      workingDirectory: '.',
+      executionCallId: CHILD_RUN_ID,
+    });
+    await harness.commitAwaitAgent(
+      [waitRun],
+      { turnId: PROMPT_ID, promptId: PROMPT_ID },
+      { attemptId: 'attempt-1', routeRef: launched.inputRef },
+    );
+    if (withAssistantRound) {
+      // The wedged batch's own round: the dead loop reached call-1's wait
+      // but never the sibling call-2 — the durable journal records the
+      // assistant message the resume story must account for.
+      await session.sink.write({
+        uuid: 'assistant-1',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'assistant',
+        cwd: root,
+        version: 'test',
+        daemonPromptId: PROMPT_ID,
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'call-1', name: 'agent', args: {} } },
+            { functionCall: { id: 'call-2', name: 'agent', args: {} } },
+          ],
+        },
+      });
+    }
   }
 
   /** The relay lands the child's terminal result and its acceptance. */
@@ -375,7 +389,7 @@ describe('hosted child wait recovery (#13708)', () => {
       await settleTheChild(first);
       await first.sink.write({
         uuid: 'fold-1',
-        parentUuid: 'message-1',
+        parentUuid: 'assistant-1',
         sessionId: SESSION_ID,
         timestamp: new Date().toISOString(),
         type: 'tool_result',
@@ -483,7 +497,7 @@ describe('hosted child wait recovery (#13708)', () => {
       expect(JSON.stringify(results[0]?.message?.parts)).toContain(
         'cancelled before the child agent finished',
       );
-      expect(results[0]?.parentUuid).toBe('message-1');
+      expect(results[0]?.parentUuid).toBe('assistant-1');
       const authorization =
         await replacement.authority.harnessRunAuthorization();
       expect(authorization.status).toBe('runnable');
@@ -912,6 +926,160 @@ describe('hosted child wait recovery (#13708)', () => {
       }
     } finally {
       await reopened.close();
+    }
+  });
+
+  it('the parked wait is never the cancellation-takeover short-circuit (R1-3)', async () => {
+    const fresh = await open('boot-0', true);
+    try {
+      // Baseline: no checkpoint yet — the journal alone answers the park.
+      await expect(parkNeedsNoRuntimeSettlement(fresh)).resolves.toBe(true);
+      await park(fresh, false);
+      // The dead wait owes the child runs their settlement: settling the
+      // terminal record directly would strand the dangling functionCall
+      // and orphan the ledger, so the separation must refuse — at once,
+      // against the still-open owner whose durable wait predicates the
+      // verdict.
+      await expect(parkNeedsNoRuntimeSettlement(fresh)).resolves.toBe(false);
+    } finally {
+      await fresh.close();
+    }
+    resetManagedRuntimeDispatchGatesForTest();
+    // A cold open judges the same park the same way.
+    const replacement = await open('boot-1', false);
+    try {
+      await expect(parkNeedsNoRuntimeSettlement(replacement)).resolves.toBe(
+        false,
+      );
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('a background-completion orphan folds the started receipt, never a poll (R1-24)', async () => {
+    await parkWedged(true);
+    const orphanRunId = `${PROMPT_ID}:call-2`;
+    const first = await open('boot-2', false);
+    try {
+      await settleTheChild(first);
+      await resumeTurn(first).resumeAgentWaitRuns(
+        [{ ...waitRun, functionCallId: 'call-1' }],
+        'recovered',
+        new AbortController().signal,
+      );
+      // Background delegations complete through the task surface, never
+      // the wait's poll: the sent-completion record is all the fill has.
+      await childrenOf(first).admit({
+        childRunId: orphanRunId,
+        ownerScopeId: SESSION_ID,
+        rootSessionId: SESSION_ID,
+        completion: 'sent',
+        description: 'background audit',
+        prompt: 'review later',
+        definition: {
+          definitionId: 'hosted-agent/hosted-workspace-files/1',
+          definitionRevision: 1,
+          definitionDigest: first.authority.sessionHeader.definitionRef.digest,
+        },
+        workingDirectory: '.',
+        executionCallId: orphanRunId,
+      });
+    } finally {
+      await first.close();
+    }
+    const replacement = await open('boot-3', false);
+    try {
+      const filled = await fillParkedRoundAgentGaps({
+        managed: replacement,
+        sessionId: SESSION_ID,
+        promptId: PROMPT_ID,
+        cwd: root,
+        children: childrenOf(replacement),
+      });
+      expect(filled).toBe(1);
+      const projected = await replacement.sink.project();
+      const callTwo = toolResultEntries(projected).find((entry) =>
+        entry.message?.parts?.some(
+          (part) => part.functionResponse?.id === 'call-2',
+        ),
+      );
+      // The live background arm's started receipt names the task the
+      // model should track — never the wait's abandoned answer nor the
+      // never-admitted one.
+      expect(JSON.stringify(callTwo?.message?.parts)).toContain(
+        'started in the background',
+      );
+      expect(JSON.stringify(callTwo?.message?.parts)).not.toContain(
+        'cancelled before the child agent finished',
+      );
+      expect(JSON.stringify(callTwo?.message?.parts)).not.toContain(
+        'cancelled before this child agent was admitted',
+      );
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('the interrupted-turn settlement folds the wait and answers the gaps, replayed silently (R1-3)', async () => {
+    await parkWedged(true);
+    const replacement = await open('boot-2', false);
+    try {
+      const settle = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions: undefined,
+        toolProfile: true,
+        children: childrenOf(replacement),
+      });
+      expect(settle.kind).toBe('ready');
+      let results = toolResultEntries(await replacement.sink.project());
+      expect(results).toHaveLength(2);
+      const texts = results.flatMap((entry) =>
+        (entry.message?.parts ?? []).map((part) =>
+          JSON.stringify(part.functionResponse?.response),
+        ),
+      );
+      // call-1 meets the live arm's abandoned answer; call-2, never
+      // admitted, meets the live admission's own wording.
+      expect(
+        texts.some((text) =>
+          text.includes('cancelled before the child agent finished'),
+        ),
+      ).toBe(true);
+      expect(
+        texts.some((text) =>
+          text.includes('cancelled before this child agent was admitted'),
+        ),
+      ).toBe(true);
+      const authorization =
+        await replacement.authority.harnessRunAuthorization();
+      expect(authorization.status).toBe('runnable');
+      if (authorization.status === 'runnable') {
+        expect(authorization.checkpoint.continuation.phase).toBe(
+          'model_output_committed',
+        );
+        expect(authorization.checkpoint.agentWait?.runs).toMatchObject([
+          { childRunId: CHILD_RUN_ID, consumed: true },
+        ]);
+      }
+      // A replayed settlement is silent: the wait stands resolved and the
+      // journal already carries both answers.
+      const replayed = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions: undefined,
+        toolProfile: true,
+        children: childrenOf(replacement),
+      });
+      expect(replayed.kind).toBe('ready');
+      results = toolResultEntries(await replacement.sink.project());
+      expect(results).toHaveLength(2);
+    } finally {
+      await replacement.close();
     }
   });
 });

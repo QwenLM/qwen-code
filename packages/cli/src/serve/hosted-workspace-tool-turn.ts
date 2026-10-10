@@ -492,6 +492,15 @@ export function hostedChildRunIdFor(promptId: string, callId: string): string {
   return `${promptKey}:${callId}`;
 }
 
+/**
+ * The live background arm's started receipt, shared with the recovery
+ * gap fill's background-orphan branch: one sentence naming the task the
+ * model should track and exactly how results land on it.
+ */
+export function hostedAgentBackgroundStartedText(taskId: string): string {
+  return `Child agent started in the background as ${taskId}; the task surface stays current with it. A completed child delivers its result as a durable notification input; a failed or cancelled child produces no notification — read the task surface instead of waiting.`;
+}
+
 export class HostedWorkspaceToolTurn {
   hookStopReason?: string;
   private readonly broker: HostedWorkspaceBroker;
@@ -2837,11 +2846,7 @@ export class HostedWorkspaceToolTurn {
     const started = convertToFunctionResponse(
       request.call.name,
       request.call.callId,
-      [
-        {
-          text: `Child agent started in the background as ${taskId}; the task surface stays current with it. A completed child delivers its result as a durable notification input; a failed or cancelled child produces no notification — read the task surface instead of waiting.`,
-        },
-      ],
+      [{ text: hostedAgentBackgroundStartedText(taskId) }],
     );
     await this.commit('tool_result', started, model);
     return started;

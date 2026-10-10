@@ -743,8 +743,27 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       );
       if (waited?.consumed === true) return previous;
       const identity = this.nextCheckpointIdentity();
+      // A replacement owner that folds the last owed run feeds the Turn's
+      // next tool batch to the model: adopt the Turn's identity on the
+      // advancing commit, or that batch is refused as work of a prior
+      // activation. Consumption before the last run keeps the parking
+      // activation — the wait is still the dead owner's in flight.
+      const willAdvance = previous.agentWait!.runs.every(
+        (run) => run.childRunId === childRunId || run.consumed,
+      );
+      const adopted =
+        willAdvance &&
+        previous.identity.activationId !== this.activation.activationId
+          ? {
+              ...previous,
+              identity: {
+                ...previous.identity,
+                activationId: this.activation.activationId,
+              },
+            }
+          : previous;
       const checkpoint = createConsumedAgentWaitHarnessCheckpoint({
-        previous,
+        previous: adopted,
         ...identity,
         childRunId,
       });

@@ -9,6 +9,7 @@ import type { Part } from '@google/genai';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import type {
+  HarnessAgentWaitRun,
   HarnessRunAuthorization,
   HarnessToolItem,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
@@ -16,6 +17,10 @@ import {
   HARNESS_MODEL_START_PHASES,
   harnessCheckpointIsAgentWait,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import {
+  managedExtensionRecordKey,
+  managedTaskId,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import {
   assertManagedSessionStableId,
   type ManagedSessionDurableRef,
@@ -27,7 +32,12 @@ import {
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
+import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
+  HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
+  HOSTED_AGENT_WAIT_ABANDONED_TEXT,
+  hostedAgentBackgroundStartedText,
+  hostedChildRunIdFor,
   hostedRuntimeSessionId,
   journaledToolResultIds,
   truncateHostedGlobResponse,
@@ -437,6 +447,277 @@ async function answerAbandonedTurnCalls(input: {
 }
 
 /**
+ * The agent wait's cancellation settlement (#13708): every outstanding
+ * wait run folds the live arm's own abandoned answer and the resolve
+ * moves the checkpoint past the wait, so the terminal record can land.
+ * The journaled set keeps a replayed cancel silent; the abandoned child
+ * is never revoked. Shared by the cancel route and the interrupted-turn
+ * funnel: both call the same code the wedge suite pins.
+ */
+export async function settleCancelledAgentWaitRuns(input: {
+  managed: ManagedSession;
+  sessionId: string;
+  promptId: string;
+  cwd: string;
+  runs: readonly HarnessAgentWaitRun[];
+}): Promise<void> {
+  const harness = createManagedHarnessHandle(input.managed);
+  const journaled = await journaledToolResultIds(input.managed, input.promptId);
+  for (const run of input.runs) {
+    const abandoned = convertToFunctionErrorResponse(
+      run.toolName,
+      run.functionCallId,
+      [],
+      HOSTED_AGENT_WAIT_ABANDONED_TEXT,
+    );
+    if (!journaled.has(run.functionCallId))
+      await input.managed.sink.write({
+        uuid: randomUUID(),
+        parentUuid: run.modelMessageId,
+        sessionId: input.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'tool_result',
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        daemonPromptId: input.promptId,
+        message: { role: 'user', parts: abandoned },
+      });
+    await harness.resolveAwaitAgent(run.childRunId);
+  }
+}
+
+/**
+ * The gap fill of a parked agent-wait round (#13708): a foreground batch
+ * parks with some later calls of its last assistant round never reached
+ * by the dead loop — the durable wait names only the admitted ones, so
+ * each remaining function call must still meet its functionResponse on
+ * the resume story, or the model request is malformed. Each fills with
+ * the live admission's own never-admitted answer, parented to that
+ * round's assistant record; the journaled set keeps a replayed fill
+ * silent, and the ledger keeps it honest: a call whose child was
+ * admitted in the gap between the last fold and its own wait commit is
+ * NOT "never admitted" — it drives to its own terminal through the same
+ * poll the live wait ran, and its answer folds truthfully (a fabricated
+ * cancellation must never be minted for a live child). A call with no
+ * run record fills the live admission's own never-admitted answer.
+ * Shared by the continue route, the cancel route, and the
+ * interrupted-turn funnel.
+ */
+export async function fillParkedRoundAgentGaps(input: {
+  managed: ManagedSession;
+  sessionId: string;
+  promptId: string;
+  cwd: string;
+  children?: HostedChildAgentSession;
+  signal?: AbortSignal;
+  messageFitsInline?: (
+    type: 'assistant' | 'tool_result',
+    parts: Part[],
+    model: string,
+  ) => boolean;
+  consume?: (childRunId: string) => void;
+}): Promise<number> {
+  const authorization = await input.managed.authority
+    .harnessRunAuthorization()
+    .catch(() => undefined);
+  const waitRuns =
+    authorization?.status === 'runnable'
+      ? (authorization.checkpoint.agentWait?.runs ?? [])
+      : [];
+  // The parked round is the one the wait names, never whatever assistant
+  // came later — a crash past the last fold can journal another round
+  // (a plain tool call whose Runtime wait was never committed), and
+  // filling THAT round writes a fabricated answer for a call with no
+  // agent story at all.
+  const namedRounds = new Set(waitRuns.map((run) => run.modelMessageId));
+  const projected = await input.managed.sink.project();
+  const assistant = projected
+    .filter(
+      (entry) =>
+        entry.daemonPromptId === input.promptId &&
+        entry.type === 'assistant' &&
+        entry.message?.parts?.some((part) => part.functionCall) &&
+        namedRounds.has(entry.uuid),
+    )
+    .at(-1);
+  if (assistant === undefined) return 0;
+  const journaled = await journaledToolResultIds(input.managed, input.promptId);
+  const writeFold = async (parts: Part[]): Promise<void> => {
+    await input.managed.sink.write({
+      uuid: randomUUID(),
+      parentUuid: assistant.uuid,
+      sessionId: input.sessionId,
+      timestamp: new Date().toISOString(),
+      type: 'tool_result',
+      cwd: input.cwd,
+      version: 'hosted-harness/1',
+      model: 'recovered',
+      daemonPromptId: input.promptId,
+      message: { role: 'user', parts },
+    });
+  };
+  // The fit predicate measures exactly this record shape (a uuid is always
+  // 36 chars; the assistant parent is always 36; the timestamp is one ISO
+  // string) — never an estimate, or the inline bound would slip.
+  const templateRecord = (parts: Part[]): Buffer =>
+    Buffer.from(
+      JSON.stringify({
+        uuid: '0'.repeat(36),
+        parentUuid: '0'.repeat(36),
+        sessionId: input.sessionId,
+        timestamp: '1970-01-01T00:00:00.000Z',
+        type: 'tool_result',
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        model: 'recovered',
+        daemonPromptId: input.promptId,
+        message: { role: 'user', parts },
+      }),
+      'utf8',
+    );
+  // The same fit discipline as the live arm: a caller's lambda wins when
+  // present; otherwise the exact template above decides. Both predicates,
+  // never estimates.
+  const fits = (parts: Part[]): boolean =>
+    input.messageFitsInline !== undefined
+      ? input.messageFitsInline('tool_result', parts, 'recovered')
+      : templateRecord(parts).byteLength <=
+        HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+  let filled = 0;
+  for (const part of assistant.message?.parts ?? []) {
+    const callId = part.functionCall?.id;
+    const name = part.functionCall?.name;
+    if (typeof callId !== 'string' || typeof name !== 'string') continue;
+    // The journaled set gates only the fold, never the replay-safe marks —
+    // both sibling arms in this diff document and follow the same rule.
+    const foldOwed = !journaled.has(callId);
+    const children = input.children;
+    const admitted =
+      children === undefined
+        ? undefined
+        : children.record(hostedChildRunIdFor(input.promptId, callId));
+    if (children === undefined || admitted === undefined) {
+      if (foldOwed) {
+        await writeFold(
+          convertToFunctionErrorResponse(
+            name,
+            callId,
+            [],
+            HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
+          ),
+        );
+        filled += 1;
+      }
+    } else if (admitted.completion === 'sent') {
+      // A background delegation answered with the live arm's started
+      // receipt: no wait row exists for it, so its consumption belongs to
+      // the wake pump — never to this fill.
+      if (foldOwed) {
+        const taskId = managedTaskId(
+          managedExtensionRecordKey(
+            input.managed.authority.sessionHeader.sessionKey.sessionId,
+            'child_run',
+            admitted.run.executionCallId ??
+              hostedChildRunIdFor(input.promptId, callId),
+          ),
+        );
+        await writeFold(
+          convertToFunctionResponse(name, callId, [
+            { text: hostedAgentBackgroundStartedText(taskId) },
+          ]),
+        );
+        filled += 1;
+      }
+    } else {
+      const runId =
+        admitted.run.executionCallId ??
+        hostedChildRunIdFor(input.promptId, callId);
+      // Mirrors the live wait's own loop (sans the wait resolve — the
+      // orphan carries no wait row): poll the ledger to a terminal and
+      // fold what really happened, nothing fabricated.
+      for (;;) {
+        if (input.signal?.aborted === true) {
+          if (foldOwed) {
+            await writeFold(
+              convertToFunctionErrorResponse(
+                name,
+                callId,
+                [],
+                HOSTED_AGENT_WAIT_ABANDONED_TEXT,
+              ),
+            );
+            filled += 1;
+          }
+          break;
+        }
+        const record = children.record(runId);
+        if (
+          record !== undefined &&
+          (record.run.state === 'failed' || record.run.state === 'cancelled')
+        ) {
+          if (foldOwed) {
+            await writeFold(
+              convertToFunctionErrorResponse(
+                name,
+                callId,
+                [],
+                `Child agent run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).`,
+              ),
+            );
+            filled += 1;
+          }
+          break;
+        }
+        const acceptance = children.acceptance(runId);
+        if (acceptance !== undefined) {
+          const text = (
+            await input.managed.resources.read(acceptance.contentRef)
+          ).toString('utf8');
+          const whole = convertToFunctionResponse(name, callId, [{ text }]);
+          // The same fit discipline as the live arm: the answer still must
+          // land, folded to the inline bound with its marker instead of
+          // erroring the recovered Turn — the full bytes stay on the
+          // acceptance record, and the fit predicate, not an estimate,
+          // measures the fold.
+          let fitted: Part[] | undefined;
+          if (fits(whole)) {
+            fitted = whole;
+          } else {
+            const marker =
+              '\n… (truncated: the full result is on the acceptance record)';
+            for (
+              let head = Math.floor(text.length / 2);
+              head > 0 && fitted === undefined;
+              head = Math.floor(head / 2)
+            ) {
+              const folded = convertToFunctionResponse(name, callId, [
+                { text: text.slice(0, head) + marker },
+              ]);
+              if (fits(folded)) fitted = folded;
+            }
+          }
+          if (fitted === undefined)
+            throw new Error(
+              'Admitted child agent result cannot be recorded inline.',
+            );
+          if (foldOwed) {
+            await writeFold(fitted);
+            filled += 1;
+          }
+          // The replay-safe marks still run when the fold already landed.
+          await children.markAccepted(runId);
+          input.consume?.(runId);
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    journaled.add(callId);
+  }
+  return filled;
+}
+
+/**
  * H5/F5 follow-up: the Runtime-facing settlement of an interrupted Turn
  * ahead of its terminal record. A Turn that died inside a tool call parked
  * its checkpoint in `await_runtime`, and a terminal record advances the
@@ -451,11 +732,15 @@ async function answerAbandonedTurnCalls(input: {
  * `await_action` is held while its approval stays `requested` and its
  * deadline lives — the interrupted owner's expiry timer died with it, so
  * an unanswered ask whose deadline passed is expired here before the same
- * ending. Once the durable Action is final, the wait is advanced, the
- * abandoned calls answered, and the turn's Workspace acquisition (its
- * promptId-named runtime session) handed back with the verdict, or every
- * later tool call in the Workspace waits behind a dead holder (F9). The
- * returned Broker releases after the caller's terminal
+ * ending. A Turn parked at an agent wait (#13708) settles the same way the
+ * takeover cancellation does: its outstanding waits fold the live arm's
+ * abandoned answers, the resolve moves the checkpoint past the wait, and
+ * the round's never-reached calls pair off. Once the durable Action is
+ * final, the wait is advanced, the abandoned calls answered, and the
+ * turn's Workspace acquisition (its promptId-named runtime session) handed
+ * back with the verdict, or every later tool call in the Workspace waits
+ * behind a dead holder (F9). The returned Broker releases after the
+ * caller's terminal
  * record is durable, never before. Throws with nothing settled when the
  * stop cannot be proven, leaving the Turn to the recovery fleet; a
  * checkpoint the authorization could not verify (a faulting Store read
@@ -469,6 +754,11 @@ export async function settleInterruptedTurnRuntime(input: {
   promptId: string;
   brokerOptions: HostedWorkspaceBrokerOptions | undefined;
   toolProfile: boolean;
+  /** The child ledger the agent-wait arm's gap fill polls — the same one
+   * the live arm drives, so an admitted orphan never meets a fabricated
+   * answer even here. */
+  children?: HostedChildAgentSession;
+  consume?: (childRunId: string) => void;
 }): Promise<HostedInterruptedTurnRuntime> {
   const authorization = await input.session.authority.harnessRunAuthorization();
   // Only a committed, readable checkpoint — or the durable absence of any
@@ -536,6 +826,32 @@ export async function settleInterruptedTurnRuntime(input: {
         sessionId: input.sessionId,
         cwd: input.cwd,
         promptId: input.promptId,
+      });
+    }
+    if (harnessCheckpointIsAgentWait(authorization.checkpoint)) {
+      // The agent wait's own mirror (R1-3): no Runtime executions exist to
+      // stop — each outstanding run folds the live arm's abandoned answer,
+      // the resolve moves the checkpoint past the wait, and the round's
+      // never-reached calls pair off before the terminal record lands.
+      const outstanding = (
+        authorization.checkpoint.agentWait?.runs ?? []
+      ).filter((run) => !run.consumed);
+      if (outstanding.length > 0) {
+        await settleCancelledAgentWaitRuns({
+          managed: input.session,
+          sessionId: input.sessionId,
+          promptId: input.promptId,
+          cwd: input.cwd,
+          runs: outstanding,
+        });
+      }
+      await fillParkedRoundAgentGaps({
+        managed: input.session,
+        sessionId: input.sessionId,
+        promptId: input.promptId,
+        cwd: input.cwd,
+        children: input.children,
+        consume: input.consume,
       });
     }
   }
