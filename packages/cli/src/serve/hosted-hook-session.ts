@@ -56,6 +56,7 @@ import {
 } from './hosted-workspace-broker.js';
 import type { HostedWorkspaceBrokerOptions } from './hosted-workspace-broker.js';
 import { waitForTurn } from './hosted-turn-wait.js';
+import { hostedShellInputError } from './hosted-shell-input.js';
 
 export class HostedHookRecoveryRequiredError extends Error {
   constructor() {
@@ -113,18 +114,74 @@ function sequentialInput(
   if (!result.success || !result.output) return input;
   const effective = applyHookOutputToInput(input, result.output, event);
   const output = result.output.hookSpecificOutput;
+  const decision =
+    event === HookEventName.PermissionRequest
+      ? (output?.['decision'] as { updatedInput?: unknown } | undefined)
+      : undefined;
+  const updatedInput = decision?.updatedInput ?? output?.['updatedInput'];
   return {
     ...effective,
     // PreToolUse replacements are validated by the shared helper above.
     ...(event !== HookEventName.PreToolUse &&
-    output?.['updatedInput'] &&
-    typeof output['updatedInput'] === 'object'
-      ? { tool_input: output['updatedInput'] }
+    updatedInput &&
+    typeof updatedInput === 'object'
+      ? { tool_input: updatedInput }
       : {}),
     ...(typeof output?.['updatedPrompt'] === 'string'
       ? { prompt: output['updatedPrompt'] }
       : {}),
   };
+}
+
+function malformedShellInput(input: HookInput, event: HookEventName): boolean {
+  return (
+    (event === HookEventName.PreToolUse ||
+      event === HookEventName.PermissionRequest) &&
+    'tool_name' in input &&
+    'tool_input' in input &&
+    hostedShellInputError(input['tool_name'], input['tool_input']) !== undefined
+  );
+}
+
+function shellRefusalOutput(
+  output: HookOutput | undefined,
+  input: HookInput,
+  event: HookEventName,
+): HookOutput | undefined {
+  if (
+    !('tool_name' in input) ||
+    !('tool_input' in input) ||
+    !malformedShellInput(input, event)
+  )
+    return output;
+  const specific = { ...output?.hookSpecificOutput };
+  delete specific['tool_input'];
+  delete specific['updatedInput'];
+  const refusal = {
+    ...output,
+    hookSpecificOutput: {
+      ...specific,
+      ...(event === HookEventName.PermissionRequest
+        ? {
+            decision: {
+              ...(specific?.['decision'] as
+                | Record<string, unknown>
+                | undefined),
+              updatedInput: input['tool_input'],
+            },
+          }
+        : { updatedInput: input['tool_input'] }),
+    },
+  };
+  return exceedsHookResourceLimit({ output: refusal })
+    ? {
+        ...byteLimitOutput(event),
+        stopReason: hostedShellInputError(
+          input['tool_name'],
+          input['tool_input'],
+        ),
+      }
+    : refusal;
 }
 
 function semanticInput(value: object): Record<string, unknown> {
@@ -813,6 +870,7 @@ export class HostedHookSession {
         const result = await execute(hook, index);
         results.push(result);
         effectiveInput = sequentialInput(effectiveInput, result, event);
+        if (malformedShellInput(effectiveInput, event)) break;
       }
     } else {
       const settled = await Promise.allSettled(plan.hooks.map(execute));
@@ -827,7 +885,11 @@ export class HostedHookSession {
       ? cancelledResult().output
       : inputLimitExceeded
         ? byteLimitOutput(event)
-        : this.aggregateOutput(results, event);
+        : shellRefusalOutput(
+            this.aggregateOutput(results, event),
+            effectiveInput,
+            event,
+          );
     const resultRef = await this.publish('managed-hook-result', {
       ...(output ? { output: createHookOutput(event, output) } : {}),
     });
@@ -1479,8 +1541,10 @@ export class HostedHookSession {
         eventName: record.eventName as HookEventName,
         ...(result.error ? { error: new Error(result.error) } : {}),
       } as HookExecutionResult);
-      if (plan.sequential)
+      if (plan.sequential) {
         effectiveInput = sequentialInput(effectiveInput, result, event);
+        if (malformedShellInput(effectiveInput, event)) break;
+      }
     }
     if (record.run.execution === 'intent') {
       await this.commit('hook_execution', record.hookExecutionId, (latest) =>
@@ -1498,7 +1562,11 @@ export class HostedHookSession {
     }
     const output = inputLimitExceeded
       ? byteLimitOutput(event)
-      : this.aggregateOutput(results, event);
+      : shellRefusalOutput(
+          this.aggregateOutput(results, event),
+          effectiveInput,
+          event,
+        );
     const resultRef = await this.publish('managed-hook-result', {
       ...(output ? { output } : {}),
     });

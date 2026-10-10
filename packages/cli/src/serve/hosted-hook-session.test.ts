@@ -986,13 +986,16 @@ it('applies failClosed when a lost reply is settled through status after reconst
   });
 });
 
+function heldHookExecution() {
+  return new Promise<(result: ManagedHookResult) => void>((started) => {
+    execute = () => new Promise((finish) => started(finish));
+  });
+}
+
 it('waits for Runtime admission before acknowledging an async Hook', async () => {
   catalog = { ...catalog, hooks: [{ ...catalog.hooks[0], async: true }] };
+  const admitted = heldHookExecution();
   let finish: ((result: ManagedHookResult) => void) | undefined;
-  execute = () =>
-    new Promise((resolve) => {
-      finish = resolve;
-    });
   let completed = false;
   const firing = hooks
     .fire(HookEventName.PreToolUse, 'call-1', {}, signal())
@@ -1000,11 +1003,21 @@ it('waits for Runtime admission before acknowledging an async Hook', async () =>
       completed = true;
       return result;
     });
-  await vi.waitFor(() => expect(finish).toBeDefined());
-  expect(completed).toBe(false);
-  finish!({ success: true, outcome: 'success', duration: 0 });
-  await firing;
-  expect(completed).toBe(true);
+  try {
+    finish = await Promise.race([
+      admitted,
+      firing.then(() => {
+        throw new Error('Hook completed before Runtime admission.');
+      }),
+    ]);
+    expect(completed).toBe(false);
+    finish!({ success: true, outcome: 'success', duration: 0 });
+    await firing;
+    expect(completed).toBe(true);
+  } finally {
+    finish?.({ success: false, outcome: 'cancelled', duration: 0 });
+    await Promise.allSettled([firing]);
+  }
 });
 
 it('rejects async prompt Hooks instead of leaving a detached model request', async () => {
@@ -1025,30 +1038,37 @@ it('rejects async prompt Hooks instead of leaving a detached model request', asy
 });
 
 it('rejects a changed input while the same occurrence is still running', async () => {
+  const admitted = heldHookExecution();
   let finish: ((result: ManagedHookResult) => void) | undefined;
-  execute = () =>
-    new Promise((resolve) => {
-      finish = resolve;
-    });
   const firing = hooks.fire(
     HookEventName.PreToolUse,
     'call-1',
     { tool_name: 'read_file' },
     signal(),
   );
-  await vi.waitFor(() => expect(finish).toBeDefined());
-  await expect(
-    hooks.fire(
-      HookEventName.PreToolUse,
-      'call-1',
-      { tool_name: 'write_file' },
-      signal(),
-    ),
-  ).rejects.toThrow(HostedHookInputConflictError);
-  expect(hooks.hasPendingOperations).toBe(true);
-  finish!({ success: true, outcome: 'success', duration: 0 });
-  await firing;
-  expect(hooks.hasPendingOperations).toBe(false);
+  try {
+    finish = await Promise.race([
+      admitted,
+      firing.then(() => {
+        throw new Error('Hook completed before Runtime admission.');
+      }),
+    ]);
+    await expect(
+      hooks.fire(
+        HookEventName.PreToolUse,
+        'call-1',
+        { tool_name: 'write_file' },
+        signal(),
+      ),
+    ).rejects.toThrow(HostedHookInputConflictError);
+    expect(hooks.hasPendingOperations).toBe(true);
+    finish!({ success: true, outcome: 'success', duration: 0 });
+    await firing;
+    expect(hooks.hasPendingOperations).toBe(false);
+  } finally {
+    finish?.({ success: false, outcome: 'cancelled', duration: 0 });
+    await Promise.allSettled([firing]);
+  }
 });
 
 it('cancels an active occurrence and does not dispatch later sequential hooks', async () => {
@@ -1059,22 +1079,29 @@ it('cancels an active occurrence and does not dispatch later sequential hooks', 
       { ...catalog.hooks[0], sequential: true, hookId: 'second' },
     ],
   };
+  const admitted = heldHookExecution();
   let finish: ((result: ManagedHookResult) => void) | undefined;
-  execute = () =>
-    new Promise((resolve) => {
-      finish = resolve;
-    });
   const firing = hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
-  await vi.waitFor(() => expect(finish).toBeDefined());
-  const cancelled = await hooks.status('call-1', true);
-  expect(cancelled.cancelRequested).toBe(true);
-  finish!({ success: false, outcome: 'cancelled', duration: 0 });
-  expect((await firing)?.decision).toBe('block');
-  expect(
-    requests.filter((request) => request.kind === 'hook-execute'),
-  ).toHaveLength(1);
-  expect((await hooks.status('call-1')).run.state).toBe('cancelled');
-  expect(hooks.hasPendingOperations).toBe(false);
+  try {
+    finish = await Promise.race([
+      admitted,
+      firing.then(() => {
+        throw new Error('Hook completed before Runtime admission.');
+      }),
+    ]);
+    const cancelled = await hooks.status('call-1', true);
+    expect(cancelled.cancelRequested).toBe(true);
+    finish!({ success: false, outcome: 'cancelled', duration: 0 });
+    expect((await firing)?.decision).toBe('block');
+    expect(
+      requests.filter((request) => request.kind === 'hook-execute'),
+    ).toHaveLength(1);
+    expect((await hooks.status('call-1')).run.state).toBe('cancelled');
+    expect(hooks.hasPendingOperations).toBe(false);
+  } finally {
+    finish?.({ success: false, outcome: 'cancelled', duration: 0 });
+    await Promise.allSettled([firing]);
+  }
 });
 
 it('refuses an ambiguous external occurrence id', async () => {
@@ -2175,6 +2202,113 @@ function loseFinalMarkerWrite() {
 }
 
 it.each([
+  ...[false, true].flatMap((merge) =>
+    [false, true].map((loseMarker) => ({
+      merge,
+      loseMarker,
+      event: HookEventName.PreToolUse,
+      padding: 0,
+    })),
+  ),
+  ...[false, true].flatMap((loseMarker) =>
+    [HookEventName.PreToolUse, HookEventName.PermissionRequest].map(
+      (event) => ({
+        merge: event === HookEventName.PreToolUse,
+        loseMarker,
+        event,
+        padding: 40 * 1024,
+      }),
+    ),
+  ),
+  ...[false, true].map((loseMarker) => ({
+    merge: false,
+    loseMarker,
+    event: HookEventName.PermissionRequest,
+    padding: 0,
+  })),
+])(
+  'stops malformed sequential Shell input and reconstructs its terminal prefix ($event, $merge, $loseMarker, $padding)',
+  async ({ merge, loseMarker, event, padding }) => {
+    enforceHostedResourceLimit();
+    const malformed = 'x'.repeat(padding) + 'echo 😀\ud800';
+    catalog = {
+      ...catalog,
+      hooks: ['first', 'repair'].map((hookId) => ({
+        ...catalog.hooks[0],
+        hookId,
+        eventName: event,
+        sequential: true,
+        onceKey: hookId === 'repair' ? 'repair-once' : null,
+      })),
+    };
+    execute = async (operation) => ({
+      success: true,
+      outcome: 'success',
+      duration: 0,
+      output: {
+        hookSpecificOutput:
+          event === HookEventName.PermissionRequest
+            ? {
+                decision: {
+                  behavior: 'allow',
+                  updatedInput: {
+                    command:
+                      operation.hookId === 'first'
+                        ? malformed
+                        : 'echo repaired',
+                  },
+                },
+              }
+            : {
+                [merge ? 'tool_input' : 'updatedInput']: {
+                  command:
+                    operation.hookId === 'first' ? malformed : 'echo repaired',
+                },
+              },
+      },
+    });
+    const input = {
+      tool_name: 'run_shell_command',
+      tool_input: { command: 'echo valid' },
+    };
+    const expected = {
+      hookSpecificOutput:
+        event === HookEventName.PermissionRequest
+          ? { decision: { updatedInput: { command: malformed } } }
+          : { updatedInput: { command: malformed } },
+    };
+    const publish = vi.spyOn(session.resources, 'publish');
+    const lost = loseMarker ? loseFinalMarkerWrite() : undefined;
+    const firing = hooks.fire(event, 'unicode', input, signal());
+    if (lost) {
+      await expect(firing).rejects.toThrow('lost final marker write');
+      lost.mockRestore();
+    } else await expect(firing).resolves.toMatchObject(expected);
+    const restored = new HostedHookSession(options, session, pin);
+    expect((await restored.status('unicode')).run.state).toBe('settled');
+    expect(
+      await restored.fire(event, 'unicode', input, signal()),
+    ).toMatchObject(expected);
+    expect(restored.hasPendingOperations).toBe(false);
+    for (const [kind, bytes] of publish.mock.calls)
+      if (kind === 'managed-hook-result')
+        expect(bytes.length).toBeLessThanOrEqual(60 * 1024);
+    expect(
+      requests
+        .filter((request) => request.kind === 'hook-execute')
+        .map((request) => request.hookId),
+    ).toEqual(['first']);
+    expect(
+      session.authority
+        .extensionRecordsInDomain('hook_execution')
+        .some(
+          (entry) => parseHookExecution(entry.record).onceKey === 'repair-once',
+        ),
+    ).toBe(false);
+  },
+);
+
+it.each([
   [HookEventName.PreToolUse, false],
   [HookEventName.PreToolUse, true],
   [HookEventName.PermissionRequest, false],
@@ -2368,5 +2502,73 @@ it.each([false, true])(
       ),
     ).toEqual(output);
     expect(runner).toHaveBeenCalledOnce();
+  },
+);
+
+it.each([false, true])(
+  'bounds assembled Unicode refusal metadata (lost marker: %s)',
+  async (loseMarker) => {
+    enforceHostedResourceLimit();
+    catalog = {
+      ...catalog,
+      hooks: ['first', 'repair'].map((hookId) => ({
+        ...catalog.hooks[0],
+        hookId,
+        sequential: true,
+      })),
+    };
+    execute = async () => ({
+      success: true,
+      outcome: 'success',
+      duration: 0,
+      output: {
+        hookSpecificOutput: {
+          tool_input: { description: '\ud800' },
+          padding: 'x'.repeat(40 * 1024),
+        },
+      },
+    });
+    const input = {
+      tool_name: 'run_shell_command',
+      tool_input: { command: 'x'.repeat(40 * 1024) },
+    };
+    const lost = loseMarker ? loseFinalMarkerWrite() : undefined;
+    const firing = hooks.fire(
+      HookEventName.PreToolUse,
+      'assembled-unicode',
+      input,
+      signal(),
+    );
+    if (lost) {
+      await expect(firing).rejects.toThrow('lost final marker write');
+      lost.mockRestore();
+    } else
+      await expect(firing).resolves.toMatchObject({
+        continue: false,
+        decision: 'block',
+      });
+    const restored = new HostedHookSession(options, session, pin);
+    expect((await restored.status('assembled-unicode')).run.state).toBe(
+      'settled',
+    );
+    expect(
+      await restored.fire(
+        HookEventName.PreToolUse,
+        'assembled-unicode',
+        input,
+        signal(),
+      ),
+    ).toMatchObject({
+      decision: 'block',
+      reason: expect.stringContaining('60 KiB'),
+      stopReason:
+        'Hosted Shell description contains an unpaired UTF-16 surrogate. Provide valid Unicode and retry.',
+    });
+    expect(restored.hasPendingOperations).toBe(false);
+    expect(
+      requests
+        .filter((request) => request.kind === 'hook-execute')
+        .map((request) => request.hookId),
+    ).toEqual(['first']);
   },
 );

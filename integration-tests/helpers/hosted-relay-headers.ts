@@ -41,8 +41,8 @@ export function relayedHeaders(headers: Headers): Record<string, string> {
   );
 }
 
-// The five wholesale upstream relays — hosted-{latency,process-crash,
-// shell-output,store-failure,workspace-tool-turn}-driver.ts — pass through
+// The wholesale upstream relays — hosted-{latency,process-crash,
+// shell-output,shell-unicode,store-failure,workspace-tool-turn}-driver.ts — pass through
 // this one site, pinned by the caller list in hosted-relay-headers.test.ts.
 // The drivers' other upstream replies write fixed header literals and must
 // stay that way: a driver-local copy of the upstream header set would leak
