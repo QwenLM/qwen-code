@@ -144,7 +144,7 @@ const EN: Messages = {
   'managed.approval.refreshFailed': 'Pending approvals could not be refreshed.',
   'managed.approval.retry': 'Retry loading approvals',
   'managed.approval.forbidden':
-    'Only the Session creator can answer this approval.',
+    "Only the Session's owner or a Workspace operator can answer this approval.",
   'managed.approval.argumentsUnavailable':
     'Tool arguments are unavailable for this approval.',
   'managed.approval.previewComplete': (v) =>
@@ -4394,7 +4394,8 @@ const ZH: Messages = {
   'managed.approval.loadFailed': '待审批请求加载失败。',
   'managed.approval.refreshFailed': '待审批请求刷新失败。',
   'managed.approval.retry': '重新读取审批',
-  'managed.approval.forbidden': '只有此会话的创建者可以回答这项审批。',
+  'managed.approval.forbidden':
+    '只有此会话的拥有者或所属 Workspace 的操作者可以回答这项审批。',
   'managed.approval.argumentsUnavailable': '此项审批的工具参数暂不可见。',
   'managed.approval.previewComplete': (v) =>
     `输入预览：${v?.bytes ?? 0} 字节。`,

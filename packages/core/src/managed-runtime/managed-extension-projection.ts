@@ -62,6 +62,11 @@ import {
   isChildAcceptanceSuccessor,
   parseChildAcceptance,
 } from './managed-child-acceptance-record.js';
+import {
+  isSessionMessageStart,
+  isSessionMessageSuccessor,
+  parseSessionMessage,
+} from './managed-session-message-record.js';
 
 // H0c of #12827: how the Session authority keys, chains and projects the
 // Stage H records of managed-extension-record/1. The shared fixtures in
@@ -116,6 +121,26 @@ export interface ManagedExtensionRecordBody {
   };
   isStart(value: unknown): boolean;
   isSuccessor(previous: unknown, next: unknown): boolean;
+}
+
+/**
+ * The task kind one child run projects, by its own kind. Each kind is
+ * named, so a kind added to `AnyChildRun` fails to compile here rather
+ * than projecting as a child agent by default.
+ */
+function childRunTaskKind(record: AnyChildRun): ManagedTaskKind {
+  switch (record.kind) {
+    case 'shell':
+      return 'background_shell';
+    case 'child_agent':
+      return 'child_agent';
+    case 'workflow':
+      return 'workflow';
+    default: {
+      const exhaustive: never = record;
+      return exhaustive;
+    }
+  }
 }
 
 /**
@@ -174,14 +199,7 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isMonitorRunSuccessor,
   }),
   child_run: Object.freeze({
-    taskKindOf: (record: unknown) => {
-      const kind = (record as AnyChildRun).kind;
-      return kind === 'shell'
-        ? 'background_shell'
-        : kind === 'workflow'
-          ? 'workflow'
-          : 'child_agent';
-    },
+    taskKindOf: (record: unknown) => childRunTaskKind(record as AnyChildRun),
     parse: (value: unknown) => {
       const record = parseChildRun(value);
       return {
@@ -237,6 +255,15 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     },
     isStart: isAutomationRunStart,
     isSuccessor: isAutomationRunSuccessor,
+  }),
+  session_message: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseSessionMessage(value);
+      return { record, recordId: record.messageId, run: record.run };
+    },
+    isStart: isSessionMessageStart,
+    isSuccessor: isSessionMessageSuccessor,
   }),
 });
 
