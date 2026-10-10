@@ -453,7 +453,12 @@ process.on('SIGTERM', () => process.exit(0));
     const workspace = scope();
     const use = activator.activate(workspace);
     await use.endpoint;
+    // Reset where the stub is armed: vitest --retry re-invokes this same
+    // registered function without re-evaluating the module, and only
+    // beforeEach/afterEach re-run — neither touches rmControl.
     rmControl.armed = true;
+    rmControl.calls = 0;
+    rmControl.settle = undefined;
     try {
       const revoking = activator.revokeWorkspace(workspace.runtime);
       void revoking.catch(() => {});
@@ -494,6 +499,18 @@ process.on('SIGTERM', () => process.exit(0));
         await expect(
           activator.revokeWorkspace(workspace.runtime),
         ).rejects.toThrow();
+        // The failed rm still freed the capacity slot: with the map delete
+        // ordered after the rm instead, the retained generation would hold
+        // the single slot and the next admission would be refused with
+        // managed_runtime_capacity_exhausted. (The same workspace object
+        // cannot be re-activated — revocation is sticky — so a second
+        // workspace contends for the freed slot.) Restore the permission
+        // bits first so the spawn does not fail for the same EACCES.
+        await chmod(workersRoot, 0o700);
+        const next = scope('b');
+        const readmitted = activator.activate(next);
+        await readmitted.endpoint;
+        await activator.revokeWorkspace(next.runtime);
         // The failure settled before close() — the stop deletion already
         // dropped it from the map, so only instance state can surface it.
         await expect(activator.close()).rejects.toMatchObject({

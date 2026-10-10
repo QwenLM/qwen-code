@@ -102,30 +102,40 @@ interface BrokerExecutionFailure {
 }
 
 // Eviction is for failures a retry can outrun: a 5xx the Broker did not
-// declare permanent, a 4xx it explicitly marked retryable, a transport
-// failure (timeout, abort, network), or a response whose body could not be
-// decoded — an LB drain page or a truncated reply is a transport-shaped
-// fault the next request can answer correctly. Everything else — a declared
-// refusal, an unclassified 4xx, or a decoded-but-invalid envelope — cannot
-// produce a different answer within the session, so it stays cached and
-// later calls replay it instead of re-driving a doomed prepare/start cycle.
+// declare permanent, a 4xx it explicitly marked retryable, a reconcilable
+// (non-abandoned) execution_unknown, a transport failure (timeout, abort,
+// network), or a response whose body could not be decoded — an LB drain page
+// or a truncated reply is a transport-shaped fault the next request can
+// answer correctly. Everything else — a declared refusal, an unclassified
+// 4xx, a decoded-but-invalid envelope, or an over-limit body — cannot produce
+// a different answer within the session, so it stays cached and later calls
+// replay it instead of re-driving a doomed prepare/start cycle.
 function isTransientBrokerFailure(error: unknown): boolean {
   if (error instanceof BrokerResponseError) {
+    // execution_unknown is non-terminal unless the Broker marked it
+    // abandoned: the record can still reconcile to settled, so the
+    // invocation re-drives instead of replaying the 409 for the session's
+    // life. The abandoned (terminal runtime_lost) variant stays cached.
+    if (error.code === 'runtime_broker_execution_unknown' && !error.abandoned)
+      return true;
     return error.status >= 500
       ? error.retryable !== false
       : error.retryable === true;
   }
-  return (
-    error instanceof TypeError ||
-    error instanceof DOMException ||
-    error instanceof BrokerWireError
-  );
+  if (error instanceof BrokerWireError) return error.retryableByRedrive;
+  return error instanceof TypeError || error instanceof DOMException;
 }
 
-// A response the client could not decode at all: over the size limit or not
-// JSON. Distinct from a decoded-but-invalid envelope, which stays permanent.
+// A response the client could not decode at all. An undecodable body (an LB
+// drain page, a truncated reply) is transport-shaped: the next request can
+// answer correctly, so it retries by re-drive. An over-limit body is a
+// deterministic property of the response — re-driving it transfers the same
+// bytes to the same refusal — so it stays cached like a declared refusal.
 class BrokerWireError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly retryableByRedrive: boolean,
+  ) {
     super(message);
     this.name = 'BrokerWireError';
   }
@@ -169,6 +179,7 @@ async function readBoundedResponseText(
         await reader.cancel().catch(() => undefined);
         throw new BrokerWireError(
           'Managed Runtime Broker response exceeded its limit.',
+          false,
         );
       }
       chunks.push(chunk.value);
@@ -654,6 +665,7 @@ export class ManagedRuntimeBrokerClient {
       await response.body?.cancel().catch(() => undefined);
       throw new BrokerWireError(
         'Managed Runtime Broker response exceeded its limit.',
+        false,
       );
     }
     const text = await readBoundedResponseText(
@@ -665,6 +677,7 @@ export class ManagedRuntimeBrokerClient {
     } catch {
       throw new BrokerWireError(
         'Managed Runtime Broker returned invalid JSON.',
+        true,
       );
     }
   }
@@ -1025,6 +1038,7 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
     const ensureExecution = (
       reference: ManagedToolInvocationReference,
     ): BrokerExecution => {
+      assertEntry();
       this.assertReference(entry, reference);
       const referenceDigest = managedToolDigest(reference);
       let execution = entry.executions.get(reference.invocationId);
@@ -1176,49 +1190,49 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         );
       }
       execution.started ??= (async () => {
-        assertEntry();
-        let status = await this.client.startExecution(
-          entry.request.sessionId,
-          entry.harnessSessionId,
-          reserved.executionCallId,
-          AbortSignal.any([
-            this.lifetime.signal,
-            AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),
-          ]),
-        );
-        while (status.state !== 'settled') {
-          await delay(EXECUTION_POLL_DELAY_MS, undefined, {
-            signal: this.lifetime.signal,
-          });
-          status = await readExecution(reference);
+        try {
+          assertEntry();
+          let status = await this.client.startExecution(
+            entry.request.sessionId,
+            entry.harnessSessionId,
+            reserved.executionCallId,
+            AbortSignal.any([
+              this.lifetime.signal,
+              AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),
+            ]),
+          );
+          while (status.state !== 'settled') {
+            await delay(EXECUTION_POLL_DELAY_MS, undefined, {
+              signal: this.lifetime.signal,
+            });
+            status = await readExecution(reference);
+          }
+          return parseExecutionResult(status.result);
+        } catch (error) {
+          // A transiently rejected start must not be cached forever either:
+          // re-execution re-prepares under the stable idempotency key, with
+          // the failed digest tombstoned for the same reason as the
+          // reservation. Evicting here — inside the continuation that
+          // settles `started` — guarantees a caller retrying off the
+          // rejection already finds the cache empty; an async handler
+          // attached beside it would resume only after that retry replayed
+          // the stale rejection. The reservation resolved before this IIFE
+          // ran, so the call id is in scope for the tombstone: without it a
+          // draining cancel/status could no longer reach the receipt.
+          if (
+            isTransientBrokerFailure(error) &&
+            entry.executions.get(reference.invocationId) === execution
+          ) {
+            entry.executions.delete(reference.invocationId);
+            entry.failedDigests.set(reference.invocationId, {
+              referenceDigest: execution.referenceDigest,
+              error,
+              executionCallId: reserved.executionCallId,
+            });
+          }
+          throw error;
         }
-        return parseExecutionResult(status.result);
       })();
-      const startedExecution = execution;
-      // A transiently rejected start must not be cached forever either:
-      // re-execution re-prepares under the stable idempotency key, with the
-      // failed digest tombstoned for the same reason as above.
-      void execution.started.catch(async (error: unknown) => {
-        if (!isTransientBrokerFailure(error)) {
-          // Same rule as the reservation: a declared-refusal or deterministic
-          // start stays cached rather than being re-driven on every call.
-          return;
-        }
-        // The reservation already resolved, so the Broker-side execution
-        // stays addressable by its call id: the tombstone must carry it, or
-        // a draining cancel/status could no longer reach the receipt.
-        const reserved = await startedExecution.reserved.catch(() => undefined);
-        if (entry.executions.get(reference.invocationId) === startedExecution) {
-          entry.executions.delete(reference.invocationId);
-          entry.failedDigests.set(reference.invocationId, {
-            referenceDigest: startedExecution.referenceDigest,
-            error,
-            ...(reserved === undefined
-              ? {}
-              : { executionCallId: reserved.executionCallId }),
-          });
-        }
-      });
       return execution.started;
     };
     return {

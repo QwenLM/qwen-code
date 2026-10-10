@@ -916,7 +916,7 @@ describe('Hosted Harness no-tool session', () => {
     { tenantId: 'foreign' },
     { workspaceId: 'foreign' },
     { writerToken: 'f'.repeat(40) },
-    { baseUrl: 'http://foreign-store.test' },
+    { baseUrl: 'https://foreign-store.test' },
     { writerId: randomUUID() },
   ])(
     'refuses lifecycle adoption with a different original grant: %s',
@@ -12921,7 +12921,7 @@ describe('Hosted Harness tool approvals', () => {
     for (const [changed, expected] of [
       [{ tenantId: 'other' }, 409],
       [{ workspaceId: 'other' }, 409],
-      [{ baseUrl: 'http://other-store.test' }, 409],
+      [{ baseUrl: 'https://other-store.test' }, 409],
     ] as const) {
       for (const recovery of [
         { passiveManagedRuntimeRecovery: true },

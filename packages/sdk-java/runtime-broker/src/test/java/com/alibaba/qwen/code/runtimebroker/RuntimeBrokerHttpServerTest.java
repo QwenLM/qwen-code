@@ -888,7 +888,7 @@ class RuntimeBrokerHttpServerTest {
             var readError = JSON.parseObject(readResponse.body());
             assertEquals("runtime_broker_store_unavailable", readError.getString("code"));
             assertTrue(readError.getBooleanValue("retryable"));
-            for (Map<String, Object> startBody : List.of(
+            for (Map<String, Object> startBody : List.<Map<String, Object>>of(
                     Map.of("protocolVersion", 1, "requestId", "start",
                             "harnessSessionId", "harness", "runtimeSessionId", "runtime"),
                     Map.of("protocolVersion", 1, "requestId", "start-payload",

@@ -975,6 +975,134 @@ describe('BrokerManagedRuntimeProvider', () => {
     provider.dispose();
   });
 
+  it('re-drives a start the Broker answered execution_unknown on', async () => {
+    let prepares = 0;
+    let starts = 0;
+    const preparedStatus = {
+      state: 'prepared' as const,
+      cancelRequested: false,
+      lastSeq: 0,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+    };
+    const settledStatus = {
+      ...preparedStatus,
+      state: 'settled' as const,
+      result: { executionStatus: 'success' },
+    };
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare')) {
+        prepares++;
+        return json(
+          envelope({ executionCallId: 'execution-1', status: preparedStatus }),
+        );
+      }
+      if (url.endsWith('/executions/execution-1:start')) {
+        // execution_unknown without the terminal abandoned detail is
+        // reconcilable — the record can still settle — so the invocation
+        // must re-drive rather than replay the 409 for the session's life.
+        if (++starts === 1)
+          return new Response(
+            JSON.stringify({
+              code: 'runtime_broker_execution_unknown',
+              error: 'Execution unknown.',
+              retryable: false,
+            }),
+            { status: 409, headers: { 'content-type': 'application/json' } },
+          );
+        return json(
+          envelope({ executionCallId: 'execution-1', status: settledStatus }),
+        );
+      }
+      if (url.includes('/executions/execution-1?'))
+        return json(
+          envelope({ executionCallId: 'execution-1', status: settledStatus }),
+        );
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(client.execute(reference())).rejects.toThrow('409');
+    await expect(client.execute(reference())).resolves.toMatchObject({
+      executionStatus: 'success',
+    });
+    expect(starts).toBe(2);
+    expect(prepares).toBe(2);
+    await expect(client.status(reference())).resolves.toMatchObject({
+      state: 'settled',
+    });
+    provider.dispose();
+  });
+
+  it('keeps a start the Broker declared abandoned permanently cached', async () => {
+    let prepares = 0;
+    let starts = 0;
+    const preparedStatus = {
+      state: 'prepared' as const,
+      cancelRequested: false,
+      lastSeq: 0,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+    };
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare')) {
+        prepares++;
+        return json(
+          envelope({ executionCallId: 'execution-1', status: preparedStatus }),
+        );
+      }
+      if (url.endsWith('/executions/execution-1:start')) {
+        starts++;
+        // The terminal runtime_lost variant is not reconcilable: the
+        // invocation stays cached rather than re-driving a start the Broker
+        // has declared permanently unknown.
+        return new Response(
+          JSON.stringify({
+            code: 'runtime_broker_execution_unknown',
+            error: 'Runtime execution outcome is permanently unknown.',
+            retryable: false,
+            details: { terminal: true, reason: 'runtime_lost' },
+          }),
+          { status: 409, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(client.execute(reference())).rejects.toMatchObject({
+      code: 'runtime_broker_execution_unknown',
+      abandoned: true,
+    });
+    await expect(client.execute(reference())).rejects.toMatchObject({
+      code: 'runtime_broker_execution_unknown',
+      abandoned: true,
+    });
+    expect(starts).toBe(1);
+    expect(prepares).toBe(1);
+    provider.dispose();
+  });
+
   it('re-prepares an execution after a transient reservation failure', async () => {
     let prepares = 0;
     const preparedStatus = {
@@ -996,6 +1124,17 @@ describe('BrokerManagedRuntimeProvider', () => {
         );
       }
       if (url.endsWith('/executions/execution-1:start'))
+        return json(
+          envelope({
+            executionCallId: 'execution-1',
+            status: {
+              ...preparedStatus,
+              state: 'settled',
+              result: { executionStatus: 'success' },
+            },
+          }),
+        );
+      if (url.includes('/executions/execution-1?'))
         return json(
           envelope({
             executionCallId: 'execution-1',
@@ -1036,6 +1175,13 @@ describe('BrokerManagedRuntimeProvider', () => {
       executionStatus: 'success',
     });
     expect(prepares).toBe(3);
+    // After the successful re-drive the invocation holds BOTH a live
+    // execution and the stale tombstone; a read must resolve from the live
+    // one. Reading the tombstone first would re-throw the recorded 503 for
+    // an invocation that already succeeded.
+    await expect(client.status(reference())).resolves.toMatchObject({
+      state: 'settled',
+    });
     provider.dispose();
   });
 
@@ -1149,6 +1295,127 @@ describe('BrokerManagedRuntimeProvider', () => {
     expect(prepares).toBe(3);
     provider.dispose();
   });
+
+  it('re-prepares an execution after a Broker request timeout', async () => {
+    let prepares = 0;
+    const preparedStatus = {
+      state: 'prepared' as const,
+      cancelRequested: false,
+      lastSeq: 0,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+    };
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare')) {
+        // A Broker stalled past BROKER_REQUEST_TIMEOUT_MS rejects with a
+        // DOMException (undici's TimeoutError): transport-shaped, so the
+        // rejected reservation must be evicted, not cached for the session.
+        if (++prepares <= 2)
+          throw new DOMException(
+            'The operation was aborted due to timeout',
+            'TimeoutError',
+          );
+        return json(
+          envelope({ executionCallId: 'execution-1', status: preparedStatus }),
+        );
+      }
+      if (url.endsWith('/executions/execution-1:start'))
+        return json(
+          envelope({
+            executionCallId: 'execution-1',
+            status: {
+              ...preparedStatus,
+              state: 'settled',
+              result: { executionStatus: 'success' },
+            },
+          }),
+        );
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(client.execute(reference())).rejects.toThrow(
+      'aborted due to timeout',
+    );
+    expect(prepares).toBe(2);
+    await expect(client.execute(reference())).resolves.toMatchObject({
+      executionStatus: 'success',
+    });
+    expect(prepares).toBe(3);
+    provider.dispose();
+  });
+
+  it.each([
+    ['declared content-length', true] as const,
+    ['streamed body', false] as const,
+  ])(
+    'caches an over-limit Broker body (%s) instead of re-driving it',
+    async (_label, declareLength) => {
+      let prepares = 0;
+      const overLimit = () => {
+        if (declareLength)
+          return new Response('{}', {
+            status: 200,
+            headers: {
+              'content-type': 'application/json',
+              'content-length': String(9 * 1024 * 1024),
+            },
+          });
+        const chunk = new Uint8Array(1024 * 1024).fill(120);
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              for (let i = 0; i < 9; i++) controller.enqueue(chunk);
+              controller.close();
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      };
+      const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+        const url = String(input);
+        if (url.endsWith('tool-sessions:acquire'))
+          return json(envelope({ acquired: true }));
+        if (url.endsWith('/executions:prepare')) {
+          prepares++;
+          return overLimit();
+        }
+        throw new Error(`Unexpected Broker request: ${url}`);
+      });
+      const provider = new BrokerManagedRuntimeProvider({
+        baseUrl: 'http://127.0.0.1:8080',
+        token: 'secret',
+        fetch: fetchImpl,
+      });
+      const client = await provider.getToolV2Client(request(), {
+        harnessSessionId,
+      });
+      // The size limit is a deterministic property of the response, not the
+      // transport: both the in-band retry and every later execute replay
+      // the recorded refusal instead of re-transferring a doomed body.
+      await expect(client.execute(reference())).rejects.toMatchObject({
+        name: 'BrokerWireError',
+        message: expect.stringContaining('exceeded its limit'),
+      });
+      expect(prepares).toBe(2);
+      await expect(client.execute(reference())).rejects.toMatchObject({
+        name: 'BrokerWireError',
+        message: expect.stringContaining('exceeded its limit'),
+      });
+      expect(prepares).toBe(2);
+      provider.dispose();
+    },
+  );
 
   it('re-prepares an execution the Broker marked retryable below 500', async () => {
     let prepares = 0;
@@ -1576,6 +1843,57 @@ describe('BrokerManagedRuntimeProvider', () => {
     );
   });
 
+  it('refuses a cached execution once the provider is disposed', async () => {
+    const preparedStatus = {
+      state: 'prepared' as const,
+      cancelRequested: false,
+      lastSeq: 0,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+    };
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare'))
+        return json(
+          envelope({ executionCallId: 'execution-1', status: preparedStatus }),
+        );
+      if (url.endsWith('/executions/execution-1:start'))
+        return json(
+          envelope({
+            executionCallId: 'execution-1',
+            status: {
+              ...preparedStatus,
+              state: 'settled',
+              result: { executionStatus: 'success' },
+            },
+          }),
+        );
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(client.execute(reference())).resolves.toMatchObject({
+      executionStatus: 'success',
+    });
+    provider.dispose();
+    // The settled execution is cached, but the provider no longer holds the
+    // Session: execute/prepareExecution must join status, cancel and
+    // manifest in refusing rather than resolving from the stale cache.
+    await expect(client.execute(reference())).rejects.toThrow('disposed');
+    await expect(client.prepareExecution!(reference())).rejects.toThrow(
+      'disposed',
+    );
+  });
+
   it('re-drives an execution after a transient start failure', async () => {
     let prepares = 0;
     let starts = 0;
@@ -1626,6 +1944,67 @@ describe('BrokerManagedRuntimeProvider', () => {
     });
     expect(starts).toBe(2);
     expect(prepares).toBe(2);
+    provider.dispose();
+  });
+
+  it('re-prepares when the retry begins in the rejection continuation', async () => {
+    let prepares = 0;
+    let starts = 0;
+    const preparedStatus = {
+      state: 'prepared' as const,
+      cancelRequested: false,
+      lastSeq: 0,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+    };
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare')) {
+        prepares++;
+        return json(
+          envelope({ executionCallId: 'execution-1', status: preparedStatus }),
+        );
+      }
+      if (url.endsWith('/executions/execution-1:start')) {
+        if (++starts === 1) return new Response('{}', { status: 503 });
+        return json(
+          envelope({
+            executionCallId: 'execution-1',
+            status: {
+              ...preparedStatus,
+              state: 'settled',
+              result: { executionStatus: 'success' },
+            },
+          }),
+        );
+      }
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    // The retry begins in the SAME continuation that observes the rejection;
+    // the rejects/resolves assertions would yield the extra microtasks an
+    // asynchronous eviction handler needs, hiding a replay of the stale
+    // rejection, so drive the pair with try/catch instead.
+    try {
+      await client.execute(reference());
+      throw new Error('expected the first execute to reject');
+    } catch {
+      await expect(client.execute(reference())).resolves.toMatchObject({
+        executionStatus: 'success',
+      });
+    }
+    expect(prepares).toBe(2);
+    expect(starts).toBe(2);
     provider.dispose();
   });
 
