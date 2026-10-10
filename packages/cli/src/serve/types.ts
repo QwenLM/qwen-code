@@ -516,11 +516,11 @@ export interface CapabilitiesEnvelope {
     workflowsEnabled?: boolean;
     removable?: boolean;
     kind?: 'live';
-    /** Stable registration IDs for this workspace (may contain multiple entries for alias paths). */
+    /** Stable registration IDs for this workspace (may contain multiple entries for alias paths). Only present when `workspace_pinning` is advertised. */
     registrationIds?: readonly string[];
-    /** Present when the workspace is pinned in the sidebar. */
+    /** Whether the workspace is pinned. Always present (false when not pinned) when `workspace_pinning` is advertised; omitted when the tag is absent. */
     isPinned?: boolean;
-    /** ISO-8601 timestamp of when the workspace was pinned. */
+    /** ISO-8601 timestamp of when the workspace was pinned. Only present when `isPinned` is true. */
     pinnedAt?: string;
   }>;
   /**

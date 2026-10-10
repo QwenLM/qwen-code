@@ -49,13 +49,13 @@
 ```ts
 interface WorkspaceEntry {
   // ...现有字段...
-  registrationIds?: readonly string[]; // 稳定注册 ID（别名路径时可能包含多个）
-  isPinned: boolean; // 功能通告时始终存在（未置顶时为 false）
-  pinnedAt?: string; // ISO-8601 时间戳，仅置顶时存在
+  registrationIds?: readonly string[]; // 仅当 workspace_pinning 通告时存在
+  isPinned?: boolean; // 仅当 workspace_pinning 通告时存在（未置顶时为 false）
+  pinnedAt?: string; // 仅当 isPinned 为 true 时存在
 }
 ```
 
-当标签不存在时，三个字段全部省略。`isPinned` 对未置顶条目始终为 `false`（不是省略），与 `primary` 和 `trusted` 等始终存在的布尔值模式一致。
+当标签不存在时，三个字段全部省略。当通告时，`registrationIds` 和 `isPinned` 始终存在；`pinnedAt` 仅在工作区实际置顶时存在。
 
 ## 能力协商
 

@@ -738,7 +738,7 @@ describe('WorkspaceRegistrationStore', () => {
     expect(snapshot.pinnedAts).toBeUndefined();
   });
 
-  it('parses stored pinnedAts and rejects invalid entries', async () => {
+  it('parses stored pinnedAts and skips invalid entries with a warning', async () => {
     const home = await tempHome();
     const store = new WorkspaceRegistrationStore('/work/primary', home);
     const id = workspaceRegistrationId('/work/secondary');

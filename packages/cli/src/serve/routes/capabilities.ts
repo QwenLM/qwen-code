@@ -84,6 +84,32 @@ export function registerCapabilitiesRoutes(
       ? configuredPollIntervalMs
       : 5_000;
   app.get('/capabilities', async (_req, res) => {
+    // Read the pin store BEFORE snapshotting registry entries so the
+    // envelope reflects a consistent point-in-time: both the registry
+    // catalog and the pin state are captured after the only async I/O.
+    const runtimeRemoval = (
+      deps.hostedHarness
+        ? hostedPersonaServeFeatures()
+        : deps.currentServeFeatures()
+    ).includes('workspace_runtime_removal');
+    const workspacePinning = (
+      deps.hostedHarness
+        ? hostedPersonaServeFeatures()
+        : deps.currentServeFeatures()
+    ).includes('workspace_pinning');
+    let pinnedAts: Record<string, string> | undefined;
+    if (workspacePinning && deps.workspaceRegistrationStore) {
+      try {
+        const snapshot = await deps.workspaceRegistrationStore.read();
+        pinnedAts = snapshot.pinnedAts;
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: failed to read workspace pin state for /capabilities: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
     const entries = deps.workspaceRegistry
       .listAllEntries()
       .filter(
@@ -98,21 +124,6 @@ export function registerCapabilitiesRoutes(
     const features = deps.hostedHarness
       ? hostedPersonaServeFeatures()
       : deps.currentServeFeatures();
-    const runtimeRemoval = features.includes('workspace_runtime_removal');
-    const workspacePinning = features.includes('workspace_pinning');
-    let pinnedAts: Record<string, string> | undefined;
-    if (deps.workspaceRegistrationStore) {
-      try {
-        const snapshot = await deps.workspaceRegistrationStore.read();
-        pinnedAts = snapshot.pinnedAts;
-      } catch (err) {
-        writeStderrLine(
-          `qwen serve: failed to read workspace pin state for /capabilities: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-    }
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,
       ...(deps.hostedHarness ? { hostedHarness: deps.hostedHarness } : {}),

@@ -49,13 +49,13 @@ When `workspace_pinning` is advertised, each workspace entry includes:
 ```ts
 interface WorkspaceEntry {
   // ...existing fields...
-  registrationIds?: readonly string[]; // stable registration IDs (may contain multiple for alias paths)
-  isPinned: boolean; // always present when feature is advertised (false when not pinned)
-  pinnedAt?: string; // ISO-8601 timestamp, present only when pinned
+  registrationIds?: readonly string[]; // present only when workspace_pinning is advertised
+  isPinned?: boolean; // present only when workspace_pinning is advertised (false when not pinned)
+  pinnedAt?: string; // present only when isPinned is true
 }
 ```
 
-When the tag is absent, all three fields are omitted entirely. `isPinned` is always `false` for unpinned entries (not omitted), matching the pattern of always-present booleans like `primary` and `trusted`.
+When the tag is absent, all three fields are omitted entirely. When advertised, `registrationIds` and `isPinned` are always present; `pinnedAt` is present only when the workspace is actually pinned.
 
 ## Capability negotiation
 

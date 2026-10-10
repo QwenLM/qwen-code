@@ -2323,7 +2323,10 @@ export function registerWorkspaceManagementRoutes(
             if (typeof workspaceRegistry.listAllEntries === 'function') {
               const entries = workspaceRegistry.listAllEntries();
               for (const entry of entries) {
-                if (entry.registrationIds.includes(requestedId)) {
+                if (
+                  entry.registrationIds.includes(requestedId) ||
+                  entry.workspaceId === requestedId
+                ) {
                   for (const regId of entry.registrationIds) {
                     if (snapshot.pinnedAts?.[regId] !== undefined) {
                       pinnedAt = snapshot.pinnedAts[regId];

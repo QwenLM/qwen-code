@@ -1490,7 +1490,7 @@ Returns `404 workspace_registration_not_found`, `500 workspace_registration_stor
 
 ### `PATCH /workspace-registrations/:id/pin`
 
-Set or clear pin state for one persisted registration. Pinned workspaces appear at the top of the Web Shell sidebar. The route requires a JSON body `{ "isPinned": boolean }`; omitting the body or passing a non-boolean returns `400 invalid_body`. Success returns `{ id, isPinned, pinnedAt? }` — `pinnedAt` is present only when `isPinned` is true.
+Set or clear pin state for a persisted registration. The route resolves the target by matching `:id` against both stored registration IDs and workspace IDs, then applies the change to every registration ID of the matched entry (covering alias paths). Pinned workspaces appear at the top of the Web Shell sidebar. The route requires a JSON body `{ "isPinned": boolean }`; omitting the body or passing a non-boolean returns `400 invalid_body`. Success returns `{ id, isPinned, pinnedAt? }` — `pinnedAt` is present only when `isPinned` is true. `pinnedAt` is a string produced by `new Date().toISOString()` (strict ISO-8601).
 
 ```json
 // Request (pin)
