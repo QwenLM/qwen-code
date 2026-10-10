@@ -295,8 +295,12 @@ describe('PreToolUse updatedInput', () => {
     ptyProcess.write(prompt);
     await waitFor('the prompt to echo', () => output.includes(prompt));
     ptyProcess.write('\r');
-    await waitFor('the confirmation for the replacement', () =>
-      output.includes('ask-b.txt'),
+    // 'ask-b.txt' already paints with the executing tool row, before the
+    // ask dialog exists; the hook's reason renders only inside the dialog,
+    // so waiting for it is what makes the approval below land.
+    await waitFor(
+      'the confirmation for the replacement',
+      () => output.includes('ask-b.txt') && output.includes('p02b1 review'),
     );
     expect(output).not.toContain('ask-a.txt');
     // The first option approves once.
