@@ -4348,7 +4348,7 @@ const ZH: Messages = {
   'capacityChoice.blocked.pendingSessionStarts': '等待会话启动',
   'capacityChoice.blocked.acpConnections': '有 ACP 客户端连接',
   'capacityChoice.blocked.memoryTasks': '记忆任务运行中',
-  'capacityChoice.blocked.channelWorkers': '频道 worker 运行中',
+  'capacityChoice.blocked.channelWorkers': '渠道 worker 运行中',
   'capacityChoice.blocked.voiceSessions': '语音会话活跃',
   'capacityChoice.blocked.management_pending': '工作区管理操作待完成',
   'capacityChoice.blocked.scheduler_pending': '正在恢复定时任务会话',
