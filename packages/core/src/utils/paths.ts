@@ -44,7 +44,7 @@ export function _resetValidatePathCacheForTest(): void {
  * Includes: spaces, parentheses, brackets, braces, semicolons, ampersands, pipes,
  * asterisks, question marks, dollar signs, backticks, quotes, hash, and other shell metacharacters.
  */
-export const SHELL_SPECIAL_CHARS = /[ \t()[\]{};|*?$`'"#&<>!~,]/;
+export const SHELL_SPECIAL_CHARS = /[\s()[\]{};|*?$`'"#&<>!~,]/;
 
 // Single shared list of path-argument keys used across file tools.
 // file_path (Edit, ReadFile, WriteFile), path (Glob, Grep, Ls, RipGrep),
@@ -348,8 +348,8 @@ export function unescapeShellSpecials(value: string): string {
  * Removes backslash escaping from shell metacharacters.
  *
  * On Windows, backslashes are path separators, not shell escape characters
- * (PowerShell uses backtick, cmd.exe uses caret). Skipping unescaping on
- * win32 avoids corrupting valid absolute paths like C:\(v2)\file.txt.
+ * (PowerShell uses backtick, cmd.exe uses caret). Backslash-separated paths
+ * are therefore preserved. Escaped references are decoded by their consumer.
  */
 export function unescapePath(filePath: string): string {
   if (os.platform() === 'win32') {

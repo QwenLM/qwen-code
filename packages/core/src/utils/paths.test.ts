@@ -23,6 +23,7 @@ import {
   validatePath,
   resolveAndValidatePath,
   unescapePath,
+  unescapeShellSpecials,
   isSubpath,
   shortenPath,
   tildeifyPath,
@@ -121,6 +122,40 @@ function useWorkspace(prefix: string) {
 }
 
 describe('escapePath', () => {
+  it.each([
+    '\t',
+    '\n',
+    '\v',
+    '\f',
+    '\r',
+    ' ',
+    '\u00a0',
+    '\u1680',
+    '\u2000',
+    '\u2001',
+    '\u2002',
+    '\u2003',
+    '\u2004',
+    '\u2005',
+    '\u2006',
+    '\u2007',
+    '\u2008',
+    '\u2009',
+    '\u200a',
+    '\u2028',
+    '\u2029',
+    '\u202f',
+    '\u205f',
+    '\u3000',
+    '\ufeff',
+  ])('round-trips tokenizer whitespace %j', (whitespace) => {
+    const raw = `docs/report${whitespace}final.txt`;
+    const escaped = `docs/report\\${whitespace}final.txt`;
+    expect(escapePath(raw)).toBe(escaped);
+    expect(escapePath(escaped)).toBe(escaped);
+    expect(unescapeShellSpecials(escaped)).toBe(raw);
+  });
+
   table('should escape %s', escapePath, [
     ['spaces', ['my file.txt', 'my\\ file.txt']],
     ['tabs', ['file\twith\ttabs.txt', 'file\\\twith\\\ttabs.txt']],
@@ -204,15 +239,29 @@ describe('escapePath', () => {
 describe('unescapePath', () => {
   const isWindows = process.platform === 'win32';
 
-  // On Windows, backslashes are path separators, not shell escape chars, so
-  // unescapePath is intentionally a no-op on win32.
-  it.skipIf(!isWindows)('should be a no-op on Windows', () => {
+  // On Windows, backslashes are path separators, not shell escape chars.
+  it.skipIf(!isWindows)('preserves backslash-separated Windows paths', () => {
     for (const p of [
       'C:\\Users\\my file.txt',
       'C:\\(v2)\\file.txt',
       'path\\to\\file\\ name.txt',
+      'C:/repo\\#docs\\readme.md',
     ]) {
       expect(unescapePath(p)).toBe(p);
+    }
+  });
+
+  it('preserves @-prefixed mixed Windows separators for the reference consumer', () => {
+    const spy = vi.spyOn(os, 'platform').mockReturnValue('win32');
+    try {
+      expect(unescapePath('@C:/repo\\#docs\\readme.md')).toBe(
+        '@C:/repo\\#docs\\readme.md',
+      );
+      expect(unescapePath('@C:/Program\\ Files/Qwen/qwen.exe')).toBe(
+        '@C:/Program\\ Files/Qwen/qwen.exe',
+      );
+    } finally {
+      spy.mockRestore();
     }
   });
 
