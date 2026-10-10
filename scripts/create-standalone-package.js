@@ -75,6 +75,7 @@ const DIST_REQUIRED_PATHS = [
   'cli.js',
   'cli-entry.js',
   'codeModeHost.js',
+  'mod-worker.js',
   'execution-worker.js',
   'sandboxBwrapRelay.js',
   'sandboxLandlockRelay.js',
@@ -93,7 +94,9 @@ const DIST_ALLOWED_ENTRIES = new Set([
   // fzf fuzzy-search worker; esbuild emits it as a standalone entry that must
   // sit next to cli.js so `new URL('./fzfWorker.js', ...)` resolves at runtime.
   'fzfWorker.js',
+  'glob-search-worker.js',
   'codeModeHost.js',
+  'mod-worker.js',
   // Sandbox relays + confined file worker; esbuild emits them as
   // standalone entries that sandboxAsset() resolves from the bundle dir at
   // execution time (packages/core/src/sandbox/sandbox-execution.ts).

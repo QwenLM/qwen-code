@@ -57,6 +57,17 @@ spec 迁入
 D1 为生命周期路由（4.3）引入了 `1.13.0`。集成 W0d 新增了 Workspace 查询路由，
 版本推进到 `1.14.0`（4.5）。
 
+版本号由手工分配，而消费者按它判断能力，因此单调性由 CI 强制（#13804）。每个
+pull request 上，SDK Java workflow 的快速守卫 lane 把合并结果中的文档与 base 分支
+head 上的副本比较：文档发生变化而 `info.version` 相等或更低时失败，按段做数字
+比较，并指名版本是停滞还是回退；与 base ref 逐字节相同的 pull request 不欠一次
+递增。每次改动该文档的 `main` push，以及每 30 分钟的定时任务，都会通过 API 读取
+每个开放 pull request 的 changed paths 与其文档——不 fetch、不 checkout、不运行
+pull request 代码——并设置 `API contract version uniqueness (latest main)` 状态：
+声明的版本不再前进到 `main` 之上时失败，否则成功，并列出声明同一版本的其他开放
+pull request；文件列表或 head 文档无法完整读取时改为错误。已带有该状态的 head
+即使不再改动该文档也会被重新评估，因此过期的失败状态会被清除。
+
 ### 4.2 生成 TypeScript，校验 Java
 
 - **TypeScript 由生成得到。** WebShell 类型由 `openapi-typescript` 生成。客户端
@@ -81,9 +92,10 @@ main 已经提供改名（`PATCH /v1/agents/sessions/{sessionId}`）、`unarchiv
 
 ### 4.4 AgentDefinition 之前的 `agent_revision`
 
-`PublicSession.agent_revision` 是必填字段，但 `/v1/agents` 仍是 `planned`。在
-AgentDefinition 落地之前，D2 返回取自服务端 agent 配置的固定 revision。D1 只
-记录该字段缺失。
+`PublicSession.agent_revision` 是必填字段。D2 返回取自服务端 agent 配置的固定
+revision，D1 只记录该字段缺失。D8a（v1.29）把 `/v1/agents` 路由实现为已存储、
+不可变的 revision；在 D8b 让会话固定已存储的 revision 之前，会话仍使用配置的
+revision。参见 [AgentDefinition revision](2026-10-01-managed-agent-definitions.zh-CN.md)。
 
 ### 4.5 W0d 发现与空会话绑定
 

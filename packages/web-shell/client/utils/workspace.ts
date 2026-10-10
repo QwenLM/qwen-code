@@ -10,6 +10,30 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 
+const AGENT_COLLABORATION_FEATURE = 'agent_collaboration_v1';
+
+export function isAgentCollaborationEnabledForWorkspace(
+  capabilities: DaemonCapabilities | undefined,
+  cwd: string | undefined,
+): boolean {
+  if (!capabilities?.features?.includes(AGENT_COLLABORATION_FEATURE)) {
+    return false;
+  }
+  const workspaces = capabilities.workspaces;
+  if (
+    !workspaces?.some((entry) => entry.agentCollaborationEnabled !== undefined)
+  ) {
+    return true;
+  }
+  if (!cwd) {
+    return workspaces.some((entry) => entry.agentCollaborationEnabled === true);
+  }
+  return (
+    workspaces.find((entry) => entry.cwd === cwd)?.agentCollaborationEnabled ===
+    true
+  );
+}
+
 /**
  * Last path segment of an absolute workspace cwd, for a compact per-workspace
  * label (e.g. `/home/me/projects/api` → `api`). Falls back to the full path when
@@ -45,6 +69,29 @@ export function workspaceLabelForCwd(
 ): string {
   const workspace = workspaces?.find((entry) => entry.cwd === cwd);
   return workspace ? workspaceLabel(workspace) : workspaceBasename(cwd);
+}
+
+/**
+ * Suffix the parent directory onto labels that collide inside one list.
+ * Two daemons — or one daemon with two checkouts — frequently register the
+ * same basename (`qwen-code` everywhere); the menu must tell them apart by
+ * the workspace's own location, not only by tooltip or host badge.
+ */
+export function disambiguateWorkspaceLabels<
+  T extends { label: string; cwd: string },
+>(entries: readonly T[]): T[] {
+  const counts = new Map<string, number>();
+  for (const entry of entries) {
+    counts.set(entry.label, (counts.get(entry.label) ?? 0) + 1);
+  }
+  return entries.map((entry) => {
+    if ((counts.get(entry.label) ?? 0) < 2) return entry;
+    const parent = entry.cwd
+      .split(/[\\/]+/)
+      .filter(Boolean)
+      .at(-2);
+    return parent ? { ...entry, label: `${entry.label} (${parent})` } : entry;
+  });
 }
 
 /**

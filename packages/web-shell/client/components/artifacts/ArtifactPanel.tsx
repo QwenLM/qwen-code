@@ -9,7 +9,6 @@ import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import type { WebShellRightPanelItem } from '../../customization';
 import {
   useConnection,
-  useWorkspace,
   type DaemonSessionOwnerSnapshot,
   type DaemonSessionActions,
   type DaemonScheduledTask,
@@ -38,7 +37,6 @@ import {
   NetworkIcon,
 } from 'lucide-react';
 import { Skeleton } from '../ui/skeleton';
-import { LazyThreadsRoute } from '../workspace-agents/LazyThreadsRoute';
 import { Button } from '../ui/button';
 import {
   useCallback,
@@ -337,13 +335,6 @@ export type ArtifactPanelTab =
       sessionId?: string;
     }
   | {
-      id: string;
-      kind: 'agent_activity';
-      title: string;
-      threadId: string;
-      workspaceCwd: string;
-    }
-  | {
       id: 'turn_calls';
       kind: 'turn_calls';
       title: string;
@@ -467,10 +458,6 @@ interface ArtifactPanelProps {
   agentTraceLoading?: boolean;
   agentTraceError?: string;
   onOpenWorkflowAgent?: (task: EnvironmentAgentTask) => void;
-  onOpenCollaborationSession?: (
-    sessionId: string,
-    workspaceCwd: string,
-  ) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
   modelManagement?: WebShellModelManagementOptions;
@@ -494,42 +481,6 @@ interface ArtifactPanelProps {
   variant?: 'docked' | 'drawer';
   fullscreen?: boolean;
   onToggleFullscreen?: () => void;
-}
-
-/**
- * A collaboration thread's activity. Reads the workspace here rather than in
- * the panel, so hosts that render the panel without a workspace provider (and
- * never open this tab) do not need one.
- */
-function AgentActivityTab({
-  threadId,
-  workspaceCwd,
-  onOpenCollaborationSession,
-}: {
-  threadId: string;
-  workspaceCwd: string;
-  onOpenCollaborationSession?: (
-    sessionId: string,
-    workspaceCwd: string,
-  ) => void;
-}) {
-  const workspace = useWorkspace();
-  if (!workspace.capabilities?.features?.includes('agent_collaboration_v1')) {
-    return null;
-  }
-  return (
-    <LazyThreadsRoute
-      chat
-      activityOnly
-      initialThreadId={threadId}
-      workspaceCwd={workspaceCwd}
-      onOpenAgentSession={
-        onOpenCollaborationSession
-          ? (sessionId) => onOpenCollaborationSession(sessionId, workspaceCwd)
-          : undefined
-      }
-    />
-  );
 }
 
 export function ArtifactPanel({
@@ -572,7 +523,6 @@ export function ArtifactPanel({
   agentTraceLoading = false,
   agentTraceError,
   onOpenWorkflowAgent,
-  onOpenCollaborationSession,
   onError,
   sessionWorkflowEnabled,
   modelManagement,
@@ -721,8 +671,7 @@ export function ArtifactPanel({
                   >
                     {getArtifactPanelTabKind(tab) === 'review' ? (
                       <TabReviewIcon />
-                    ) : tab.kind === 'workflow' ||
-                      tab.kind === 'agent_activity' ? (
+                    ) : tab.kind === 'workflow' ? (
                       <NetworkIcon
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
@@ -1392,13 +1341,6 @@ export function ArtifactPanel({
               {activeTab.loadError ?? t('common.loading')}
             </div>
           )
-        ) : activeTab.kind === 'agent_activity' ? (
-          <AgentActivityTab
-            key={activeTab.id}
-            threadId={activeTab.threadId}
-            workspaceCwd={activeTab.workspaceCwd}
-            onOpenCollaborationSession={onOpenCollaborationSession}
-          />
         ) : activeTab.kind === 'context_usage' ? (
           <ContextUsagePanel
             key={activeTab.id}

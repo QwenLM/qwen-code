@@ -16,6 +16,38 @@ abstract class DelegatingBindingRepository implements RuntimeBindingRepository {
     }
 
     @Override
+    public void requestStorageFence(String tenant, String storage, String operation) {
+        delegate.requestStorageFence(tenant, storage, operation);
+    }
+
+    @Override
+    public boolean isStorageFenced(String tenant, String storage, String operation) {
+        return delegate.isStorageFenced(tenant, storage, operation);
+    }
+
+    @Override
+    public List<RuntimeBindingRecord> findByStorage(String tenant, String storage, String cursor, int limit) {
+        return delegate.findByStorage(tenant, storage, cursor, limit);
+    }
+
+    @Override
+    public void requestHarnessDrain(String tenantId, String harnessSessionId) {
+        delegate.requestHarnessDrain(tenantId, harnessSessionId);
+    }
+
+    @Override
+    public boolean isHarnessDraining(String tenantId, String harnessSessionId) {
+        return delegate.isHarnessDraining(tenantId, harnessSessionId);
+    }
+
+    @Override
+    public List<RuntimeBindingRecord> findByHarnessSession(String tenantId,
+            String harnessSessionId, String afterBindingId, int limit) {
+        return delegate.findByHarnessSession(tenantId, harnessSessionId,
+                afterBindingId, limit);
+    }
+
+    @Override
     public RuntimeSessionRecord admitSession(RuntimeSessionRepository sessions,
             RuntimeSessionRecord candidate) {
         return delegate.admitSession(sessions, candidate);
@@ -25,6 +57,13 @@ abstract class DelegatingBindingRepository implements RuntimeBindingRepository {
     public ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, ToolExecutionRecord candidate) {
         return delegate.admitExecution(sessions, executions, candidate);
+    }
+
+    @Override
+    public ToolExecutionRecord authorizeDispatch(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, ToolExecutionRecord expected,
+            String owner, long generation) {
+        return delegate.authorizeDispatch(sessions, executions, expected, owner, generation);
     }
 
     @Override
@@ -50,6 +89,13 @@ abstract class DelegatingBindingRepository implements RuntimeBindingRepository {
     public RuntimeSessionRecord completeSessionRelease(
             RuntimeSessionRepository sessions, RuntimeSessionRecord expected) {
         return delegate.completeSessionRelease(sessions, expected);
+    }
+
+    @Override
+    public RuntimeSessionRecord beginSessionRelease(
+            RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeSessionRecord expected) {
+        return delegate.beginSessionRelease(sessions, executions, expected);
     }
 
     @Override

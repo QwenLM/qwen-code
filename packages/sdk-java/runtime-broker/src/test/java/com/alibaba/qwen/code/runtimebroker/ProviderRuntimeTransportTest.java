@@ -99,10 +99,26 @@ class ProviderRuntimeTransportTest {
         assertEquals(result, transport.control(lease, session, bind).toCompletableFuture().join());
         assertEquals(1, requests.size());
         assertEquals(bind, requests.getFirst().get("operation"));
+        Map<String, Object> prepare = Map.of("kind", "raw-file-history", "action", "prepare",
+                "promptId", "original-prompt", "paths", List.of("a"));
+        assertEquals(result, transport.control(lease, session, prepare).toCompletableFuture().join());
+        assertEquals(prepare, requests.getLast().get("operation"));
         assertThrows(RuntimeBrokerException.class, () -> transport.control(lease, session,
-                Map.of("kind", "raw-file-history", "action", "prepare", "promptId", "other", "paths", List.of("a"))));
+                Map.of("kind", "raw-file-history", "action", "prepare", "promptId", "", "paths", List.of("a"))));
         assertThrows(RuntimeBrokerException.class, () -> transport.control(lease, session,
                 Map.of("kind", "raw-file-history", "action", "bind", "state", Map.of("ownerSessionId", "other"))));
+        assertEquals(2, requests.size());
+    }
+
+    @Test
+    void workspaceContextDoesNotAcquireAProviderSession() {
+        result = Map.of("files", List.of(Map.of("name", "QWEN.md", "text", "rules")));
+        Map<String, Object> read = Map.of("kind", "workspace-context");
+        assertEquals(result, transport.control(lease, session, read).toCompletableFuture().join());
+        assertEquals(1, requests.size());
+        assertEquals(read, requests.getFirst().get("operation"));
+        assertThrows(RuntimeBrokerException.class, () -> transport.control(lease, session,
+                Map.of("kind", "workspace-context", "path", "/etc/passwd")));
         assertEquals(1, requests.size());
     }
 
@@ -239,7 +255,9 @@ class ProviderRuntimeTransportTest {
             assertEquals(8 * 1024 * 1024, ProviderRuntimeProtocol.limit(kind), kind);
         }
         for (String kind : Set.of("acquire", "release", "manifest", "begin-turn", "prepare",
-                "confirmation", "confirm", "preflight", "execute", "status", "cancel")) {
+                "confirmation", "confirm", "preflight", "execute", "status", "cancel",
+                // The TS per-file cap is sized against this tier.
+                "workspace-context")) {
             assertEquals(1024 * 1024, ProviderRuntimeProtocol.limit(kind), kind);
         }
     }

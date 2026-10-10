@@ -19,6 +19,10 @@ if (process.env['QWEN_SERVE_NO_PERSISTENT_REGISTRATION'] === undefined) {
   process.env['QWEN_SERVE_NO_PERSISTENT_REGISTRATION'] = '1';
 }
 
+// Model limits and modalities come from the regex tables unless a test opts
+// into the models.dev catalog.
+process.env['QWEN_CODE_MODELS_DEV'] = 'off';
+
 // The review sandbox policy is the OPERATOR's setting for their own reviews,
 // and this suite must not inherit it. A maintainer who turns the feature on
 // and then runs `npm test` would otherwise watch the review tests refuse to
@@ -29,6 +33,13 @@ if (process.env['QWEN_SERVE_NO_PERSISTENT_REGISTRATION'] === undefined) {
 delete process.env['QWEN_REVIEW_SANDBOX'];
 delete process.env['SANDBOX_SET_UID_GID'];
 
+// QWEN_RUNTIME_DIR is the OPERATOR's runtime root, and it outranks
+// Storage.setRuntimeBaseDir (config/storage.ts:169). Exported on a developer
+// run, any test relying on that static override alone reads and writes the
+// ambient runtime root instead of its own temp dir. Deleting rather than
+// pinning: tests that want the variable set it in-body.
+delete process.env['QWEN_RUNTIME_DIR'];
+
 // Registration capacity is an OPERATOR daemon setting, and `createServeApp` /
 // `runQwenServe` read it straight from the ambient environment when no explicit
 // option or `daemonEnv` is supplied. A maintainer who exports the documented
@@ -37,6 +48,21 @@ delete process.env['SANDBOX_SET_UID_GID'];
 // one. Deleting rather than pinning, so tests that want a capacity still pass
 // one explicitly.
 delete process.env['QWEN_SERVE_MAX_WORKSPACES'];
+
+// The operator's home directory is ambient state too, and the operator
+// settings read (config/execution-sandbox-settings.ts) fails CLOSED on a
+// malformed `~/.qwen/settings.json`: on a machine whose real user settings
+// file is corrupt — observed on the shared autofix verification runners —
+// every test that loads settings or starts a serve stack fails with a
+// FatalConfigError it has nothing to do with. Pinning QWEN_HOME to an empty
+// per-file directory keeps the suite off the operator's settings. Tests that
+// exercise QWEN_HOME resolution itself set or delete the variable in-body.
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+process.env['QWEN_HOME'] = fs.mkdtempSync(
+  path.join(os.tmpdir(), 'qwen-cli-test-home-'),
+);
 
 import { configure } from '@testing-library/react';
 

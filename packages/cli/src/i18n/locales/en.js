@@ -23,6 +23,8 @@ export default {
   'Project level': 'Project level',
   'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
     'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+  'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.':
+    'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -234,12 +236,6 @@ export default {
   'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
   'toolDisplayName.ReadMcpResource': 'toolDisplayName.ReadMcpResource',
   'toolDisplayName.ImageGen': 'toolDisplayName.ImageGen',
-  'toolDisplayName.ThreadPost': 'toolDisplayName.ThreadPost',
-  'toolDisplayName.ThreadWait': 'toolDisplayName.ThreadWait',
-  'toolDisplayName.ThreadBlock': 'toolDisplayName.ThreadBlock',
-  'toolDisplayName.ThreadReview': 'toolDisplayName.ThreadReview',
-  'toolDisplayName.ThreadCreate': 'toolDisplayName.ThreadCreate',
-  'toolDisplayName.ThreadRead': 'toolDisplayName.ThreadRead',
   'toolDisplayName.DownsampleImage': 'toolDisplayName.DownsampleImage',
   'toolDisplayName.DownscaleVideo': 'toolDisplayName.DownscaleVideo',
   'toolDisplayName.DownsampleAudio': 'toolDisplayName.DownsampleAudio',

@@ -1,18 +1,22 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.managedagent.api.ApiModels.ChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CreateSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCommandOperation;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCwdOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTask;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTaskEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionEventRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.UpdateSessionRequest;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService.SessionMutationResult;
 import com.alibaba.qwen.code.managedagent.service.ManagedEventStreamService;
+import com.alibaba.qwen.code.managedagent.service.ManagedTaskCancelService;
 import com.alibaba.qwen.code.managedagent.service.ManagedTaskService;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleService;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
@@ -39,14 +43,17 @@ public class PublicAgentController {
     private final ManagedEventStreamService streams;
     private final SessionLifecycleService lifecycle;
     private final ManagedTaskService tasks;
+    private final ManagedTaskCancelService taskCancels;
 
     public PublicAgentController(ManagedAgentService service,
             ManagedEventStreamService streams,
-            SessionLifecycleService lifecycle, ManagedTaskService tasks) {
+            SessionLifecycleService lifecycle, ManagedTaskService tasks,
+            ManagedTaskCancelService taskCancels) {
         this.service = service;
         this.streams = streams;
         this.lifecycle = lifecycle;
         this.tasks = tasks;
+        this.taskCancels = taskCancels;
     }
 
     @PostMapping
@@ -68,9 +75,10 @@ public class PublicAgentController {
                     "Phase 1 streams through the Session events route.");
         }
         CommandAdmission admission = selection == null
-                ? service.createSession(tenant.tenantId(), idempotencyKey,
-                        request.agentId(), request.agentRevision(), null,
-                        request.metadata(), request.input())
+                ? service.createSession(tenant.tenantId(), tenant.actorId(),
+                        idempotencyKey, request.agentId(),
+                        request.agentRevision(), null, request.metadata(),
+                        request.input())
                 : service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), idempotencyKey,
                         request.agentId(), request.agentRevision(), null,
@@ -140,11 +148,22 @@ public class PublicAgentController {
     }
 
     @GetMapping("/{sessionId}/operations/{operationId}")
-    public PublicCommandOperation getOperation(TenantContext tenant,
+    public Object getOperation(TenantContext tenant,
             @PathVariable String sessionId,
             @PathVariable String operationId) {
-        return lifecycle.getPublic(tenant.tenantId(), tenant.actorId(),
-                sessionId, operationId);
+        return lifecycle.getPublicOperation(tenant.tenantId(),
+                tenant.actorId(), sessionId, operationId);
+    }
+
+    @PostMapping("/{sessionId}/cwd")
+    public ResponseEntity<PublicCwdOperation> changeCwd(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            @Valid @RequestBody ChangeCwdRequest request) {
+        return ResponseEntity.accepted().body(lifecycle.admitPublicCwdChange(
+                tenant.tenantId(), tenant.actorId(), sessionId,
+                idempotencyKey, request.cwdRelative(),
+                request.expectedContextRevision()));
     }
 
     @PostMapping("/{sessionId}/events")
@@ -234,6 +253,25 @@ public class PublicAgentController {
             @PathVariable String sessionId, @PathVariable String taskId) {
         return tasks.getPublicTask(tenant.tenantId(), tenant.actorId(),
                 sessionId, taskId);
+    }
+
+    @GetMapping("/{sessionId}/tasks/{taskId}/events")
+    public PublicList<PublicTaskEvent> taskEvents(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String taskId,
+            @RequestParam(required = false) String after,
+            @RequestParam(defaultValue = "20") int limit) {
+        return tasks.listPublicTaskEvents(tenant.tenantId(), tenant.actorId(),
+                sessionId, taskId, after, limit);
+    }
+
+    @PostMapping("/{sessionId}/tasks/{taskId}/cancel")
+    public ResponseEntity<PublicCommandOperation> cancelTask(
+            TenantContext tenant, @PathVariable String sessionId,
+            @PathVariable String taskId,
+            @RequestHeader("Idempotency-Key") String idempotencyKey) {
+        return ResponseEntity.accepted().body(taskCancels.cancelPublic(
+                tenant.tenantId(), tenant.actorId(), idempotencyKey,
+                sessionId, taskId));
     }
 
     private static long parseSequence(String header, long fallback) {

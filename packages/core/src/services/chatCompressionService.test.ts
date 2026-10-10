@@ -176,6 +176,8 @@ const SNAPSHOT_SUMMARY: [string, object] = [
   usage(1000, 500),
 ];
 
+const REQUEST_ONLY_CATALOG = 'request-only managed-memory catalog';
+
 describe('ChatCompressionService', () => {
   let service: ChatCompressionService;
   let mockChat: LlmChat;
@@ -192,9 +194,10 @@ describe('ChatCompressionService', () => {
       ),
       appendSystemInstruction: vi.fn(),
     } as unknown as LlmChat;
-    mockGetHookSystem = vi.fn().mockReturnValue({});
+    mockGetHookSystem = vi.fn().mockReturnValue({ isManaged: () => false });
     mockConfig = {
       getChatCompression: vi.fn(),
+      getAutoMemoryContext: () => REQUEST_ONLY_CATALOG,
       getAutoCompactThreshold: vi.fn(),
       getBaseLlmClient: vi.fn(),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
@@ -593,6 +596,18 @@ describe('ChatCompressionService', () => {
     expect(generateText).toHaveBeenCalled();
   });
 
+  it('keeps the request-only memory catalog out of the compaction side query', async () => {
+    const generateText = arrangeForced();
+
+    await run({ force: true });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    const request = generateText.mock.calls[0]![0] as GenerateTextOptions;
+    expect(JSON.stringify(request.contents)).not.toContain(
+      REQUEST_ONLY_CATALOG,
+    );
+  });
+
   it('passes abort signal to summary generation', async () => {
     const abortController = new AbortController();
     const generateText = arrangeForced();
@@ -966,6 +981,7 @@ describe('ChatCompressionService', () => {
     mockFirePreCompactEvent = resolvedFn();
     mockFirePostCompactEvent = resolvedFn();
     mockGetHookSystem.mockReturnValue({
+      isManaged: () => false,
       firePreCompactEvent: mockFirePreCompactEvent,
       firePostCompactEvent: mockFirePostCompactEvent,
     });
@@ -1017,6 +1033,49 @@ describe('ChatCompressionService', () => {
       expectCompressed(await run());
       expect(mockFirePreCompactEvent).toHaveBeenCalled();
     });
+
+    it.each(['PreCompact', 'PostCompact'])(
+      'propagates managed %s recovery failures',
+      async (event) => {
+        vi.mocked(mockChat.getHistory).mockReturnValue([
+          { role: 'user', parts: [{ text: 'message one' }] },
+          { role: 'model', parts: [{ text: 'answer one' }] },
+          { role: 'user', parts: [{ text: 'message two' }] },
+          { role: 'model', parts: [{ text: 'answer two' }] },
+        ]);
+        const generateText = vi.fn().mockResolvedValue({
+          text: 'Summary',
+          usage: {
+            promptTokenCount: 1600,
+            candidatesTokenCount: 50,
+            totalTokenCount: 1650,
+          },
+        });
+        vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+          generateText,
+        } as unknown as BaseLlmClient);
+        mockGetHookSystem.mockReturnValue({
+          isManaged: () => true,
+          firePreCompactEvent: mockFirePreCompactEvent,
+          firePostCompactEvent: mockFirePostCompactEvent,
+        });
+        const failing =
+          event === 'PreCompact'
+            ? mockFirePreCompactEvent
+            : mockFirePostCompactEvent;
+        failing.mockRejectedValue(new Error('Hook recovery required'));
+        await expect(
+          service.compress(mockChat, {
+            promptId: mockPromptId,
+            force: true,
+            config: mockConfig,
+            consecutiveFailures: 0,
+            originalTokenCount: 1000,
+          }),
+        ).rejects.toThrow('Hook recovery required');
+        if (event === 'PreCompact') expect(generateText).not.toHaveBeenCalled();
+      },
+    );
 
     it('should fire PreCompact hook before compression', async () => {
       arrangeAuto();
@@ -1266,6 +1325,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     } as unknown as LlmChat;
     const config = {
       getChatCompression: vi.fn(),
+      getAutoMemoryContext: () => REQUEST_ONLY_CATALOG,
       getAutoCompactThreshold: vi.fn(),
       getBaseLlmClient: vi.fn().mockReturnValue(baseLlmClient),
       getContentGeneratorConfig: vi.fn().mockReturnValue({
@@ -1357,6 +1417,9 @@ describe('ChatCompressionService.compress cache sharing', () => {
     );
     expect(request.config?.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
     expect(request.contents.slice(0, -1)).toEqual(history);
+    expect(JSON.stringify(request.contents)).not.toContain(
+      REQUEST_ONLY_CATALOG,
+    );
     expect(request.contents).toHaveLength(43);
     expect(request.contents.at(-1)?.parts?.[0]?.text).toContain(
       'Keep the exact command output.',

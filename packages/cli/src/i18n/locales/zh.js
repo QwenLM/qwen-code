@@ -21,6 +21,8 @@ export default {
   'Project level': '项目级',
   'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
     '剪贴板图片粘贴不可用，因为原生剪贴板模块加载失败。请重新安装 Qwen Code，或改用 npm 安装方式。',
+  'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.':
+    '剪贴板图片粘贴不可用：未找到受支持的剪贴板工具。Linux 下请安装 `wl-clipboard`（Wayland）或 `xclip`（X11），无显示器环境下请设置 DISPLAY/WAYLAND_DISPLAY。',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -226,12 +228,6 @@ export default {
   'toolDisplayName.Workflow': '工作流',
   'toolDisplayName.ReadMcpResource': '读取 MCP 资源',
   'toolDisplayName.ImageGen': '图像生成',
-  'toolDisplayName.ThreadPost': '发帖到线程',
-  'toolDisplayName.ThreadWait': '等待协作方',
-  'toolDisplayName.ThreadBlock': '提出阻塞问题',
-  'toolDisplayName.ThreadReview': '提交待评审',
-  'toolDisplayName.ThreadCreate': '创建子线程',
-  'toolDisplayName.ThreadRead': '读取线程',
   'toolDisplayName.DownsampleImage': '降采样图像',
   'toolDisplayName.DownscaleVideo': '降采样视频',
   'toolDisplayName.DownsampleAudio': '降采样音频',

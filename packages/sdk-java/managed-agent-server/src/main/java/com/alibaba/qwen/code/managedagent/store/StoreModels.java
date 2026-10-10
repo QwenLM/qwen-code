@@ -17,7 +17,8 @@ public final class StoreModels {
             String status, String harnessBootId, String harnessEventEpoch,
             long harnessLastEventId, long lastSequence,
             long replayFloorSequence, long createdAt, long updatedAt,
-            Long deletedAt, long version, ContextBinding workspace) {
+            Long deletedAt, long version, ContextBinding workspace,
+            String approvalMode, String toolProfile) {
         public SessionRecord(String tenantId, String sessionId,
                 String agentId, String title, String status,
                 String harnessBootId, String harnessEventEpoch,
@@ -26,7 +27,7 @@ public final class StoreModels {
             this(tenantId, sessionId, agentId, null, title, status,
                     harnessBootId, harnessEventEpoch, harnessLastEventId,
                     lastSequence, 0, createdAt, updatedAt, deletedAt, version,
-                    null);
+                    null, "yolo", null);
         }
     }
 
@@ -60,7 +61,9 @@ public final class StoreModels {
     /**
      * Events at or below {@code floorSequence} may be pruned. A client that
      * falls below it reloads the Snapshot, which covers events through
-     * {@code snapshotThroughSequence}.
+     * {@code snapshotThroughSequence}. A stream reconciliation discards the
+     * Snapshot without lowering the floor, so the floor can exceed the
+     * coverage while the Items rebuild; the cursor is still served then.
      */
     public record ReplayWindow(long floorSequence,
             long snapshotThroughSequence) {
@@ -72,6 +75,14 @@ public final class StoreModels {
             long createdAt, long updatedAt) {
     }
 
+    /**
+     * H4b: a child Session's ancestry (V54). v1 children run at depth 1;
+     * the tree root for a first-level child is the parent Session itself.
+     */
+    public record SessionLineage(String parentSessionId, String rootSessionId,
+            String parentChildRunId, int depth) {
+    }
+
     public enum SessionMutationKind {
         RENAME,
         UNARCHIVE
@@ -81,23 +92,74 @@ public final class StoreModels {
             boolean replayed) {
     }
 
+    public record SessionMutation(SessionRecord session, boolean replayed) {
+    }
+
     public enum OperationKind {
         CLOSE,
         ARCHIVE,
         DELETE,
-        ACTION_RESPONSE
+        ACTION_RESPONSE,
+        CWD_CHANGE,
+        TASK_CANCEL
     }
 
     /**
      * A durable lifecycle operation. {@code sessionStatusBefore} is the
      * Session status when it was admitted; only an operation admitted on an
-     * active Session closes the Harness.
+     * active Session closes the Harness. The cwd fields, {@code taskId} and
+     * {@code failureCode} are set only for the kinds that populate them.
      */
     public record OperationRecord(String tenantId, String sessionId,
             String operationId, OperationKind kind, String requestDigest,
             String state, String admissionStage, String deliveryState,
             String sessionStatusBefore, String receiptId, String leaseOwner,
-            long claimGeneration, int attemptCount) {
+            long claimGeneration, int attemptCount, String targetCwdRelative,
+            Long expectedContextRevision, Long resultContextRevision,
+            String failureCode, int lifecycleProtocolVersion,
+            byte[] actorKey, String taskId) {
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState,
+                String sessionStatusBefore, String receiptId, String leaseOwner, long claimGeneration,
+                int attemptCount, String targetCwdRelative, Long expectedContextRevision,
+                Long resultContextRevision, String failureCode, int lifecycleProtocolVersion, byte[] actorKey) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, targetCwdRelative,
+                    expectedContextRevision, resultContextRevision, failureCode, lifecycleProtocolVersion, actorKey,
+                    null);
+        }
+
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState, String sessionStatusBefore,
+                String receiptId, String leaseOwner, long claimGeneration, int attemptCount, String targetCwdRelative,
+                Long expectedContextRevision, Long resultContextRevision, String failureCode) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, targetCwdRelative,
+                    expectedContextRevision, resultContextRevision, failureCode, 0, null);
+        }
+
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState, String sessionStatusBefore,
+                String receiptId, String leaseOwner, long claimGeneration, int attemptCount, String failureCode,
+                int lifecycleProtocolVersion) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, null, null, null,
+                    failureCode, lifecycleProtocolVersion, null);
+        }
+
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState, String sessionStatusBefore,
+                String receiptId, String leaseOwner, long claimGeneration, int attemptCount, String failureCode) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, failureCode, 0);
+        }
+
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState,
+                String sessionStatusBefore, String receiptId, String leaseOwner, long claimGeneration, int attemptCount) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, null, 0);
+        }
     }
 
     public record OperationAdmission(OperationRecord operation,
@@ -149,6 +211,10 @@ public final class StoreModels {
 
     public record MaterializationResult(boolean advanced,
             long coveredSequence) {
+    }
+
+    /** A Session whose Snapshot covers more than its replay floor. */
+    public record ReplayFloorTarget(String tenantId, String sessionId) {
     }
 
     public record DispatchTarget(String tenantId, String sessionId,

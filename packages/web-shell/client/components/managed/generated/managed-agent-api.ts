@@ -59,7 +59,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description POST SSE consumed through fetch response.body. An afterSequence below the replay floor ends the stream with one agent.session.resync_required frame instead of a 409; reload the transcript and resume after its lastSequence. */
+        /** @description POST SSE consumed through fetch response.body. An afterSequence below the replay floor ends the stream with one agent.session.resync_required frame instead of a 409 only while the Snapshot backs the floor (replay_floor_sequence <= snapshot_through_sequence); a stream reconciliation discards the Snapshot without lowering the floor, and during that rebuild such a cursor is served from the retained events. On the resync frame, reload the transcript and resume after its lastSequence. */
         post: operations["webShellStreamEvents"];
         delete?: never;
         options?: never;
@@ -76,7 +76,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. Later Workspace submit, cancel and lifecycle operations remain gated. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
+        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. Any caller holding the OPERATOR role may submit later Turns and rename the Session under the same opt-in, while the Workspace registry row stays ACTIVE and still backs the binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is an active, undeleted qwen-code Session on the frozen execution profile; Workspace close follows its separate close capability and lifecycle admission; the same caller may cancel a running Turn (its delivery re-checks no grants); archive and unarchive follow their separate retention capabilities after reliable Workspace close; delete supports either L3 idle ACTIVE files Sessions or L2 CLOSED/ARCHIVED Sessions; controlled same-Workspace cwd changes ship through the durable cwd_change operations (v1.32). The per-caller workspaceTurns capability on this surface advertises the same submit/rename admission rule; it does not gate cancellation. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
         post: operations["webShellCreateSession"];
         delete?: never;
         options?: never;
@@ -133,6 +133,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/sessions/cwd/change": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description W2, implemented: the camelCase twin of the public changeSessionCwd with the matched refusal order: 400 invalid_request for a missing or malformed field; 401 actor_required without a trusted actor; 400 invalid_idempotency_key for a malformed idempotencyKey — with two documented divergences: a key over 128 characters is refused during request validation with 400 invalid_request before the service's check, and a blank idempotencyKey is refused there too, while the public header answers 400 invalid_idempotency_key for both shapes; 400 invalid_cwd for a lexical violation and 400 invalid_request for an expectedContextRevision below 1; 404 session_not_found for an unknown Session id; 400 unsupported_feature for an unbound Session; 404 session_not_found for an unreadable Session; 409 idempotency_conflict when one key carries different content, and a completed change under the same key always replays instead, before the role refusal; 403 session_operation_forbidden when a readable actor's Workspace role is below OPERATOR; 409 workspace_unavailable when execution is disabled; 404 session_not_found for a deleted Session; then 409 session_state_conflict, 409 workspace_unavailable from moved Registry facts (the recorded create-command actor's grant included, and the settlement re-checks the V56-persisted initiator the same way, so demoting either actor fails the operation, exactly like the public surface), 409 context_revision_conflict and 409 session_context_busy. Poll the operation or await session.context.changed; do not treat 202 as activation. */
+        post: operations["webShellChangeCwd"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/operations/query": {
         parameters: {
             query?: never;
@@ -158,7 +175,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision. */
+        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["queryWebShellActions"];
         delete?: never;
         options?: never;
@@ -175,7 +192,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision. */
+        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["getWebShellAction"];
         delete?: never;
         options?: never;
@@ -192,7 +209,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision. */
+        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["respondWebShellAction"];
         delete?: never;
         options?: never;
@@ -209,6 +226,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Uses the same close admission, owner authorization and durable cleanup semantics as the public close route. sessionClose describes deployment support; it does not grant actor authorization. New L3 Workspace close operations run SessionEnd only, retain data, and finish after durable effects verification and original Runtime stop. SessionDelete is reserved for ACTIVE delete. Missing protocol support rejects new admission; previously admitted operations retain their saved protocol. Unknown outcomes remain recovery_blocked. */
         post: operations["closeWebShellSession"];
         delete?: never;
         options?: never;
@@ -225,6 +243,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Workspace-bound archive requires a closed Session with completed reliable-close evidence and the Session's recorded owner with current read access. It completes atomically during admission, preserves data and the permanent close fence, and calls neither Harness nor Runtime. A readable non-owner returns 403; missing close evidence returns 409 workspace_unavailable. */
         post: operations["archiveWebShellSession"];
         delete?: never;
         options?: never;
@@ -241,6 +260,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Workspace-bound ACTIVE deletion supports idle hosted-workspace-files/1 Sessions when L3 lifecycle protocol and reliable Runtime stop are available. Only the Session's recorded owner (owner_actor_key, with the pre-V40 creator fallback) with current read access may admit it; accepted, running, cancelling or approval-waiting Turns return 409 turn_active. Admission persists a lifecycle-only execution fence and a versioned actor-scoped operation. SessionEnd settles before SessionDelete; committed Hook results are verified in Session Store and saved before permanent draining, attachment cleanup and original worker stop. Unknown outcomes or missing original stop evidence remain recovery_blocked and are never replayed on a replacement worker. CLOSED/ARCHIVED deletion retains L2: completed reliable-close evidence is required and no Harness or Hook is invoked. Completion atomically commits retirement, tombstone, receipt and terminal event, retaining shared Workspace files and neighboring holders. Authorized same-actor/key replays return the original operation, including after deletion; a readable non-owner returns 403. Missing lifecycle capability or close evidence returns 409 workspace_unavailable. */
         post: operations["deleteWebShellSession"];
         delete?: never;
         options?: never;
@@ -297,6 +317,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/tasks/events/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["queryWebShellTaskEvents"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/tasks/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cancelWebShellTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/tool-results/get": {
         parameters: {
             query?: never;
@@ -339,6 +391,23 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["queryWebShellArtifacts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/sessions/unarchive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the Session's recorded owner with current read access (404 unreadable, 403 readable non-owner). Bound keys are tenant/Session/actor scoped. Replay returns the current visible Session without repeating the mutation; a deleted Session returns 404. The permanent close fence is preserved and no Harness or Runtime call is made. */
+        post: operations["unarchiveWebShellSession"];
         delete?: never;
         options?: never;
         head?: never;
@@ -471,13 +540,38 @@ export interface components {
             /** Format: int64 */
             lastSequence: number;
             workspace?: components["schemas"]["WebShellWorkspaceContext"];
-            capabilities?: components["schemas"]["WebShellSessionCapabilities"];
+            capabilities: components["schemas"]["WebShellSessionCapabilities"];
         };
         WebShellSessionCapabilities: {
             /** @default false */
             actions: boolean;
+            /**
+             * @description True when the caller may submit later Turns of this Workspace-bound Session or rename it: the deployment enables Workspace files, the caller holds the OPERATOR role on a Workspace registry row whose state is ACTIVE and still backs the Session's binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is an active qwen-code Session on the frozen execution profile. Cancelling only aborts work already running, so an OPERATOR caller may cancel a running Turn even when this is false; the capability does not gate cancellation. False for every other caller and for unbound Sessions, which do not use it.
+             * @default false
+             */
+            workspaceTurns: boolean;
             tasks: boolean;
             artifacts: boolean;
+            /**
+             * @description Deployment support for close independently of archive/delete. Admission also requires Session ownership and current read access for a bound Session.
+             * @default false
+             */
+            sessionClose?: boolean;
+            /**
+             * @description Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply.
+             * @default false
+             */
+            sessionArchive?: boolean;
+            /**
+             * @description Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply.
+             * @default false
+             */
+            sessionUnarchive?: boolean;
+            /**
+             * @description Optional support capability. ACTIVE Workspace files Sessions require L3 lifecycle protocol and reliable original Runtime stop; CLOSED/ARCHIVED Sessions use independent L2 close evidence. Current creator/read authorization and idle/source-state admission checks still apply. The aggregate session lifecycle capability is unchanged.
+             * @default false
+             */
+            sessionDelete?: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -564,6 +658,8 @@ export interface components {
                 code: string;
                 message: string;
                 request_id: string;
+                /** @description Present on Runtime Broker refusals; true permits retry, false is a definite refusal. Other errors may omit this field. */
+                retryable?: boolean;
                 /** Format: int64 */
                 replay_floor_sequence?: number | null;
                 /** Format: int64 */
@@ -576,6 +672,8 @@ export interface components {
          * @example services/api
          */
         WorkspaceRelativePath: string;
+        /** @enum {string} */
+        CwdOperationStatus: "pending" | "installing" | "completed" | "failed";
         WebShellWorkspaceSelection: {
             workspaceId: string;
             /** @default . */
@@ -607,7 +705,7 @@ export interface components {
                  * @default false
                  */
                 workspaceContext: boolean;
-                /** @description Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; later submit, cancel and lifecycle operations remain gated. */
+                /** @description Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; callers holding the OPERATOR role may submit later Turns or rename under the same opt-in while the registry row stays ACTIVE and still backs the Session's binding and the actor recorded by the Workspace create command keeps OPERATOR or above, and may cancel a running Turn (its delivery re-checks no grants), while close follows its separate capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close. */
                 workspaceBinding: boolean;
             };
             /** @description Same authorized explicit default as default_workspace, including when outside this page; null if absent or not creatable. A non-null default is active and has canCreateSession=true. */
@@ -618,11 +716,36 @@ export interface components {
                 canCreateSession?: true;
             }) | null;
         };
+        WebShellChangeCwdRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            idempotencyKey: string;
+            cwdRelative: components["schemas"]["WorkspaceRelativePath"];
+            /** Format: int64 */
+            expectedContextRevision: number;
+            requestId?: string | null;
+        };
         WebShellOperationRequest: {
             /** Format: uuid */
             sessionId: string;
             operationId: string;
         };
+        /** @description A completed operation returns the committed target revision. A replay returns the same operation identity and latest durable status, with replayed=true; polling itself is not replay. */
+        WebShellCwdOperation: {
+            operationId: string;
+            /** Format: uuid */
+            sessionId: string;
+            /** @constant */
+            type: "cwd_change";
+            status: components["schemas"]["CwdOperationStatus"];
+            /** Format: int64 */
+            expectedContextRevision: number;
+            targetCwdRelative: components["schemas"]["WorkspaceRelativePath"];
+            /** Format: int64 */
+            resultContextRevision?: number | null;
+            failureCode?: string | null;
+            replayed: boolean;
+        } & (unknown & unknown);
         WebShellAction: components["schemas"]["WebShellPermissionAction"] | components["schemas"]["WebShellQuestionAction"];
         WebShellActionResolution: {
             actionId: string;
@@ -654,6 +777,8 @@ export interface components {
             sessionId: string;
             /** @enum {unknown} */
             type: "create_session" | "submit_input" | "cancel" | "action_response" | "close" | "archive" | "delete" | "task_cancel";
+            /** @description Task that a task_cancel operation targets. */
+            taskId?: string;
             /** @enum {unknown} */
             status: "pending" | "running" | "completed" | "failed" | "cancelled" | "recovery_blocked";
             /** @enum {unknown} */
@@ -662,10 +787,10 @@ export interface components {
             deliveryState: "pending" | "leased" | "confirmed" | "blocked";
             receiptId?: string;
             actionResolution?: components["schemas"]["WebShellActionResolution"];
-            /** @description Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. */
+            /** @description Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Task cancel failures are task_already_settled (the run ended before the stop request was recorded), task_action_unavailable and task_not_found; a recovery_blocked task cancel reports task_cancel_unconfirmed. Workspace close recovery_blocked reports original resource identity or unsettled execution; the Session remains closing. */
             failureCode?: string;
             replayed: boolean;
-        } & (unknown & unknown & unknown & unknown);
+        } & (unknown & unknown & unknown & unknown & unknown);
         WebShellQuestionAction: {
             actionId: string;
             /** Format: uuid */
@@ -685,7 +810,7 @@ export interface components {
             decisionReceiptId?: string;
             questions: components["schemas"]["WebShellActionQuestion"][];
         } & unknown;
-        /** @description At most one requested Hosted approval per Turn. allow and deny are stable option IDs. Tool arguments are read from Items by function_call_id (functionCallId in WebShell). Public timestamps are milliseconds, as recorded by the Harness. Decision receipts are opaque product IDs. */
+        /** @description At most one requested Hosted approval per Turn. allow and deny are stable option IDs. A requested native-tool Action may carry a bounded input preview when the producer supplies an input reference. Version 1 Actions and unavailable inputs omit it. Public timestamps are milliseconds, as recorded by the Harness. Decision receipts are opaque product IDs. */
         WebShellPermissionAction: {
             actionId: string;
             /** Format: uuid */
@@ -707,6 +832,7 @@ export interface components {
             turnId?: string;
             functionCallId: string;
             toolName: string;
+            inputPreview?: components["schemas"]["WebShellActionInputPreview"];
         } & unknown;
         WebShellPermissionResponse: {
             /** @constant */
@@ -741,7 +867,7 @@ export interface components {
             policyRevision: string;
             answers: components["schemas"]["WebShellQuestionAnswer"][];
         };
-        WebShellOperation: components["schemas"]["WebShellCommandOperation"];
+        WebShellOperation: components["schemas"]["WebShellCwdOperation"] | components["schemas"]["WebShellCommandOperation"];
         WebShellActionQueryRequest: {
             /** Format: uuid */
             sessionId: string;
@@ -778,7 +904,7 @@ export interface components {
         /** @enum {string} */
         TaskKind: "child_agent" | "workflow" | "background_shell" | "monitor" | "automation_run";
         /**
-         * @description Logical run state. completed, failed and cancelled are terminal and are set only after the physical execution has settled. degraded means that the task still runs with reduced guarantees, such as a Monitor that lost its observation source. recovery_blocked means that recovery cannot prove the physical outcome: it is not settled, is never reported as success and is never re-run automatically.
+         * @description Logical run state. completed is terminal and is set when the run's own line ends settled, with or without a physical execution; failed and cancelled are terminal too, and they also cover a run that ended before its execution started (cancelled before dispatch, or failed with no provable start), when no physical execution ever settled. degraded means that the task still runs with reduced guarantees, such as a Monitor that lost its observation source. recovery_blocked means that recovery cannot prove the physical outcome: it is not settled, is never reported as success and is never re-run automatically.
          * @enum {string}
          */
         TaskState: "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "degraded" | "recovery_blocked";
@@ -788,7 +914,7 @@ export interface components {
          */
         TaskRuntimeState: "unbound" | "provisioning" | "ready" | "draining" | "lost";
         /**
-         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task; whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
+         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task (since 1.40, child_agent tasks in pending, running, waiting or degraded, in an active Session); whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
          * @enum {string}
          */
         TaskActionCapability: "cancel" | "send_input" | "read_output";
@@ -820,6 +946,8 @@ export interface components {
              * @description Unix epoch milliseconds.
              */
             settledAt?: number;
+            /** @description Stable task event cursor after the committed tail at view read time. No event can later appear at or before it. Pass it as after to follow only new events; recovery must instead keep its saved event page cursor so it does not skip intervening output. Normal retention may expire it. */
+            outputCursor?: string;
             /** @description The newest Artifacts that hold durable task output, at most 100, oldest first. Entries must not rotate out until older Artifacts can be enumerated and attributed to the task: an evicted Artifact stays readable by id through the Session artifact routes but is no longer discoverable from the task. */
             artifactRefs: string[];
             actionCapabilities: components["schemas"]["TaskActionCapability"][];
@@ -829,6 +957,31 @@ export interface components {
             hasMore: boolean;
             nextCursor?: string | null;
         } & unknown;
+        /** @description One task event: a logical state change, a bounded output chunk, or an Artifact reference. High-volume output goes to Artifacts or bounded chunks in this paged stream, never one Session event per raw line. The closed schema validates the server's own version; clients ignore unknown optional fields and unknown types and checkpoint their cursors. Strict response validation against an older minor version is not supported. Event identity, position, payload and accepted schema/projection versions are immutable across restart, projection rebuild and archival. */
+        WebShellTaskEvent: {
+            schemaVersion: number;
+            projectionVersion: number;
+            taskId: string;
+            /** Format: uuid */
+            sessionId: string;
+            type: components["schemas"]["TaskEventType"];
+            /** @description Stable opaque position after this event and its identity. Atomically apply the event and save this cursor to avoid duplicate application after a crash. It is never reassigned; normal retention can expire it. */
+            cursor: string;
+            /** Format: int64 */
+            createdAt: number;
+            state?: components["schemas"]["TaskState"];
+            runtimeState?: components["schemas"]["TaskRuntimeState"];
+            text?: string;
+            /** @description True when the chunk was cut to the event limit; its full output is already durably readable and discoverable in the task Artifacts when the event is published. */
+            truncated?: boolean;
+            artifactId?: string;
+        } & (unknown & unknown & unknown);
+        WebShellTaskEventPage: {
+            data: components["schemas"]["WebShellTaskEvent"][];
+            hasMore: boolean;
+            /** @description The last returned event cursor, never passing an event held back by limit. On an empty page, the requested position, or the durable retention floor if after was omitted. Required and never null, including when no events remain. No event may later become visible at or before this position. */
+            nextCursor: string;
+        };
         WebShellTaskQueryRequest: {
             /** Format: uuid */
             sessionId: string;
@@ -841,6 +994,25 @@ export interface components {
             sessionId: string;
             taskId: string;
         };
+        WebShellTaskEventQueryRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            taskId: string;
+            /** @description Opaque task event cursor: an event cursor, a page nextCursor or a task outputCursor. Omit it to read from the durable retention floor. Strictly below the floor is 409 cursor_expired; equality is valid, including with no retained events. */
+            after?: string;
+            /** @default 20 */
+            limit?: number;
+        };
+        WebShellTaskCancelRequest: {
+            /** @description Trace correlation only; excluded from the request digest, so a retry with another requestId still replays. A header-safe value (1 to 128 visible ASCII characters) is echoed as X-Request-Id; any other value is replaced by a server-chosen id. */
+            requestId?: string | null;
+            /** Format: uuid */
+            sessionId: string;
+            taskId: string;
+            idempotencyKey: string;
+        };
+        /** @description state_changed, output or artifact. The set is open: a later minor version may add types and optional fields. Clients ignore unknown optional fields and unknown types, while still checkpointing event cursors; strict validation against an older minor response schema is not supported. Existing fields forbidden for a known type cannot be repurposed on that type. */
+        TaskEventType: string;
         ToolResultPreview: {
             text: string;
             truncated: boolean;
@@ -905,6 +1077,18 @@ export interface components {
             /** @default 20 */
             limit?: number;
         };
+        /** @description Optional preview for requested native read_file, write_file, edit or run_shell_command approvals. Missing or invalid input, and internal MCP inputs, omit the preview. No general secret redaction is performed; visibility follows Session read permissions. Deploy the version 2 Java reader before a Harness producer starts writing version 2 options. */
+        WebShellActionInputPreview: {
+            /** @description Exact prefix of the stored payloadJson ({toolName,input}), at most 8192 UTF-8 bytes ending at a complete code point. Truncated text may not be valid JSON. */
+            text: string;
+            /** @description True when text is shorter than the complete UTF-8 input. */
+            truncated: boolean;
+            /**
+             * Format: int64
+             * @description Byte length of the complete payloadJson in UTF-8, before truncation.
+             */
+            byteLength: number;
+        };
     };
     responses: {
         /** @description The authenticated actor belongs to another tenant than X-Qwen-Tenant-Id or has an invalid ID (actor_scope_mismatch, which the tenant filter answers on every /v1/agents/ and WebShell route), or the resource is readable but the actor lacks this operation or the original Action responder permission. Artifact content reads may also return artifact_content_forbidden when the actor cannot read the original bytes. */
@@ -916,8 +1100,17 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
-        /** @description A trusted actor is required for this request but none was supplied. */
+        /** @description A trusted actor is required for this request but none was supplied (actor_required). In signed authentication mode (qwenSignature) every covered public and WebShell route additionally answers 401 authentication_required when the signature, timestamp or actor headers are missing, and 401 invalid_signature when the signature is wrong or stale. */
         Unauthorized: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
+        /** @description In signed authentication mode (qwenSignature) a request body beyond the configured signed-body limit (qwen.managed-agent.auth.max-signed-body-bytes, default 10 MiB) answers 413 payload_too_large before the signature is compared. */
+        PayloadTooLarge: {
             headers: {
                 [name: string]: unknown;
             };
@@ -934,7 +1127,7 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
-        /** @description State, idempotency, or recovery conflict. */
+        /** @description State, idempotency, or recovery conflict. New Workspace-scoped admissions return workspace_unavailable with retryable=false while an offline Workspace migration holds the storage fence; authorized durable replays retain their existing behavior. */
         Conflict: {
             headers: {
                 [name: string]: unknown;
@@ -945,6 +1138,15 @@ export interface components {
         };
         /** @description Resource absent or outside the caller tenant scope. */
         NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
+        /** @description Task event cursor is strictly below the task's durable retention floor, which survives an empty retained set; equality is valid. The envelope's replay_floor_sequence and snapshot_through_sequence stay absent because task cursors are opaque. */
+        TaskCursorExpired: {
             headers: {
                 [name: string]: unknown;
             };
@@ -965,6 +1167,8 @@ export interface components {
     parameters: never;
     requestBodies: never;
     headers: {
+        /** @description True when an accepted command or operation was replayed for the same idempotency key and digest without repeating its mutation. Session mutation responses represent the current visible Session; operation responses represent the original operation at its current state. */
+        IdempotentReplay: boolean;
         /** @description Trace-only correlation identifier; never an idempotency key. */
         RequestId: string;
     };
@@ -995,7 +1199,9 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     webShellGetSession: {
@@ -1021,8 +1227,10 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     webShellTranscript: {
@@ -1048,8 +1256,10 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     webShellStreamEvents: {
@@ -1075,8 +1285,10 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     webShellCreateSession: {
@@ -1107,6 +1319,7 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -1134,9 +1347,11 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     webShellCancelTurn: {
@@ -1163,9 +1378,11 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     webShellQueryWorkspaces: {
@@ -1191,8 +1408,40 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellChangeCwd: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellChangeCwdRequest"];
+            };
+        };
+        responses: {
+            /** @description Durable cwd operation; acceptance does not mean the new cwd is active. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellCwdOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     webShellQueryCwdOperation: {
@@ -1218,9 +1467,11 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     queryWebShellActions: {
@@ -1246,11 +1497,12 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
-            /** @description Responding requires the Session creator (action_forbidden). */
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             /** @description Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found). */
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     getWebShellAction: {
@@ -1276,11 +1528,12 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
-            /** @description Responding requires the Session creator (action_forbidden). */
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             /** @description Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found). */
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     respondWebShellAction: {
@@ -1306,12 +1559,14 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
-            /** @description Responding requires the Session creator (action_forbidden). */
+            401: components["responses"]["Unauthorized"];
+            /** @description Responding requires the Session's recorded owner or a Workspace OPERATOR (action_forbidden). An unbound Session with no recorded creator and no recorded create command (anonymous open-mode creation, or an unbound Session created before the V40 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL; a bound Session with no recorded owner answers through the create-command actor recorded for it, or through the Workspace role arm. The tenant filter's 403 actor_scope_mismatch also applies on this route. */
             403: components["responses"]["Forbidden"];
             /** @description Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found). */
             404: components["responses"]["NotFound"];
-            /** @description Idempotency conflict or an ended Action (action_expired, action_cancelled, action_already_resolved). */
+            /** @description Idempotency conflict, a non-active Session (session_inactive), or an ended Action (action_expired, action_cancelled, action_already_resolved). An existing matching response replays before the Session-state check. */
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     closeWebShellSession: {
@@ -1337,9 +1592,11 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     archiveWebShellSession: {
@@ -1365,9 +1622,11 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     deleteWebShellSession: {
@@ -1393,9 +1652,11 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     webShellGetWorkspace: {
@@ -1421,8 +1682,10 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     queryWebShellTasks: {
@@ -1448,8 +1711,10 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     getWebShellTask: {
@@ -1475,8 +1740,71 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    queryWebShellTaskEvents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellTaskEventQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized task semantics as the public task events route, including the durable retention floor, committed-prefix publication, Artifact recovery order and client tolerance of unknown optional fields and event types. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellTaskEventPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["TaskCursorExpired"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    cancelWebShellTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellTaskCancelRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized task cancellation semantics as the public API: key validation, current access, idempotent replay, then new-request capability, Session, task and storage-migration checks (409 workspace_unavailable under a migration fence). Replay returns the same operation and latest durable state. 202 is durable admission, completed is authority acceptance, and neither proves physical stop. Admission requires no other open operation on the Session (409 session_operation_active), as on the lifecycle routes. A requestId in the body becomes the response's X-Request-Id and stays out of the request digest. */
+            202: {
+                headers: {
+                    "X-Request-Id": components["headers"]["RequestId"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellCommandOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     getWebShellToolResult: {
@@ -1530,6 +1858,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            413: components["responses"]["PayloadTooLarge"];
             /** @description Resource temporarily unavailable. */
             503: {
                 headers: {
@@ -1592,6 +1921,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            413: components["responses"]["PayloadTooLarge"];
             /** @description Resource temporarily unavailable. */
             503: {
                 headers: {
@@ -1654,6 +1984,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            413: components["responses"]["PayloadTooLarge"];
             /** @description Resource temporarily unavailable. */
             503: {
                 headers: {
@@ -1663,6 +1994,37 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+        };
+    };
+    unarchiveWebShellSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellLifecycleRequest"];
+            };
+        };
+        responses: {
+            /** @description Current WebShell Session; replay does not repeat the mutation. */
+            200: {
+                headers: {
+                    "X-Qwen-Idempotent-Replay": components["headers"]["IdempotentReplay"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSession"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
 }

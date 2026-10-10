@@ -597,6 +597,7 @@ for (const theme of THEMES) {
         resolveBaseURL(testInfo),
       );
       await gotoSession(page, scenario, daemon, theme);
+      await page.getByRole('button', { name: 'More', exact: true }).click();
       await page
         .getByRole('button', { name: 'Session Overview', exact: true })
         .click();
@@ -1189,7 +1190,7 @@ for (const theme of THEMES) {
 
       await page.getByRole('button', { name: 'Channels' }).click();
       await expect(
-        page.getByRole('heading', { name: 'Channels', level: 1 }),
+        page.getByRole('heading', { name: 'Settings', level: 1 }),
       ).toBeVisible();
       const configuredChannels = page.getByLabel('Configured channels');
       await expect(
@@ -1306,7 +1307,7 @@ for (const theme of THEMES) {
 
       await page.getByRole('button', { name: 'Channels' }).click();
       await expect(
-        page.getByRole('heading', { name: 'Channels', level: 1 }),
+        page.getByRole('heading', { name: 'Settings', level: 1 }),
       ).toBeVisible();
       await page.getByRole('button', { name: 'Configure GitHub' }).click();
       await expect(

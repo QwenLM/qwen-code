@@ -22,7 +22,11 @@ import { McpClientManager } from './mcp-client-manager.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
 import { ToolErrorType } from './tool-error.js';
-import { ToolNames } from './tool-names.js';
+import { AGENT_HOST_TOOL_NAMES, ToolNames } from './tool-names.js';
+import {
+  MANAGED_RUNTIME_TOOL_NAMES,
+  type ExecutionEnvironment,
+} from '../services/execution-environment.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -318,8 +322,8 @@ export class ToolRegistry {
   }
 
   /**
-   * Returns true when `name` is in the Config's `disabledTools` set, in
-   * which case `registerTool` / `registerFactory` will skip it. This is
+   * Returns true when Config disables `name` or the Host profile withholds it,
+   * in which case tool registration will skip it. This is
    * the chokepoint for the daemon mutation route at `POST /workspace/
    * tools/:name/enable {enabled:false}`; both
    * built-ins and MCP-discovered tools flow through `registerTool`, so
@@ -329,6 +333,12 @@ export class ToolRegistry {
     name: string,
     aliases: readonly string[] = [],
   ): boolean {
+    if (
+      this.config.getSessionSourceType?.() === 'agent-host' &&
+      !AGENT_HOST_TOOL_NAMES.includes(name)
+    ) {
+      return true;
+    }
     const disabledTools = this.config.getDisabledTools();
     const hasExactMatch =
       disabledTools.has(name) ||
@@ -343,6 +353,20 @@ export class ToolRegistry {
       }
     }
     return false;
+  }
+
+  /**
+   * The permission aliases a registered tool advertises (the exact raw
+   * identity followed by the MCP legacy spelling, as
+   * `DiscoveredMCPTool.permissionAliases` publishes), or `undefined` for
+   * tools that advertise none. Permission matchers thread these so a rule
+   * written in a legacy spelling still reaches the tool it names (#10199).
+   */
+  getPermissionAliases(name: string): readonly string[] | undefined {
+    const tool = this.tools.get(name);
+    if (!(tool instanceof DiscoveredMCPTool)) return undefined;
+    const aliases = tool.permissionAliases;
+    return aliases.length ? aliases : undefined;
   }
 
   /**
@@ -363,6 +387,41 @@ export class ToolRegistry {
   }
 
   /**
+   * The producer-carried identity of an MCP tool (`serverName` /
+   * `serverToolName`), or `undefined` for non-MCP tools. Permission matchers
+   * prefer this over re-deriving the boundary from a flattened
+   * `mcp__<server>__<tool>` rendering, which cannot tell `foo` from `foo_`.
+   */
+  getMcpToolIdentity(
+    name: string,
+  ): { serverName: string; serverToolName: string } | undefined {
+    const tool = this.tools.get(name);
+    if (tool instanceof DiscoveredMCPTool) {
+      return {
+        serverName: tool.serverName,
+        serverToolName: tool.serverToolName,
+      };
+    }
+    return undefined;
+  }
+
+  getMcpToolIdentities(): Array<{
+    serverName: string;
+    serverToolName: string;
+  }> {
+    const tools = new Map(this.mcpAppTools);
+    for (const tool of this.tools.values()) {
+      if (tool instanceof DiscoveredMCPTool) {
+        tools.set(JSON.stringify([tool.serverName, tool.serverToolName]), tool);
+      }
+    }
+    return Array.from(tools.values(), ({ serverName, serverToolName }) => ({
+      serverName,
+      serverToolName,
+    }));
+  }
+
+  /**
    * Registers a tool definition.
    * @param tool - The tool object containing schema and execution logic.
    */
@@ -371,11 +430,11 @@ export class ToolRegistry {
     if (
       this.isToolDisabled(
         tool.name,
-        tool instanceof DiscoveredMCPTool ? tool.permissionAliases : [],
+        tool instanceof DiscoveredMCPTool ? tool.disabledToolAliases : [],
       )
     ) {
       debugLogger.info(
-        `Tool "${tool.name}" skipped: present in disabledTools set.`,
+        `Tool "${tool.name}" skipped: disabled for this session.`,
       );
       return;
     }
@@ -413,7 +472,7 @@ export class ToolRegistry {
     if (
       this.isToolDisabled(
         tool.name,
-        tool instanceof DiscoveredMCPTool ? tool.permissionAliases : [],
+        tool instanceof DiscoveredMCPTool ? tool.disabledToolAliases : [],
       )
     ) {
       debugLogger.info(
@@ -441,11 +500,50 @@ export class ToolRegistry {
     if (this.refusesHostTool(name)) return;
     if (this.isToolDisabled(name)) {
       debugLogger.info(
-        `Tool factory "${name}" skipped: present in disabledTools set.`,
+        `Tool factory "${name}" skipped: disabled for this session.`,
       );
       return;
     }
     this.factories.set(name, factory);
+  }
+
+  /**
+   * Registers one of the tools a Managed session runs in its Runtime worker.
+   * Only these pass the Managed refusal, and only as the tool built for the
+   * session's own environment: any other name, environment, or tool under the
+   * name, is refused.
+   */
+  registerRuntimeBackedFactory(
+    name: string,
+    factory: ToolFactory,
+    environment: ExecutionEnvironment,
+    deferred: boolean,
+  ): void {
+    if (
+      !this.refusesHostTools() ||
+      !MANAGED_RUNTIME_TOOL_NAMES.has(name) ||
+      environment !== this.config.getManagedRuntimeEnvironment?.()
+    ) {
+      debugLogger.info(`Tool "${name}" skipped: it is not Runtime-backed.`);
+      return;
+    }
+    if (this.isToolDisabled(name)) {
+      debugLogger.info(
+        `Tool factory "${name}" skipped: present in disabledTools set.`,
+      );
+      return;
+    }
+    this.factories.set(name, async () => {
+      const tool = await factory();
+      if (
+        tool.name !== name ||
+        (tool as { environment?: unknown }).environment !== environment
+      ) {
+        throw new Error(`Tool "${name}" is not Runtime-backed.`);
+      }
+      return tool;
+    });
+    if (deferred) this.permissionDeferred.add(name);
   }
 
   unregisterTool(name: string): void {
@@ -465,7 +563,7 @@ export class ToolRegistry {
     if (this.refusesHostTool(name)) return;
     if (this.isToolDisabled(name)) {
       debugLogger.info(
-        `Tool factory "${name}" skipped: present in disabledTools set.`,
+        `Tool factory "${name}" skipped: disabled for this session.`,
       );
       return;
     }
@@ -574,7 +672,7 @@ export class ToolRegistry {
     for (const [key, tool] of source.mcpAppTools) {
       if (
         !this.mcpAppTools.has(key) &&
-        !this.isToolDisabled(tool.name, tool.permissionAliases)
+        !this.isToolDisabled(tool.name, tool.disabledToolAliases)
       ) {
         this.mcpAppTools.set(key, tool);
       }
@@ -1374,6 +1472,11 @@ export class ToolRegistry {
     );
   }
 
+  /** True under `ToolMode.CodeModeOnly`, where `tool_call` is hidden and refused. */
+  isCodeModeOnly(): boolean {
+    return this.config.getToolMode?.() === ToolMode.CodeModeOnly;
+  }
+
   /**
    * Returns an array of all registered and discovered tool names,
    * including tools that are registered via factory but not yet loaded.
@@ -1426,7 +1529,7 @@ export class ToolRegistry {
     rawName: string,
   ): DiscoveredMCPTool | undefined {
     const tool = this.mcpAppTools.get(JSON.stringify([serverName, rawName]));
-    return tool && !this.isToolDisabled(tool.name, tool.permissionAliases)
+    return tool && !this.isToolDisabled(tool.name, tool.disabledToolAliases)
       ? tool
       : undefined;
   }
@@ -1437,7 +1540,7 @@ export class ToolRegistry {
         tool instanceof DiscoveredMCPTool &&
         tool.serverName === serverName &&
         tool.appResourceUri === uri &&
-        !this.isToolDisabled(tool.name, tool.permissionAliases),
+        !this.isToolDisabled(tool.name, tool.disabledToolAliases),
     );
   }
 

@@ -63,6 +63,23 @@ and 4.5.
 D1 introduced `1.13.0` for the lifecycle routes (4.3). Integrating W0d adds
 the workspace lookup route and advances the version to `1.14.0` (4.5).
 
+The version is allocated by hand and consumers key capability detection on
+it, so monotonicity is enforced in CI (#13804). On every pull request the
+SDK Java workflow's fast guard lane compares the merge result's document
+with the base branch's head copy and fails when a changed document declares
+an equal or lower `info.version`, numeric per segment, naming whether the
+number stalled or regressed; a pull request arriving at the base ref's own
+bytes owes no bump. After every push to `main` that changes the document,
+and every 30 minutes, a re-check reads each open pull request's changed
+paths and document through the API — no pull request code is fetched,
+checked out or run — and sets the
+`API contract version uniqueness (latest main)` status: failure when the
+declared version no longer advances past `main`'s, success otherwise,
+naming the other open pull requests claiming the same version, and error
+when a file list or head document could not be read in full. A head that
+already carries the status is re-evaluated even after it stops changing the
+document, so a stale failure is cleared.
+
 ### 4.2 Generate TypeScript, validate Java
 
 - **TypeScript is generated.** `openapi-typescript` generates the WebShell
@@ -90,9 +107,11 @@ so v1.13 records all four as `partial`:
 
 ### 4.4 `agent_revision` before AgentDefinition
 
-`PublicSession.agent_revision` is required, but `/v1/agents` is still
-`planned`. Until AgentDefinition lands, D2 returns a fixed revision taken from
-the server's agent configuration. D1 only records the missing field.
+`PublicSession.agent_revision` is required. D2 returns a fixed revision taken
+from the server's agent configuration, and D1 only records the missing field.
+D8a (v1.29) implements the `/v1/agents` routes as stored, immutable revisions;
+Sessions keep the configured revision until D8b pins a stored one. See
+[AgentDefinition revisions](2026-10-01-managed-agent-definitions.md).
 
 ### 4.5 W0d discovery and empty-session binding
 

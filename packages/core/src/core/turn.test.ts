@@ -19,11 +19,17 @@ import {
   createDuplicateProviderToolCallResponse,
   findRepeatedDuplicateProviderToolCall,
 } from './turn.js';
-import type { Part, Content, PartListUnion } from '@google/genai';
+import type {
+  Part,
+  Content,
+  PartListUnion,
+  GenerateContentResponse,
+} from '@google/genai';
 import { reportError } from '../utils/errorReporting.js';
 import type { LlmChat } from './llm-chat.js';
 import { StreamEventType } from './llm-chat.js';
 import { normalizeModelToolCallIds } from './toolCallIdUtils.js';
+import { markToolCallArgumentsIncomplete } from './incomplete-tool-call-args.js';
 import { createOpenAIReasoningThoughtPart } from '../utils/thoughtUtils.js';
 import {
   collect,
@@ -264,6 +270,36 @@ describe('Turn', () => {
       );
 
       expect(events).toEqual([contentEvent('Hello'), contentEvent(' world')]);
+    });
+
+    it('forwards retractDeliveredOutputOnRetry to the chat send options', async () => {
+      // The Hosted Harness retracts published output on a fresh retry; the
+      // flag must reach LlmChat or a post-delivery cut continues instead of
+      // replaying (#13319).
+      turn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+        } as unknown as LlmChat,
+        'prompt-id-1',
+        undefined,
+        'stable-prompt-id',
+        true,
+      );
+      await run([textChunk('Hello')]);
+
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        'test-model',
+        expect.objectContaining({
+          config: { abortSignal: expect.any(AbortSignal) },
+        }),
+        'prompt-id-1',
+        undefined,
+        { promptId: 'stable-prompt-id', retractDeliveredOutputOnRetry: true },
+      );
     });
 
     it('should preserve ordered image parts in content events', async () => {
@@ -927,6 +963,125 @@ describe('Turn', () => {
       expect(turn.pendingToolCalls).toHaveLength(2);
       expect(turn.pendingToolCalls[0].wasOutputTruncated).toBe(true);
       expect(turn.pendingToolCalls[1].wasOutputTruncated).toBe(true);
+    });
+
+    // The main-session producer of `hadIncompleteArguments` (#12970): the
+    // marker — not the finish-reason diagnosis — must arm the scheduler's
+    // data-loss guard when the turn was not token-truncated. The finish must
+    // be STOP: under MAX_TOKENS `wasOutputTruncated` is set on every pending
+    // call and could not distinguish the marker from the truncation flag.
+    it('should set hadIncompleteArguments on tool calls whose arguments arrived incomplete', async () => {
+      const markedCall = {
+        name: 'write_file',
+        args: { file_path: '/test.txt', content: 'half-written' },
+      };
+      // A clean sibling in the same response pins the per-call quantifier:
+      // the marker must land on the marked call only — a response-wide
+      // `functionCalls.some(...)` read would flag the complete call too, and
+      // the scheduler would then reject a well-formed Edit as malformed.
+      const cleanCall = {
+        name: 'write_file',
+        args: { file_path: '/other.txt', content: 'complete' },
+      };
+      // Mark the same object reference that goes on the stream — the marker
+      // is a non-enumerable symbol and does not survive a rebuild.
+      markToolCallArgumentsIncomplete([{ functionCall: markedCall }]);
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            functionCalls: [markedCall, cleanCall],
+          } as unknown as GenerateContentResponse,
+        };
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                finishReason: 'STOP',
+                content: { parts: [] },
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const reqParts: Part[] = [{ text: 'Test prompt' }];
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      const toolCallEvents = events.filter(
+        (event): event is ServerLlmToolCallRequestEvent =>
+          event.type === LlmEventType.ToolCallRequest,
+      );
+      expect(toolCallEvents).toHaveLength(2);
+      expect(toolCallEvents[0].value.hadIncompleteArguments).toBe(true);
+      expect(toolCallEvents[0].value.wasOutputTruncated).toBeUndefined();
+      expect(toolCallEvents[1].value).not.toHaveProperty(
+        'hadIncompleteArguments',
+      );
+      expect(turn.pendingToolCalls).toHaveLength(2);
+      expect(turn.pendingToolCalls[0].hadIncompleteArguments).toBe(true);
+      expect(turn.pendingToolCalls[0].wasOutputTruncated).toBeUndefined();
+      expect(turn.pendingToolCalls[1]).not.toHaveProperty(
+        'hadIncompleteArguments',
+      );
+    });
+
+    it('should NOT set hadIncompleteArguments on unmarked tool calls', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            functionCalls: [
+              {
+                name: 'write_file',
+                args: { file_path: '/test.txt', content: 'complete' },
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                finishReason: 'STOP',
+                content: { parts: [] },
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const reqParts: Part[] = [{ text: 'Test prompt' }];
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      const toolCallEvent = events.find(
+        (event): event is ServerLlmToolCallRequestEvent =>
+          event.type === LlmEventType.ToolCallRequest,
+      );
+      expect(toolCallEvent).toBeDefined();
+      expect(toolCallEvent!.value).not.toHaveProperty('hadIncompleteArguments');
+      expect(turn.pendingToolCalls).toHaveLength(1);
+      expect(turn.pendingToolCalls[0]).not.toHaveProperty(
+        'hadIncompleteArguments',
+      );
     });
   });
 });

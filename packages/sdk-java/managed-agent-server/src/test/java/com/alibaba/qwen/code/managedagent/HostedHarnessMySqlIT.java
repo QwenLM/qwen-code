@@ -61,6 +61,12 @@ class HostedHarnessMySqlIT {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
     private static final Pattern LISTENING = Pattern.compile(
             "listening on http://127\\.0\\.0\\.1:(\\d+)");
+    // The CI job's MySQL service container can stall journal writes for tens
+    // of seconds when its InnoDB redo log fills under fork load (MY-014084);
+    // a 30s settlement poll expires mid-stall (#13780). 60s keeps a fully
+    // stalled run of this class inside the shared 900s failsafe fork budget
+    // (hosted-harness-mysql profile), so the sibling classes still report.
+    private static final int SETTLEMENT_POLL_SECONDS = 60;
     private final ObjectMapper json = new ObjectMapper();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
@@ -112,10 +118,10 @@ class HostedHarnessMySqlIT {
                 "--spring.datasource.username=" + required("mysql.user"),
                 "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
-                "--spring.datasource.hikari.maximum-pool-size=3",
-                "--spring.datasource.hikari.connection-timeout=5000",
-                "--spring.datasource.hikari.data-source-properties.connectTimeout=5000",
-                "--spring.datasource.hikari.data-source-properties.socketTimeout=10000",
+                "--spring.datasource.druid.max-active=3",
+                "--spring.datasource.druid.max-wait=5000",
+                "--spring.datasource.druid.connect-properties.connectTimeout=5000",
+                "--spring.datasource.druid.connect-properties.socketTimeout=10000",
                 "--qwen.managed-agent.session-store.enabled=true",
                 "--qwen.managed-agent.harness.enabled=false",
                 "--qwen.managed-agent.runtime-broker.enabled=false");
@@ -206,7 +212,7 @@ class HostedHarnessMySqlIT {
     }
 
     @Test
-    @Timeout(120)
+    @Timeout(240)
     void lifecycleOperationsCloseThePackagedHarnessSession() throws Exception {
         Path cli = Path.of(required("qwen.cli.entry")).toAbsolutePath();
         assertThat(cli).as("Build and bundle the packaged CLI first").isRegularFile();
@@ -226,7 +232,7 @@ class HostedHarnessMySqlIT {
                 "--spring.datasource.username=" + required("mysql.user"),
                 "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
-                "--spring.datasource.hikari.maximum-pool-size=3",
+                "--spring.datasource.druid.max-active=3",
                 "--qwen.managed-agent.session-store.enabled=true",
                 "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + springPort,
                 "--qwen.managed-agent.session-store.workspace-id=hosted-lifecycle-workspace",
@@ -242,8 +248,8 @@ class HostedHarnessMySqlIT {
                      "input":[{"type":"input_text","text":"LIFECYCLE_FIRST"}]}
                     """, 202).path("id").asText();
             await(() -> api("GET", "/v1/agents/sessions/" + id + "/events", null, null, 200)
-                    .path("data").toString().contains("\"turn.completed\""), 30,
-                    "Turn completion");
+                    .path("data").toString().contains("\"turn.completed\""),
+                    SETTLEMENT_POLL_SECONDS, "Turn completion");
             assertThat(writerState(id)).isEqualTo("ACTIVE");
 
             JsonNode close = api("POST", "/v1/agents/sessions/" + id + "/close", "close",
@@ -261,7 +267,7 @@ class HostedHarnessMySqlIT {
             assertThat(awaitOperation(id, deleteId).path("admission_stage").asText())
                     .isEqualTo("java_durable");
             api("GET", "/v1/agents/sessions/" + id, null, null, 404);
-            assertThat(writerState(id)).isEqualTo("SEALED");
+            assertThat(writerState(id)).isEqualTo("DELETED");
             assertThat(modelRequests).hasSize(1);
             assertThat(modelFailure.get()).isNull();
         } catch (Exception | AssertionError failure) {
@@ -277,7 +283,7 @@ class HostedHarnessMySqlIT {
             operation.set(api("GET", "/v1/agents/sessions/" + session + "/operations/"
                     + operationId, null, null, 200));
             return "completed".equals(operation.get().path("status").asText());
-        }, 30, "Operation " + operationId);
+        }, SETTLEMENT_POLL_SECONDS, "Operation " + operationId);
         return operation.get();
     }
 
@@ -388,7 +394,7 @@ class HostedHarnessMySqlIT {
         environment.put("QWEN_CODE_SYSTEM_DEFAULTS_PATH", temporary.resolve("system-defaults.json").toString());
         environment.put("QWEN_CODE_TRUSTED_FOLDERS_PATH", temporary.resolve("trusted-folders.json").toString());
         child = builder.start();
-        watchdog.schedule(this::killChild, 100, TimeUnit.SECONDS);
+        watchdog.schedule(this::killChild, 300, TimeUnit.SECONDS);
         outputReader = Thread.ofPlatform().daemon().start(() -> {
             try (var reader = child.inputReader(StandardCharsets.UTF_8)) {
                 char[] buffer = new char[2048];

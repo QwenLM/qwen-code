@@ -26,11 +26,12 @@ import {
   type ToolResultDisplay,
 } from '../tools/tools.js';
 import { WriteFileTool } from '../tools/write-file.js';
-import type {
-  ExecutionConfirmation,
-  ExecutionEnvironment,
-  ExecutionPreparation,
-  PreparedExecution,
+import {
+  stableJson,
+  type ExecutionConfirmation,
+  type ExecutionEnvironment,
+  type ExecutionPreparation,
+  type PreparedExecution,
 } from './execution-environment.js';
 
 export function createExecutionTools(
@@ -51,19 +52,57 @@ export function createExecutionTools(
 }
 
 interface PendingExecution {
+  toolName: string;
   invocation: AnyToolInvocation;
   confirmation?: ToolCallConfirmationDetails;
   executing: boolean;
+  /** The scheduler's function-call id, when the call carries one. */
+  callId?: string;
+}
+
+/**
+ * Runs a call this environment prepared, with its final parameters, in place
+ * of the prepared invocation's own `execute()`.
+ */
+export type PreparedExecutionRunner = (
+  call: {
+    readonly id: string;
+    readonly toolName: string;
+    readonly params: Record<string, unknown>;
+    /** The scheduler's function-call id, when the call carries one. */
+    readonly callId?: string;
+  },
+  signal: AbortSignal,
+  updateOutput?: (output: ToolResultDisplay) => void,
+) => Promise<ToolResult>;
+
+export interface LocalExecutionEnvironmentOptions {
+  /** The tools it prepares; every execution tool by default. */
+  readonly toolNames?: ReadonlySet<string>;
+  /** Where prepared calls run; in this process by default. */
+  readonly run?: PreparedExecutionRunner;
 }
 
 export class LocalExecutionEnvironment implements ExecutionEnvironment {
+  readonly toolNames?: ReadonlySet<string>;
   private readonly tools: Map<string, AnyDeclarativeTool>;
   private readonly invocations = new Map<string, PendingExecution>();
   private readonly controllers = new Set<AbortController>();
+  private readonly run?: PreparedExecutionRunner;
   private disposed = false;
 
-  constructor(private readonly config: Config) {
+  constructor(
+    private readonly config: Config,
+    options: LocalExecutionEnvironmentOptions = {},
+  ) {
+    this.toolNames = options.toolNames;
+    this.run = options.run;
     this.tools = createExecutionTools(config);
+    if (options.toolNames) {
+      for (const name of this.tools.keys()) {
+        if (!options.toolNames.has(name)) this.tools.delete(name);
+      }
+    }
   }
 
   private tool(name: string): AnyDeclarativeTool {
@@ -79,6 +118,21 @@ export class LocalExecutionEnvironment implements ExecutionEnvironment {
     if (!pending) throw new Error(`Unknown execution invocation: ${id}`);
     if (pending.executing) throw new Error(`Invocation is executing: ${id}`);
     return pending;
+  }
+
+  /**
+   * The declaration of one admitted tool, as the model sees it: its name,
+   * description and parameter schema. An environment that dispatched the
+   * tool elsewhere publishes this so the durable record names what the host
+   * approved.
+   */
+  toolDefinition(name: string): Record<string, unknown> {
+    const {
+      name: toolName,
+      description,
+      parametersJsonSchema,
+    } = this.tool(name).schema;
+    return { name: toolName, description, parametersJsonSchema };
   }
 
   async prepare(
@@ -104,7 +158,12 @@ export class LocalExecutionEnvironment implements ExecutionEnvironment {
         );
     }
     const invocation = tool.build(params);
-    this.invocations.set(request.id, { invocation, executing: false });
+    this.invocations.set(request.id, {
+      toolName: request.toolName,
+      invocation,
+      executing: false,
+      ...(request.callId === undefined ? {} : { callId: request.callId }),
+    });
     return {
       params: invocation.params as Record<string, unknown>,
       description: invocation.getDescription(),
@@ -157,6 +216,32 @@ export class LocalExecutionEnvironment implements ExecutionEnvironment {
     signal.addEventListener('abort', abort, { once: true });
     this.controllers.add(controller);
     try {
+      if (this.run) {
+        const params = structuredClone(
+          pending.invocation.params as Record<string, unknown>,
+        );
+        // Elsewhere the call is built again from these parameters. Building
+        // must leave them as they are, or it would run what the host did not
+        // approve, such as a path unescaped a second time.
+        const rebuilt = this.tool(pending.toolName).build(
+          structuredClone(params),
+        ).params;
+        if (stableJson(rebuilt) !== stableJson(params)) {
+          throw new Error(
+            'The approved parameters change when the tool builds them again; the call did not run.',
+          );
+        }
+        return await this.run(
+          {
+            id,
+            toolName: pending.toolName,
+            params,
+            ...(pending.callId === undefined ? {} : { callId: pending.callId }),
+          },
+          controller.signal,
+          updateOutput,
+        );
+      }
       return await pending.invocation.execute(controller.signal, updateOutput, {
         ...this.config.getShellExecutionConfig(),
         streamBufferedOutput: true,

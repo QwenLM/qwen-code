@@ -92,6 +92,8 @@ import type {
 } from '@qwen-code/sdk/daemon';
 
 import { isGoalGateBlocked as isGoalGateBlockedFor } from './utils/goalGate';
+import { cancelledTurnProducedNothing } from './utils/cancelledTurn';
+import { useDaemonPromptSettled } from './daemon/session/DaemonSessionProvider';
 import { keepWorkspaceSplitSessionIds } from './utils/standalone-session-routing';
 import { setBoundedMapEntry } from './utils/bounded-map';
 import { type SessionGitIntent } from './components/GitModePopover';
@@ -154,6 +156,7 @@ import {
 import { useWorkspaceSessionLiveState } from './session-catalog/workspace-session-live-state';
 import { isAbsolutePath } from './components/sidebar/WorkspaceSection';
 import { useLiveVoiceSetup } from './live/useLiveVoiceSetup';
+import { LiveVoiceSettingsCard } from './live/LiveVoiceSettingsCard';
 import {
   ChatEditor,
   type ComposerToolbarAction,
@@ -203,11 +206,20 @@ import {
   saveManagedSelection,
 } from './components/managed/managed-session-storage';
 import { AgentsManagerPage } from './components/agents/AgentsManagerPage';
-import { LazyThreadsRoute } from './components/workspace-agents/LazyThreadsRoute';
 import {
-  conversationContext,
+  recordedAgentMentionTexts,
   useAgentChatEntry,
 } from './components/workspace-agents/useAgentChatEntry';
+import { createSessionAgentsHttpApi } from './components/workspace-agents/session-agents-api';
+import {
+  settledAgentRunKey,
+  useSessionAgentRuns,
+} from './components/workspace-agents/use-session-agent-runs';
+import {
+  PendingAgentMentions,
+  SessionAgentLiveRuns,
+  StopAllAgentsButton,
+} from './components/workspace-agents/session-agent-live-runs';
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
@@ -224,8 +236,14 @@ import {
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { createTrajectoryPageLoader } from './trajectory/transcriptPageLoader';
 import { WorkspacesOverviewPanel } from './components/workspaces/WorkspacesOverviewPanel';
+import { WorkspaceLocation } from './components/workspaces/WorkspaceLocation';
+import {
+  useDaemonTargetOptional,
+  useInterceptHostLinks,
+} from './config/daemon-target';
+import { useFanoutOrigins, useHostFanout } from './config/host-fanout';
 import { SplitView } from './components/SplitView';
-import { GaugeIcon, LayersIcon } from 'lucide-react';
+import { ChevronLeftIcon, GaugeIcon, LayersIcon } from 'lucide-react';
 import type { PaneHeaderActionsRenderer } from './components/ChatPane';
 import {
   ArtifactPanel,
@@ -259,6 +277,7 @@ import {
   getFileChangesByTurn,
   getScheduledTasksByTurn,
 } from './components/artifacts/turnOutputSelectors';
+import { artifactDisplayName } from './components/artifacts/artifactUtils';
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
 import { usePrefersReducedMotion } from './hooks/usePrefersReducedMotion';
 import {
@@ -296,6 +315,10 @@ import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
 import { WorkspaceAddStatusDialog } from './components/dialogs/WorkspaceAddStatusDialog';
 import { StandaloneContext } from './config/standalone';
 import {
+  WorkspaceHostsEnabled,
+  rememberWorkspaceHost,
+} from './config/workspace-hosts';
+import {
   addWorkspaceToDaemon,
   clearRemoteWorkspaceAddStep,
   completeRemoteWorkspaceAdd,
@@ -316,6 +339,7 @@ import {
   navigateToDaemon,
 } from './config/daemon';
 import { Button } from './components/ui/button';
+import { isDesktopShell } from './utils/externalOpen';
 import {
   isPluginShadowPanel,
   installWebShellShadowStyles,
@@ -325,6 +349,7 @@ import {
 import {
   WebShellSidebar,
   DEFAULT_SESSION_ACTION_ITEMS,
+  SIDEBAR_RAIL_WIDTH,
   type WebShellSidebarBranding,
   type WebShellSidebarFooterOptions,
   type WebShellSidebarWorkspaceOverviewOptions,
@@ -333,7 +358,12 @@ import {
   type WebShellSidebarSessionActionsOptions,
 } from './components/sidebar/WebShellSidebar';
 import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShortcut';
-import { workspaceLabel, workspaceLabelForCwd } from './utils/workspace';
+import {
+  isAgentCollaborationEnabledForWorkspace,
+  workspaceLabel,
+  disambiguateWorkspaceLabels,
+  workspaceLabelForCwd,
+} from './utils/workspace';
 import { loadReadyWorkspaceSkills } from './daemon/workspace/load-ready-skills';
 import {
   getLocalCommands,
@@ -388,6 +418,7 @@ import {
   decodeVisionModelForPicker,
   encodeVisionModelForSetting,
   extractBareModelId,
+  resolveFastModelForPicker,
 } from './utils/modelEncoding';
 import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
 import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
@@ -719,7 +750,7 @@ interface SendPromptOptionsWithRetry {
   onAdmissionStarted?: () => void;
   clearComposerOnPromptStart?: boolean;
   commitComposerAccepted?: ComposerSubmitCommit;
-  onAdmitted?: () => void;
+  onAdmitted?: (admission: { promptId: string }) => void;
 }
 
 interface OptimisticUserMessage {
@@ -745,6 +776,49 @@ interface FailedPrompt {
 interface TranscriptUserMessageIdentity {
   block: DaemonTranscriptBlock;
 }
+
+interface InFlightPrompt {
+  block: DaemonTranscriptBlock;
+  text: string;
+  images?: PromptImage[];
+  files?: PromptFile[];
+  inputAnnotations?: DaemonInputAnnotation[];
+  /** The daemon's id for the prompt, known once it is admitted. */
+  promptId?: string;
+}
+
+/**
+ * A prompt this tab cancelled and may take back once the daemon reports the
+ * turn as ended. Nothing is decided before that: output the turn produced
+ * before the cancel landed can still be on its way when the cancel returns.
+ * The turn is recognised by the prompt's id, or — when the cancel cut the
+ * admission response short — as the next turn of this client's to settle.
+ */
+interface CancelledPromptTakeBack {
+  prompt: InFlightPrompt;
+  promptId: string | undefined;
+  clientId: string | undefined;
+  sessionId: string | undefined;
+  owner: DaemonSessionOwnerSnapshot;
+  historyComplete: boolean;
+  requestedAt: number;
+}
+
+function settlesCancelledPrompt(
+  event: { promptId: string; originatorClientId?: string },
+  takeBack: CancelledPromptTakeBack,
+): boolean {
+  if (takeBack.promptId !== undefined) {
+    return event.promptId === takeBack.promptId;
+  }
+  return (
+    takeBack.clientId !== undefined &&
+    event.originatorClientId === takeBack.clientId
+  );
+}
+
+/** Longest a cancelled turn may take to settle before its take-back lapses. */
+const CANCELLED_TURN_SETTLE_TIMEOUT_MS = 10_000;
 
 interface TranscriptTurnErrorIdentity {
   block: DaemonTranscriptBlock;
@@ -905,6 +979,53 @@ function waitForRewindApplied(
     };
     poll();
   });
+}
+
+/** Pause before asking the daemon again whether a rewind landed. */
+const REWIND_OUTCOME_RECHECK_MS = 500;
+/** Longest pause between attempts to reach the daemon about it. */
+const REWIND_OUTCOME_RETRY_MAX_MS = 2_000;
+
+/**
+ * Whether a rewind the tab stopped waiting for missed the daemon. The daemon
+ * cannot take back a rewind it has admitted, so only it can tell: it lists
+ * a turn's snapshot while the turn is in history, never reuses a snapshot
+ * id, and answers the listing only after every rewind admitted before it
+ * has run. The target still listed on two readings — the first can be
+ * answered while the daemon is still reading the rewind's own request —
+ * means no rewind happened. Keeps asking while the daemon cannot be
+ * reached. Resolves `false` once the daemon shows the rewind landed (the
+ * transcript then lifts the hold) or `stillHeld` says the hold is gone.
+ */
+async function rewindMissed(
+  target: string,
+  listSnapshots: () => Promise<{
+    snapshots: ReadonlyArray<{ promptId: string }>;
+  }>,
+  stillHeld: () => boolean,
+): Promise<boolean> {
+  let listedBefore = false;
+  let failures = 0;
+  for (;;) {
+    if (!stillHeld()) return false;
+    let listed: boolean | undefined;
+    try {
+      const { snapshots } = await listSnapshots();
+      listed = snapshots.some((entry) => entry.promptId === target);
+    } catch {
+      failures += 1;
+    }
+    if (listed === false) return false;
+    if (listed && listedBefore) return true;
+    listedBefore = listed === true;
+    const pause = listed
+      ? REWIND_OUTCOME_RECHECK_MS
+      : Math.min(
+          REWIND_OUTCOME_RETRY_MAX_MS,
+          REWIND_OUTCOME_RECHECK_MS * 2 ** (failures - 1),
+        );
+    await new Promise<void>((resolve) => window.setTimeout(resolve, pause));
+  }
 }
 
 function matchesUserMessageIdentity(
@@ -1127,7 +1248,7 @@ export interface WebShellSidebarOptions {
   showCompactToggle?: boolean;
   /** Whether to show the Tasks/Channels session-source switch. Defaults to true. */
   showSessionSourceSwitch?: boolean;
-  /** Whether to show daemon-owned Live conversations. Defaults to false. */
+  /** Show Live conversations and, in rail layout, the Live entry. Defaults to false. */
   showLive?: boolean;
   /** Hide or replace the complete sidebar branding row. */
   branding?: false | WebShellSidebarBranding;
@@ -1264,7 +1385,7 @@ export interface WebShellProps {
   shadowDom?: WebShellShadowDom;
   /** Maximum chat content width in regular mode. Defaults to 1000px. */
   chatMaxWidth?: number;
-  /** Optional workspace sidebar. Disabled by default. */
+  /** Workspace sidebar. Defaults to Home only; false hides it. */
   sidebar?: boolean | WebShellSidebarOptions;
   /** Persistent chat header options. */
   header?: WebShellChatHeaderOptions;
@@ -1719,37 +1840,26 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
   workspaceOverview?: false | WebShellSidebarWorkspaceOverviewOptions;
 } {
-  if (sidebar === true) {
-    return {
-      enabled: true,
-      defaultCollapsed: false,
-      showCompactToggle: true,
-      showSessionSourceSwitch: true,
-      showLive: false,
-    };
-  }
-  if (!sidebar) {
-    return {
-      enabled: false,
-      defaultCollapsed: false,
-      showCompactToggle: true,
-      showSessionSourceSwitch: true,
-      showLive: false,
-    };
-  }
+  const options = typeof sidebar === 'object' ? sidebar : {};
   return {
-    enabled: sidebar.enabled ?? true,
-    defaultCollapsed: sidebar.defaultCollapsed ?? false,
-    showCompactToggle: sidebar.showCompactToggle ?? true,
-    showSessionSourceSwitch: sidebar.showSessionSourceSwitch ?? true,
-    showLive: sidebar.showLive ?? false,
-    branding: sidebar.branding,
-    primaryNav: sidebar.primaryNav,
-    hideProjectHeader: sidebar.hideProjectHeader,
-    sessionActions: sidebar.sessionActions,
-    footer: sidebar.footer,
-    lockedWorkspace: sidebar.lockedWorkspace,
-    workspaceOverview: sidebar.workspaceOverview,
+    enabled: sidebar !== false && (options.enabled ?? true),
+    defaultCollapsed: options.defaultCollapsed ?? false,
+    showCompactToggle: options.showCompactToggle ?? true,
+    showSessionSourceSwitch: options.showSessionSourceSwitch ?? true,
+    showLive: options.showLive ?? false,
+    branding: options.branding,
+    primaryNav: {
+      ...options.primaryNav,
+      items: options.primaryNav?.items ?? ['newTask'],
+    },
+    hideProjectHeader: options.hideProjectHeader,
+    sessionActions: options.sessionActions,
+    footer:
+      options.footer === false
+        ? false
+        : { ...options.footer, items: options.footer?.items ?? ['collapse'] },
+    lockedWorkspace: options.lockedWorkspace,
+    workspaceOverview: options.workspaceOverview,
   };
 }
 
@@ -1912,8 +2022,7 @@ type PersistedArtifactPanelTab =
   | Pick<
       Extract<ArtifactPanelTab, { kind: 'workflow' }>,
       'id' | 'kind' | 'title' | 'sessionId'
-    >
-  | Extract<ArtifactPanelTab, { kind: 'agent_activity' }>;
+    >;
 
 function parsePersistedArtifactPanelTab(
   value: unknown,
@@ -2116,18 +2225,6 @@ function parsePersistedArtifactPanelTab(
         sessionId: tab['sessionId'],
         closeWithPane: tab['closeWithPane'],
       } as PersistedArtifactPanelTab;
-    case 'agent_activity':
-      if (
-        typeof tab['threadId'] !== 'string' ||
-        typeof tab['workspaceCwd'] !== 'string'
-      )
-        return;
-      return {
-        ...common,
-        kind: 'agent_activity',
-        threadId: tab['threadId'],
-        workspaceCwd: tab['workspaceCwd'],
-      };
     case 'workflow':
       return {
         ...common,
@@ -2293,16 +2390,6 @@ function serializeArtifactPanelTabs(
               },
             ]
           : [];
-      case 'agent_activity':
-        return [
-          {
-            id,
-            kind: tab.kind,
-            title,
-            threadId: tab.threadId,
-            workspaceCwd: tab.workspaceCwd,
-          },
-        ];
       case 'workflow':
         return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
       case 'pending': {
@@ -3339,6 +3426,8 @@ export function App({
     () => resolveSidebarOptions(sidebar),
     [sidebar],
   );
+  // Menu defaults do not restrict page URLs; only explicit host lists do.
+  const hostSidebar = typeof sidebar === 'object' ? sidebar : undefined;
   const showMobileAccess = header?.showMobileAccess ?? false;
   const chatHeaderItems = header?.items ?? DEFAULT_CHAT_HEADER_ITEMS;
   const chatHeaderEnabled =
@@ -3368,6 +3457,20 @@ export function App({
   const environmentTasksReplacementEnabled =
     environmentPanelReachable &&
     environmentPanelItems.includes('backgroundTasks');
+  const sidebarLayoutRef = useRef<HTMLDivElement>(null);
+  const [sidebarLayoutWidth, setSidebarLayoutWidth] = useState<number>();
+  const [liveVoiceSlot, setLiveVoiceSlot] = useState<HTMLDivElement | null>(
+    null,
+  );
+  // Fallback portal target in the Live page header: the sidebar's slot
+  // unmounts when the column is hidden (collapsed rail, closed compact
+  // drawer), and the chat composer is display:none on the Live page, so
+  // without it an ongoing call loses every visible control.
+  const [liveVoicePageSlot, setLiveVoicePageSlot] =
+    useState<HTMLDivElement | null>(null);
+  const [sidebarSection, setSidebarSection] = useState<
+    'home' | 'channels' | 'live'
+  >('home');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     readSidebarCollapsed(sidebarOptions.defaultCollapsed),
   );
@@ -3381,26 +3484,42 @@ export function App({
     setForceMobileDrawer(false);
   }, []);
   // Split view still needs desktop-scale horizontal room.
-  const isLargeScreen = useIsLargeScreen();
+  const largeViewport = useIsLargeScreen();
+  const isLargeScreen =
+    sidebarLayoutWidth === undefined
+      ? largeViewport
+      : sidebarLayoutWidth >= 1024;
   const canDockArtifactPanel = useIsLargeScreen('(min-width: 1001px)');
   const prefersReducedMotion = usePrefersReducedMotion();
   // In split view the session sidebar competes with the panes for width. Below
   // this width it auto-collapses to its icon rail so the panes get the room, and
-  // expands again once the window grows back. A wide split keeps the full
+  // expands again once the container grows back. A wide split keeps the full
   // sidebar (and the user's own collapse preference).
-  const splitSidebarHasRoom = useIsLargeScreen('(min-width: 1200px)');
+  const wideViewport = useIsLargeScreen('(min-width: 1200px)');
+  const splitSidebarHasRoom =
+    sidebarLayoutWidth === undefined
+      ? wideViewport
+      : sidebarLayoutWidth >= 1200;
 
   useEffect(() => {
     if (!sidebarOptions.enabled) closeMobileDrawer();
   }, [closeMobileDrawer, sidebarOptions.enabled]);
 
-  useEffect(() => {
-    const mql = window.matchMedia('(max-width: 760px)');
-    const handler = (e: MediaQueryListEvent) => {
-      if (!e.matches) closeMobileDrawer();
+  useLayoutEffect(() => {
+    const layout = sidebarLayoutRef.current;
+    if (!layout) return;
+    let previousWidth = layout.clientWidth;
+    const updateWidth = () => {
+      const width = layout.clientWidth;
+      if (width <= 0) return;
+      setSidebarLayoutWidth(width);
+      if (previousWidth <= 760 && width > 760) closeMobileDrawer();
+      previousWidth = width;
     };
-    mql.addEventListener('change', handler);
-    return () => mql.removeEventListener('change', handler);
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(layout);
+    return () => observer.disconnect();
   }, [closeMobileDrawer]);
 
   useEffect(() => {
@@ -3414,7 +3533,15 @@ export function App({
       // The fullscreen artifact surface owns Escape too (it shrinks back);
       // a force-hidden drawer must not swallow the key first.
       if (artifactPanelFullscreenRef.current) return;
-      const target = e.target as HTMLElement | null;
+      const target = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
+      if (
+        target instanceof Element &&
+        target.closest(
+          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
+        )
+      ) {
+        return;
+      }
       // Only let an editable element keep Escape for itself when it lives
       // outside the drawer; the drawer's own search input should still close
       // the drawer on the first Escape.
@@ -3435,7 +3562,15 @@ export function App({
       // The dim backdrop also lives under [data-sidebar-shell], so exclude it:
       // a touchmove starting on the backdrop must still be blocked, otherwise
       // iOS Safari scrolls the page behind the open drawer.
-      const el = e.target as HTMLElement | null;
+      const el = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
+      if (
+        el instanceof Element &&
+        el.closest(
+          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
+        )
+      ) {
+        return;
+      }
       if (
         el?.closest('[data-sidebar-shell]') &&
         !el.closest(`.${styles.mobileBackdrop}`)
@@ -3452,65 +3587,52 @@ export function App({
       window.removeEventListener('keydown', onKey, true);
     };
   }, [mobileDrawerOpen, closeMobileDrawer]);
-  const handleSidebarCollapsedChange = useCallback((collapsed: boolean) => {
-    setSidebarCollapsed(collapsed);
-    writeSidebarCollapsed(collapsed);
-  }, []);
+  // Shared writer for every collapse entrance — its inputs need refs:
+  // `sidebarCollapsed` would close over the mount-time value, and
+  // `splitFoldedSidebar` (declared around 9447) sits after this callback in
+  // the component body, so a dependency on it would throw TDZ during render.
+  const sidebarCollapsedRef = useRef(sidebarCollapsed);
+  sidebarCollapsedRef.current = sidebarCollapsed;
+  const splitFoldedSidebarRef = useRef(false);
+  const handleSidebarCollapsedChange = useCallback(
+    (collapsed: boolean, options?: { exitFoldBand?: boolean }) => {
+      // In the split-view fold band the auto-fold, not the user, owns the
+      // rendered state. Every entrance — the Cmd/Ctrl+B shortcut AND the
+      // rail's Collapse/Expand button — must preserve the stored preference
+      // there: a visually no-op interaction that rewrote it to `false` would
+      // be unrecoverable in the band (the button can only ever request that
+      // value), so the writer re-stores the current preference instead.
+      // The carve-out, `exitFoldBand`, marks entrances that reorganize the
+      // layout away from split view: the write is exactly what the user
+      // asked for, not a no-op tap in place, so it bypasses preservation.
+      const preserve =
+        options?.exitFoldBand !== true && splitFoldedSidebarRef.current;
+      const target = preserve ? sidebarCollapsedRef.current : collapsed;
+      const layout = sidebarLayoutRef.current;
+      const root = layout?.getRootNode();
+      const focused =
+        root instanceof ShadowRoot
+          ? root.activeElement
+          : document.activeElement;
+      if (
+        collapsed &&
+        focused instanceof Element &&
+        layout?.contains(focused) &&
+        focused.closest('[data-web-shell-home-column]')
+      ) {
+        const focusTarget =
+          layout.querySelector<HTMLElement>(
+            '[data-web-shell-navigation-rail] [data-web-shell-sidebar-collapse]',
+          ) ??
+          layout.querySelector<HTMLElement>('[data-web-shell-home-trigger]');
+        focusTarget?.focus();
+      }
+      setSidebarCollapsed(target);
+      writeSidebarCollapsed(target);
+    },
+    [],
+  );
 
-  // #5074: Cmd+B / Ctrl+B toggles the session sidebar, matching the editor
-  // convention (VS Code et al.). It works while any element is focused —
-  // the composer has no bold formatting, so nothing competes for the
-  // binding. Phone-width layouts render the sidebar as a drawer, so the
-  // shortcut toggles that instead of the collapsed rail.
-  useEffect(() => {
-    if (!sidebarOptions.enabled) return undefined;
-    const onKey = (e: KeyboardEvent) => {
-      if (!isSidebarToggleShortcut(e)) return;
-      if (isWebTerminalTarget(e)) return;
-      // The composer keeps the editor-convention behavior (VS Code toggles
-      // the sidebar while the editor is focused), but other editable targets
-      // — sidebar search, session rename, settings inputs — must not have
-      // the sidebar yanked around while the user is typing, matching the
-      // codebase's isEditableTarget convention.
-      const target = e.target as HTMLElement | null;
-      if (
-        isEditableTarget(target) &&
-        !target?.closest('[data-web-shell-composer-editor]')
-      ) {
-        return;
-      }
-      e.preventDefault();
-      // All state updates are dispatched sequentially outside the updater
-      // functions (React purity contract — mirrors the hamburger handler),
-      // which is why this effect re-binds on state changes: the listener
-      // closure must stay fresh.
-      if (
-        forceMobileDrawer ||
-        window.matchMedia('(max-width: 760px)').matches
-      ) {
-        // A forced drawer on a wide viewport still belongs to the drawer
-        // path: collapsing the rail underneath the overlay would look like
-        // a no-op to the user.
-        if (mobileDrawerOpen) {
-          setMobileDrawerOpen(false);
-          setForceMobileDrawer(false);
-        } else {
-          setMobileDrawerOpen(true);
-        }
-        return;
-      }
-      const next = !sidebarCollapsed;
-      setSidebarCollapsed(next);
-      writeSidebarCollapsed(next);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [
-    sidebarOptions.enabled,
-    mobileDrawerOpen,
-    forceMobileDrawer,
-    sidebarCollapsed,
-  ]);
   const customization = useMemo(
     () => ({
       artifact,
@@ -3598,30 +3720,34 @@ export function App({
     connection.sessionId,
     connection.workspaceCwd,
   );
-  const [pendingEditRewind, setPendingEditRewind] = useState<{
+  // A rewind this tab asked for whose `session_rewound` has not reached the
+  // transcript yet. Prompts wait for it: one sent in between would land after
+  // the turn the daemon is dropping, and be dropped with it.
+  const [pendingRewind, setPendingRewind] = useState<{
     sessionKey: string | undefined;
     turnIndex: number;
     owner: DaemonSessionOwnerSnapshot;
-    recover: () => void;
+    /** Runs once the hold lifts with the session still current. */
+    recover?: () => void;
   } | null>(null);
-  const editRewindSyncBlocked = Boolean(
-    pendingEditRewind &&
-      pendingEditRewind.sessionKey === logicalSessionKey &&
-      pendingEditRewind.owner.isCurrent() &&
-      countUserTurns(blocks) > pendingEditRewind.turnIndex,
+  const rewindSyncBlocked = Boolean(
+    pendingRewind &&
+      pendingRewind.sessionKey === logicalSessionKey &&
+      pendingRewind.owner.isCurrent() &&
+      countUserTurns(blocks) > pendingRewind.turnIndex,
   );
   useLayoutEffect(() => {
-    if (!pendingEditRewind || editRewindSyncBlocked) return;
-    setPendingEditRewind(null);
+    if (!pendingRewind || rewindSyncBlocked) return;
+    setPendingRewind(null);
     if (
-      pendingEditRewind.sessionKey === logicalSessionKey &&
-      pendingEditRewind.owner.isCurrent()
+      pendingRewind.sessionKey === logicalSessionKey &&
+      pendingRewind.owner.isCurrent()
     ) {
-      pendingEditRewind.recover();
+      pendingRewind.recover?.();
     }
-  }, [pendingEditRewind, editRewindSyncBlocked, logicalSessionKey]);
+  }, [pendingRewind, rewindSyncBlocked, logicalSessionKey]);
   const sessionWriteBlocked =
-    Boolean(connection.loadingTranscript) || editRewindSyncBlocked;
+    Boolean(connection.loadingTranscript) || rewindSyncBlocked;
   const sessionWriteBlockedRef = useRef(sessionWriteBlocked);
   const sessionWriteBlockGenerationRef = useRef(0);
   if (sessionWriteBlocked && !sessionWriteBlockedRef.current) {
@@ -3638,9 +3764,29 @@ export function App({
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
+  // Multi-daemon (#13727): saved hosts stay connected read-only alongside
+  // the provider that owns this App subtree; the picker and sidebar consume
+  // their live workspaces/sessions; embedded shells have no controller and
+  // fan out to nothing.
+  const daemonTarget = useDaemonTargetOptional();
+  // Same-origin links pointing at a connected host become in-app focus
+  // switches instead of document reloads (#13727).
+  useInterceptHostLinks();
+  const fanoutOrigins = useFanoutOrigins();
+  const { workspacesByOrigin, refreshAll: refreshAllHosts } =
+    useHostFanout(fanoutOrigins);
+  const focusedHostOrigin = useMemo(
+    () =>
+      new URL(
+        workspace.baseUrl || window.location.origin,
+        window.location.origin,
+      ).origin,
+    [workspace.baseUrl],
+  );
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
+
   const refreshWorkspaceCapabilities = workspace.refreshCapabilities;
   const refreshWorkspaceBrand = workspace.refreshBrand;
   const workspaces = useMemo(() => {
@@ -3655,6 +3801,23 @@ export function App({
     }
     return capabilityWorkspaces;
   }, [lockedWorkspaceCapability, workspace.capabilities?.workspaces]);
+  const workspaceHostsEnabled = useContext(WorkspaceHostsEnabled);
+  // Keep the connected host's saved project identities fresh so the sidebar
+  // can group local and remote projects and navigate back across hosts.
+  useEffect(() => {
+    if (!workspaceHostsEnabled || !workspace.capabilities?.workspaces) return;
+    rememberWorkspaceHost(
+      new URL(
+        workspace.baseUrl || window.location.origin,
+        window.location.origin,
+      ).origin,
+      workspace.capabilities.workspaces.filter((ws) => ws.kind !== 'live'),
+    );
+  }, [
+    workspaceHostsEnabled,
+    workspace.baseUrl,
+    workspace.capabilities?.workspaces,
+  ]);
   const ordinaryWorkspaces = useMemo(
     () => workspaces.filter((entry) => entry.kind !== 'live'),
     [workspaces],
@@ -3722,17 +3885,37 @@ export function App({
         label: string;
         primary: boolean;
         trusted: boolean;
+        hostOrigin?: string;
       }>
     | undefined
   >(undefined);
   const nextComposerWorkspaces = !lockedWorkspaceCwd
-    ? ordinaryWorkspaces.map((entry) => ({
-        id: entry.id,
-        cwd: entry.cwd,
-        label: workspaceLabel(entry),
-        primary: entry.primary,
-        trusted: entry.trusted,
-      }))
+    ? [
+        ...ordinaryWorkspaces.map((entry) => ({
+          id: entry.id,
+          cwd: entry.cwd,
+          label: workspaceLabel(entry),
+          primary: entry.primary,
+          trusted: entry.trusted,
+          hostOrigin: focusedHostOrigin,
+        })),
+        // Fan-out hosts offer their own live workspaces in the same picker
+        // (#13727); composite ids keep a cwd that exists on two hosts one
+        // selectable option each — selection routes through the hosted
+        // callback with the option's hostOrigin.
+        ...fanoutOrigins.flatMap((origin) =>
+          (workspacesByOrigin.get(origin) ?? [])
+            .filter((entry) => entry.kind !== 'live')
+            .map((entry) => ({
+              id: `${origin}${entry.id}`,
+              cwd: entry.cwd,
+              label: workspaceLabel(entry),
+              primary: entry.primary,
+              trusted: entry.trusted,
+              hostOrigin: origin,
+            })),
+        ),
+      ]
     : undefined;
   const currentComposerWorkspaces = composerWorkspacesRef.current;
   if (
@@ -3745,11 +3928,14 @@ export function App({
         current.cwd !== next.cwd ||
         current.label !== next.label ||
         current.primary !== next.primary ||
-        current.trusted !== next.trusted
+        current.trusted !== next.trusted ||
+        current.hostOrigin !== next.hostOrigin
       );
     })
   ) {
-    composerWorkspacesRef.current = nextComposerWorkspaces;
+    composerWorkspacesRef.current = nextComposerWorkspaces
+      ? disambiguateWorkspaceLabels(nextComposerWorkspaces)
+      : undefined;
   }
   const composerWorkspaces = composerWorkspacesRef.current;
   const workspacesRef = useRef(ordinaryWorkspaces);
@@ -5005,9 +5191,10 @@ export function App({
   const webPreviewAvailable =
     workspaceContextActive && rightPanelItems.includes('webPreview');
   const trajectoryAvailable = rightPanelItems.includes('trajectory');
-  const collaborationAvailable =
-    workspace.capabilities?.features?.includes('agent_collaboration_v1') ===
-    true;
+  const collaborationAvailable = isAgentCollaborationEnabledForWorkspace(
+    workspace.capabilities,
+    legacyWorkspaceContextCwd,
+  );
   const webTerminalAvailable =
     workspaceContextActive &&
     rightPanelItems.includes('terminal') &&
@@ -5030,23 +5217,6 @@ export function App({
       setArtifactPanelOpen(false);
     }
   }, [activeArtifactPanelTabId, artifactPanelTabs, workspaceContextActive]);
-  useEffect(() => {
-    if (collaborationAvailable) return;
-    const activityIds = artifactPanelTabs
-      .filter((tab) => tab.kind === 'agent_activity')
-      .map((tab) => tab.id);
-    if (activityIds.length === 0) return;
-    setArtifactPanelTabs((tabs) =>
-      tabs.filter((tab) => tab.kind !== 'agent_activity'),
-    );
-    if (
-      activeArtifactPanelTabId &&
-      activityIds.includes(activeArtifactPanelTabId)
-    ) {
-      setActiveArtifactPanelTabId(null);
-      setArtifactPanelOpen(false);
-    }
-  }, [activeArtifactPanelTabId, artifactPanelTabs, collaborationAvailable]);
   const [sideTaskCatalog, setSideTaskCatalog] = useState<SideTaskCatalogState>({
     items: [],
     loaded: false,
@@ -5464,7 +5634,7 @@ export function App({
         id: `artifact:${artifactId}`,
         kind: 'artifact',
         artifactId,
-        title: artifact?.title ?? 'Artifact',
+        title: artifact ? artifactDisplayName(artifact) : 'Artifact',
         ...(connection.workspaceCwd
           ? { workspaceCwd: connection.workspaceCwd }
           : {}),
@@ -6679,8 +6849,6 @@ export function App({
                   const { taskId: _taskId, ...rest } = tab;
                   return { ...rest, task, sessionActions } as ArtifactPanelTab;
                 }
-                case 'agent_activity':
-                  return collaborationAvailable ? tab : undefined;
                 case 'side_task':
                   return tab.sessionId ? tab : undefined;
                 case 'terminal':
@@ -6828,7 +6996,6 @@ export function App({
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,
-    collaborationAvailable,
     getDefaultReviewPanelWidth,
     hydratePendingArtifactPanelTab,
     hydrateRestoredAttachmentTab,
@@ -8083,6 +8250,9 @@ export function App({
   const lastSubmittedSourceVersionRef = useRef(
     composerSourceVersionRef.current,
   );
+  // The composer prompt this client still has in flight. Cancelling it before
+  // the turn produced anything hands it back instead of leaving it in history.
+  const inFlightPromptRef = useRef<InFlightPrompt | null>(null);
   const retryableTurnErrorIdRef = useRef<string | null>(null);
   const lastTurnErrorIdRef = useRef<string | null>(null);
   const retryableTurnErrorIdentityRef = useRef<
@@ -9167,6 +9337,7 @@ export function App({
     | 'plugins'
     | 'agents'
     | 'channels'
+    | 'live'
     | 'managed'
     | 'workspaces'
     | null
@@ -9188,56 +9359,10 @@ export function App({
   const navigateToMessage = useMessageNavigation(messageListRef, chatActive);
 
   const activePanelRef = useRef(activePanel);
-  const [collaborationThread, setCollaborationThread] = useState<
-    { id: string; cwd: string; server: string } | undefined
-  >(() => {
-    try {
-      const saved = JSON.parse(
-        sessionStorage.getItem('qwen:team-conversation') ?? 'null',
-      );
-      return saved &&
-        typeof saved.id === 'string' &&
-        typeof saved.cwd === 'string' &&
-        typeof saved.server === 'string'
-        ? saved
-        : undefined;
-    } catch {
-      return undefined;
-    }
-  });
-  const collaborationThreadId =
-    workspace.capabilities?.features?.includes('agent_collaboration_v1') &&
-    collaborationThread !== undefined &&
-    collaborationThread.server === workspace.baseUrl
-      ? collaborationThread.id
-      : undefined;
-  const [collaborationTitle, setCollaborationTitle] = useState<{
-    id: string;
-    title: string;
-  }>();
-  const [collaborationHeaderActions, setCollaborationHeaderActions] =
-    useState<HTMLDivElement | null>(null);
-  const updateCollaborationTitle = useCallback((id: string, title: string) => {
-    setCollaborationTitle((current) =>
-      current?.id === id && current.title === title ? current : { id, title },
-    );
-  }, []);
   const [agentsNav, setAgentsNav] = useState<{
-    view: 'agents' | 'tasks' | 'new-agent';
+    view: 'agents' | 'squads' | 'runtime' | 'new-agent';
     request: number;
   }>({ view: 'agents', request: 0 });
-  useEffect(() => {
-    try {
-      if (collaborationThread)
-        sessionStorage.setItem(
-          'qwen:team-conversation',
-          JSON.stringify(collaborationThread),
-        );
-      else sessionStorage.removeItem('qwen:team-conversation');
-    } catch {
-      /* Storage may be unavailable in embedded hosts. */
-    }
-  }, [collaborationThread]);
   // Deep-link target for the Settings panel (e.g. 'Daemon' from the Local
   // Control QR popover). Cleared on any panel close/switch, not just
   // closePanel — several paths call setActivePanel directly (approval
@@ -9337,6 +9462,7 @@ export function App({
         | 'plugins'
         | 'agents'
         | 'channels'
+        | 'live'
         | 'managed'
         | 'workspaces',
     ) => {
@@ -9390,6 +9516,198 @@ export function App({
       showChat();
     }
   }, [closePanel, showChat]);
+  const sidebarRailEnabled =
+    sidebarOptions.enabled &&
+    Boolean(
+      sidebarOptions.primaryNav?.items?.some((item) => {
+        if (item === 'newTask') return false;
+        if (item === 'managed') return externalManagedAgentAvailable;
+        if (!projectFeaturesAvailable) return false;
+        if (item === 'live') return sidebarOptions.showLive;
+        if (item === 'workflows') return workflowsEnabled;
+        return true;
+      }) ||
+        (sidebarOptions.footer !== false &&
+          sidebarOptions.footer?.items?.some((item) => {
+            if (item === 'collapse') return false;
+            if (item === 'settings' || item === 'sessionsOverview') {
+              return projectFeaturesAvailable;
+            }
+            if (item === 'workspacesOverview') return !lockedWorkspaceCwd;
+            if (item === 'localFiles' || item === 'desktopRelay')
+              return isPageOriginDaemon(workspace.baseUrl);
+            if (item === 'splitView')
+              return projectFeaturesAvailable && isLargeScreen;
+            if (item === 'update') {
+              return (
+                !isDesktopShell() &&
+                Boolean(
+                  connection.capabilities?.features?.includes('daemon_update'),
+                )
+              );
+            }
+            return true;
+          })),
+    );
+  const navigationRailVisible =
+    sidebarOptions.enabled &&
+    sidebarRailEnabled &&
+    (sidebarLayoutWidth ?? window.innerWidth) > 760;
+  // In the split-view fold band the auto-fold, not the user, owns the
+  // rendered state. Toggles issued there must rewrite the unchanged
+  // preference rather than toggle it, or a visually no-op keypress flips the
+  // stored value (and a stored `true` can never be reached again).
+  const splitFoldedSidebar =
+    mainView === 'split' && !splitSidebarHasRoom && !mobileDrawerOpen;
+  splitFoldedSidebarRef.current = splitFoldedSidebar;
+  // The collapsed value the sidebar actually renders: the split-view
+  // auto-fold and the mobile drawer override the persisted preference.
+  // Keyboard toggles and dock breakpoints must read this expression, not the
+  // raw state, or they silently invert the stored preference while the
+  // auto-fold owns the screen.
+  const sidebarCollapsedEffective =
+    (sidebarCollapsed || splitFoldedSidebar) && !mobileDrawerOpen;
+  // One compact-chrome signal for the whole shell: the sidebar drawer chrome
+  // and the empty-chat welcome layout both key off it, so they cannot split
+  // when an embedded container disagrees with the viewport.
+  const compactShell =
+    sidebarLayoutWidth !== undefined && sidebarLayoutWidth <= 760;
+  const channelSidebarEnabled =
+    sidebarOptions.enabled &&
+    projectFeaturesAvailable &&
+    sidebarRailEnabled &&
+    sidebarOptions.showSessionSourceSwitch &&
+    sidebarOptions.primaryNav?.items?.includes('channels') !== false &&
+    Boolean(
+      connection.capabilities?.features?.includes('session_source_metadata'),
+    );
+  const liveSidebarEnabled =
+    sidebarOptions.enabled &&
+    projectFeaturesAvailable &&
+    sidebarRailEnabled &&
+    sidebarOptions.showLive &&
+    sidebarOptions.primaryNav?.items?.includes('live') !== false;
+  useEffect(() => {
+    setSidebarSection((current) =>
+      liveSidebarEnabled && connection.sessionContext?.kind === 'live'
+        ? 'live'
+        : current === 'live'
+          ? 'home'
+          : current,
+    );
+  }, [
+    connection.sessionId,
+    connection.sessionContext?.kind,
+    liveSidebarEnabled,
+  ]);
+  useEffect(() => {
+    if (activePanel === 'channels' || activePanel === 'live') {
+      setSidebarSection(activePanel);
+      return;
+    }
+    // Closing a panel returns to the chat. Keep a still-valid current
+    // section — an explicit Home choice or the Channels column the opened
+    // conversation came from — and only drop sections whose feature is gone.
+    if (activePanel === null) {
+      setSidebarSection((current) => {
+        if (current === 'channels') {
+          return channelSidebarEnabled ? 'channels' : 'home';
+        }
+        if (current === 'live') {
+          return liveSidebarEnabled &&
+            connection.sessionContext?.kind === 'live'
+            ? 'live'
+            : 'home';
+        }
+        return current;
+      });
+    }
+  }, [
+    activePanel,
+    channelSidebarEnabled,
+    connection.sessionContext?.kind,
+    liveSidebarEnabled,
+  ]);
+  const appliedHistoryRevision = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (navigation?.historyRevision === appliedHistoryRevision.current) return;
+    appliedHistoryRevision.current = navigation?.historyRevision;
+    if (navigation?.route.page === 'chat') {
+      setSidebarSection(
+        navigation.route.context === 'live' && liveSidebarEnabled
+          ? 'live'
+          : 'home',
+      );
+    }
+  }, [navigation, liveSidebarEnabled]);
+  const sidebarPage =
+    (activePanel === 'mcp' ||
+    activePanel === 'skills' ||
+    activePanel === 'agents' ||
+    activePanel === 'extensions'
+      ? 'home'
+      : activePanel) ??
+    (mainView === 'chat' || mainView === 'cockpit' || mainView === 'split'
+      ? (sidebarSection === 'channels' && channelSidebarEnabled) ||
+        (sidebarSection === 'live' && liveSidebarEnabled)
+        ? sidebarSection
+        : 'home'
+      : mainView);
+  // #5074: Cmd+B / Ctrl+B toggles the session sidebar, matching the editor
+  // convention (VS Code et al.). It works while any element is focused —
+  // the composer has no bold formatting, so nothing competes for the
+  // binding. Phone-width layouts render the sidebar as a drawer, so the
+  // shortcut toggles that instead of the collapsed rail.
+  useEffect(() => {
+    if (!sidebarOptions.enabled) return undefined;
+    const onKey = (e: KeyboardEvent) => {
+      if (!isSidebarToggleShortcut(e)) return;
+      if (isWebTerminalTarget(e)) return;
+      // The composer keeps the editor-convention behavior (VS Code toggles
+      // the sidebar while the editor is focused), but other editable targets
+      // — sidebar search, session rename, settings inputs — must not have
+      // the sidebar yanked around while the user is typing, matching the
+      // codebase's isEditableTarget convention. Shadow-DOM portal hosts
+      // retarget the event to the host element, so resolve the real target.
+      const target = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
+      if (
+        isEditableTarget(target) &&
+        !target?.closest('[data-web-shell-composer-editor]')
+      ) {
+        return;
+      }
+      e.preventDefault();
+      // All state updates are dispatched sequentially outside the updater
+      // functions (React purity contract — mirrors the hamburger handler),
+      // which is why this effect re-binds on state changes: the listener
+      // closure must stay fresh.
+      if (
+        forceMobileDrawer ||
+        (sidebarLayoutWidth ?? window.innerWidth) <= 760
+      ) {
+        // A forced drawer on a wide viewport still belongs to the drawer
+        // path: collapsing the rail underneath the overlay would look like
+        // a no-op to the user.
+        if (mobileDrawerOpen) {
+          setMobileDrawerOpen(false);
+          setForceMobileDrawer(false);
+        } else {
+          setMobileDrawerOpen(true);
+        }
+        return;
+      }
+      handleSidebarCollapsedChange(!sidebarCollapsedEffective);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [
+    sidebarOptions.enabled,
+    mobileDrawerOpen,
+    forceMobileDrawer,
+    sidebarCollapsedEffective,
+    sidebarLayoutWidth,
+    handleSidebarCollapsedChange,
+  ]);
   const navigationAppliedRef = useRef<number | undefined>(undefined);
   const navigationExpectedPageRef = useRef<WebShellPage | undefined>(undefined);
   const navigationSettledRef = useRef(false);
@@ -9413,10 +9731,11 @@ export function App({
     const allowed =
       page === 'chat' ||
       (projectFeaturesAvailable &&
+        (page !== 'live' || liveSidebarEnabled) &&
         (page === 'settings'
-          ? sidebarOptions.footer !== false &&
-            (sidebarOptions.footer?.items?.includes('settings') ?? true)
-          : (sidebarOptions.primaryNav?.items?.some(
+          ? hostSidebar?.footer !== false &&
+            (hostSidebar?.footer?.items?.includes('settings') ?? true)
+          : (hostSidebar?.primaryNav?.items?.some(
               (item) => item === primaryItem,
             ) ?? true)));
     if (navigationAppliedRef.current === navigation.revision && allowed) return;
@@ -9428,6 +9747,7 @@ export function App({
     setActivePanel(
       nextPage === 'plugins' ||
         nextPage === 'channels' ||
+        nextPage === 'live' ||
         nextPage === 'settings'
         ? nextPage
         : null,
@@ -9444,8 +9764,9 @@ export function App({
   }, [
     navigation,
     projectFeaturesAvailable,
-    sidebarOptions.footer,
-    sidebarOptions.primaryNav?.items,
+    hostSidebar?.footer,
+    hostSidebar?.primaryNav?.items,
+    liveSidebarEnabled,
     workspaceCapabilitiesReady,
   ]);
   useEffect(() => {
@@ -9790,7 +10111,7 @@ export function App({
   // the composer to be refocused once the chat is shown again.
   const focusComposerAfterSplitCloseRef = useRef(false);
   // True while the split view is only *temporarily* folded away because the
-  // window is narrower than the large-screen breakpoint. Growing back past the
+  // container is narrower than the large-screen breakpoint. Growing back past the
   // breakpoint restores it, so a transient resize doesn't drop the user's panes.
   const splitFoldedByShrinkRef = useRef(false);
   // The manual title an armed `/clear` carries into the next created session
@@ -9876,6 +10197,7 @@ export function App({
       if (
         activePanel === 'extensions' ||
         activePanel === 'channels' ||
+        activePanel === 'live' ||
         // The Workspaces panel renders its own header; the generic Back
         // button (panelBackRef) is excluded for it, so the fallback below
         // would focus nothing.
@@ -10302,11 +10624,6 @@ export function App({
     connection.sessionContext?.kind === 'standalone'
       ? (sessionStatusDisplayName ?? connection.displayName)
       : (connection.displayName ?? sessionStatusDisplayName);
-  const chatHeaderTitle = collaborationThreadId
-    ? collaborationTitle?.id === collaborationThreadId
-      ? collaborationTitle.title
-      : t('collab.chat.title')
-    : sessionDisplayName;
   useEffect(() => {
     onSessionInfoChange?.({
       sessionId: connection.sessionId,
@@ -10915,6 +11232,32 @@ export function App({
       }
       let admissionStarted = false;
       let admitted = false;
+      const previousUserMessage = getLatestUserBlock(
+        store.getSnapshot().blocks,
+      );
+      let inFlightPrompt: InFlightPrompt | undefined;
+      // A text prompt gets its transcript block as it is sent, one with
+      // attachments only once it is admitted, so both points try.
+      const trackInFlightPrompt = () => {
+        if (
+          inFlightPrompt ||
+          opts?.retry ||
+          opts?.optimisticUserMessage === false ||
+          isSlashPreparedSubmit
+        ) {
+          return;
+        }
+        const block = getLatestUserBlock(store.getSnapshot().blocks);
+        if (!block || block === previousUserMessage) return;
+        inFlightPrompt = {
+          block,
+          text: preparedPrompt,
+          images,
+          files,
+          inputAnnotations: preparedInputAnnotations,
+        };
+        inFlightPromptRef.current = inFlightPrompt;
+      };
       const promptOptions: SendPromptOptionsWithRetry = {
         ...(opts?.submittedPrompt !== undefined
           ? { submittedPrompt: opts.submittedPrompt }
@@ -10933,13 +11276,17 @@ export function App({
             connectionRef.current.sessionId ?? allocatedSessionId,
           );
         },
-        onAdmitted: () => {
+        onAdmitted: (admission) => {
           admitted = true;
           if (sessionIdAfterEnsure && promptWorkspaceCwd) {
             sessionCatalogController.promptAdmitted(
               promptWorkspaceCwd,
               sessionIdAfterEnsure,
             );
+          }
+          trackInFlightPrompt();
+          if (inFlightPrompt && admission?.promptId) {
+            inFlightPrompt.promptId = admission.promptId;
           }
           opts?.onAdmitted?.();
         },
@@ -10957,15 +11304,13 @@ export function App({
           queued: false,
         });
       }
-      const previousUserMessage = opts?.onOptimisticUserMessage
-        ? getLatestUserBlock(store.getSnapshot().blocks)
-        : undefined;
       const resultPromise = (
         sessionActions.sendPrompt as (
           promptText: string,
           options?: SendPromptOptionsWithRetry,
         ) => ReturnType<typeof sessionActions.sendPrompt>
       )(preparedPrompt, promptOptions);
+      trackInFlightPrompt();
       if (
         sessionIdAfterEnsure &&
         opts?.optimisticUserMessage !== false &&
@@ -10996,6 +11341,10 @@ export function App({
           sessionCatalogController.promptAdmissionUncertain(promptWorkspaceCwd);
         }
         throw error;
+      } finally {
+        if (inFlightPrompt && inFlightPromptRef.current === inFlightPrompt) {
+          inFlightPromptRef.current = null;
+        }
       }
     },
     [
@@ -12011,7 +12360,8 @@ export function App({
     enabled: projectFeaturesAvailable,
   });
   const providersEnabled =
-    projectFeaturesAvailable && activePanel === 'settings';
+    projectFeaturesAvailable &&
+    (activePanel === 'settings' || modelDialogMode === 'fast');
   const providersState = useProviders({
     autoLoad: providersEnabled,
     enabled: providersEnabled,
@@ -12041,7 +12391,8 @@ export function App({
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
     ),
-    activePanel === 'settings',
+    activePanel === 'live' ||
+      (activePanel === 'settings' && !liveSidebarEnabled),
   );
   // Do not expose workflow surfaces until settings have loaded successfully.
   // The resource keeps stale data when a reload fails, so the error check is
@@ -12195,7 +12546,7 @@ export function App({
     ...workspaceSettingsState,
     settings: targetedWorkspaceSettings,
     reload: reloadTargetedWorkspaceSettings,
-    liveSetup,
+    liveSetup: liveSidebarEnabled ? undefined : liveSetup,
   };
   const themeSetting = workspaceSettings.find(
     (setting) => setting.key === THEME_SETTING_KEY,
@@ -12229,12 +12580,19 @@ export function App({
       modelSettingScope,
       'fastModel',
     );
-    // The CLI picker may persist `authType:id\0<baseUrl>` (#12760); decode
-    // like the vision sibling so the dialog highlights the pinned row
-    // instead of falling to the list head. The persisted value keeps the
-    // suffix — this is a read-side strip only.
     if (typeof value !== 'string' || !value.trim()) return undefined;
-    return decodeVisionModelForPicker(value.trim());
+    const models = providersState.providers.flatMap((provider) =>
+      provider.models.map((model) => ({
+        id: model.modelId,
+        baseModelId: model.baseModelId,
+        authType: provider.authType,
+        baseUrl: model.baseUrl,
+      })),
+    );
+    return resolveFastModelForPicker(
+      value.trim(),
+      models.length ? models : (connection.models ?? []),
+    );
   })();
   const currentAdvisorModel = readScopedModelSetting(
     workspaceSettings,
@@ -13713,7 +14071,6 @@ export function App({
         pushToast('warning', t('session.recoveryBlocksAction'));
         return false;
       }
-      setCollaborationThread(undefined);
       pendingManualTitleRef.current = opts?.carryManualTitle
         ? { displayName: opts.carryManualTitle }
         : undefined;
@@ -14201,6 +14558,15 @@ export function App({
         );
         workspaceBrowseActiveRef.current = false;
         completeRemoteWorkspaceAdd();
+        const targetOrigin = workspaceAddSelectedLocation;
+        if (daemonTarget?.coversOrigin(targetOrigin)) {
+          // Multi-daemon (#13727): an already-connected host needs no
+          // navigation — focus it in-app and hand the new workspace's
+          // preselection to the remounted picker state.
+          daemonTarget.focusHost({ origin: targetOrigin });
+          refreshAllHosts();
+          return;
+        }
         // Navigate to the target daemon so the user lands on the new
         // workspace. Deliberately a plain switch, NOT
         // selectRemoteWorkspaceLocation(): that helper arms the
@@ -14208,17 +14574,20 @@ export function App({
         // daemon we just registered on would boot into a fresh, empty Add
         // Workspace dialog on top of the workspace the user already added.
         // The add is finished — there is no flow left to continue.
-        navigateToDaemon(
-          workspaceAddSelectedLocation,
-          getDaemonToken(workspaceAddSelectedLocation),
-        );
+        navigateToDaemon(targetOrigin, getDaemonToken(targetOrigin));
         return;
       }
       await handleAddWorkspace(cwd, persist, displayName);
       workspaceBrowseActiveRef.current = false;
       completeRemoteWorkspaceAdd();
     },
-    [handleAddWorkspace, workspace.baseUrl, workspaceAddSelectedLocation],
+    [
+      handleAddWorkspace,
+      workspace.baseUrl,
+      workspaceAddSelectedLocation,
+      daemonTarget,
+      refreshAllHosts,
+    ],
   );
 
   const closeAddWorkspaceDialog = useCallback(() => {
@@ -14326,6 +14695,28 @@ export function App({
       void switchWorkspace(cwd);
     },
     [switchWorkspace],
+  );
+  // A workspace picked on another connected host (#13727): focus that host
+  // in-app (no document reload), carrying the target cwd and any typed draft
+  // text so the remounted composer lands ready to submit there. Attachments
+  // cannot cross the provider remount and are dropped.
+  const handleSelectHostedWorkspace = useCallback(
+    (hostOrigin: string, cwd: string | undefined) => {
+      if (!daemonTarget || hostOrigin === focusedHostOrigin) {
+        handleSelectComposerWorkspace(cwd);
+        return;
+      }
+      daemonTarget.focusHostWithHandoff(
+        { origin: hostOrigin },
+        {
+          kind: 'create',
+          origin: hostOrigin,
+          workspaceCwd: cwd,
+          draftText: composerTextRef.current.trim() || undefined,
+        },
+      );
+    },
+    [daemonTarget, focusedHostOrigin, handleSelectComposerWorkspace],
   );
   const handleSelectComposerStandalone = useCallback(() => {
     if (connectionRef.current.sessionId) {
@@ -14724,7 +15115,6 @@ export function App({
       workspaceCwd?: string,
       sessionContext?: DaemonProductSessionContext,
     ) => {
-      setCollaborationThread(undefined);
       pendingManualTitleRef.current = undefined;
       splitClassificationGenerationRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
@@ -14817,6 +15207,62 @@ export function App({
         setStandaloneRetrySessionId(undefined);
       });
   }, [loadSidebarSession]);
+
+  // A session row opened from a fan-out host group (#13727): same in-app
+  // focus switch as the hosted composer pick, with an 'open' intent drained
+  // by the handoff effect below.
+  const handleOpenHostSession = useCallback(
+    (origin: string, sessionId: string, workspaceCwd?: string) => {
+      if (!daemonTarget) return;
+      if (origin === focusedHostOrigin) {
+        showChat();
+        void loadSidebarSession(sessionId, workspaceCwd);
+        return;
+      }
+      daemonTarget.focusHostWithHandoff(
+        { origin },
+        { kind: 'open', origin, sessionId, workspaceCwd },
+      );
+    },
+    [daemonTarget, focusedHostOrigin, loadSidebarSession, showChat],
+  );
+
+  // Drain the intent carried across a focused-host switch (#13727): fires
+  // once the NEW host's provider is connected; stale intents from an
+  // aborted switch (user moved to a third host meanwhile) are dropped.
+  const pendingHostHandoff = daemonTarget?.pendingHandoff;
+  useEffect(() => {
+    if (!daemonTarget || !pendingHostHandoff) return;
+    if (workspace.status !== 'connected') return;
+    if (pendingHostHandoff.origin !== daemonTarget.activeOrigin) {
+      daemonTarget.takePendingHandoff();
+      return;
+    }
+    const taken = daemonTarget.takePendingHandoff();
+    if (!taken) return;
+    if (taken.kind === 'open' && taken.sessionId) {
+      showChat();
+      void loadSidebarSession(taken.sessionId, taken.workspaceCwd);
+      return;
+    }
+    // 'create': preselect the picked workspace on this host and put any
+    // carried draft text back into the composer.
+    if (taken.draftText) {
+      handleComposerTextChange(taken.draftText);
+      editorRef.current?.insertText(taken.draftText);
+    }
+    if (taken.workspaceCwd) {
+      handleSelectComposerWorkspace(taken.workspaceCwd);
+    }
+  }, [
+    daemonTarget,
+    pendingHostHandoff,
+    workspace.status,
+    showChat,
+    loadSidebarSession,
+    handleComposerTextChange,
+    handleSelectComposerWorkspace,
+  ]);
 
   const handleCheckStandaloneRecovery = useCallback(async () => {
     const recovery = connectionRef.current.standaloneSession?.creationRecovery;
@@ -15885,7 +16331,7 @@ export function App({
             !rewindApplied &&
             countUserTurns(store.getSnapshot().blocks) > turnIndex
           ) {
-            setPendingEditRewind({
+            setPendingRewind({
               sessionKey: logicalSessionKey,
               turnIndex,
               owner,
@@ -17505,6 +17951,136 @@ export function App({
     [sessionActions],
   );
 
+  // Runs once the daemon has settled the cancelled turn, so the transcript
+  // holds everything the turn produced.
+  const takeBackCancelledPrompt = useCallback(
+    async ({
+      prompt: cancelled,
+      sessionId,
+      owner,
+      historyComplete,
+    }: CancelledPromptTakeBack) => {
+      const isCurrent = () =>
+        appMountedRef.current &&
+        owner.isCurrent() &&
+        connectionRef.current.sessionId === sessionId;
+      // The turn index of the cancelled prompt while it is still the newest
+      // turn and nothing but thoughts and notices came after it.
+      const bareTurnIndex = () => {
+        if (!isCurrent()) return undefined;
+        const blocks = store.getSnapshot().blocks;
+        const prompt = getLatestUserBlock(blocks);
+        return prompt &&
+          matchesUserMessageIdentity(
+            prompt,
+            { block: cancelled.block },
+            true,
+          ) &&
+          cancelledTurnProducedNothing(blocks.slice(blocks.indexOf(prompt) + 1))
+          ? countUserTurns(blocks) - 1
+          : undefined;
+      };
+      const turnIndex = bareTurnIndex();
+      const editor = editorRef.current;
+      if (
+        turnIndex === undefined ||
+        sessionWriteBlockedRef.current ||
+        !editor ||
+        editor.hasInput()
+      ) {
+        return;
+      }
+      editor.setText(cancelled.text);
+      if (cancelled.images?.length) editor.restoreImages(cancelled.images);
+      if (cancelled.files?.length) editor.restoreFiles(cancelled.files);
+      if (cancelled.inputAnnotations?.length) {
+        editor.restoreInputAnnotations?.(cancelled.inputAnnotations);
+      }
+      // A partial transcript cannot tell which turn the prompt was, so the
+      // prompt goes back to the composer but stays in history.
+      if (!historyComplete) return;
+      // Hold prompts from here until the rewind has shown up in the
+      // transcript or is known not to happen.
+      let lifted = false;
+      const pending = {
+        sessionKey: logicalSessionKey,
+        turnIndex,
+        owner,
+        recover: () => {
+          lifted = true;
+        },
+      };
+      setPendingRewind(pending);
+      const release = () => {
+        lifted = true;
+        setPendingRewind((current) => (current === pending ? null : current));
+      };
+      const listSnapshots = () =>
+        sessionActions.getRewindSnapshots({ silent: true });
+      let rewound = false;
+      let target: string | undefined;
+      try {
+        const { snapshots } = await listSnapshots();
+        // Only ever rewind the daemon's newest turn: a prompt cancelled before
+        // it reached the model has no snapshot of its own, and the newest one
+        // then belongs to the turn before it.
+        const newest = snapshots[snapshots.length - 1];
+        if (!newest || newest.turnIndex !== bareTurnIndex()) return;
+        target = newest.promptId;
+        await sessionActions.rewindSession(target, {
+          rewindFiles: false,
+          silent: true,
+        });
+        // `pendingRewind` releases itself once the transcript shows the rewind.
+        rewound = true;
+      } catch (error) {
+        // Nobody asked for a rewind, so a failed one is not worth a toast:
+        // the prompt is back in the composer and simply stays in history. A
+        // daemon refusal (an SSH workspace, say) did not rewind. Any other
+        // failure of an issued rewind leaves it open whether the daemon
+        // applied it, and a wait proves nothing: prompts stay held until
+        // the daemon says the turn is still there or the transcript shows
+        // it gone.
+        if (target !== undefined && !(error instanceof DaemonHttpError)) {
+          rewound = !(await rewindMissed(
+            target,
+            listSnapshots,
+            () => isCurrent() && !lifted,
+          ));
+        }
+      } finally {
+        if (!rewound) release();
+      }
+    },
+    [logicalSessionKey, sessionActions, store],
+  );
+
+  const cancelledPromptTakeBackRef = useRef<CancelledPromptTakeBack | null>(
+    null,
+  );
+  useDaemonPromptSettled((event) => {
+    const takeBack = cancelledPromptTakeBackRef.current;
+    if (
+      !takeBack ||
+      event.sessionId !== takeBack.sessionId ||
+      !settlesCancelledPrompt(event, takeBack)
+    ) {
+      return;
+    }
+    cancelledPromptTakeBackRef.current = null;
+    // A turn that finished or failed on its own keeps its result.
+    if (
+      event.outcome !== 'cancelled' ||
+      Date.now() - takeBack.requestedAt > CANCELLED_TURN_SETTLE_TIMEOUT_MS
+    ) {
+      return;
+    }
+    void takeBackCancelledPrompt(takeBack);
+  });
+
+  const transcriptHistoryComplete =
+    !transcriptHistory.hasMore && !transcriptHistory.capacityReached;
+  const hasQueuedPrompts = queuedPrompts.length > 0;
   const handleCancel = useCallback(() => {
     const owner = sessionOwnerGuard.capture();
     const dropped = queuedShellCommandsRef.current.length;
@@ -17515,11 +18091,33 @@ export function App({
     if (dropped > 0) {
       pushToast('warning', t('queue.shellDropped', { count: dropped }));
     }
+    // Read before cancelling: the abort settles the send, which clears the ref.
+    // Queued prompts mean the user has moved on, so the turn is just stopped.
+    const cancelled = hasQueuedPrompts ? null : inFlightPromptRef.current;
+    cancelledPromptTakeBackRef.current = cancelled
+      ? {
+          prompt: cancelled,
+          promptId: cancelled.promptId,
+          clientId: connectionRef.current.clientId,
+          sessionId: connectionRef.current.sessionId,
+          owner,
+          historyComplete: transcriptHistoryComplete,
+          requestedAt: Date.now(),
+        }
+      : null;
     sessionActions.cancel().catch((error: unknown) => {
       if (!owner.isCurrent()) return;
       reportError(error, 'Failed to cancel request');
     });
-  }, [sessionActions, reportError, pushToast, sessionOwnerGuard, t]);
+  }, [
+    sessionActions,
+    reportError,
+    pushToast,
+    sessionOwnerGuard,
+    t,
+    transcriptHistoryComplete,
+    hasQueuedPrompts,
+  ]);
 
   const handleFocusTaskPill = useCallback((): boolean => {
     if (interactionBlocked) return false;
@@ -18249,24 +18847,6 @@ export function App({
     (modelId: string) => {
       if (!projectFeaturesAvailable) return;
       if (!workspaceContextActive) {
-        // This picker cannot distinguish same-id rows by endpoint, so writing
-        // the bare id would erase a live `authType:id\0<baseUrl>` pin the CLI
-        // picker made (#12760). Confirming the already-pinned row leaves the
-        // setting untouched.
-        const existingFast = readScopedModelSetting(
-          workspaceSettings,
-          modelSettingScope,
-          'fastModel',
-        );
-        if (
-          typeof existingFast === 'string' &&
-          existingFast.includes('\0') &&
-          extractBareModelId(
-            decodeVisionModelForPicker(existingFast.trim()),
-          ) === modelId
-        ) {
-          return;
-        }
         void setWorkspaceSetting(modelSettingScope, 'fastModel', modelId)
           .then(() => {
             void reloadWorkspaceSettings().catch((error: unknown) => {
@@ -18289,10 +18869,6 @@ export function App({
         blockCommand();
         return;
       }
-      // Model IDs from the picker arrive as bare model IDs (baseModelId), not
-      // ACP format. The model picker strips the (authType) suffix before
-      // calling this handler.
-      //
       // Close the panel before sending: unlike the vision/voice pickers (silent
       // setWorkspaceSetting), `/model --fast` runs a real turn whose response
       // lands in the message list. With the panel open the chat is hidden, so
@@ -18345,7 +18921,6 @@ export function App({
       projectFeaturesAvailable,
       setWorkspaceSetting,
       workspaceContextActive,
-      workspaceSettings,
     ],
   );
 
@@ -18688,36 +19263,138 @@ export function App({
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
-  const handleCollaborationThreadOpen = useCallback(
-    (id: string, cwd: string) => {
-      setCollaborationThread({ id, cwd, server: workspace.baseUrl });
-      setMainView('chat');
-      closePanel();
-    },
-    [closePanel, workspace.baseUrl],
-  );
-  const handleCollaborationThreadError = useCallback(
+  const handleAgentCollaborationError = useCallback(
     (message: string) => pushToast('error', message),
     [pushToast],
   );
-  const displayMessagesRef = useRef(displayMessages);
-  displayMessagesRef.current = displayMessages;
-  const getMentionContext = useCallback(
-    () => conversationContext(displayMessagesRef.current),
-    [],
+  // Agents @-mentioned in this chat answer inside it: the session routes of
+  // the session's workspace.
+  const sessionAgentsApi = useMemo(
+    () =>
+      collaborationAvailable && legacyWorkspaceContextCwd
+        ? createSessionAgentsHttpApi(
+            workspace.baseUrl,
+            workspace.token,
+            legacyWorkspaceContextCwd,
+          )
+        : undefined,
+    [
+      collaborationAvailable,
+      legacyWorkspaceContextCwd,
+      workspace.baseUrl,
+      workspace.token,
+    ],
+  );
+  // The session an @-mention goes to, with the workspace it lives in: a new
+  // chat's session is created in the composer's workspace, which can differ
+  // from the one this hook's routes were built for. Same resolution as an
+  // ordinary first prompt (`promptWorkspaceCwd` in the submit path).
+  const ensureAgentMentionSession = useCallback(async () => {
+    const existing = connectionRef.current.sessionId;
+    const allocated = existing ? undefined : await ensureSessionForPrompt();
+    const sessionId = existing ?? allocated ?? connectionRef.current.sessionId;
+    if (!sessionId) return undefined;
+    const allocatedOwner = allocatedSessionCatalogOwnerRef.current;
+    const workspaceCwd =
+      allocatedOwner?.sessionId === sessionId
+        ? allocatedOwner.workspaceCwd
+        : getComposerWorkspaceCwd();
+    return { sessionId, ...(workspaceCwd ? { workspaceCwd } : {}) };
+  }, [ensureSessionForPrompt, getComposerWorkspaceCwd]);
+  const settledAgentRunsKey = useMemo(
+    () => settledAgentRunKey(blocks),
+    [blocks],
+  );
+  const settledAgentRunIds = useMemo(
+    () => new Set(settledAgentRunsKey ? settledAgentRunsKey.split('\n') : []),
+    [settledAgentRunsKey],
+  );
+  const sessionAgentRuns = useSessionAgentRuns({
+    api: sessionAgentsApi,
+    sessionId: connection.sessionId,
+    settledRunIds: settledAgentRunIds,
+  });
+  const reportAgentError = useCallback(
+    (error: unknown) =>
+      pushToast(
+        'error',
+        error instanceof Error ? error.message : String(error),
+      ),
+    [pushToast],
+  );
+  const cancelSessionAgentRun = useCallback(
+    async (runId: string) => {
+      const sessionId = connectionRef.current.sessionId;
+      if (!sessionAgentsApi || !sessionId) return;
+      try {
+        await sessionAgentsApi.cancelRun(sessionId, runId);
+      } catch (error) {
+        reportAgentError(error);
+      }
+    },
+    [reportAgentError, sessionAgentsApi],
+  );
+  const stopAllSessionAgents = useCallback(async () => {
+    const sessionId = connectionRef.current.sessionId;
+    if (!sessionAgentsApi || !sessionId) return;
+    try {
+      await sessionAgentsApi.stopAll(sessionId);
+    } catch (error) {
+      reportAgentError(error);
+    }
+  }, [reportAgentError, sessionAgentsApi]);
+  const respondToSessionAgentPermission = useCallback(
+    async (runId: string, requestId: string, optionId: string) => {
+      const sessionId = connectionRef.current.sessionId;
+      if (!sessionAgentsApi || !sessionId) return;
+      try {
+        await sessionAgentsApi.respondToPermission(
+          sessionId,
+          runId,
+          requestId,
+          optionId,
+        );
+      } catch (error) {
+        reportAgentError(error);
+        // Rethrown so the card comes back for another vote.
+        throw error;
+      }
+    },
+    [reportAgentError, sessionAgentsApi],
+  );
+  const retrySessionAgentRunRequest = sessionAgentRuns.retry;
+  const retrySessionAgentRun = useCallback(
+    async (runId: string) => {
+      try {
+        await retrySessionAgentRunRequest(runId);
+      } catch (error) {
+        reportAgentError(error);
+      }
+    },
+    [reportAgentError, retrySessionAgentRunRequest],
+  );
+  // The @-mentions recorded in the shown session, keyed so the list keeps its
+  // identity across streamed deltas (it changes far less often than blocks).
+  const recordedMentionTextsKey = useMemo(
+    () => JSON.stringify(recordedAgentMentionTexts(blocks)),
+    [blocks],
+  );
+  const recordedMentionTexts = useMemo(
+    () => JSON.parse(recordedMentionTextsKey) as string[],
+    [recordedMentionTextsKey],
   );
   const agentChatEntry = useAgentChatEntry({
-    enabled: Boolean(
-      workspace.capabilities?.features?.includes('agent_collaboration_v1'),
-    ),
-    getContext: getMentionContext,
+    enabled: collaborationAvailable,
     t,
     cwd: legacyWorkspaceContextCwd,
     baseUrl: workspace.baseUrl,
     token: workspace.token,
+    sessionApi: sessionAgentsApi,
+    ensureSession: ensureAgentMentionSession,
     onSubmit: handleEditorSubmit,
-    onOpen: handleCollaborationThreadOpen,
-    onError: handleCollaborationThreadError,
+    onError: handleAgentCollaborationError,
+    sessionId: connection.sessionId,
+    recordedMentionTexts,
     onCreateAgent: () => {
       setAgentsNav((current) => ({
         view: 'new-agent',
@@ -18727,6 +19404,28 @@ export function App({
       openPanel('agents');
     },
   });
+  const sessionAgentTail = useMemo(
+    () =>
+      sessionAgentRuns.runs.length > 0 ||
+      agentChatEntry.pendingMentions.length > 0 ? (
+        <>
+          <PendingAgentMentions mentions={agentChatEntry.pendingMentions} />
+          <SessionAgentLiveRuns
+            runs={sessionAgentRuns.runs}
+            onCancel={cancelSessionAgentRun}
+            onRespond={respondToSessionAgentPermission}
+            onRetry={retrySessionAgentRun}
+          />
+        </>
+      ) : undefined,
+    [
+      agentChatEntry.pendingMentions,
+      cancelSessionAgentRun,
+      respondToSessionAgentPermission,
+      retrySessionAgentRun,
+      sessionAgentRuns.runs,
+    ],
+  );
   const composerAtProviders = useMemo(
     () =>
       collaborationAvailable
@@ -18787,9 +19486,17 @@ export function App({
           selectedWorkspaceGitStatus?.branch ??
           undefined)
         : (selectedWorkspaceGitStatus?.branch ?? undefined);
+  // The rail adds 56px of persistent navigation chrome beside the Home
+  // column. Exclude it from the dock budget so the environment panel keeps
+  // docking at the same window widths hosts had before the rail (1440px
+  // laptops included): the message area yields those 56px rather than the
+  // panel losing its dock.
   const environmentPanelCanDock =
     contextBodyWidth === null ||
-    contextBodyWidth >=
+    contextBodyWidth +
+      (navigationRailVisible && !sidebarCollapsedEffective
+        ? SIDEBAR_RAIL_WIDTH
+        : 0) >=
       MIN_DOCKED_MESSAGE_AREA_WIDTH + DOCKED_ENVIRONMENT_PANEL_WIDTH;
   const environmentPanelFits =
     chatWidthMode !== 'wide' && environmentPanelCanDock;
@@ -18976,9 +19683,7 @@ export function App({
   const appClassName = [
     styles.app,
     styles.appChat,
-    isChatEmptyState && !collaborationThreadId
-      ? styles.appChatEmpty
-      : undefined,
+    isChatEmptyState ? styles.appChatEmpty : undefined,
     sidebarOptions.enabled ? styles.appWithSidebar : undefined,
     selectedTheme === WebShellThemeId.Light
       ? styles.themeLight
@@ -19278,8 +19983,6 @@ export function App({
   // Shared by the drawer and docked render sites below; only the genuine
   // per-variant props (variant / panelWidth) stay at each site.
   const artifactPanelSharedProps = {
-    onOpenCollaborationSession: (sessionId: string, workspaceCwd: string) =>
-      void loadSidebarSession(sessionId, workspaceCwd),
     onSelectTurnCallsPrompt: openTurnCalls,
     artifacts: artifactPanelArtifacts,
     tabs: artifactPanelTabs,
@@ -19413,6 +20116,7 @@ export function App({
           style={appStyle}
           data-web-shell-root
           data-web-shell-shadcn
+          data-compact-sidebar={compactShell ? '' : undefined}
           lang={selectedLanguage}
         >
           {capacityRecovery && <CapacityRecoveryDialog intent={capacityRecovery} onClose={dismissCapacityRecovery} />}
@@ -19856,7 +20560,10 @@ export function App({
             </DialogShell>
           )}
 
-          <div className={styles.appShell}>
+          <div
+            className={styles.appShell}
+            ref={sidebarLayoutRef}
+          >
             {sidebarOptions.enabled && (
               <div
                 data-sidebar-shell=""
@@ -19880,23 +20587,51 @@ export function App({
                   aria-hidden="true"
                 />
                 <WebShellSidebar
-                  selectedCollaborationId={collaborationThreadId}
-                  onOpenCollaboration={(id, cwd) => {
+                  collapsed={sidebarCollapsedEffective}
+                  layout={sidebarRailEnabled ? 'rail' : 'single'}
+                  containerWidth={sidebarLayoutWidth}
+                  activePage={sidebarPage}
+                  onOpenHome={() => {
+                    // No handleSidebarCollapsedChange here in the general
+                    // case: the rail's openNavigation already restores the
+                    // column when it is actually collapsed, and writing from
+                    // inside the forced-open mobile drawer would silently
+                    // clear the desktop preference. Leaving split view in the
+                    // fold band is the one exception — the rail's
+                    // restoresColumn call is clamped by design for taps that
+                    // stay in split view, so the exit-split entry points
+                    // must restore the user's column themselves.
                     closeMobileDrawer();
-                    setCollaborationThread({ id, cwd, server: workspace.baseUrl });
-                    setMainView('chat');
-                    closePanel();
+                    setSidebarSection('home');
+                    splitFoldedByShrinkRef.current = false;
+                    returnToChat();
+                    if (splitFoldedSidebarRef.current) {
+                      handleSidebarCollapsedChange(false, {
+                        exitFoldBand: true,
+                      });
+                    }
                   }}
-                  collapsed={
-                    (sidebarCollapsed ||
-                      (mainView === 'split' && !splitSidebarHasRoom)) &&
-                    !mobileDrawerOpen
-                  }
                   onCollapsedChange={handleSidebarCollapsedChange}
                   onOpenSettings={() => {
                     closeMobileDrawer();
                     openPanel('settings');
                   }}
+                  onOpenLive={
+                    liveSidebarEnabled
+                      ? () => {
+                          closeMobileDrawer();
+                          openPanel('live');
+                          // Leaving split view for a section column restores
+                          // the rail column just like the Home entry does.
+                          if (splitFoldedSidebarRef.current) {
+                            handleSidebarCollapsedChange(false, {
+                              exitFoldBand: true,
+                            });
+                          }
+                        }
+                      : undefined
+                  }
+                  onLiveVoiceSlotChange={setLiveVoiceSlot}
                   onOpenAgents={
                     collaborationAvailable
                       ? (view = 'agents') => {
@@ -19917,6 +20652,14 @@ export function App({
                   onOpenChannels={() => {
                     closeMobileDrawer();
                     openPanel('channels');
+                    if (
+                      splitFoldedSidebarRef.current &&
+                      channelSidebarEnabled
+                    ) {
+                      handleSidebarCollapsedChange(false, {
+                        exitFoldBand: true,
+                      });
+                    }
                   }}
                   onOpenManagedSessions={
                     managedAgentProvider
@@ -19983,6 +20726,7 @@ export function App({
                     showChat();
                     return loadSidebarSession(sessionId, workspaceCwd);
                   }}
+                  onOpenHostSession={handleOpenHostSession}
                   onLoadStandaloneSession={(sessionId) => {
                     setMainView('chat');
                     return loadSidebarSession(
@@ -20123,7 +20867,7 @@ export function App({
               aria-hidden={artifactPanelFullscreen || undefined}
             >
               {chatHeaderEnabled &&
-                (!isChatEmptyState || Boolean(collaborationThreadId)) &&
+                !isChatEmptyState &&
                 !activePanel &&
                 (mainView === 'chat' || mainView === 'cockpit') && (
                 <div className={styles.chatHeaderRow}>
@@ -20158,7 +20902,7 @@ export function App({
                     <div className={styles.customChatHeader}>
                       {renderChatHeader({
                         sessionId: connection.sessionId,
-                        sessionName: chatHeaderTitle,
+                        sessionName: sessionDisplayName,
                         workspaceCwd: workspaceContextActive
                           ? connection.workspaceCwd
                           : undefined,
@@ -20194,9 +20938,17 @@ export function App({
                     </div>
                   ) : (
                     <ChatContextHeader
+                      location={
+                        workspaceHostsEnabled && mainView === 'chat' ? (
+                          <WorkspaceLocation
+                            cwd={connection.workspaceCwd}
+                            hostOrigin={focusedHostOrigin}
+                          />
+                        ) : undefined
+                      }
                       content={
                         titleHeaderItemVisible
-                          ? (chatHeaderTitle ?? t('session.new'))
+                          ? (sessionDisplayName ?? t('session.new'))
                           : null
                       }
                       workspaceName={headerWorkspaceName}
@@ -20244,7 +20996,6 @@ export function App({
                       }
                     />
                   )}
-                  {collaborationThreadId && <div ref={setCollaborationHeaderActions} className="flex shrink-0 items-center pr-3" />}
                   {sessionWorkflowEnabled &&
                     (sessionWorkflowTodos.length > 0 ||
                       mainView === 'cockpit') && (
@@ -20288,14 +21039,14 @@ export function App({
             >
               {sidebarOptions.enabled &&
                 sidebarOptions.showCompactToggle &&
-                (!chatHeaderEnabled || (isChatEmptyState && !collaborationThreadId)) &&
+                (!chatHeaderEnabled || isChatEmptyState) &&
                 !activePanel &&
                 mainView === 'chat' && (
                   <button
                     type="button"
                     className={[
                       styles.hamburgerButton,
-                      !chatHeaderEnabled || (isChatEmptyState && !collaborationThreadId)
+                      !chatHeaderEnabled || isChatEmptyState
                         ? styles.hamburgerButtonFloating
                         : undefined,
                     ]
@@ -20348,7 +21099,9 @@ export function App({
                           : activePanel === 'plugins'
                               ? t('plugins.title')
                             : activePanel === 'channels'
-                              ? t('channels.title')
+                              ? t('sidebar.channelSettings')
+                            : activePanel === 'live'
+                              ? t('sidebar.liveSettings')
                             : activePanel === 'managed'
                               ? t('managed.title')
                               : activePanel === 'workspaces'
@@ -20362,6 +21115,7 @@ export function App({
                     activePanel !== 'agents' &&
                     activePanel !== 'plugins' &&
                     activePanel !== 'channels' &&
+                    activePanel !== 'live' &&
                     activePanel !== 'workspaces' && (
                     <div className={styles.panelHeader}>
                     <button
@@ -20468,6 +21222,7 @@ export function App({
                           ? pluginTabRef
                           : activePanel === 'extensions' ||
                               activePanel === 'channels' ||
+                              activePanel === 'live' ||
                               activePanel === 'workspaces'
                             ? panelHeadingRef
                             : undefined
@@ -20579,23 +21334,22 @@ export function App({
                     ) : activePanel === 'agents' ? (
                       <AgentsManagerPage
                         key={agentsNav.request}
+                        workspaceCwd={legacyWorkspaceContextCwd}
                         initialAgentView={agentsNav.view}
-                        onOpenThreadChat={(threadId, cwd) => {
-                          setCollaborationThread({ id: threadId, cwd, server: workspace.baseUrl });
-                          setMainView('chat');
-                          closePanel();
-                        }}
                         onClose={() => {
                           setAgentsCreateScope(null);
                           closePanel();
                         }}
                         initialCreateScope={agentsCreateScope}
-                        onOpenAgentSession={(sessionId) => {
-                          // An agent is its own session, so a run opens the
-                          // ordinary session view. `loadSidebarSession`
-                          // already closes this panel on its way there.
+                        onMentionAgent={(name) => {
+                          // Agents answer inside the chat: "Mention in chat"
+                          // starts the @ there.
                           setAgentsCreateScope(null);
-                          void loadSidebarSession(sessionId);
+                          closePanel();
+                          window.setTimeout(() => {
+                            editorRef.current?.setText(`@${name} `);
+                            editorRef.current?.focus();
+                          }, 0);
                         }}
                       />
                     ) : activePanel === 'plugins' ? (
@@ -20606,9 +21360,50 @@ export function App({
                       />
                     ) : activePanel === 'channels' ? (
                       <ChannelsManagerPage
-                        onClose={returnToChat}
+                        onClose={
+                          channelSidebarEnabled && navigationRailVisible
+                            ? undefined
+                            : returnToChat
+                        }
                         initialFocusRef={panelHeadingRef}
                       />
+                    ) : activePanel === 'live' ? (
+                      <div className="-mx-5 -mt-4">
+                        <div className={styles.fullPageHeader}>
+                          {!navigationRailVisible && (
+                            <button
+                              type="button"
+                              className={styles.fullPageBack}
+                              onClick={returnToChat}
+                              aria-label={t('common.back')}
+                            >
+                              <ChevronLeftIcon size={18} />
+                            </button>
+                          )}
+                          <h1
+                            ref={panelHeadingRef}
+                            tabIndex={-1}
+                            className={`${styles.fullPageTitle} outline-none`}
+                          >
+                            {t('sidebar.liveSettings')}
+                          </h1>
+                          <div
+                            ref={setLiveVoicePageSlot}
+                            className={styles.liveVoicePageSlot}
+                            data-live-voice-page-slot
+                          />
+                        </div>
+                        {liveSetup.supported ? (
+                          <LiveVoiceSettingsCard setup={liveSetup} />
+                        ) : (
+                          <p className="p-5 text-sm text-muted-foreground" role="status">
+                            {workspaceSettingsState.loading
+                              ? t('common.loading')
+                              : workspaceSettingsState.error?.message ||
+                                t('sidebar.liveSettingsUnavailable')}
+                          </p>
+                        )}
+                      </div>
                     ) : activePanel === 'workspaces' ? (
                       <WorkspacesOverviewPanel
                         onClose={closePanel}
@@ -20646,27 +21441,29 @@ export function App({
                   data-testid="scheduled-tasks-page"
                 >
                   <div className={styles.fullPageHeader}>
-                    <button
-                      type="button"
-                      className={styles.fullPageBack}
-                      onClick={returnToChat}
-                      aria-label={t('common.back')}
-                      title={t('common.back')}
-                    >
-                      <svg
-                        viewBox="0 0 24 24"
-                        width="18"
-                        height="18"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        aria-hidden="true"
+                    {!navigationRailVisible && (
+                      <button
+                        type="button"
+                        className={styles.fullPageBack}
+                        onClick={returnToChat}
+                        aria-label={t('common.back')}
+                        title={t('common.back')}
                       >
-                        <path d="M15 18l-6-6 6-6" />
-                      </svg>
-                    </button>
+                        <svg
+                          viewBox="0 0 24 24"
+                          width="18"
+                          height="18"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <path d="M15 18l-6-6 6-6" />
+                        </svg>
+                      </button>
+                    )}
                     <div className={styles.fullPageTitle}>
                       {t('scheduledTasks.title')}
                     </div>
@@ -20804,27 +21601,29 @@ export function App({
               {projectFeaturesAvailable && mainView === 'goals' && (
                 <div className={styles.fullPage} data-testid="goals-page">
                   <div className={styles.fullPageHeader}>
-                    <button
-                      type="button"
-                      className={styles.fullPageBack}
-                      onClick={returnToChat}
-                      aria-label={t('common.back')}
-                      title={t('common.back')}
-                    >
-                      <svg
-                        viewBox="0 0 24 24"
-                        width="18"
-                        height="18"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        aria-hidden="true"
+                    {!navigationRailVisible && (
+                      <button
+                        type="button"
+                        className={styles.fullPageBack}
+                        onClick={returnToChat}
+                        aria-label={t('common.back')}
+                        title={t('common.back')}
                       >
-                        <path d="M15 18l-6-6 6-6" />
-                      </svg>
-                    </button>
+                        <svg
+                          viewBox="0 0 24 24"
+                          width="18"
+                          height="18"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <path d="M15 18l-6-6 6-6" />
+                        </svg>
+                      </button>
+                    )}
                     <div className={styles.fullPageTitle}>
                       {t('goals.title')}
                     </div>
@@ -21042,22 +21841,7 @@ export function App({
                     : undefined
                 }
               >
-                {collaborationThreadId && (
-                  <LazyThreadsRoute key={`${collaborationThread?.cwd}:${collaborationThreadId}`} chat initialThreadId={collaborationThreadId}
-                    workspaceCwd={collaborationThread?.cwd}
-                    headerActionsContainer={collaborationHeaderActions}
-                    onTitleChange={updateCollaborationTitle}
-                    onOpenActivity={(threadId, workspaceCwd) => {
-                      const tab: ArtifactPanelTab = { id: `agent-activity:${workspaceCwd}:${threadId}`, kind: 'agent_activity', title: t('collab.team.title'), threadId, workspaceCwd };
-                      setArtifactPanelTabs((tabs) => tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab]);
-                      setActiveArtifactPanelTabId(tab.id);
-                      setArtifactPanelWidth((width) => artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth());
-                      setArtifactPanelOpen(true);
-                    }}
-                    onOpenThreadChat={(id, cwd) => setCollaborationThread({ id, cwd, server: workspace.baseUrl })}
-                    onOpenAgentSession={(sessionId) => void loadSidebarSession(sessionId, collaborationThread?.cwd)} />
-                )}
-                {!collaborationThreadId && showMissingSessionState && (
+                {showMissingSessionState && (
                   <div className={styles.missingSessionState}>
                     <div className={styles.missingSessionMessage}>
                       {t('session.missing')}
@@ -21074,7 +21858,7 @@ export function App({
                 )}
                 <div
                   className={
-                    showMissingSessionState || collaborationThreadId
+                    showMissingSessionState
                       ? styles.chatSubtreeHidden
                       : styles.chatSubtree
                   }
@@ -21187,8 +21971,8 @@ export function App({
                                 centerWelcomeHeader={
                                   showMobileWelcomeFooterMiddle || undefined
                                 }
-                                tailContent={undefined}
-                                tailKey={undefined}
+                                tailContent={sessionAgentTail}
+                                tailKey="session-agent-runs"
                                 onCanScrollToBottomChange={
                                   handleCanScrollToBottomChange
                                 }
@@ -21732,6 +22516,11 @@ export function App({
                             />
                           </div>
                         )}
+                        {sessionAgentRuns.anyLive && (
+                          <StopAllAgentsButton
+                            onStopAll={stopAllSessionAgents}
+                          />
+                        )}
                         <SessionRecoveryBanner
                           blocked={
                             isDisabled ||
@@ -21743,6 +22532,9 @@ export function App({
                         />
                         <ChatEditor
                           ref={setEditorHandle}
+                          liveVoicePortalContainer={
+                            liveVoiceSlot ?? liveVoicePageSlot
+                          }
                           compactOverlays={compactComposerOverlays}
                           onSubmit={
                             collaborationAvailable
@@ -21953,6 +22745,11 @@ export function App({
                           onSelectWorkspace={
                             composerWorkspaceSelectEnabled
                               ? handleSelectComposerWorkspace
+                              : undefined
+                          }
+                          onSelectHostedWorkspace={
+                            composerWorkspaceSelectEnabled
+                              ? handleSelectHostedWorkspace
                               : undefined
                           }
                           standaloneTargetSupported={

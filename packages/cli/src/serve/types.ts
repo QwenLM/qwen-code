@@ -450,6 +450,7 @@ export interface ServeOptions {
  * `v` is the wire schema version; bumped only on breaking frame changes.
  */
 export interface HostedHarnessCapabilities {
+  readonly lifecycleProtocolVersion?: 1;
   readonly protocolVersions: {
     readonly current: 1;
     readonly supported: readonly [1];
@@ -510,6 +511,8 @@ export interface CapabilitiesEnvelope {
     ssh?: { host: string; port?: number; directory: string };
     primary: boolean;
     trusted: boolean;
+    /** Whether persistent Agent collaboration is enabled for this workspace. */
+    agentCollaborationEnabled?: boolean;
     workflowsEnabled?: boolean;
     removable?: boolean;
     kind?: 'live';

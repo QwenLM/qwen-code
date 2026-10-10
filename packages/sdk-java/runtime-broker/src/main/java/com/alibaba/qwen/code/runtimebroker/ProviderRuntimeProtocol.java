@@ -67,7 +67,7 @@ final class ProviderRuntimeProtocol {
                     }
                     case "prepare" -> {
                         required = Set.of("kind", "action", "promptId", "paths");
-                        if (!sessionId.equals(string(operation, "promptId"))
+                        if (string(operation, "promptId").length() > 128
                                 || !(operation.get("paths") instanceof List<?> paths)
                                 || paths.isEmpty() || paths.stream().anyMatch(value -> !(value instanceof String))) {
                             throw invalid();
@@ -81,7 +81,7 @@ final class ProviderRuntimeProtocol {
                     default -> throw invalid();
                 }
             }
-            case "manifest", "history" -> required = Set.of("kind");
+            case "manifest", "history", "workspace-context" -> required = Set.of("kind");
             case "begin-turn" -> required = Set.of("kind", "identity");
             case "prepare" -> {
                 required = Set.of("kind", "identity", "toolName", "input");

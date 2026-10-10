@@ -16,6 +16,7 @@ import {
   type FakeOpenAIHandler,
 } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
+import { relayUpstream } from './hosted-relay-headers.js';
 
 const config = JSON.parse(await readFile(process.argv[2], 'utf8')) as {
   tenantId: string;
@@ -164,8 +165,7 @@ const storeProxy = createServer(async (req, res) => {
           durableReceipts.push(record.managedSession);
       }
     }
-    res.writeHead(response.status, Object.fromEntries(response.headers));
-    res.end(output);
+    relayUpstream(res, response, output);
   } catch (cause) {
     res.writeHead(503);
     res.end(String(cause));
@@ -227,10 +227,16 @@ let modelCalls = 0;
 const modelReply: FakeOpenAIHandler = ({ body }) => {
   modelCalls++;
   const tools = body['tools'] as Array<{ function: { name: string } }>;
+  // Since H4b, a depth-0 Shell-lane Session whose child kind gate is on
+  // advertises the Agent tool beside the Shell vocabulary, and since H4d-b
+  // the parent form of send_message beside it.
   assert.deepEqual(tools.map((tool) => tool.function.name).sort(), [
+    ...(shellProfile ? ['agent'] : []),
     'edit',
+    ...(shellProfile ? ['monitor'] : []),
     'read_file',
     ...(shellProfile ? ['run_shell_command'] : []),
+    ...(shellProfile ? ['send_message'] : []),
     'write_file',
   ]);
   const messages = body['messages'] as Array<{

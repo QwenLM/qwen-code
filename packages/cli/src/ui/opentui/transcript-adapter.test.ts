@@ -144,6 +144,30 @@ describe('transcriptToEvents resumed tool calls', () => {
       { type: 'done' },
     ]);
   });
+
+  it('skips internal Code Mode results during resume replay', () => {
+    const events = transcriptToEvents(
+      [
+        JSON.stringify({
+          type: 'tool_result',
+          subtype: 'code_mode_tool_result',
+          toolCallResult: {
+            callId: 'outer:code:1',
+            status: 'success',
+            resultDisplay: 'internal result',
+          },
+        }),
+        JSON.stringify({
+          type: 'tool_result',
+          toolCallResult: { callId: 'outer', status: 'success' },
+        }),
+      ].join('\n'),
+    );
+    expect(events).toEqual([
+      { type: 'tool-end', id: 'outer', success: true, summary: 'ok' },
+      { type: 'done' },
+    ]);
+  });
 });
 
 describe('transcriptToEvents assistant timestamps (#76)', () => {

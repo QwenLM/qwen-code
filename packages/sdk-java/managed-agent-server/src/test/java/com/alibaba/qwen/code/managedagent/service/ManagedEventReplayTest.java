@@ -8,7 +8,6 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionResyncRequired;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellResyncRequired;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -20,26 +19,21 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.LongStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
-import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter.DataWithMediaType;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 /**
  * Replays committed events through JSON pages and both streams: resuming from
@@ -61,7 +55,9 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
         "qwen.managed-agent.events.heartbeat-interval=60s",
         "qwen.managed-agent.events.materialize-interval=10ms"
 })
-@AutoConfigureMockMvc
+// Streaming flows write the Mock response from a background thread while a
+// printing handler would walk the same headers.
+@AutoConfigureMockMvc(print = MockMvcPrint.NONE)
 class ManagedEventReplayTest {
     private static final String TENANT = TenantContextFilter.HEADER;
     private static final Pattern ID = Pattern.compile("(?m)^id:(\\d+)$");
@@ -97,7 +93,8 @@ class ManagedEventReplayTest {
         JsonNode page;
         int pages = 0;
         do {
-            page = json(mvc.perform(events(tenant, sessionId)
+            page = EventStreams.json(objectMapper,
+                    mvc.perform(EventStreams.events(tenant, sessionId)
                             .param("after", cursor).param("limit", "7"))
                     .andReturn().getResponse());
             pages++;
@@ -108,15 +105,18 @@ class ManagedEventReplayTest {
         } while (page.get("has_more").asBoolean());
 
         assertThat(pages).isEqualTo(35);
-        assertThat(sequences).containsExactlyElementsOf(range(1, last));
+        assertThat(sequences)
+                .containsExactlyElementsOf(EventStreams.range(1, last));
         assertThat(page.get("next_cursor").isNull()).isTrue();
-        assertThat(mvc.perform(events(tenant, sessionId)
+        assertThat(mvc.perform(EventStreams.events(tenant, sessionId)
                         .param("limit", "1000"))
                 .andReturn().getResponse().getStatus()).isEqualTo(200);
-        MockHttpServletResponse tooMany = mvc.perform(events(tenant,
-                sessionId).param("limit", "1001")).andReturn().getResponse();
+        MockHttpServletResponse tooMany = mvc.perform(EventStreams.events(
+                        tenant, sessionId).param("limit", "1001"))
+                .andReturn().getResponse();
         assertThat(tooMany.getStatus()).isEqualTo(400);
-        assertThat(json(tooMany).at("/error/code").asText())
+        assertThat(EventStreams.json(objectMapper, tooMany)
+                .at("/error/code").asText())
                 .isEqualTo("invalid_limit");
     }
 
@@ -125,7 +125,8 @@ class ManagedEventReplayTest {
         String tenant = tenant();
         String sessionId = session(tenant);
         long caughtUp = append(tenant, sessionId, 250);
-        MockHttpServletResponse stream = mvc.perform(events(tenant, sessionId)
+        MockHttpServletResponse stream = mvc.perform(EventStreams.events(
+                        tenant, sessionId)
                         .param("stream", "true").param("after", "5")
                         .header("Last-Event-ID", "120")
                         .accept(MediaType.TEXT_EVENT_STREAM))
@@ -138,7 +139,8 @@ class ManagedEventReplayTest {
 
         await().atMost(Duration.ofSeconds(10))
                 .until(() -> ids(stream).contains(last));
-        assertThat(ids(stream)).containsExactlyElementsOf(range(121, last));
+        assertThat(ids(stream))
+                .containsExactlyElementsOf(EventStreams.range(121, last));
     }
 
     @Test
@@ -149,7 +151,8 @@ class ManagedEventReplayTest {
         append(tenant, sessionId, 150);
         CompletableFuture<Long> writer = CompletableFuture.supplyAsync(
                 () -> append(tenant, sessionId, 300));
-        MockHttpServletResponse stream = mvc.perform(events(tenant, sessionId)
+        MockHttpServletResponse stream = mvc.perform(EventStreams.events(
+                        tenant, sessionId)
                         .param("stream", "true")
                         .accept(MediaType.TEXT_EVENT_STREAM))
                 .andReturn().getResponse();
@@ -158,7 +161,8 @@ class ManagedEventReplayTest {
 
         await().atMost(Duration.ofSeconds(10))
                 .until(() -> ids(stream).contains(last));
-        assertThat(ids(stream)).containsExactlyElementsOf(range(1, last));
+        assertThat(ids(stream))
+                .containsExactlyElementsOf(EventStreams.range(1, last));
     }
 
     @ParameterizedTest(name = "web shell: {0}")
@@ -169,12 +173,14 @@ class ManagedEventReplayTest {
         String tenant = tenant();
         String sessionId = session(tenant);
         long caughtUp = append(tenant, sessionId, 20);
-        RecordingEmitter emitter = new RecordingEmitter(caughtUp + 1);
+        EventStreams.RecordingEmitter emitter = EventStreams.RecordingEmitter
+                .blockingOn(caughtUp + 1);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            open(streams(executor, emitter), webShell, tenant, sessionId);
+            open(EventStreams.streams(agentService, hub, executor, emitter),
+                    webShell, tenant, sessionId);
             await().atMost(Duration.ofSeconds(5))
-                    .until(() -> emitter.ids().contains(caughtUp));
+                    .until(() -> emitter.ids.contains(caughtUp));
             append(tenant, sessionId, 1);
             assertThat(emitter.blocked.await(5, TimeUnit.SECONDS)).isTrue();
             // The hub drops the oldest events while the client is stuck.
@@ -184,8 +190,8 @@ class ManagedEventReplayTest {
 
             assertThat(emitter.completed.await(10, TimeUnit.SECONDS))
                     .isTrue();
-            assertThat(emitter.ids())
-                    .containsExactlyElementsOf(range(RESUME_AFTER + 1, last));
+            assertThat(emitter.ids).containsExactlyElementsOf(
+                    EventStreams.range(RESUME_AFTER + 1, last));
             assertThat(emitter.failed).isEmpty();
             // Catching up from the store needs no Snapshot reload.
             assertThat(emitter.resync).isEmpty();
@@ -201,12 +207,14 @@ class ManagedEventReplayTest {
         String tenant = tenant();
         String sessionId = session(tenant);
         long caughtUp = append(tenant, sessionId, 20);
-        RecordingEmitter emitter = new RecordingEmitter(caughtUp + 1);
+        EventStreams.RecordingEmitter emitter = EventStreams.RecordingEmitter
+                .blockingOn(caughtUp + 1);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            open(streams(executor, emitter), webShell, tenant, sessionId);
+            open(EventStreams.streams(agentService, hub, executor, emitter),
+                    webShell, tenant, sessionId);
             await().atMost(Duration.ofSeconds(5))
-                    .until(() -> emitter.ids().contains(caughtUp));
+                    .until(() -> emitter.ids.contains(caughtUp));
             long stuck = append(tenant, sessionId, 1);
             assertThat(emitter.blocked.await(5, TimeUnit.SECONDS)).isTrue();
             long last = append(tenant, sessionId, OVERFLOW);
@@ -215,8 +223,8 @@ class ManagedEventReplayTest {
 
             assertThat(emitter.completed.await(10, TimeUnit.SECONDS))
                     .isTrue();
-            assertThat(emitter.ids())
-                    .containsExactlyElementsOf(range(RESUME_AFTER + 1, stuck));
+            assertThat(emitter.ids).containsExactlyElementsOf(
+                    EventStreams.range(RESUME_AFTER + 1, stuck));
             assertThat(emitter.resync).containsExactly(webShell
                     ? new WebShellResyncRequired(
                             ManagedEventStreamService.RESYNC, sessionId,
@@ -246,11 +254,13 @@ class ManagedEventReplayTest {
         assertThat(store.advanceReplayFloor(tenant, sessionId, 1))
                 .isEqualTo(window);
 
-        MockHttpServletResponse expired = mvc.perform(events(tenant,
-                sessionId).param("after", Long.toString(floor - 1)))
+        MockHttpServletResponse expired = mvc.perform(EventStreams.events(
+                        tenant, sessionId)
+                        .param("after", Long.toString(floor - 1)))
                 .andReturn().getResponse();
         assertThat(expired.getStatus()).isEqualTo(409);
-        JsonNode error = json(expired).get("error");
+        JsonNode error = EventStreams.json(objectMapper, expired)
+                .get("error");
         assertThat(error.get("code").asText()).isEqualTo("cursor_expired");
         assertThat(error.get("replay_floor_sequence").asLong())
                 .isEqualTo(floor);
@@ -258,16 +268,18 @@ class ManagedEventReplayTest {
                 .isEqualTo(floor);
         assertThat(error.get("request_id").asText())
                 .isEqualTo(expired.getHeader("X-Request-Id"));
-        assertThat(mvc.perform(events(tenant, sessionId)
+        assertThat(mvc.perform(EventStreams.events(tenant, sessionId)
                         .param("after", Long.toString(floor)))
                 .andReturn().getResponse().getStatus()).isEqualTo(200);
-        assertThat(json(mvc.perform(get("/v1/agents/sessions/{id}",
-                        sessionId).header(TENANT, tenant))
-                .andReturn().getResponse())
+        assertThat(EventStreams.json(objectMapper,
+                        mvc.perform(get("/v1/agents/sessions/{id}", sessionId)
+                                .header(TENANT, tenant))
+                        .andReturn().getResponse())
                 .get("replay_floor_sequence").asLong()).isEqualTo(floor);
 
-        MockHttpServletResponse publicStream = mvc.perform(events(tenant,
-                        sessionId).param("stream", "true")
+        MockHttpServletResponse publicStream = mvc.perform(
+                EventStreams.events(tenant, sessionId)
+                        .param("stream", "true")
                         .accept(MediaType.TEXT_EVENT_STREAM))
                 .andReturn().getResponse();
         MockHttpServletResponse webShellStream = mvc.perform(
@@ -319,22 +331,6 @@ class ManagedEventReplayTest {
         }
     }
 
-    private ManagedEventStreamService streams(ExecutorService executor,
-            SseEmitter emitter) {
-        ManagedAgentProperties properties = new ManagedAgentProperties();
-        // Only an overflow or the end of catch-up makes the stream read
-        // the store again.
-        properties.getEvents().setPollInterval(Duration.ofSeconds(60));
-        properties.getEvents().setHeartbeatInterval(Duration.ofSeconds(60));
-        return new ManagedEventStreamService(agentService, hub, executor,
-                properties) {
-            @Override
-            SseEmitter emitter() {
-                return emitter;
-            }
-        };
-    }
-
     private ReplayWindow advanceFloor(String tenant, String sessionId,
             long floor) {
         long last = store.requireSession(tenant, sessionId).lastSequence();
@@ -366,16 +362,6 @@ class ManagedEventReplayTest {
         return store.requireSession(tenant, sessionId).lastSequence();
     }
 
-    private MockHttpServletRequestBuilder events(String tenant,
-            String sessionId) {
-        return get("/v1/agents/sessions/{id}/events", sessionId)
-                .header(TENANT, tenant).accept(MediaType.APPLICATION_JSON);
-    }
-
-    private JsonNode json(MockHttpServletResponse response) throws Exception {
-        return objectMapper.readTree(content(response));
-    }
-
     private static String content(MockHttpServletResponse response)
             throws Exception {
         return response.getContentAsString(StandardCharsets.UTF_8);
@@ -391,72 +377,7 @@ class ManagedEventReplayTest {
         return ids;
     }
 
-    private static List<Long> range(long first, long last) {
-        return LongStream.rangeClosed(first, last).boxed().toList();
-    }
-
     private static String tenant() {
         return "tenant-replay-" + UUID.randomUUID();
-    }
-
-    /** Records frames and blocks the stream thread on one sequence. */
-    private static final class RecordingEmitter extends SseEmitter {
-        private final long blockOn;
-        private final List<Long> sent = new CopyOnWriteArrayList<>();
-        private final List<Object> resync = new CopyOnWriteArrayList<>();
-        private final List<Throwable> failed = new CopyOnWriteArrayList<>();
-        private final CountDownLatch blocked = new CountDownLatch(1);
-        private final CountDownLatch release = new CountDownLatch(1);
-        private final CountDownLatch completed = new CountDownLatch(1);
-
-        RecordingEmitter(long blockOn) {
-            this.blockOn = blockOn;
-        }
-
-        @Override
-        public void send(SseEventBuilder builder) {
-            StringBuilder text = new StringBuilder();
-            Object data = null;
-            for (DataWithMediaType part : builder.build()) {
-                if (part.getData() instanceof String value) {
-                    text.append(value);
-                } else {
-                    data = part.getData();
-                }
-            }
-            Matcher matcher = ID.matcher(text);
-            if (!matcher.find()) {
-                if (text.toString().contains(
-                        "event:" + ManagedEventStreamService.RESYNC)) {
-                    resync.add(data);
-                }
-                return;
-            }
-            long id = Long.parseLong(matcher.group(1));
-            sent.add(id);
-            if (id == blockOn) {
-                blocked.countDown();
-                try {
-                    release.await(10, TimeUnit.SECONDS);
-                } catch (InterruptedException error) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-        }
-
-        @Override
-        public void complete() {
-            completed.countDown();
-        }
-
-        @Override
-        public void completeWithError(Throwable error) {
-            failed.add(error);
-            completed.countDown();
-        }
-
-        List<Long> ids() {
-            return List.copyOf(sent);
-        }
     }
 }

@@ -77,6 +77,7 @@ import {
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { LlmClient } from '../core/client.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { buildSessionAgentToolConfig } from '../agents/workspace-agents/capability.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import {
@@ -111,6 +112,7 @@ import {
   clearAutoMemoryRootCache,
   getAutoMemoryIndexPath,
   getUserAutoMemoryIndexPath,
+  getTeamAutoMemoryRoot,
 } from '../memory/paths.js';
 import {
   rebuildTeamAutoMemoryIndex,
@@ -313,6 +315,7 @@ vi.mock('../hooks/index.js', () => {
   HookSystemMock.prototype.runtimeId = 'test-hook-runtime';
   HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
+  HookSystemMock.prototype.isManaged = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
   return {
     HookSystem: HookSystemMock,
@@ -5676,6 +5679,22 @@ describe('Server Config (config.ts)', () => {
       expect(config.getFileCheckpointingEnabled()).toBe(false);
     });
 
+    it('installs a managed dispatcher while ambient Hook discovery is disabled', async () => {
+      const config = new Config({ ...baseParams });
+      const dispatcher = {
+        hasHooksForEvent: () => false,
+        execute: vi.fn(),
+      };
+      await config.initialize({
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        managedHookDispatcher: dispatcher,
+      });
+      expect(HookSystem).toHaveBeenCalledWith(config, dispatcher);
+      expect(config.getHookSystem()).toBeDefined();
+    });
+
     it('warms tools strictly by default and leniently when lenientToolWarmup is set', async () => {
       // Regression guard for the read-only transcript-replay path: a Config
       // that skips the SkillManager must warm tools leniently, or warmAll()
@@ -7421,14 +7440,87 @@ describe('Server Config (config.ts)', () => {
 
     await config.refreshHierarchicalMemory();
 
-    // Context files stay in userMemory; the volatile auto-memory section is
-    // kept separate so prompt assembly can order stable → context → volatile.
+    // The system policy stays separate from the request-only catalog.
     expect(config.getUserMemory()).toContain('Project rules');
     expect(config.getUserMemory()).not.toContain('# auto memory');
     expect(config.getAutoMemoryPrompt()).toContain('# auto memory');
-    expect(config.getAutoMemoryPrompt()).toContain(
+    expect(config.getAutoMemoryPrompt()).not.toContain(
       '[Project Memory](project.md)',
     );
+    expect(config.getAutoMemoryContext()).toContain(
+      '[Project Memory](project.md)',
+    );
+  });
+
+  it('delivers each memory tier in the request catalog while keeping indexes out of the policy', async () => {
+    const config = makeConfig({ enableTeamMemory: true });
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+    loadProjectRules();
+    const projectEntry = '- [Project](project.md) — PROJECT_ENTRY';
+    const userEntry = '- [User](user.md) — USER_ENTRY';
+    const teamEntry = '- [Team](team.md) — TEAM_ENTRY';
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(
+      mockAutoMemoryIndexRead(projectEntry),
+    );
+    vi.mocked(readUserAutoMemoryIndexWithStats).mockResolvedValueOnce(
+      mockAutoMemoryIndexRead(userEntry),
+    );
+    vi.mocked(rebuildTeamAutoMemoryIndex).mockResolvedValueOnce(teamEntry);
+
+    await config.refreshHierarchicalMemory();
+
+    for (const [indexPath, entry] of [
+      [getAutoMemoryIndexPath(config.getProjectRoot()), projectEntry],
+      [getUserAutoMemoryIndexPath(), userEntry],
+      [
+        path.join(getTeamAutoMemoryRoot(config.getProjectRoot()), 'MEMORY.md'),
+        teamEntry,
+      ],
+    ]) {
+      expect(config.getAutoMemoryContext()).toContain(
+        `## ${indexPath}\n\n${entry}`,
+      );
+      expect(config.getAutoMemoryPrompt()).not.toContain(entry);
+    }
+  });
+
+  it('keeps policy stable through first save, update, no-op and deletion', async () => {
+    const config = makeConfig();
+    loadProjectRules();
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(null);
+    await config.refreshHierarchicalMemory();
+    const policy = config.getAutoMemoryPrompt();
+    const emptyCatalog = config.getAutoMemoryContext();
+    const scoped = Object.create(config) as Config;
+    scoped.getAutoMemoryPrompt = () => '';
+    expect(scoped.getAutoMemoryContext()).toBe('');
+
+    for (const index of ['- [First](first.md)', '- [Updated](updated.md)']) {
+      vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(
+        mockAutoMemoryIndexRead(index),
+      );
+      await config.refreshHierarchicalMemory();
+      expect(config.getAutoMemoryPrompt()).toBe(policy);
+      expect(config.getAutoMemoryContext()).toContain(index);
+      expect(scoped.getAutoMemoryContext()).toBe('');
+    }
+    const populatedCatalog = config.getAutoMemoryContext();
+    await config.refreshHierarchicalMemory();
+    expect(config.getAutoMemoryContext()).toBe(populatedCatalog);
+
+    vi.mocked(readAutoMemoryIndexWithStats).mockRejectedValueOnce(
+      new Error('read failed'),
+    );
+    await expect(config.refreshHierarchicalMemory()).rejects.toThrow(
+      'read failed',
+    );
+    expect(config.getAutoMemoryPrompt()).toBe(policy);
+    expect(config.getAutoMemoryContext()).toBe(populatedCatalog);
+
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(null);
+    await config.refreshHierarchicalMemory();
+    expect(config.getAutoMemoryPrompt()).toBe(policy);
+    expect(config.getAutoMemoryContext()).toBe(emptyCatalog);
   });
 
   /**
@@ -7744,6 +7836,7 @@ describe('Server Config (config.ts)', () => {
       memoryRecallModeInitialized: true,
       memoryCorpusRevision: 'legacy-revision',
       autoMemoryPrompt: 'legacy prompt',
+      autoMemoryContext: 'legacy catalog',
     });
     vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
     vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
@@ -7782,13 +7875,16 @@ describe('Server Config (config.ts)', () => {
       config.confirmMemoryRecallTransition(transition!),
     ).resolves.toBe(true);
 
+    expect(config.getAutoMemoryContext()).toBe('legacy catalog');
     config.commitMemoryRecallTransition(transition!);
+    expect(config.getAutoMemoryContext()).toBe('');
     expect(config.getMemoryRecallMode()).toBe('structured');
     expect(config.getAutoMemoryPrompt()).toBe(transition?.autoMemoryPrompt);
 
     config.rollbackMemoryRecallTransition(transition!);
     expect(config.getMemoryRecallMode()).toBe('legacy');
     expect(config.getAutoMemoryPrompt()).toBe('legacy prompt');
+    expect(config.getAutoMemoryContext()).toBe('legacy catalog');
 
     scan.mockResolvedValueOnce({ ready: true, revision: 'changed-revision' });
     await expect(
@@ -7946,6 +8042,49 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expectWarning(config, ALWAYS_ON_CONTEXT);
+  });
+
+  it('refreshHierarchicalMemory should count the request-only catalog in the context warning estimate', async () => {
+    // The warning is built from [userMemory, policy, catalog]. With
+    // the full protocol the policy alone already exceeds the small-window
+    // bound, so asserting only that the warning fires cannot tell which term
+    // it was built from — dropping the catalog keeps it green while the
+    // estimate under-reports by every MEMORY.md index line. Compare the quoted
+    // figure across two index sizes instead.
+    const warningTokenFigure = (config: Config) => {
+      const warning = config
+        .getWarnings()
+        .find((w) => w.includes(ALWAYS_ON_CONTEXT));
+      const match = /uses about ([\d,]+) tokens/.exec(warning ?? '');
+      expect(match).not.toBeNull();
+      return Number(match![1].replace(/,/g, ''));
+    };
+    const indexWithLines = (count: number) =>
+      '# Managed Auto-Memory Index\n\n' +
+      Array.from(
+        { length: count },
+        (_, i) => `- [Entry ${i}](entry-${i}.md) — remembered note`,
+      ).join('\n');
+    const refreshWithIndex = async (indexContent: string) => {
+      const config = makeConfig(smallWindow());
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue(
+        memoryLoad({ memoryContent: 'short project rules', fileCount: 1 }),
+      );
+      vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(
+        mockAutoMemoryIndexRead(indexContent),
+      );
+      await config.refreshHierarchicalMemory();
+      return config;
+    };
+
+    const smallIndex = warningTokenFigure(
+      await refreshWithIndex(indexWithLines(2)),
+    );
+    const largeIndex = warningTokenFigure(
+      await refreshWithIndex(indexWithLines(60)),
+    );
+
+    expect(largeIndex).toBeGreaterThan(smallIndex);
   });
 
   it('refreshHierarchicalMemory should warn when always-loaded context is large for the model window', async () => {
@@ -8712,6 +8851,7 @@ describe('Server Config (config.ts)', () => {
     const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
     Object.assign(config, {
       autoMemoryPrompt: 'structured prompt naming the old workspace',
+      autoMemoryContext: 'old workspace catalog',
       memoryRecallMode: 'structured',
     });
     vi.mocked(loadServerHierarchicalMemory).mockRejectedValueOnce(
@@ -8723,6 +8863,7 @@ describe('Server Config (config.ts)', () => {
     expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
     expect(config.getMemoryRecallMode()).toBe('legacy');
     expect(config.getAutoMemoryPrompt()).toBe('');
+    expect(config.getAutoMemoryContext()).toBe('');
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();
@@ -8768,7 +8909,10 @@ describe('Server Config (config.ts)', () => {
       expect(readAutoMemoryIndexWithStats).not.toHaveBeenCalled();
     } else {
       expect(config.getAutoMemoryPrompt()).toContain('# auto memory');
-      expect(config.getAutoMemoryPrompt()).toContain(
+      expect(config.getAutoMemoryPrompt()).not.toContain(
+        'MEMORY.md is currently empty',
+      );
+      expect(config.getAutoMemoryContext()).toContain(
         'MEMORY.md is currently empty',
       );
     }
@@ -12195,35 +12339,41 @@ describe('applyWorkspaceAgentPersona', () => {
     expect(new Config(baseParams).isWorkspaceAgentSession()).toBe(false);
   });
 
-  it('registers collaboration tools for top-level agents, not ordinary sessions', async () => {
-    // `registerFactory` is a single mock on the prototype, so every registry
-    // shares one call log. Snapshot and clear between the two, or the ordinary
-    // session inherits the agent's registrations and the negative half of this
-    // test can never fail.
-    const factory = ToolRegistry.prototype.registerFactory as unknown as Mock;
-    factory.mockClear();
-    await agentSession().createToolRegistry(undefined, { skipDiscovery: true });
-    const agentTools = factory.mock.calls.map(([name]) => name as string);
-
-    factory.mockClear();
-    await new Config(baseParams).createToolRegistry(undefined, {
-      skipDiscovery: true,
+  it('pins a session-agents session to default approval', () => {
+    // Every write or command a session agent runs asks the person in the chat
+    // session, whatever the settings say (session-multi-agent design §8-1).
+    const config = new Config({
+      ...baseParams,
+      agentCollaborationEnabled: true,
+      approvalMode: ApprovalMode.YOLO,
     });
-    const ordinaryTools = factory.mock.calls.map(([name]) => name as string);
-    // Asserted against the recorded registrations, not `getAllToolNames`:
-    // that method is stubbed to `[]` at module scope, so the positive half
-    // could never pass and the negative half could never fail.
-    for (const name of [
-      'thread_post',
-      'thread_read',
-      'thread_create',
-      'thread_wait',
-      'thread_block',
-      'thread_review',
+    config.setSessionSource('agent', 'ag_alice');
+    expect(config.getApprovalMode()).toBe(ApprovalMode.YOLO);
+    config.markSessionAgentSession();
+    expect(config.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+
+    for (const mode of [
+      ApprovalMode.YOLO,
+      ApprovalMode.AUTO_EDIT,
+      ApprovalMode.AUTO,
     ]) {
-      expect(agentTools).toContain(name);
-      expect(ordinaryTools).not.toContain(name);
+      expect(() => config.setApprovalMode(mode)).toThrow(/stays "default"/);
+      expect(config.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
     }
+    expect(() => config.setPlanMode(true, ApprovalMode.AUTO_EDIT)).toThrow(
+      /stays "default"/,
+    );
+    config.setApprovalMode(ApprovalMode.PLAN);
+    expect(config.getApprovalMode()).toBe(ApprovalMode.PLAN);
+    config.setApprovalMode(ApprovalMode.DEFAULT);
+    expect(config.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+    // A subagent it starts cannot widen it either.
+    expect(
+      deriveApprovalModeConfig(
+        config,
+        ApprovalMode.YOLO,
+      ).config.getApprovalMode(),
+    ).toBe(ApprovalMode.DEFAULT);
   });
 
   it('refuses on a session that is not an agent', () => {
@@ -12238,16 +12388,11 @@ describe('applyWorkspaceAgentPersona', () => {
     const config = agentSession();
     config.applyWorkspaceAgentPersona('Read only', 'alice', [
       'read_file',
-      'thread_review',
+      'grep_search',
       'write_file',
     ]);
     const guard = config.getToolInvocationGuard()!;
-    for (const toolName of [
-      'read_file',
-      'thread_review',
-      'write_file',
-      'glob',
-    ]) {
+    for (const toolName of ['read_file', 'grep_search', 'write_file', 'glob']) {
       const result = await guard({
         callId: 'guard-check',
         toolName,
@@ -12255,8 +12400,150 @@ describe('applyWorkspaceAgentPersona', () => {
         signal: new AbortController().signal,
       });
       expect(result.allowed).toBe(
-        toolName === 'read_file' || toolName === 'thread_review',
+        toolName === 'read_file' || toolName === 'grep_search',
       );
+    }
+  });
+
+  it("enforces a session agent's deny-only definition", async () => {
+    const config = agentSession();
+    config.markSessionAgentSession();
+    const toolConfig = buildSessionAgentToolConfig({
+      tools: ['*'],
+      disallowedTools: ['write_file'],
+    });
+    config.applyWorkspaceAgentPersona(
+      'You are alice.',
+      'alice',
+      toolConfig.executionAllowedTools,
+      toolConfig.disallowedTools,
+    );
+    const guard = config.getToolInvocationGuard()!;
+    for (const [toolName, allowed] of [
+      ['write_file', false],
+      ['read_file', true],
+    ] as const) {
+      const result = await guard({
+        callId: 'guard-check',
+        toolName,
+        args: {},
+        signal: new AbortController().signal,
+      });
+      expect(result.allowed).toBe(allowed);
+    }
+  });
+
+  it('keeps agent-host sessions read-only', async () => {
+    const config = new Config(baseParams);
+    config.setSessionSource('agent-host', 'host_1');
+    const guard = config.getToolInvocationGuard()!;
+
+    for (const [toolName, args, allowed] of [
+      [ToolNames.READ_FILE, { file_path: path.resolve('package.json') }, true],
+      ['mcp__trusted__write', {}, false],
+      ['unknown_tool', {}, false],
+      [ToolNames.WRITE_FILE, {}, false],
+      [ToolNames.SHELL, {}, false],
+    ] as const) {
+      const result = await guard({
+        callId: 'host-guard-check',
+        toolName,
+        args,
+        signal: new AbortController().signal,
+      });
+      expect(result.allowed).toBe(allowed);
+    }
+  });
+
+  it('confines agent-host reads to the canonical workspace', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'agent-host-guard-'));
+    const workspace = path.join(root, 'workspace');
+    const outside = path.join(root, 'outside');
+    await mkdir(workspace);
+    await mkdir(outside);
+    await writeFile(path.join(workspace, 'inside.txt'), 'inside');
+    await writeFile(path.join(outside, 'secret.txt'), 'secret');
+    const escape = path.join(workspace, 'escape');
+    fs.symlinkSync(
+      outside,
+      escape,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    // The file-wide node:fs mock resolves realpathSync to the identity, so the
+    // symlink is only followed when this test maps it to its real target.
+    vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) => {
+      const resolvedPath = pathToResolve.toString();
+      if (resolvedPath === escape) {
+        return outside;
+      }
+      if (resolvedPath.startsWith(escape + path.sep)) {
+        return path.join(outside, resolvedPath.slice(escape.length + 1));
+      }
+      return resolvedPath;
+    });
+
+    try {
+      const config = new Config({
+        ...baseParams,
+        targetDir: workspace,
+        cwd: workspace,
+      });
+      config.setSessionSource('agent-host', 'host_1');
+      const guard = config.getToolInvocationGuard()!;
+      const check = (toolName: string, args: Record<string, unknown>) =>
+        guard({
+          callId: 'host-path-check',
+          toolName,
+          args,
+          signal: new AbortController().signal,
+          cwd: workspace,
+        });
+
+      await expect(
+        check(ToolNames.READ_FILE, {
+          file_path: path.join(workspace, 'inside.txt'),
+        }),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        check(ToolNames.GREP, { pattern: 'inside' }),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        check(ToolNames.READ_FILE, {
+          file_path: path.join(
+            os.homedir(),
+            '.qwen',
+            'agent-hosts',
+            'host.json',
+          ),
+        }),
+      ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+      await expect(
+        check(ToolNames.READ_FILE, {
+          file_path: path.join(workspace, 'escape', 'secret.txt'),
+        }),
+      ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+      await expect(check(ToolNames.LS, { path: outside })).resolves.toEqual(
+        expect.objectContaining({ allowed: false }),
+      );
+      await expect(
+        check(ToolNames.GREP, { pattern: 'secret', glob: '../outside/**' }),
+      ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+      await expect(
+        check(ToolNames.GLOB, {
+          pattern: '**/*',
+          path: workspace,
+        }),
+      ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+      await expect(
+        check(ToolNames.ZOOM_IMAGE, {
+          file_path: path.join(workspace, 'inside.txt'),
+        }),
+      ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+    } finally {
+      vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) =>
+        pathToResolve.toString(),
+      );
+      await rm(root, { recursive: true, force: true });
     }
   });
 

@@ -303,6 +303,172 @@ describe('useManagedActions', () => {
     expect(hook.latest?.answerError).toBeUndefined();
   });
 
+  it('keeps the role-based refusal for the Session after that Action leaves the list', async () => {
+    const next = { ...pending, actionId: 'tool_approval_2' };
+    const respond = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pending])
+      .mockResolvedValue([next]);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+    expect(hook.latest?.respondForbidden).toBe(false);
+
+    await act(async () => {
+      await expect(
+        hook.latest!.respond('tool_approval_1', 'allow'),
+      ).rejects.toThrow('Forbidden');
+    });
+    expect(hook.latest?.respondForbidden).toBe(true);
+
+    // The refused Action is gone and its per-Action warning with it, but the
+    // refusal is a fact about the viewer and the Session, so it still covers
+    // the Action that replaced it.
+    hook.rerender({ events: [update(7)] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(next));
+    expect(hook.latest?.answerError).toBeUndefined();
+    expect(hook.latest?.respondForbidden).toBe(true);
+
+    // A different Session may be the viewer's own: the refusal does not
+    // follow the selection.
+    hook.rerender({ sessionId: 'session-2' });
+    expect(hook.latest?.respondForbidden).toBe(false);
+
+    // Coming back does not re-admit the 403 either: the refusal is remembered
+    // for the Session, not for one uninterrupted visit to it.
+    hook.rerender({ sessionId: 'session-1' });
+    expect(hook.latest?.respondForbidden).toBe(true);
+  });
+
+  it('latches a role-based refusal that lands after the Action left the list', async () => {
+    let rejectAnswer!: (failure: Error) => void;
+    const respond = vi.fn().mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectAnswer = reject;
+        }),
+    );
+    const next = { ...pending, actionId: 'tool_approval_2' };
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pending])
+      .mockResolvedValue([next]);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+    expect(hook.latest?.respondForbidden).toBe(false);
+
+    let oldAnswer!: Promise<unknown>;
+    await act(async () => {
+      oldAnswer = hook
+        .latest!.respond(pending.actionId, 'allow')
+        .catch((failure: unknown) => failure);
+    });
+
+    // The refused Action leaves the pending list while its answer is in flight.
+    // The service checks the creator before it checks that the Action still
+    // exists, so the refusal arrives anyway and still has to latch: the next
+    // approval of this Session is refused identically.
+    hook.rerender({ events: [update(7)] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(next));
+    await act(async () => {
+      rejectAnswer(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+      await oldAnswer;
+    });
+    expect(hook.latest?.respondForbidden).toBe(true);
+    // The warning is still scoped to the Action that failed, and that Action is
+    // gone, so the latch is what carries the reason from here on.
+    expect(hook.latest?.answerError).toBeUndefined();
+  });
+
+  it('re-probes a role-based refusal on retry instead of latching for the mount', async () => {
+    const respond = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+    const listPending = vi.fn().mockResolvedValue([pending]);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+
+    await act(async () => {
+      await hook
+        .latest!.respond(pending.actionId, 'allow')
+        .catch(() => undefined);
+    });
+    expect(hook.latest?.respondForbidden).toBe(true);
+
+    // The refusal came from the viewer's Workspace role row, which an operator
+    // can raise while the page stays open — an explicit retry lets a lifted
+    // grant answer where a permanent latch would keep refusing.
+    await act(async () => {
+      hook.latest!.retry();
+    });
+    expect(hook.latest?.respondForbidden).toBe(false);
+  });
+
+  it('latches the Session the answer was aimed at, not the one now selected', async () => {
+    let rejectAnswer!: (failure: Error) => void;
+    const respond = vi.fn().mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectAnswer = reject;
+        }),
+    );
+    const listPending = vi.fn().mockResolvedValue([pending]);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+
+    let refusedAnswer!: Promise<unknown>;
+    await act(async () => {
+      refusedAnswer = hook
+        .latest!.respond(pending.actionId, 'allow')
+        .catch((failure: unknown) => failure);
+    });
+
+    // The Session nav has no in-flight guard, so the viewer can already be
+    // looking at their own Session when the 403 lands. Latching that one would
+    // disable a card they may well be allowed to answer, while the Session that
+    // actually refused keeps offering one guaranteed 403 per click.
+    hook.rerender({ sessionId: 'session-2' });
+    await act(async () => {
+      rejectAnswer(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+      await refusedAnswer;
+    });
+    expect(hook.latest?.respondForbidden).toBe(false);
+
+    hook.rerender({ sessionId: 'session-1' });
+    expect(hook.latest?.respondForbidden).toBe(true);
+
+    // An explicit retry re-probes the latched Session too — it is not
+    // selected right now, yet its role row can have been raised meanwhile.
+    await act(async () => {
+      hook.latest!.retry();
+    });
+    hook.rerender({ sessionId: 'session-2' });
+    hook.rerender({ sessionId: 'session-1' });
+    expect(hook.latest?.respondForbidden).toBe(false);
+  });
+
   it('restores the retry budget when the reader is withdrawn and back', async () => {
     vi.useFakeTimers();
     const listPending = vi
@@ -328,6 +494,36 @@ describe('useManagedActions', () => {
     await act(async () => vi.advanceTimersByTimeAsync(0));
     expect(listPending).toHaveBeenCalledTimes(5);
     // The restored read failed, and it is retried instead of being stranded.
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(listPending).toHaveBeenCalledTimes(6);
+    expect(hook.latest?.action).toEqual(pending);
+    expect(hook.latest?.loadError).toBeUndefined();
+  });
+
+  it('restores the retry budget after a reload of the Session summary', async () => {
+    vi.useFakeTimers();
+    const listPending = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockResolvedValueOnce([pending]);
+    const provider = {
+      actions: { listPending, respond: vi.fn() },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    for (const delay of [0, 2_000, 5_000, 10_000, 60_000]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+    }
+    expect(listPending).toHaveBeenCalledTimes(4);
+
+    // Refresh reloads the summary: the capability is unknown, then known again.
+    hook.rerender({ enabled: undefined });
+    hook.rerender({ enabled: true });
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    expect(listPending).toHaveBeenCalledTimes(5);
     await act(async () => vi.advanceTimersByTimeAsync(2_000));
     expect(listPending).toHaveBeenCalledTimes(6);
     expect(hook.latest?.action).toEqual(pending);
@@ -478,6 +674,30 @@ describe('useManagedActions', () => {
     expect(hook.latest?.answerError).toBeUndefined();
     await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
     expect(hook.latest?.action).toBeUndefined();
+  });
+
+  it('drops an approval another client already answered', async () => {
+    // The code Java returns when a stale tab answers an Action that another
+    // tab or the REST API already decided.
+    const ended = Object.assign(new Error('Action already resolved'), {
+      status: 409,
+      code: 'action_already_resolved',
+    });
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pending])
+      .mockResolvedValueOnce([]);
+    const respond = vi.fn().mockRejectedValue(ended);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+
+    await act(() => hook.latest!.respond('tool_approval_1', 'deny'));
+    expect(hook.latest?.action).toBeUndefined();
+    expect(hook.latest?.answerError).toBeUndefined();
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
   });
 
   it('shows an ended approval again when the next read still lists it', async () => {
