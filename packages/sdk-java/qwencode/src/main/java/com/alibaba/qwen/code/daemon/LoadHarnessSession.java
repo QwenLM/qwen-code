@@ -13,6 +13,7 @@ public final class LoadHarnessSession {
     private final boolean cancellationTakeover;
     private final boolean suppressChildAgents;
     private Map<String, Object> lifecycleAuthority;
+    private boolean stopMessages;
     private boolean childWorkspaces;
 
     /**
@@ -25,6 +26,7 @@ public final class LoadHarnessSession {
                 suppressChildAgents);
         copy.lifecycleAuthority = lifecycleAuthority;
         copy.childWorkspaces = value;
+        copy.stopMessages = stopMessages;
         return copy;
     }
 
@@ -37,6 +39,18 @@ public final class LoadHarnessSession {
                 suppressChildAgents);
         copy.lifecycleAuthority = Map.of("operationId", operationId, "claimGeneration", claimGeneration);
         copy.childWorkspaces = childWorkspaces;
+        copy.stopMessages = stopMessages;
+        return copy;
+    }
+
+    /** The load of a stopped run's child (H4f): its wake pump starts none
+     * of its message inputs, from before the load can kick it. */
+    public LoadHarnessSession withStoppedMessages() {
+        LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
+                passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover);
+        copy.lifecycleAuthority = lifecycleAuthority;
+        copy.childWorkspaces = childWorkspaces;
+        copy.stopMessages = true;
         return copy;
     }
 
@@ -129,6 +143,9 @@ public final class LoadHarnessSession {
         }
         if (cancellationTakeover) {
             result.put("cancellationTakeover", true);
+        }
+        if (stopMessages) {
+            result.put("stopMessages", true);
         }
         if (childWorkspaces) {
             result.put("childWorkspaces", true);

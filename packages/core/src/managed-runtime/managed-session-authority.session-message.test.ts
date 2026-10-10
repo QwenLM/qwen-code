@@ -29,10 +29,10 @@ import {
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import { type ManagedSessionDurableRef } from './managed-session-records.js';
 
-// H4d-a: `session_message` and child continuations are registered and
-// checked but not enabled for submission. The flags below lift exactly those
-// two gates (and the shell/workflow kind gates for cross-kind plantings), so
-// the suite runs the commit and rebuild paths ahead of enablement.
+// H4d-b enabled `session_message` and child continuations. The flags below
+// close exactly those two gates again where a test pins that the authority
+// consults them before anything publishes (and lift the shell/workflow kind
+// gates for cross-kind plantings).
 const enablement = vi.hoisted(() => ({
   sessionMessage: true,
   continuation: true,
@@ -46,18 +46,24 @@ vi.mock('./managed-session-records.js', async (importOriginal) => {
   return {
     ...actual,
     assertManagedSessionDomainEnabled: (domain: string) => {
-      if (!(domain === 'session_message' && enablement.sessionMessage)) {
-        actual.assertManagedSessionDomainEnabled(
-          domain as Parameters<
-            typeof actual.assertManagedSessionDomainEnabled
-          >[0],
+      if (domain === 'session_message' && !enablement.sessionMessage) {
+        throw new actual.ManagedSessionRecordError(
+          'domain session_message is registered but not enabled for submission.',
         );
       }
+      actual.assertManagedSessionDomainEnabled(
+        domain as Parameters<
+          typeof actual.assertManagedSessionDomainEnabled
+        >[0],
+      );
     },
     assertManagedSessionChildContinuationEnabled: () => {
       if (!enablement.continuation) {
-        actual.assertManagedSessionChildContinuationEnabled();
+        throw new actual.ManagedSessionRecordError(
+          'child_run continuations are registered but not enabled for submission.',
+        );
       }
+      actual.assertManagedSessionChildContinuationEnabled();
     },
     assertManagedSessionChildRunKindEnabled: (kind: string) => {
       if (
