@@ -11,6 +11,7 @@ import { Config } from '../config/config.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { subagentIdentityContext } from '../utils/subagentNameContext.js';
 import { startRequestLifecycle } from './request-lifecycle.js';
+import { runWithChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 
 function fixture() {
   const recordUiTelemetryEvent = vi.fn();
@@ -24,6 +25,66 @@ function fixture() {
 }
 
 describe('request lifecycle persistence', () => {
+  it.each([
+    'prompt_suggestion',
+    'forked_query',
+    'speculation',
+    'side-query:review',
+  ])('does not record or notify internal request %s', (promptId) => {
+    const f = fixture();
+    const request = startRequestLifecycle(
+      f.config,
+      'execution',
+      promptId,
+      'model',
+    );
+    request.finish('success');
+    expect(f.recordUiTelemetryEvent).not.toHaveBeenCalled();
+    expect(f.notifyRequestLifecycle).not.toHaveBeenCalled();
+  });
+
+  it('retains hidden visibility after leaving the suppression context', () => {
+    const f = fixture();
+    const request = runWithChatRecordingSuppressed(() =>
+      startRequestLifecycle(f.config, 'execution', 'user-prompt', 'model'),
+    );
+    request.finish('error');
+    expect(f.recordUiTelemetryEvent).not.toHaveBeenCalled();
+    expect(f.notifyRequestLifecycle).not.toHaveBeenCalled();
+  });
+
+  it('delivers visible requests without a recorder', () => {
+    const f = fixture();
+    vi.spyOn(f.config, 'getChatRecordingService').mockReturnValue(undefined);
+    startRequestLifecycle(f.config, 'execution', 'user-prompt', 'model').finish(
+      'success',
+    );
+    expect(f.notifyRequestLifecycle).toHaveBeenCalledTimes(2);
+  });
+
+  it('clamps the terminal clock to the start when wall time moves backwards', () => {
+    const f = fixture();
+    const clock = vi
+      .spyOn(Date, 'now')
+      .mockReturnValueOnce(1000)
+      .mockReturnValueOnce(500);
+    try {
+      startRequestLifecycle(
+        f.config,
+        'execution',
+        'user-prompt',
+        'model',
+      ).finish('success');
+      expect(f.notifyRequestLifecycle.mock.calls[1][0]).toMatchObject({
+        startedAt: 1000,
+        endedAt: 1000,
+        durationMs: 0,
+      });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it.each(['cancelled', 'error'] as const)(
     'keeps late %s terminals in the original session after rotation',
     async (outcome) => {

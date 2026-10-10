@@ -977,6 +977,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         resetSpanTimeout?.();
         yield response;
       }
+      abortedBeforeStreamCompletion ||= abortSignal?.aborted === true;
       streamCompleted = true;
       lifecycle.finish(abortedBeforeStreamCompletion ? 'cancelled' : 'success');
       refreshLateUsageMetadata();
@@ -1032,6 +1033,8 @@ export class LoggingContentGenerator implements ContentGenerator {
     } catch (error) {
       errorOccurred = true;
       lastError = error;
+      abortedBeforeStreamCompletion ||=
+        !streamCompleted && abortSignal?.aborted === true;
       lifecycle.finish(
         abortedBeforeStreamCompletion && isAbortError(error)
           ? 'cancelled'
@@ -1064,6 +1067,8 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       throw error;
     } finally {
+      abortedBeforeStreamCompletion ||=
+        !streamCompleted && abortSignal?.aborted === true;
       const cancelled =
         abortedBeforeStreamCompletion &&
         (lastError === undefined || isAbortError(lastError));
@@ -1086,9 +1091,6 @@ export class LoggingContentGenerator implements ContentGenerator {
       // own ended guard, but we want to avoid pretending the final token
       // counts were recorded — they weren't, the span is the timeout one.
       if (span && !spanEndedByTimeout) {
-        const cancelled =
-          abortedBeforeStreamCompletion &&
-          (lastError === undefined || isAbortError(lastError));
         const observedFinishReasons = exchangeController?.finalize(
           !errorOccurred && !cancelled && streamCompleted,
         );

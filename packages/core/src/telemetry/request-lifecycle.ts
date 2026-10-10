@@ -7,6 +7,8 @@
 import type { Config } from '../config/config.js';
 import { subagentIdentityContext } from '../utils/subagentNameContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isInternalPromptId } from '../utils/internalPromptIds.js';
+import { isChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 
 const debugLogger = createDebugLogger('REQUEST_LIFECYCLE');
 
@@ -49,6 +51,8 @@ export function startRequestLifecycle(
   promptId: string,
   model: string,
 ) {
+  const suppressed =
+    isInternalPromptId(promptId) || isChatRecordingSuppressed();
   const identity = subagentIdentityContext.getStore();
   const base: RequestLifecycleBase = {
     v: 1,
@@ -62,6 +66,7 @@ export function startRequestLifecycle(
   };
   const recorder = config.getChatRecordingService();
   const publish = (event: RequestLifecycleEvent) => {
+    if (suppressed) return;
     try {
       recorder?.recordUiTelemetryEvent({
         ...event,

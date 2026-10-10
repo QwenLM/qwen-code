@@ -727,7 +727,7 @@ describe('LoggingContentGenerator', () => {
     });
 
     it.each([false, true])(
-      'closes a stream once when return follows iteration=%s',
+      'requests source return and ends once after iteration=%s',
       async (iterated) => {
         const config = createConfig();
         const source = streamOf(resp('first'), resp('second'));
@@ -747,7 +747,7 @@ describe('LoggingContentGenerator', () => {
       },
     );
 
-    it('reports an injected failure before the first next and closes the source', async () => {
+    it('reports an injected failure before the first next and requests source return', async () => {
       const config = createConfig();
       const source = streamOf(resp('unconsumed'));
       const close = vi.spyOn(source, 'return');
@@ -760,7 +760,7 @@ describe('LoggingContentGenerator', () => {
       expectEnded(config, 'error');
     });
 
-    it('confirms an injected abort before the first next after source cleanup', async () => {
+    it('confirms an injected abort before the first next after requesting source return', async () => {
       const config = createConfig();
       const abort = new AbortController();
       const source = streamOf(resp('unconsumed'));
@@ -845,6 +845,79 @@ describe('LoggingContentGenerator', () => {
       } finally {
         gate.resolve();
         idle.restore();
+      }
+    });
+
+    it.each(['abort-error', 'return', 'done', 'provider-error'] as const)(
+      'classifies %s after idle then cancellation',
+      async (exit) => {
+        const config = createConfig();
+        const abort = new AbortController();
+        const idle = captureIdleTimeout();
+        const error =
+          exit === 'provider-error'
+            ? new Error('provider failed')
+            : userAbort();
+        try {
+          const iterator = await openStream(
+            resolving(
+              (async function* () {
+                yield resp('first');
+                if (exit === 'abort-error' || exit === 'provider-error')
+                  throw error;
+              })(),
+            ),
+            'lifecycle-idle-abort',
+            { config, request: helloRequest({ abortSignal: abort.signal }) },
+          );
+          await iterator.next();
+          expect(idle.callback).toBeDefined();
+          idle.callback!();
+          abort.abort();
+          expect(events(config)).toHaveLength(1);
+          if (exit === 'return') await iterator.return(undefined);
+          else if (exit === 'done')
+            expect((await iterator.next()).done).toBe(true);
+          else await expect(iterator.next()).rejects.toBe(error);
+          expectEnded(
+            config,
+            exit === 'provider-error' ? 'error' : 'cancelled',
+          );
+        } finally {
+          idle.restore();
+        }
+      },
+    );
+
+    it('retains success when cancellation follows completion during logging', async () => {
+      const config = createConfig();
+      const abort = new AbortController();
+      const loggingEntered = deferred();
+      const loggingGate = deferred();
+      const generator = makeGenerator(
+        { stream: streams(resp('complete')) },
+        { enableOpenAILogging: true },
+        config,
+      );
+      openaiLogger().logInteraction.mockImplementationOnce(() => {
+        loggingEntered.resolve();
+        return loggingGate.promise;
+      });
+      const iterator = await generator.generateContentStream(
+        helloRequest({ abortSignal: abort.signal }),
+        'lifecycle-completed-abort',
+      );
+      await iterator.next();
+      const pending = iterator.next();
+      try {
+        await loggingEntered.promise;
+        expectEnded(config, 'success');
+        abort.abort();
+        loggingGate.resolve();
+        expect((await pending).done).toBe(true);
+        expectEnded(config, 'success');
+      } finally {
+        loggingGate.resolve();
       }
     });
 

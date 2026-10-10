@@ -2324,6 +2324,8 @@ export class Session implements SessionContext {
   private unsubscribeChatRecordingFailure?: () => void;
   private unsubscribeApprovalModeChange?: () => void;
   private unsubscribeRequestLifecycle?: () => void;
+  private requestLifecycleSessionId: string;
+  private readonly requestLifecycleExecutions = new Set<string>();
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
@@ -2472,6 +2474,7 @@ export class Session implements SessionContext {
     ) => boolean = () => false,
   ) {
     this.sessionId = id;
+    this.requestLifecycleSessionId = id;
     // Config releases the restore projection after this Session is created.
     this.restoredHistoryGaps = config.getSessionRestoreRuntime?.()?.historyGaps;
     this.workflowHistory = [...workflowHistory];
@@ -2540,8 +2543,22 @@ export class Session implements SessionContext {
     this.messageEmitter = new MessageEmitter(this);
     this.unsubscribeRequestLifecycle = this.config.onRequestLifecycle?.(
       (event) => {
-        if (this.disposed || this.closing || event.sessionId !== this.sessionId)
+        if (this.disposed) return;
+        const key = JSON.stringify([
+          event.sessionId,
+          event.subagentId ?? null,
+          event.executionId,
+        ]);
+        if (
+          event.sessionId !== this.requestLifecycleSessionId &&
+          !(event.phase === 'ended' && this.requestLifecycleExecutions.has(key))
+        )
           return;
+        if (event.phase === 'started') {
+          this.requestLifecycleExecutions.add(key);
+        } else {
+          this.requestLifecycleExecutions.delete(key);
+        }
         void this.sendUpdate(
           createTranscriptExecutionLifecycleUpdate(event),
         ).catch((error) =>
@@ -2652,6 +2669,7 @@ export class Session implements SessionContext {
    */
   rebindGoalRuntimeForNewSession(): void {
     if (this.disposed || this.closing) return;
+    this.requestLifecycleSessionId = this.config.getSessionId();
     this.goalRuntimeUnsubscribe?.();
     this.goalRuntimeUnsubscribe = undefined;
     this.goalHostUnbind?.();
@@ -4662,6 +4680,7 @@ export class Session implements SessionContext {
     this.unsubscribeApprovalModeChange = undefined;
     this.unsubscribeRequestLifecycle?.();
     this.unsubscribeRequestLifecycle = undefined;
+    this.requestLifecycleExecutions.clear();
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
     this.resolveCloseGate?.();
