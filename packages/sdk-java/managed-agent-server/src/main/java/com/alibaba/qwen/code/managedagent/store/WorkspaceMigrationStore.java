@@ -340,6 +340,12 @@ public final class WorkspaceMigrationStore {
                 + " ON r.tenant_id = s.tenant_id AND r.session_id = s.session_id WHERE s.tenant_id = ?"
                 + " AND s.workspace_storage_id = ? AND r.delivery_state <> 'COMPLETED'") == 0,
                 "migration_work_unsettled");
+        // A child Workspace's worktree records absolute paths of this root
+        // (#13753 I1): it must be merged or discarded before the storage
+        // moves. A conflicted one keeps only refs, which move with it.
+        check(count("SELECT COUNT(*) FROM qwen_managed_child_workspace WHERE tenant_id = ?"
+                + " AND storage_id = ? AND state NOT IN ('merged', 'discarded', 'failed', 'conflicted')") == 0,
+                "migration_work_unsettled");
         long now = jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> Math.addExact(Math.multiplyExact(row.getLong(1), 1000), row.getLong(2) / 1000));
         String after = "";
