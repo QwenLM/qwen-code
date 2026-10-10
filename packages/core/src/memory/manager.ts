@@ -803,9 +803,14 @@ export class MemoryManager {
 
   /** Wait for all in-flight tasks to settle, with optional timeout. */
   async drain(options: DrainOptions = {}): Promise<boolean> {
-    const promises = [...this.inFlight.values()];
-    if (promises.length === 0) return true;
-    const waitAll = Promise.allSettled(promises).then(() => true);
+    if (this.inFlight.size === 0) return true;
+    const waitAll = (async () => {
+      // A settling extract can start an already-queued trailing extract.
+      while (this.inFlight.size > 0) {
+        await Promise.allSettled([...this.inFlight.values()]);
+      }
+      return true;
+    })();
     if (!options.timeoutMs || options.timeoutMs <= 0) return waitAll;
     return Promise.race<boolean>([
       waitAll,
@@ -1494,6 +1499,13 @@ export class MemoryManager {
   async scheduleDream(
     params: ScheduleDreamParams,
   ): Promise<DreamScheduleResult> {
+    // Shutdown can begin while the asynchronous scheduling checks are pending.
+    return this.track(randomUUID(), this.prepareDream(params));
+  }
+
+  private async prepareDream(
+    params: ScheduleDreamParams,
+  ): Promise<DreamScheduleResult> {
     // `params.config` is optional only because some test paths omit it;
     // production callers always pass it. Without a config the
     // fork-agent execution can't start (`runManagedAutoMemoryDream`
@@ -2078,14 +2090,19 @@ export class MemoryManager {
     config: Config,
     now = new Date(),
   ): Promise<void> {
-    try {
-      const state = await recordUserAutoMemoryMutation(now);
-      if (state.metadata.pendingReason) {
-        await this.scheduleUserDream({ projectRoot, config, now });
-      }
-    } catch (error) {
-      debugLogger.warn('Failed to update User Dream state:', error);
-    }
+    return this.track(
+      randomUUID(),
+      (async () => {
+        try {
+          const state = await recordUserAutoMemoryMutation(now);
+          if (state.metadata.pendingReason) {
+            await this.scheduleUserDream({ projectRoot, config, now });
+          }
+        } catch (error) {
+          debugLogger.warn('Failed to update User Dream state:', error);
+        }
+      })(),
+    );
   }
 
   private async runUserDream(
@@ -2351,22 +2368,31 @@ export class MemoryManager {
     projectRoot: string,
     matches: AutoMemoryForgetMatch[],
     now?: Date,
-    options: { config?: Config; abortSignal?: AbortSignal } = {},
+    options: {
+      config?: Config;
+      abortSignal?: AbortSignal;
+      memoryHookDeliveryId?: symbol;
+    } = {},
   ): Promise<AutoMemoryForgetResult> {
-    const result = await forgetManagedAutoMemoryMatches(
-      projectRoot,
-      matches,
-      now,
-      options,
+    return this.track(
+      randomUUID(),
+      (async () => {
+        const result = await forgetManagedAutoMemoryMatches(
+          projectRoot,
+          matches,
+          now,
+          options,
+        );
+        if (result.touchedScopes.includes('user') && options.config) {
+          await this.recordUserMutation(
+            projectRoot,
+            options.config,
+            now ?? new Date(),
+          );
+        }
+        return result;
+      })(),
     );
-    if (result.touchedScopes.includes('user') && options.config) {
-      await this.recordUserMutation(
-        projectRoot,
-        options.config,
-        now ?? new Date(),
-      );
-    }
-    return result;
   }
 
   /** Convenience: select + remove in a single call. */
@@ -2380,20 +2406,25 @@ export class MemoryManager {
     } = {},
     now?: Date,
   ): Promise<AutoMemoryForgetResult> {
-    const result = await forgetManagedAutoMemoryEntries(
-      projectRoot,
-      query,
-      options,
-      now,
+    return this.track(
+      randomUUID(),
+      (async () => {
+        const result = await forgetManagedAutoMemoryEntries(
+          projectRoot,
+          query,
+          options,
+          now,
+        );
+        if (result.touchedScopes.includes('user') && options.config) {
+          await this.recordUserMutation(
+            projectRoot,
+            options.config,
+            now ?? new Date(),
+          );
+        }
+        return result;
+      })(),
     );
-    if (result.touchedScopes.includes('user') && options.config) {
-      await this.recordUserMutation(
-        projectRoot,
-        options.config,
-        now ?? new Date(),
-      );
-    }
-    return result;
   }
 
   // ─── Status ───────────────────────────────────────────────────────────────────
@@ -2452,12 +2483,27 @@ export class MemoryManager {
    * Takes the same consolidation lock the scheduled path does so a manual
    * run never writes concurrently with a background dream.
    */
-  async runManualDream(
+  runManualDream(
     projectRoot: string,
     config: Config,
     sessionId: string,
     now = new Date(),
+    abortSignal?: AbortSignal,
   ): Promise<AutoMemoryDreamResult> {
+    return this.track(
+      randomUUID(),
+      this.prepareManualDream(projectRoot, config, sessionId, now, abortSignal),
+    );
+  }
+
+  private async prepareManualDream(
+    projectRoot: string,
+    config: Config,
+    sessionId: string,
+    now: Date,
+    abortSignal?: AbortSignal,
+  ): Promise<AutoMemoryDreamResult> {
+    abortSignal?.throwIfAborted();
     await ensureAutoMemoryScaffold(projectRoot, now);
     const alreadyRunning: AutoMemoryDreamResult = {
       touchedTopics: [],
@@ -2505,7 +2551,7 @@ export class MemoryManager {
         projectRoot,
         now,
         config,
-        undefined,
+        abortSignal,
         {
           trigger: 'manual',
           recordMetadata: true,

@@ -24,6 +24,7 @@ import {
   DREAM_OPERATIONS_FILENAME,
 } from './dream-operations.js';
 import { rebuildAutoMemoryIndexAtRoot } from './indexer.js';
+import { withCoalescedMemoryChanges } from './memory-file-change.js';
 import {
   getMemoryBaseDir,
   getUserAutoMemoryMetadataPath,
@@ -253,56 +254,67 @@ export async function runManagedUserAutoMemoryDream(
   abortSignal?: AbortSignal,
 ): Promise<AutoMemoryDreamResult> {
   await ensureUserAutoMemoryScaffold();
-  const memoryRoot = getUserAutoMemoryRoot();
-  await fs.rm(path.join(memoryRoot, DREAM_OPERATIONS_FILENAME), {
-    force: true,
-  });
-  const before = await snapshotDreamFiles(memoryRoot, 'user');
-  let agent;
-  try {
-    agent = await planUserAutoMemoryDreamByAgent(
-      config,
-      projectRoot,
-      abortSignal,
-    );
-  } catch (error) {
-    await fs
-      .rm(path.join(memoryRoot, DREAM_OPERATIONS_FILENAME), { force: true })
-      .catch(() => {});
-    throw error;
-  }
-  let operations: AppliedDreamOperations;
-  let after: Map<string, DreamSnapshotEntry>;
-  const writtenPaths = dreamRelativePaths(
-    memoryRoot,
-    agent.filesWritten ?? agent.filesTouched,
-  );
-  try {
-    const written = await snapshotDreamFiles(memoryRoot, 'user');
-    validateDreamSnapshotChanges(before, written, writtenPaths);
-    abortSignal?.throwIfAborted();
-    operations = await applyDreamOperations(memoryRoot, before, abortSignal);
-    after = await snapshotDreamFiles(memoryRoot, 'user');
-    for (const deletedPath of operations.deletedPaths) {
-      writtenPaths.add(deletedPath);
-    }
-  } catch (error) {
-    await fs
-      .rm(path.join(memoryRoot, DREAM_OPERATIONS_FILENAME), { force: true })
-      .catch(() => {});
-    throw error;
-  }
-  const changes = diffDreamSnapshots(before, after, writtenPaths);
-  if (!abortSignal?.aborted) {
-    await rebuildAutoMemoryIndexAtRoot(memoryRoot, 'user');
-  }
-  const summary = agent.finalText?.trim().slice(0, 300) ?? 'completed';
-  const result: AutoMemoryDreamResult = {
-    ...changes,
-    dedupedEntries: operations.dedupedEntries,
-    splitEntries: operations.splitEntries,
-    systemMessage: `Managed User Memory dream: ${summary}`,
-  };
+  return withCoalescedMemoryChanges(
+    projectRoot,
+    config.getMemoryHookDeliveryId?.(),
+    async () => {
+      const memoryRoot = getUserAutoMemoryRoot();
+      await fs.rm(path.join(memoryRoot, DREAM_OPERATIONS_FILENAME), {
+        force: true,
+      });
+      const before = await snapshotDreamFiles(memoryRoot, 'user');
+      let agent;
+      try {
+        agent = await planUserAutoMemoryDreamByAgent(
+          config,
+          projectRoot,
+          abortSignal,
+        );
+      } catch (error) {
+        await fs
+          .rm(path.join(memoryRoot, DREAM_OPERATIONS_FILENAME), { force: true })
+          .catch(() => {});
+        throw error;
+      }
+      let operations: AppliedDreamOperations;
+      let after: Map<string, DreamSnapshotEntry>;
+      const writtenPaths = dreamRelativePaths(
+        memoryRoot,
+        agent.filesWritten ?? agent.filesTouched,
+      );
+      try {
+        const written = await snapshotDreamFiles(memoryRoot, 'user');
+        validateDreamSnapshotChanges(before, written, writtenPaths);
+        abortSignal?.throwIfAborted();
+        operations = await applyDreamOperations(
+          memoryRoot,
+          before,
+          abortSignal,
+        );
+        after = await snapshotDreamFiles(memoryRoot, 'user');
+        for (const deletedPath of operations.deletedPaths) {
+          writtenPaths.add(deletedPath);
+        }
+      } catch (error) {
+        await fs
+          .rm(path.join(memoryRoot, DREAM_OPERATIONS_FILENAME), { force: true })
+          .catch(() => {});
+        throw error;
+      }
+      const changes = diffDreamSnapshots(before, after, writtenPaths);
+      if (!abortSignal?.aborted) {
+        await rebuildAutoMemoryIndexAtRoot(memoryRoot, 'user');
+      }
+      const summary = agent.finalText?.trim().slice(0, 300) ?? 'completed';
+      const result: AutoMemoryDreamResult = {
+        ...changes,
+        dedupedEntries: operations.dedupedEntries,
+        splitEntries: operations.splitEntries,
+        systemMessage: `Managed User Memory dream: ${summary}`,
+      };
 
-  return result;
+      return result;
+    },
+    abortSignal,
+  );
 }

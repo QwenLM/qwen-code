@@ -666,6 +666,52 @@ it('aggregates parallel results in plan order rather than reply order', async ()
   );
 });
 
+it.each([
+  { paths: ['project/a.md'], expected: ['all'] },
+  { paths: ['user/a.md'], expected: ['all', 'user'] },
+  { paths: ['project/a.md', 'user/b.md'], expected: ['all', 'user'] },
+  { paths: [], expected: ['all', 'user'] },
+])(
+  'matches MemoryChanged relative paths $paths',
+  async ({ paths, expected }) => {
+    catalog = {
+      ...catalog,
+      hooks: [
+        {
+          ...catalog.hooks[0],
+          hookId: 'all',
+          eventName: HookEventName.MemoryChanged,
+        },
+        {
+          ...catalog.hooks[0],
+          hookId: 'user',
+          eventName: HookEventName.MemoryChanged,
+          matcher: '^user/',
+        },
+      ],
+    };
+    await hooks.fire(
+      HookEventName.MemoryChanged,
+      'memory-1',
+      {
+        paths: paths.map((file) => `/memory/${file}`),
+        relative_paths: paths,
+        workspace: root,
+        ...(paths.length
+          ? { memory_scope: 'project', operation: 'update' }
+          : { enabled: false }),
+      },
+      signal(),
+    );
+    expect(
+      requests
+        .filter((request) => request.kind === 'hook-execute')
+        .map((request) => request.hookId)
+        .sort(),
+    ).toEqual([...expected].sort());
+  },
+);
+
 it('passes committed effective inputs to sequential hooks and preserves aliases', async () => {
   catalog = {
     ...catalog,

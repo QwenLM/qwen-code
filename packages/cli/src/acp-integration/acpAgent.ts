@@ -5,6 +5,7 @@
  */
 
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
+import { notifyMemoryEnabledChange } from '@qwen-code/qwen-code-core/memory/memory-file-change.js';
 import {
   findSessionAgentBinding,
   type SessionAgentNativeBinding,
@@ -7254,6 +7255,43 @@ class QwenAgent implements Agent {
     }
   }
 
+  private applyManagedAutoMemorySetting(
+    settings: LoadedSettings,
+    settingsCwd: string,
+    scope: SettingScope,
+  ): void {
+    const workspace = this.canonicalWorkspacePath(settingsCwd);
+    const configs = new Set([
+      this.config,
+      ...this.getActiveSessions().map((session) => session.getConfig()),
+    ]);
+    for (const config of configs) {
+      const root =
+        config === this.config
+          ? config.getTargetDir()
+          : this.sessionWorkspaceRoot(config);
+      const sameWorkspace = this.canonicalWorkspacePath(root) === workspace;
+      if (scope !== SettingScope.User && !sameWorkspace) continue;
+      // User settings affect every workspace, each with its own overrides.
+      let merged = settings.merged;
+      if (!sameWorkspace) {
+        try {
+          merged = this.loadRequestSettings(root).merged;
+        } catch {
+          debugLogger.warn(
+            'Memory settings reload failed; keeping this workspace runtime setting',
+          );
+          continue;
+        }
+      }
+      config.setManagedAutoMemoryEnabled(
+        !config.getBareMode() &&
+          !config.isSafeMode() &&
+          (merged.memory?.enableManagedAutoMemory ?? true),
+      );
+    }
+  }
+
   /**
    * Load settings for a single `qwen/settings/*` / `qwen/permissions/*`
    * request. `skipLoadEnvironment` is set because a per-request read — and, for
@@ -9905,12 +9943,26 @@ class QwenAgent implements Agent {
         };
       }
       case 'qwen/settings/setMemory': {
+        const sessionId = params['sessionId'];
+        if (
+          sessionId !== undefined &&
+          sessionId !== null &&
+          (typeof sessionId !== 'string' || sessionId.length === 0)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid sessionId: expected a non-empty string',
+          );
+        }
         const updates = toRecord(params['updates']);
         // Mutate a freshly loaded settings object and adopt it, mirroring the
         // other settings mutation handlers, instead of writing through the
         // possibly-stale cached `this.settings` and reading it back.
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
         const settings = this.loadRequestSettings(settingsCwd);
+        const previousEnabled =
+          settings.merged.memory?.enableManagedAutoMemory ?? true;
+        // Validate the full request before making any persistent changes.
         for (const key of QWEN_MEMORY_SETTING_KEYS) {
           if (updates[key] === undefined) continue;
           if (typeof updates[key] !== 'boolean') {
@@ -9919,9 +9971,60 @@ class QwenAgent implements Agent {
               `Invalid memory setting '${key}': expected boolean`,
             );
           }
-          settings.setValue(SettingScope.User, `memory.${key}`, updates[key]);
         }
-        this.adoptRequestSettings(settings, settingsCwd);
+        let memoryEnabledSaved = false;
+        try {
+          for (const key of QWEN_MEMORY_SETTING_KEYS) {
+            if (updates[key] === undefined) continue;
+            settings.setValue(
+              SettingScope.User,
+              `memory.${key}`,
+              updates[key],
+              undefined,
+              {
+                throwOnWriteFailure: true,
+              },
+            );
+            if (key === 'enableManagedAutoMemory') memoryEnabledSaved = true;
+          }
+        } finally {
+          this.adoptRequestSettings(settings, settingsCwd);
+          if (memoryEnabledSaved) {
+            this.applyManagedAutoMemorySetting(
+              settings,
+              settingsCwd,
+              SettingScope.User,
+            );
+          }
+          const effectiveEnabled =
+            settings.merged.memory?.enableManagedAutoMemory ?? true;
+          if (effectiveEnabled !== previousEnabled) {
+            // Fire-and-forget: the RPC response does not read the hook result,
+            // and awaiting delivery would block the control plane on the hook
+            // timeout. When the request names a session, attribute the toggle
+            // to that session's registration — the same id its MemoryChanged
+            // file events already carry. Without one, pass no id so the event
+            // falls back to the settings workspace's newest registration
+            // instead of the bootstrap Config's launch-directory id.
+            const deliveryId =
+              typeof sessionId === 'string' && sessionId.length > 0
+                ? (this.sessions
+                    .get(sessionId)
+                    ?.getConfig()
+                    .getMemoryHookDeliveryId?.() ??
+                  Symbol('unavailable-memory-session'))
+                : undefined;
+            if (deliveryId === undefined) {
+              void notifyMemoryEnabledChange(settingsCwd, effectiveEnabled);
+            } else {
+              void notifyMemoryEnabledChange(
+                settingsCwd,
+                effectiveEnabled,
+                deliveryId,
+              );
+            }
+          }
+        }
         return {
           settings: normalizeQwenMemorySettings(settings.merged.memory),
         };
@@ -14466,6 +14569,18 @@ class QwenAgent implements Agent {
             'Unsupported Qwen setting key',
           );
         }
+        const sessionId = params['sessionId'];
+        if (
+          key === 'memory.enableManagedAutoMemory' &&
+          sessionId !== undefined &&
+          sessionId !== null &&
+          (typeof sessionId !== 'string' || sessionId.length === 0)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid sessionId: expected a non-empty string',
+          );
+        }
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
         const settings = this.loadRequestSettings(settingsCwd);
         const settingKey = key as QwenCoreSettingKey;
@@ -14474,7 +14589,15 @@ class QwenAgent implements Agent {
           params['value'],
         );
         const scope = toSettingsScope(params['scope']);
-        settings.setValue(scope, key, normalizedValue);
+        const previousEnabled =
+          settings.merged.memory?.enableManagedAutoMemory ?? true;
+        if (settingKey === 'memory.enableManagedAutoMemory') {
+          settings.setValue(scope, key, normalizedValue, undefined, {
+            throwOnWriteFailure: true,
+          });
+        } else {
+          settings.setValue(scope, key, normalizedValue);
+        }
         if (settingKey === 'model.name') {
           // Selecting a model by id here can't disambiguate providers that
           // share that id, so clear the paired baseUrl disambiguator left by a
@@ -14497,6 +14620,33 @@ class QwenAgent implements Agent {
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
         this.adoptRequestSettings(settings, settingsCwd);
+        if (settingKey === 'memory.enableManagedAutoMemory') {
+          this.applyManagedAutoMemorySetting(settings, settingsCwd, scope);
+        }
+        const effectiveEnabled =
+          settings.merged.memory?.enableManagedAutoMemory ?? true;
+        if (
+          settingKey === 'memory.enableManagedAutoMemory' &&
+          effectiveEnabled !== previousEnabled
+        ) {
+          const deliveryId =
+            typeof sessionId === 'string' && sessionId.length > 0
+              ? (this.sessions
+                  .get(sessionId)
+                  ?.getConfig()
+                  .getMemoryHookDeliveryId?.() ??
+                Symbol('unavailable-memory-session'))
+              : undefined;
+          if (deliveryId === undefined) {
+            void notifyMemoryEnabledChange(settingsCwd, effectiveEnabled);
+          } else {
+            void notifyMemoryEnabledChange(
+              settingsCwd,
+              effectiveEnabled,
+              deliveryId,
+            );
+          }
+        }
         return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/setMcpServer': {

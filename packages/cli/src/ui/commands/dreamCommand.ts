@@ -37,7 +37,13 @@ export const dreamCommand: SlashCommand = {
       if (config.getMemoryRecallMode?.() === 'structured') {
         const result = await config
           .getMemoryManager()
-          .runManualDream(projectRoot, config, config.getSessionId());
+          .runManualDream(
+            projectRoot,
+            config,
+            config.getSessionId(),
+            undefined,
+            context.abortSignal,
+          );
         return {
           type: 'message',
           messageType: 'info',

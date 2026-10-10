@@ -44,6 +44,7 @@ export const forgetCommand: SlashCommand = {
       const result = await config
         .getMemoryManager()
         .forgetMatches(config.getProjectRoot(), selection.matches, undefined, {
+          memoryHookDeliveryId: config.getMemoryHookDeliveryId?.(),
           config,
         });
       return {

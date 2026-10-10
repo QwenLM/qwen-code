@@ -12,6 +12,10 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import {
+  registerMemoryChangedListener,
+  withCoalescedMemoryChanges,
+} from './memory-file-change.js';
+import {
   commitMigratedMemoryMetadata,
   runMemoryMetadataMigration,
   scanMemoryMetadataCorpusStatus,
@@ -105,6 +109,182 @@ describe('memory metadata migration', () => {
     await fs.writeFile(filePath, content, 'utf-8');
     return filePath;
   }
+
+  it('delivers committed metadata and its index only to the owning session', async () => {
+    const file = await write('project/legacy.md', legacyContent());
+    const owner = vi.fn();
+    const sibling = vi.fn();
+    const unregisterOwner = registerMemoryChangedListener(projectRoot, owner);
+    const unregisterSibling = registerMemoryChangedListener(
+      projectRoot,
+      sibling,
+    );
+    const controller = new AbortController();
+    const config = {
+      getMemoryHookDeliveryId: () => unregisterOwner.id,
+      isTrustedFolder: () => true,
+    } as unknown as Config;
+    try {
+      const result = await runMemoryMetadataMigration({
+        config,
+        projectRoot,
+        root: memoryRoot,
+        scope: 'project',
+        abortSignal: controller.signal,
+        generateMetadata: async (_config, candidate) => metadata(candidate),
+      });
+      expect(result.committed).toBe(1);
+      expect(await fs.readFile(file, 'utf8')).toContain(
+        'name: Migrated memory',
+      );
+      expect(await fs.readFile(file, 'utf8')).toContain(
+        'BODY\nWITH TRAILING NEWLINE\n',
+      );
+      expect(sibling).not.toHaveBeenCalled();
+      expect(owner).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          scope: 'project',
+          operation: 'update',
+          relativePaths: expect.arrayContaining([
+            'project/legacy.md',
+            'MEMORY.md',
+          ]),
+        }),
+        undefined,
+      );
+    } finally {
+      unregisterOwner();
+      unregisterSibling();
+    }
+  });
+
+  it('keeps intermediate metadata commits out of a sibling window', async () => {
+    await write('project/one.md', legacyContent());
+    await write('project/two.md', legacyContent());
+    const owner = vi.fn();
+    const sibling = vi.fn();
+    const stopOwner = registerMemoryChangedListener(projectRoot, owner);
+    const stopSibling = registerMemoryChangedListener(projectRoot, sibling);
+    let closeSibling!: () => void;
+    let siblingOpened!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      siblingOpened = resolve;
+    });
+    const close = new Promise<void>((resolve) => {
+      closeSibling = resolve;
+    });
+    const siblingWindow = withCoalescedMemoryChanges(
+      projectRoot,
+      stopSibling.id,
+      async () => {
+        siblingOpened();
+        await close;
+      },
+    );
+    try {
+      await opened;
+      const generate = vi.fn(
+        async (_config: Config, candidate: MemoryMetadataMigrationCandidate) =>
+          metadata(candidate),
+      );
+      const pending = runMemoryMetadataMigration({
+        config: {
+          getMemoryHookDeliveryId: () => stopOwner.id,
+          isTrustedFolder: () => true,
+        } as unknown as Config,
+        projectRoot,
+        root: memoryRoot,
+        scope: 'project',
+        generateMetadata: generate,
+      });
+      for (let i = 0; i < 10; i++) await fs.readdir(memoryRoot);
+      expect(generate).not.toHaveBeenCalled();
+      closeSibling();
+      await siblingWindow;
+      const result = await pending;
+      expect(result.committed).toBe(2);
+      expect(sibling).not.toHaveBeenCalled();
+      expect(owner).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          operation: 'update',
+          relativePaths: expect.arrayContaining([
+            'project/one.md',
+            'project/two.md',
+            'MEMORY.md',
+          ]),
+        }),
+        undefined,
+      );
+    } finally {
+      closeSibling();
+      await siblingWindow;
+      stopOwner();
+      stopSibling();
+    }
+  });
+
+  it.each([false, true])(
+    'notifies only the configured root while migrating both project roots (cancelled=%s)',
+    async (cancelled) => {
+      const file = await write('project/local.md', legacyContent());
+      await write('project/second.md', legacyContent());
+      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      clearAutoMemoryRootCache();
+      const configuredRoot = getAutoMemoryRoot(projectRoot);
+      const configuredFile = path.join(configuredRoot, 'project/local.md');
+      await fs.mkdir(path.dirname(configuredFile), { recursive: true });
+      await fs.writeFile(configuredFile, legacyContent());
+      const listener = vi.fn();
+      const stop = registerMemoryChangedListener(projectRoot, listener);
+      const controller = new AbortController();
+      const config = {
+        getMemoryHookDeliveryId: () => stop.id,
+        isTrustedFolder: () => true,
+      } as unknown as Config;
+      let calls = 0;
+      try {
+        const pending = runMemoryMetadataMigration({
+          config,
+          projectRoot,
+          roots: [configuredRoot, memoryRoot],
+          scope: 'project',
+          abortSignal: controller.signal,
+          generateMetadata: async (_config, candidate) => {
+            if (cancelled && ++calls === 3) {
+              controller.abort();
+              controller.signal.throwIfAborted();
+            }
+            return metadata(candidate);
+          },
+        });
+        if (cancelled)
+          await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+        else expect((await pending).committed).toBe(3);
+        expect(await fs.readFile(file, 'utf8')).toContain(
+          'name: Migrated memory',
+        );
+        expect(await fs.readFile(configuredFile, 'utf8')).toContain(
+          'name: Migrated memory',
+        );
+        expect(
+          await fs.readFile(path.join(memoryRoot, 'MEMORY.md'), 'utf8'),
+        ).toContain('Migrated memory');
+        expect(
+          listener.mock.calls.flatMap(([change]) => change.paths).sort(),
+        ).toEqual(
+          [
+            await fs.realpath(path.join(configuredRoot, 'MEMORY.md')),
+            await fs.realpath(configuredFile),
+          ].sort(),
+        );
+        expect(
+          listener.mock.calls.every(([, signal]) => signal === undefined),
+        ).toBe(true);
+      } finally {
+        stop();
+      }
+    },
+  );
 
   it('selects only files missing the strict structured contract', async () => {
     await write('project/legacy.md', legacyContent());

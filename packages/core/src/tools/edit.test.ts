@@ -31,6 +31,10 @@ import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.j
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import { registerMemoryChangedListener } from '../memory/memory-file-change.js';
+import { HookRunner } from '../hooks/hookRunner.js';
+import { HookEventName, HookType } from '../hooks/types.js';
+import { clearAutoMemoryRootCache } from '../memory/paths.js';
 
 const readText = (filePath: string) => fs.readFileSync(filePath, 'utf8');
 
@@ -167,6 +171,61 @@ describe('EditTool', () => {
       });
     return { invocation, calculateSpy };
   };
+
+  it('delivers the memory hook when cancelled after the file is committed', async () => {
+    vi.stubEnv('QWEN_CODE_MEMORY_LOCAL', '1');
+    clearAutoMemoryRootCache();
+    const controller = new AbortController();
+    const filePath = path.join(rootDir, '.qwen', 'memory', 'cancelled.md');
+    const runner = new HookRunner();
+    const outcomes: boolean[] = [];
+    const unregister = registerMemoryChangedListener(
+      rootDir,
+      async (_, signal) => {
+        const result = await runner.executeHook(
+          {
+            type: HookType.Command,
+            command: `"${process.execPath}" -e "process.exit(0)"`,
+          },
+          HookEventName.MemoryChanged,
+          {
+            session_id: 'committed-memory-write',
+            timestamp: new Date().toISOString(),
+            transcript_path: '',
+            cwd: rootDir,
+            hook_event_name: HookEventName.MemoryChanged,
+          },
+          signal,
+        );
+        outcomes.push(result.success);
+      },
+    );
+    const originalWrite = fsService.writeTextFile.bind(fsService);
+    const writeSpy = vi
+      .spyOn(fsService, 'writeTextFile')
+      .mockImplementation(async (params) => {
+        const result = await originalWrite(params);
+        expect(fs.readFileSync(filePath, 'utf8')).toBe('after memory\n');
+        controller.abort();
+        return result;
+      });
+    try {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      seedFile(filePath, 'before memory\n');
+      const result = await tool
+        .build(edit(filePath, 'before memory', 'after memory'))
+        .execute(controller.signal);
+      expect(result.error).toBeUndefined();
+      expect(controller.signal.aborted).toBe(true);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('after memory\n');
+      expect(outcomes).toEqual([true]);
+    } finally {
+      writeSpy.mockRestore();
+      unregister();
+      vi.unstubAllEnvs();
+      clearAutoMemoryRootCache();
+    }
+  });
 
   describe('applyReplacement', () => {
     const replace = (current: string, oldStr: string, newStr: string) =>

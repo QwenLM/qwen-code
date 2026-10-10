@@ -89,6 +89,14 @@ const calls: Record<
       [],
       HookPhase.PostWrite,
     ),
+  MemoryChanged: (h) =>
+    h.fireMemoryChangedEvent({
+      scope: 'project',
+      operation: 'update',
+      paths: ['/workspace/.qwen/memory/a.md'],
+      relativePaths: ['a.md'],
+      workspace: '/workspace',
+    }),
   InstructionsLoaded: (h) =>
     h.fireInstructionsLoadedEvent(
       '/workspace/AGENTS.md',

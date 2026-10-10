@@ -17,6 +17,7 @@ import {
   getUserAutoMemoryRoot,
   AUTO_MEMORY_INDEX_FILENAME,
 } from '@qwen-code/qwen-code-core/memory/paths.js';
+import { notifyMemoryEnabledChange } from '@qwen-code/qwen-code-core/memory/memory-file-change.js';
 import { getAllMemoryFilenames } from '@qwen-code/qwen-code-core/utils/memory-constants.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
@@ -132,8 +133,8 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
   const safeMode = config.isSafeMode();
   const readToggle = (value: boolean | undefined): boolean =>
     !bareMode && !safeMode && (value ?? true);
-  const [autoMemoryOn, setAutoMemoryOn] = useState(() =>
-    readToggle(loadedSettings.merged.memory?.enableManagedAutoMemory),
+  const [autoMemoryOn, setAutoMemoryOn] = useState(
+    () => loadedSettings.merged.memory?.enableManagedAutoMemory ?? true,
   );
   const [autoDreamOn, setAutoDreamOn] = useState(() =>
     readToggle(loadedSettings.merged.memory?.enableManagedAutoDream),
@@ -320,14 +321,45 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
   );
 
   const handleToggleAutoMemory = useCallback(() => {
-    const newValue = !autoMemoryOn;
-    loadedSettings.setValue(
-      SettingScope.Workspace,
-      'memory.enableManagedAutoMemory',
-      newValue,
+    // setValue recomputes the merged view after committing, so read the
+    // effective value back from it: a System-scope override (or an untrusted
+    // workspace, whose settings are stripped from the merge) can mask a
+    // Workspace-scope write, and announcing the requested value would
+    // announce a change that did not take effect.
+    const previousEffective =
+      loadedSettings.merged.memory?.enableManagedAutoMemory ?? true;
+    const newValue = !previousEffective;
+    try {
+      loadedSettings.setValue(
+        SettingScope.Workspace,
+        'memory.enableManagedAutoMemory',
+        newValue,
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+    } catch (toggleError) {
+      setError(
+        toggleError instanceof Error
+          ? toggleError.message
+          : String(toggleError),
+      );
+      return;
+    }
+    setError(null);
+    const effectiveValue =
+      loadedSettings.merged.memory?.enableManagedAutoMemory ?? true;
+    config.setManagedAutoMemoryEnabled(
+      !bareMode && !safeMode && effectiveValue,
     );
-    setAutoMemoryOn(newValue);
-  }, [autoMemoryOn, loadedSettings]);
+    setAutoMemoryOn(effectiveValue);
+    if (effectiveValue !== previousEffective) {
+      void notifyMemoryEnabledChange(
+        config.getProjectRoot(),
+        effectiveValue,
+        config.getMemoryHookDeliveryId(),
+      );
+    }
+  }, [bareMode, safeMode, config, loadedSettings]);
 
   const handleToggleAutoDream = useCallback(() => {
     const newValue = !autoDreamOn;
@@ -490,6 +522,11 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
           {t('Auto-memory: {{status}}', {
             status: autoMemoryOn ? t('on') : t('off'),
           })}
+          {bareMode
+            ? ` · ${t('disabled (bare mode)')}`
+            : safeMode
+              ? ` · ${t('disabled (safe mode)')}`
+              : ''}
         </Text>
         <Text
           color={

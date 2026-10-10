@@ -5,6 +5,8 @@
  */
 
 import { execFile } from 'node:child_process';
+import * as fs from 'node:fs/promises';
+import { devNull } from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -13,7 +15,8 @@ import {
   isGitRepository,
   NO_EXEC_CONFIG,
 } from '../utils/gitUtils.js';
-import { getTeamAutoMemoryRoot } from './paths.js';
+import { getTeamAutoMemoryRoot, isMemoryDocumentFilename } from './paths.js';
+import { withTeamMemorySync } from './memory-file-change.js';
 
 const execFileAsync = promisify(execFile);
 const debugLogger = createDebugLogger('TEAM_MEMORY_SYNC');
@@ -54,6 +57,7 @@ async function tryGit(
   cwd: string,
   args: string[],
   killSignal: NodeJS.Signals = 'SIGTERM',
+  maxBuffer?: number,
 ): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(
@@ -64,6 +68,7 @@ async function tryGit(
         encoding: 'utf8',
         timeout: GIT_TIMEOUT_MS,
         killSignal,
+        ...(maxBuffer === undefined ? {} : { maxBuffer }),
         env: {
           ...process.env,
           // Force non-interactive git so a missing credential / askpass prompt
@@ -195,8 +200,76 @@ export async function syncTeamMemory(
     // would diverge a two-writer branch and wedge `--ff-only`. SIGKILL: a hung
     // pull is hung in its network fetch phase (which holds no index.lock); the
     // ff ref-advance afterwards is fast and local, so a hard kill is safe.
-    result.pulled =
-      (await tryGit(gitRoot, ['pull', '--ff-only'], 'SIGKILL')) !== null;
+    result.pulled = await withTeamMemorySync(projectRoot, async (record) => {
+      let before = (await tryGit(gitRoot, ['rev-parse', 'HEAD']))?.trim();
+      if (!before) {
+        const branchRef = await tryGit(gitRoot, [
+          'for-each-ref',
+          '--format=%(refname)',
+          `refs/heads/${branch.trim()}`,
+        ]);
+        if (
+          branchRef === null ||
+          branchRef.split('\n').includes(`refs/heads/${branch}`)
+        )
+          return false;
+        before = (
+          await tryGit(gitRoot, ['hash-object', '-w', '-t', 'tree', devNull])
+        )?.trim();
+        if (!before) return false;
+      }
+      const pulled =
+        (await tryGit(gitRoot, ['pull', '--ff-only'], 'SIGKILL')) !== null;
+      if (!pulled) return pulled;
+      const after = (await tryGit(gitRoot, ['rev-parse', 'HEAD']))?.trim();
+      if (!after || after === before) return pulled;
+      const changes = await tryGit(
+        gitRoot,
+        [
+          'diff',
+          '--raw',
+          '-z',
+          '--no-abbrev',
+          '--no-renames',
+          before,
+          after,
+          '--',
+          relPath,
+        ],
+        'SIGKILL',
+        Infinity,
+      );
+      const entries = changes?.split('\0') ?? [];
+      for (let i = 0; i + 1 < entries.length; i += 2) {
+        const [, mode, , blob] = entries[i]!.split(' ');
+        const filePath = path.join(gitRoot, entries[i + 1]!);
+        if (!isMemoryDocumentFilename(path.basename(filePath))) continue;
+        if (mode === '000000') {
+          const leaf = await fs
+            .lstat(filePath)
+            .catch((error: unknown) =>
+              (error as NodeJS.ErrnoException).code === 'ENOENT'
+                ? null
+                : undefined,
+            );
+          record(filePath, leaf === null ? null : undefined);
+        } else if ((mode === '100644' || mode === '100755') && blob) {
+          const leaf = await fs.lstat(filePath).catch(() => undefined);
+          if (!leaf?.isFile()) {
+            record(filePath, undefined);
+            continue;
+          }
+          const content = await tryGit(
+            gitRoot,
+            ['cat-file', '--filters', `--path=${entries[i + 1]!}`, blob],
+            'SIGKILL',
+            Infinity,
+          );
+          record(filePath, content ?? undefined);
+        }
+      }
+      return pulled;
+    });
     if (!result.pulled) {
       // ff refused (diverged) or a transient error — nothing can be shared this
       // cycle. Skip cleanly WITHOUT committing, leaving the working tree as-is.

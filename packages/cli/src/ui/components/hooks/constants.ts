@@ -66,6 +66,10 @@ export function getHookExitCodes(eventName: string): HookExitCode[] {
       { code: 0, description: t('stdout/stderr not shown') },
       { code: 'Other', description: t('show stderr to user only') },
     ],
+    [HookEventName.MemoryChanged]: [
+      { code: 0, description: t('stdout/stderr not shown') },
+      { code: 'Other', description: t('show stderr to user only') },
+    ],
     [HookEventName.UserPromptSubmit]: [
       { code: 0, description: t('stdout shown to Qwen') },
       {
@@ -183,6 +187,9 @@ export function getHookShortDescription(eventName: string): string {
     [HookEventName.PostToolBatch]: t('After all tool calls in a batch resolve'),
     [HookEventName.Notification]: t('When notifications are sent'),
     [HookEventName.InstructionsLoaded]: t('When instruction files are loaded'),
+    [HookEventName.MemoryChanged]: t(
+      'After managed memory changes or is turned on or off',
+    ),
     [HookEventName.UserPromptSubmit]: t('When the user submits a prompt'),
     [HookEventName.UserPromptExpansion]: t(
       'When a slash command expands into a prompt',
@@ -287,6 +294,9 @@ export function getHookDescription(eventName: string): string {
     ),
     [HookEventName.TodoCompleted]: t(
       'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.',
+    ),
+    [HookEventName.MemoryChanged]: t(
+      'Input to command is JSON with paths (absolute; one path, or several when files changed together), relative_paths (stable key inside the memory root, same order as paths), memory_scope (user, project, or team), operation (create, update, or delete), and workspace for project and team memory. User memory omits workspace. Turning memory on or off sends paths: [], workspace, and enabled, and omits operation and memory_scope. The change has already landed. Output and exit status are ignored.',
     ),
   };
   return descriptions[eventName] || '';

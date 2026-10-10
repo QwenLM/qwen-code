@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -27,6 +28,7 @@ import { ensureAutoMemoryScaffold } from './store.js';
 import * as trustedMemoryFilesystem from './trusted-memory-filesystem.js';
 
 vi.mock('./trusted-memory-filesystem.js', { spy: true });
+vi.mock('node:fs/promises', { spy: true });
 
 // Extract the Markdown link target from a `- [title](target) — desc` line. The
 // encoder leaves no raw ')' in the target, so the first ')' is the link close.
@@ -98,17 +100,72 @@ describe('managed auto-memory indexer', () => {
     );
   });
 
-  it('replaces a linked project index without overwriting its target', async () => {
-    const index = getAutoMemoryIndexPath(projectRoot);
-    const outside = path.join(tempDir, 'outside-project-index.md');
-    await fs.writeFile(outside, 'SENTINEL\n', 'utf-8');
-    await fs.rm(index, { force: true });
-    await fs.symlink(outside, index, 'file');
+  it.each([false, true])(
+    'replaces a linked project index without overwriting its target (identical: %s)',
+    async (identical) => {
+      const index = getAutoMemoryIndexPath(projectRoot);
+      const outside = path.join(tempDir, 'outside-project-index.md');
+      const original = identical
+        ? buildManagedAutoMemoryIndex([])
+        : 'SENTINEL\n';
+      await fs.writeFile(outside, original, 'utf-8');
+      await fs.rm(index, { force: true });
+      await fs.symlink(outside, index, 'file');
 
-    await rebuildManagedAutoMemoryIndex(projectRoot);
+      await rebuildManagedAutoMemoryIndex(projectRoot);
 
-    await expect(fs.readFile(outside, 'utf-8')).resolves.toBe('SENTINEL\n');
-    expect((await fs.lstat(index)).isSymbolicLink()).toBe(false);
+      await expect(fs.readFile(outside, 'utf-8')).resolves.toBe(original);
+      expect((await fs.lstat(index)).isSymbolicLink()).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32').each([false, true])(
+    'replaces a non-regular index without reading it (symlink: %s)',
+    async (linked) => {
+      const root = path.join(tempDir, 'compat-memory');
+      const index = path.join(root, 'MEMORY.md');
+      const fifo = linked ? path.join(tempDir, 'outside.pipe') : index;
+      await fs.mkdir(root);
+      execFileSync('mkfifo', [fifo]);
+      if (linked) await fs.symlink(fifo, index);
+      // Bound the regression: the old read would otherwise wait for a writer.
+      const read = vi
+        .spyOn(fs, 'readFile')
+        .mockRejectedValue(new Error('must not read a non-regular index'));
+      try {
+        await rebuildAutoMemoryIndexAtRoot(root, 'project', { projectRoot });
+        expect(read).not.toHaveBeenCalled();
+        expect((await fs.lstat(index)).isFile()).toBe(true);
+        if (linked) expect((await fs.lstat(fifo)).isFIFO()).toBe(true);
+      } finally {
+        read.mockRestore();
+      }
+      expect(await fs.readFile(index, 'utf8')).toBe(
+        buildManagedAutoMemoryIndex([]),
+      );
+    },
+  );
+
+  it('does not read or replace an index after cancellation', async () => {
+    const root = path.join(tempDir, 'compat-memory');
+    const index = path.join(root, 'MEMORY.md');
+    await fs.mkdir(root);
+    await fs.writeFile(index, 'previous index');
+    const controller = new AbortController();
+    controller.abort();
+    const read = vi.spyOn(fs, 'readFile');
+    try {
+      await expect(
+        rebuildAutoMemoryIndexAtRoot(root, 'project', {
+          projectRoot,
+          signal: controller.signal,
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(read).not.toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+    }
+    expect(await fs.readFile(index, 'utf8')).toBe('previous index');
   });
 
   it('preserves an existing index when the root cannot be read', async () => {
@@ -169,7 +226,7 @@ describe('managed auto-memory indexer', () => {
     try {
       const missingRoot = getUserAutoMemoryRoot();
 
-      await expect(rebuildUserAutoMemoryIndex()).resolves.toBe('');
+      await expect(rebuildUserAutoMemoryIndex(projectRoot)).resolves.toBe('');
       await expect(fs.stat(missingRoot)).rejects.toMatchObject({
         code: 'ENOENT',
       });
@@ -183,31 +240,37 @@ describe('managed auto-memory indexer', () => {
     }
   });
 
-  it('replaces a linked user index without overwriting its target', async () => {
-    const previousBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
-    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'runtime');
-    clearAutoMemoryRootCache();
-    try {
-      const root = getUserAutoMemoryRoot();
-      const index = path.join(root, 'MEMORY.md');
-      const outside = path.join(tempDir, 'outside-user-index.md');
-      await fs.mkdir(root, { recursive: true });
-      await fs.writeFile(outside, 'SENTINEL\n', 'utf-8');
-      await fs.symlink(outside, index, 'file');
-
-      await rebuildUserAutoMemoryIndex();
-
-      await expect(fs.readFile(outside, 'utf-8')).resolves.toBe('SENTINEL\n');
-      expect((await fs.lstat(index)).isSymbolicLink()).toBe(false);
-    } finally {
-      if (previousBaseDir === undefined) {
-        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
-      } else {
-        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBaseDir;
-      }
+  it.each([false, true])(
+    'replaces a linked user index without overwriting its target (identical: %s)',
+    async (identical) => {
+      const previousBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'runtime');
       clearAutoMemoryRootCache();
-    }
-  });
+      try {
+        const root = getUserAutoMemoryRoot();
+        const index = path.join(root, 'MEMORY.md');
+        const outside = path.join(tempDir, 'outside-user-index.md');
+        const original = identical
+          ? buildManagedAutoMemoryIndex([])
+          : 'SENTINEL\n';
+        await fs.mkdir(root, { recursive: true });
+        await fs.writeFile(outside, original, 'utf-8');
+        await fs.symlink(outside, index, 'file');
+
+        await rebuildUserAutoMemoryIndex(projectRoot);
+
+        await expect(fs.readFile(outside, 'utf-8')).resolves.toBe(original);
+        expect((await fs.lstat(index)).isSymbolicLink()).toBe(false);
+      } finally {
+        if (previousBaseDir === undefined) {
+          delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+        } else {
+          process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBaseDir;
+        }
+        clearAutoMemoryRootCache();
+      }
+    },
+  );
 
   it('formats a compact file-based MEMORY.md index view', () => {
     const content = buildManagedAutoMemoryIndex([

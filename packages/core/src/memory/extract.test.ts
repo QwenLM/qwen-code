@@ -10,7 +10,17 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { Content } from '@google/genai';
-import { getAutoMemoryExtractCursorPath } from './paths.js';
+import {
+  getAutoMemoryExtractCursorPath,
+  getAutoMemoryRoot,
+  getAutoMemoryIndexPath,
+  getUserAutoMemoryRoot,
+  getUserAutoMemoryIndexPath,
+} from './paths.js';
+import {
+  registerMemoryChangedListener,
+  type MemoryChangedNotice,
+} from './memory-file-change.js';
 import { runAutoMemoryExtract } from './extract.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { ensureAutoMemoryScaffold } from './store.js';
@@ -85,6 +95,7 @@ describe('auto-memory extraction', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await fs.rm(tempDir, {
       recursive: true,
       force: true,
@@ -243,6 +254,90 @@ describe('auto-memory extraction', () => {
 
       const cursorAfter = await readCursor();
       expect(cursorAfter).toEqual(cursorBefore);
+    });
+
+    it('waits for the user index notification before propagating a project rebuild failure', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', path.join(tempDir, 'memories'));
+      const userRoot = getUserAutoMemoryRoot();
+      await fs.mkdir(path.join(userRoot, 'user'), { recursive: true });
+      await fs.writeFile(
+        path.join(userRoot, 'user', 'fact.md'),
+        '---\nname: User fact\ndescription: Durable fact\ntype: user\n---\nKeep this fact.\n',
+      );
+      const cursorBefore = await readCursor();
+      const realIndexer =
+        await vi.importActual<typeof import('./indexer.js')>('./indexer.js');
+      const gate = deferred<void>();
+      const entered = deferred<void>();
+      const userFinished = deferred<void>();
+      const projectError = new Error(
+        'EACCES: project memory index write failed',
+      );
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: ['project', 'user'],
+        touchedProjectScope: true,
+        touchedUserScope: true,
+        hasToolActivity: true,
+      });
+      vi.mocked(rebuildManagedAutoMemoryIndex).mockRejectedValueOnce(
+        projectError,
+      );
+      vi.mocked(rebuildUserAutoMemoryIndex).mockImplementationOnce(
+        async (...args) => {
+          entered.resolve();
+          await gate.promise;
+          try {
+            return await realIndexer.rebuildUserAutoMemoryIndex(...args);
+          } finally {
+            userFinished.resolve();
+          }
+        },
+      );
+      const seen: MemoryChangedNotice[] = [];
+      const unregister = registerMemoryChangedListener(
+        projectRoot,
+        (notice) => {
+          seen.push(notice);
+        },
+      );
+      mockConfig.getMemoryHookDeliveryId = () => unregister.id;
+      let settled = false;
+      const outcome = runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [...newHistory],
+      })
+        .catch((error: unknown) => error)
+        .finally(() => {
+          settled = true;
+        });
+      try {
+        await entered.promise;
+        // Keep the user write pending while a fail-fast window would close.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect.soft(settled).toBe(false);
+        gate.resolve();
+        expect(await outcome).toBe(projectError);
+        await userFinished.promise;
+        await vi.waitFor(async () => {
+          expect(
+            await fs.readFile(getUserAutoMemoryIndexPath(), 'utf8'),
+          ).toContain('fact.md');
+        });
+        expect(seen).toContainEqual(
+          expect.objectContaining({
+            scope: 'user',
+            relativePaths: ['MEMORY.md'],
+          }),
+        );
+        expect(await readCursor()).toEqual(cursorBefore);
+        expect(refreshMemoryInstruction).not.toHaveBeenCalled();
+      } finally {
+        gate.resolve();
+        await outcome;
+        unregister();
+      }
     });
 
     it('user-scope rebuild failure is logged and swallowed; project rebuild + cursor advance still happen', async () => {
@@ -750,5 +845,131 @@ describe('auto-memory extraction', () => {
 
       expect(result.cursor.processedOffset).toBe(1);
     });
+  });
+
+  it.each(['project', 'user'] as const)(
+    'attributes a replaced symlink %s index to the extracting session',
+    async (scope) => {
+      vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', path.join(tempDir, 'memories'));
+      await fs.mkdir(path.join(projectRoot, '.git'));
+      const root =
+        scope === 'project'
+          ? getAutoMemoryRoot(projectRoot)
+          : getUserAutoMemoryRoot();
+      const indexPath =
+        scope === 'project'
+          ? getAutoMemoryIndexPath(projectRoot)
+          : getUserAutoMemoryIndexPath();
+      await fs.mkdir(path.join(root, scope), { recursive: true });
+      await fs.writeFile(
+        path.join(root, scope, 'routing.md'),
+        `---\nname: Routing memory\ndescription: Owner routing\ntype: ${scope}\n---\nKeep session ownership.\n`,
+      );
+      const target = path.join(tempDir, 'index.md');
+      await fs.writeFile(target, 'stale index');
+      await fs.rm(indexPath, { force: true });
+      await fs.symlink(target, indexPath);
+      const realIndexer =
+        await vi.importActual<typeof import('./indexer.js')>('./indexer.js');
+      if (scope === 'project') {
+        vi.mocked(rebuildManagedAutoMemoryIndex).mockImplementationOnce(
+          realIndexer.rebuildManagedAutoMemoryIndex,
+        );
+      } else {
+        vi.mocked(rebuildUserAutoMemoryIndex).mockImplementationOnce(
+          realIndexer.rebuildUserAutoMemoryIndex,
+        );
+      }
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: [scope],
+        touchedProjectScope: scope === 'project',
+        touchedUserScope: scope === 'user',
+        hasToolActivity: true,
+        systemMessage: undefined,
+      });
+      const owner = vi.fn();
+      const sibling = vi.fn();
+      const unregisterOwner = registerMemoryChangedListener(projectRoot, owner);
+      const unregisterSibling = registerMemoryChangedListener(
+        projectRoot,
+        sibling,
+      );
+      mockConfig.getMemoryHookDeliveryId = () => unregisterOwner.id;
+      try {
+        await runAutoMemoryExtract({
+          projectRoot,
+          sessionId: 'session-1',
+          config: mockConfig,
+          history: [{ role: 'user', parts: [{ text: 'Remember routing.' }] }],
+        });
+        expect(await fs.readFile(target, 'utf-8')).toBe('stale index');
+        expect((await fs.lstat(indexPath)).isSymbolicLink()).toBe(false);
+        expect(await fs.readFile(indexPath, 'utf-8')).toContain(
+          'Routing memory',
+        );
+        expect.soft(sibling).not.toHaveBeenCalled();
+        expect.soft(owner).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            scope,
+            operation: 'create',
+            relativePaths: ['MEMORY.md'],
+          }),
+          undefined,
+        );
+      } finally {
+        unregisterOwner();
+        unregisterSibling();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it('does not attribute documents landed by the instruction refresh to the extract window', async () => {
+    // The refresh can pull team memory (syncTeamMemory). If it ran inside
+    // the coalesced window, collaborator documents landing between the
+    // snapshots would be reported as this session's own changes.
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(
+      tempDir,
+      'user-memory-base',
+    );
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const topicFile = path.join(memoryRoot, 'project', 'release.md');
+    const pulledFile = path.join(memoryRoot, 'project', 'pulled.md');
+    vi.mocked(runAutoMemoryExtractionByAgent).mockImplementation(async () => {
+      await fs.mkdir(path.dirname(topicFile), { recursive: true });
+      await fs.writeFile(topicFile, 'topic\n');
+      return {
+        touchedTopics: ['project'],
+        touchedProjectScope: true,
+        touchedUserScope: false,
+        hasToolActivity: true,
+        systemMessage: undefined,
+      };
+    });
+    vi.mocked(refreshMemoryInstruction).mockImplementation(async () => {
+      await fs.writeFile(pulledFile, 'pulled\n');
+    });
+    const seen: MemoryChangedNotice[] = [];
+    const unregister = registerMemoryChangedListener(projectRoot, (change) => {
+      seen.push(change);
+    });
+    try {
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [{ role: 'user', parts: [{ text: 'Remember this.' }] }],
+      });
+    } finally {
+      unregister();
+      delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    }
+    expect(refreshMemoryInstruction).toHaveBeenCalled();
+    expect(seen).toEqual([
+      expect.objectContaining({
+        operation: 'create',
+        relativePaths: ['project/release.md'],
+      }),
+    ]);
   });
 });

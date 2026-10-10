@@ -16,6 +16,7 @@ import {
 import { listTrustedMemoryMarkdownFiles } from './trusted-memory-filesystem.js';
 import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
+import { withCoalescedMemoryChanges } from './memory-file-change.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import type { AutoMemoryMetadata, AutoMemoryType } from './types.js';
 import { logMemoryDream, MemoryDreamEvent } from '../telemetry/index.js';
@@ -347,15 +348,38 @@ export async function runManagedAutoMemoryDream(
     };
   }
 
-  const agentResult = await runDreamByAgent(projectRoot, config, abortSignal, {
-    suppressChatRecording: options.suppressChatRecording,
-  });
-  // Cancel-aware ordering:
-  //   1. If aborted before this point, return the agent's partial result
-  //      WITHOUT rebuilding the index — index rebuild can be expensive
-  //      and re-running a cancelled dream cycle next time will rebuild
-  //      against the latest topic files anyway.
-  //   2. If still alive, deterministically rebuild the generated index.
+  const { agentResult, hasChanges } = await withCoalescedMemoryChanges(
+    projectRoot,
+    config.getMemoryHookDeliveryId?.(),
+    async () => {
+      const agentResult = await runDreamByAgent(
+        projectRoot,
+        config,
+        abortSignal,
+        {
+          suppressChatRecording: options.suppressChatRecording,
+        },
+      );
+      // Deleting a file whose frontmatter cannot be parsed yields no touched
+      // topic, so gating on touchedTopics alone would skip the rebuild and leave
+      // MEMORY.md pointing at deleted files (and record the run as a noop).
+      const hasChanges =
+        agentResult.createdEntries +
+          agentResult.updatedEntries +
+          agentResult.deletedEntries >
+          0 ||
+        agentResult.touchedTopics.length > 0 ||
+        agentResult.hasFilesystemChanges === true;
+      if (!abortSignal?.aborted && hasChanges) {
+        await rebuildManagedAutoMemoryIndex(
+          projectRoot,
+          config.getMemoryHookDeliveryId?.(),
+        );
+      }
+      return { agentResult, hasChanges };
+    },
+    abortSignal,
+  );
   // Scheduler-gating metadata (`lastDreamAt`, `lastDreamSessionId`,
   // `lastDreamTouchedTopics`, `lastDreamStatus`) is intentionally NOT
   // written here — `MemoryManager.runDream` owns the atomic
@@ -364,19 +388,6 @@ export async function runManagedAutoMemoryDream(
   // could persist gating metadata for a record the manager is about
   // to mark `'cancelled'`.
   if (abortSignal?.aborted) return agentResult;
-  // Deleting a file whose frontmatter cannot be parsed yields no touched
-  // topic, so gating on touchedTopics alone would skip the rebuild and leave
-  // MEMORY.md pointing at deleted files (and record the run as a noop).
-  const hasChanges =
-    agentResult.createdEntries +
-      agentResult.updatedEntries +
-      agentResult.deletedEntries >
-      0 ||
-    agentResult.touchedTopics.length > 0 ||
-    agentResult.hasFilesystemChanges === true;
-  if (hasChanges) {
-    await rebuildManagedAutoMemoryIndex(projectRoot);
-  }
   if (options.recordMetadata) {
     await updateDreamMetadataResult(
       projectRoot,

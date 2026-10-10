@@ -286,6 +286,7 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
   getModelsForProviderProtocol: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).getModelsForProviderProtocol,
@@ -2543,6 +2544,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
 
     mockConfig = {
+      setManagedAutoMemoryEnabled: vi.fn(),
+      getBareMode: vi.fn(() => false),
+      isSafeMode: vi.fn(() => false),
       initialize: vi.fn().mockResolvedValue(undefined),
       closeSessionWriter: vi.fn().mockResolvedValue(undefined),
       shutdown: vi.fn().mockResolvedValue(undefined),
@@ -20187,15 +20191,655 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'User',
       'memory.enableManagedAutoDream',
       true,
+      undefined,
+      { throwOnWriteFailure: true },
     );
     expect(settings.setValue).toHaveBeenCalledWith(
       'User',
       'memory.enableAutoSkill',
       true,
+      undefined,
+      { throwOnWriteFailure: true },
     );
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it.each([false, true])(
+    'qwen/settings setMemory reports only persisted toggles when a write fails (partial=%s)',
+    async (partial) => {
+      const memoryFileChange = await import(
+        '@qwen-code/qwen-code-core/memory/memory-file-change.js'
+      );
+      const notify = vi
+        .spyOn(memoryFileChange, 'notifyMemoryEnabledChange')
+        .mockResolvedValue(undefined);
+      const memory = { enableManagedAutoMemory: true };
+      const settings = {
+        merged: { mcpServers: {}, memory },
+        user: { path: '/home/test/.qwen/settings.json', settings: { memory } },
+        getSystemHooks: vi.fn(),
+        getUserHooks: vi.fn().mockReturnValue({}),
+        getProjectHooks: vi.fn().mockReturnValue({}),
+        setValue: vi.fn(
+          (
+            _scope: string,
+            key: string,
+            value: unknown,
+            _guard: unknown,
+            options?: { throwOnWriteFailure?: boolean },
+          ) => {
+            if (partial && key === 'memory.enableManagedAutoMemory') {
+              memory.enableManagedAutoMemory = value as boolean;
+              return;
+            }
+            if (options?.throwOnWriteFailure)
+              throw new Error('Refused settings write');
+            memory.enableManagedAutoMemory = value as boolean;
+          },
+        ),
+      } as unknown as LoadedSettings;
+      vi.mocked(loadSettings).mockReturnValue(settings);
+      const running = runAcpAgent(mockConfig, settings, mockArgv);
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+      try {
+        await expect(
+          agent.extMethod('qwen/settings/setMemory', {
+            updates: {
+              enableManagedAutoMemory: false,
+              ...(partial ? { enableAutoSkill: true } : {}),
+            },
+          }),
+        ).rejects.toThrow('Refused settings write');
+        expect(memory.enableManagedAutoMemory).toBe(!partial);
+        if (partial) {
+          expect(notify).toHaveBeenCalledExactlyOnceWith('/tmp', false);
+        } else {
+          expect(notify).not.toHaveBeenCalled();
+        }
+      } finally {
+        notify.mockRestore();
+        mockConnectionState.resolve();
+        await running;
+      }
+    },
+  );
+
+  it('qwen/settings setMemory does not emit when a workspace override still wins', async () => {
+    const memoryFileChange = await import(
+      '@qwen-code/qwen-code-core/memory/memory-file-change.js'
+    );
+    const notify = vi
+      .spyOn(memoryFileChange, 'notifyMemoryEnabledChange')
+      .mockResolvedValue(undefined);
+    const userMemory: Record<string, unknown> = {
+      enableManagedAutoMemory: false,
+    };
+    const mergedMemory: Record<string, unknown> = {
+      enableManagedAutoMemory: false,
+    };
+    const settings = {
+      merged: { mcpServers: {}, memory: mergedMemory },
+      user: {
+        path: '/home/test/.qwen/settings.json',
+        settings: { memory: userMemory },
+      },
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+      setValue: vi.fn((_scope: string, key: string, value: unknown) => {
+        const [, memoryKey] = key.split('.');
+        if (memoryKey) {
+          userMemory[memoryKey] = value;
+        }
+      }),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/settings/setMemory', {
+        updates: { enableManagedAutoMemory: true },
+      }),
+    ).resolves.toEqual({
+      settings: expect.objectContaining({
+        enableManagedAutoMemory: false,
+      }),
+    });
+    expect(userMemory['enableManagedAutoMemory']).toBe(true);
+    expect(notify).not.toHaveBeenCalled();
+
+    notify.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings setMemory emits the toggle without the bootstrap delivery id', async () => {
+    const memoryFileChange = await import(
+      '@qwen-code/qwen-code-core/memory/memory-file-change.js'
+    );
+    const notify = vi
+      .spyOn(memoryFileChange, 'notifyMemoryEnabledChange')
+      .mockResolvedValue(undefined);
+    // The bootstrap Config's delivery id is registered on the LAUNCH
+    // directory; a request-scoped toggle must not carry it.
+    const bootstrapId = Symbol('bootstrap-registration');
+    mockConfig = {
+      ...mockConfig,
+      getMemoryHookDeliveryId: vi.fn(() => bootstrapId),
+    } as unknown as Config;
+    const userMemory: Record<string, unknown> = {
+      enableManagedAutoMemory: true,
+    };
+    const mergedMemory: Record<string, unknown> = {
+      enableManagedAutoMemory: true,
+    };
+    const settings = {
+      merged: { mcpServers: {}, memory: mergedMemory },
+      user: {
+        path: '/home/test/.qwen/settings.json',
+        settings: { memory: userMemory },
+      },
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+      setValue: vi.fn((_scope: string, key: string, value: unknown) => {
+        const [, memoryKey] = key.split('.');
+        if (memoryKey) {
+          userMemory[memoryKey] = value;
+          mergedMemory[memoryKey] = value;
+        }
+      }),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/settings/setMemory', {
+        cwd: '/tmp/qwen-memory-cwd-test',
+        updates: { enableManagedAutoMemory: false },
+      }),
+    ).resolves.toEqual({
+      settings: expect.objectContaining({ enableManagedAutoMemory: false }),
+    });
+    // No id: the event falls back to the settings workspace's own newest
+    // registration instead of the bootstrap Config's launch-directory one.
+    expect(notify).toHaveBeenCalledWith('/tmp/qwen-memory-cwd-test', false);
+
+    notify.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings setMemory attributes the toggle to the requesting session', async () => {
+    const memoryFileChange = await import(
+      '@qwen-code/qwen-code-core/memory/memory-file-change.js'
+    );
+    const workspace = '/tmp/qwen-memory-cwd-test';
+    // Two listeners on one workspace: the older one stands in for the
+    // requesting session's registration, the newer one for another session
+    // on the same workspace.
+    const olderSeen: unknown[] = [];
+    const newerSeen: unknown[] = [];
+    const older = memoryFileChange.registerMemoryChangedListener(
+      workspace,
+      (change) => {
+        olderSeen.push(change);
+      },
+    );
+    const newer = memoryFileChange.registerMemoryChangedListener(
+      workspace,
+      (change) => {
+        newerSeen.push(change);
+      },
+    );
+    const userMemory: Record<string, unknown> = {
+      enableManagedAutoMemory: true,
+    };
+    const mergedMemory: Record<string, unknown> = {
+      enableManagedAutoMemory: true,
+    };
+    const settings = {
+      merged: { mcpServers: {}, memory: mergedMemory },
+      user: {
+        path: '/home/test/.qwen/settings.json',
+        settings: { memory: userMemory },
+      },
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+      setValue: vi.fn((_scope: string, key: string, value: unknown) => {
+        const [, memoryKey] = key.split('.');
+        if (memoryKey) {
+          userMemory[memoryKey] = value;
+          mergedMemory[memoryKey] = value;
+        }
+      }),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    const sessions = (
+      agent as unknown as {
+        sessions: Map<string, { getConfig: () => Record<string, unknown> }>;
+      }
+    ).sessions;
+    sessions.set('requesting-session', {
+      getConfig: () => ({
+        storage: { getProjectRoot: () => workspace },
+        setManagedAutoMemoryEnabled: vi.fn(),
+        getBareMode: () => false,
+        isSafeMode: () => false,
+        getMemoryHookDeliveryId: () => older.id,
+      }),
+    });
+    try {
+      await expect(
+        agent.extMethod('qwen/settings/setMemory', {
+          sessionId: 'requesting-session',
+          updates: { enableManagedAutoMemory: false },
+        }),
+      ).resolves.toEqual({
+        settings: expect.objectContaining({ enableManagedAutoMemory: false }),
+      });
+      // The toggle carries the requesting session's delivery id, so only
+      // that session's listener fires — not the workspace's newest one.
+      await vi.waitFor(() => expect(olderSeen).toHaveLength(1));
+      expect(olderSeen[0]).toMatchObject({
+        workspace,
+        enabled: false,
+      });
+      expect(newerSeen).toEqual([]);
+    } finally {
+      older();
+      newer();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it.each([
+    ['unknown', 'unknown-session'],
+    ['uninitialized', 'requesting-session'],
+    ['empty', ''],
+    ['number', 42],
+    ['object', {}],
+  ] as const)(
+    'qwen/settings setMemory does not reroute a named %s session',
+    async (sessionState, sessionId) => {
+      const memoryFileChange = await import(
+        '@qwen-code/qwen-code-core/memory/memory-file-change.js'
+      );
+      const workspace = '/tmp/qwen-memory-cwd-test';
+      const olderSeen: unknown[] = [];
+      const newerSeen: unknown[] = [];
+      const older = memoryFileChange.registerMemoryChangedListener(
+        workspace,
+        (change) => {
+          olderSeen.push(change);
+        },
+      );
+      const newer = memoryFileChange.registerMemoryChangedListener(
+        workspace,
+        (change) => {
+          newerSeen.push(change);
+        },
+      );
+      const userMemory: Record<string, unknown> = {
+        enableManagedAutoMemory: true,
+      };
+      const mergedMemory: Record<string, unknown> = {
+        enableManagedAutoMemory: true,
+      };
+      const settings = {
+        merged: { mcpServers: {}, memory: mergedMemory },
+        user: {
+          path: '/home/test/.qwen/settings.json',
+          settings: { memory: userMemory },
+        },
+        getSystemHooks: vi.fn().mockReturnValue(undefined),
+        getUserHooks: vi.fn().mockReturnValue({}),
+        getProjectHooks: vi.fn().mockReturnValue({}),
+        setValue: vi.fn((_scope: string, key: string, value: unknown) => {
+          const [, memoryKey] = key.split('.');
+          if (memoryKey) {
+            userMemory[memoryKey] = value;
+            mergedMemory[memoryKey] = value;
+          }
+        }),
+      } as unknown as LoadedSettings;
+      vi.mocked(loadSettings).mockReturnValue(settings);
+      const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+      const sessions = (
+        agent as unknown as {
+          sessions: Map<string, { getConfig: () => Record<string, unknown> }>;
+        }
+      ).sessions;
+      sessions.set('requesting-session', {
+        getConfig: () => ({
+          storage: { getProjectRoot: () => workspace },
+          setManagedAutoMemoryEnabled: vi.fn(),
+          getBareMode: () => false,
+          isSafeMode: () => false,
+          getMemoryHookDeliveryId: () => undefined,
+        }),
+      });
+      try {
+        const request = agent.extMethod('qwen/settings/setMemory', {
+          cwd: workspace,
+          sessionId,
+          updates: { enableManagedAutoMemory: false },
+        });
+        if (sessionState === 'unknown' || sessionState === 'uninitialized') {
+          await expect(request).resolves.toEqual({
+            settings: expect.objectContaining({
+              enableManagedAutoMemory: false,
+            }),
+          });
+        } else {
+          await expect(request).rejects.toThrow(
+            'Invalid sessionId: expected a non-empty string',
+          );
+          expect(settings.setValue).not.toHaveBeenCalled();
+          expect(mergedMemory['enableManagedAutoMemory']).toBe(true);
+        }
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(olderSeen).toEqual([]);
+        expect(newerSeen).toEqual([]);
+      } finally {
+        older();
+        newer();
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it('qwen/settings setMemory validates every key before writing any', async () => {
+    const memoryFileChange = await import(
+      '@qwen-code/qwen-code-core/memory/memory-file-change.js'
+    );
+    const notify = vi
+      .spyOn(memoryFileChange, 'notifyMemoryEnabledChange')
+      .mockResolvedValue(undefined);
+    const userMemory: Record<string, unknown> = {
+      enableManagedAutoMemory: true,
+      enableAutoSkill: false,
+    };
+    const mergedMemory: Record<string, unknown> = {
+      enableManagedAutoMemory: true,
+      enableAutoSkill: false,
+    };
+    const settings = {
+      merged: { mcpServers: {}, memory: mergedMemory },
+      user: {
+        path: '/home/test/.qwen/settings.json',
+        settings: { memory: userMemory },
+      },
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+      setValue: vi.fn((_scope: string, key: string, value: unknown) => {
+        const [, memoryKey] = key.split('.');
+        if (memoryKey) {
+          userMemory[memoryKey] = value;
+          mergedMemory[memoryKey] = value;
+        }
+      }),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    // The first key is valid and the second is not: nothing may be written.
+    await expect(
+      agent.extMethod('qwen/settings/setMemory', {
+        updates: { enableManagedAutoMemory: false, enableAutoSkill: 'yes' },
+      }),
+    ).rejects.toThrow("Invalid memory setting 'enableAutoSkill'");
+    expect(userMemory['enableManagedAutoMemory']).toBe(true);
+    expect(settings.setValue).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+
+    // The all-valid retry then emits the toggle exactly once.
+    await expect(
+      agent.extMethod('qwen/settings/setMemory', {
+        updates: { enableManagedAutoMemory: false },
+      }),
+    ).resolves.toEqual({
+      settings: expect.objectContaining({ enableManagedAutoMemory: false }),
+    });
+    expect(notify).toHaveBeenCalledTimes(1);
+
+    notify.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings setMemory does not await toggle hook delivery', async () => {
+    const memoryFileChange = await import(
+      '@qwen-code/qwen-code-core/memory/memory-file-change.js'
+    );
+    // A hook that never settles must not block the RPC: the response carries
+    // the settings, not the hook result.
+    const notify = vi
+      .spyOn(memoryFileChange, 'notifyMemoryEnabledChange')
+      .mockReturnValue(new Promise(() => {}));
+    const userMemory: Record<string, unknown> = {
+      enableManagedAutoMemory: true,
+    };
+    const mergedMemory: Record<string, unknown> = {
+      enableManagedAutoMemory: true,
+    };
+    const settings = {
+      merged: { mcpServers: {}, memory: mergedMemory },
+      user: {
+        path: '/home/test/.qwen/settings.json',
+        settings: { memory: userMemory },
+      },
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+      setValue: vi.fn((_scope: string, key: string, value: unknown) => {
+        const [, memoryKey] = key.split('.');
+        if (memoryKey) {
+          userMemory[memoryKey] = value;
+          mergedMemory[memoryKey] = value;
+        }
+      }),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/settings/setMemory', {
+        updates: { enableManagedAutoMemory: false },
+      }),
+    ).resolves.toEqual({
+      settings: expect.objectContaining({ enableManagedAutoMemory: false }),
+    });
+    expect(notify).toHaveBeenCalledWith(expect.any(String), false);
+
+    notify.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it.each([
+    'workspace',
+    'owner',
+    'unknown',
+    'uninitialized',
+    'override',
+    'unchanged',
+    'write-failure',
+    'pending-hook',
+    'other-key',
+    'empty-session',
+    'number-session',
+  ])('qwen/settings setCoreValue memory toggle: %s', async (scenario) => {
+    const memoryFileChange = await import(
+      '@qwen-code/qwen-code-core/memory/memory-file-change.js'
+    );
+    const notify = vi
+      .spyOn(memoryFileChange, 'notifyMemoryEnabledChange')
+      .mockImplementation(() =>
+        scenario === 'pending-hook' ? new Promise(() => {}) : Promise.resolve(),
+      );
+    const settings = makeCoreSettings();
+    const memory = { enableManagedAutoMemory: scenario !== 'override' };
+    settings.merged.memory = memory;
+    const diskMemory = {
+      enableManagedAutoMemory: memory.enableManagedAutoMemory,
+    };
+    settings.user.settings.memory = diskMemory;
+    vi.mocked(settings.setValue).mockImplementation(
+      (_scope, key, value, _assert, opts) => {
+        if (scenario === 'write-failure') {
+          if (opts?.throwOnWriteFailure)
+            throw new Error('EACCES: settings write failed');
+          memory.enableManagedAutoMemory = value as boolean;
+          return;
+        }
+        if (key === 'memory.enableManagedAutoMemory') {
+          diskMemory.enableManagedAutoMemory = value as boolean;
+          if (scenario !== 'override')
+            memory.enableManagedAutoMemory = value as boolean;
+        }
+      },
+    );
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+    const workspace = '/tmp/qwen-memory-core-settings';
+    const ownerId = Symbol('requesting-memory-session');
+    const sessions = (
+      agent as unknown as {
+        sessions: Map<string, { getConfig: () => Record<string, unknown> }>;
+      }
+    ).sessions;
+    sessions.set('owner', {
+      getConfig: () => ({
+        storage: { getProjectRoot: () => workspace },
+        setManagedAutoMemoryEnabled: vi.fn(),
+        getBareMode: () => false,
+        isSafeMode: () => false,
+        getMemoryHookDeliveryId: () => ownerId,
+      }),
+    });
+    sessions.set('uninitialized', {
+      getConfig: () => ({
+        storage: { getProjectRoot: () => workspace },
+        setManagedAutoMemoryEnabled: vi.fn(),
+        getBareMode: () => false,
+        isSafeMode: () => false,
+      }),
+    });
+    try {
+      const request = agent.extMethod('qwen/settings/setCoreValue', {
+        cwd: workspace,
+        ...(['owner', 'unknown', 'uninitialized'].includes(scenario)
+          ? { sessionId: scenario }
+          : {}),
+        ...(scenario === 'empty-session' ? { sessionId: '' } : {}),
+        ...(scenario === 'number-session' ? { sessionId: 42 } : {}),
+        scope: 'user',
+        key:
+          scenario === 'other-key'
+            ? 'memory.enableManagedAutoDream'
+            : 'memory.enableManagedAutoMemory',
+        value: scenario === 'override' || scenario === 'unchanged',
+      });
+      if (scenario.endsWith('-session')) {
+        await expect(request).rejects.toThrow('Invalid sessionId');
+        expect(settings.setValue).not.toHaveBeenCalled();
+      } else if (scenario === 'write-failure') {
+        await expect(request).rejects.toThrow('EACCES: settings write failed');
+        expect(diskMemory.enableManagedAutoMemory).toBe(true);
+        expect(memory.enableManagedAutoMemory).toBe(true);
+      } else {
+        await expect(request).resolves.toMatchObject({
+          merged: {
+            values: {
+              'memory.enableManagedAutoMemory':
+                scenario === 'unchanged' || scenario === 'other-key',
+            },
+          },
+        });
+        if (scenario === 'override' || scenario === 'unchanged') {
+          expect(diskMemory.enableManagedAutoMemory).toBe(true);
+        }
+      }
+      if (
+        [
+          'override',
+          'unchanged',
+          'write-failure',
+          'other-key',
+          'empty-session',
+          'number-session',
+        ].includes(scenario)
+      ) {
+        expect(notify).not.toHaveBeenCalled();
+      } else if (scenario === 'owner') {
+        expect(notify).toHaveBeenCalledExactlyOnceWith(
+          workspace,
+          false,
+          ownerId,
+        );
+      } else if (scenario === 'unknown' || scenario === 'uninitialized') {
+        expect(notify).toHaveBeenCalledExactlyOnceWith(
+          workspace,
+          false,
+          expect.any(Symbol),
+        );
+        expect(notify.mock.calls[0]![2]).not.toBe(ownerId);
+      } else {
+        expect(notify).toHaveBeenCalledExactlyOnceWith(workspace, false);
+      }
+    } finally {
+      notify.mockRestore();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('qwen/settings setCoreValue syncs output language rule file', async () => {
@@ -20240,6 +20884,123 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }) as AgentLike;
     return { agent, agentPromise };
   }
+
+  it.each([
+    ['qwen/settings/setMemory', 'user', false, false],
+    ['qwen/settings/setCoreValue', 'user', false, false],
+    ['qwen/settings/setCoreValue', 'user', true, false],
+    ['qwen/settings/setCoreValue', 'workspace', false, false],
+    ['qwen/settings/setMemory', 'user', false, true],
+  ] as const)(
+    'applies %s %s toggles with overrides=%s and foreign failure=%s',
+    async (route, scope, overridden, foreignFailure) => {
+      const { Config: LiveConfig } = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core')
+      >('@qwen-code/qwen-code-core');
+      const { LoadedSettings: LiveSettings } = await vi.importActual<
+        typeof import('../config/settings.js')
+      >('../config/settings.js');
+      const temp = await realFsPromises.mkdtemp(
+        path.join(os.tmpdir(), 'acp-live-memory-'),
+      );
+      const roots = [path.join(temp, 'a'), path.join(temp, 'b')];
+      const userPath = path.join(temp, 'user.json');
+      await realFsPromises.writeFile(
+        userPath,
+        JSON.stringify({ memory: { enableManagedAutoMemory: true } }),
+      );
+      for (const root of roots) {
+        await realFsPromises.mkdir(root);
+        await realFsPromises.writeFile(
+          path.join(root, 'settings.json'),
+          JSON.stringify(
+            overridden && root === roots[0]
+              ? { memory: { enableManagedAutoMemory: true } }
+              : {},
+          ),
+        );
+      }
+      const nativeFs =
+        await vi.importActual<typeof import('node:fs')>('node:fs');
+      const load = (root: string) => {
+        const file = (filename: string) => {
+          const settings = JSON.parse(nativeFs.readFileSync(filename, 'utf8'));
+          return {
+            path: filename,
+            settings,
+            originalSettings: structuredClone(settings),
+          };
+        };
+        const empty = {
+          path: path.join(temp, 'system'),
+          settings: {},
+          originalSettings: {},
+        };
+        return new LiveSettings(
+          empty,
+          empty,
+          file(userPath),
+          file(path.join(root, 'settings.json')),
+          true,
+          new Set(),
+        );
+      };
+      const configs = [roots[0]!, roots[0]!, roots[1]!].map(
+        (root, i) =>
+          new LiveConfig({
+            sessionId: `live-${i}`,
+            cwd: root,
+            targetDir: root,
+            model: 'test',
+            debugMode: false,
+            telemetry: { enabled: false },
+            enableManagedAutoMemory: true,
+          }),
+      );
+      const { agent, agentPromise } = await bootCoreSettingsAgent(
+        load(roots[0]!),
+      );
+      vi.mocked(loadSettings).mockImplementation((cwd) => {
+        if (foreignFailure && cwd === roots[1]) {
+          throw new Error('Unreadable foreign workspace settings');
+        }
+        return load(cwd === roots[1] ? roots[1]! : roots[0]!);
+      });
+      const sessions = (agent as unknown as { sessions: Map<string, unknown> })
+        .sessions;
+      configs.forEach((config, i) =>
+        sessions.set(`live-${i}`, { getConfig: () => config }),
+      );
+      try {
+        await agent.extMethod(route, {
+          sessionId: 'live-0',
+          cwd: scope === 'workspace' ? roots[1] : roots[0],
+          ...(route.endsWith('setMemory')
+            ? { updates: { enableManagedAutoMemory: false } }
+            : { scope, key: 'memory.enableManagedAutoMemory', value: false }),
+        });
+        expect(
+          configs.map((config) => config.getManagedAutoMemoryEnabled()),
+        ).toEqual(
+          scope === 'workspace' || overridden
+            ? [true, true, false]
+            : [false, false, foreignFailure],
+        );
+        expect(load(roots[0]!).merged.memory?.enableManagedAutoMemory).toBe(
+          scope === 'workspace' || overridden,
+        );
+        expect(load(roots[1]!).merged.memory?.enableManagedAutoMemory).toBe(
+          false,
+        );
+      } finally {
+        sessions.clear();
+        mockConnectionState.resolve();
+        await agentPromise;
+        await Promise.all(configs.map((config) => config.shutdown()));
+        await realFsPromises.rm(temp, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('qwen/settings getCore resolves the bootstrap target dir when cwd and sessionId are omitted', async () => {
     const settings = makeCoreSettings();

@@ -1,0 +1,3069 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  describeMemoryFileChange,
+  memoryChangedNoticeFromHookInput,
+  notifyMemoryEnabledChange,
+  notifyMemoryFileChange,
+  registerMemoryChangedListener,
+  withCoalescedMemoryChanges,
+  withTeamMemorySync,
+  type MemoryChangedNotice,
+} from './memory-file-change.js';
+import {
+  rebuildManagedAutoMemoryIndex,
+  rebuildTeamAutoMemoryIndex,
+  rebuildUserAutoMemoryIndex,
+} from './indexer.js';
+import {
+  clearAutoMemoryRootCache,
+  getAutoMemoryIndexPath,
+  getAutoMemoryConsolidationLockPath,
+  getAutoMemoryExtractCursorPath,
+  getAutoMemoryMetadataPath,
+  getAutoMemoryRoot,
+  getTeamAutoMemoryRoot,
+  getUserAutoMemoryIndexPath,
+  getUserAutoMemoryRoot,
+} from './paths.js';
+
+import { ensureAutoMemoryScaffold } from './store.js';
+import { HookRunner } from '../hooks/hookRunner.js';
+import { HookEventName, HookType } from '../hooks/types.js';
+
+vi.mock('node:fs/promises', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:fs/promises')>()),
+}));
+
+describe('memory file change hook', () => {
+  const originalBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+  let tempDir: string | undefined;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    clearAutoMemoryRootCache();
+    if (originalBase === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalBase;
+    }
+    if (tempDir) {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      tempDir = undefined;
+    }
+  });
+
+  async function setup(): Promise<string> {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-file-change-'));
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = tempDir;
+    const projectRoot = path.join(tempDir, 'repo');
+    await fs.mkdir(path.join(projectRoot, '.git'), { recursive: true });
+    return projectRoot;
+  }
+
+  it('classifies user, project, and unrelated paths', async () => {
+    const projectRoot = await setup();
+
+    expect(
+      describeMemoryFileChange(
+        path.join(tempDir!, 'memories', 'user', 'role.md'),
+        projectRoot,
+      ),
+    ).toMatchObject({
+      scope: 'user',
+      relativePath: 'user/role.md',
+    });
+    expect(
+      describeMemoryFileChange(
+        path.join(getAutoMemoryRoot(projectRoot), 'feedback.md'),
+        projectRoot,
+      ),
+    ).toMatchObject({
+      scope: 'project',
+      relativePath: 'feedback.md',
+    });
+    expect(
+      describeMemoryFileChange(path.join(tempDir!, 'notes.md'), projectRoot),
+    ).toBeUndefined();
+    for (const schedulingPath of [
+      getAutoMemoryMetadataPath(projectRoot),
+      getAutoMemoryExtractCursorPath(projectRoot),
+      getAutoMemoryConsolidationLockPath(projectRoot),
+    ]) {
+      expect(
+        describeMemoryFileChange(schedulingPath, projectRoot),
+      ).toBeUndefined();
+    }
+  });
+
+  it.each(['user', 'project', 'team'] as const)(
+    'notifies and coalesces legal dot-prefixed documents in %s memory',
+    async (scope) => {
+      const projectRoot = await setup();
+      const root =
+        scope === 'user'
+          ? getUserAutoMemoryRoot()
+          : scope === 'project'
+            ? getAutoMemoryRoot(projectRoot)
+            : getTeamAutoMemoryRoot(projectRoot);
+      const relativePaths = ['..notes.md', '..archive/note.md'];
+      const files = relativePaths.map((relative) => path.join(root, relative));
+      const seen: MemoryChangedNotice[] = [];
+      const stop = registerMemoryChangedListener(projectRoot, (change) => {
+        seen.push(change);
+      });
+      try {
+        for (const file of files) {
+          await fs.mkdir(path.dirname(file), { recursive: true });
+          await fs.writeFile(file, 'before');
+        }
+        await notifyMemoryFileChange(files, projectRoot, 'create', stop.id);
+        expect(seen).toEqual([
+          expect.objectContaining({
+            scope,
+            operation: 'create',
+            relativePaths,
+          }),
+        ]);
+        seen.length = 0;
+        await withCoalescedMemoryChanges(projectRoot, stop.id, async () => {
+          for (const file of files) {
+            await fs.writeFile(file, 'after');
+            await notifyMemoryFileChange(file, projectRoot, 'update', stop.id);
+          }
+          expect(seen).toEqual([]);
+        });
+        expect(seen).toEqual([
+          expect.objectContaining({
+            scope,
+            operation: 'update',
+            relativePaths: expect.arrayContaining(relativePaths),
+          }),
+        ]);
+        expect(seen[0]!.relativePaths).toHaveLength(relativePaths.length);
+        seen.length = 0;
+        await withCoalescedMemoryChanges(projectRoot, stop.id, async () => {
+          for (const file of files) await fs.unlink(file);
+        });
+        expect(seen).toEqual([
+          expect.objectContaining({
+            scope,
+            operation: 'delete',
+            relativePaths: expect.arrayContaining(relativePaths),
+          }),
+        ]);
+        expect(seen[0]!.relativePaths).toHaveLength(relativePaths.length);
+        expect(
+          describeMemoryFileChange(
+            path.join(root, '..', 'outside.md'),
+            projectRoot,
+          ),
+        ).toBeUndefined();
+      } finally {
+        stop();
+      }
+    },
+  );
+
+  it('keeps secondary project roots out of configured-root document keys', async () => {
+    const projectRoot = await setup();
+    const originalLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    clearAutoMemoryRootCache();
+    const configured = path.join(getAutoMemoryRoot(projectRoot), 'a.md');
+    const secondary = path.join(projectRoot, '.qwen', 'memory', 'a.md');
+    const listener = vi.fn();
+    const stop = registerMemoryChangedListener(projectRoot, listener);
+    try {
+      for (const file of [configured, secondary]) {
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        await fs.writeFile(file, 'before');
+        await notifyMemoryFileChange(file, projectRoot, 'update', stop.id);
+      }
+      expect(describeMemoryFileChange(secondary, projectRoot)).toBeUndefined();
+      expect(listener).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          scope: 'project',
+          relativePaths: ['a.md'],
+          paths: [await fs.realpath(configured)],
+        }),
+        undefined,
+      );
+      listener.mockClear();
+      await withCoalescedMemoryChanges(projectRoot, stop.id, () =>
+        fs.rm(secondary),
+      );
+      expect(listener).not.toHaveBeenCalled();
+      await withCoalescedMemoryChanges(projectRoot, stop.id, () =>
+        fs.rm(configured),
+      );
+      expect(listener).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          scope: 'project',
+          operation: 'delete',
+          relativePaths: ['a.md'],
+        }),
+        undefined,
+      );
+    } finally {
+      stop();
+      if (originalLocal === undefined)
+        delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      else process.env['QWEN_CODE_MEMORY_LOCAL'] = originalLocal;
+      clearAutoMemoryRootCache();
+    }
+  });
+
+  it('notifies listeners only for managed memory files', async () => {
+    const projectRoot = await setup();
+    const seen: MemoryChangedNotice[] = [];
+    const unregister = registerMemoryChangedListener(projectRoot, (change) => {
+      seen.push(change);
+    });
+    try {
+      await notifyMemoryFileChange(
+        path.join(tempDir!, 'memories', 'MEMORY.md'),
+        projectRoot,
+        'update',
+      );
+      await notifyMemoryFileChange(
+        path.join(tempDir!, 'notes.md'),
+        projectRoot,
+        'update',
+      );
+      await notifyMemoryFileChange(
+        getAutoMemoryMetadataPath(projectRoot),
+        projectRoot,
+        'update',
+      );
+    } finally {
+      unregister();
+    }
+    expect(seen).toEqual([
+      expect.objectContaining({
+        scope: 'user',
+        operation: 'update',
+        relativePaths: ['MEMORY.md'],
+      }),
+    ]);
+    expect(seen[0]).not.toHaveProperty('workspace');
+    expect(seen[0]).not.toHaveProperty('enabled');
+    expect(seen[0]).toMatchObject({
+      paths: [path.join(await fs.realpath(tempDir!), 'memories', 'MEMORY.md')],
+    });
+  });
+
+  it('sends one path alone and paths changed together as one array', async () => {
+    const projectRoot = await setup();
+    const seen: MemoryChangedNotice[] = [];
+    const unregister = registerMemoryChangedListener(projectRoot, (change) => {
+      seen.push(change);
+    });
+    const role = path.join(tempDir!, 'memories', 'user', 'role.md');
+    const feedback = path.join(tempDir!, 'memories', 'feedback', 'tone.md');
+    try {
+      await notifyMemoryFileChange(role, projectRoot, 'update');
+      await notifyMemoryFileChange([role, feedback], projectRoot, 'update');
+    } finally {
+      unregister();
+    }
+    expect(
+      seen.map((change) =>
+        'relativePaths' in change ? change.relativePaths : [],
+      ),
+    ).toEqual([['user/role.md'], ['user/role.md', 'feedback/tone.md']]);
+  });
+
+  it('splits mixed scopes and keeps workspace on project and team memory', async () => {
+    const projectRoot = await setup();
+    const seen: MemoryChangedNotice[] = [];
+    const unregister = registerMemoryChangedListener(projectRoot, (change) => {
+      seen.push(change);
+    });
+    const userFile = path.join(tempDir!, 'memories', 'user', 'role.md');
+    const projectFile = path.join(getAutoMemoryRoot(projectRoot), 'a.md');
+    const teamFile = path.join(getTeamAutoMemoryRoot(projectRoot), 'b.md');
+    try {
+      await notifyMemoryFileChange(
+        [userFile, projectFile, teamFile],
+        projectRoot,
+        'create',
+      );
+    } finally {
+      unregister();
+    }
+    expect(seen).toEqual([
+      expect.objectContaining({
+        scope: 'user',
+        operation: 'create',
+        relativePaths: ['user/role.md'],
+      }),
+      expect.objectContaining({
+        scope: 'project',
+        operation: 'create',
+        relativePaths: ['a.md'],
+        workspace: projectRoot,
+      }),
+      expect.objectContaining({
+        scope: 'team',
+        operation: 'create',
+        relativePaths: ['b.md'],
+        workspace: projectRoot,
+      }),
+    ]);
+    expect(seen[0]).not.toHaveProperty('workspace');
+  });
+
+  it('reports the on/off toggle without document paths', async () => {
+    const projectRoot = await setup();
+    const seen: MemoryChangedNotice[] = [];
+    const unregister = registerMemoryChangedListener(projectRoot, (change) => {
+      seen.push(change);
+    });
+    try {
+      await notifyMemoryEnabledChange(projectRoot, false);
+    } finally {
+      unregister();
+    }
+    expect(seen).toEqual([
+      {
+        paths: [],
+        relativePaths: [],
+        workspace: projectRoot,
+        enabled: false,
+      },
+    ]);
+  });
+
+  it('isolates a listener failure from the write', async () => {
+    const projectRoot = await setup();
+    const seen: string[] = [];
+    const unregisterFail = registerMemoryChangedListener(projectRoot, () => {
+      throw new Error('upload failed');
+    });
+    const unregisterOk = registerMemoryChangedListener(projectRoot, () => {
+      seen.push('ok');
+    });
+    try {
+      await expect(
+        notifyMemoryFileChange(
+          path.join(tempDir!, 'memories', 'MEMORY.md'),
+          projectRoot,
+          'delete',
+        ),
+      ).resolves.toBeUndefined();
+    } finally {
+      unregisterFail();
+      unregisterOk();
+    }
+    expect(seen).toEqual(['ok']);
+  });
+
+  it('does not deliver a write to another workspace', async () => {
+    const projectRoot = await setup();
+    const seen: MemoryChangedNotice[] = [];
+    const unregister = registerMemoryChangedListener(
+      path.join(tempDir!, 'other'),
+      (change) => {
+        seen.push(change);
+      },
+    );
+    try {
+      await notifyMemoryFileChange(
+        path.join(tempDir!, 'memories', 'MEMORY.md'),
+        projectRoot,
+        'update',
+      );
+    } finally {
+      unregister();
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it('does not route an empty project root to a registered workspace', async () => {
+    const projectRoot = await setup();
+    const seen: MemoryChangedNotice[] = [];
+    const unregister = registerMemoryChangedListener(projectRoot, (change) => {
+      seen.push(change);
+    });
+    try {
+      await notifyMemoryFileChange(
+        path.join(tempDir!, 'memories', 'MEMORY.md'),
+        '',
+        'update',
+      );
+    } finally {
+      unregister();
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it('stops delivery after the listener is unregistered', async () => {
+    const projectRoot = await setup();
+    const seen: MemoryChangedNotice[] = [];
+    const unregister = registerMemoryChangedListener(projectRoot, (change) => {
+      seen.push(change);
+    });
+    unregister();
+    const again = registerMemoryChangedListener(projectRoot, (change) => {
+      seen.push(change);
+    });
+    try {
+      await notifyMemoryFileChange(
+        path.join(tempDir!, 'memories', 'MEMORY.md'),
+        projectRoot,
+        'update',
+      );
+    } finally {
+      again();
+    }
+    expect(seen).toHaveLength(1);
+  });
+
+  it('rebuilds a document notice and a toggle from hook input', () => {
+    expect(
+      memoryChangedNoticeFromHookInput({
+        paths: ['/memories/user/role.md'],
+        relative_paths: ['user/role.md'],
+        memory_scope: 'user',
+        operation: 'update',
+      }),
+    ).toEqual({
+      scope: 'user',
+      operation: 'update',
+      paths: ['/memories/user/role.md'],
+      relativePaths: ['user/role.md'],
+    });
+    expect(
+      memoryChangedNoticeFromHookInput({
+        paths: [],
+        workspace: '/repo',
+        enabled: false,
+      }),
+    ).toEqual({
+      paths: [],
+      relativePaths: [],
+      workspace: '/repo',
+      enabled: false,
+    });
+    expect(
+      memoryChangedNoticeFromHookInput({ operation: 'nope' }),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    { enabled: true },
+    { enabled: false, workspace: '' },
+    { enabled: true, workspace: '   ' },
+    { memory_scope: 'user', operation: 'update' },
+    {
+      memory_scope: 'user',
+      operation: 'update',
+      paths: [],
+      relative_paths: [],
+    },
+    {
+      memory_scope: 'project',
+      operation: 'update',
+      paths: ['/repo/.qwen/memory/a.md'],
+      relative_paths: ['a.md'],
+    },
+    {
+      memory_scope: 'team',
+      operation: 'update',
+      paths: ['/repo/.qwen/team-memory/a.md'],
+      relative_paths: ['a.md'],
+      workspace: '',
+    },
+    {
+      memory_scope: 'user',
+      operation: 'update',
+      paths: [''],
+      relative_paths: ['a.md'],
+    },
+    {
+      memory_scope: 'user',
+      operation: 'update',
+      paths: ['/memories/a.md'],
+      relative_paths: [''],
+    },
+    {
+      memory_scope: 'user',
+      operation: 'update',
+      paths: ['/memories/a.md', '/memories/c.md'],
+      relative_paths: ['a.md', 'b.md', 'c.md'],
+    },
+    {
+      memory_scope: 'user',
+      operation: 'update',
+      paths: ['/memories/a.md', 42, '/memories/c.md'],
+      relative_paths: ['a.md', 'b.md', 'c.md'],
+    },
+    {
+      memory_scope: 'user',
+      operation: 'update',
+      paths: ['/memories/a.md', '/memories/b.md'],
+      relative_paths: ['a.md', 42],
+    },
+  ])('rejects malformed hook input %#', (input) => {
+    expect(memoryChangedNoticeFromHookInput(input)).toBeUndefined();
+  });
+
+  it.skipIf(process.platform === 'win32').each([
+    { scope: 'team', canonicalFile: true },
+    { scope: 'team', canonicalFile: false },
+    { scope: 'project', canonicalFile: true },
+    { scope: 'project', canonicalFile: false },
+  ] as const)(
+    'notifies $scope memory across a workspace alias (canonicalFile=$canonicalFile)',
+    async ({ scope, canonicalFile }) => {
+      await setup();
+      const realParent = path.join(tempDir!, 'real');
+      const realRoot = path.join(realParent, 'repo');
+      const linkedParent = path.join(tempDir!, 'link');
+      const linkedRoot = path.join(linkedParent, 'repo');
+      await fs.mkdir(path.join(realRoot, '.git'), { recursive: true });
+      await fs.symlink(realParent, linkedParent, 'dir');
+      const originalLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+      const workspace = canonicalFile ? linkedRoot : realRoot;
+      const fileRoot = canonicalFile ? realRoot : linkedRoot;
+      const file = path.join(
+        fileRoot,
+        '.qwen',
+        scope === 'team' ? 'team-memory' : 'memory',
+        'a.md',
+      );
+      const seen: MemoryChangedNotice[] = [];
+      const unregister = registerMemoryChangedListener(workspace, (change) => {
+        seen.push(change);
+      });
+      try {
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        await fs.writeFile(file, 'new memory');
+        await notifyMemoryFileChange(file, workspace, 'create');
+        expect(seen).toEqual([
+          expect.objectContaining({
+            scope,
+            operation: 'create',
+            relativePaths: ['a.md'],
+            workspace,
+          }),
+        ]);
+      } finally {
+        unregister();
+        if (originalLocal === undefined) {
+          delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+        } else {
+          process.env['QWEN_CODE_MEMORY_LOCAL'] = originalLocal;
+        }
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32').each([
+    ['.qwen', '1'],
+    ['.qwen/memory', '1'],
+    ['.qwen', '0'],
+    ['.qwen/memory', '0'],
+  ])(
+    'ignores a relocated local project root through %s (local=%s)',
+    async (suffix, local) => {
+      const workspace = await setup();
+      const originalLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = local;
+      const outside = path.join(tempDir!, 'outside');
+      const link = path.join(workspace, suffix);
+      const file = path.join(
+        outside,
+        suffix === '.qwen' ? 'memory' : '',
+        'a.md',
+      );
+      const seen: MemoryChangedNotice[] = [];
+      const stop = registerMemoryChangedListener(workspace, (change) => {
+        seen.push(change);
+      });
+      try {
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        await fs.writeFile(file, 'outside');
+        await fs.mkdir(path.dirname(link), { recursive: true });
+        await fs.symlink(outside, link, 'dir');
+        const readFile = vi.spyOn(fs, 'readFile');
+        await withCoalescedMemoryChanges(workspace, stop.id, async () => {
+          await fs.writeFile(file, 'changed outside');
+          await notifyMemoryFileChange(file, workspace, 'update', stop.id);
+        });
+        expect(describeMemoryFileChange(file, workspace)).toBeUndefined();
+        expect(
+          describeMemoryFileChange(
+            path.join(workspace, '.qwen', 'memory', 'a.md'),
+            workspace,
+          ),
+        ).toBeUndefined();
+        expect(readFile).not.toHaveBeenCalledWith(
+          await fs.realpath(file),
+          'utf-8',
+        );
+        expect(seen).toEqual([]);
+      } finally {
+        stop();
+        if (originalLocal === undefined)
+          delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+        else process.env['QWEN_CODE_MEMORY_LOCAL'] = originalLocal;
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not classify a team child symlink that escapes its root',
+    async () => {
+      const workspace = await setup();
+      const outsideRoot = path.join(tempDir!, 'outside');
+      const root = getTeamAutoMemoryRoot(workspace);
+      await fs.mkdir(outsideRoot);
+      await fs.writeFile(path.join(outsideRoot, 'a.md'), 'outside');
+      await fs.mkdir(root, { recursive: true });
+      await fs.symlink(outsideRoot, path.join(root, 'linked'), 'dir');
+      expect(
+        describeMemoryFileChange(path.join(root, 'linked', 'a.md'), workspace),
+      ).toBeUndefined();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not classify an outside document through a relocated team root',
+    async () => {
+      const workspace = await setup();
+      const outsideRoot = path.join(tempDir!, 'outside');
+      const file = path.join(outsideRoot, 'a.md');
+      await fs.mkdir(outsideRoot);
+      await fs.writeFile(file, 'outside');
+      await fs.mkdir(path.join(workspace, '.qwen'));
+      await fs.symlink(outsideRoot, getTeamAutoMemoryRoot(workspace), 'dir');
+      expect(describeMemoryFileChange(file, workspace)).toBeUndefined();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not read outside documents through a relocated team snapshot root',
+    async () => {
+      const workspace = await setup();
+      const outsideRoot = path.join(tempDir!, 'outside');
+      const file = path.join(outsideRoot, 'a.md');
+      await fs.mkdir(outsideRoot);
+      await fs.writeFile(file, 'outside');
+      await fs.mkdir(path.join(workspace, '.qwen'));
+      await fs.symlink(outsideRoot, getTeamAutoMemoryRoot(workspace), 'dir');
+      const outsideFile = await fs.realpath(file);
+      const readFile = vi.spyOn(fs, 'readFile');
+
+      await withCoalescedMemoryChanges(workspace, undefined, async () => {});
+
+      expect(readFile).not.toHaveBeenCalledWith(outsideFile, 'utf-8');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps private notifications when a relocated team snapshot root is not a directory',
+    async () => {
+      const workspace = await setup();
+      const outsideFile = path.join(tempDir!, 'outside');
+      await fs.writeFile(outsideFile, 'not a directory');
+      await fs.mkdir(path.join(workspace, '.qwen'));
+      await fs.symlink(outsideFile, getTeamAutoMemoryRoot(workspace));
+      const userFile = path.join(getUserAutoMemoryRoot(), 'user.md');
+      const projectFile = path.join(getAutoMemoryRoot(workspace), 'project.md');
+      const seen: MemoryChangedNotice[] = [];
+      const registration = registerMemoryChangedListener(
+        workspace,
+        (change) => {
+          seen.push(change);
+        },
+      );
+      try {
+        await withCoalescedMemoryChanges(
+          workspace,
+          registration.id,
+          async () => {
+            for (const file of [userFile, projectFile]) {
+              await fs.mkdir(path.dirname(file), { recursive: true });
+              await fs.writeFile(file, 'new memory');
+            }
+          },
+        );
+      } finally {
+        registration();
+      }
+      expect(seen).toEqual([
+        expect.objectContaining({
+          scope: 'user',
+          operation: 'create',
+          relativePaths: ['user.md'],
+        }),
+        expect.objectContaining({
+          scope: 'project',
+          operation: 'create',
+          relativePaths: ['project.md'],
+        }),
+      ]);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'emits a coalesced alias write exactly once with a readable path',
+    async () => {
+      await setup();
+      const realParent = path.join(tempDir!, 'real');
+      const workspace = path.join(tempDir!, 'link', 'repo');
+      const file = path.join(realParent, 'repo/.qwen/team-memory/a.md');
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.mkdir(path.join(realParent, 'repo/.git'));
+      await fs.symlink(realParent, path.join(tempDir!, 'link'), 'dir');
+      const seen: MemoryChangedNotice[] = [];
+      const unregister = registerMemoryChangedListener(workspace, (change) => {
+        seen.push(change);
+      });
+      try {
+        await withCoalescedMemoryChanges(workspace, undefined, async () => {
+          await fs.writeFile(file, 'new memory');
+          await notifyMemoryFileChange(file, workspace, 'create');
+          expect(seen).toEqual([]);
+        });
+        expect(seen).toEqual([
+          expect.objectContaining({
+            scope: 'team',
+            operation: 'create',
+            relativePaths: ['a.md'],
+            workspace,
+          }),
+        ]);
+        expect(await fs.readFile(seen[0]!.paths[0]!, 'utf8')).toBe(
+          'new memory',
+        );
+      } finally {
+        unregister();
+      }
+    },
+  );
+
+  it('delivers a write to the named registration when several share a workspace', async () => {
+    const projectRoot = await setup();
+    const first: MemoryChangedNotice[] = [];
+    const second: MemoryChangedNotice[] = [];
+    const firstRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        first.push(change);
+      },
+    );
+    const secondRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        second.push(change);
+      },
+    );
+    const file = path.join(tempDir!, 'memories', 'MEMORY.md');
+    try {
+      await notifyMemoryFileChange(file, projectRoot, 'update');
+      await notifyMemoryFileChange(
+        file,
+        projectRoot,
+        'update',
+        firstRegistration.id,
+      );
+    } finally {
+      firstRegistration();
+      secondRegistration();
+    }
+    expect(first).toHaveLength(1);
+    expect(second).toHaveLength(1);
+  });
+
+  it('delivers to a live named registration even when the notify names another workspace', async () => {
+    const projectRoot = await setup();
+    const other = path.join(tempDir!, 'other');
+    const elsewhereSeen: MemoryChangedNotice[] = [];
+    const hereSeen: MemoryChangedNotice[] = [];
+    const elsewhere = registerMemoryChangedListener(other, (change) => {
+      elsewhereSeen.push(change);
+    });
+    const here = registerMemoryChangedListener(projectRoot, (change) => {
+      hereSeen.push(change);
+    });
+    try {
+      await notifyMemoryFileChange(
+        path.join(tempDir!, 'memories', 'MEMORY.md'),
+        projectRoot,
+        'update',
+        elsewhere.id,
+      );
+    } finally {
+      elsewhere();
+      here();
+    }
+    // A delivery id names one registration globally (the ids are unique
+    // symbols): a Config relocated by /cd or a derived worktree Config
+    // notifies with its live root, which no longer equals the key the
+    // registration was made under.
+    expect(elsewhereSeen).toHaveLength(1);
+    expect(hereSeen).toEqual([]);
+  });
+
+  it('delivers nothing for a delivery id whose registration is gone', async () => {
+    const projectRoot = await setup();
+    const seen: MemoryChangedNotice[] = [];
+    const gone = registerMemoryChangedListener(projectRoot, (change) => {
+      seen.push(change);
+    });
+    const staleId = gone.id;
+    gone();
+    const alive = registerMemoryChangedListener(projectRoot, (change) => {
+      seen.push(change);
+    });
+    const file = path.join(tempDir!, 'memories', 'MEMORY.md');
+    try {
+      await notifyMemoryFileChange(file, projectRoot, 'update', staleId);
+      expect(seen).toEqual([]);
+      // Control: an id-less notify still falls back to the newest
+      // registration for the workspace.
+      await notifyMemoryFileChange(file, projectRoot, 'update');
+      expect(seen).toHaveLength(1);
+    } finally {
+      alive();
+    }
+  });
+
+  it('emits create for a file that appears inside a coalesced window', async () => {
+    const projectRoot = await setup();
+    const file = path.join(tempDir!, 'memories', 'user', 'new.md');
+    const seen: MemoryChangedNotice[] = [];
+    const registration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        seen.push(change);
+      },
+    );
+    try {
+      await withCoalescedMemoryChanges(
+        projectRoot,
+        registration.id,
+        async () => {
+          await fs.mkdir(path.dirname(file), { recursive: true });
+          await fs.writeFile(file, 'new\n');
+        },
+      );
+    } finally {
+      registration();
+    }
+    expect(seen).toEqual([
+      expect.objectContaining({
+        operation: 'create',
+        relativePaths: ['user/new.md'],
+      }),
+    ]);
+  });
+
+  it('does not report an outside write again in the coalesced diff', async () => {
+    const projectRoot = await setup();
+    const file = path.join(tempDir!, 'memories', 'user', 'outside.md');
+    const writer: MemoryChangedNotice[] = [];
+    const windowSeen: MemoryChangedNotice[] = [];
+    const writerRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        writer.push(change);
+      },
+    );
+    const windowRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        windowSeen.push(change);
+      },
+    );
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      const pending = withCoalescedMemoryChanges(
+        projectRoot,
+        windowRegistration.id,
+        () => gate,
+      );
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, 'out\n');
+      await notifyMemoryFileChange(
+        file,
+        projectRoot,
+        'create',
+        writerRegistration.id,
+      );
+      release();
+      await pending;
+    } finally {
+      writerRegistration();
+      windowRegistration();
+    }
+    expect(writer).toEqual([
+      expect.objectContaining({
+        operation: 'create',
+        relativePaths: ['user/outside.md'],
+      }),
+    ]);
+    expect(windowSeen).toEqual([]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not repeat an alias writer change in a canonical workspace window',
+    async () => {
+      await setup();
+      const realParent = path.join(tempDir!, 'real');
+      const canonicalWorkspace = path.join(realParent, 'repo');
+      const aliasWorkspace = path.join(tempDir!, 'link', 'repo');
+      const file = path.join(canonicalWorkspace, '.qwen/team-memory/a.md');
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.mkdir(path.join(canonicalWorkspace, '.git'));
+      await fs.symlink(realParent, path.join(tempDir!, 'link'), 'dir');
+      const writer: MemoryChangedNotice[] = [];
+      const windowSeen: MemoryChangedNotice[] = [];
+      const writerRegistration = registerMemoryChangedListener(
+        aliasWorkspace,
+        (change) => {
+          writer.push(change);
+        },
+      );
+      const windowRegistration = registerMemoryChangedListener(
+        canonicalWorkspace,
+        (change) => {
+          windowSeen.push(change);
+        },
+      );
+      let open!: () => void;
+      const opened = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const pending = withCoalescedMemoryChanges(
+        canonicalWorkspace,
+        windowRegistration.id,
+        async () => {
+          open();
+          await gate;
+        },
+      );
+      try {
+        await opened;
+        await fs.writeFile(file, 'outside write');
+        await notifyMemoryFileChange(
+          file,
+          aliasWorkspace,
+          'create',
+          writerRegistration.id,
+        );
+      } finally {
+        release();
+        await pending;
+        writerRegistration();
+        windowRegistration();
+      }
+      expect(writer).toEqual([
+        expect.objectContaining({
+          scope: 'team',
+          operation: 'create',
+          relativePaths: ['a.md'],
+        }),
+      ]);
+      expect(windowSeen).toEqual([]);
+    },
+  );
+
+  it('still reports a window change to a path an outside write already reported', async () => {
+    const projectRoot = await setup();
+    const file = path.join(tempDir!, 'memories', 'user', 'shared.md');
+    const writer: MemoryChangedNotice[] = [];
+    const windowSeen: MemoryChangedNotice[] = [];
+    const writerRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        writer.push(change);
+      },
+    );
+    const windowRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        windowSeen.push(change);
+      },
+    );
+    let outsideDone: () => void = () => {};
+    const outsideReported = new Promise<void>((resolve) => {
+      outsideDone = resolve;
+    });
+    try {
+      const pending = withCoalescedMemoryChanges(
+        projectRoot,
+        windowRegistration.id,
+        async () => {
+          await outsideReported;
+          await fs.writeFile(file, 'rewritten by the window\n');
+        },
+      );
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, 'out\n');
+      await notifyMemoryFileChange(
+        file,
+        projectRoot,
+        'create',
+        writerRegistration.id,
+      );
+      outsideDone();
+      await pending;
+    } finally {
+      writerRegistration();
+      windowRegistration();
+    }
+    expect(writer).toEqual([expect.objectContaining({ operation: 'create' })]);
+    expect(windowSeen).toEqual([
+      expect.objectContaining({
+        operation: 'update',
+        relativePaths: ['user/shared.md'],
+      }),
+    ]);
+  });
+
+  it.each([
+    {
+      name: 'reports a window delete of a path an outside write created',
+      before: undefined,
+      outside: 'create' as const,
+      window: 'rm' as const,
+      expected: 'delete',
+    },
+    {
+      name: 'reports a window re-create of a path an outside write deleted',
+      before: 'old\n',
+      outside: 'delete' as const,
+      window: 'write' as const,
+      expected: 'create',
+    },
+  ])('$name', async ({ before, outside, window, expected }) => {
+    const projectRoot = await setup();
+    const file = path.join(tempDir!, 'memories', 'user', 'shared.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    if (before !== undefined) await fs.writeFile(file, before);
+    const windowSeen: MemoryChangedNotice[] = [];
+    const writerRegistration = registerMemoryChangedListener(
+      projectRoot,
+      () => {},
+    );
+    const windowRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        windowSeen.push(change);
+      },
+    );
+    let windowOpened: () => void = () => {};
+    const opened = new Promise<void>((resolve) => {
+      windowOpened = resolve;
+    });
+    let outsideDone: () => void = () => {};
+    const outsideReported = new Promise<void>((resolve) => {
+      outsideDone = resolve;
+    });
+    try {
+      const pending = withCoalescedMemoryChanges(
+        projectRoot,
+        windowRegistration.id,
+        async () => {
+          windowOpened();
+          await outsideReported;
+          if (window === 'rm') await fs.rm(file);
+          else await fs.writeFile(file, 'back\n');
+        },
+      );
+      // The window has taken its snapshot before the outside write lands.
+      await opened;
+      if (outside === 'delete') await fs.rm(file);
+      else await fs.writeFile(file, 'out\n');
+      await notifyMemoryFileChange(
+        file,
+        projectRoot,
+        outside,
+        writerRegistration.id,
+      );
+      outsideDone();
+      await pending;
+    } finally {
+      writerRegistration();
+      windowRegistration();
+    }
+    expect(windowSeen).toEqual([
+      expect.objectContaining({
+        operation: expected,
+        relativePaths: ['user/shared.md'],
+      }),
+    ]);
+  });
+
+  it('attributes a raw shared-user delete to its owner across workspaces', async () => {
+    const projectRoot = await setup();
+    const otherRoot = path.join(tempDir!, 'other');
+    await fs.mkdir(otherRoot);
+    const file = path.join(getUserAutoMemoryRoot(), 'raw.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, 'before');
+    const owner = vi.fn();
+    const sibling = vi.fn();
+    const stopOwner = registerMemoryChangedListener(projectRoot, owner);
+    const stopSibling = registerMemoryChangedListener(otherRoot, sibling);
+    let entered!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const close = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pending = withCoalescedMemoryChanges(
+      projectRoot,
+      stopOwner.id,
+      async () => {
+        await fs.rm(file);
+        entered();
+        await close;
+      },
+    );
+    await opened;
+    const siblingFn = vi.fn(async () => {});
+    const next = withCoalescedMemoryChanges(
+      otherRoot,
+      stopSibling.id,
+      siblingFn,
+    );
+    try {
+      // Yield real I/O turns while the owning window is still open; the
+      // sibling must remain queued until its closing diff is delivered.
+      for (let i = 0; i < 10; i++) await fs.readdir(tempDir!);
+      expect(siblingFn).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await Promise.all([pending, next]);
+      stopOwner();
+      stopSibling();
+    }
+    expect(siblingFn).toHaveBeenCalledOnce();
+    expect(sibling).not.toHaveBeenCalled();
+    expect(owner).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        scope: 'user',
+        operation: 'delete',
+        paths: [
+          path.join(await fs.realpath(path.dirname(file)), path.basename(file)),
+        ],
+      }),
+      undefined,
+    );
+  });
+
+  it('releases a failed window and skips a queued cancelled callback', async () => {
+    const projectRoot = await setup();
+    let release!: () => void;
+    let entered!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const close = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = withCoalescedMemoryChanges(
+      projectRoot,
+      undefined,
+      async () => {
+        entered();
+        await close;
+        throw new Error('task failed');
+      },
+    );
+    const failed = first.catch((error: unknown) => error);
+    await opened;
+    const controller = new AbortController();
+    const callback = vi.fn(async () => {});
+    const second = withCoalescedMemoryChanges(
+      projectRoot,
+      undefined,
+      callback,
+      controller.signal,
+    );
+    const cancelled = second.catch((error: unknown) => error);
+    controller.abort();
+    release();
+    await expect(failed).resolves.toMatchObject({ message: 'task failed' });
+    await expect(cancelled).resolves.toMatchObject({ name: 'AbortError' });
+    expect(callback).not.toHaveBeenCalled();
+    await expect(
+      withCoalescedMemoryChanges(projectRoot, undefined, async () => 42),
+    ).resolves.toBe(42);
+  });
+
+  it('cancels a queued window before the active window closes', async () => {
+    const projectRoot = await setup();
+    let release!: () => void;
+    let entered!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const close = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const active = withCoalescedMemoryChanges(
+      projectRoot,
+      undefined,
+      async () => {
+        entered();
+        await close;
+      },
+    );
+    await opened;
+    const controller = new AbortController();
+    const callback = vi.fn(async () => {});
+    const cancelled = withCoalescedMemoryChanges(
+      projectRoot,
+      undefined,
+      callback,
+      controller.signal,
+    ).catch((error: unknown) => error);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      controller.abort();
+      await expect(
+        Promise.race([
+          cancelled,
+          new Promise((resolve) => {
+            timer = setTimeout(() => resolve('still queued'), 100);
+          }),
+        ]),
+      ).resolves.toBe(controller.signal.reason);
+      expect(callback).not.toHaveBeenCalled();
+    } finally {
+      clearTimeout(timer);
+      release();
+      await active;
+      await cancelled;
+    }
+    await expect(
+      withCoalescedMemoryChanges(projectRoot, undefined, async () => 42),
+    ).resolves.toBe(42);
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it('coalesces nested work without waiting for its own window', async () => {
+    const projectRoot = await setup();
+    const file = path.join(getUserAutoMemoryRoot(), 'nested.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const listener = vi.fn();
+    const stop = registerMemoryChangedListener(projectRoot, listener);
+    try {
+      await withCoalescedMemoryChanges(projectRoot, stop.id, async () => {
+        await withCoalescedMemoryChanges(projectRoot, stop.id, () =>
+          fs.writeFile(file, 'nested'),
+        );
+      });
+      expect(listener).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          operation: 'create',
+          paths: [
+            path.join(
+              await fs.realpath(path.dirname(file)),
+              path.basename(file),
+            ),
+          ],
+        }),
+        undefined,
+      );
+    } finally {
+      stop();
+    }
+  });
+
+  it('delivers committed raw deletes even when the task cancels', async () => {
+    const projectRoot = await setup();
+    const file = path.join(getUserAutoMemoryRoot(), 'cancelled.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, 'before');
+    const listener = vi.fn();
+    const stop = registerMemoryChangedListener(projectRoot, listener);
+    const controller = new AbortController();
+    try {
+      await expect(
+        withCoalescedMemoryChanges(
+          projectRoot,
+          stop.id,
+          async () => {
+            await fs.rm(file);
+            controller.abort();
+            controller.signal.throwIfAborted();
+          },
+          controller.signal,
+        ),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(listener).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          operation: 'delete',
+          paths: [
+            path.join(
+              await fs.realpath(path.dirname(file)),
+              path.basename(file),
+            ),
+          ],
+        }),
+        undefined,
+      );
+    } finally {
+      stop();
+    }
+  });
+
+  it('does not cross-report a write made inside a sibling window', async () => {
+    const projectRoot = await setup();
+    const file = path.join(tempDir!, 'memories', 'user', 'sibling.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const aSeen: MemoryChangedNotice[] = [];
+    const bSeen: MemoryChangedNotice[] = [];
+    const aRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        aSeen.push(change);
+      },
+    );
+    const bRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        bSeen.push(change);
+      },
+    );
+    let aOpened: () => void = () => {};
+    const aOpenGate = new Promise<void>((resolve) => {
+      aOpened = resolve;
+    });
+    let closeA: () => void = () => {};
+    const aCloseGate = new Promise<void>((resolve) => {
+      closeA = resolve;
+    });
+    try {
+      const aPending = withCoalescedMemoryChanges(
+        projectRoot,
+        aRegistration.id,
+        async () => {
+          aOpened();
+          await aCloseGate;
+        },
+      );
+      // A's before-snapshot has completed once its fn starts.
+      await aOpenGate;
+      const bPending = withCoalescedMemoryChanges(
+        projectRoot,
+        bRegistration.id,
+        async () => {
+          await fs.writeFile(file, 'from b\n');
+          // Suppressed inside B's own window; B reports it in its own diff.
+          await notifyMemoryFileChange(
+            file,
+            projectRoot,
+            'create',
+            bRegistration.id,
+          );
+        },
+      );
+      closeA();
+      await aPending;
+      await bPending;
+    } finally {
+      aRegistration();
+      bRegistration();
+    }
+    expect(bSeen).toEqual([
+      expect.objectContaining({
+        operation: 'create',
+        relativePaths: ['user/sibling.md'],
+      }),
+    ]);
+    expect(aSeen).toEqual([]);
+  });
+
+  it('does not turn a sibling write to a symlinked document into a window delete', async () => {
+    const projectRoot = await setup();
+    const target = path.join(tempDir!, 'vault', 'role.md');
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, 'v1\n');
+    const link = path.join(tempDir!, 'memories', 'user', 'role.md');
+    await fs.mkdir(path.dirname(link), { recursive: true });
+    await fs.symlink(target, link);
+    const writerSeen: MemoryChangedNotice[] = [];
+    const windowSeen: MemoryChangedNotice[] = [];
+    const writerRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        writerSeen.push(change);
+      },
+    );
+    const windowRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        windowSeen.push(change);
+      },
+    );
+    let outsideDone: () => void = () => {};
+    const outsideReported = new Promise<void>((resolve) => {
+      outsideDone = resolve;
+    });
+    try {
+      const pending = withCoalescedMemoryChanges(
+        projectRoot,
+        windowRegistration.id,
+        () => outsideReported,
+      );
+      await fs.writeFile(target, 'v2\n');
+      await notifyMemoryFileChange(
+        link,
+        projectRoot,
+        'update',
+        writerRegistration.id,
+      );
+      outsideDone();
+      await pending;
+    } finally {
+      writerRegistration();
+      windowRegistration();
+    }
+    // The tree walk cannot see a symlink (Dirent.isFile() is false), so the
+    // window must not turn the recorded outside write into a `delete` for a
+    // file that is still on disk.
+    expect(windowSeen).toEqual([]);
+    expect(writerSeen).toEqual([
+      expect.objectContaining({
+        operation: 'update',
+        relativePaths: ['user/role.md'],
+      }),
+    ]);
+  });
+
+  // chmod 0o000 denies reads only for a non-root user on POSIX: on Windows
+  // or as root the 'unreadable' file stays readable and the case passes
+  // vacuously. Skip there instead. Symlinks need creation privileges on
+  // Windows, so symlink cases skip there too.
+  const noPosixPermissions =
+    process.platform === 'win32' || process.getuid?.() === 0;
+  const noSymlinks = process.platform === 'win32';
+
+  it.skipIf(noPosixPermissions)(
+    'resolves through an unreadable document and still reports the rest',
+    async () => {
+      const projectRoot = await setup();
+      const userRoot = path.join(tempDir!, 'memories');
+      const stuck = path.join(userRoot, 'user', 'stuck.md');
+      await fs.mkdir(path.dirname(stuck), { recursive: true });
+      await fs.writeFile(stuck, 'locked\n');
+      await fs.writeFile(path.join(userRoot, 'user', 'keep.md'), 'keep\n');
+      const seen: MemoryChangedNotice[] = [];
+      const registration = registerMemoryChangedListener(
+        projectRoot,
+        (change) => {
+          seen.push(change);
+        },
+      );
+      try {
+        const result = await withCoalescedMemoryChanges(
+          projectRoot,
+          registration.id,
+          async () => {
+            // After the before-snapshot, one document stops being readable.
+            await fs.chmod(stuck, 0o000);
+            await fs.writeFile(path.join(userRoot, 'user', 'new.md'), 'new\n');
+            return 'fn-result';
+          },
+        );
+        // The after snapshot runs in a finally; its failure must never replace
+        // fn's result.
+        expect(result).toBe('fn-result');
+      } finally {
+        await fs.chmod(stuck, 0o644).catch(() => undefined);
+        registration();
+      }
+      // The unreadable file is unknown, not deleted; the new file is a create.
+      expect(seen).toEqual([
+        expect.objectContaining({
+          operation: 'create',
+          relativePaths: ['user/new.md'],
+        }),
+      ]);
+    },
+  );
+
+  it.skipIf(noPosixPermissions)(
+    'keeps the snapshot baseline when an outside emit cannot stat the file',
+    async () => {
+      const projectRoot = await setup();
+      const dir = path.join(tempDir!, 'memories', 'user');
+      const file = path.join(dir, 'jammed.md');
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(file, 'same\n');
+      const windowSeen: MemoryChangedNotice[] = [];
+      const writerRegistration = registerMemoryChangedListener(
+        projectRoot,
+        () => {},
+      );
+      const windowRegistration = registerMemoryChangedListener(
+        projectRoot,
+        (change) => {
+          windowSeen.push(change);
+        },
+      );
+      let windowOpened: () => void = () => {};
+      const opened = new Promise<void>((resolve) => {
+        windowOpened = resolve;
+      });
+      let outsideDone: () => void = () => {};
+      const outsideReported = new Promise<void>((resolve) => {
+        outsideDone = resolve;
+      });
+      try {
+        const pending = withCoalescedMemoryChanges(
+          projectRoot,
+          windowRegistration.id,
+          async () => {
+            windowOpened();
+            await outsideReported;
+          },
+        );
+        // The window has taken its before-snapshot once fn starts.
+        await opened;
+        // The notify's stat hits a transient EACCES (the parent directory is
+        // not searchable): 'unknown' is not 'absent', so nothing may be
+        // recorded — a null baseline would mislabel the untouched file.
+        await fs.chmod(dir, 0o000);
+        await notifyMemoryFileChange(
+          file,
+          projectRoot,
+          'update',
+          writerRegistration.id,
+        );
+        await fs.chmod(dir, 0o755);
+        outsideDone();
+        await pending;
+      } finally {
+        await fs.chmod(dir, 0o755).catch(() => undefined);
+        writerRegistration();
+        windowRegistration();
+      }
+      expect(windowSeen).toEqual([]);
+    },
+  );
+
+  it.each(['opening', 'closing'] as const)(
+    'retains explicit notifications when the %s snapshot is incomplete',
+    async (failure) => {
+      const workspace = await setup();
+      const root = getUserAutoMemoryRoot();
+      await fs.mkdir(root, { recursive: true });
+      const canonicalRoot = await fs.realpath(root);
+      const file = path.join(root, 'saved.md');
+      const seen: MemoryChangedNotice[] = [];
+      const signals: Array<AbortSignal | undefined> = [];
+      const stop = registerMemoryChangedListener(
+        workspace,
+        (notice, signal) => {
+          seen.push(notice);
+          signals.push(signal);
+        },
+      );
+      const sibling = vi.fn();
+      const stopSibling = registerMemoryChangedListener(workspace, sibling);
+      const controller = new AbortController();
+      let closing = false;
+      const readdir = fs.readdir;
+      vi.spyOn(fs, 'readdir').mockImplementation(
+        async (...args: Parameters<typeof readdir>) => {
+          if (
+            args[0] === canonicalRoot &&
+            closing === (failure === 'closing')
+          ) {
+            throw Object.assign(new Error('unreadable directory'), {
+              code: 'EACCES',
+            });
+          }
+          return readdir(...args);
+        },
+      );
+      const taskError = new Error('task failed after saving');
+      try {
+        await expect(
+          withCoalescedMemoryChanges(
+            workspace,
+            stop.id,
+            async () => {
+              await fs.writeFile(file, 'saved');
+              await notifyMemoryFileChange(
+                file,
+                workspace,
+                'create',
+                stop.id,
+                controller.signal,
+              );
+              await fs.writeFile(
+                path.join(root, 'unreported.md'),
+                'unknown raw write',
+              );
+              closing = true;
+              throw taskError;
+            },
+            controller.signal,
+          ),
+        ).rejects.toBe(taskError);
+        expect(seen).toEqual([
+          expect.objectContaining({
+            scope: 'user',
+            operation: 'create',
+            relativePaths: ['saved.md'],
+          }),
+        ]);
+        expect(signals).toEqual([
+          failure === 'opening' ? controller.signal : undefined,
+        ]);
+        expect(sibling).not.toHaveBeenCalled();
+      } finally {
+        stop();
+        stopSibling();
+      }
+    },
+  );
+
+  it('emits nothing from the window when a memory root cannot be enumerated', async () => {
+    const projectRoot = await setup();
+    const userRoot = path.join(tempDir!, 'memories');
+    const doc = path.join(userRoot, 'user', 'keep.md');
+    await fs.mkdir(path.dirname(doc), { recursive: true });
+    await fs.writeFile(doc, 'keep\n');
+    const seen: MemoryChangedNotice[] = [];
+    const registration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        seen.push(change);
+      },
+    );
+    try {
+      await withCoalescedMemoryChanges(
+        projectRoot,
+        registration.id,
+        async () => {
+          // After the before-snapshot, the user root stops being enumerable:
+          // it is replaced by a plain file (readdir -> ENOTDIR).
+          await fs.rm(userRoot, { recursive: true });
+          await fs.writeFile(userRoot, 'not a directory');
+        },
+      );
+    } finally {
+      registration();
+    }
+    // 'Could not enumerate' is not 'empty': nothing may be diffed off a
+    // snapshot that could not be taken.
+    expect(seen).toEqual([]);
+  });
+
+  it.skipIf(noPosixPermissions)(
+    'does not create a phantom event when an outside notify cannot read the file',
+    async () => {
+      const projectRoot = await setup();
+      const file = path.join(tempDir!, 'memories', 'user', 'jammed.md');
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, 'same\n');
+      const windowSeen: MemoryChangedNotice[] = [];
+      const writerRegistration = registerMemoryChangedListener(
+        projectRoot,
+        () => {},
+      );
+      const windowRegistration = registerMemoryChangedListener(
+        projectRoot,
+        (change) => {
+          windowSeen.push(change);
+        },
+      );
+      let windowOpened: () => void = () => {};
+      const opened = new Promise<void>((resolve) => {
+        windowOpened = resolve;
+      });
+      let outsideDone: () => void = () => {};
+      const outsideReported = new Promise<void>((resolve) => {
+        outsideDone = resolve;
+      });
+      try {
+        const pending = withCoalescedMemoryChanges(
+          projectRoot,
+          windowRegistration.id,
+          async () => {
+            windowOpened();
+            await outsideReported;
+          },
+        );
+        // The window has taken its before-snapshot once fn starts.
+        await opened;
+        // The outside notify cannot read the file (a transient EACCES); the
+        // file is still there, unchanged, when the window closes.
+        await fs.chmod(file, 0o000);
+        await notifyMemoryFileChange(
+          file,
+          projectRoot,
+          'update',
+          writerRegistration.id,
+        );
+        await fs.chmod(file, 0o644);
+        outsideDone();
+        await pending;
+      } finally {
+        await fs.chmod(file, 0o644).catch(() => undefined);
+        writerRegistration();
+        windowRegistration();
+      }
+      // A transiently unreadable file is unknown, not absent: the window must
+      // not diff it as created against a moved-to-null baseline.
+      expect(windowSeen).toEqual([]);
+    },
+  );
+
+  it('keeps the previous team index when cancelled before writing', async () => {
+    const projectRoot = await setup();
+    const teamRoot = getTeamAutoMemoryRoot(projectRoot);
+    await fs.mkdir(teamRoot, { recursive: true });
+    const indexPath = path.join(teamRoot, 'MEMORY.md');
+    await fs.writeFile(indexPath, 'previous index\n');
+    const listener = vi.fn();
+    const registration = registerMemoryChangedListener(projectRoot, listener);
+    const controller = new AbortController();
+    controller.abort();
+    try {
+      await expect(
+        rebuildTeamAutoMemoryIndex(projectRoot, {
+          deliveryId: registration.id,
+          signal: controller.signal,
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      await expect(fs.readFile(indexPath, 'utf8')).resolves.toBe(
+        'previous index\n',
+      );
+      expect(await fs.readdir(teamRoot)).toEqual(['MEMORY.md']);
+      expect(listener).not.toHaveBeenCalled();
+    } finally {
+      registration();
+    }
+  });
+
+  it('delivers the team index hook when cancelled after commit', async () => {
+    const projectRoot = await fs.realpath(await setup());
+    const teamRoot = getTeamAutoMemoryRoot(projectRoot);
+    await fs.mkdir(teamRoot, { recursive: true });
+    const indexPath = path.join(teamRoot, 'MEMORY.md');
+    const controller = new AbortController();
+    const runner = new HookRunner();
+    const outcomes: boolean[] = [];
+    const registration = registerMemoryChangedListener(
+      projectRoot,
+      async (_, signal) => {
+        const result = await runner.executeHook(
+          {
+            type: HookType.Command,
+            command: `"${process.execPath}" -e "process.exit(0)"`,
+          },
+          HookEventName.MemoryChanged,
+          {
+            session_id: 'committed-team-index',
+            timestamp: new Date().toISOString(),
+            transcript_path: '',
+            cwd: projectRoot,
+            hook_event_name: HookEventName.MemoryChanged,
+          },
+          signal,
+        );
+        outcomes.push(result.success);
+      },
+    );
+    const rename = fs.rename;
+    let committedContent: string | undefined;
+    vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      await rename(from, to);
+      if (String(to) === indexPath) {
+        committedContent = await fs.readFile(indexPath, 'utf8');
+        controller.abort();
+      }
+    });
+    try {
+      const content = await rebuildTeamAutoMemoryIndex(projectRoot, {
+        deliveryId: registration.id,
+        signal: controller.signal,
+      });
+      expect(controller.signal.aborted).toBe(true);
+      expect(content).toEqual(expect.any(String));
+      expect(committedContent).toBe(content);
+      await expect(fs.readFile(indexPath, 'utf8')).resolves.toBe(content);
+      expect(outcomes).toEqual([true]);
+      await rebuildTeamAutoMemoryIndex(projectRoot, {
+        deliveryId: registration.id,
+      });
+      expect(outcomes).toEqual([true]);
+    } finally {
+      registration();
+    }
+  });
+
+  it('delivers a team index rebuild to the writing registration', async () => {
+    const projectRoot = await setup();
+    // Anchor the team root deterministically inside the temp repo.
+    await fs.mkdir(path.join(projectRoot, '.git'), { recursive: true });
+    const teamRoot = getTeamAutoMemoryRoot(projectRoot);
+    await fs.mkdir(teamRoot, { recursive: true });
+    const first: MemoryChangedNotice[] = [];
+    const second: MemoryChangedNotice[] = [];
+    const firstRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        first.push(change);
+      },
+    );
+    const secondRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        second.push(change);
+      },
+    );
+    try {
+      await rebuildTeamAutoMemoryIndex(projectRoot, {
+        deliveryId: firstRegistration.id,
+      });
+    } finally {
+      firstRegistration();
+      secondRegistration();
+    }
+    expect(first).toEqual([
+      expect.objectContaining({
+        scope: 'team',
+        operation: 'create',
+        relativePaths: ['MEMORY.md'],
+      }),
+    ]);
+    expect(second).toEqual([]);
+  });
+
+  it.skipIf(noPosixPermissions)(
+    'labels an existing but unreadable index as update, not create',
+    async () => {
+      const projectRoot = await setup();
+      const indexPath = getUserAutoMemoryIndexPath();
+      await fs.mkdir(path.dirname(indexPath), { recursive: true });
+      await fs.writeFile(indexPath, 'stale\n');
+      const seen: MemoryChangedNotice[] = [];
+      const registration = registerMemoryChangedListener(
+        projectRoot,
+        (change) => {
+          seen.push(change);
+        },
+      );
+      await fs.chmod(indexPath, 0o000);
+      try {
+        await rebuildUserAutoMemoryIndex(projectRoot);
+      } finally {
+        await fs.chmod(indexPath, 0o644).catch(() => undefined);
+        registration();
+      }
+      expect(seen).toEqual([
+        expect.objectContaining({
+          operation: 'update',
+          relativePaths: ['MEMORY.md'],
+        }),
+      ]);
+    },
+  );
+
+  it.each([
+    {
+      name: 'reports a window delete of a path an outside write created',
+      before: undefined,
+      outside: 'create' as const,
+      window: 'rm' as const,
+      expected: 'delete',
+    },
+    {
+      name: 'reports a window re-create of a path an outside write deleted',
+      before: 'old\n',
+      outside: 'delete' as const,
+      window: 'write' as const,
+      expected: 'create',
+    },
+  ])('$name', async ({ before, outside, window, expected }) => {
+    const projectRoot = await setup();
+    const file = path.join(tempDir!, 'memories', 'user', 'shared.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    if (before !== undefined) await fs.writeFile(file, before);
+    const windowSeen: MemoryChangedNotice[] = [];
+    const writerRegistration = registerMemoryChangedListener(
+      projectRoot,
+      () => {},
+    );
+    const windowRegistration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        windowSeen.push(change);
+      },
+    );
+    let windowOpened: () => void = () => {};
+    const opened = new Promise<void>((resolve) => {
+      windowOpened = resolve;
+    });
+    let outsideDone: () => void = () => {};
+    const outsideReported = new Promise<void>((resolve) => {
+      outsideDone = resolve;
+    });
+    try {
+      const pending = withCoalescedMemoryChanges(
+        projectRoot,
+        windowRegistration.id,
+        async () => {
+          windowOpened();
+          await outsideReported;
+          if (window === 'rm') await fs.rm(file);
+          else await fs.writeFile(file, 'back\n');
+        },
+      );
+      // The window has taken its snapshot before the outside write lands.
+      await opened;
+      if (outside === 'delete') await fs.rm(file);
+      else await fs.writeFile(file, 'out\n');
+      await notifyMemoryFileChange(
+        file,
+        projectRoot,
+        outside,
+        writerRegistration.id,
+      );
+      outsideDone();
+      await pending;
+    } finally {
+      writerRegistration();
+      windowRegistration();
+    }
+    expect(windowSeen).toEqual([
+      expect.objectContaining({
+        operation: expected,
+        relativePaths: ['user/shared.md'],
+      }),
+    ]);
+  });
+
+  it('reports a window change when the window body fails', async () => {
+    const projectRoot = await setup();
+    const file = path.join(tempDir!, 'memories', 'user', 'partial.md');
+    const seen: MemoryChangedNotice[] = [];
+    const registration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        seen.push(change);
+      },
+    );
+    const sentinel = new Error('agent aborted');
+    try {
+      await expect(
+        withCoalescedMemoryChanges(projectRoot, registration.id, async () => {
+          await fs.mkdir(path.dirname(file), { recursive: true });
+          await fs.writeFile(file, 'partial\n');
+          throw sentinel;
+        }),
+      ).rejects.toBe(sentinel);
+    } finally {
+      registration();
+    }
+    // The finally still diffs and reports what the failed run wrote.
+    expect(seen).toEqual([
+      expect.objectContaining({
+        operation: 'create',
+        relativePaths: ['user/partial.md'],
+      }),
+    ]);
+  });
+
+  it('ignores non-document files in the coalesced window diff', async () => {
+    const projectRoot = await setup();
+    const userRoot = path.join(tempDir!, 'memories');
+    // An atomicWriteFile temp sibling and macOS junk, present at both
+    // snapshots' time but never memory documents.
+    const tmpSibling = path.join(
+      userRoot,
+      'user',
+      'MEMORY.md.deadbeef0000.tmp',
+    );
+    const junk = path.join(userRoot, 'user', '.DS_Store');
+    await fs.mkdir(path.dirname(tmpSibling), { recursive: true });
+    await fs.writeFile(tmpSibling, 'partial\n');
+    await fs.writeFile(junk, 'junk\n');
+    const seen: MemoryChangedNotice[] = [];
+    const registration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        seen.push(change);
+      },
+    );
+    try {
+      await withCoalescedMemoryChanges(
+        projectRoot,
+        registration.id,
+        async () => {
+          await fs.rm(tmpSibling);
+          await fs.rm(junk);
+        },
+      );
+    } finally {
+      registration();
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it.skipIf(noPosixPermissions)(
+    'labels a document unreadable only at window open as update, not create',
+    async () => {
+      const projectRoot = await setup();
+      const file = path.join(tempDir!, 'memories', 'user', 'old.md');
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, 'same\n');
+      // Unreadable when the window opens, readable again before it closes.
+      await fs.chmod(file, 0o000);
+      const seen: MemoryChangedNotice[] = [];
+      const registration = registerMemoryChangedListener(
+        projectRoot,
+        (change) => {
+          seen.push(change);
+        },
+      );
+      try {
+        await withCoalescedMemoryChanges(
+          projectRoot,
+          registration.id,
+          async () => {
+            await fs.chmod(file, 0o644);
+          },
+        );
+      } finally {
+        await fs.chmod(file, 0o644).catch(() => undefined);
+        registration();
+      }
+      // The document existed (unreadable) before the window:
+      // unknown-before is not absent-before, so this is an update.
+      expect(seen).toEqual([
+        expect.objectContaining({
+          operation: 'update',
+          relativePaths: ['user/old.md'],
+        }),
+      ]);
+    },
+  );
+
+  it.skipIf(noPosixPermissions)(
+    'reports a delete for a document that was unreadable at window open',
+    async () => {
+      const projectRoot = await setup();
+      const file = path.join(tempDir!, 'memories', 'user', 'stuck.md');
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, 'locked\n');
+      await fs.chmod(file, 0o000);
+      const seen: MemoryChangedNotice[] = [];
+      const registration = registerMemoryChangedListener(
+        projectRoot,
+        (change) => {
+          seen.push(change);
+        },
+      );
+      try {
+        await withCoalescedMemoryChanges(
+          projectRoot,
+          registration.id,
+          async () => {
+            // unlink needs write on the directory, not the file, so the
+            // delete works even while the document itself is unreadable.
+            await fs.rm(file);
+          },
+        );
+      } finally {
+        await fs.chmod(file, 0o644).catch(() => undefined);
+        registration();
+      }
+      // Present-but-unreadable at open, gone at close is a delete: the
+      // document was on disk and no longer is.
+      expect(seen).toEqual([
+        expect.objectContaining({
+          operation: 'delete',
+          relativePaths: ['user/stuck.md'],
+        }),
+      ]);
+    },
+  );
+
+  it.skipIf(noSymlinks)(
+    'does not turn a sibling write behind a symlinked directory into a window delete',
+    async () => {
+      const projectRoot = await setup();
+      const vaultDir = path.join(tempDir!, 'vault');
+      await fs.mkdir(vaultDir, { recursive: true });
+      await fs.writeFile(path.join(vaultDir, 'role.md'), 'v1\n');
+      const memoriesRoot = path.join(tempDir!, 'memories');
+      await fs.mkdir(memoriesRoot, { recursive: true });
+      // The symlink sits one level up from the document: the tree walk
+      // recurses only into real directories, so the path behind it is
+      // invisible to every window.
+      await fs.symlink(vaultDir, path.join(memoriesRoot, 'linked'));
+      const writerSeen: MemoryChangedNotice[] = [];
+      const windowSeen: MemoryChangedNotice[] = [];
+      const writerRegistration = registerMemoryChangedListener(
+        projectRoot,
+        (change) => {
+          writerSeen.push(change);
+        },
+      );
+      const windowRegistration = registerMemoryChangedListener(
+        projectRoot,
+        (change) => {
+          windowSeen.push(change);
+        },
+      );
+      let outsideDone: () => void = () => {};
+      const outsideReported = new Promise<void>((resolve) => {
+        outsideDone = resolve;
+      });
+      try {
+        const pending = withCoalescedMemoryChanges(
+          projectRoot,
+          windowRegistration.id,
+          () => outsideReported,
+        );
+        const linkedFile = path.join(memoriesRoot, 'linked', 'role.md');
+        await fs.writeFile(linkedFile, 'v2\n');
+        await notifyMemoryFileChange(
+          linkedFile,
+          projectRoot,
+          'update',
+          writerRegistration.id,
+        );
+        outsideDone();
+        await pending;
+      } finally {
+        writerRegistration();
+        windowRegistration();
+      }
+      // The walk cannot see the path, so the window must not turn the
+      // recorded outside write into a `delete` for a file still on disk.
+      expect(windowSeen).toEqual([]);
+      expect(writerSeen).toEqual([
+        expect.objectContaining({
+          operation: 'update',
+          relativePaths: ['linked/role.md'],
+        }),
+      ]);
+    },
+  );
+
+  it.skipIf(noSymlinks)(
+    'still emits a window write that lands behind a symlinked directory',
+    async () => {
+      const projectRoot = await setup();
+      const vaultDir = path.join(tempDir!, 'vault');
+      await fs.mkdir(vaultDir, { recursive: true });
+      const memoriesRoot = path.join(tempDir!, 'memories');
+      await fs.mkdir(memoriesRoot, { recursive: true });
+      await fs.symlink(vaultDir, path.join(memoriesRoot, 'linked'));
+      const seen: MemoryChangedNotice[] = [];
+      const registration = registerMemoryChangedListener(
+        projectRoot,
+        (change) => {
+          seen.push(change);
+        },
+      );
+      try {
+        await withCoalescedMemoryChanges(
+          projectRoot,
+          registration.id,
+          async () => {
+            const linkedFile = path.join(memoriesRoot, 'linked', 'role.md');
+            await fs.writeFile(linkedFile, 'v1\n');
+            // The closing diff can never see this path; the write must be
+            // delivered directly instead of swallowed with the window.
+            await notifyMemoryFileChange(
+              linkedFile,
+              projectRoot,
+              'create',
+              registration.id,
+            );
+          },
+        );
+      } finally {
+        registration();
+      }
+      expect(seen).toEqual([
+        expect.objectContaining({
+          operation: 'create',
+          relativePaths: ['linked/role.md'],
+        }),
+      ]);
+    },
+  );
+
+  it('delivers the caller abort signal to listeners', async () => {
+    const projectRoot = await setup();
+    const file = path.join(tempDir!, 'memories', 'user', 'role.md');
+    const seen: Array<AbortSignal | undefined> = [];
+    const registration = registerMemoryChangedListener(
+      projectRoot,
+      (_change, signal) => {
+        seen.push(signal);
+      },
+    );
+    const controller = new AbortController();
+    try {
+      await notifyMemoryFileChange(
+        file,
+        projectRoot,
+        'update',
+        registration.id,
+        controller.signal,
+      );
+    } finally {
+      registration();
+    }
+    expect(seen).toEqual([controller.signal]);
+  });
+
+  it('labels a rebuild of an existing empty index as update', async () => {
+    const projectRoot = await setup();
+    const userRoot = getUserAutoMemoryRoot();
+    await fs.mkdir(path.join(userRoot, 'user'), { recursive: true });
+    await fs.writeFile(getUserAutoMemoryIndexPath(), '');
+    await fs.writeFile(
+      path.join(userRoot, 'user', 'role.md'),
+      [
+        '---',
+        'name: role',
+        'description: User is a Go engineer.',
+        'type: user',
+        '---',
+        '',
+        'User has been writing Go for 10 years.',
+        '',
+      ].join('\n'),
+    );
+    const seen: MemoryChangedNotice[] = [];
+    const registration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        seen.push(change);
+      },
+    );
+    try {
+      await rebuildUserAutoMemoryIndex(projectRoot);
+    } finally {
+      registration();
+    }
+    expect(seen).toEqual([
+      expect.objectContaining({
+        scope: 'user',
+        operation: 'update',
+        relativePaths: ['MEMORY.md'],
+      }),
+    ]);
+  });
+
+  it('reports a file removed inside a coalesced window once', async () => {
+    const projectRoot = await setup();
+    const file = path.join(tempDir!, 'memories', 'user', 'gone.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, 'old\n');
+    const seen: MemoryChangedNotice[] = [];
+    const registration = registerMemoryChangedListener(
+      projectRoot,
+      (change) => {
+        seen.push(change);
+      },
+    );
+    try {
+      await withCoalescedMemoryChanges(
+        projectRoot,
+        registration.id,
+        async () => {
+          await notifyMemoryFileChange(
+            file,
+            projectRoot,
+            'delete',
+            registration.id,
+          );
+          await fs.rm(file);
+        },
+      );
+    } finally {
+      registration();
+    }
+    expect(seen).toEqual([
+      expect.objectContaining({
+        operation: 'delete',
+        relativePaths: ['user/gone.md'],
+      }),
+    ]);
+  });
+});
+
+describe('memory change snapshot ordering', () => {
+  let temp: string;
+  let workspace: string;
+  const unregister: Array<() => void> = [];
+  function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+  beforeEach(async () => {
+    temp = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-change-races-'));
+    workspace = path.join(temp, 'repo');
+    await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
+    vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', temp);
+    clearAutoMemoryRootCache();
+    await fs.mkdir(getUserAutoMemoryRoot(), { recursive: true });
+  });
+  afterEach(async () => {
+    for (const stop of unregister.splice(0)) stop();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    clearAutoMemoryRootCache();
+    await fs.rm(temp, { recursive: true, force: true });
+  });
+  function listener(seen: MemoryChangedNotice[]) {
+    const stop = registerMemoryChangedListener(workspace, (notice) => {
+      seen.push(notice);
+    });
+    unregister.push(stop);
+    return stop.id;
+  }
+  it('ignores outside non-documents and never fabricates their deletion', async () => {
+    const windowNotices: MemoryChangedNotice[] = [];
+    const writerNotices: MemoryChangedNotice[] = [];
+    const windowId = listener(windowNotices);
+    const writerId = listener(writerNotices);
+    const entered = deferred();
+    const done = deferred();
+    const window = withCoalescedMemoryChanges(workspace, windowId, async () => {
+      entered.resolve();
+      await done.promise;
+    });
+    await entered.promise;
+    const file = path.join(getUserAutoMemoryRoot(), 'notes.txt');
+    await fs.writeFile(file, 'still alive');
+    await notifyMemoryFileChange(file, workspace, 'create', writerId);
+    done.resolve();
+    await window;
+    expect(await fs.readFile(file, 'utf8')).toBe('still alive');
+    expect(windowNotices).toEqual([]);
+    expect(writerNotices).toEqual([]);
+  });
+  it('first contentful coalesced scaffold write announces update', async () => {
+    await ensureAutoMemoryScaffold(workspace);
+    const index = getAutoMemoryIndexPath(workspace);
+    expect(await fs.readFile(index, 'utf8')).toBe('');
+    const notices: MemoryChangedNotice[] = [];
+    await withCoalescedMemoryChanges(workspace, listener(notices), async () => {
+      await fs.writeFile(index, '- [role](role.md)\n');
+    });
+    expect(notices).toEqual([
+      expect.objectContaining({
+        operation: 'update',
+        relativePaths: ['MEMORY.md'],
+      }),
+    ]);
+  });
+  it('indexer refill of an already-announced index remains update', async () => {
+    await ensureAutoMemoryScaffold(workspace);
+    const index = getAutoMemoryIndexPath(workspace);
+    await fs.writeFile(
+      path.join(path.dirname(index), 'role.md'),
+      '---\nname: Role\ndescription: Role description\ntype: user\n---\nEngineer\n',
+    );
+    const notices: MemoryChangedNotice[] = [];
+    const id = listener(notices);
+    await rebuildManagedAutoMemoryIndex(workspace, id);
+    expect(notices.splice(0)).toEqual([
+      expect.objectContaining({ operation: 'update' }),
+    ]);
+    await fs.writeFile(index, '');
+    await notifyMemoryFileChange(index, workspace, 'update', id);
+    notices.splice(0);
+    await rebuildManagedAutoMemoryIndex(workspace, id);
+    expect(notices).toEqual([
+      expect.objectContaining({
+        operation: 'update',
+        relativePaths: ['MEMORY.md'],
+      }),
+    ]);
+  });
+  it('does not replay a saved notification superseded by an outside delete when the closing snapshot fails', async () => {
+    const seen: MemoryChangedNotice[] = [];
+    const writer: MemoryChangedNotice[] = [];
+    const id = listener(seen);
+    const writerId = listener(writer);
+    const root = await fs.realpath(getUserAutoMemoryRoot());
+    const file = path.join(root, 'saved.md');
+    const kept = path.join(root, 'kept.md');
+    const saved = deferred();
+    const release = deferred();
+    const pending = withCoalescedMemoryChanges(workspace, id, async () => {
+      await fs.writeFile(file, 'saved');
+      await fs.writeFile(kept, 'kept');
+      await notifyMemoryFileChange([file, kept], workspace, 'create', id);
+      saved.resolve();
+      await release.promise;
+    });
+    try {
+      await saved.promise;
+      await fs.unlink(file);
+      await notifyMemoryFileChange(file, workspace, 'delete', writerId);
+      const readdir = fs.readdir;
+      vi.spyOn(fs, 'readdir').mockImplementation(
+        async (...args: Parameters<typeof readdir>) => {
+          if (args[0] === root)
+            throw Object.assign(new Error('unreadable'), { code: 'EACCES' });
+          return readdir(...args);
+        },
+      );
+      release.resolve();
+      await pending;
+      expect(writer).toEqual([
+        expect.objectContaining({
+          operation: 'delete',
+          relativePaths: ['saved.md'],
+        }),
+      ]);
+      expect(seen).toEqual([
+        expect.objectContaining({
+          operation: 'create',
+          relativePaths: ['kept.md'],
+        }),
+      ]);
+    } finally {
+      release.resolve();
+      await pending;
+    }
+  });
+
+  it('outside create during closing directory enumeration produces no window delete', async () => {
+    const seen: MemoryChangedNotice[] = [];
+    const writer: MemoryChangedNotice[] = [];
+    const id = listener(seen);
+    const writerId = listener(writer);
+    const userRoot = await fs.realpath(getUserAutoMemoryRoot());
+    const file = path.join(userRoot, 'late.md');
+    const held = deferred();
+    const release = deferred();
+    let closing = false;
+    const readdir = fs.readdir;
+    vi.spyOn(fs, 'readdir').mockImplementation(
+      async (...args: Parameters<typeof readdir>) => {
+        const result = await readdir(...args);
+        if (closing && args[0] === userRoot) {
+          held.resolve();
+          await release.promise;
+        }
+        return result;
+      },
+    );
+    const window = withCoalescedMemoryChanges(workspace, id, async () => {
+      closing = true;
+    });
+    await held.promise;
+    await fs.writeFile(file, 'live');
+    await notifyMemoryFileChange(file, workspace, 'create', writerId);
+    release.resolve();
+    await window;
+    expect(await fs.readFile(file, 'utf8')).toBe('live');
+    expect(writer).toEqual([expect.objectContaining({ operation: 'create' })]);
+    expect(seen).toEqual([]);
+  });
+  it('outside delete after closing read produces no window create', async () => {
+    const seen: MemoryChangedNotice[] = [];
+    const writer: MemoryChangedNotice[] = [];
+    const id = listener(seen);
+    const writerId = listener(writer);
+    const file = path.join(
+      await fs.realpath(getUserAutoMemoryRoot()),
+      'gone.md',
+    );
+    await fs.writeFile(file, 'present');
+    const held = deferred();
+    const release = deferred();
+    let closing = false;
+    const readFile = fs.readFile;
+    vi.spyOn(fs, 'readFile').mockImplementation(
+      async (...args: Parameters<typeof readFile>) => {
+        const result = await readFile(...args);
+        if (closing && args[0] === file) {
+          held.resolve();
+          await release.promise;
+        }
+        return result;
+      },
+    );
+    const window = withCoalescedMemoryChanges(workspace, id, async () => {
+      closing = true;
+    });
+    await held.promise;
+    await fs.rm(file);
+    await notifyMemoryFileChange(file, workspace, 'delete', writerId);
+    release.resolve();
+    await window;
+    await expect(fs.access(file)).rejects.toThrow();
+    expect(writer).toEqual([expect.objectContaining({ operation: 'delete' })]);
+    expect(seen).toEqual([]);
+  });
+});
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { resolve, promise };
+}
+
+describe('memory notification snapshot boundaries', () => {
+  let root: string;
+  let workspace: string;
+  const unregister: Array<() => void> = [];
+
+  beforeEach(async () => {
+    root = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'memory-r8-')),
+    );
+    workspace = path.join(root, 'repo');
+    await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
+    vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', path.join(root, 'memory'));
+    clearAutoMemoryRootCache();
+    await fs.mkdir(path.join(getUserAutoMemoryRoot(), 'user'), {
+      recursive: true,
+    });
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    for (const dispose of unregister.splice(0)) dispose();
+    vi.unstubAllEnvs();
+    clearAutoMemoryRootCache();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  function listen(notices: MemoryChangedNotice[]) {
+    const registration = registerMemoryChangedListener(workspace, (notice) => {
+      notices.push(notice);
+    });
+    unregister.push(registration);
+    return registration.id;
+  }
+
+  async function openWindow(notices: MemoryChangedNotice[]) {
+    const entered = deferred();
+    const release = deferred();
+    const pending = withCoalescedMemoryChanges(
+      workspace,
+      listen(notices),
+      async () => {
+        entered.resolve();
+        await release.promise;
+      },
+    );
+    await entered.promise;
+    return { release: release.resolve, pending };
+  }
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'does not repeat an outside delete of an initially unreadable document',
+    async () => {
+      const file = path.join(getUserAutoMemoryRoot(), 'user', 'stuck.md');
+      await fs.writeFile(file, 'secret');
+      await fs.chmod(file, 0o000);
+      await expect(fs.readFile(file, 'utf8')).rejects.toMatchObject({
+        code: 'EACCES',
+      });
+      const windowNotices: MemoryChangedNotice[] = [];
+      const writerNotices: MemoryChangedNotice[] = [];
+      const writer = listen(writerNotices);
+      const window = await openWindow(windowNotices);
+      try {
+        await fs.rm(file);
+        await notifyMemoryFileChange(file, workspace, 'delete', writer);
+      } finally {
+        window.release();
+        await window.pending;
+      }
+      expect(writerNotices).toEqual([
+        expect.objectContaining({
+          operation: 'delete',
+          relativePaths: ['user/stuck.md'],
+        }),
+      ]);
+      expect(windowNotices).toEqual([]);
+    },
+  );
+
+  for (const aliasPath of ['User/a.md', 'User/A.MD']) {
+    it(`uses one key for case alias ${aliasPath} on a case-insensitive filesystem`, async ({
+      skip,
+    }) => {
+      const file = path.join(getUserAutoMemoryRoot(), 'user', 'a.md');
+      await fs.writeFile(file, 'before');
+      const alias = path.join(getUserAutoMemoryRoot(), aliasPath);
+      if (!(await fs.stat(alias).catch(() => undefined))) {
+        skip();
+        return;
+      }
+      expect(await fs.realpath(alias)).toBe(file);
+      const windowNotices: MemoryChangedNotice[] = [];
+      const writerNotices: MemoryChangedNotice[] = [];
+      const writer = listen(writerNotices);
+      const window = await openWindow(windowNotices);
+      try {
+        await fs.writeFile(alias, 'after');
+        await notifyMemoryFileChange(alias, workspace, 'update', writer);
+      } finally {
+        window.release();
+        await window.pending;
+      }
+      expect({ writerNotices, windowNotices }).toEqual({
+        writerNotices: [
+          expect.objectContaining({
+            operation: 'update',
+            relativePaths: ['user/a.md'],
+          }),
+        ],
+        windowNotices: [],
+      });
+    });
+  }
+
+  it.skipIf(process.platform === 'win32')(
+    'does not delete an outside write whose ancestor becomes a symlink',
+    async () => {
+      const directory = path.join(getUserAutoMemoryRoot(), 'user');
+      const file = path.join(directory, 'outside.md');
+      const target = path.join(root, 'linked-content');
+      await fs.mkdir(target);
+      await fs.writeFile(path.join(target, 'outside.md'), 'still present');
+      const windowNotices: MemoryChangedNotice[] = [];
+      const writerNotices: MemoryChangedNotice[] = [];
+      const writer = listen(writerNotices);
+      const window = await openWindow(windowNotices);
+      try {
+        await fs.writeFile(file, 'still present');
+        await notifyMemoryFileChange(file, workspace, 'create', writer);
+        await fs.rm(directory, { recursive: true });
+        await fs.symlink(target, directory, 'dir');
+      } finally {
+        window.release();
+        await window.pending;
+      }
+      expect(await fs.readFile(file, 'utf8')).toBe('still present');
+      expect(writerNotices).toEqual([
+        expect.objectContaining({
+          operation: 'create',
+          relativePaths: ['user/outside.md'],
+        }),
+      ]);
+      expect(windowNotices).toEqual([]);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not delete a document whose leaf becomes a symlink',
+    async () => {
+      const file = path.join(getUserAutoMemoryRoot(), 'user', 'a.md');
+      const target = path.join(root, 'linked-document.md');
+      await fs.writeFile(file, 'still present');
+      await fs.writeFile(target, 'still present');
+      const notices: MemoryChangedNotice[] = [];
+      await withCoalescedMemoryChanges(workspace, listen(notices), async () => {
+        await fs.rm(file);
+        await fs.symlink(target, file);
+      });
+      expect(await fs.readFile(file, 'utf8')).toBe('still present');
+      expect(notices).toEqual([]);
+    },
+  );
+  it('waits for an unfinished sync baseline before closing the window', async () => {
+    const file = path.join(getTeamAutoMemoryRoot(workspace), 'remote.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const notices: MemoryChangedNotice[] = [];
+    const window = await openWindow(notices);
+    const syncEntered = deferred();
+    const syncRelease = deferred();
+    const sync = withTeamMemorySync(workspace, async (record) => {
+      await fs.writeFile(file, 'remote content');
+      syncEntered.resolve();
+      await syncRelease.promise;
+      record(file, 'remote content');
+    });
+    let closed = false;
+    const closing = window.pending.then(() => {
+      closed = true;
+    });
+    try {
+      await syncEntered.promise;
+      window.release();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(closed).toBe(false);
+      expect(notices).toEqual([]);
+    } finally {
+      window.release();
+      syncRelease.resolve();
+      await sync;
+      await closing;
+    }
+    expect(closed).toBe(true);
+    expect(notices).toEqual([]);
+    expect(await fs.readFile(file, 'utf8')).toBe('remote content');
+  });
+
+  it('still reports a local rewrite after the sync records remote content', async () => {
+    const file = path.join(getTeamAutoMemoryRoot(workspace), 'shared.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const notices: MemoryChangedNotice[] = [];
+    const entered = deferred();
+    const syncDone = deferred();
+    const window = withCoalescedMemoryChanges(
+      workspace,
+      listen(notices),
+      async () => {
+        entered.resolve();
+        await syncDone.promise;
+        await fs.writeFile(file, 'local shell content');
+      },
+    );
+    try {
+      await entered.promise;
+      await withTeamMemorySync(workspace, async (record) => {
+        await fs.writeFile(file, 'remote content');
+        record(file, 'remote content');
+      });
+    } finally {
+      syncDone.resolve();
+      await window;
+    }
+    expect(await fs.readFile(file, 'utf8')).toBe('local shell content');
+    expect(notices).toEqual([
+      expect.objectContaining({
+        scope: 'team',
+        operation: 'update',
+        relativePaths: ['shared.md'],
+      }),
+    ]);
+  });
+  it.each(['create', 'update', 'delete'] as const)(
+    'delivers explicit %s after an unknown import without a delayed sync duplicating it',
+    async (operation) => {
+      const file = path.join(getTeamAutoMemoryRoot(workspace), 'shared.md');
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      if (operation !== 'create') await fs.writeFile(file, 'original');
+      const notices: MemoryChangedNotice[] = [];
+      const owner = listen(notices);
+      await withCoalescedMemoryChanges(workspace, owner, async () => {
+        await withTeamMemorySync(workspace, async (record) => {
+          record(file, undefined);
+        });
+        const entered = deferred();
+        const release = deferred();
+        const sync = withTeamMemorySync(workspace, async (record) => {
+          entered.resolve();
+          await release.promise;
+          record(file, 'remote content');
+        });
+        try {
+          await entered.promise;
+          if (operation === 'delete') await fs.rm(file);
+          else await fs.writeFile(file, 'local content');
+          await notifyMemoryFileChange(file, workspace, operation, owner);
+          expect(notices).toEqual([
+            expect.objectContaining({
+              scope: 'team',
+              operation,
+              relativePaths: ['shared.md'],
+            }),
+          ]);
+        } finally {
+          release.resolve();
+          await sync;
+        }
+      });
+      expect(notices).toEqual([
+        expect.objectContaining({
+          scope: 'team',
+          operation,
+          relativePaths: ['shared.md'],
+        }),
+      ]);
+    },
+  );
+  it.each(
+    (['create', 'update', 'delete'] as const).flatMap((operation) =>
+      [true, false].flatMap((complete) =>
+        [true, false].map((unknown) => ({ operation, complete, unknown })),
+      ),
+    ),
+  )(
+    'retains explicit $operation before a late sync baseline (complete=$complete, unknown=$unknown)',
+    async ({ operation, complete, unknown }) => {
+      const teamRoot = getTeamAutoMemoryRoot(workspace);
+      const file = path.join(teamRoot, 'shared.md');
+      await fs.mkdir(teamRoot, { recursive: true });
+      if (operation !== 'create') await fs.writeFile(file, 'remote content');
+      const notices: MemoryChangedNotice[] = [];
+      const sibling: MemoryChangedNotice[] = [];
+      const owner = listen(notices);
+      listen(sibling);
+      await withCoalescedMemoryChanges(workspace, owner, async () => {
+        const entered = deferred();
+        const release = deferred();
+        const sync = withTeamMemorySync(workspace, async (record) => {
+          entered.resolve();
+          await release.promise;
+          record(
+            file,
+            unknown
+              ? undefined
+              : operation === 'create'
+                ? null
+                : 'remote content',
+          );
+        });
+        try {
+          await entered.promise;
+          if (operation === 'delete') await fs.rm(file);
+          else await fs.writeFile(file, 'local content');
+          await notifyMemoryFileChange(file, workspace, operation, owner);
+        } finally {
+          release.resolve();
+          await sync;
+        }
+        if (!complete) {
+          const readdir = fs.readdir;
+          vi.spyOn(fs, 'readdir').mockImplementation(
+            async (...args: Parameters<typeof readdir>) => {
+              if (args[0] === teamRoot)
+                throw Object.assign(new Error('unreadable'), {
+                  code: 'EACCES',
+                });
+              return readdir(...args);
+            },
+          );
+        }
+      });
+      expect(notices).toEqual([
+        expect.objectContaining({
+          scope: 'team',
+          operation,
+          relativePaths: ['shared.md'],
+        }),
+      ]);
+      expect(sibling).toEqual([]);
+      if (operation === 'delete')
+        await expect(fs.stat(file)).rejects.toMatchObject({ code: 'ENOENT' });
+      else expect(await fs.readFile(file, 'utf8')).toBe('local content');
+    },
+  );
+
+  it('does not replay a pending notice preceding an unknown sync that starts during baseline reading', async () => {
+    const file = path.join(getTeamAutoMemoryRoot(workspace), 'shared.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const notices: MemoryChangedNotice[] = [];
+    const owner = listen(notices);
+    await withCoalescedMemoryChanges(workspace, owner, async () => {
+      await fs.writeFile(file, 'local content');
+      const lstat = fs.lstat;
+      let reads = 0;
+      vi.spyOn(fs, 'lstat').mockImplementation(
+        async (...args: Parameters<typeof lstat>) => {
+          if (args[0] === file && ++reads === 2) {
+            await withTeamMemorySync(workspace, async (record) => {
+              await fs.writeFile(file, 'new imported content');
+              record(file, undefined);
+            });
+          }
+          return lstat(...args);
+        },
+      );
+      await notifyMemoryFileChange(file, workspace, 'create', owner);
+      expect(reads).toBe(2);
+    });
+    expect(await fs.readFile(file, 'utf8')).toBe('new imported content');
+    expect(notices).toEqual([]);
+  });
+
+  it('does not replay an older pending write after a later unknown-path explicit notification', async () => {
+    const file = path.join(getTeamAutoMemoryRoot(workspace), 'shared.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const notices: MemoryChangedNotice[] = [];
+    const owner = listen(notices);
+    await withCoalescedMemoryChanges(workspace, owner, async () => {
+      const entered = deferred();
+      const release = deferred();
+      const sync = withTeamMemorySync(workspace, async (record) => {
+        entered.resolve();
+        await release.promise;
+        record(file, undefined);
+      });
+      try {
+        await entered.promise;
+        await fs.writeFile(file, 'first local content');
+        await notifyMemoryFileChange(file, workspace, 'create', owner);
+      } finally {
+        release.resolve();
+        await sync;
+      }
+      await fs.writeFile(file, 'second local content');
+      await notifyMemoryFileChange(file, workspace, 'update', owner);
+      expect(notices).toEqual([
+        expect.objectContaining({ operation: 'update' }),
+      ]);
+    });
+    expect(notices).toEqual([
+      expect.objectContaining({
+        operation: 'update',
+        relativePaths: ['shared.md'],
+      }),
+    ]);
+  });
+  it('rereads a snapshot crossed by sync and preserves the subsequent local write', async () => {
+    const file = path.join(getTeamAutoMemoryRoot(workspace), 'shared.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, 'initial content');
+    const notices: MemoryChangedNotice[] = [];
+    const readEntered = deferred();
+    const readRelease = deferred();
+    let closing = false;
+    let held = false;
+    let closingReads = 0;
+    const readFile = fs.readFile;
+    vi.spyOn(fs, 'readFile').mockImplementation(
+      async (...args: Parameters<typeof readFile>) => {
+        const content = await readFile(...args);
+        if (closing && args[0] === file) {
+          closingReads++;
+          if (!held) {
+            held = true;
+            readEntered.resolve();
+            await readRelease.promise;
+          }
+        }
+        return content;
+      },
+    );
+    const window = withCoalescedMemoryChanges(
+      workspace,
+      listen(notices),
+      async () => {
+        closing = true;
+      },
+    );
+    try {
+      await readEntered.promise;
+      await withTeamMemorySync(workspace, async (record) => {
+        await fs.writeFile(file, 'remote content');
+        record(file, 'remote content');
+      });
+      await fs.writeFile(file, 'local shell content');
+    } finally {
+      readRelease.resolve();
+      await window;
+    }
+    expect(closingReads).toBeGreaterThanOrEqual(2);
+    expect(notices).toEqual([
+      expect.objectContaining({
+        scope: 'team',
+        operation: 'update',
+        relativePaths: ['shared.md'],
+      }),
+    ]);
+    expect(await fs.readFile(file, 'utf8')).toBe('local shell content');
+  });
+  it('does not overwrite a newer outside notification with a delayed remote baseline', async () => {
+    const file = path.join(getTeamAutoMemoryRoot(workspace), 'shared.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const windowNotices: MemoryChangedNotice[] = [];
+    const writerNotices: MemoryChangedNotice[] = [];
+    const writer = listen(writerNotices);
+    const window = await openWindow(windowNotices);
+    const syncEntered = deferred();
+    const syncRelease = deferred();
+    const sync = withTeamMemorySync(workspace, async (record) => {
+      await fs.writeFile(file, 'remote content');
+      syncEntered.resolve();
+      await syncRelease.promise;
+      record(file, 'remote content');
+    });
+    try {
+      await syncEntered.promise;
+      await fs.writeFile(file, 'newer local content');
+      await notifyMemoryFileChange(file, workspace, 'update', writer);
+    } finally {
+      syncRelease.resolve();
+      await sync;
+      window.release();
+      await window.pending;
+    }
+    expect(await fs.readFile(file, 'utf8')).toBe('newer local content');
+    expect(writerNotices).toEqual([
+      expect.objectContaining({
+        scope: 'team',
+        operation: 'update',
+        relativePaths: ['shared.md'],
+      }),
+    ]);
+    expect(windowNotices).toEqual([]);
+  });
+  it('does not attribute consecutive concurrent syncs to the window', async () => {
+    const file = path.join(getTeamAutoMemoryRoot(workspace), 'remote.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const notices: MemoryChangedNotice[] = [];
+    const window = await openWindow(notices);
+    const firstRelease = deferred();
+    const secondRelease = deferred();
+    const first = withTeamMemorySync(workspace, async (record) => {
+      await firstRelease.promise;
+      await fs.writeFile(file, 'remote one');
+      record(file, 'remote one');
+    });
+    const second = withTeamMemorySync(workspace, async (record) => {
+      await secondRelease.promise;
+      await fs.writeFile(file, 'remote two');
+      record(file, 'remote two');
+    });
+    try {
+      firstRelease.resolve();
+      await first;
+      secondRelease.resolve();
+      await second;
+    } finally {
+      firstRelease.resolve();
+      secondRelease.resolve();
+      await Promise.all([first, second]);
+      window.release();
+      await window.pending;
+    }
+    expect(notices).toEqual([]);
+    expect(await fs.readFile(file, 'utf8')).toBe('remote two');
+  });
+});

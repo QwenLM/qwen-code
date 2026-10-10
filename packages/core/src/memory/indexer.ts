@@ -8,6 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { existsSync } from 'node:fs';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { notifyMemoryFileChange } from './memory-file-change.js';
 import { QWEN_DIR } from '../utils/paths.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
@@ -326,31 +327,49 @@ async function readAutoMemoryMetadata(
 
 export async function rebuildManagedAutoMemoryIndex(
   projectRoot: string,
+  deliveryId?: symbol,
+  signal?: AbortSignal,
 ): Promise<string> {
   const [docs, metadata] = await Promise.all([
     scanAutoMemoryTopicDocuments(projectRoot),
     readAutoMemoryMetadata(projectRoot),
   ]);
   const content = buildManagedAutoMemoryIndex(docs, metadata);
-  await atomicWriteFile(getAutoMemoryIndexPath(projectRoot), content, {
-    encoding: 'utf-8',
-    noFollow: true,
-  });
+  await writeMemoryIndex(
+    projectRoot,
+    getAutoMemoryIndexPath(projectRoot),
+    content,
+    { deliveryId, signal, noFollow: true },
+  );
   return content;
 }
 
 export async function rebuildAutoMemoryIndexAtRoot(
   root: string,
   scope: AutoMemoryScope,
+  notification?: {
+    projectRoot: string;
+    deliveryId?: symbol;
+    signal?: AbortSignal;
+  },
 ): Promise<string> {
   if (!existsSync(root)) return '';
   await resolveTrustedMemoryRoot(root, getMemoryRootTrustedAnchor(root));
   const docs = await scanAllAutoMemoryTopicDocumentsFromRoot(root, scope);
   const content = buildManagedAutoMemoryIndex(docs);
-  await atomicWriteFile(path.join(root, AUTO_MEMORY_INDEX_FILENAME), content, {
-    encoding: 'utf-8',
-    noFollow: true,
-  });
+  const indexPath = path.join(root, AUTO_MEMORY_INDEX_FILENAME);
+  if (notification) {
+    await writeMemoryIndex(notification.projectRoot, indexPath, content, {
+      deliveryId: notification.deliveryId,
+      signal: notification.signal,
+      noFollow: true,
+    });
+  } else {
+    await atomicWriteFile(indexPath, content, {
+      encoding: 'utf-8',
+      noFollow: true,
+    });
+  }
   return content;
 }
 
@@ -359,12 +378,15 @@ export async function rebuildAutoMemoryIndexAtRoot(
  * Mirrors {@link rebuildManagedAutoMemoryIndex} but uses the global root
  * and skips metadata (user memory has no per-project state file).
  */
-export async function rebuildUserAutoMemoryIndex(): Promise<string> {
+export async function rebuildUserAutoMemoryIndex(
+  projectRoot: string,
+  deliveryId?: symbol,
+): Promise<string> {
   if (!existsSync(getUserAutoMemoryRoot())) return '';
   const docs = await scanUserAutoMemoryTopicDocuments();
   const content = buildManagedAutoMemoryIndex(docs);
-  await atomicWriteFile(getUserAutoMemoryIndexPath(), content, {
-    encoding: 'utf-8',
+  await writeMemoryIndex(projectRoot, getUserAutoMemoryIndexPath(), content, {
+    deliveryId,
     noFollow: true,
   });
   return content;
@@ -398,6 +420,7 @@ export class TeamMemoryRootSecurityError extends Error {
  */
 export async function rebuildTeamAutoMemoryIndex(
   projectRoot: string,
+  options: { deliveryId?: symbol; signal?: AbortSignal } = {},
 ): Promise<string | null> {
   const teamRoot = getTeamAutoMemoryRoot(projectRoot);
   if (!existsSync(teamRoot)) {
@@ -447,17 +470,60 @@ export async function rebuildTeamAutoMemoryIndex(
   );
   const content = buildTeamAutoMemoryIndex(ordered);
   const indexPath = getTeamAutoMemoryIndexPath(projectRoot);
-  // Skip a byte-identical rewrite: regenerating MEMORY.md every run would churn
-  // its mtime and produce no-op commits that ping-pong between collaborators.
-  const existing = await fs.readFile(indexPath, 'utf-8').catch(() => null);
-  if (existing === content) {
-    return content;
-  }
   // noFollow: never follow a symlink at MEMORY.md itself — replace the link with
   // the regular index instead of writing through it to an attacker path.
-  await atomicWriteFile(indexPath, content, {
-    encoding: 'utf-8',
+  await writeMemoryIndex(projectRoot, indexPath, content, {
     noFollow: true,
+    deliveryId: options.deliveryId,
+    signal: options.signal,
   });
   return content;
+}
+
+async function writeMemoryIndex(
+  projectRoot: string,
+  indexPath: string,
+  content: string,
+  options: {
+    noFollow?: boolean;
+    deliveryId?: symbol;
+    signal?: AbortSignal;
+  } = {},
+): Promise<void> {
+  // Skip a byte-identical rewrite: regenerating MEMORY.md every run would
+  // churn its mtime and, for the committed team index, produce no-op commits
+  // that ping-pong between collaborators. Only ENOENT means 'absent': an
+  // existing but unreadable index is still rewritten (rename needs only
+  // directory write permission) and announced as 'update', not 'create'.
+  options.signal?.throwIfAborted();
+  const leaf = await fs
+    .lstat(indexPath)
+    .catch((err: unknown) =>
+      (err as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : null,
+    );
+  const existing =
+    leaf === undefined
+      ? undefined
+      : leaf?.isFile()
+        ? await fs
+            .readFile(indexPath, {
+              encoding: 'utf-8',
+              signal: options.signal,
+            })
+            .catch(() => null)
+        : null;
+  if (existing === content) {
+    return;
+  }
+  options.signal?.throwIfAborted();
+  await atomicWriteFile(indexPath, content, {
+    encoding: 'utf-8',
+    ...(options.noFollow ? { noFollow: true } : {}),
+  });
+  await notifyMemoryFileChange(
+    indexPath,
+    projectRoot,
+    existing === undefined ? 'create' : 'update',
+    options.deliveryId,
+  );
 }

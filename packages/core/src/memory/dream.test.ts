@@ -18,6 +18,7 @@ import {
 } from './paths.js';
 import type { AutoMemoryMetadata } from './types.js';
 import { DREAM_OPERATIONS_FILENAME } from './dream-operations.js';
+import { registerMemoryChangedListener } from './memory-file-change.js';
 
 vi.mock('./dreamAgentPlanner.js', () => ({
   planManagedAutoMemoryDreamByAgent: vi.fn(),
@@ -46,6 +47,7 @@ describe('managed auto-memory dream', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await fs.rm(tempDir, {
       recursive: true,
       force: true,
@@ -58,6 +60,92 @@ describe('managed auto-memory dream', () => {
     await expect(runManagedAutoMemoryDream(projectRoot)).rejects.toThrow(
       'Managed auto-memory dream requires config',
     );
+  });
+
+  it('finishes index repair if cancelled after the repair starts without recording completion metadata', async () => {
+    vi.stubEnv(
+      'QWEN_CODE_MEMORY_BASE_DIR',
+      path.join(tempDir, 'isolated-memory'),
+    );
+    await ensureAutoMemoryScaffold(projectRoot);
+    const indexPath = getAutoMemoryIndexPath(projectRoot);
+    await fs.writeFile(indexPath, 'stale index');
+    const metadataBefore = await fs.readFile(
+      getAutoMemoryMetadataPath(projectRoot),
+      'utf8',
+    );
+    const topic = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'project',
+      'durable.md',
+    );
+    vi.mocked(planManagedAutoMemoryDreamByAgent).mockImplementation(
+      async () => {
+        await fs.mkdir(path.dirname(topic), { recursive: true });
+        await fs.writeFile(
+          topic,
+          '---\ntype: project\nname: Durable\ndescription: Persisted fact\ncategory: project_introduction\nkeywords:\n  - durable fact\n  - project details\nusage_scenarios:\n  - Project work\n---\nCommitted consolidation.\n',
+        );
+        return {
+          status: 'completed',
+          finalText: 'done',
+          filesTouched: [topic],
+        };
+      },
+    );
+    const owner = vi.fn();
+    const sibling = vi.fn();
+    const unregisterOwner = registerMemoryChangedListener(projectRoot, owner);
+    const unregisterSibling = registerMemoryChangedListener(
+      projectRoot,
+      sibling,
+    );
+    const controller = new AbortController();
+    let deliveryReads = 0;
+    mockConfig.getMemoryHookDeliveryId = () => {
+      // The second read occurs after the cancellation guard, at index repair.
+      if (++deliveryReads === 2) controller.abort();
+      return unregisterOwner.id;
+    };
+    try {
+      await runManagedAutoMemoryDream(
+        projectRoot,
+        new Date(),
+        mockConfig,
+        controller.signal,
+        { recordMetadata: true },
+      );
+      expect(controller.signal.aborted).toBe(true);
+      expect(await fs.readFile(indexPath, 'utf8')).toContain(
+        'project/durable.md',
+      );
+      expect(
+        await fs.readFile(getAutoMemoryMetadataPath(projectRoot), 'utf8'),
+      ).toBe(metadataBefore);
+      expect(owner).toHaveBeenCalledTimes(2);
+      expect(owner).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          scope: 'project',
+          operation: 'update',
+          relativePaths: ['MEMORY.md'],
+        }),
+        undefined,
+      );
+      expect(owner).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          scope: 'project',
+          operation: 'create',
+          relativePaths: ['project/durable.md'],
+        }),
+        undefined,
+      );
+      expect(sibling).not.toHaveBeenCalled();
+    } finally {
+      unregisterOwner();
+      unregisterSibling();
+    }
   });
 
   it('reports file changes and keyword backfills from filesystem snapshots', async () => {
@@ -104,6 +192,65 @@ describe('managed auto-memory dream', () => {
     expect(result.systemMessage).toContain(
       'Managed auto-memory dream (agent):',
     );
+  });
+
+  it('attributes a replaced symlink index to the dreaming session', async () => {
+    vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', path.join(tempDir, 'memories'));
+    await fs.mkdir(path.join(projectRoot, '.git'));
+    await ensureAutoMemoryScaffold(projectRoot);
+    const topicPath = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'project',
+      'routing.md',
+    );
+    await fs.mkdir(path.dirname(topicPath), { recursive: true });
+    await fs.writeFile(
+      topicPath,
+      '---\nname: Routing memory\ndescription: Owner routing\ntype: project\n---\nKeep session ownership.\n',
+    );
+    const indexPath = getAutoMemoryIndexPath(projectRoot);
+    const target = path.join(tempDir, 'index.md');
+    await fs.writeFile(target, 'stale index');
+    await fs.rm(indexPath);
+    await fs.symlink(target, indexPath);
+    const owner = vi.fn();
+    const sibling = vi.fn();
+    const unregisterOwner = registerMemoryChangedListener(projectRoot, owner);
+    const unregisterSibling = registerMemoryChangedListener(
+      projectRoot,
+      sibling,
+    );
+    mockConfig.getMemoryHookDeliveryId = () => unregisterOwner.id;
+    const controller = new AbortController();
+    vi.mocked(planManagedAutoMemoryDreamByAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Updated routing memory.',
+      filesTouched: [indexPath],
+    });
+    try {
+      await runManagedAutoMemoryDream(
+        projectRoot,
+        new Date(),
+        mockConfig,
+        controller.signal,
+      );
+      expect(await fs.readFile(target, 'utf-8')).toBe('stale index');
+      expect((await fs.lstat(indexPath)).isSymbolicLink()).toBe(false);
+      expect(await fs.readFile(indexPath, 'utf-8')).toContain('Routing memory');
+      expect.soft(sibling).not.toHaveBeenCalled();
+      expect.soft(owner).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          scope: 'project',
+          operation: 'create',
+          relativePaths: ['MEMORY.md'],
+        }),
+        undefined,
+      );
+    } finally {
+      unregisterOwner();
+      unregisterSibling();
+      vi.unstubAllEnvs();
+    }
   });
 
   it('applies a validated dedupe manifest after the canonical file exists', async () => {
