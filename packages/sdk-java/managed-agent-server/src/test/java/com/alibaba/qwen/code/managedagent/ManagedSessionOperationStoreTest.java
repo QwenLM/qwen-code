@@ -305,7 +305,7 @@ class ManagedSessionOperationStoreTest {
     // The upgrade backfill: an operation already retrying when the budget
     // column arrived accumulated its attempt_count under a regime with no
     // terminal budget at all, so none of those attempts was ever classified
-    // against one. V54 marks the in-flight rows' existing attempts exempt —
+    // against one. V58 marks the in-flight rows' existing attempts exempt —
     // each starts with a full budget instead of terminating on its first
     // post-upgrade failure (review round 7, R7-5). An ACTION_RESPONSE row is
     // excluded: there a nonzero watermark is the durable "the Harness

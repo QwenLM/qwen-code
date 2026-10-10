@@ -469,6 +469,12 @@ export interface ChatRecord {
   usageMetadata?: GenerateContentResponseUsageMetadata;
   /** Model used for this response */
   model?: string;
+  /** Effective session settings when user input reaches the recorder. */
+  executionContext?: {
+    modelId: string;
+    authType?: string;
+    approvalMode: ApprovalMode;
+  };
   /** Context window size of the model used for this response */
   contextWindowSize?: number;
   /**
@@ -2312,6 +2318,14 @@ export class ChatRecordingService {
     this.resetExternalRecordIndex();
   }
 
+  private getExecutionContext(): NonNullable<ChatRecord['executionContext']> {
+    return {
+      modelId: this.config.getModel(),
+      authType: this.config.getAuthType(),
+      approvalMode: this.config.getApprovalMode(),
+    };
+  }
+
   /**
    * Records a user message.
    * Queues the write immediately on the serialized async writer.
@@ -2334,6 +2348,7 @@ export class ChatRecordingService {
       this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
+        executionContext: this.getExecutionContext(),
         ...(daemonPromptId ? { daemonPromptId } : {}),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
@@ -2396,6 +2411,7 @@ export class ChatRecordingService {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
+        executionContext: this.getExecutionContext(),
         subtype: 'mid_turn_user_message',
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
