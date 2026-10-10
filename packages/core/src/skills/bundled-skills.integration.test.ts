@@ -130,7 +130,6 @@ describe('bundled pr skill permissions', () => {
     expect([...allowedTools].sort()).toEqual(
       [
         'Bash(gh auth status)',
-        'Bash(gh pr list)',
         'Bash(gh pr view)',
         'Bash(gh repo view)',
         'Bash(git config --get)',

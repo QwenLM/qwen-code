@@ -10,7 +10,6 @@ allowedTools:
   - Bash(gh auth status)
   - Bash(gh repo view)
   - Bash(gh pr view)
-  - Bash(gh pr list)
   - Bash(git config --get)
   - Write(/.qwen/tmp/**)
 ---
