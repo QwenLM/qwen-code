@@ -1419,6 +1419,10 @@ describe('loggers', () => {
       recordToolCallMetrics: vi.fn(),
       recordToolExecutionMetrics: vi.fn(),
     };
+    const redactedToolCallArgs = {
+      __redacted: 'tool arguments omitted from telemetry',
+    };
+    const redactedFunctionArgs = JSON.stringify(redactedToolCallArgs, null, 2);
 
     beforeEach(() => {
       vi.spyOn(metrics, 'recordToolCallMetrics').mockImplementation(
@@ -1431,6 +1435,51 @@ describe('loggers', () => {
         () => undefined,
       );
       mockLogger.emit.mockReset();
+    });
+
+    it('omits tool args from every telemetry sink without mutating the input', () => {
+      const secret = 'known-sentinel-secret-value';
+      const command =
+        `export BFF_TOKEN='${secret}' && ` +
+        `curl -H 'Authorization: Bearer ${secret}' ` +
+        `https://user:${secret}@example.com`;
+      const recordUiTelemetryEvent = vi.fn();
+      const configWithRecording = recordingConfig(recordUiTelemetryEvent);
+      const event = rawEvent({
+        function_name: 'run_shell_command',
+        function_args: { command },
+        duration_ms: 25,
+        status: 'success',
+        success: true,
+        prompt_id: 'prompt-secret-redaction',
+      });
+
+      logToolCall(configWithRecording, event);
+
+      expect
+        .soft(JSON.stringify(mockUiEvent.addEvent.mock.calls[0]))
+        .not.toContain(secret);
+      expect
+        .soft(JSON.stringify(recordUiTelemetryEvent.mock.calls[0]))
+        .not.toContain(secret);
+      expect
+        .soft(JSON.stringify(mockLogger.emit.mock.calls[0]))
+        .not.toContain(secret);
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ function_args: redactedToolCallArgs }),
+        'test-session-id',
+      );
+      expect(recordUiTelemetryEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ function_args: redactedToolCallArgs }),
+      );
+      expect(QwenLogger.prototype.logToolCallEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ function_args: redactedToolCallArgs }),
+      );
+      const otelAttributes = mockLogger.emit.mock.calls[0][0].attributes;
+      expect(JSON.parse(otelAttributes['function_args'] as string)).toEqual(
+        redactedToolCallArgs,
+      );
+      expect(event.function_args).toEqual({ command });
     });
 
     const DIFF_STAT = {
@@ -1510,7 +1559,7 @@ describe('loggers', () => {
       expectEmitted(body, EVENT_TOOL_CALL, {
         call_id: 'test-call-id',
         function_name: 'test-function',
-        function_args: JSON.stringify({ arg1: 'value1', arg2: 2 }, null, 2),
+        function_args: redactedFunctionArgs,
         duration_ms: 100,
         tool_type: 'native',
         ...attributes,
@@ -1531,6 +1580,7 @@ describe('loggers', () => {
       expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
         {
           ...normalizeToolCallEvent(event),
+          function_args: redactedToolCallArgs,
           'event.name': EVENT_TOOL_CALL,
           'event.timestamp': TS,
         },
@@ -1786,6 +1836,7 @@ describe('loggers', () => {
       expectQwenAndUiEvents(
         expect.objectContaining({
           function_name: 'unknown_tool',
+          function_args: redactedToolCallArgs,
           status: 'error',
           success: false,
           execution_status: 'unknown',
