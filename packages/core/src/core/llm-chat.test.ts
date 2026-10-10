@@ -11939,7 +11939,7 @@ describe('LlmChat', async () => {
       ).toHaveLength(1);
     });
 
-    it.each(['constructor', 'setHistory'] as const)(
+    it.each(['constructor', 'setHistory', 'addHistory'] as const)(
       'does not recount %s history while counting new fork results',
       async (load) => {
         const inherited = result();
@@ -11960,7 +11960,8 @@ describe('LlmChat', async () => {
           modelText('parent complete'),
         ];
         if (load === 'constructor') chat = new LlmChat(mockConfig, {}, history);
-        else chat.setHistory(history);
+        else if (load === 'setHistory') chat.setHistory(history);
+        else for (const entry of history) chat.addHistory(entry);
         vi.spyOn(chat, 'tryCompress').mockResolvedValue({
           compressionStatus: CompressionStatus.NOOP,
           originalTokenCount: 0,

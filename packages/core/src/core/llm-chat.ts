@@ -2397,8 +2397,10 @@ export class LlmChat {
     this.markLoadedToolResults();
   }
 
-  private markLoadedToolResults(): void {
-    for (const content of this.history)
+  private markLoadedToolResults(
+    history: readonly Content[] = this.history,
+  ): void {
+    for (const content of history)
       for (const part of content.parts ?? []) {
         const provenance = getToolOutputProvenance(part);
         if (provenance) this.injectedToolResults.add(provenance);
@@ -5634,6 +5636,10 @@ export class LlmChat {
   addHistory(content: Content): void {
     this.history.push(content);
     this.syncReviewedSchemasForContent(content);
+    // acceptSpeculation replays provenance-bearing parts another chat
+    // already injected; seed them so the next dispatch does not re-emit
+    // those injection events.
+    this.markLoadedToolResults([content]);
     // addHistory only runs between sends, so the partial-push marker
     // should already be cleared. If it is not, a new caller is
     // violating that invariant — surface it at error level so the
