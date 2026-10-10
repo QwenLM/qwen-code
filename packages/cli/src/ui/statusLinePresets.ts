@@ -240,10 +240,12 @@ export function formatTokenCount(value: number): string {
   if (!Number.isFinite(value) || value <= 0) {
     return '0';
   }
-  if (value >= 1_000_000) {
+  // Compare against the rounding cutoff, not the unit itself, so 999,950
+  // reads 1.0m instead of 1000.0k.
+  if (value >= 999_950) {
     return `${(value / 1_000_000).toFixed(1)}m`;
   }
-  if (value >= 1_000) {
+  if (value >= 999.5) {
     return `${(value / 1_000).toFixed(1)}k`;
   }
   return String(Math.round(value));
