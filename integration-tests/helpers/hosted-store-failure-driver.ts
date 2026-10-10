@@ -173,6 +173,11 @@ const proxy = createServer(async (req, res) => {
         return;
       }
       assert.equal(upstream.status, 500, bytes.toString());
+    } else if (url.pathname.endsWith(':release-mount')) {
+      // #13800: the recovery-blocked turn hands its mount back here; a
+      // transient 409 runtime_session_busy while the turn's own dying
+      // operation still reads active is legitimate, settled by the bounded
+      // handback retries.
     } else assert.equal(upstream.status, 200, `${url}: ${bytes}`);
     if (restoring && store && url.pathname.endsWith('/transactions'))
       report.restoreTransactions.push(...json.transactions);
