@@ -8,12 +8,23 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Config, OutputStyleDefinition } from '@qwen-code/qwen-code-core';
 import { BUILT_IN_OUTPUT_STYLES } from '@qwen-code/qwen-code-core';
 import { renderWithProviders } from '../../test-utils/render.js';
+import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 import { DialogManager } from './DialogManager.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import {
   UIActionsContext,
   type UIActions,
 } from '../contexts/UIActionsContext.js';
+
+const statsDialogProps = vi.hoisted(() => ({
+  last: undefined as { sessionAvailableHeight?: number } | undefined,
+}));
+vi.mock('./StatsDialog.js', () => ({
+  StatsDialog: (props: { sessionAvailableHeight?: number }) => {
+    statsDialogProps.last = props;
+    return null;
+  },
+}));
 
 const CUSTOM_STYLE: OutputStyleDefinition = {
   name: 'Reviewer',
@@ -78,6 +89,31 @@ describe('DialogManager', () => {
       const frame = lastFrame() ?? '';
       expect(frame).toContain('Loading output styles…');
       expect(frame).not.toContain('1. default');
+    });
+  });
+
+  // The height budget is the only link between the terminal size and the
+  // Session tab's scrolling; dropping it silently brings back clipping.
+  describe('stats dialog', () => {
+    const open = (overrides: Partial<UIState>) => {
+      statsDialogProps.last = undefined;
+      renderDialogManager(
+        createUIState({ isStatsDialogOpen: true, ...overrides }),
+        {},
+      );
+    };
+
+    it('hands the constrained dialog height to StatsDialog as the session budget', () => {
+      open({ constrainHeight: true, terminalHeight: 24 });
+      expect(statsDialogProps.last?.sessionAvailableHeight).toBe(
+        getDialogMaxHeight(24, 0),
+      );
+    });
+
+    it('passes no budget when the height is unconstrained', () => {
+      open({ constrainHeight: false, terminalHeight: 24 });
+      expect(statsDialogProps.last).toBeDefined();
+      expect(statsDialogProps.last?.sessionAvailableHeight).toBeUndefined();
     });
   });
 });
