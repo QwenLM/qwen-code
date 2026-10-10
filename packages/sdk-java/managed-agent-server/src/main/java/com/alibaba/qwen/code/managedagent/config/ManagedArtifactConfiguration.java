@@ -31,6 +31,17 @@ public class ManagedArtifactConfiguration {
     }
 
     /**
+     * The automation scanner relays each fire to the Hosted Harness over
+     * blocking HTTP (up to the Harness request timeout per call), so it must
+     * not share the one-thread default pool with the message materializer
+     * and the dispatch and lifecycle recovery ticks.
+     */
+    @Bean
+    public ThreadPoolTaskScheduler managedAutomationScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("managed-automation-").build();
+    }
+
+    /**
      * The replay-floor pass's own tick: a first pass after an operator opts
      * in drains every Session with a Snapshot, which on a large deployment
      * takes minutes, and on the shared one-thread default taskScheduler it

@@ -680,6 +680,15 @@ public class ManagedExtensionRecordStore {
                 }
             }
         }
+        if (domain.equals("schedule")) {
+            JsonNode ref = record.get("promptRef");
+            requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+            // H6b: a persistent definition lives in its target Session.
+            require(!"persistent".equals(record.get("sessionMode").textValue())
+                    || sessionId.equals(record.get("targetSessionId").textValue()),
+                    "Schedule targetSessionId must be this Session for a"
+                            + " persistent definition.");
+        }
         if (domain.equals("monitor_run")) {
             for (String field : List.of("commandRef", "startReceiptRef", "outputRef",
                     "lastObservationRef")) {
@@ -892,6 +901,38 @@ public class ManagedExtensionRecordStore {
                                 .allMatch(key -> ManagedMcpRecords.same(config.get(key), record.get(key)))
                         && ManagedMcpRecords.same(config.get("run").get("definition"), record.get("run").get("definition")),
                         "MCP operation must bind to its active committed configuration.");
+            }
+            if (domain.equals("automation_run")) {
+                // H6b: a run binds to its live definition at the current
+                // revision, and its id is the derivation of its occurrence
+                // (design decisions 2 and 3).
+                String scheduleKey = ManagedExtensionProjection.recordKey(sessionId,
+                        "schedule", record.get("scheduleId").textValue());
+                String scheduleResource = jdbc.query("SELECT record_resource_id FROM"
+                                + " qwen_managed_session_extension_record WHERE"
+                                + " session_scope_key = ? AND record_key = ?",
+                        (result, row) -> result.getString("record_resource_id"),
+                        scopeKey, scheduleKey).stream().findFirst().orElse(null);
+                String binding = "Automation run must bind to its live definition"
+                        + " at the current revision.";
+                require(scheduleResource != null, binding);
+                JsonNode schedule = readBody(resources.apply(scheduleResource));
+                require(!ManagedExtensionRecords
+                                .isTerminalRunState(
+                                schedule.get("run").get("state").textValue())
+                        && schedule.get("definitionRevision").decimalValue().compareTo(
+                                record.get("definitionRevision").decimalValue()) == 0
+                        && ManagedMcpRecords.same(schedule.get("sessionMode"),
+                                record.get("sessionMode"))
+                        && ManagedMcpRecords.same(schedule.get("targetSessionId"),
+                                record.get("targetSessionId")),
+                        binding);
+                require(record.get("automationRunId").textValue().equals(
+                                AutomationLedgerStore.automationRunId(
+                                        record.get("scheduleId").textValue(),
+                                        record.get("occurrenceKey").textValue())),
+                        "Automation run id must be derived from its definition"
+                                + " and occurrence.");
             }
             if (domain.equals("channel_delivery")) {
                 // H5c: a delivery goes out through a committed, live route
