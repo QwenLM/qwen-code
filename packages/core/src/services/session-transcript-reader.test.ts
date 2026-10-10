@@ -1948,6 +1948,24 @@ describe('SessionTranscriptReader', () => {
     expect(page.branchPointsByAssistantUuid).toEqual({ a1: 'checkpoint-1' });
   });
 
+  it('advertises branch points on the restore replay pages', async () => {
+    await writeRecords([
+      ...chain('prompt', 'answer'),
+      branchCheckpoint('checkpoint-1'),
+    ]);
+    const reader = newReader();
+    const restored = await reader.readRestoreProjection(sessionId, all(false));
+    expect(uuids(restored?.replay?.records)).toContain('a1');
+    expect(restored?.replay?.branchPointsByAssistantUuid).toEqual({
+      a1: 'checkpoint-1',
+    });
+
+    const live = await reader.readLiveRestoreProjection(sessionId, all(false));
+    expect(live?.replay?.branchPointsByAssistantUuid).toEqual({
+      a1: 'checkpoint-1',
+    });
+  });
+
   it('keeps a long user turn complete when it exceeds the record limit', async () => {
     await writeRecords([
       ...toolTurn('prompt', 'a-final', 'final answer'),
