@@ -33,3 +33,12 @@ UPDATE managed_agent_operation
 -- the same grace the operation backfill above grants.
 ALTER TABLE managed_agent_turn
     ADD COLUMN consecutive_failures INT NOT NULL DEFAULT 0;
+
+-- The Turn side of the same accounting: an exempt wait (a predecessor's
+-- lease-bounded conflict, or the daemon's own recovery window) still grows
+-- consecutive_failures, so the journaled-progress reset keeps one counter,
+-- and records the exempt share here; the terminal budget reads
+-- consecutive_failures - budget_exempt_failures, so an exempt wait never
+-- consumes the budget the Turn's own failures still have.
+ALTER TABLE managed_agent_turn
+    ADD COLUMN budget_exempt_failures INT NOT NULL DEFAULT 0;

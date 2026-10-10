@@ -1,7 +1,9 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
@@ -19,6 +21,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
@@ -575,6 +578,181 @@ class ManagedActionStoreTest {
                 .isEqualTo("invalid_action_response");
         assertThat(admission.operation().receiptId()).isEqualTo("rcpt-1");
         assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
+    }
+
+    // Both mutating replay arms re-check the mutable actor gate: a caller
+    // admitted only by the Workspace role loses the resurrect the moment
+    // the role is revoked, instead of re-arming a delivery it may no longer
+    // make — while the read-only replay of the recorded failure stays open
+    // to it (review round 10, R10-1).
+    @Test
+    void aReplayedFailedResponseIsNotReadmittedOnceTheOperatorRoleWasRevoked()
+            throws Exception {
+        ManagedAgentStore agents = agents();
+        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
+        String sessionId = agents.insertSessionCommand(TENANT,
+                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
+                List.of(), null).sessionId();
+        admitThroughWorkspaceRole(sessionId);
+        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
+                        + " action_id, state, options_json, created_at)"
+                        + " VALUES (?, ?, ?, 'requested', ?, 0)",
+                TENANT, sessionId, ACTION_ID,
+                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
+                        + "\"expiresAt\":9999999999999}");
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                        + " session_id, operation_id, operation_kind,"
+                        + " actor_digest, idempotency_key, request_digest,"
+                        + " state, admission_stage, delivery_state,"
+                        + " session_status_before, receipt_id, attempt_count,"
+                        + " budget_exempt_attempt, available_at, created_at,"
+                        + " updated_at, completed_at, action_id,"
+                        + " response_json, error_code) VALUES (?, ?,"
+                        + " 'op-action', 'ACTION_RESPONSE', 'digest',"
+                        + " 'idem-key', 'digest', 'FAILED', 'JAVA_DURABLE',"
+                        + " 'CONFIRMED', 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0,"
+                        + " 0, ?, ?, 'action_response_delivery_failed')",
+                TENANT, sessionId, ACTION_ID,
+                "{\"optionId\":\"allow\",\"inputRevision\":1,"
+                        + "\"policyRevision\":\"p/1\"}");
+        var body = new ObjectMapper().readTree("{\"optionId\":\"allow\","
+                + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}");
+
+        // The role arm admits the resurrect while the role stands.
+        var readmitted = actions.admit(TENANT, sessionId, "operator",
+                "digest", "idem-key", "digest", ACTION_ID, body, now.get());
+        assertThat(readmitted.replayed()).isTrue();
+        assertThat(readmitted.operation().state()).isEqualTo("PENDING");
+
+        jdbc.update("UPDATE managed_agent_operation SET state = 'FAILED',"
+                        + " delivery_state = 'CONFIRMED', receipt_id ="
+                        + " 'rcpt-1', error_code ="
+                        + " 'action_response_delivery_failed', attempt_count ="
+                        + " 10, completed_at = 0 WHERE tenant_id = ? AND"
+                        + " session_id = ? AND operation_id = 'op-action'",
+                TENANT, sessionId);
+        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?"
+                        + " AND workspace_id = 'workspace'", TENANT);
+
+        assertThatThrownBy(() -> actions.admit(TENANT, sessionId, "operator",
+                "digest", "idem-key", "digest", ACTION_ID, body, now.get()))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> {
+                    var refusal = (ApiException) error;
+                    assertThat(refusal.getStatus())
+                            .isEqualTo(HttpStatus.FORBIDDEN);
+                    assertThat(refusal.getCode())
+                            .isEqualTo("action_forbidden");
+                });
+        assertThat(state(sessionId)).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT receipt_id FROM"
+                        + " managed_agent_operation WHERE tenant_id = ? AND"
+                        + " session_id = ? AND operation_id = 'op-action'",
+                String.class, TENANT, sessionId)).isEqualTo("rcpt-1");
+    }
+
+    // The digest-match heal settles the row too, so it answers the revoked
+    // role the same way.
+    @Test
+    void aReplayedDecisionExpiredResponseIsNotSettledOnceTheOperatorRoleWasRevoked()
+            throws Exception {
+        ManagedAgentStore agents = agents();
+        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
+        String sessionId = agents.insertSessionCommand(TENANT,
+                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
+                List.of(), null).sessionId();
+        admitThroughWorkspaceRole(sessionId);
+        var body = new ObjectMapper().readTree("{\"optionId\":\"allow\","
+                + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}");
+        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
+                        + " action_id, state, options_json,"
+                        + " decision_receipt_id, decision_digest, created_at)"
+                        + " VALUES (?, ?, ?, 'decided', ?, 'rcpt-decision-1',"
+                        + " ?, 0)",
+                TENANT, sessionId, ACTION_ID,
+                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
+                        + "\"expiresAt\":500}",
+                ManagedActionStore.decisionDigest(body));
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                        + " session_id, operation_id, operation_kind,"
+                        + " actor_digest, idempotency_key, request_digest,"
+                        + " state, admission_stage, delivery_state,"
+                        + " session_status_before, receipt_id, attempt_count,"
+                        + " available_at, created_at, updated_at,"
+                        + " completed_at, action_id, response_json,"
+                        + " error_code) VALUES (?, ?, 'op-action',"
+                        + " 'ACTION_RESPONSE', 'digest', 'idem-key',"
+                        + " 'digest', 'FAILED', 'JAVA_DURABLE', 'CONFIRMED',"
+                        + " 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0, ?, ?,"
+                        + " 'action_response_decision_expired')",
+                TENANT, sessionId, ACTION_ID,
+                "{\"optionId\":\"allow\",\"inputRevision\":1,"
+                        + "\"policyRevision\":\"p/1\"}");
+
+        // The role arm admits the heal while the role stands.
+        var settled = actions.admit(TENANT, sessionId, "operator", "digest",
+                "idem-key", "digest", ACTION_ID, body, now.get());
+        assertThat(settled.operation().state()).isEqualTo("COMPLETED");
+
+        jdbc.update("UPDATE managed_agent_operation SET state = 'FAILED',"
+                        + " delivery_state = 'CONFIRMED', receipt_id ="
+                        + " 'rcpt-1', error_code ="
+                        + " 'action_response_decision_expired',"
+                        + " decision_receipt_id = NULL, completed_at = 0"
+                        + " WHERE tenant_id = ? AND session_id = ? AND"
+                        + " operation_id = 'op-action'",
+                TENANT, sessionId);
+        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?"
+                        + " AND workspace_id = 'workspace'", TENANT);
+
+        assertThatThrownBy(() -> actions.admit(TENANT, sessionId, "operator",
+                "digest", "idem-key", "digest", ACTION_ID, body, now.get()))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> {
+                    var refusal = (ApiException) error;
+                    assertThat(refusal.getStatus())
+                            .isEqualTo(HttpStatus.FORBIDDEN);
+                    assertThat(refusal.getCode())
+                            .isEqualTo("action_forbidden");
+                });
+        assertThat(state(sessionId)).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT decision_receipt_id FROM"
+                        + " managed_agent_operation WHERE tenant_id = ? AND"
+                        + " session_id = ? AND operation_id = 'op-action'",
+                String.class, TENANT, sessionId)).isNull();
+    }
+
+    // A Session whose answer admits only through the mutable Workspace role:
+    // the owner arms never match the operator (the recorded create command
+    // names another actor), the Workspace grant does.
+    private void admitThroughWorkspaceRole(String sessionId) {
+        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id,"
+                        + " actor_id, idempotency_key, request_digest,"
+                        + " session_id, created_at) VALUES (?, ?, 'create',"
+                        + " 'digest', ?, 0)",
+                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"),
+                sessionId);
+        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+                        + " workspace_id, workspace_generation, storage_id,"
+                        + " display_name, config_ref, policy_ref, state)"
+                        + " VALUES (?, 'workspace', 1, 'storage',"
+                        + " 'Workspace', ?, ?, 'ACTIVE')",
+                TENANT, WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        jdbc.update("UPDATE managed_agent_session SET workspace_id ="
+                        + " 'workspace', workspace_generation = 1,"
+                        + " workspace_storage_id = 'storage', cwd_relative ="
+                        + " '.', context_config_ref = ?, context_revision ="
+                        + " 1, workspace_config_ref = ?,"
+                        + " workspace_policy_ref = ? WHERE tenant_id = ? AND"
+                        + " session_id = ?",
+                WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF, TENANT, sessionId);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+                        + " workspace_id, actor_id, role) VALUES (?,"
+                        + " 'workspace', ?, 'OPERATOR')",
+                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "operator"));
     }
 
     private String stage(String sessionId) {

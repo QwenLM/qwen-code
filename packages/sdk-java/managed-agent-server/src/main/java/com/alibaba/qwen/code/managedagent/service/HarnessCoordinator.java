@@ -1091,9 +1091,15 @@ public class HarnessCoordinator {
         // admitted or journaled since.
         TurnRecord current = store.findTurn(turn.tenantId(),
                 turn.sessionId(), turn.turnId()).orElse(turn);
+        // The budget reads only the attempts that could have made progress:
+        // exempt waits (a predecessor's lease-bounded conflict, the daemon's
+        // recovery window) still count toward the journaled-progress reset
+        // but not toward the terminal budget (review round 10, R10-2).
+        int chargedFailures =
+                current.consecutiveFailures() - current.budgetExemptFailures();
         if (!submissionAttempted
                 && !exemptFromRetryBudget
-                && current.consecutiveFailures() >= maxPreAdmissionRetries) {
+                && chargedFailures >= maxPreAdmissionRetries) {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
@@ -1138,7 +1144,7 @@ public class HarnessCoordinator {
         // resolving on its own.
         if (submissionAttempted
                 && !exemptFromRetryBudget
-                && current.consecutiveFailures() >= maxPostAdmissionRetries) {
+                && chargedFailures >= maxPostAdmissionRetries) {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
@@ -1166,7 +1172,7 @@ public class HarnessCoordinator {
                 current.retryCount());
         long retryAfter = Math.addExact(clock.millis(), delay);
         store.scheduleTurnRetry(turn.tenantId(), turn.sessionId(),
-                turn.turnId(), owner, retryAfter);
+                turn.turnId(), owner, retryAfter, exemptFromRetryBudget);
         LOG.warn("Managed Turn coordination will retry tenant={} session={}"
                         + " turn={} retry={} delayMs={} failure={}",
                 turn.tenantId(), turn.sessionId(), turn.turnId(),

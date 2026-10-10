@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -66,7 +67,7 @@ class AdmittedTurnRetryTerminalStateTest {
                 anyString(), eq("hosted_harness_unavailable_after_admission"),
                 anyString());
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
-                anyString(), anyString(), anyLong());
+                anyString(), anyString(), anyLong(), anyBoolean());
     }
 
     // The cancel carries no Turn identity — the daemon aborts whichever Turn
@@ -90,7 +91,7 @@ class AdmittedTurnRetryTerminalStateTest {
                 anyString(), eq("hosted_harness_unavailable_after_admission"),
                 anyString());
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
-                anyString(), anyString(), anyLong());
+                anyString(), anyString(), anyLong(), anyBoolean());
     }
 
     // The named recovery refusals never reach the post-admission budget this
@@ -122,7 +123,7 @@ class AdmittedTurnRetryTerminalStateTest {
         verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), eq(refusalCode), anyString());
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
-                anyString(), anyString(), anyLong());
+                anyString(), anyString(), anyLong(), anyBoolean());
     }
 
     // The cancel gate on a terminal pre-admission fail reads the re-read
@@ -138,7 +139,7 @@ class AdmittedTurnRetryTerminalStateTest {
                 "11111111-1111-4111-8111-111111111111",
                 List.of(Map.of("type", "text", "text", "recover")),
                 "sha256:" + "a".repeat(64), "RUNNING", false, null, null,
-                "previous-owner", Long.MAX_VALUE, 5, 5, null, null,
+                "previous-owner", Long.MAX_VALUE, 5, 5, 0, null, null,
                 null, 1, 1, null, 1);
         // The durable record advanced past the claim: the submission and its
         // recorded admission landed between the claim and the failure.
@@ -146,7 +147,7 @@ class AdmittedTurnRetryTerminalStateTest {
                 "11111111-1111-4111-8111-111111111111",
                 List.of(Map.of("type", "text", "text", "recover")),
                 "sha256:" + "a".repeat(64), "RUNNING", true, "epoch-1", 5L,
-                "previous-owner", Long.MAX_VALUE, 5, 5, null, null,
+                "previous-owner", Long.MAX_VALUE, 5, 5, 0, null, null,
                 null, 1, 1, null, 1);
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), any(Duration.class)))
@@ -183,7 +184,7 @@ class AdmittedTurnRetryTerminalStateTest {
         order.verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), eq("hosted_harness_unavailable"), anyString());
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
-                anyString(), anyString(), anyLong());
+                anyString(), anyString(), anyLong(), anyBoolean());
     }
 
     // 9 is the last retry inside the budget; 6 is already past the
@@ -195,7 +196,7 @@ class AdmittedTurnRetryTerminalStateTest {
         AgentStateStore store = dispatchTransientFailure(retryCount).store();
 
         verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
-                eq("turn"), anyString(), anyLong());
+                eq("turn"), anyString(), anyLong(), eq(false));
         verify(store, never()).failTurn(anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyString());
     }
@@ -217,7 +218,7 @@ class AdmittedTurnRetryTerminalStateTest {
                     anyString());
         } else {
             verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
-                    eq("turn"), anyString(), anyLong());
+                    eq("turn"), anyString(), anyLong(), eq(false));
         }
     }
 
@@ -239,7 +240,7 @@ class AdmittedTurnRetryTerminalStateTest {
                     anyString(), eq("workspace_unavailable"), anyString());
         } else {
             verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
-                    eq("turn"), anyString(), anyLong());
+                    eq("turn"), anyString(), anyLong(), eq(false));
         }
     }
 
@@ -264,7 +265,7 @@ class AdmittedTurnRetryTerminalStateTest {
                     anyString());
         } else {
             verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
-                    eq("turn"), anyString(), anyLong());
+                    eq("turn"), anyString(), anyLong(), eq(false));
         }
     }
 
@@ -285,7 +286,7 @@ class AdmittedTurnRetryTerminalStateTest {
                 new ManagedAgentProperties(), conflict).store();
 
         verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
-                eq("turn"), anyString(), anyLong());
+                eq("turn"), anyString(), anyLong(), eq(true));
         verify(store, never()).failTurn(anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyString());
     }
@@ -306,13 +307,13 @@ class AdmittedTurnRetryTerminalStateTest {
                 promptId,
                 List.of(Map.of("type", "text", "text", "recover")),
                 "sha256:" + "a".repeat(64), "RUNNING", true, "epoch-1", 5L,
-                "previous-owner", Long.MAX_VALUE, retryCount, retryCount,
+                "previous-owner", Long.MAX_VALUE, retryCount, retryCount, 0,
                 null, null, null, 1, 1, null, 1);
         TurnRecord progressed = new TurnRecord("tenant", "session", "turn",
                 promptId,
                 List.of(Map.of("type", "text", "text", "recover")),
                 "sha256:" + "a".repeat(64), "RUNNING", true, "epoch-1", 6L,
-                "previous-owner", Long.MAX_VALUE, retryCount, 0, null, null,
+                "previous-owner", Long.MAX_VALUE, retryCount, 0, 0, null, null,
                 null, 1, 1, null, 1);
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), any(Duration.class)))
@@ -369,7 +370,7 @@ class AdmittedTurnRetryTerminalStateTest {
         verify(store).recordHarnessEvents(eq("tenant"), eq("session"),
                 eq("turn"), anyString(), eq("epoch-1"), any());
         verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
-                eq("turn"), anyString(), anyLong());
+                eq("turn"), anyString(), anyLong(), eq(false));
         verify(store, never()).failTurn(anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyString());
         verify(harness, never()).cancel(anyString(), anyString());
@@ -390,7 +391,7 @@ class AdmittedTurnRetryTerminalStateTest {
                 promptId,
                 List.of(Map.of("type", "text", "text", "recover")),
                 "sha256:" + "a".repeat(64), "RUNNING", false, null, null,
-                "previous-owner", Long.MAX_VALUE, 0, 0, null, null,
+                "previous-owner", Long.MAX_VALUE, 0, 0, 0, null, null,
                 null, 1, 1, null, 1);
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), any(Duration.class)))
@@ -431,7 +432,7 @@ class AdmittedTurnRetryTerminalStateTest {
                 anyString(), eq("hosted_harness_protocol_error"),
                 anyString());
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
-                anyString(), anyString(), anyLong());
+                anyString(), anyString(), anyLong(), anyBoolean());
     }
 
     private static Dispatched dispatchTransientFailure(int retryCount) {
@@ -466,7 +467,7 @@ class AdmittedTurnRetryTerminalStateTest {
                 List.of(Map.of("type", "text", "text", "recover")),
                 "sha256:" + "a".repeat(64), "RUNNING", true, admittedEpoch,
                 null, "previous-owner", Long.MAX_VALUE, retryCount,
-                retryCount, null, null, null, 1, 1, null, 1);
+                retryCount, 0, null, null, null, 1, 1, null, 1);
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));

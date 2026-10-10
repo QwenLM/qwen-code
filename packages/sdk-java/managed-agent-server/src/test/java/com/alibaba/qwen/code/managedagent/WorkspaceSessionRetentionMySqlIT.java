@@ -362,7 +362,9 @@ class WorkspaceSessionRetentionMySqlIT {
                 .containsEntry("budget_exempt_attempt", 0)
                 // V56 grandfather: a pre-V56 operation settles on the
                 // creator-keyed facts alone.
-                .containsEntry("actor_key", null);
+                .containsEntry("actor_key", null)
+                // V62: only a task_cancel names a task.
+                .containsEntry("task_id", null);
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         var store = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);

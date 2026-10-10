@@ -356,7 +356,11 @@ function buildManagedSessionRestoreProjection(
       const uiEvent = (
         record.systemPayload as UiTelemetryRecordPayload | undefined
       )?.uiEvent;
-      if (uiEvent && uiEvent['event.name'] !== 'request_lifecycle') {
+      if (
+        uiEvent &&
+        uiEvent['event.name'] !== 'request_lifecycle' &&
+        uiEvent['event.name'] !== 'tool_lifecycle'
+      ) {
         uiTelemetryEvents.push(uiEvent as UiEvent);
       }
     }
@@ -3259,7 +3263,11 @@ export class SessionTranscriptReader {
         const uiEvent = (
           record.systemPayload as UiTelemetryRecordPayload | undefined
         )?.uiEvent;
-        if (uiEvent && uiEvent['event.name'] !== 'request_lifecycle') {
+        if (
+          uiEvent &&
+          uiEvent['event.name'] !== 'request_lifecycle' &&
+          uiEvent['event.name'] !== 'tool_lifecycle'
+        ) {
           uiTelemetryEvents.push(uiEvent as UiEvent);
         }
       }

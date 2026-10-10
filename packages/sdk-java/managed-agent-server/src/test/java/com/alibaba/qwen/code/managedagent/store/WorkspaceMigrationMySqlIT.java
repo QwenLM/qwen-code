@@ -63,7 +63,8 @@ class WorkspaceMigrationMySqlIT {
         assertThat(jdbc.queryForList("SELECT version FROM flyway_schema_history"
                 + " WHERE installed_rank > ? AND success = TRUE ORDER BY installed_rank",
                 String.class, lastRank)).containsExactly("48", "49", "50",
-                "51", "52", "53", "54", "55", "56", "57", "58", "60");
+                "51", "52", "53", "54", "55", "56", "57", "60", "62",
+                "64", "65");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Integer.class)).isZero();
     }
@@ -266,6 +267,21 @@ class WorkspaceMigrationMySqlIT {
                 WorkspaceExecutionProfile.POLICY_REF, "DELETED".equals(state) ? 1L : null);
         jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id, actor_id, idempotency_key, request_digest,"
                 + " session_id, created_at) VALUES (?, ?, ?, 'digest', ?, 1)", tenant, new byte[] {1}, session, session);
+    }
+
+    // A database that ran main's migrations through V64 must accept the
+    // upgrade that brings the new migration: a lower-numbered resolved-but-
+    // unapplied version fails validate-on-migrate, so the new migration
+    // must sort after main's latest (review round 9 re-review, R8-1).
+    @Test
+    void theBudgetExemptMigrationAppliesAfterMainsLatest() {
+        Flyway.configure().dataSource(data)
+                .locations("classpath:db/migration").target("64").load()
+                .migrate();
+        var result = Flyway.configure().dataSource(data)
+                .locations("classpath:db/migration").load().migrate();
+        assertThat(result.migrationsExecuted).isEqualTo(1);
+        assertThat(result.migrations.getFirst().version).isEqualTo("65");
     }
 
     @AfterEach

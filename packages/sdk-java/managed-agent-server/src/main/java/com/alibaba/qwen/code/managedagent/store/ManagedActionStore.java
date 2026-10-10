@@ -479,6 +479,15 @@ public class ManagedActionStore {
                         && (replayStorage == null
                                 || WorkspaceMigrationAdmission.owner(jdbc,
                                         tenantId, replayStorage) == null)) {
+                    // The resurrect re-arms a delivery, so the mutable
+                    // actor gate is re-evaluated here: a Workspace role
+                    // revoked after the first delivery failed must not
+                    // re-admit the answer (review round 10, R10-1). The
+                    // read-only replay below stays open to it.
+                    if (!admitted && !workspaceOperatorAdmits(tenantId,
+                            ownerRow, actorKey)) {
+                        throw forbidden();
+                    }
                     jdbc.update("UPDATE managed_agent_operation SET state ="
                                     + " 'PENDING', delivery_state ="
                                     + " 'PENDING', error_code = NULL,"
@@ -510,6 +519,11 @@ public class ManagedActionStore {
                         && action.get().decisionDigest() != null
                         && action.get().decisionDigest().equals(
                                 decisionDigest(failedResponse.body()))) {
+                    // The heal settles the row: same gate, same reason.
+                    if (!admitted && !workspaceOperatorAdmits(tenantId,
+                            ownerRow, actorKey)) {
+                        throw forbidden();
+                    }
                     jdbc.update("UPDATE managed_agent_operation SET state ="
                                     + " 'COMPLETED', admission_stage ="
                                     + " 'HARNESS_CONFIRMED', delivery_state ="

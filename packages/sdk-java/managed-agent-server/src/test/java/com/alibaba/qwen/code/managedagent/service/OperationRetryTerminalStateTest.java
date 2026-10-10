@@ -79,7 +79,7 @@ class OperationRetryTerminalStateTest {
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-close", OperationKind.CLOSE, "digest", "RUNNING",
                 "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner", 1,
-                attemptCount, null, null, null, null, 0, lifecycleProtocol, null);
+                attemptCount, null, null, null, null, 0, lifecycleProtocol, null, null);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         when(store.claimOperation(eq("tenant"), eq("session"),
                 eq("op-close"), anyString(), any(Duration.class)))
@@ -475,7 +475,7 @@ class OperationRetryTerminalStateTest {
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-close", OperationKind.CLOSE, "digest", "RUNNING",
                 "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner", 1,
-                10, null, null, null, null, 0, lifecycleProtocol, null);
+                10, null, null, null, null, 0, lifecycleProtocol, null, null);
         when(store.claimOperation(eq("tenant"), eq("session"),
                 eq("op-close"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
@@ -1272,7 +1272,7 @@ class OperationRetryTerminalStateTest {
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-close", OperationKind.CLOSE, "digest", "RUNNING",
                 "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner", 1,
-                10, null, null, null, null, 0, 1, null);
+                10, null, null, null, null, 0, 1, null, null);
         when(store.claimOperation(eq("tenant"), eq("session"),
                 eq("op-close"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
@@ -1335,7 +1335,7 @@ class OperationRetryTerminalStateTest {
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-delete", OperationKind.DELETE, "digest", "RUNNING",
                 "JAVA_DURABLE", "LEASED", "CLOSED", null, "owner", 1,
-                10, null, null, null, null, 0, 0, null);
+                10, null, null, null, null, 0, 0, null, null);
         when(store.claimOperation(eq("tenant"), eq("session"),
                 eq("op-delete"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
@@ -1549,10 +1549,9 @@ class OperationRetryTerminalStateTest {
 
     // A delete of an already closed bound Session settles with zero Runtime
     // calls (the completed CLOSE is the cleanup authority), so settle always
-    // returns for this shape — and a completion-write failure therefore
-    // retries instead of terminating: the terminal record would claim a
-    // settle failure for a shape whose settle is a no-op success. No Runtime
-    // call happens on either path.
+    // returns for this shape — and below the budget a completion-write
+    // failure therefore retries instead of terminating. No Runtime call
+    // happens on either path.
     @Test
     void closedSessionDeleteRetriesACompletionWriteFailureWithoutTouchingTheRuntime() {
         AgentStateStore store = mock(AgentStateStore.class);
@@ -1561,7 +1560,7 @@ class OperationRetryTerminalStateTest {
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-delete", OperationKind.DELETE, "digest", "RUNNING",
-                "JAVA_DURABLE", "LEASED", "CLOSED", null, "owner", 1, 10);
+                "JAVA_DURABLE", "LEASED", "CLOSED", null, "owner", 1, 9);
         when(store.claimOperation(eq("tenant"), eq("session"),
                 eq("op-delete"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
@@ -1601,6 +1600,67 @@ class OperationRetryTerminalStateTest {
                     eq("op-delete"), anyString(), eq(1L), anyLong());
             verify(store, never()).failOperation(anyString(), anyString(),
                     anyString(), anyString(), anyLong(), anyString());
+            verify(runtimeWarmer, never()).drain(anyString());
+            verify(runtimeWarmer, never()).requestWorkspaceClose(anyString(),
+                    anyString());
+            verify(runtimeWarmer, never()).closeWorkspace(anyString(),
+                    anyString());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // ...but the settle of that shape still never reached the Harness, so
+    // it must not read as one that did: past the plain budget the
+    // completion-write failure terminates with the delivery failure code,
+    // not the session_close_completion_unsettled code the contract reserves
+    // for a settle that DID reach the Harness (review round 10, R7-2). The
+    // terminal arm makes no Runtime call for this shape either.
+    @Test
+    void closedSessionDeleteTerminatesWithTheDeliveryCodePastTheBudget() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = new OperationRecord("tenant", "session",
+                "op-delete", OperationKind.DELETE, "digest", "RUNNING",
+                "JAVA_DURABLE", "LEASED", "CLOSED", null, "owner", 1, 10);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-delete"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "CLOSED", null, null, 0, 0, 0, 1, 1, null, 1,
+                        BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(false);
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(store.completeOperation(eq("tenant"), eq("session"),
+                eq("op-delete"), anyString(), eq(1L), anyBoolean()))
+                .thenThrow(new IllegalStateException(
+                        "Session was retired by another operation"));
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-delete");
+
+            verify(store).failOperation(eq("tenant"), eq("session"),
+                    eq("op-delete"), anyString(), eq(1L),
+                    eq("session_lifecycle_delivery_failed"));
+            verify(store, never()).retryOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyLong());
             verify(runtimeWarmer, never()).drain(anyString());
             verify(runtimeWarmer, never()).requestWorkspaceClose(anyString(),
                     anyString());
@@ -1733,7 +1793,7 @@ class OperationRetryTerminalStateTest {
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-close", OperationKind.CLOSE, "digest", "RUNNING",
                 "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner", 1,
-                10, null, null, null, null, 0, lifecycleProtocol, null);
+                10, null, null, null, null, 0, lifecycleProtocol, null, null);
         when(store.claimOperation(eq("tenant"), eq("session"),
                 eq("op-close"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
@@ -1953,7 +2013,7 @@ class OperationRetryTerminalStateTest {
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-action", OperationKind.ACTION_RESPONSE, "digest",
                 "RUNNING", "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner",
-                3, 10, null, null, null, null, 10, 0, null);
+                3, 10, null, null, null, null, 10, 0, null, null);
         JsonNode body = actionBody();
         when(sessions.claimOperation(eq("tenant"), eq("session"),
                 eq("op-action"), anyString(), any(Duration.class)))
@@ -2001,7 +2061,7 @@ class OperationRetryTerminalStateTest {
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-action", OperationKind.ACTION_RESPONSE, "digest",
                 "RUNNING", "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner",
-                3, 10, null, null, null, null, 10, 0, null);
+                3, 10, null, null, null, null, 10, 0, null, null);
         JsonNode body = actionBody();
         when(sessions.claimOperation(eq("tenant"), eq("session"),
                 eq("op-action"), anyString(), any(Duration.class)))
@@ -2457,7 +2517,7 @@ class OperationRetryTerminalStateTest {
         return new OperationRecord("tenant", "session", "op-close",
                 OperationKind.CLOSE, "digest", "RUNNING", "JAVA_DURABLE",
                 "LEASED", "ACTIVE", null, "owner", 1, attemptCount, null,
-                null, null, null, budgetExemptAttempt, lifecycleProtocol, null);
+                null, null, null, budgetExemptAttempt, lifecycleProtocol, null, null);
     }
 
     private static OperationRecord actionOperation(int attemptCount) {
