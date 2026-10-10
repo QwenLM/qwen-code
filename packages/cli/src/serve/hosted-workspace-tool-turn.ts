@@ -51,6 +51,7 @@ import {
   assertManagedSessionDomainEnabled,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
+  ManagedSessionWritesStoppedError,
   type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
@@ -58,6 +59,7 @@ import type { HarnessAgentWaitRun } from '@qwen-code/qwen-code-core/managed-runt
 import {
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
   ManagedSessionStoreHttpError,
+  ManagedSessionStoreTransportError,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
@@ -84,6 +86,9 @@ import {
   childLaunchAdmission,
   childWorkspaceAnswerSuffix,
 } from './hosted-child-agent-session.js';
+import type { HostedSessionMessageSession } from './hosted-session-message-session.js';
+import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
+import { MANAGED_SESSION_MESSAGE_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import { sanitizeName } from '@qwen-code/qwen-code-core/agents/team/teamHelpers.js';
 import {
   HOSTED_TEAM_TOOLS,
@@ -98,6 +103,7 @@ import {
   MANAGED_CHILD_LIMITS,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import {
   managedExtensionRecordKey,
   managedTaskId,
@@ -205,6 +211,21 @@ function shellHistoryId(executionCallId: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+// H4d-b: a refusal the store makes at commit (a closing Session, a rule the
+// authority holds) is a send_message call's answer, never a failed turn. A
+// conflict and the store's own transient faults fail the call like any
+// other store fault: a refusal answer would tell the model a message that
+// may yet commit was never sent.
+function isMessageRefusal(cause: unknown): cause is ManagedSessionRecordError {
+  return (
+    cause instanceof ManagedSessionRecordError &&
+    !(cause instanceof ManagedSessionConflictError) &&
+    !(cause instanceof ManagedSessionStoreHttpError) &&
+    !(cause instanceof ManagedSessionStoreTransportError) &&
+    !(cause instanceof ManagedSessionWritesStoppedError)
+  );
+}
+
 // H3: background admissions exist only while the child_run domain is
 // enabled for commits; otherwise the turn keeps its foreground refusals.
 function childRunAdmissionsEnabled(): boolean {
@@ -233,6 +254,17 @@ function monitorRunAdmissionsEnabled(): boolean {
 function childAgentAdmissionsEnabled(): boolean {
   try {
     assertManagedSessionChildRunKindEnabled('child_agent');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// H4d-b: session message admissions exist only while the session_message
+// domain is enabled for commits.
+function sessionMessageAdmissionsEnabled(): boolean {
+  try {
+    assertManagedSessionDomainEnabled('session_message');
     return true;
   } catch {
     return false;
@@ -390,6 +422,7 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'edit',
   'run_shell_command',
   'agent',
+  'send_message',
   'team_create',
   'task_create',
   'task_update',
@@ -423,6 +456,71 @@ export const HOSTED_AGENT_TOOL: FunctionDeclaration = {
       },
     },
     required: ['description', 'prompt'],
+    additionalProperties: false,
+  },
+};
+
+const SEND_MESSAGE_TEXT_SCHEMA = {
+  type: 'string',
+  description: 'The message text.',
+  minLength: 1,
+};
+
+/**
+ * H4d-b: a parent's durable message to one of its child agent tasks. A
+ * running child takes it as its next input; a completed child is
+ * continued as a new background run with the message as its instruction.
+ */
+export const HOSTED_SEND_MESSAGE_TO_CHILD_TOOL: FunctionDeclaration = {
+  name: 'send_message',
+  description:
+    'Send a message to a child agent this Session launched, by the task_id its launch returned. A running child receives it as its next input once its current turn ends. A child that completed is continued as a new background task with your message as its next instruction, together with its earlier instructions and results; its result arrives as a notification like the first. A failed or cancelled child cannot receive messages. There is no inline reply: the child answers through its completion notification or by messaging you.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      task_id: {
+        type: 'string',
+        description: 'The task id the child agent launch returned.',
+      },
+      message: SEND_MESSAGE_TEXT_SCHEMA,
+    },
+    required: ['task_id', 'message'],
+    additionalProperties: false,
+  },
+};
+
+/** H4d-b: the answers of a committed send_message, which recovery repeats
+ * for a call an interrupted turn committed but never answered. */
+export const HOSTED_MESSAGE_TO_PARENT_TEXT =
+  "Message queued for delivery to the parent agent. It arrives as the parent's next input once its current turn ends.";
+
+export function hostedMessageToChildText(taskId: string): string {
+  return `Message queued for delivery to child agent ${taskId}. It arrives as the child's next input once its current turn ends. There is no inline reply: the child answers through its completion notification or a message to you. Do not relaunch the task while waiting.`;
+}
+
+export function hostedMessageContinuedText(
+  predecessorTaskId: string,
+  taskId: string,
+): string {
+  return `Child agent ${predecessorTaskId} had completed; continued it as ${taskId} with your message as its next instruction. Its result arrives as a durable notification input; either task id reaches the newest run.`;
+}
+
+/** H4d-b: a child Session's durable message to the parent that launched it. */
+export const HOSTED_SEND_MESSAGE_TO_PARENT_TOOL: FunctionDeclaration = {
+  name: 'send_message',
+  description:
+    "Send a message to the parent agent that launched this Session, for a question or progress it needs before you finish. It arrives as the parent's next input once the parent's current turn ends. Your final answer still reaches the parent as your result, so do not repeat it here.",
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      to: {
+        type: 'string',
+        enum: ['parent'],
+        description: 'The recipient: always "parent".',
+      },
+      message: SEND_MESSAGE_TEXT_SCHEMA,
+    },
+    required: ['to', 'message'],
     additionalProperties: false,
   },
 };
@@ -683,6 +781,7 @@ export class HostedWorkspaceToolTurn {
   private readonly childDepth: number;
   private readonly childWorkspaces: boolean;
   private readonly childConsumption: (childRunId: string) => void;
+  private readonly messages?: HostedSessionMessageSession;
   private readonly teams?: HostedTeamSession;
 
   constructor(
@@ -725,6 +824,7 @@ export class HostedWorkspaceToolTurn {
         readonly childWorkspaces?: boolean;
         readonly queueConsumption: (childRunId: string) => void;
       };
+      messages?: HostedSessionMessageSession;
       teams?: HostedTeamSession;
     },
   ) {
@@ -740,6 +840,7 @@ export class HostedWorkspaceToolTurn {
     this.childWorkspaces = extras?.childAgents?.childWorkspaces === true;
     this.childConsumption =
       extras?.childAgents?.queueConsumption ?? (() => undefined);
+    this.messages = extras?.messages;
     this.teams = extras?.teams;
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
@@ -835,8 +936,29 @@ export class HostedWorkspaceToolTurn {
                 : HOSTED_AGENT_TOOL,
             ]
           : []),
+      // H4d-b: the same Sessions message along their lineage — a parent
+      // to the child tasks it launched, a child to its own parent.
+      ...(this.sendMessageRole() === 'parent'
+        ? [HOSTED_SEND_MESSAGE_TO_CHILD_TOOL]
+        : this.sendMessageRole() === 'child'
+          ? [HOSTED_SEND_MESSAGE_TO_PARENT_TOOL]
+          : []),
     ];
     return this.advertised;
+  }
+
+  /** Which side of its lineage this Session's send_message addresses. */
+  private sendMessageRole(): 'parent' | 'child' | undefined {
+    if (
+      this.messages === undefined ||
+      (this.shell === undefined && this.backgroundLane === undefined) ||
+      !sessionMessageAdmissionsEnabled()
+    )
+      return undefined;
+    if (this.messages.lineage !== undefined) return 'child';
+    return this.childDepth === 0 && childAgentAdmissionsEnabled()
+      ? 'parent'
+      : undefined;
   }
 
   /**
@@ -1207,6 +1329,7 @@ export class HostedWorkspaceToolTurn {
         // otherwise read as a hybrid between the two before the third hop.
         this.childAgents?.record(this.childRunIdFor(call.callId)) !==
           undefined ||
+        this.messages?.message(this.messageIdFor(call.callId)) !== undefined ||
         intents.some((entry) => entry.payload['ordinal'] === ordinal) ||
         // A team tool commits only to the journal and answers a refusal as
         // its error, so its committed answer is its own dispatch evidence.
@@ -1433,6 +1556,7 @@ export class HostedWorkspaceToolTurn {
         let monitorAdmitted = false;
         let agentAdmitted = false;
         let agentBackground = true;
+        let messageAdmitted = false;
         const team =
           mcpInput === undefined && HOSTED_TEAM_TOOL_NAMES.includes(call.name);
         if (mcpInput) {
@@ -1694,6 +1818,43 @@ export class HostedWorkspaceToolTurn {
             validationError = this.memberBatchError(call, source);
           }
           input = { ...args };
+        } else if (call.name === 'send_message') {
+          const args = call.args;
+          const role = this.sendMessageRole();
+          messageAdmitted = role !== undefined;
+          const keys =
+            role === 'child' ? ['to', 'message'] : ['task_id', 'message'];
+          const unsupportedKey = Object.keys(args).find(
+            (key) => !keys.includes(key),
+          );
+          const text = args['message'];
+          if (role === undefined) {
+            validationError =
+              'Hosted session messages are unavailable on this Session profile.';
+          } else if (unsupportedKey !== undefined) {
+            validationError =
+              role === 'child'
+                ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A child Session messages only its parent: pass to "parent" and message.`
+                : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. This Session messages only the child agents it launched: pass task_id and message; teams and other Sessions belong to the legacy tool.`;
+          } else if (role === 'child' && args['to'] !== 'parent') {
+            validationError =
+              'Hosted send_message from a child Session addresses only to "parent".';
+          } else if (
+            role === 'parent' &&
+            (typeof args['task_id'] !== 'string' || !args['task_id'].trim())
+          ) {
+            validationError =
+              'Hosted send_message requires the task_id a child agent launch returned.';
+          } else if (typeof text !== 'string' || !text.trim()) {
+            validationError =
+              'Hosted send_message requires a nonempty message.';
+          } else if (
+            Buffer.byteLength(text, 'utf8') >
+            MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes
+          ) {
+            validationError = `Hosted send_message message exceeds ${MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes} bytes.`;
+          }
+          input = { ...args };
         } else if (team) {
           validationError = hostedTeamArgumentError(call.name, call.args);
           input = { ...call.args };
@@ -1741,6 +1902,7 @@ export class HostedWorkspaceToolTurn {
           monitoring: mcpInput === undefined && monitorAdmitted,
           agent: mcpInput === undefined && agentAdmitted,
           agentBackground,
+          message: mcpInput === undefined && messageAdmitted,
           team,
         };
       });
@@ -1799,10 +1961,15 @@ export class HostedWorkspaceToolTurn {
     // child's wait is exactly the deadlock a shared Workspace creates
     // (parent turn held, child tool call queued behind it forever). v1
     // therefore takes the mount only for a batch with at least one
-    // non-agent tool. H4e-b1's team tools touch only the journal.
+    // non-agent tool. A session message (H4d-b) commits a record and
+    // touches no Runtime either, and H4e-b1's team tools touch only
+    // the journal.
     if (
       !this.acquired &&
-      requests.some((request) => request.agent !== true && !request.team)
+      requests.some(
+        (request) =>
+          request.agent !== true && request.message !== true && !request.team,
+      )
     ) {
       // Acquisition may have taken effect even when its reply is lost.
       await this.acquire(false, signal);
@@ -2058,9 +2225,9 @@ export class HostedWorkspaceToolTurn {
         if (refusals[ordinal] !== undefined) continue;
         // A child-agent launch has no Runtime execution to reserve: the
         // control plane's relay owns its side effect, so it never enters
-        // the Broker pipeline below. Nor does a team tool, which commits
-        // only to this Session's journal.
-        if (request.agent || request.team) continue;
+        // the Broker pipeline below. Nor does a session message or a team
+        // tool, which commit only to this Session's journal.
+        if (request.agent || request.message || request.team) continue;
         if (request.mcp) {
           const renewed = this.mcp!.toolInput(
             request.call.name,
@@ -2423,6 +2590,12 @@ export class HostedWorkspaceToolTurn {
         if (request.agent) {
           responses.push(
             ...(await this.acceptChildAgent(request, model, signal, messageId)),
+          );
+          continue;
+        }
+        if (request.message) {
+          responses.push(
+            ...(await this.acceptSessionMessage(request, model, signal)),
           );
           continue;
         }
@@ -2988,6 +3161,102 @@ export class HostedWorkspaceToolTurn {
    */
   private childRunIdFor(callId: string): string {
     return hostedChildRunIdFor(this.promptId, callId);
+  }
+
+  /** The message id one send_message call mints, replay-stable. */
+  private messageIdFor(callId: string): string {
+    return sessionMessageId({
+      senderSessionId:
+        this.session.authority.sessionHeader.sessionKey.sessionId,
+      turnId: this.promptId,
+      callId,
+    });
+  }
+
+  /**
+   * H4d-b: commit one `send_message` and answer the call. The message only
+   * opens its sender's outbox entry (or a continuation launch); the control
+   * plane's relay hands it over, so nothing here waits on the target.
+   * A re-driven batch names the same message or continuation again.
+   */
+  private async acceptSessionMessage(
+    request: { call: ToolCallRequestInfo },
+    model: string,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    const answer = async (text: string, failed: boolean): Promise<Part[]> => {
+      const parts = failed
+        ? convertToFunctionErrorResponse(
+            request.call.name,
+            request.call.callId,
+            [],
+            text,
+          )
+        : convertToFunctionResponse(request.call.name, request.call.callId, [
+            { text },
+          ]);
+      await this.commit('tool_result', parts, model);
+      return parts;
+    };
+    if (signal.aborted) {
+      return answer(
+        'The turn was cancelled before this message was sent.',
+        true,
+      );
+    }
+    const authority = this.session.authority;
+    const text = request.call.args['message'] as string;
+    const messageId = this.messageIdFor(request.call.callId);
+    const callKey = this.childRunIdFor(request.call.callId);
+    if (this.messages!.lineage !== undefined) {
+      try {
+        await this.messages!.sendToParent({
+          text,
+          messageId,
+          executionCallId: callKey,
+          closing: authority.currentActivation?.phase !== 'active',
+        });
+      } catch (cause) {
+        if (!isMessageRefusal(cause)) throw cause;
+        return answer(
+          `The message to the parent was refused: ${cause.message}`,
+          true,
+        );
+      }
+      this.agentDispatched.add(request.call.callId);
+      return answer(HOSTED_MESSAGE_TO_PARENT_TEXT, false);
+    }
+    const taskId = (request.call.args['task_id'] as string).trim();
+    let route: Awaited<ReturnType<HostedChildAgentSession['sendToChild']>>;
+    try {
+      route = await this.childAgents!.sendToChild({
+        taskId,
+        text,
+        messageId,
+        continuationRunId: callKey,
+        executionCallId: callKey,
+        closing: authority.currentActivation?.phase !== 'active',
+        childWorkspaces: this.childWorkspaces,
+      });
+    } catch (cause) {
+      if (!isMessageRefusal(cause)) throw cause;
+      return answer(`The message was refused: ${cause.message}`, true);
+    }
+    if (route.kind === 'refused') return answer(route.reason, true);
+    this.agentDispatched.add(request.call.callId);
+    if (route.kind === 'message') {
+      return answer(
+        hostedMessageToChildText(this.childAgents!.taskIdOf(route.childRunId)),
+        false,
+      );
+    }
+    return answer(
+      hostedMessageContinuedText(
+        this.childAgents!.taskIdOf(route.predecessorChildRunId),
+        this.childAgents!.taskIdOf(route.childRunId),
+      ),
+      false,
+    );
   }
 
   /**
