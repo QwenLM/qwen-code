@@ -1389,10 +1389,17 @@ describe('ChatRecordingService', () => {
 
   describe('rewindRecording', () => {
     it('keeps recorded boundaries aligned after a rejected user message', async () => {
-      turn('T0', 'reply T0');
-      svc.recordUserMessage([]);
-      turn('B', 'reply B');
-      turn('C', 'reply C');
+      const displayedTurn = (text: string) => {
+        user(text, undefined, { displayText: text, hookContext: '' });
+        reply(`reply ${text}`);
+      };
+      displayedTurn('T0');
+      svc.recordUserMessage([], undefined, {
+        displayText: 'rejected',
+        hookContext: '',
+      });
+      displayedTurn('B');
+      displayedTurn('C');
       const records = await flushedAll();
       const target = records.find((r) => r.message?.parts?.[0]?.text === 'C')!;
       const parent = records.find(
@@ -1401,6 +1408,7 @@ describe('ChatRecordingService', () => {
       const index = svc.getRewindTurnIndex(`legacy-record:${target.uuid}`);
       expect(index).toBe(2);
       svc.rewindRecording(index, { truncatedCount: 2 });
+      expect(svc.getUserDisplayTextsForTitle()).toEqual(['T0', 'B']);
       await svc.flush();
       expect(writes().findLast((r) => r.subtype === 'rewind')?.parentUuid).toBe(
         parent.uuid,
@@ -1425,25 +1433,22 @@ describe('ChatRecordingService', () => {
             null,
             ['a', 'user', 'A'],
             ['ra', 'assistant', 'reply A'],
-            [
-              'image',
-              'user',
-              '',
-              {
-                message: {
-                  role: 'user',
-                  parts: [
-                    { inlineData: { mimeType: 'image/png', data: 'image' } },
-                  ],
-                },
-              },
-            ],
+            ['image', 'user', ''],
             ['ri', 'assistant', 'reply image'],
             ['c', 'user', 'C'],
             ['rc', 'assistant', 'reply C'],
             ['d', 'user', 'D'],
             ['rd', 'assistant', 'reply D'],
           );
+          // resumedChain synthesizes `message` after spreading `extra`, so the
+          // inline-data shape has to be applied here, not passed as extra.
+          records[2] = {
+            ...records[2]!,
+            message: {
+              role: 'user',
+              parts: [{ inlineData: { mimeType: 'image/png', data: 'image' } }],
+            },
+          };
           if (mode === 'full restore') {
             svc.rebuildTurnBoundaries(records);
           } else {
@@ -1455,6 +1460,7 @@ describe('ChatRecordingService', () => {
             });
           }
         }
+        expect(records[2]!.message?.parts?.[0]).toHaveProperty('inlineData');
         const target = records.find(
           (r) => r.message?.parts?.[0]?.text === 'D',
         )!;

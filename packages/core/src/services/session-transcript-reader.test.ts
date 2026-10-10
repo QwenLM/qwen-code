@@ -668,10 +668,9 @@ describe('SessionTranscriptReader', () => {
         { ...output, parentUuid: 'invocation' },
       ]);
       const custom = await service.readRestoreProjection(sessionId, NONE);
-      expect(custom?.runtime.apiHistory).toMatchObject([
-        answer.message,
-        user.message,
-      ]);
+      expect(
+        custom?.runtime.apiHistory.map(({ role, parts }) => ({ role, parts })),
+      ).toEqual([answer.message, user.message]);
       expect(custom?.runtime.apiHistory.map(getApiHistoryPromptId)).toEqual([
         undefined,
         'legacy-record:u1',
@@ -1770,9 +1769,9 @@ describe('SessionTranscriptReader', () => {
       executionContext,
     );
     const restored = await service.readRestoreProjection(sessionId, NONE);
-    expect(restored?.runtime.apiHistory).toMatchObject(
-      messages.map((message) => message.message),
-    );
+    expect(
+      restored?.runtime.apiHistory.map(({ role, parts }) => ({ role, parts })),
+    ).toEqual(messages.map((message) => message.message));
     expect(restored?.runtime.recording.sessionModel).toBeUndefined();
     expect(restored?.runtime.recording.sessionApprovalMode).toBeUndefined();
 
@@ -2350,10 +2349,12 @@ describe('SessionTranscriptReader', () => {
 
     const projection = await coldProjection();
 
-    expect(projection?.runtime.apiHistory).toMatchObject([
-      first.message,
-      second.message,
-    ]);
+    expect(
+      projection?.runtime.apiHistory.map(({ role, parts }) => ({
+        role,
+        parts,
+      })),
+    ).toEqual([first.message, second.message]);
     expect(projection?.runtime.apiHistory.map(getApiHistoryPromptId)).toEqual([
       'legacy-record:u1',
       undefined,

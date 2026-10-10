@@ -2354,7 +2354,6 @@ export class ChatRecordingService {
     daemonPromptId?: string,
   ): void {
     try {
-      this.trackUserDisplayTextForTitle(promptPayload?.displayText);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
         executionContext: this.getExecutionContext(),
@@ -2364,6 +2363,9 @@ export class ChatRecordingService {
         ...(promptPayload ? { systemPayload: promptPayload } : {}),
         ...(promptId ? { promptId } : {}),
       };
+      // Tracked only once the record is built: all three parallel arrays must
+      // advance together, or a rejected message skews the rewind projection.
+      this.trackUserDisplayTextForTitle(promptPayload?.displayText);
       this.turnParentUuids.push(record.parentUuid ?? null);
       this.turnPromptIds.push(getRecordRewindId(record));
       this.appendRecord(record);
