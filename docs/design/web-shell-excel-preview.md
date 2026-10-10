@@ -89,6 +89,8 @@ revalidate this hook on upgrades. Invalid merge addresses fail closed. Rejection
 keeps the original downloadable. These guards do not bound general ZIP expansion
 or non-merge workbook memory. Download retains the existing separate file-size policy.
 
+ExcelJS's prebuilt browser bundle includes packages outside its runtime dependency graph. Supplement the extension notices with original license texts for those embedded packages, verified against the pinned sourcemap sources. Notice generation checks the bundle hash and version so an upgrade requires reviewing this inventory.
+
 ## Affected areas
 
 - ArtifactPanel routing, artifact type detection and shared preview components.
@@ -115,6 +117,8 @@ first-party webview CSP permits blob workers while restrictive third-party hosts
 still receive the download fallback. Verify bounded tabs with thousands of
 worksheets, navigation across groups, six-digit row numbers in a wide font,
 independent download failures, and sparse distant formatting without hole scans.
+
+Compare the browser sourcemap package inventory with generated notice headers and verify the supplementary original license texts are included. Reject a changed ExcelJS bundle until its inventory is refreshed.
 
 ## Open questions
 

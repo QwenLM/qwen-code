@@ -7,6 +7,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 
 const projectRoot = path.resolve(
   path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..'),
@@ -408,6 +409,31 @@ export async function collectDependencies(
   }
 }
 
+// ExcelJS ships a prebuilt browser bundle whose embedded dependencies are not
+// discoverable by walking its runtime package.json dependencies.
+export async function getExceljsBrowserNotices(packageDir) {
+  const inventory = JSON.parse(
+    await fs.readFile(
+      new URL('./licenses/exceljs-browser.json', import.meta.url),
+      'utf-8',
+    ),
+  );
+  const manifest = JSON.parse(
+    await fs.readFile(path.join(packageDir, 'package.json'), 'utf-8'),
+  );
+  const bundle = await fs.readFile(path.join(packageDir, inventory.browser));
+  if (
+    manifest.version !== inventory.exceljsVersion ||
+    manifest.browser !== inventory.browser ||
+    createHash('sha256').update(bundle).digest('hex') !== inventory.bundleSha256
+  ) {
+    throw new Error(
+      'ExcelJS browser bundle changed; refresh its bundled license inventory.',
+    );
+  }
+  return inventory.packages;
+}
+
 async function main() {
   try {
     const packageJsonPath = path.join(packagePath, 'package.json');
@@ -436,6 +462,10 @@ async function main() {
     );
 
     const dependencyLicenses = await Promise.all(licensePromises);
+    const exceljs = dependencyEntries.find(({ name }) => name === 'exceljs');
+    if (exceljs) {
+      dependencyLicenses.push(...(await getExceljsBrowserNotices(exceljs.dir)));
+    }
 
     let noticeText =
       'This file contains third-party software notices and license terms.\n\n';
@@ -455,7 +485,7 @@ async function main() {
 
     await fs.writeFile(noticeFilePath, noticeText);
     console.log(`NOTICES.txt generated at ${noticeFilePath}`);
-    console.log(`Total dependencies: ${dependencyEntries.length}`);
+    console.log(`Total dependencies: ${dependencyLicenses.length}`);
   } catch (error) {
     console.error('Error generating NOTICES.txt:', error);
     process.exit(1);
