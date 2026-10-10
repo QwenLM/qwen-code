@@ -6,7 +6,7 @@
 
 Issue #12333 needs evidence that withholding tool declarations reduces total task cost without losing tool recall or correct results. The existing release benchmark dispatches to a separate pool without a repository-owned settings injection point. A local normal CLI run can already compare configurations; it needs an actual caller and independently checked tasks rather than another unused profiling utility.
 
-This change adds a fixed real-model paired acceptance command and a manual GitHub Actions caller. It does not change production defaults, add telemetry, replace SWE-bench or Terminal-Bench, or claim to finish the external pool's settings-overlay integration.
+This change adds a fixed real-model paired acceptance command. It does not change production defaults, add telemetry, replace SWE-bench or Terminal-Bench, or claim to finish the external pool's settings-overlay integration. Like the startup-benchmark harness, it adds no CI gate: only its deterministic result-logic tests run in CI.
 
 ## Paired runs
 
@@ -40,7 +40,7 @@ OPENAI_API_KEY=... npm run test:tool-surface:real -- \
 
 Use a fresh output directory. The command removes only its temporary session profiles/workspaces and retains sanitized reports and request evidence. It never modifies the user's configuration. A bounded session timeout stops owned processes and records failure.
 
-The `Tool surface real-model acceptance` workflow invokes this same command with a compatible model/base URL and the existing `QWEN_API_KEY` secret. It is manually dispatched, so ordinary PR CI does not require model credentials or spend provider tokens. Its report and sanitized artifacts are retained even when the acceptance command fails. Deterministic result-logic tests are picked up by the existing `test:scripts` CI lane; those tests exercise failure rejection and accounting, not model quality.
+This command is a manual entry point: no workflow or scheduled job invokes it, so ordinary PR CI requires neither model credentials nor provider tokens, and whoever runs it keeps the reports and sanitized artifacts, including when acceptance fails. Deterministic result-logic tests are picked up by the existing `test:scripts` CI lane; those tests exercise failure rejection and accounting, not model quality.
 
 ## Validation and remaining work
 

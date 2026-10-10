@@ -6,7 +6,7 @@
 
 Issue #12333 需要证明：减少工具声明能够降低完整任务成本，同时不损害工具召回与结果正确性。现有 release benchmark 会派发到独立 pool，仓库内没有可用的 settings 注入点。本地正常 CLI 已能对照配置；需要补上实际调用入口和独立验证的任务，而不是再增加没有调用方的统计工具。
 
-本次增加固定任务的真实模型配对验收命令，以及手动 GitHub Actions 调用入口。不改变生产默认配置、不新增遥测、不替代 SWE-bench 或 Terminal-Bench，也不宣称完成外部 pool 的 settings-overlay 接入。
+本次增加固定任务的真实模型配对验收命令。不改变生产默认配置、不新增遥测、不替代 SWE-bench 或 Terminal-Bench，也不宣称完成外部 pool 的 settings-overlay 接入。与 startup-benchmark harness 一样，本次不新增 CI 门禁：CI 只运行其结果判定测试。
 
 ## 配对运行
 
@@ -40,7 +40,7 @@ OPENAI_API_KEY=... npm run test:tool-surface:real -- \
 
 输出目录必须是新目录。命令仅清理自己创建的临时会话配置与工作区，保留脱敏报告和请求证据，不修改用户配置。单次会话有时间上限，超时终止自己的进程并记录失败。
 
-`Tool surface real-model acceptance` 工作流用相同命令、兼容的模型／base URL 和现有 `QWEN_API_KEY` secret 执行验收。工作流手动触发，普通 PR CI 不依赖模型凭证，也不消耗供应商 Token。验收失败时仍保留报告和脱敏产物。确定性的结果判定测试由现有 `test:scripts` CI 通道执行；这些测试验证失败拒绝与计量逻辑，不验证模型质量。
+该命令是手动入口，没有工作流或定时任务调用它，因此普通 PR CI 既不依赖模型凭证，也不消耗供应商 Token；报告与脱敏产物由运行者自行保留，验收失败时同样保留。确定性的结果判定测试由现有 `test:scripts` CI 通道执行；这些测试验证失败拒绝与计量逻辑，不验证模型质量。
 
 ## 验证与剩余工作
 
