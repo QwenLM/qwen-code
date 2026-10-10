@@ -423,6 +423,47 @@ class SessionLifecycleCoordinatorTest {
         }
     }
 
+    // H4e-b1 (#13745 E3): a team's members are the lead's child_agent runs,
+    // so the lead's close cascades over them exactly as over any child; the
+    // team's row in the same table is never taken for a child to cascade.
+    @Test
+    void aLeadCloseCancelsItsMembersAndNotItsTeamRecord() {
+        World world = closingWorld("team-");
+        liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
+        world.jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+                        + " (session_scope_key, record_key, tenant_id,"
+                        + " workspace_id, session_id, domain, record_id,"
+                        + " operation_hash, revision, record_resource_id,"
+                        + " created_at)"
+                        + " VALUES ('scope-parent', 'team-1-key', 'tenant',"
+                        + " 'workspace', ?, 'team_state', 'team-1', 'h', 2,"
+                        + " 'res-team-1', 1)",
+                world.session);
+        var harness = new CascadingHarness(true, false);
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(world.store,
+                    new ManagedSessionStore(world.jdbc), harness,
+                    warmer(true, false), world.relayStore, new ObjectMapper(),
+                    admissions(world.store, warmer(true, false)),
+                    brokerProvider(null), executor,
+                    Clock.systemUTC(), world.properties);
+            try {
+                coordinator.dispatch("tenant", world.session,
+                        world.operation);
+                redispatchUntil(coordinator, world, "COMPLETED");
+                assertThat(harness.operations)
+                        .extracting(op -> op.get("kind"))
+                        .containsSequence("cancel", "close_scope");
+                assertThat(harness.operations)
+                        .extracting(op -> op.get("childRunId"))
+                        .containsOnly("run-1");
+                assertThat(harness.closed).contains(world.child, world.session);
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
     @Test
     void aChildThatCannotCloseLeavesTheParentCloseReArmed() {
         World world = closingWorld("stuck-");

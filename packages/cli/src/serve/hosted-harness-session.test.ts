@@ -113,6 +113,7 @@ import { LocalShellStreamCapture } from '@qwen-code/qwen-code-core/managed-runti
 import { monitorWakeNeedsRecovery } from './hosted-monitor-wake-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedSessionMessageSession } from './hosted-session-message-session.js';
+import { HostedTeamSession } from './hosted-team-session.js';
 
 const wakeDeps = vi.hoisted(() => ({
   last: undefined as unknown,
@@ -121,6 +122,7 @@ const wakeDeps = vi.hoisted(() => ({
 const domainEnablement = vi.hoisted(() => ({
   childRun: false,
   monitorRun: false,
+  teams: false,
 }));
 
 vi.mock(
@@ -137,6 +139,7 @@ vi.mock(
       ) => {
         if (domain === 'child_run' && domainEnablement.childRun) return;
         if (domain === 'monitor_run' && domainEnablement.monitorRun) return;
+        if (domain.startsWith('team_') && domainEnablement.teams) return;
         actual.assertManagedSessionDomainEnabled(domain);
       },
       // H4b: record commits gate per kind, beside the admission mock.
@@ -5346,6 +5349,119 @@ describe('Hosted Harness no-tool session', () => {
       (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
         .status,
     ).toBe(204);
+  });
+
+  // H4e-b1: the reopen verifier admits the lead's team roster and board, so
+  // a Session that led a team reopens with its own committed history.
+  it('reopens a Session whose journal carries its team and board', async () => {
+    domainEnablement.childRun = true;
+    domainEnablement.teams = true;
+    try {
+      const key = {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      };
+      const resources = LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
+      const managed = await openManagedSession({
+        runtimeBaseDir: state.root,
+        transcriptPath: '',
+        sessionId: SESSION_ID,
+        sessionKey: key,
+        cwd: state.root,
+        version: 'hosted-harness/1',
+        workerId: BOOT_ID,
+        activationLeaseDurationMs: 60_000,
+        journalStore: new LocalJsonlManagedSessionJournalStore({
+          runtimeBaseDir: state.root,
+          sessionId: SESSION_ID,
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        }),
+        resourceStore: resources,
+        create: {
+          definitionRef: await resources.publish(
+            'managed-definition',
+            Buffer.from(
+              JSON.stringify({
+                engine: 'managed',
+                sessionId: SESSION_ID,
+                toolProfile: 'hosted-workspace-shell/1',
+              }),
+            ),
+          ),
+          rootSnapshotRef: await resources.publish(
+            'managed-root',
+            Buffer.from(JSON.stringify({ cwd: state.root })),
+          ),
+          createdBy: 'hosted-harness',
+        },
+      });
+      try {
+        const store = {
+          authority: managed.authority,
+          resources: managed.resources,
+        };
+        const children = new HostedChildAgentSession(store, key);
+        const teams = new HostedTeamSession(store, key);
+        await teams.run('team_create', { team_name: 'review' }, 'p:team');
+        const member = teams.admitMember('alice');
+        await children.admit({
+          childRunId: 'run-1',
+          ownerScopeId: SESSION_ID,
+          rootSessionId: SESSION_ID,
+          completion: 'sent',
+          description: 'audit the diff',
+          prompt: 'review the change',
+          definition: {
+            definitionId: 'hosted-agent/hosted-workspace-shell/1',
+            definitionRevision: 1,
+            definitionDigest:
+              managed.authority.sessionHeader.definitionRef.digest,
+          },
+          workingDirectory: '.',
+          executionCallId: 'run-1',
+        });
+        await teams.join({ ...member, childRunId: 'run-1' });
+        await children.settleFailed('run-1', {
+          stopReason: 'creation_failed',
+          reason: null,
+          started: false,
+        });
+        await teams.run(
+          'task_create',
+          { subject: 'audit', description: 'audit the diff' },
+          'p:task',
+        );
+      } finally {
+        await managed.close().catch(() => undefined);
+      }
+      mockBrokerBroker();
+      const server = await app(true);
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store() });
+      expect(loaded.status).toBe(200);
+      const journal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+      );
+      expect(
+        journal.events
+          .filter((event) => event.kind === 'domain.committed')
+          .map((event) => event.payload['domain']),
+      ).toEqual(
+        expect.arrayContaining(['team_state', 'team_task', 'child_run']),
+      );
+      expect(
+        (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+          .status,
+      ).toBe(204);
+    } finally {
+      domainEnablement.teams = false;
+    }
   });
 
   // An array-valued `lineage` must not be silently accepted as a root

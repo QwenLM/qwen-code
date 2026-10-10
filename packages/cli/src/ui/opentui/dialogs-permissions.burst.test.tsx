@@ -45,9 +45,25 @@ const mocks = vi.hoisted(() => {
       const config = key === undefined ? props : { ...props, key };
       const children = (config?.children ?? null) as React.ReactNode;
       if (type === 'box' || type === 'text') {
+        // Keep the layout primitives as an attribute so a frame's declared
+        // geometry is readable without booting the native renderer.
+        const captured = JSON.stringify(
+          Object.fromEntries(
+            Object.entries(config ?? {}).filter(
+              ([k, v]) =>
+                k !== 'children' &&
+                (typeof v === 'string' ||
+                  typeof v === 'number' ||
+                  typeof v === 'boolean'),
+            ),
+          ),
+        );
         return React.createElement(
           type === 'box' ? 'div' : 'span',
-          key === undefined ? null : { key },
+          {
+            ...(key === undefined ? {} : { key }),
+            'data-p': captured,
+          },
           children,
         );
       }
@@ -97,6 +113,15 @@ vi.mock('./key-map.js', () => ({
 }));
 
 import { OpenTuiPermissionsDialog } from './dialogs-permissions.js';
+import { getCachedStringWidth } from '../utils/textUtils.js';
+
+/** The layout primitives the jsx mock captured on the element. */
+function layoutOf(node: Element | null): Record<string, unknown> {
+  return JSON.parse(node?.getAttribute('data-p') ?? '{}') as Record<
+    string,
+    unknown
+  >;
+}
 
 /** One stdin read: every key hits the same handler closure, no render between. */
 function burst(keys: RawKey[]) {
@@ -161,6 +186,122 @@ beforeEach(() => {
   mocks.state.keyboardHandlers.length = 0;
   mocks.state.width = 100;
   document.body.innerHTML = '';
+});
+
+describe('OpenTuiPermissionsDialog region budget', () => {
+  it('windows the rule list to the region, so Enter only commits a painted row', () => {
+    // Region nineteen pays the rule view's chrome — tab bar 1, description
+    // and margin 2, search box and margin 4, spacer 1, footer hint 2 — and
+    // leaves the list nine rows, not the constant fifteen whose tail the
+    // region's clip took while the keys kept committing the clipped rows.
+    const rules = Array.from({ length: 20 }, (_, i) => ({
+      raw: `WebFetch(domain-${i}.example.com)`,
+      toolName: 'WebFetch',
+      type: 'allow' as const,
+      scope: 'user',
+    }));
+    render(
+      <OpenTuiPermissionsDialog
+        rules={rules}
+        directories={[]}
+        initialDirectories={[]}
+        onAddRule={vi.fn()}
+        onDeleteRule={vi.fn()}
+        onAddDirectory={vi.fn()}
+        onRemoveDirectory={vi.fn()}
+        onExit={vi.fn()}
+        availableTerminalHeight={19}
+      />,
+    );
+
+    // The window is the nine rows the region pays for: 'Add a new rule…'
+    // plus the first eight rules; the ninth rule does not paint.
+    expect(screen.getByText('WebFetch(domain-7.example.com)')).toBeTruthy();
+    expect(screen.queryByText('WebFetch(domain-8.example.com)')).toBeNull();
+
+    // Eight downs land on the window's last painted row, and Enter commits
+    // exactly that rule's confirmation.
+    for (let i = 0; i < 8; i++) press({ name: 'down' });
+    press(ENTER);
+    expect(screen.getByText('Delete allow rule?')).toBeTruthy();
+    expect(
+      screen.getAllByText('WebFetch(domain-7.example.com)').length,
+    ).toBeGreaterThan(0);
+  });
+});
+
+describe('OpenTuiPermissionsDialog charged runs', () => {
+  it('lays the search box out as the one content row the chrome charge pays for', () => {
+    // The budget charges the search box four rows — margin, two borders, one
+    // content row. Stacked, its two texts would paint five rows, and the rule
+    // list's last windowed row would be one the region never paid for.
+    renderDialog();
+    const placeholder = screen.getByText('Search…');
+    expect(layoutOf(placeholder.parentElement)).toMatchObject({
+      flexDirection: 'row',
+      borderStyle: 'rounded',
+    });
+  });
+
+  it('charges the workspace description the rows it wraps into', () => {
+    // The workspace tab's description is 87 columns — two rows at 80 — and
+    // the flat one-row charge used to hand the directory list a row the
+    // region never paid for: the window is one row smaller now.
+    mocks.state.width = 80;
+    const dirs = Array.from({ length: 10 }, (_, i) => `/ws/dir-${i}`);
+    render(
+      <OpenTuiPermissionsDialog
+        rules={[]}
+        directories={dirs.slice(2)}
+        initialDirectories={dirs.slice(0, 2)}
+        onAddRule={vi.fn()}
+        onDeleteRule={vi.fn()}
+        onAddDirectory={vi.fn()}
+        onRemoveDirectory={vi.fn()}
+        onExit={vi.fn()}
+        availableTerminalHeight={15}
+      />,
+    );
+    press(TAB);
+    press(TAB);
+    press(TAB);
+
+    // 15 - 4 chrome - 2 description rows - 2 initial-directory rows = 7:
+    // 'Add directory…' plus six directories paint, the seventh does not.
+    expect(screen.getByText('/ws/dir-7')).toBeTruthy();
+    expect(screen.queryByText('/ws/dir-8')).toBeNull();
+  });
+
+  it('clips a rule row to the width the window charges for it', () => {
+    // A rule raw wider than the row wraps into a second physical row the
+    // window charged as one; ink truncates the label, and so does the port.
+    mocks.state.width = 80;
+    const longRule = `WebFetch(domain:${'a'.repeat(70)})`;
+    render(
+      <OpenTuiPermissionsDialog
+        rules={[
+          {
+            raw: longRule,
+            toolName: 'WebFetch',
+            type: 'allow' as const,
+            scope: 'user',
+          },
+        ]}
+        directories={[]}
+        initialDirectories={[]}
+        onAddRule={vi.fn()}
+        onDeleteRule={vi.fn()}
+        onAddDirectory={vi.fn()}
+        onRemoveDirectory={vi.fn()}
+        onExit={vi.fn()}
+      />,
+    );
+
+    const row = screen.getByText(/^WebFetch\(domain:/);
+    // Area width 76, minus the `›` box (2) and the one-digit number box (3).
+    expect(getCachedStringWidth(row.textContent ?? '')).toBeLessThanOrEqual(71);
+    expect(row.textContent).toMatch(/…$/);
+  });
 });
 
 describe('OpenTuiPermissionsDialog text-field bursts', () => {

@@ -90,6 +90,7 @@ import {
   ChildMessagesPendingError,
   HostedChildAgentSession,
 } from './hosted-child-agent-session.js';
+import { HostedTeamSession } from './hosted-team-session.js';
 import { MANAGED_SESSION_MESSAGE_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import {
   HostedSessionMessageSession,
@@ -270,6 +271,8 @@ interface HostedSession {
   childAgents?: HostedChildAgentSession;
   /** H4d-b: the Session's messages along its lineage, beside its children. */
   messages?: HostedSessionMessageSession;
+  /** H4e-b1: the lead's team funnel, beside its child orchestrator. */
+  teams?: HostedTeamSession;
   /** Depth of this Session in its child tree; absent or 0 is the root. */
   childDepth?: number;
   /** Tool-arm results answered by a turn; flushed at that turn's settle. */
@@ -1671,6 +1674,9 @@ async function verifyWorkspaceRestore(
         // H5: channel routes and deliveries, parsed by their own bodies.
         'channel_route',
         'channel_delivery',
+        // H4e-b1: the lead's team roster and board.
+        'team_state',
+        'team_task',
       ].includes(event.payload['domain'] as string)
     )
       throw new Error('Hosted recovery domain is unsupported.');
@@ -2281,6 +2287,7 @@ async function executeHostedTurn(
                       session.childConsumption.add(childRunId),
                   },
                   messages: session.messages,
+                  teams: session.teams,
                 },
               )
             : undefined;
@@ -3184,6 +3191,13 @@ export function registerHostedHarnessSessionRoutes(
             },
             session.managed.authority.sessionHeader.sessionKey,
           );
+          session.teams = new HostedTeamSession(
+            {
+              authority: session.managed.authority,
+              resources: session.managed.resources,
+            },
+            session.managed.authority.sessionHeader.sessionKey,
+          );
           // H4d-b: the Session messages along its lineage on the same
           // writes chain; a child names its parent from its definition.
           session.messages = new HostedSessionMessageSession(
@@ -3383,6 +3397,7 @@ export function registerHostedHarnessSessionRoutes(
                     children: session.childAgents,
                     consume: (childRunId) =>
                       session.childConsumption.add(childRunId),
+                    teams: session.teams,
                   });
                 } catch (cause) {
                   // R6 P1: a durable decline freezes for the fleet, but a
@@ -5810,6 +5825,7 @@ export function registerHostedHarnessSessionRoutes(
                 session.childConsumption.add(childRunId),
             },
             messages: session.messages,
+            teams: session.teams,
           },
         );
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
