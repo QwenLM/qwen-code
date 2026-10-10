@@ -487,6 +487,7 @@ import {
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  MID_TURN_SEND_NOW_METHOD,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
@@ -9632,6 +9633,7 @@ class QwenAgent implements Agent {
   private isSessionScopedExtMethod(method: string): boolean {
     return (
       method === PROMPT_CANCEL_METHOD ||
+      method === MID_TURN_SEND_NOW_METHOD ||
       method === TODO_STOP_GUARD_QUEUE_RELEASE_METHOD ||
       method.startsWith('qwen/control/session/') ||
       method.startsWith('qwen/status/session/') ||
@@ -9781,6 +9783,17 @@ class QwenAgent implements Agent {
         targetedCalls.forEach((call) => call.controller.abort());
         await Promise.all(Array.from(targetedCalls, (call) => call.settled));
         return { cancelled: true };
+      }
+      case MID_TURN_SEND_NOW_METHOD: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        this.sessions.get(sessionId)?.sendMidTurnInputNow();
+        return {};
       }
       case TODO_STOP_GUARD_QUEUE_RELEASE_METHOD: {
         const sessionId = params['sessionId'];

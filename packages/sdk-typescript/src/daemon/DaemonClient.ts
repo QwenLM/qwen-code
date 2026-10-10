@@ -209,6 +209,7 @@ import type {
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
+  DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionRecapResult,
@@ -4918,6 +4919,44 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonMidTurnMessageResult;
+      },
+    );
+  }
+
+  /**
+   * Ask the daemon to deliver the session's queued mid-turn messages now
+   * instead of at the agent's next tool boundary: a model response that a
+   * foreground turn is streaming is cut short unless it has started a tool
+   * call, and running tools still finish first. Otherwise, as in a channel,
+   * cron or background turn, the messages are delivered as without the
+   * request, at a tool boundary or by promotion when the turn ends; the
+   * protocol reference lists the narrow windows where neither happens.
+   * `requested: true` means user messages were waiting and the agent was
+   * asked, not that a response was cut. Only available when the daemon
+   * advertises `session_mid_turn_send_now`.
+   */
+  async sendMidTurnMessagesNow(
+    sessionId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSendMidTurnMessagesNowResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/mid-turn-messages/send-now`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/mid-turn-messages/send-now',
+          );
+        }
+        return (await res.json()) as DaemonSendMidTurnMessagesNowResult;
       },
     );
   }

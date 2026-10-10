@@ -4421,6 +4421,112 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     }
   });
 
+  it('requeues a failed send-now drain in its original order', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const media = new SessionAttachmentStore();
+    const queue: MidTurnQueueEntry[] = [];
+    const readFile = vi
+      .spyOn(fsp, 'readFile')
+      .mockImplementationOnce(async () => {
+        // Typed while the drain reads the attachment.
+        queue.push({ messageId: 'u3', text: 'u3' });
+        throw Object.assign(new Error('too many open files'), {
+          code: 'EMFILE',
+        });
+      });
+    try {
+      const reference = await media.putAttachment(
+        Uint8Array.of(1, 2, 3),
+        'image/png',
+      );
+      queue.push(
+        { messageId: 'u1', text: 'u1', content: [reference] },
+        { messageId: 'q1', text: 'q1', queueOnly: true },
+        { messageId: 'u2', text: 'u2' },
+      );
+      const entry = {
+        sessionId: 'sess:emfile-partial',
+        midTurnMessageQueue: queue,
+        settledMidTurnMessageIds: [] as string[],
+        events: { publish },
+        attachments: media,
+      };
+      const client = makeClientWithEntry('sess:emfile-partial', entry);
+
+      await expect(
+        client.extMethod('craft/drainMidTurnQueue', {
+          sessionId: 'sess:emfile-partial',
+          userInputOnly: true,
+        }),
+      ).rejects.toThrow('too many open files');
+      expect(queue.map((item) => item.messageId)).toEqual([
+        'u1',
+        'q1',
+        'u2',
+        'u3',
+      ]);
+      expect(entry.settledMidTurnMessageIds).toEqual([]);
+      expect(publish).not.toHaveBeenCalled();
+
+      await expect(
+        client.extMethod('craft/drainMidTurnQueue', {
+          sessionId: 'sess:emfile-partial',
+        }),
+      ).resolves.toMatchObject({ messages: ['u1', 'q1', 'u2', 'u3'] });
+    } finally {
+      readFile.mockRestore();
+      await media.close();
+    }
+  });
+
+  it('does not requeue a message that left the queue while a send-now drain failed', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const media = new SessionAttachmentStore();
+    const queue: MidTurnQueueEntry[] = [];
+    const readFile = vi
+      .spyOn(fsp, 'readFile')
+      .mockImplementationOnce(async () => {
+        // The turn ends and settles the queue-only entry meanwhile.
+        queue.splice(
+          queue.findIndex((item) => item.messageId === 'q1'),
+          1,
+        );
+        queue.push({ messageId: 'u3', text: 'u3' });
+        throw Object.assign(new Error('too many open files'), {
+          code: 'EMFILE',
+        });
+      });
+    try {
+      const reference = await media.putAttachment(
+        Uint8Array.of(1, 2, 3),
+        'image/png',
+      );
+      queue.push(
+        { messageId: 'u1', text: 'u1', content: [reference] },
+        { messageId: 'q1', text: 'q1', queueOnly: true },
+        { messageId: 'u2', text: 'u2' },
+      );
+      const client = makeClientWithEntry('sess:emfile-settled', {
+        sessionId: 'sess:emfile-settled',
+        midTurnMessageQueue: queue,
+        settledMidTurnMessageIds: [] as string[],
+        events: { publish },
+        attachments: media,
+      });
+
+      await expect(
+        client.extMethod('craft/drainMidTurnQueue', {
+          sessionId: 'sess:emfile-settled',
+          userInputOnly: true,
+        }),
+      ).rejects.toThrow('too many open files');
+      expect(queue.map((item) => item.messageId)).toEqual(['u1', 'u2', 'u3']);
+    } finally {
+      readFile.mockRestore();
+      await media.close();
+    }
+  });
+
   it('keeps a resolvable sibling when one reference is gone at drain', async () => {
     // One dead reference must drop only itself, not the whole message's
     // media: the sibling the store still holds reaches the child.
