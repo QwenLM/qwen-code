@@ -135,8 +135,9 @@ A second click on the row while the request is out is ignored.
 
 - **Explicit, not default.** Enter keeps the edit window and never cuts a
   response for an aside; the user decides when a message is urgent.
-- **Session-wide.** Send now on one row serves all of the session's user
-  input: the drain takes every message the user queued, in queue order.
+- **Session-wide.** Send now on one row serves the session's user input, not
+  only that row: the drain takes the user's queued messages, in queue order,
+  within the drain limit listed under Risks.
   Queue-only steering keeps its own delivery; when it goes out in the same
   request, it follows the user's messages.
 - **Drain before abort.** Aborting first could leave nothing to send: the
@@ -157,12 +158,13 @@ A second click on the row while the request is out is ignored.
   request the turn never served therefore cannot cut a later turn short for
   messages typed with plain Enter.
 - **Taken input is never stranded.** Once the host hands queued input over,
-  the user sees it as delivered and the host will not promote it. Input that
-  a turn took but never sent is kept in that turn's conversation rather than
-  dropped. Only a drain that timed out and is
-  answered after the response it was meant to interrupt has ended falls back
-  to the existing late-recovery path, which delivers the input at the next
-  tool boundary.
+  the user sees it as delivered and the host will not promote it. Input a
+  send-now drain took but the turn never sent is kept in that turn's
+  conversation rather than dropped, also when the turn is stopped while a
+  tool boundary resolves it. Only a drain that timed out and is answered
+  after the response it was meant to interrupt has ended falls back to the
+  existing late-recovery path, which delivers the input with a later drain,
+  possibly in a later turn. The limits listed under Risks still apply.
 - **Partial output is kept.** The cut-off text stays in the transcript (Web
   Shell shows it inside the turn's collapsed processing group) and in
   context, so the model can resume or change course. When the cut comes
@@ -189,12 +191,14 @@ A second click on the row while the request is out is ignored.
   timed-out send-now drain during the response, after it, and after the turn;
   input recovered from a timed-out drain; a host that cannot answer drains; a
   Stop-hook continuation, and the Stop-hook state after input cut one short;
-  channel turns and their Stop continuations; repeated requests while a drain
+  a Goal continuation; channel turns, their Stop continuations, and
+  background-notification turns; repeated requests while a drain
   is out; a tool-boundary drain that waits for an early drain; input kept
   when the turn is cancelled (as text when its attachment cannot be resolved
   then) or when a tool ends it while the drain is out (within the keep
   deadline when a file read or a media bridge hangs, the bridge being
-  cancelled at the deadline); no further
+  cancelled at the deadline), or when the turn is stopped while a tool
+  boundary resolves it; no further
   drain once the turn is stopped, also while its response still streams; a
   request between turns; a request its turn never served; and a request left
   over from a stopped turn. `acpAgent.test.ts` covers routing and the
@@ -202,7 +206,8 @@ A second click on the row while the request is out is ignored.
   typing alone sends nothing, that send-now sends the request only when user
   messages wait, that a rejected request is logged and changes nothing, that
   the send-now drain leaves queue-only steering queued, that a failed
-  send-now drain requeues in the original order, and client authorization.
+  send-now drain requeues in the original order without what left the queue
+  meanwhile, and client authorization.
   `server.test.ts` and `multi-workspace-sessions.test.ts` cover the route,
   its owner routing and its failure statuses, the SDK tests cover both
   clients, and the Web Shell tests cover the row action, its wiring in the
@@ -247,4 +252,18 @@ and the transcript keeps that order after a reload.
 - In the narrow window where a drain is already out when a tool call starts,
   and that tool then ends the turn, or when the turn is stopped, the taken
   input is kept in the conversation and transcript but is not answered in
-  that turn.
+  that turn. When the send-now drain itself times out (the agent waits 2 s,
+  and the daemon may still be reading attachments) and the host answers
+  after the response ended, the input is delivered with a later drain,
+  possibly in a later turn. As for any timed-out drain, it is lost if the
+  answer comes more than 30 s after the timeout, or if the turn is stopped
+  while that later drain resolves its attachments.
+- The agent reads at most 10 messages from one drain answer, while the
+  daemon's queue holds up to 20 and a drain hands all of them over. With
+  more than 10 user messages queued, the rest are settled but never
+  delivered. A tool-boundary drain does the same today; aligning the two
+  limits is left for a follow-up.
+- When the turn is stopped while a tool-boundary drain resolves an
+  attachment, the messages it has not built yet are still dropped, as before
+  this change. Only input a send-now drain took is kept then, and not when
+  that drain timed out and answered after its response ended.

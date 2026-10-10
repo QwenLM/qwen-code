@@ -669,8 +669,9 @@ export interface DaemonSessionActions {
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonRemoveMidTurnMessageResult>;
   /**
-   * Ask the daemon to deliver the queued mid-turn messages now, cutting a
-   * streaming model response short unless it has started a tool call.
+   * Ask the daemon to deliver the queued mid-turn messages now, cutting short
+   * a model response that a foreground turn is streaming, unless it has
+   * started a tool call.
    * Pre-flight the daemon's `session_mid_turn_send_now` capability: older
    * daemons lack the route.
    */

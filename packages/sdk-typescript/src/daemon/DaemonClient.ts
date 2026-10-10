@@ -4925,11 +4925,15 @@ export class DaemonClient {
 
   /**
    * Ask the daemon to deliver the session's queued mid-turn messages now
-   * instead of at the agent's next tool boundary: a model response that is
-   * streaming is cut short unless it has started a tool call, and running
-   * tools still finish first; otherwise the messages wait for the next tool
-   * boundary. Only available when the daemon advertises
-   * `session_mid_turn_send_now`.
+   * instead of at the agent's next tool boundary: a model response that a
+   * foreground turn is streaming is cut short unless it has started a tool
+   * call, and running tools still finish first. Otherwise, as in a channel,
+   * cron or background turn, the messages are delivered as without the
+   * request, at a tool boundary or by promotion when the turn ends; the
+   * protocol reference lists the narrow windows where neither happens.
+   * `requested: true` means user messages were waiting and the agent was
+   * asked, not that a response was cut. Only available when the daemon
+   * advertises `session_mid_turn_send_now`.
    */
   async sendMidTurnMessagesNow(
     sessionId: string,

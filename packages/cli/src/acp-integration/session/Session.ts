@@ -10100,7 +10100,7 @@ export class Session implements SessionContext {
       proposalTurn.settlementBlocked = true;
     }
     const parts: Part[] = [];
-    for (const message of messages) {
+    for (const [index, message] of messages.entries()) {
       const displayText =
         message.kind === 'text' ? message.message : message.displayText;
       let rawParts: Part[];
@@ -10131,6 +10131,15 @@ export class Session implements SessionContext {
         }
       } catch (messageError) {
         if (abortSignal.aborted && !options.preserveFallbackOnAbort) {
+          // Input an early drain took is kept when the turn ends, so give
+          // back what of it this drain did not build.
+          this.midTurnRecoveredMessages.unshift(
+            ...messages
+              .slice(index)
+              .filter((unbuilt) =>
+                this.earlyDrainedMidTurnMessages.has(unbuilt),
+              ),
+          );
           return parts;
         }
         if (!abortSignal.aborted) {

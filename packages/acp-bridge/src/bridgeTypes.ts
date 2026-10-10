@@ -2848,10 +2848,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
 
   /**
    * Ask the agent to deliver the session's queued mid-turn messages now: a
-   * model response that is streaming is cut short so they reach the model in
-   * this round trip, unless it has started a tool call; running tools still
-   * finish first. `requested` is false when no user message is waiting.
-   * Authorized like the sibling mid-turn methods.
+   * model response that a foreground turn is streaming is cut short so they
+   * reach the model in this round trip, unless it has started a tool call;
+   * running tools still finish first. Otherwise, as in a channel, cron or
+   * background turn, the messages are delivered as without the request, at a
+   * tool boundary or by promotion when the turn ends; the protocol reference
+   * lists the narrow windows where neither happens. `requested` is true
+   * when user messages were waiting and the agent was asked, not that a
+   * response was cut; it is false when none were waiting. Authorized like
+   * the sibling mid-turn methods.
    */
   sendMidTurnMessagesNow(
     sessionId: string,
