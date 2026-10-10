@@ -206,6 +206,8 @@ describe('extractClaims', () => {
     '12,34 tests passed',
     '1,234,56 specs to pass',
     '1,2345 assertions green',
+    'Tests: 12,34 passed',
+    'Tests: 1,2345 passed',
   ])('does not extract a count from %s', (text) => {
     expect(extractClaims(text).filter((c) => c.kind === 'count')).toEqual([]);
   });
