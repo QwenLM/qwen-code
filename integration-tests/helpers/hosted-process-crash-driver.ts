@@ -201,6 +201,21 @@ const proxy = createServer(async (req, res) => {
           `${url}: ${bytes}`,
         );
         report.staleWriterConflicts++;
+      } else if (url.pathname.endsWith(':release-mount')) {
+        // #13800: a recovery-blocked turn hands its Workspace mount back
+        // on this route; only two refusals are legitimate — a transient
+        // 409 runtime_session_busy while its own dying operation still
+        // reads active (settled by the bounded handback retries) and a
+        // 503 runtime_reconciliation_required when the turn's full
+        // release already evicted the Runtime Session (non-resident
+        // mount residue belongs to the LOST family's own sweep).
+        assert(
+          upstream.status === 200 ||
+            (upstream.status === 409 && json.code === 'runtime_session_busy') ||
+            (upstream.status === 503 &&
+              json.code === 'runtime_reconciliation_required'),
+          `${upstream.status} ${url}: ${bytes}`,
+        );
       } else if (upstream.status === 409) {
         assert(
           injected &&

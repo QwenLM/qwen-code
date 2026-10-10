@@ -125,7 +125,27 @@ const proxy = createServer(async (req, res) => {
       signal: AbortSignal.timeout(30_000),
     });
     const text = await upstream.text();
-    assert.equal(upstream.status, 200, text);
+    // #13800: a recovery-blocked turn hands its Workspace mount back on
+    // this route; only two refusals are legitimate — a transient 409
+    // runtime_session_busy while the turn's own dying operation still
+    // reads active (settled by the bounded handback retries), and a 503
+    // runtime_reconciliation_required when the turn's full release
+    // already evicted the Runtime Session (non-resident mount residue
+    // belongs to the LOST family's own sweep). Anything else breaks the
+    // fixture's contract.
+    if (url.pathname.endsWith(':release-mount')) {
+      const replyBody = JSON.parse(text) as { code?: unknown };
+      assert(
+        upstream.status === 200 ||
+          (upstream.status === 409 &&
+            replyBody.code === 'runtime_session_busy') ||
+          (upstream.status === 503 &&
+            replyBody.code === 'runtime_reconciliation_required'),
+        `${upstream.status}: ${text}`,
+      );
+    } else {
+      assert.equal(upstream.status, 200, text);
+    }
     const reply = JSON.parse(text);
     if (id) assert.equal(reply.executionCallId, executionCallId);
     if (operation === 'prepare') {

@@ -173,6 +173,21 @@ const proxy = createServer(async (req, res) => {
         return;
       }
       assert.equal(upstream.status, 500, bytes.toString());
+    } else if (url.pathname.endsWith(':release-mount')) {
+      // #13800: the recovery-blocked turn hands its mount back here; only
+      // two refusals are legitimate — a transient 409 runtime_session_busy
+      // while the turn's own dying operation still reads active (settled
+      // by the bounded handback retries), and a 503
+      // runtime_reconciliation_required when the turn's full release
+      // already evicted the Runtime Session (non-resident mount residue
+      // belongs to the LOST family's own sweep).
+      assert(
+        upstream.status === 200 ||
+          (upstream.status === 409 && json?.code === 'runtime_session_busy') ||
+          (upstream.status === 503 &&
+            json?.code === 'runtime_reconciliation_required'),
+        `${upstream.status} ${url}: ${bytes}`,
+      );
     } else assert.equal(upstream.status, 200, `${url}: ${bytes}`);
     if (restoring && store && url.pathname.endsWith('/transactions'))
       report.restoreTransactions.push(...json.transactions);

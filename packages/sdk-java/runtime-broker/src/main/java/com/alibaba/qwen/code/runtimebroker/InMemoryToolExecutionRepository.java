@@ -395,6 +395,28 @@ public final class InMemoryToolExecutionRepository
     }
 
     @Override
+    public synchronized boolean hasPendingDeliveryByRuntimeSession(
+            String bindingId, long runtimeGeneration, String runtimeSessionId) {
+        return recordsById.values().stream().anyMatch(record -> record.isSettled()
+                && record.getBindingId().equals(bindingId)
+                && record.getRuntimeGeneration() == runtimeGeneration
+                && record.getRuntimeSessionId().equals(runtimeSessionId)
+                && deliveryPending(record.getResult()));
+    }
+
+    private static boolean deliveryPending(Map<String, Object> result) {
+        if (result == null) {
+            return false;
+        }
+        Object capture = result.get("capture");
+        if (!(capture instanceof Map<?, ?> map)) {
+            return false;
+        }
+        Object status = map.get("deliveryStatus");
+        return "pending".equals(status) || "blocked".equals(status);
+    }
+
+    @Override
     public synchronized boolean hasActiveByBinding(String bindingId,
             long runtimeGeneration) {
         String id = BrokerValues.requireId(bindingId, "bindingId");

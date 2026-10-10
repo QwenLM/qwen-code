@@ -251,6 +251,22 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                             runtimeSessionId, "released", released));
             return;
         }
+        if ("POST".equals(exchange.getRequestMethod())
+                && suffix.endsWith(":release-mount")) {
+            String runtimeSessionId = pathId(suffix.substring(0,
+                    suffix.length() - ":release-mount".length()));
+            Map<String, Object> body = requestBody(exchange,
+                    "mount release request");
+            requireProtocol(body);
+            JsonCodec.requiredString(body, "requestId",
+                    "mount release request");
+            String harnessSessionId = JsonCodec.requiredString(body,
+                    "harnessSessionId", "mount release request");
+            complete(exchange, service.releaseMount(harnessSessionId,
+                    runtimeSessionId), released -> envelope(harnessSessionId,
+                            runtimeSessionId, "mountReleased", released));
+            return;
+        }
         throw notFound();
     }
 

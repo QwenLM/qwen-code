@@ -106,6 +106,19 @@ public interface ToolExecutionRepository {
             String runtimeSessionId,
             java.util.Set<String> excludingExecutionCallIds);
 
+    /** Any execution of this Runtime Session that settled its tool work but
+     * whose output delivery is still open (publication `deliveryStatus`
+     * `pending` or `blocked`): its Workspace effects are discharged, but
+     * its output evidence is not closed, so the mount's exclusion must
+     * hold too — the operator-recovery family lives on exactly this
+     * distinction. The default fails closed like findByBinding's: a
+     * repository without the probe cannot vouch for anything unproven. */
+    default boolean hasPendingDeliveryByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId) {
+        throw new UnsupportedOperationException(
+                "Pending-delivery probe is unavailable");
+    }
+
     /** Any nonterminal execution still points at this binding generation.
      * UNKNOWN counts as active; terminal uncertainty is not physical stop proof. */
     boolean hasActiveByBinding(String bindingId, long runtimeGeneration);

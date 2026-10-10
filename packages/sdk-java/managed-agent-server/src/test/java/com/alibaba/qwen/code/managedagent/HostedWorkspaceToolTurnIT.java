@@ -465,10 +465,20 @@ class HostedWorkspaceToolTurnIT {
         Map<String, Object> owner = jdbc.queryForMap("SELECT holder_key, runtime_session_id"
                 + " FROM managed_workspace_execution_lease WHERE storage_key = ?", storageKey);
         boolean released = storeFaults ? fault.equals("turn-reply") : List.of("prepare", "start", "release").contains(fault);
+        // #13800: a turn that recovery-blocks no longer parks its mount
+        // forever — its handback frees the holder row once nothing is
+        // unproven (every execution SETTLED, no control in flight) and the
+        // Runtime Session stays READY for the fleet. The one family whose
+        // work genuinely never settles here — the PREPARED prepare-twice
+        // execution — keeps the mount honestly, the gate's busy freeze
+        // while anything is unproven, same as the fleet's.
+        boolean retained = !storeFaults && fault.equals("prepare-twice");
         if (released) assertThat(owner.get("holder_key")).as(fault + " released owner").isNull();
-        else {
+        else if (retained) {
             assertThat(owner.get("holder_key")).as(fault + " retained owner").isNotNull();
             assertThat(owner.get("runtime_session_id")).isEqualTo(report.path("promptId").asText());
+        } else {
+            assertThat(owner.get("holder_key")).as(fault + " handed-back owner").isNull();
         }
         assertThat(jdbc.queryForObject("SELECT session_state FROM qwen_runtime_session WHERE harness_session_id = ?"
                 + " AND runtime_session_id = ?", String.class, session.get("sessionId"), report.path("promptId").asText()))
