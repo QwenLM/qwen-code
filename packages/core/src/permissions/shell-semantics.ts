@@ -35,7 +35,13 @@ import nodePath from 'node:path';
 import os from 'node:os';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { splitCompoundCommandSegments } from './rule-parser.js';
+import {
+  splitCompoundCommandSegments,
+  splitCompoundCommandSegmentsForReading,
+  readingEndsInOpenQuote,
+  type BackslashReading,
+  type CompoundCommandSegment,
+} from './rule-parser.js';
 
 const shellSemanticsDebugLogger = createDebugLogger('SHELL_SEMANTICS');
 
@@ -148,6 +154,134 @@ function trimShellSyntax(token: string): string {
   }
 
   return token.slice(start, end);
+}
+
+/**
+ * Cut the parts of a simple command `tokenize` cannot model but bash never
+ * passes to the command: `#` comments and `>(...)`/`<(...)` process
+ * substitutions. A `#` opens a comment only where bash would start a word
+ * (line start, or after a blank or metacharacter) outside quotes, and runs to
+ * the end of the line; a process substitution is one word however much
+ * whitespace or operator text its parens contain. `cd` operand counting runs
+ * on the cut text so leftover comment words or substitution fragments cannot
+ * read as extra operands and de-resolve a `cd` bash really performs (#12280
+ * R7-2). Anything `cd`-unrelated keeps the raw text.
+ */
+function cutShellCommentsAndProcessSubstitutions(command: string): string {
+  let out = '';
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+  let wordStart = true;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+
+    if (escaped) {
+      out += ch;
+      escaped = false;
+      wordStart = false;
+      continue;
+    }
+    if (ch === '\\' && !inSingle && command[i + 1] === '\n') {
+      // bash drops a `\<newline>` continuation outright, so a `#` opening the
+      // continuation line still starts a comment; emitting the pair as an
+      // escaped newline would hide that and leave the comment words reading
+      // as extra `cd` operands (#12280 R1-4). rule-parser consumes the same
+      // pair without emitting a boundary.
+      i++;
+      continue;
+    }
+    if (ch === '\\' && !inSingle) {
+      out += ch;
+      escaped = true;
+      wordStart = false;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      out += ch;
+      inSingle = !inSingle;
+      wordStart = false;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      out += ch;
+      inDouble = !inDouble;
+      wordStart = false;
+      continue;
+    }
+    if (inSingle || inDouble) {
+      out += ch;
+      continue;
+    }
+
+    if (ch === '#' && wordStart) {
+      while (i < command.length && command[i] !== '\n') {
+        i++;
+      }
+      if (i >= command.length) break;
+      // A comment ending in an odd run of backslashes marks a desync: the
+      // segment splitter suppressed that newline as a `\<newline>`
+      // continuation, but bash does not continue comments, so the next line
+      // is a separate command rather than more words of this one. Emitting
+      // the newline would glue the two sides together (tokenize splits on
+      // space/tab only); stop cutting and leave the remainder raw (#12280
+      // R2-2).
+      let trailingBackslashes = 0;
+      for (let j = i - 1; j >= 0 && command[j] === '\\'; j--) {
+        trailingBackslashes++;
+      }
+      if (trailingBackslashes % 2 === 1) break;
+      out += '\n';
+      wordStart = true;
+      continue;
+    }
+    if ((ch === '>' || ch === '<') && command[i + 1] === '(') {
+      let depth = 0;
+      let psSingle = false;
+      let psDouble = false;
+      let psEscaped = false;
+      let j = i + 1;
+      for (; j < command.length; j++) {
+        const c = command[j]!;
+        if (psEscaped) {
+          psEscaped = false;
+          continue;
+        }
+        if (c === '\\' && !psSingle) {
+          psEscaped = true;
+          continue;
+        }
+        if (c === "'" && !psDouble) {
+          psSingle = !psSingle;
+          continue;
+        }
+        if (c === '"' && !psSingle) {
+          psDouble = !psDouble;
+          continue;
+        }
+        if (psSingle || psDouble) continue;
+        if (c === '(') {
+          depth++;
+        } else if (c === ')') {
+          depth--;
+          if (depth === 0) break;
+        }
+      }
+      // bash expands a process substitution to exactly one real word (an fd
+      // path), so erasing it under-counts the `cd` operands: `cd backup
+      // >(tee log)` fails with too many arguments and never moves the cwd
+      // (#12280 R2-1).
+      out += ' /dev/fd/63';
+      i = j;
+      wordStart = false;
+      continue;
+    }
+
+    wordStart = ' \t\n|&;()<>'.includes(ch);
+    out += ch;
+  }
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2054,17 +2188,65 @@ type CdResolution =
   | { kind: 'dynamic' }
   | { kind: 'static'; cwd: string; cwdUnknown: boolean };
 
-function isDynamicShellPath(word: string): boolean {
-  return word.includes('$') || word.includes('`');
+function isDynamicShellPath(word: string, artifactSegment: boolean): boolean {
+  if (word.includes('$') || word.includes('`')) return true;
+  // A `cd` target in a segment only one quote reading produces is a quoting
+  // artifact of the split, not a real directory, so it must escalate like a
+  // `$`/backtick target instead of becoming a concrete cwd writes get
+  // attributed to (#12246 variant). What marks the artifact is the reading
+  // split, not the word's spelling, so no metacharacter is required (#12280
+  // R1-3, R2-1).
+  return artifactSegment;
+}
+
+// Every redirection spelling bash accepts, with an optional fd (`3>`),
+// both-streams (`&>>`) or named-fd (`{fd}>log`) prefix. Hand-listing the
+// fd-1/2 forms left `3>`, `4>log`, `5>&2`, `<>` and `{fd}>log` behind as fake
+// `cd` operands that de-resolve a `cd` bash really performs (#12280 R7-2).
+const REDIRECT_OPERATOR_TOKEN =
+  /^(?:(?:\d+|&|\{\w+\})?(?:<<<|<<-?|>>|<>|>|<)|>\|)$/;
+const REDIRECT_OPERATOR_PREFIX =
+  /^(?:(?:\d+|&|\{\w+\})?(?:<<<|<<-?|>>|<>|>|<)|>\|)/;
+
+/**
+ * Drop every redirection a simple command carries so only real words remain
+ * for `cd` operand classification: separate (`> file`) and combined
+ * (`>file`) operators, fd duplications (`>&2`, `>& 2`), here-docs (`<<EOF`,
+ * `<< EOF`) and here-strings (`<<< word`). extractRedirects is not reused
+ * here — it is built to REPORT redirect targets, so it consumes a
+ * separate-token operator only when the target passes looksLikePath, parses
+ * a separate `<<<` as a combined `<<` and keeps the here-string word, and
+ * loses an fd-duplication `&` to trimShellSyntax; every one of those
+ * leftovers reads as an extra `cd` operand and de-resolves a `cd` bash
+ * really performs (#12280 R7-2).
+ */
+function stripRedirectsForOperandCount(tokens: string[]): string[] {
+  const words: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i]!;
+    if (REDIRECT_OPERATOR_TOKEN.test(tok)) {
+      // Separate-token operator: its target/delimiter is the next word.
+      i++;
+      continue;
+    }
+    if (REDIRECT_OPERATOR_PREFIX.test(tok)) {
+      // Combined operator+target in one token (`>file`, `2>/dev/null`,
+      // `>&2`, `<<EOF`).
+      continue;
+    }
+    words.push(tok);
+  }
+  return words;
 }
 
 function resolveCdTargetCwd(
   command: string,
   cwd: string,
   cwdUnknown: boolean,
+  artifactSegment = false,
 ): CdResolution {
-  const words = tokenize(command);
-  extractRedirects(words, cwd);
+  const tokens = tokenize(cutShellCommentsAndProcessSubstitutions(command));
+  const words = stripRedirectsForOperandCount(tokens);
 
   if (words[0] === 'popd') return { kind: 'dynamic' };
   if (words[0] !== 'cd' && words[0] !== 'pushd') return { kind: 'not-cd' };
@@ -2078,20 +2260,49 @@ function resolveCdTargetCwd(
   // Skip POSIX `cd` flags (-L, -P, --, -e, -@) without consuming the special
   // `cd -` (previous directory) which is non-static and should bail out.
   let targetIndex = 1;
+  let skippedOption = false;
   while (
     targetIndex < words.length &&
     words[targetIndex]!.startsWith('-') &&
     words[targetIndex] !== '-' &&
     words[targetIndex] !== '--'
   ) {
+    skippedOption = true;
     targetIndex++;
   }
   if (words[targetIndex] === '--') {
     targetIndex++;
   }
 
-  const target = words[targetIndex] ?? process.env['HOME'];
-  if (!target || target === '-' || isDynamicShellPath(target)) {
+  // bash rejects a `cd` carrying more than one operand (`too many
+  // arguments`), so the cwd never moves; trusting words[targetIndex] there
+  // would attribute later writes to a directory the shell never entered
+  // (#12280 R7-2). Sits after redirect stripping so `cd x > /dev/null`
+  // still counts as one operand.
+  if (words.length > targetIndex + 1) return { kind: 'dynamic' };
+
+  const target = words[targetIndex];
+  if (target === undefined) {
+    // A bare `cd` lands in $HOME, but only when nothing was skipped to get
+    // there: `cd -x` makes bash reject the command (`invalid option`) and
+    // stay put, so once the flag loop consumed a word there is no directory
+    // to certify (#12280 R2-1).
+    const home = process.env['HOME'];
+    if (!home || skippedOption) return { kind: 'dynamic' };
+    return { kind: 'static', cwd: home, cwdUnknown: false };
+  }
+  if (
+    target === '-' ||
+    isDynamicShellPath(target, artifactSegment) ||
+    // Glob and tilde spellings (`*`, `?`, `[...]`, `{a,b}`, `~-`) expand to a
+    // directory bash picks at runtime; the literal word is a path no shell
+    // enters, so it certifies nothing (#12280 R2-1).
+    /[*?[\]{}]/.test(target) ||
+    target.startsWith('~') ||
+    // A process substitution expands to an fd path, and `cd /dev/fd/N` fails
+    // (`Not a directory`): the shell stays where it was (#12280 R1-6).
+    target.startsWith('/dev/fd/')
+  ) {
     return { kind: 'dynamic' };
   }
 
@@ -2112,7 +2323,8 @@ function resolveCdTargetCwd(
  * unwrapping shell wrappers (`bash -lc '...'`, `sh -c "..."`).
  *
  * Behaviour:
- *   - `splitCompoundCommand` produces the segment boundaries.
+ *   - `splitCompoundCommandSegments` produces the segment boundaries (the
+ *     per-reading splits below take over for backslash-bearing commands).
  *   - Literal `cd <dir>` segments shift the effective cwd for subsequent
  *     segments and themselves emit no ops.
  *   - Dynamic `cd` targets (variables, substitutions, `cd -`) keep the last
@@ -2121,7 +2333,18 @@ function resolveCdTargetCwd(
  *   - Shell wrappers are unwrapped after the outer command is split, so
  *     wrapper suffixes remain visible while inner compound operators
  *     (`&&`, `;`, `|`) are still recursively discovered.
- *   - Operation order is preserved across segments.
+ *   - Operation order is preserved across segments within one quote reading.
+ *     Commands containing a backslash are walked under bash's
+ *     literal-backslash-in-single-quotes reading first; when that walk
+ *     cannot be trusted to have seen the whole command (it ended inside an
+ *     unterminated quote, or a `#` comment desynced the scanners), the union
+ *     split's extra operations are merged in (#12280 R7-3, R1-1), and when
+ *     it finds no operation at all a union-split fallback runs so a boundary
+ *     only the other reading sees can still surface a write (#12246)
+ *     without losing the cwd the bash-found boundaries establish (#12280
+ *     R9-2). This per-level decision is re-run on every unwrapped shell
+ *     payload, so wrapping a command in `bash -lc "…"` cannot hide
+ *     operations from it (#12280 R8-1).
  *
  * Single source of truth for compound shell analysis: both the
  * PermissionManager (matching `Edit/Write` rules against shell writes) and
@@ -2140,7 +2363,123 @@ export function extractShellOperationsAcrossCommand(
   command: string,
   cwd: string,
 ): ShellOperation[] {
-  return walkCompoundCommand(command, cwd, 0, false);
+  return walkWithBackslashGate(command, cwd, 0, false);
+}
+
+/**
+ * Walk one compound command level, deciding on THIS level's own text how the
+ * two quote readings contribute. The decision is re-run at every wrapper
+ * unwrap depth instead of inheriting the outermost reading, so a payload
+ * inside `bash -lc "…"` gets the same dual-reading treatment as the
+ * outermost command (#12280 R8-1). `depth` is threaded through so the
+ * MAX_SHELL_UNWRAP_DEPTH bound still holds.
+ */
+function walkWithBackslashGate(
+  command: string,
+  cwd: string,
+  depth: number,
+  initialCwdUnknown: boolean,
+): ShellOperation[] {
+  // The walks split stripHeredocBodies(command), so a backslash that only
+  // exists inside a heredoc body can never make the two readings diverge;
+  // gate on what the walks will see rather than on the raw command.
+  const stripped = stripHeredocBodies(command);
+  if (!stripped.includes('\\')) {
+    return walkCompoundCommand(
+      command,
+      cwd,
+      depth,
+      initialCwdUnknown,
+      undefined,
+    );
+  }
+  // The two quote readings can disagree on where the operators are when a
+  // backslash appears: the escape-everywhere reading sees terminators that
+  // bash's literal-backslash-in-single-quotes reading does not (and vice
+  // versa). Each reading is walked on its own; the union split's mixed
+  // boundaries would attribute writes to phantom cwds that no shell produces.
+  // The bash reading is authoritative, with two repairs:
+  //
+  // - When bash's scan of THIS level cannot be trusted to have seen the whole
+  //   command (it ran out of input still inside a quote, or a `#` comment the
+  //   scanners do not model desynced it), the operations past that point sit
+  //   inside what bash's reading treats as a quoted blob. A second walk's
+  //   operations are merged in, deduped (#12280 R7-3, R1-1). Gated on the
+  //   desync so a clean bash scan never publishes the phantoms the coarser
+  //   reading mines out of genuinely quoted text (#12280 R7-3 crossing).
+  // - When the bash walk found no operation at all, the fallback walk uses
+  //   the union split instead of the escape-everywhere split alone, so the
+  //   boundaries bash's reading already found (and the cwd they establish)
+  //   survive into the fallback; re-walking under the coarser reading from
+  //   the original cwd attributes the write to the wrong directory and drops
+  //   the cwd-unknown escalate flags (#12280 R9-2). The merge walk above uses
+  //   the union split for the same reason (#12280 R1-5).
+  //
+  // This per-level decision is re-run on every unwrapped shell payload, so
+  // wrapping a command in `bash -lc "…"` cannot hide operations from it
+  // (#12280 R8-1).
+  const bashOps = walkCompoundCommand(
+    command,
+    cwd,
+    depth,
+    initialCwdUnknown,
+    'bash',
+  );
+  if (bashOps.length > 0) {
+    // A comment apostrophe can re-close the quote the bash scan is stuck in,
+    // so the scan reports balanced while a real write sits inside what bash
+    // treats as a quoted blob; a comment anywhere the scanners do not model
+    // (#11882) therefore forces the merge too, not just an unclosed quote
+    // (#12280 R1-1).
+    const commentDesynced =
+      cutShellCommentsAndProcessSubstitutions(stripped) !== stripped;
+    if (!readingEndsInOpenQuote(stripped, 'bash') && !commentDesynced) {
+      return bashOps;
+    }
+    // The extra walk uses the union split, not the escape-everywhere reading
+    // alone: re-walking under the coarser reading from the original cwd
+    // attributes the writes it adds to the wrong directory and drops the
+    // cwd-unknown escalate flags, the same defect the fallback below avoids
+    // (#12280 R1-5, R9-2).
+    const extraOps = walkCompoundCommand(
+      command,
+      cwd,
+      depth,
+      initialCwdUnknown,
+      undefined,
+    );
+    return mergeShellOperations(bashOps, extraOps);
+  }
+  return walkCompoundCommand(command, cwd, depth, initialCwdUnknown, undefined);
+}
+
+/**
+ * Union of two operation lists; the first copy of each operation wins, so the
+ * bash reading's cwd attribution beats the coarser escape-everywhere
+ * reading's. The escalation flags are unioned across copies instead: this
+ * merge only runs where the gate has already decided the bash scan cannot be
+ * trusted to have seen the whole command, so dropping the losing copy's
+ * `cwdUnknown`/`pathMayDependOnCwd` would certify certainty the analysis
+ * does not have (#12280 R2-3).
+ */
+function mergeShellOperations(
+  primary: ShellOperation[],
+  extra: ShellOperation[],
+): ShellOperation[] {
+  const key = (op: ShellOperation) =>
+    `${op.virtualTool}:${op.filePath ?? ''}:${op.domain ?? ''}`;
+  const merged = new Map<string, ShellOperation>();
+  for (const op of [...primary, ...extra]) {
+    const existing = merged.get(key(op));
+    if (existing) {
+      existing.cwdUnknown = existing.cwdUnknown || op.cwdUnknown;
+      existing.pathMayDependOnCwd =
+        existing.pathMayDependOnCwd || op.pathMayDependOnCwd;
+    } else {
+      merged.set(key(op), op);
+    }
+  }
+  return [...merged.values()];
 }
 
 function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
@@ -2257,19 +2596,96 @@ function getHeredocDelimiters(line: string): string[] {
   return delimiters;
 }
 
+/**
+ * Locate each segment's trimmed text inside the command, in order. Returns
+ * null when the segmentation cannot be replayed verbatim (callers then treat
+ * nothing as an artifact, the pre-escalation behavior).
+ */
+function segmentSpans(
+  segments: CompoundCommandSegment[],
+  text: string,
+): Array<{ start: number; end: number }> | null {
+  const spans: Array<{ start: number; end: number }> = [];
+  let from = 0;
+  for (const segment of segments) {
+    const start = text.indexOf(segment.command, from);
+    if (start === -1) return null;
+    spans.push({ start, end: start + segment.command.length });
+    from = start + segment.command.length;
+  }
+  return spans;
+}
+
+/**
+ * Per-segment quoting-artifact flags for `cd` classification. Directional on
+ * purpose (#12280 R7-1):
+ *
+ * - Under a single reading, a segment is an artifact only when the OTHER
+ *   reading cuts strictly inside this segment's span: a finer split there
+ *   means the segment's spelling spans an operator that reading cannot see.
+ *   Substring containment is not the test — an inert sibling segment whose
+ *   text happens to occur inside a `cd` target (`ls` inside `tools`) must not
+ *   mark a genuine directory (#12280 R1-2), and the other reading merely
+ *   failing to reproduce the segment proves nothing either: the accurate bash
+ *   segmentation of a genuine backslash-bearing directory is exactly what the
+ *   escape reading swallows into one quoted span.
+ * - Under the union split, a segment is an artifact when the authoritative
+ *   bash segmentation does not reproduce it at all: a `cd` target only the
+ *   union split produces must escalate to cwdUnknown instead of becoming a
+ *   trusted static cwd (#12280 R1-3).
+ */
+function buildArtifactSegmentChecks(
+  stripped: string,
+  subCommands: CompoundCommandSegment[],
+  reading: BackslashReading | undefined,
+): boolean[] {
+  if (reading === undefined) {
+    if (!stripped.includes('\\')) return subCommands.map(() => false);
+    const bashSegments = new Set(
+      splitCompoundCommandSegmentsForReading(stripped, 'bash').map(
+        (segment) => segment.command,
+      ),
+    );
+    return subCommands.map((segment) => !bashSegments.has(segment.command));
+  }
+
+  const otherCommands = splitCompoundCommandSegmentsForReading(
+    stripped,
+    reading === 'bash' ? 'escape-everywhere' : 'bash',
+  );
+  const mySpans = segmentSpans(subCommands, stripped);
+  const otherSpans = segmentSpans(otherCommands, stripped);
+  if (mySpans === null || otherSpans === null) {
+    return subCommands.map(() => false);
+  }
+  const otherEnds = otherSpans.map((span) => span.end);
+  return mySpans.map((span) =>
+    otherEnds.some((end) => span.start < end && end < span.end),
+  );
+}
+
 function walkCompoundCommand(
   command: string,
   cwd: string,
   depth: number,
   initialCwdUnknown: boolean,
+  reading?: BackslashReading,
 ): ShellOperation[] {
-  const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
+  const stripped = stripHeredocBodies(command);
+  const subCommands = reading
+    ? splitCompoundCommandSegmentsForReading(stripped, reading)
+    : splitCompoundCommandSegments(stripped);
+  const artifactSegment = buildArtifactSegmentChecks(
+    stripped,
+    subCommands,
+    reading,
+  );
 
   const ops: ShellOperation[] = [];
   let effectiveCwd = cwd;
   let cwdUnknown = initialCwdUnknown;
 
-  for (const { command: sub, terminator } of subCommands) {
+  for (const [index, { command: sub, terminator }] of subCommands.entries()) {
     // `cd x & …` runs the `cd` in a background subshell, so it does not move
     // the cwd the following segments run in. Treating it as a foreground `cd`
     // would attribute their relative writes to the wrong directory — for
@@ -2277,7 +2693,12 @@ function walkCompoundCommand(
     // cwd, which is exactly where a protected settings file would be.
     const backgrounded = terminator === '&';
 
-    const cdTarget = resolveCdTargetCwd(sub, effectiveCwd, cwdUnknown);
+    const cdTarget = resolveCdTargetCwd(
+      sub,
+      effectiveCwd,
+      cwdUnknown,
+      artifactSegment[index] ?? false,
+    );
     if (cdTarget.kind === 'static') {
       if (!backgrounded) {
         effectiveCwd = cdTarget.cwd;
@@ -2293,12 +2714,14 @@ function walkCompoundCommand(
     }
 
     // Unwrap per segment, after the outer split, so wrapper suffixes like
-    // `bash -lc 'safe' && echo > file` are not discarded.
+    // `bash -lc 'safe' && echo > file` are not discarded. The unwrapped
+    // payload re-runs the reading decision on its own text instead of
+    // inheriting this level's reading (#12280 R8-1).
     if (depth < MAX_SHELL_UNWRAP_DEPTH) {
       const subUnwrapped = stripShellWrapper(sub);
       if (subUnwrapped !== sub) {
         ops.push(
-          ...walkCompoundCommand(
+          ...walkWithBackslashGate(
             subUnwrapped,
             effectiveCwd,
             depth + 1,
