@@ -11,6 +11,7 @@ import {
   isChildRunSuccessor,
   parseChildRun,
   type ChildAgentRun,
+  type ChildSessionRun,
 } from './managed-child-run-record.js';
 import {
   isChildAcceptanceStart,
@@ -32,7 +33,10 @@ import {
   childSettleCompletedBody,
   childStopRequestedBody,
   decodeChildLaunchEnvelope,
+  decodeWorkflowLaunchEnvelope,
   encodeChildLaunchEnvelope,
+  encodeWorkflowLaunchEnvelope,
+  workflowLaunchBody,
 } from './managed-child-operations.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
 
@@ -70,13 +74,15 @@ function launch(): ChildAgentRun {
   });
 }
 
-function chain(...steps: Array<(previous: ChildAgentRun) => ChildAgentRun>) {
-  const bodies: ChildAgentRun[] = [launch()];
+function chain(
+  ...steps: Array<(previous: ChildSessionRun) => ChildSessionRun>
+) {
+  const bodies: ChildSessionRun[] = [launch()];
   for (const step of steps) bodies.push(step(bodies[bodies.length - 1]!));
   return bodies;
 }
 
-function expectValidChain(bodies: readonly ChildAgentRun[]) {
+function expectValidChain(bodies: readonly ChildSessionRun[]) {
   expect(isChildRunStart(bodies[0])).toBe(true);
   for (const body of bodies) expect(parseChildRun(body)).toBeDefined();
   for (let index = 1; index < bodies.length; index++) {
@@ -457,6 +463,256 @@ describe('managed child operations (H4b)', () => {
         kind: 'workflow',
         depth: 2,
         workspaceMode: 'snapshot',
+      });
+    });
+  });
+});
+
+describe('managed workflow child operations (#13803)', () => {
+  const WORKFLOW_DEFINITION = {
+    definitionId: 'workflow/audit',
+    definitionRevision: 1,
+    definitionDigest: 'a'.repeat(64),
+  };
+  const SCRIPT = 'return args.x + 1;';
+
+  function workflowLaunch(): ChildSessionRun {
+    return workflowLaunchBody({
+      childRunId: 'run-1',
+      ownerScopeId: 'scope-main',
+      rootSessionId: '550e8400-e29b-41d4-a716-446655440000',
+      completion: 'sent',
+      inputRef: INPUT,
+      workingDirectory: '.',
+      executionCallId: 'call-1',
+      definition: WORKFLOW_DEFINITION,
+    });
+  }
+
+  function workflowChain(
+    ...steps: Array<(previous: ChildSessionRun) => ChildSessionRun>
+  ) {
+    const bodies: ChildSessionRun[] = [workflowLaunch()];
+    for (const step of steps) bodies.push(step(bodies[bodies.length - 1]!));
+    return bodies;
+  }
+
+  describe('workflow launch envelope', () => {
+    it('round-trips definition, script and args, with args null when absent', () => {
+      const envelope = {
+        definition: WORKFLOW_DEFINITION,
+        script: SCRIPT,
+        args: { x: 1 },
+      };
+      expect(
+        decodeWorkflowLaunchEnvelope(encodeWorkflowLaunchEnvelope(envelope)),
+      ).toEqual(envelope);
+      expect(
+        decodeWorkflowLaunchEnvelope(
+          encodeWorkflowLaunchEnvelope({
+            definition: WORKFLOW_DEFINITION,
+            script: SCRIPT,
+            args: undefined,
+          }),
+        ),
+      ).toEqual({ ...envelope, args: null });
+    });
+
+    it('refuses an oversized envelope and non-serializable args', () => {
+      expect(() =>
+        encodeWorkflowLaunchEnvelope({
+          definition: WORKFLOW_DEFINITION,
+          script: 's'.repeat(MANAGED_CHILD_LIMITS.maxEnvelopeBytes),
+          args: null,
+        }),
+      ).toThrow('byte_limit');
+      expect(() =>
+        encodeWorkflowLaunchEnvelope({
+          definition: WORKFLOW_DEFINITION,
+          script: SCRIPT,
+          args: null,
+        }),
+      ).not.toThrow();
+      const cyclic: Record<string, unknown> = {};
+      cyclic['self'] = cyclic;
+      expect(() =>
+        encodeWorkflowLaunchEnvelope({
+          definition: WORKFLOW_DEFINITION,
+          script: SCRIPT,
+          args: cyclic,
+        }),
+      ).toThrow(ManagedSessionRecordError);
+    });
+
+    it('refuses malformed envelope bytes', () => {
+      for (const [bytes, message] of [
+        [Buffer.from('not json', 'utf8'), 'must be JSON'],
+        [Buffer.from('[]', 'utf8'), 'must be a JSON object'],
+        [Buffer.from('{"script":"s"}', 'utf8'), 'must have exactly'],
+        [
+          Buffer.from(
+            JSON.stringify({ definition: WORKFLOW_DEFINITION, script: SCRIPT }),
+            'utf8',
+          ),
+          'must have exactly',
+        ],
+        [
+          Buffer.from(
+            JSON.stringify({
+              definition: {},
+              script: SCRIPT,
+              args: null,
+            }),
+            'utf8',
+          ),
+          'must have exactly the keys',
+        ],
+        [
+          Buffer.from(
+            JSON.stringify({
+              definition: { ...WORKFLOW_DEFINITION, extra: true },
+              script: SCRIPT,
+              args: null,
+            }),
+            'utf8',
+          ),
+          'must have exactly the keys',
+        ],
+        [
+          Buffer.from(
+            JSON.stringify({
+              definition: {
+                ...WORKFLOW_DEFINITION,
+                definitionDigest: 'F'.repeat(64),
+              },
+              script: SCRIPT,
+              args: null,
+            }),
+            'utf8',
+          ),
+          'digest',
+        ],
+        [
+          Buffer.from(
+            JSON.stringify({
+              definition: {
+                ...WORKFLOW_DEFINITION,
+                definitionRevision: 0,
+              },
+              script: SCRIPT,
+              args: null,
+            }),
+            'utf8',
+          ),
+          'integer from 1 or more',
+        ],
+        [
+          Buffer.from(
+            JSON.stringify({
+              definition: WORKFLOW_DEFINITION,
+              script: '',
+              args: null,
+            }),
+            'utf8',
+          ),
+          'must be non-empty text',
+        ],
+      ] as const) {
+        expect(() => decodeWorkflowLaunchEnvelope(bytes)).toThrow(message);
+      }
+    });
+  });
+
+  describe('workflow run revision builders', () => {
+    it('opens with the pin from revision 1, as the contract requires', () => {
+      const launch = workflowLaunch();
+      expect(launch.kind).toBe('workflow');
+      expect(isChildRunStart(launch)).toBe(true);
+      expect(launch.run.definition).toEqual(WORKFLOW_DEFINITION);
+      expect(launch.depth).toBe(1);
+      expect(launch.workspaceMode).toBe('shared');
+      // H4c's parse rule: a first revision without the pin is refused.
+      expect(() =>
+        parseChildRun({
+          ...launch,
+          run: { ...launch.run, definition: null },
+        }),
+      ).toThrow('Workflow run must pin its workflow definition from launch.');
+    });
+
+    it('replays the full sent-arm pipeline over a workflow chain', () => {
+      const bodies = workflowChain(
+        (p) =>
+          childDispatchBody(p, { dispatchId: 'dispatch-1', runtime: BINDING }),
+        (p) => childAttachBody(p, { childSessionId: 'session-child' }),
+        (p) =>
+          childSettleCompletedBody(p, {
+            resultRef: RESULT,
+            terminalReceiptRef: RECEIPT,
+          }),
+        (p) => childDeliveryBody(p, 'accepted'),
+        (p) => childDeliveryBody(p, 'consumed'),
+      );
+      expectValidChain(bodies);
+      const settled = parseChildRun(bodies[3]!);
+      if (settled.kind !== 'workflow') throw new Error('kind');
+      expect(settled.stopReason).toBe('completed');
+      expect(settled.run.delivery).toEqual({
+        target: 'session',
+        state: 'accepting',
+      });
+      const acceptance = childAcceptanceBody(bodies[3]!, {
+        contentRef: RESULT,
+        terminalReceiptRef: RECEIPT,
+      });
+      expect(isChildAcceptanceStart(acceptance)).toBe(true);
+      expect(
+        isChildAcceptanceSuccessor(
+          acceptance,
+          childAcceptanceConsumedBody(acceptance),
+        ),
+      ).toBe(true);
+    });
+
+    it('replays the cancel cascade and proven failures over a workflow chain', () => {
+      expectValidChain(
+        workflowChain(
+          (p) =>
+            childDispatchBody(p, {
+              dispatchId: 'dispatch-1',
+              runtime: BINDING,
+            }),
+          (p) => childStopRequestedBody(p),
+          (p) => childCancelBody(p, { started: false }),
+        ),
+      );
+      expectValidChain(
+        workflowChain(
+          (p) =>
+            childDispatchBody(p, {
+              dispatchId: 'dispatch-1',
+              runtime: BINDING,
+            }),
+          (p) => childAttachBody(p, { childSessionId: 'session-child' }),
+          (p) =>
+            childFailBody(p, {
+              stopReason: 'child_failed',
+              reason: null,
+              started: true,
+            }),
+        ),
+      );
+      const cancelled = parseChildRun(
+        workflowChain(
+          (p) => childStopRequestedBody(p),
+          (p) => childCancelBody(p, { started: false }),
+        ).at(-1)!,
+      );
+      if (cancelled.kind !== 'workflow') throw new Error('kind');
+      expect(cancelled.stopReason).toBe('stop_requested');
+      expect(cancelled.run.delivery).toEqual({
+        target: 'session',
+        state: 'cancelled',
       });
     });
   });

@@ -7,7 +7,6 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
-  ChildAgentRun,
   ChildAgentStopReason,
   ChildCompletion,
   ChildSessionRun,
@@ -44,8 +43,11 @@ import {
   childSettleCompletedBody,
   childStopRequestedBody,
   encodeChildLaunchEnvelope,
+  encodeWorkflowLaunchEnvelope,
+  workflowLaunchBody,
   type ChildAdmission,
   type ChildLaunchEnvelope,
+  type WorkflowLaunchEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import type { DefinitionPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
@@ -108,6 +110,23 @@ export interface ChildAgentLaunchParams {
   readonly executionCallId: string;
 }
 
+/**
+ * The workflow launch (#13803 decision 3): the script the child executes
+ * and its arguments ride the envelope; the pin the admission computed from
+ * those exact bytes opens the chain (K3).
+ */
+export interface WorkflowLaunchParams {
+  readonly childRunId: string;
+  readonly ownerScopeId: string;
+  readonly rootSessionId: string;
+  readonly completion: ChildCompletion;
+  readonly script: string;
+  readonly args: unknown;
+  readonly definition: DefinitionPin;
+  readonly workingDirectory: string;
+  readonly executionCallId: string;
+}
+
 const TRUSTED: ManagedSessionActor = { class: 'trusted_entry' };
 
 function digest(record: unknown): string {
@@ -161,15 +180,18 @@ export function childResultNotificationText(params: {
    * can follow the child's terminal list surface — never the internal
    * `promptId:callId` marker. */
   readonly taskId: string;
+  /** The record kind of the child that finished ('child_agent' | 'workflow'). */
+  readonly kind: 'child_agent' | 'workflow';
   readonly description: string;
   readonly text: string;
 }): string {
+  const label = params.kind === 'workflow' ? 'Workflow child' : 'Child agent';
   const head = [
     '<task-notification>',
     `<task-id>${escapeXml(params.taskId)}</task-id>`,
-    '<kind>child_agent</kind>',
+    `<kind>${params.kind}</kind>`,
     '<status>completed</status>',
-    `<summary>Child agent "${escapeXml(truncateNotificationLabel(params.description))}" finished.</summary>`,
+    `<summary>${label} "${escapeXml(truncateNotificationLabel(params.description))}" finished.</summary>`,
     '<result>',
   ].join('\n');
   const tail = '</result>\n</task-notification>';
@@ -213,15 +235,16 @@ export class HostedChildAgentSession {
     private readonly key: ManagedSessionKey,
   ) {}
 
-  /** The last committed body of one child run, parsed. */
-  record(childRunId: string): ChildAgentRun | undefined {
+  /** The last committed body of one child run, parsed. Both child Session
+   * kinds answer: the relay and cascade verbs are kind-blind (#13803 K2). */
+  record(childRunId: string): ChildSessionRun | undefined {
     const existing = this.store.authority.extensionRecord(
       'child_run',
       childRunId,
     );
     if (existing === undefined) return undefined;
     const record = parseChildRun(existing.record);
-    return record.kind === 'child_agent' ? record : undefined;
+    return isChildSessionRun(record) ? record : undefined;
   }
 
   /** The last committed acceptance of one child run, parsed. */
@@ -269,9 +292,70 @@ export class HostedChildAgentSession {
       prompt: params.prompt,
       definition: params.definition,
     };
-    const bytes = encodeChildLaunchEnvelope(envelope);
-    // A restated launch names the same record: identical evidence is the
-    // replay — anything else conflicts, never a second child chain.
+    const { inputRef } = await this.admitLaunch(params, {
+      bytes: encodeChildLaunchEnvelope(envelope),
+      build: (inputRef) =>
+        childLaunchBody({
+          childRunId: params.childRunId,
+          ownerScopeId: params.ownerScopeId,
+          rootSessionId: params.rootSessionId,
+          completion: params.completion,
+          inputRef,
+          workingDirectory: params.workingDirectory,
+          executionCallId: params.executionCallId,
+          definition: params.definition,
+        }),
+    });
+    return { inputRef, envelope };
+  }
+
+  /**
+   * Revision 1 of a `workflow` launch (#13803 K1): same discipline as
+   * {@link admit}, with the workflow envelope and the pin opening the chain.
+   */
+  async admitWorkflow(params: WorkflowLaunchParams): Promise<{
+    readonly inputRef: ManagedSessionDurableRef;
+    readonly envelope: WorkflowLaunchEnvelope;
+  }> {
+    const envelope: WorkflowLaunchEnvelope = {
+      definition: params.definition,
+      script: params.script,
+      args: params.args ?? null,
+    };
+    const { inputRef } = await this.admitLaunch(params, {
+      bytes: encodeWorkflowLaunchEnvelope(envelope),
+      build: (inputRef) =>
+        workflowLaunchBody({
+          childRunId: params.childRunId,
+          ownerScopeId: params.ownerScopeId,
+          rootSessionId: params.rootSessionId,
+          completion: params.completion,
+          inputRef,
+          workingDirectory: params.workingDirectory,
+          executionCallId: params.executionCallId,
+          definition: params.definition,
+        }),
+    });
+    return { inputRef, envelope };
+  }
+
+  /** The shared launch path of both kinds: publish, commit, replay by
+   * identical evidence — anything else conflicts, never a second chain. */
+  private async admitLaunch(
+    params: {
+      readonly childRunId: string;
+      readonly ownerScopeId: string;
+      readonly rootSessionId: string;
+      readonly completion: ChildCompletion;
+      readonly definition: DefinitionPin;
+      readonly workingDirectory: string;
+      readonly executionCallId: string;
+    },
+    prepared: {
+      readonly bytes: Buffer;
+      readonly build: (inputRef: ManagedSessionDurableRef) => ChildSessionRun;
+    },
+  ): Promise<{ readonly inputRef: ManagedSessionDurableRef }> {
     const existing = this.record(params.childRunId);
     if (existing !== undefined) {
       const sameEvidence =
@@ -283,32 +367,26 @@ export class HostedChildAgentSession {
         isDeepStrictEqual(existing.run.definition, params.definition) &&
         isDeepStrictEqual(
           await this.store.resources.read(existing.inputRef),
-          bytes,
+          prepared.bytes,
         );
       if (!sameEvidence) {
         throw new ManagedSessionConflictError(
           `Child run ${params.childRunId} was launched with different evidence.`,
         );
       }
-      return { inputRef: existing.inputRef, envelope };
+      return { inputRef: existing.inputRef };
     }
-    const inputRef = await this.store.resources.publish('managed-input', bytes);
+    const inputRef = await this.store.resources.publish(
+      'managed-input',
+      prepared.bytes,
+    );
     await this.commit(
       params.childRunId,
-      childLaunchBody({
-        childRunId: params.childRunId,
-        ownerScopeId: params.ownerScopeId,
-        rootSessionId: params.rootSessionId,
-        completion: params.completion,
-        inputRef,
-        workingDirectory: params.workingDirectory,
-        executionCallId: params.executionCallId,
-        definition: params.definition,
-      }),
+      prepared.build(inputRef),
       params.childRunId,
       'startChildRun',
     );
-    return { inputRef, envelope };
+    return { inputRef };
   }
 
   /**
@@ -383,7 +461,7 @@ export class HostedChildAgentSession {
       if (existing === undefined) {
         throw new Error(`Child run ${childRunId} has no record to revise.`);
       }
-      const previous = this.parseAgent(existing.record, childRunId);
+      const previous = this.parseSessionRun(existing.record, childRunId);
       if (previous.resultRef != null && previous.terminalReceiptRef != null) {
         const committedResult = await this.store.resources.read(
           previous.resultRef,
@@ -440,7 +518,7 @@ export class HostedChildAgentSession {
         ChildAgentStopReason,
         'creation_failed' | 'child_failed' | 'quota_exceeded'
       >;
-      readonly reason: ChildAgentRun['run']['reason'];
+      readonly reason: ChildSessionRun['run']['reason'];
       readonly started: boolean;
       readonly childSessionId?: string;
     },
@@ -585,7 +663,7 @@ export class HostedChildAgentSession {
 
   private async buildResultNotification(
     childRunId: string,
-    child: ChildAgentRun,
+    child: ChildSessionRun,
     params: { readonly description: string },
   ): Promise<ManagedSessionInputRequest> {
     const resultRef = child.resultRef;
@@ -596,7 +674,9 @@ export class HostedChildAgentSession {
     return {
       inputId,
       turnId: inputId,
-      source: 'child_agent',
+      // The source names the record kind that produced the result; the
+      // wake and consumption predicates admit both (#13803 K2).
+      source: child.kind,
       contentRef: await this.store.resources.publish(
         'managed-input',
         Buffer.from(
@@ -609,6 +689,7 @@ export class HostedChildAgentSession {
                   childRunId,
                 ),
               ),
+              kind: child.kind,
               description: params.description,
               text: (await this.store.resources.read(resultRef)).toString(
                 'utf8',
@@ -627,7 +708,7 @@ export class HostedChildAgentSession {
     };
   }
 
-  private mustRecord(childRunId: string): ChildAgentRun {
+  private mustRecord(childRunId: string): ChildSessionRun {
     const record = this.record(childRunId);
     if (record === undefined) {
       throw new Error(`Child run ${childRunId} has no record to revise.`);
@@ -648,7 +729,7 @@ export class HostedChildAgentSession {
 
   private revise(
     childRunId: string,
-    step: (previous: ChildAgentRun) => ChildAgentRun,
+    step: (previous: ChildSessionRun) => ChildSessionRun,
   ): Promise<void> {
     const write = this.writes.then(async () => {
       const existing = this.store.authority.extensionRecord(
@@ -658,7 +739,7 @@ export class HostedChildAgentSession {
       const previousParsed =
         existing === undefined
           ? undefined
-          : this.parseAgent(existing.record, childRunId);
+          : this.parseSessionRun(existing.record, childRunId);
       if (previousParsed === undefined) {
         throw new Error(`Child run ${childRunId} has no record to revise.`);
       }
@@ -679,17 +760,20 @@ export class HostedChildAgentSession {
     return write;
   }
 
-  private parseAgent(record: unknown, childRunId: string): ChildAgentRun {
+  private parseSessionRun(
+    record: unknown,
+    childRunId: string,
+  ): ChildSessionRun {
     const parsed = parseChildRun(record);
-    if (parsed.kind !== 'child_agent') {
-      throw new Error(`Child run ${childRunId} is not a child agent.`);
+    if (!isChildSessionRun(parsed)) {
+      throw new Error(`Child run ${childRunId} is not a child Session run.`);
     }
     return parsed;
   }
 
   private commit(
     childRunId: string,
-    record: ChildAgentRun,
+    record: ChildSessionRun,
     commandId: string,
     operation: string,
   ): Promise<void> {

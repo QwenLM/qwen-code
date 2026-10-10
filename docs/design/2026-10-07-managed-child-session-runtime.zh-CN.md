@@ -145,7 +145,7 @@ H4b 交付该流水线的 child-agent 部分:
 
 | 切片   | 范围                                                                                                                                                                                                                                                     |
 | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| H4c    | 已完成:`workflow` 记录体 kind(禁用)、child launch 预算([设计](2026-10-09-managed-workflow-child-kind.zh-CN.md))。Workflow 工具准入:后续切片。                                                                                                            |
+| H4c    | 已完成:`workflow` 记录体 kind 与 child launch 预算([设计](2026-10-09-managed-workflow-child-kind.zh-CN.md));workflow kind 由 workflow 运行时启用([设计](2026-10-10-managed-workflow-child-runtime.zh-CN.md))。                                           |
 | H4d    | 契约已完成:`session_message` 记录体与 `continueChildRun` 规则,二者均为 disabled([设计](2026-10-09-managed-session-messages.zh-CN.md))。运行时(H4d-b):managed `send_message`、消息 relay、`continueChildRun` 的第一个诚实生产者、以新链复活已完成 child。 |
 | H4e    | team 各 domain 与七个 team 工具、plan 决议、成员关停、legacy 导入。                                                                                                                                                                                      |
 | H4f    | 公开任务取消路由,结清 #12847 A6/A7 与 B12;`unknown` delivery 的运维故事(开放问题 1)。                                                                                                                                                                    |

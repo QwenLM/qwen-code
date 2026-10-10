@@ -171,16 +171,21 @@ export function assertManagedSessionScheduleSessionModeEnabled(
 }
 
 /**
- * The `child_run` body kinds a caller may actually submit today (H4b).
- * `child_run` carries two capabilities with independent enablement gates —
- * H3's background Shell and H4's child agent — so it never joins the plain
+ * The `child_run` body kinds a caller may actually submit today (H4b, and
+ * the workflow runtime slice of #13803). `child_run` carries three
+ * capabilities with independent enablement gates — H3's background Shell,
+ * H4's child agent and H4's workflow — so it never joins the plain
  * enabled list as a whole: the shell kind stays disabled here until the H3
- * enablement gates clear, while H4b admits `child_agent`. The Java store
- * validates both kinds and, since H4a, deploys before any writer, keeping
- * the server-first order H1/H2 used.
+ * enablement gates clear, while `child_agent` and `workflow` are admitted.
+ * The kind gate fires on every `child_run` revision commitment, so a kind
+ * joins this list only together with the runtime whose verbs commit its
+ * later revisions (relay, cascade, funnel). The Java store validates all
+ * three kinds and, since H4a, deploys before any writer, keeping the
+ * server-first order H1/H2 used.
  */
 export const MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS = Object.freeze([
   'child_agent',
+  'workflow',
 ] as const);
 
 /**

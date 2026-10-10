@@ -184,6 +184,17 @@ const state = vi.hoisted(() => ({
       model: 'test-model',
     }),
   ),
+  workflow: vi.fn(
+    async (_input: {
+      signal: AbortSignal;
+      sessionId: string;
+      launch: unknown;
+    }) => ({
+      text: 'Hello from workflow',
+      parts: [{ text: 'Hello from workflow' }] as Array<{ text: string }>,
+      model: 'workflow',
+    }),
+  ),
 }));
 
 vi.mock(
@@ -253,6 +264,11 @@ vi.mock(
 );
 vi.mock('./hosted-harness-model.js', () => ({
   runHostedHarnessTextTurn: state.model,
+}));
+
+vi.mock('./hosted-workflow-turn.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./hosted-workflow-turn.js')>()),
+  runHostedWorkflowTurn: state.workflow,
 }));
 
 const BOOT_ID = '11111111-1111-4111-8111-111111111111';
@@ -4215,6 +4231,19 @@ describe('Hosted Harness no-tool session', () => {
   // notification input is still owed: accepted, never settled, and the
   // Session holds no prompt of its own.
   async function prewriteChildNotificationSession(): Promise<string> {
+    return prewriteChildNotificationOfSource('child_agent');
+  }
+
+  // The same planted acceptance notification with a workflow source:
+  // its kind never changes the journal shape, only the `source` the wake
+  // and close paths predicate on (#13803 K2).
+  async function prewriteWorkflowNotificationSession(): Promise<string> {
+    return prewriteChildNotificationOfSource('workflow');
+  }
+
+  async function prewriteChildNotificationOfSource(
+    source: 'child_agent' | 'workflow',
+  ): Promise<string> {
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -4271,7 +4300,7 @@ describe('Hosted Harness no-tool session', () => {
         {
           inputId: turnId,
           turnId,
-          source: 'child_agent',
+          source,
           contentRef: await managed.resources.publish(
             'managed-input',
             Buffer.from('{"text":"<task-notification />"}', 'utf8'),
@@ -4293,6 +4322,19 @@ describe('Hosted Harness no-tool session', () => {
   // A Session that has accepted a child result: the restore verifier must
   // admit the child_acceptance domain its journal now carries.
   async function prewriteAcceptedChildSession(): Promise<string> {
+    return prewriteAcceptedChildOfKind('child_agent');
+  }
+
+  // The same Session with its child result carried by a workflow record:
+  // its notification input rides the workflow source through the wake and
+  // close paths the monitor witness exercises for `monitor` (#13803 K2).
+  async function prewriteAcceptedWorkflowChildSession(): Promise<string> {
+    return prewriteAcceptedChildOfKind('workflow');
+  }
+
+  async function prewriteAcceptedChildOfKind(
+    kind: 'child_agent' | 'workflow',
+  ): Promise<string> {
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -4342,22 +4384,43 @@ describe('Hosted Harness no-tool session', () => {
         { authority: managed.authority, resources: managed.resources },
         key,
       );
-      await children.admit({
-        childRunId: 'run-1',
-        ownerScopeId: SESSION_ID,
-        rootSessionId: SESSION_ID,
-        completion: 'sent',
-        description: 'audit the diff',
-        prompt: 'review the change',
-        definition: {
-          definitionId: 'hosted-agent/hosted-workspace-shell/1',
-          definitionRevision: 1,
-          definitionDigest:
-            managed.authority.sessionHeader.definitionRef.digest,
-        },
-        workingDirectory: '.',
-        executionCallId: 'run-1',
-      });
+      if (kind === 'child_agent') {
+        await children.admit({
+          childRunId: 'run-1',
+          ownerScopeId: SESSION_ID,
+          rootSessionId: SESSION_ID,
+          completion: 'sent',
+          description: 'audit the diff',
+          prompt: 'review the change',
+          definition: {
+            definitionId: 'hosted-agent/hosted-workspace-shell/1',
+            definitionRevision: 1,
+            definitionDigest:
+              managed.authority.sessionHeader.definitionRef.digest,
+          },
+          workingDirectory: '.',
+          executionCallId: 'run-1',
+        });
+      } else {
+        const script = 'return { answer: 1 };';
+        await children.admitWorkflow({
+          childRunId: 'run-1',
+          ownerScopeId: SESSION_ID,
+          rootSessionId: SESSION_ID,
+          completion: 'sent',
+          script,
+          args: undefined,
+          definition: {
+            definitionId: 'workflow/unnamed',
+            definitionRevision: 1,
+            definitionDigest: createHash('sha256')
+              .update(script, 'utf8')
+              .digest('hex'),
+          },
+          workingDirectory: '.',
+          executionCallId: 'run-1',
+        });
+      }
       await children.dispatchStarted('run-1', {
         dispatchId: 'dispatch-1',
         runtime: { runtimeBindingId: 'binding-1', generation: '1' },
@@ -4482,6 +4545,49 @@ describe('Hosted Harness no-tool session', () => {
     ).send({ managedSessionStore: store() });
     expect(loaded.status).toBe(200);
     expect(loaded.body.recoveryRequired).toBe(true);
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+    const journal = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+    );
+    const settled = journal.events.filter(
+      (event) =>
+        event.kind === 'turn.settled' &&
+        event.payload['turnId'] === notificationTurnId,
+    );
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.payload).toMatchObject({
+      outcome: 'cancelled',
+      stopReason: 'session_closing',
+    });
+    expect(
+      (
+        await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      ).status,
+    ).toBe(404);
+  });
+
+  // #13803 (K2): a workflow child's acceptance notification closes through
+  // the same wake-owned drain — its source names the record's own kind. The
+  // kick is parked so the close, never the live pump, owns this settle: the
+  // load witness below exercises the pump; this one exercises the drain.
+  it('settles a pending workflow child notification as session_closing when the Session closes', async () => {
+    domainEnablement.childRun = true;
+    const notificationTurnId = await prewriteAcceptedWorkflowChildSession();
+    mockBrokerBroker();
+    vi.spyOn(HostedMonitorWakeScheduler.prototype, 'kick').mockImplementation(
+      () => {},
+    );
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
     expect(
       (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
         .status,
@@ -5001,6 +5107,47 @@ describe('Hosted Harness no-tool session', () => {
     // before the close route executes, or DELETE races an active wake turn
     // (409 hosted_turn_active) and the fixture teardown races its journal
     // writes.
+    await vi.waitFor(
+      async () => {
+        const journal = await LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: SESSION_ID,
+          },
+        );
+        expect(
+          journal.events.some(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === notificationTurnId,
+          ),
+        ).toBe(true);
+      },
+      { timeout: 15_000, interval: 100 },
+    );
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+  });
+
+  // #13803 (K2): the wake pump classifies a workflow child's acceptance
+  // notification the same way — its source never wedges the load.
+  it('loads a Session whose only owed input is a workflow acceptance notification', async () => {
+    domainEnablement.childRun = true;
+    const notificationTurnId = await prewriteWorkflowNotificationSession();
+    mockBrokerBroker();
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    expect(JSON.stringify(log.mock.calls)).not.toContain('unsettled_input');
     await vi.waitFor(
       async () => {
         const journal = await LocalJsonlManagedSessionJournalStore.read(
@@ -9032,6 +9179,8 @@ describe('Hosted Harness no-tool session', () => {
         'run_shell_command',
         // H4b: a Shell-laned root Session advertises its Agent tool.
         'agent',
+        // #13803: and, behind its own kind gate, its Workflow tool.
+        'workflow',
       ]);
       return { text: 'text without side effects', model: 'test-model' };
     });
@@ -9109,6 +9258,8 @@ describe('Hosted Harness no-tool session', () => {
       'monitor',
       // H4b: a Shell-laned root Session advertises its Agent tool.
       'agent',
+      // #13803: and, behind its own kind gate, its Workflow tool.
+      'workflow',
     ]);
     expect(state.model).toHaveBeenCalledTimes(2);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
@@ -17277,5 +17428,176 @@ describe('Hosted Harness Runtime turn takeover', () => {
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );
+  });
+
+  describe('workflow launch prompts (#13803)', () => {
+    const WORKFLOW_SCRIPT =
+      'export const meta = { name: "audit", description: "d" };\nreturn { answer: 1 };';
+    const WORKFLOW_PIN = {
+      definitionId: 'workflow/audit',
+      definitionRevision: 1,
+      definitionDigest: createHash('sha256')
+        .update(WORKFLOW_SCRIPT, 'utf8')
+        .digest('hex'),
+    };
+    function workflowPrompt(
+      overrides: Record<string, unknown> = {},
+    ): Array<Record<string, unknown>> {
+      return [
+        {
+          type: 'workflow_launch',
+          definition: WORKFLOW_PIN,
+          script: WORKFLOW_SCRIPT,
+          ...overrides,
+        },
+      ];
+    }
+    const CHILD_LINEAGE = {
+      parentSessionId: '10f4e2c2-93e6-4c26-b24a-b7c8b0f56aa1',
+      rootSessionId: '10f4e2c2-93e6-4c26-b24a-b7c8b0f56aa1',
+      parentChildRunId: 'run-1',
+      depth: 1,
+    };
+    async function workflowApp(childShaped = true) {
+      const server = await app();
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        ...(childShaped ? { lineage: CHILD_LINEAGE } : {}),
+      });
+      expect(created.status).toBe(200);
+      const authorize = (request: supertest.Test) =>
+        headers(request).set(
+          'X-Qwen-Client-Id',
+          created.body.clientId as string,
+        );
+      const send = (prompt: Array<Record<string, unknown>>, promptId: string) =>
+        authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`)).send(
+          {
+            prompt,
+            promptId,
+            payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          },
+        );
+      return { server, authorize, send };
+    }
+
+    it('admits a workflow launch block and runs it as the turn', async () => {
+      const { server, authorize, send } = await workflowApp();
+      const prompt = workflowPrompt({ args: { x: 1 } });
+      const admitted = await send(prompt, PROMPT_ID);
+      expect(admitted.status).toBe(202);
+      await vi.waitFor(() => expect(state.workflow).toHaveBeenCalledTimes(1), {
+        timeout: 10_000,
+      });
+      expect(state.workflow).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: SESSION_ID,
+          launch: {
+            definition: WORKFLOW_PIN,
+            script: WORKFLOW_SCRIPT,
+            args: { x: 1 },
+          },
+        }),
+      );
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
+      expect(state.model).not.toHaveBeenCalled();
+      // The user record's message resource carries the one-line summary,
+      // never the full launch payload journaling inline — the input
+      // resource the input's digest names is where the payload lives.
+      const transcript = await readFile(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        'utf8',
+      );
+      // A fragment, not WORKFLOW_SCRIPT itself: the transcript JSON-escapes
+      // the script body, so the whole string literal would never match.
+      expect(transcript).not.toContain('export const meta =');
+      const tree = await readdir(state.root, { recursive: true });
+      const blobs = (
+        await Promise.all(
+          tree
+            .filter((name) => !name.endsWith('.jsonl'))
+            .map((name) =>
+              readFile(path.join(state.root, name), 'utf8').catch(() => ''),
+            ),
+        )
+      ).join('\n');
+      expect(blobs).toContain('<workflow workflow/audit@1 sha256:');
+      // A same-body replay answers the same admission watermark.
+      const replayed = await send(prompt, PROMPT_ID);
+      expect(replayed.status).toBe(202);
+      expect(replayed.body.lastEventId).toBe(admitted.body.lastEventId);
+      expect(state.workflow).toHaveBeenCalledTimes(1);
+      await authorize(supertest(server).delete(`/session/${SESSION_ID}`));
+    });
+
+    it('refuses malformed workflow blocks at the boundary', async () => {
+      const { server, authorize, send } = await workflowApp();
+      const malformed: Array<Array<Record<string, unknown>>> = [
+        workflowPrompt({
+          definition: { ...WORKFLOW_PIN, definitionDigest: 'not-hex' },
+        }),
+        workflowPrompt({
+          definition: { ...WORKFLOW_PIN, definitionRevision: 0 },
+        }),
+        workflowPrompt({ script: '' }),
+        workflowPrompt({ stray: 1 }),
+        [...workflowPrompt(), { type: 'text', text: 'mixed' }],
+      ];
+      for (const prompt of malformed) {
+        const response = await send(prompt, randomUUID());
+        expect(response.status).toBe(400);
+        expect(response.body.code).toBe('invalid_hosted_prompt');
+      }
+      expect(state.workflow).not.toHaveBeenCalled();
+      expect(state.model).not.toHaveBeenCalled();
+      await authorize(supertest(server).delete(`/session/${SESSION_ID}`));
+    });
+
+    // #13803: a workflow_launch block names work outside any managed
+    // record, so it is mint-able only by the control plane's own child
+    // creation — every other shape keeps the old refusal.
+    it('refuses a workflow launch on a session without child lineage', async () => {
+      const { server, authorize, send } = await workflowApp(false);
+      const response = await send(workflowPrompt(), randomUUID());
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe('invalid_hosted_prompt');
+      expect(state.workflow).not.toHaveBeenCalled();
+      expect(state.model).not.toHaveBeenCalled();
+      await authorize(supertest(server).delete(`/session/${SESSION_ID}`));
+    });
+
+    it('refuses a workflow launch once the child Session has any input', async () => {
+      const { server, authorize, send } = await workflowApp();
+      // The child's own creation turn is text; after it settles, the
+      // route never admits a workflow_launch block again.
+      const first = [{ type: 'text', text: 'the creation turn is text' }];
+      const admitted = await send(first, randomUUID());
+      expect(admitted.status).toBe(202);
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
+      const response = await send(workflowPrompt(), randomUUID());
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe('invalid_hosted_prompt');
+      expect(state.workflow).not.toHaveBeenCalled();
+      expect(state.model).toHaveBeenCalledTimes(1);
+      await authorize(supertest(server).delete(`/session/${SESSION_ID}`));
+    });
   });
 });

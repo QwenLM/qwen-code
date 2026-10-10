@@ -76,6 +76,12 @@ import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.j
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import {
+  parseHostedWorkflowLaunchBlock,
+  runHostedWorkflowTurn,
+  workflowLaunchSummaryText,
+  type HostedWorkflowLaunch,
+} from './hosted-workflow-turn.js';
+import {
   HostedHookSession,
   HostedHookInputConflictError,
   HostedHookRecoveryRequiredError,
@@ -588,13 +594,16 @@ function unansweredPrompts(session: HostedSession): Set<string> {
 
 /** Which input sources ride the wake pump — the one predicate the probe,
  * the park guard, the pump's pick and the wake-owned classifier share:
- * a monitor notification, an H6 automation input, and H4b's child
- * acceptance notification alike (child runs park as Turns, never here). */
+ * a monitor notification, an H6 automation input, and a child
+ * acceptance notification of either child Session kind alike (child
+ * runs park as Turns, never here; #13803 widened the child source to
+ * the record's own kind, `child_agent` or `workflow`). */
 function isWakeInputSource(source: string): boolean {
   return (
     source === 'monitor' ||
     source === AUTOMATION_INPUT_SOURCE ||
-    source === 'child_agent'
+    source === 'child_agent' ||
+    source === 'workflow'
   );
 }
 
@@ -886,8 +895,9 @@ function isWakeOwnedInput(event: ManagedSessionEvent): boolean {
   if (isWakeInputSource(event.payload['source'] as string)) return true;
   if (event.payload['source'] === CHANNEL_INPUT_SOURCE) return true;
   const turnId = event.payload['turnId'];
+  const source = event.payload['source'];
   return (
-    event.payload['source'] === 'child_agent' &&
+    (source === 'child_agent' || source === 'workflow') &&
     typeof turnId === 'string' &&
     turnId.endsWith(':accept:notify')
   );
@@ -2140,6 +2150,7 @@ async function executeHostedTurn(
   resumeFromToolResults?: Part[],
   onTurnResult?: (result: ChatRecord) => void,
   onResumeReady?: () => void,
+  workflowLaunch?: HostedWorkflowLaunch,
 ): Promise<ChatRecord> {
   const authority = session.managed.authority;
   const harness = createManagedHarnessHandle(session.managed);
@@ -2221,8 +2232,11 @@ async function executeHostedTurn(
             session.workspaceContext = undefined;
           },
         };
+        // #13803: a workflow Turn owns no tool turn — its work is the
+        // runner's own dispatch, and the Session's broker-backed tool
+        // surface belongs to model turns.
         toolTurn =
-          session.toolProfile && brokerOptions
+          workflowLaunch === undefined && session.toolProfile && brokerOptions
             ? new HostedWorkspaceToolTurn(
                 brokerOptions,
                 session.managed,
@@ -2273,25 +2287,39 @@ async function executeHostedTurn(
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
         let stopReason = 'end_turn';
         try {
-          const result = await runHostedHarnessTextTurn({
-            sessionId,
-            cwd,
-            history,
-            prompt: text,
-            promptId,
-            signal: abort.signal,
-            modelScope,
-            workspaceContext,
-            ...(session.hooks ? { hooks: session.hooks } : {}),
-            ...(toolTurn ? { toolTurn } : {}),
-            ...(resumeFromToolResults ? { resumeFromToolResults } : {}),
-            ...(deltas ? { textDeltas: deltas } : {}),
-          });
-          await commit(
-            'assistant',
-            result.parts ?? [{ text: result.text }],
-            result.model,
-          );
+          if (workflowLaunch !== undefined) {
+            const result = await runHostedWorkflowTurn({
+              sessionId,
+              cwd,
+              launch: workflowLaunch,
+              signal: abort.signal,
+            });
+            await commit(
+              'assistant',
+              result.parts ?? [{ text: result.text }],
+              result.model,
+            );
+          } else {
+            const result = await runHostedHarnessTextTurn({
+              sessionId,
+              cwd,
+              history,
+              prompt: text,
+              promptId,
+              signal: abort.signal,
+              modelScope,
+              workspaceContext,
+              ...(session.hooks ? { hooks: session.hooks } : {}),
+              ...(toolTurn ? { toolTurn } : {}),
+              ...(resumeFromToolResults ? { resumeFromToolResults } : {}),
+              ...(deltas ? { textDeltas: deltas } : {}),
+            });
+            await commit(
+              'assistant',
+              result.parts ?? [{ text: result.text }],
+              result.model,
+            );
+          }
         } catch (cause) {
           if (
             cause instanceof HostedToolRecoveryRequiredError ||
@@ -4254,20 +4282,44 @@ export function registerHostedHarnessSessionRoutes(
     const prompt = body?.['prompt'];
     const digest = body?.['payloadDigest'];
     const deadlineMs = body?.['deadlineMs'];
+    const workflowLaunch =
+      Array.isArray(prompt) && prompt.length === 1
+        ? parseHostedWorkflowLaunchBlock(prompt[0])
+        : undefined;
+    // #13803: a workflow_launch block names work outside any record, so it
+    // is admitted only where the control plane's own creation could mint
+    // it — a lined child Session at its very first prompt. Its byte-equal
+    // replay answers through the ordinary dedup machinery; every other
+    // shape keeps the pre-change refusal.
+    if (workflowLaunch !== undefined) {
+      const journaledInputs = session.managed.authority
+        .eventsInSequenceRange(1, session.managed.authority.committedSequence)
+        .filter((event) => event.kind === 'input.accepted');
+      if (
+        (session.childDepth ?? 0) < 1 ||
+        (journaledInputs.length > 0 &&
+          !journaledInputs.some(
+            (event) => event.payload['inputId'] === promptId,
+          ))
+      ) {
+        return error(res, 400, 'invalid_hosted_prompt');
+      }
+    }
     if (
       typeof promptId !== 'string' ||
       !HOSTED_UUID.test(promptId) ||
       !Array.isArray(prompt) ||
       prompt.length === 0 ||
-      !prompt.every((block) => {
-        const item = object(block);
-        return (
-          item?.['type'] === 'text' &&
-          typeof item['text'] === 'string' &&
-          item['text'].length > 0 &&
-          Object.keys(item).length === 2
-        );
-      }) ||
+      (workflowLaunch === undefined &&
+        !prompt.every((block) => {
+          const item = object(block);
+          return (
+            item?.['type'] === 'text' &&
+            typeof item['text'] === 'string' &&
+            item['text'].length > 0 &&
+            Object.keys(item).length === 2
+          );
+        })) ||
       typeof digest !== 'string' ||
       !DIGEST.test(digest) ||
       (deadlineMs !== undefined &&
@@ -4279,9 +4331,12 @@ export function registerHostedHarnessSessionRoutes(
     ) {
       return error(res, 400, 'invalid_hosted_prompt');
     }
-    const text = prompt
-      .map((block) => (block as { text: string }).text)
-      .join('\n');
+    // #13803: a workflow child Session's first Turn carries one
+    // `workflow_launch` block instead of text; the journal's user record
+    // keeps the one-line summary while the full payload rides the input.
+    const text = workflowLaunch
+      ? workflowLaunchSummaryText(workflowLaunch)
+      : prompt.map((block) => (block as { text: string }).text).join('\n');
     const maxBytes = HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
     // A parent UUID is the largest possible parentUuid in the durable record.
     const userRecord = record(session, req.params['id'], 'user', promptId, {
@@ -4507,6 +4562,8 @@ export function registerHostedHarnessSessionRoutes(
           (result) => {
             turnResult = result;
           },
+          undefined,
+          workflowLaunch,
         );
         settled = true;
       } catch (cause) {
@@ -6329,7 +6386,8 @@ export function registerHostedHarnessSessionRoutes(
           cwd: session.cwd,
           sources: [
             ...(session.monitors ? ['monitor'] : []),
-            ...(session.childAgents ? ['child_agent'] : []),
+            // #13803: child notifications of either child Session kind.
+            ...(session.childAgents ? ['child_agent', 'workflow'] : []),
             ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
             ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),
           ],

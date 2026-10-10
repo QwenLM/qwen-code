@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.daemon;
 
-import com.alibaba.fastjson2.JSON;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
@@ -24,7 +23,199 @@ final class JsonSupport {
     }
 
     static String encode(Object value) {
-        return JSON.toJSONString(value);
+        StringBuilder result = new StringBuilder();
+        writeCanonical(value, result);
+        return result.toString();
+    }
+
+    /**
+     * Serializes one contract value byte-for-byte as JavaScript's
+     * `JSON.stringify` renders it. The daemon's prompt admission pins
+     * `sha256(JSON.stringify(prompt))` over this exact substrate, and the
+     * managed workflow launch block is the first prompt ever to carry a
+     * fractional number across it: fastjson2's `Double.toString` scientific
+     * form diverges from ECMAScript outside [0.001, 1e7), so the digest
+     * substrate is canonicalized here, not at each call site. Only contract
+     * JSON values appear (Map, List, String, Boolean, null, and finite
+     * numbers); key order follows each map's own iteration order, as the
+     * builders of these blocks use LinkedHashMap.
+     */
+    private static void writeCanonical(Object value, StringBuilder out) {
+        if (value == null) {
+            out.append("null");
+        } else if (value instanceof Map) {
+            out.append('{');
+            boolean first = true;
+            for (Map.Entry<String, ?> entry
+                    : ((Map<String, ?>) value).entrySet()) {
+                if (!first) {
+                    out.append(',');
+                }
+                first = false;
+                writeCanonicalString(String.valueOf(entry.getKey()), out);
+                out.append(':');
+                writeCanonical(entry.getValue(), out);
+            }
+            out.append('}');
+        } else if (value instanceof List) {
+            out.append('[');
+            boolean first = true;
+            for (Object item : (List<?>) value) {
+                if (!first) {
+                    out.append(',');
+                }
+                first = false;
+                writeCanonical(item, out);
+            }
+            out.append(']');
+        } else if (value instanceof String) {
+            writeCanonicalString((String) value, out);
+        } else if (value instanceof Boolean) {
+            out.append(value);
+        } else if (value instanceof Number) {
+            writeCanonicalNumber((Number) value, out);
+        } else {
+            throw new IllegalArgumentException(
+                    "Unsupported JSON value type: " + value.getClass().getName());
+        }
+    }
+
+    /** A JSON string with the escapes JSON.stringify performs. */
+    private static void writeCanonicalString(String text, StringBuilder out) {
+        out.append('"');
+        int length = text.length();
+        for (int index = 0; index < length; index++) {
+            int code = text.codePointAt(index);
+            if (Character.isSupplementaryCodePoint(code)) {
+                index++;
+            }
+            switch (code) {
+                case '"':
+                    out.append("\\\"");
+                    break;
+                case '\\':
+                    out.append("\\\\");
+                    break;
+                case '\b':
+                    out.append("\\b");
+                    break;
+                case '\f':
+                    out.append("\\f");
+                    break;
+                case '\n':
+                    out.append("\\n");
+                    break;
+                case '\r':
+                    out.append("\\r");
+                    break;
+                case '\t':
+                    out.append("\\t");
+                    break;
+                default:
+                    // ES2019 well-formed stringify escapes C0 controls and
+                    // lone surrogates alike; a raw lone surrogate would be
+                    // destroyed (replaced with U+FFFD/'?') when the digest
+                    // step encodes this string as UTF-8.
+                    if (code < 0x20 || (code >= 0xD800 && code <= 0xDFFF)) {
+                        out.append(String.format("\\u%04x", code));
+                    } else {
+                        out.appendCodePoint(code);
+                    }
+            }
+        }
+        out.append('"');
+    }
+
+    /**
+     * A JSON number with JSON.stringify's numeric grammar. ECMAScript has
+     * only Number (IEEE 754 double): integers print exactly when |x| < 2^53
+     * and round through the double beyond it; a non-integer prints plain
+     * when 1e-6 ≤ |x| < 1e21, otherwise shortest-round-trip exponent
+     * notation. Longs and BigIntegers therefore render through the same
+     * double the JS side would hold — an exact decimal printout past 2^53
+     * never matches `JSON.stringify`.
+     */
+    private static void writeCanonicalNumber(Number value, StringBuilder out) {
+        if (value instanceof Byte || value instanceof Short
+                || value instanceof Integer) {
+            out.append(value.longValue());
+            return;
+        }
+        if (value instanceof Long || value instanceof BigInteger) {
+            long asLong = value.longValue();
+            if (Math.abs(asLong) < 9_007_199_254_740_992L) {
+                out.append(asLong);
+            } else {
+                writeCanonicalDecimal(
+                        BigDecimal.valueOf(value.doubleValue())
+                                .stripTrailingZeros(),
+                        out);
+            }
+            return;
+        }
+        if (value instanceof BigDecimal) {
+            writeCanonicalDecimal(
+                    ((BigDecimal) value).stripTrailingZeros(), out);
+            return;
+        }
+        double number = value.doubleValue();
+        if (!Double.isFinite(number)) {
+            throw new IllegalArgumentException(
+                    "JSON numbers must be finite: " + value);
+        }
+        // Subnormal doubles carry Java's minimum-two-digit `Double.toString`
+        // form where ECMAScript prints the shortest one (`5e-324`): the
+        // BigDecimal digit path cannot reconcile them, so they are refused
+        // here rather than digested into a cross-language wedge. JSON
+        // parses never produce them — Jackson yields BigDecimal for
+        // fractional literals — and model-produced args at this scale are
+        // not a lawful prompt payload to begin with.
+        if (number != 0 && Math.abs(number) < 1.1125369292536007e-308) {
+            throw new IllegalArgumentException(
+                    "JSON number outside the canonical range: " + value);
+        }
+        if (number == Math.rint(number)
+                && Math.abs(number) < 9.007199254740992e15) {
+            out.append((long) number);
+            return;
+        }
+        writeCanonicalDecimal(
+                BigDecimal.valueOf(number).stripTrailingZeros(), out);
+    }
+
+    /**
+     * Renders a scale-stripped BigDecimal with JSON.stringify's notation:
+     * a plain decimal when the ECMAScript Number the value names is in
+     * [1e-6, 1e21), otherwise the shortest exponent form with no '+', no
+     * redundant exponent zeros and no trailing coefficient zeros.
+     */
+    private static void writeCanonicalDecimal(BigDecimal value,
+            StringBuilder out) {
+        if (value.signum() == 0) {
+            out.append('0');
+            return;
+        }
+        double asDouble = value.doubleValue();
+        double magnitude = Math.abs(asDouble);
+        if (magnitude >= 1e-6 && magnitude < 1e21) {
+            out.append(value.toPlainString());
+            return;
+        }
+        String coefficient = value.unscaledValue().abs().toString();
+        int exponent = coefficient.length() - 1 - value.scale();
+        if (value.signum() < 0) {
+            out.append('-');
+        }
+        out.append(coefficient.charAt(0));
+        if (coefficient.length() > 1) {
+            out.append('.').append(coefficient.substring(1));
+        }
+        // ECMAScript always signs a positive exponent: `1e+21`, never `1e21`.
+        out.append('e');
+        if (exponent >= 0) {
+            out.append('+');
+        }
+        out.append(exponent);
     }
 
     static Map<String, Object> parseObject(String json, String context) {
@@ -170,8 +361,7 @@ final class JsonSupport {
         Object value = object.get(field);
         long result = exactLong(value, context + "." + field);
         if (result < 0) {
-            throw new DaemonProtocolException(context + "." + field
-                    + " must be non-negative");
+            throw new DaemonProtocolException(context + " must be non-negative");
         }
         return result;
     }
@@ -184,8 +374,7 @@ final class JsonSupport {
         }
         long result = exactLong(value, context + "." + field);
         if (result <= 0) {
-            throw new DaemonProtocolException(context + "." + field
-                    + " must be positive");
+            throw new DaemonProtocolException(context + " must be positive");
         }
         return result;
     }
@@ -194,7 +383,7 @@ final class JsonSupport {
             String context) {
         long value = exactLong(object.get(field), context + "." + field);
         if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
-            throw new DaemonProtocolException(context + "." + field
+            throw new DaemonProtocolException(context
                     + " is outside the integer range");
         }
         return (int) value;
@@ -204,8 +393,7 @@ final class JsonSupport {
             String field, String context) {
         Map<String, Object> value = optionalObject(object, field);
         if (value == null) {
-            throw new DaemonProtocolException(context + "." + field
-                    + " must be an object");
+            throw new DaemonProtocolException(field + " must be an object");
         }
         return value;
     }

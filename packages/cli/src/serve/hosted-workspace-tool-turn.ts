@@ -82,8 +82,20 @@ import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { childLaunchAdmission } from './hosted-child-agent-session.js';
 import {
   encodeChildLaunchEnvelope,
+  encodeWorkflowLaunchEnvelope,
   MANAGED_CHILD_LIMITS,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+import type { DefinitionPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
+import {
+  compileWorkflowScript,
+  describeWorkflowCompileError,
+  extractAndStripMeta,
+} from '@qwen-code/qwen-code-core/agents/runtime/workflow-sandbox.js';
+import {
+  describeWorkflowDeterminismViolations,
+  scanWorkflowScriptShape,
+} from '@qwen-code/qwen-code-core/agents/runtime/workflow-script-shape.js';
+import { WORKFLOW_NAME_PATTERN } from '@qwen-code/qwen-code-core/agents/runtime/workflow-saved.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   managedExtensionRecordKey,
@@ -224,6 +236,36 @@ function childAgentAdmissionsEnabled(): boolean {
   } catch {
     return false;
   }
+}
+
+// #13803 (K1/K4): workflow-child admissions exist only while the
+// child_run domain's workflow kind is enabled for commits — its own
+// reader beside the child agent's, so the two kinds' enablement stays
+// decoupled in code even while the gate lists both.
+function childWorkflowAdmissionsEnabled(): boolean {
+  try {
+    assertManagedSessionChildRunKindEnabled('workflow');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The launch-time definition pin of an inline workflow (#13803 decision
+ * 2): id+revision classify, the digest binds the exact bytes the child
+ * executes. Inline sources need no revision counter, so revision 1 is the
+ * convention, as in the child agent's own pin.
+ */
+export function workflowDefinitionPin(script: string): DefinitionPin {
+  const meta = extractAndStripMeta(script).meta;
+  const name =
+    meta && WORKFLOW_NAME_PATTERN.test(meta.name) ? meta.name : 'unnamed';
+  return Object.freeze({
+    definitionId: `workflow/${name}`,
+    definitionRevision: 1,
+    definitionDigest: createHash('sha256').update(script, 'utf8').digest('hex'),
+  });
 }
 
 export interface HostedApprovalTurnOptions {
@@ -395,6 +437,41 @@ export const HOSTED_AGENT_TOOL: FunctionDeclaration = {
       },
     },
     required: ['description', 'prompt'],
+    additionalProperties: false,
+  },
+};
+
+/**
+ * #13803 (K1): launch one child Session that runs one workflow instead of a
+ * prompt. The script is the complete definition: the child executes exactly
+ * these bytes, digest-pinned from the launch on and re-verified before it
+ * runs. The result crosses on the same arms as a child agent — background
+ * by default through a durable notification, or folded into this tool
+ * result when run_in_background is false.
+ */
+export const HOSTED_WORKFLOW_TOOL: FunctionDeclaration = {
+  name: 'workflow',
+  description:
+    'Launch one workflow as an independent child Session of this Workspace. The script is deterministic JavaScript with the injected globals phase(), log(), agent(), parallel(), pipeline(), workflow(), args and budget, and cannot import anything; Date and Math.random() throw. Runs in the background by default: the run settles later and its result arrives as a notification input. With run_in_background false the call waits and returns the run result directly. Saved-workflow names, script paths, resume and nesting are unavailable in this profile: pass the complete script inline.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      script: {
+        type: 'string',
+        description:
+          'The complete workflow source, optionally starting with a literal `export const meta = {...}` whose name labels the run.',
+      },
+      args: {
+        description:
+          'Optional structured JSON value bound to the `args` global.',
+      },
+      run_in_background: {
+        type: 'boolean',
+        description:
+          'Run the workflow in the background and notify at completion (default true).',
+      },
+    },
+    required: ['script'],
     additionalProperties: false,
   },
 };
@@ -580,6 +657,15 @@ export class HostedWorkspaceToolTurn {
       this.childDepth === 0 &&
       childAgentAdmissionsEnabled()
         ? [HOSTED_AGENT_TOOL]
+        : []),
+      // #13803: the Workflow tool joins under the exact gate shape of the
+      // Agent tool, behind its own kind reader — a child Session neither
+      // advertises it nor may admit it (#13803 decision 5).
+      ...(this.childAgents !== undefined &&
+      (this.shell !== undefined || this.backgroundLane !== undefined) &&
+      this.childDepth === 0 &&
+      childWorkflowAdmissionsEnabled()
+        ? [HOSTED_WORKFLOW_TOOL]
         : []),
     ];
     return this.advertised;
@@ -1130,6 +1216,7 @@ export class HostedWorkspaceToolTurn {
         let backgroundAdmitted = false;
         let monitorAdmitted = false;
         let agentAdmitted = false;
+        let workflowAdmitted = false;
         let agentBackground = true;
         if (mcpInput) {
           input = { ...mcpInput.input };
@@ -1358,12 +1445,15 @@ export class HostedWorkspaceToolTurn {
               'Hosted child agent run_in_background=true is unavailable while the Session’s Hook catalog or MCP owner holds the Workspace mount, which ends when the Session closes; launch after the owner closes or from a Session without the mount held.';
           } else if (
             !agentBackground &&
-            calls.some((other) => other.name !== 'agent')
+            calls.some(
+              (other) => other.name !== 'agent' && other.name !== 'workflow',
+            )
           ) {
-            // The same one-batch candidacy: a non-agent sibling holds the
-            // mount for exactly the wait the foreground answer needs.
+            // The same one-batch candidacy: a sibling outside a child
+            // launch holds the mount for exactly the wait the foreground
+            // answer needs.
             validationError =
-              'Hosted child agent run_in_background=false cannot share a batch with a non-agent tool; the sibling would hold the Workspace mount the child needs.';
+              'Hosted child agent run_in_background=false cannot share a batch with a tool other than agent or workflow; the sibling would hold the Workspace mount the child needs.';
           } else if (
             typeof args['description'] !== 'string' ||
             !args['description'].trim() ||
@@ -1376,6 +1466,83 @@ export class HostedWorkspaceToolTurn {
             !args['prompt'].trim()
           ) {
             validationError = 'Hosted child agent requires a nonempty prompt.';
+          }
+          input = { ...args };
+        } else if (call.name === 'workflow') {
+          const args = call.args;
+          // #13803: the Workflow call answers the same admission shape as
+          // the Agent call, behind its own kind reader.
+          workflowAdmitted =
+            this.childAgents !== undefined &&
+            (this.shell !== undefined || this.backgroundLane !== undefined) &&
+            this.childDepth === 0 &&
+            childWorkflowAdmissionsEnabled();
+          const unsupportedKey = Object.keys(args).find(
+            (key) => !['script', 'args', 'run_in_background'].includes(key),
+          );
+          const backgroundValue = args['run_in_background'];
+          agentBackground = !(
+            backgroundValue === false ||
+            (typeof backgroundValue === 'string' &&
+              backgroundValue.toLowerCase() === 'false')
+          );
+          const backgroundIllFormed =
+            backgroundValue !== undefined &&
+            backgroundValue !== true &&
+            backgroundValue !== false &&
+            !(
+              typeof backgroundValue === 'string' &&
+              ['true', 'false'].includes(backgroundValue.toLowerCase())
+            );
+          if (!workflowAdmitted) {
+            validationError =
+              'Hosted workflow children are unavailable on this Session profile; read work through ordinary tools instead.';
+          } else if (unsupportedKey !== undefined) {
+            validationError = `Hosted workflow received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs a complete inline script only: name, scriptPath, resumeFromRunId and sourceRef belong to the legacy Workflow tool and its reference follow-up.`;
+          } else if (backgroundIllFormed) {
+            validationError =
+              'Hosted workflow run_in_background must be a boolean.';
+          } else if (!agentBackground && this.sessionHoldsMount()) {
+            validationError =
+              'Hosted workflow run_in_background=false is unavailable while this Turn holds the Workspace mount; run it in the background or let the current tool work finish first in a fresh turn.';
+          } else if (
+            agentBackground &&
+            (this.mcp?.mountHeld === true || this.hooks?.mountHeld === true)
+          ) {
+            validationError =
+              'Hosted workflow run_in_background=true is unavailable while the Session’s Hook catalog or MCP owner holds the Workspace mount, which ends when the Session closes; launch after the owner closes or from a Session without the mount held.';
+          } else if (
+            !agentBackground &&
+            calls.some(
+              (other) => other.name !== 'agent' && other.name !== 'workflow',
+            )
+          ) {
+            validationError =
+              'Hosted workflow run_in_background=false cannot share a batch with a tool other than agent or workflow; the sibling would hold the Workspace mount the child needs.';
+          } else if (
+            typeof args['script'] !== 'string' ||
+            !args['script'].trim()
+          ) {
+            validationError = 'Hosted workflow requires a nonempty script.';
+          } else {
+            // An unstartable script is a model-correctable argument
+            // error, so it refuses here with the runner's own texts
+            // rather than wedging the child's first Turn on its compile:
+            // a failed child Session is the answer for a run that fails,
+            // never for one that could never start.
+            try {
+              compileWorkflowScript(args['script']);
+            } catch (cause) {
+              validationError = `Hosted workflow script is invalid: ${describeWorkflowCompileError(cause, args['script'].split(/\r\n|[\n\r\u2028\u2029]/).length)}`;
+            }
+            if (validationError === undefined) {
+              const violations = scanWorkflowScriptShape(
+                args['script'],
+              ).determinismViolations;
+              if (violations.length > 0) {
+                validationError = `Hosted workflow script is invalid: ${describeWorkflowDeterminismViolations(violations)}`;
+              }
+            }
           }
           input = { ...args };
         } else {
@@ -1421,6 +1588,7 @@ export class HostedWorkspaceToolTurn {
           background: mcpInput === undefined && backgroundAdmitted,
           monitoring: mcpInput === undefined && monitorAdmitted,
           agent: mcpInput === undefined && agentAdmitted,
+          workflow: mcpInput === undefined && workflowAdmitted,
           agentBackground,
         };
       });
@@ -1479,8 +1647,14 @@ export class HostedWorkspaceToolTurn {
     // child's wait is exactly the deadlock a shared Workspace creates
     // (parent turn held, child tool call queued behind it forever). v1
     // therefore takes the mount only for a batch with at least one
-    // non-agent tool.
-    if (!this.acquired && requests.some((request) => request.agent !== true)) {
+    // non-agent tool; a workflow launch is a child launch of the same
+    // shape (#13803).
+    if (
+      !this.acquired &&
+      requests.some(
+        (request) => request.agent !== true && request.workflow !== true,
+      )
+    ) {
       // Acquisition may have taken effect even when its reply is lost.
       await this.acquire(false, signal);
     }
@@ -1733,10 +1907,10 @@ export class HostedWorkspaceToolTurn {
       const bindings = [];
       for (const [ordinal, request] of requests.entries()) {
         if (refusals[ordinal] !== undefined) continue;
-        // A child-agent launch has no Runtime execution to reserve: the
-        // control plane's relay owns its side effect, so it never enters
-        // the Broker pipeline below.
-        if (request.agent) continue;
+        // A child launch has no Runtime execution to reserve: the control
+        // plane's relay owns its side effect, so it never enters the
+        // Broker pipeline below.
+        if (request.agent || request.workflow) continue;
         if (request.mcp) {
           const renewed = this.mcp!.toolInput(
             request.call.name,
@@ -2099,6 +2273,12 @@ export class HostedWorkspaceToolTurn {
         if (request.agent) {
           responses.push(
             ...(await this.acceptChildAgent(request, model, signal)),
+          );
+          continue;
+        }
+        if (request.workflow) {
+          responses.push(
+            ...(await this.acceptChildWorkflow(request, model, signal)),
           );
           continue;
         }
@@ -2766,6 +2946,7 @@ export class HostedWorkspaceToolTurn {
         childRunId,
         model,
         signal,
+        'Child agent',
       );
     }
     const taskId = managedTaskId(
@@ -2785,6 +2966,107 @@ export class HostedWorkspaceToolTurn {
   }
 
   /**
+   * The workflow launch of the batch (#13803 K1): the same discipline as
+   * {@link acceptChildAgent}, with the script-derived pin opening the chain
+   * and the workflow envelope as the launch evidence.
+   */
+  private async acceptChildWorkflow(
+    request: {
+      call: ToolCallRequestInfo;
+      agentBackground: boolean;
+    },
+    model: string,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    if (signal.aborted) {
+      const skipped = convertToFunctionErrorResponse(
+        request.call.name,
+        request.call.callId,
+        [],
+        'The turn was cancelled before this workflow was admitted.',
+      );
+      await this.commit('tool_result', skipped, model);
+      return skipped;
+    }
+    const children = this.childAgents!;
+    const authority = this.session.authority;
+    const key = authority.sessionHeader.sessionKey;
+    const script = request.call.args['script'] as string;
+    const args = request.call.args['args'];
+    const childRunId = this.childRunIdFor(request.call.callId);
+    // The launch pin (decision 2): computed from the exact script bytes
+    // that ride the envelope — the child re-verifies before it runs.
+    const definition = workflowDefinitionPin(script);
+    let envelopeBytes: number;
+    try {
+      envelopeBytes = encodeWorkflowLaunchEnvelope({
+        definition,
+        script,
+        args: args ?? null,
+      }).byteLength;
+    } catch (cause) {
+      if (!(cause instanceof ManagedSessionRecordError)) throw cause;
+      envelopeBytes = Number.POSITIVE_INFINITY;
+    }
+    if (children.record(childRunId) === undefined) {
+      const admission = childLaunchAdmission({
+        workspaceMode: 'shared',
+        sameDefinition: true,
+        closing: authority.currentActivation?.phase !== 'active',
+        activeInScope: children.activeChildRunsOf(key.sessionId).length,
+        launchedInScope: children.launchedChildRunsOf(key.sessionId).length,
+        envelopeBytes,
+      });
+      if (!admission.admitted) {
+        const refused = convertToFunctionErrorResponse(
+          request.call.name,
+          request.call.callId,
+          [],
+          `Hosted workflow refused this launch (${admission.reason}).`,
+        );
+        await this.commit('tool_result', refused, model);
+        return refused;
+      }
+    }
+    await children.admitWorkflow({
+      childRunId,
+      ownerScopeId: key.sessionId,
+      rootSessionId: key.sessionId,
+      completion: request.agentBackground ? 'sent' : 'tool',
+      script,
+      args: args ?? null,
+      definition,
+      workingDirectory: '.',
+      executionCallId: childRunId,
+    });
+    this.agentDispatched.add(request.call.callId);
+    if (!request.agentBackground) {
+      return await this.awaitChildToolResult(
+        children,
+        request,
+        childRunId,
+        model,
+        signal,
+        'Workflow child',
+      );
+    }
+    const taskId = managedTaskId(
+      managedExtensionRecordKey(key.sessionId, 'child_run', childRunId),
+    );
+    const started = convertToFunctionResponse(
+      request.call.name,
+      request.call.callId,
+      [
+        {
+          text: `Workflow child started in the background as ${taskId}; the task surface stays current with it. A completed child delivers its result as a durable notification input; a failed or cancelled child produces no notification — read the task surface instead of waiting.`,
+        },
+      ],
+    );
+    await this.commit('tool_result', started, model);
+    return started;
+  }
+
+  /**
    * The foreground arm: the call's answer always re-derives from the
    * committed chain — a crashed Session resumes into this same wait and
    * answers from the settled run and its acceptance, never from relay
@@ -2796,6 +3078,7 @@ export class HostedWorkspaceToolTurn {
     childRunId: string,
     model: string,
     signal: AbortSignal,
+    label: 'Child agent' | 'Workflow child',
   ): Promise<Part[]> {
     for (;;) {
       if (signal.aborted) {
@@ -2803,7 +3086,7 @@ export class HostedWorkspaceToolTurn {
           request.call.name,
           request.call.callId,
           [],
-          'The turn was cancelled before the child agent finished; the child keeps running and its committed result is retained.',
+          `The turn was cancelled before the child finished; the child keeps running and its committed result is retained.`,
         );
         await this.commit('tool_result', abandoned, model);
         return abandoned;
@@ -2815,7 +3098,7 @@ export class HostedWorkspaceToolTurn {
             request.call.name,
             request.call.callId,
             [],
-            `Child agent run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).`,
+            `${label} run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).`,
           );
           await this.commit('tool_result', ended, model);
           return ended;

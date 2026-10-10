@@ -22,22 +22,18 @@ import {
   childSettleCompletedBody,
   childStopRequestedBody,
 } from './managed-child-operations.js';
-import {
-  type ChildAgentRun,
-  type ChildSessionRun,
-} from './managed-child-run-record.js';
+import { type ChildSessionRun } from './managed-child-run-record.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import { type ManagedSessionDurableRef } from './managed-session-records.js';
 
 // H4d-a: `session_message` and child continuations are registered and
 // checked but not enabled for submission. The flags below lift exactly those
-// two gates (and the shell/workflow kind gates for cross-kind plantings), so
+// two gates (and the shell kind gate for cross-kind plantings), so
 // the suite runs the commit and rebuild paths ahead of enablement.
 const enablement = vi.hoisted(() => ({
   sessionMessage: true,
   continuation: true,
   shellKind: false,
-  workflowKind: false,
 }));
 
 vi.mock('./managed-session-records.js', async (importOriginal) => {
@@ -60,10 +56,7 @@ vi.mock('./managed-session-records.js', async (importOriginal) => {
       }
     },
     assertManagedSessionChildRunKindEnabled: (kind: string) => {
-      if (
-        !(kind === 'shell' && enablement.shellKind) &&
-        !(kind === 'workflow' && enablement.workflowKind)
-      ) {
+      if (!(kind === 'shell' && enablement.shellKind)) {
         actual.assertManagedSessionChildRunKindEnabled(kind);
       }
     },
@@ -76,7 +69,6 @@ afterEach(async () => {
   enablement.sessionMessage = true;
   enablement.continuation = true;
   enablement.shellKind = false;
-  enablement.workflowKind = false;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -202,7 +194,7 @@ async function publishRefs(harness: Harness): Promise<Refs> {
 }
 
 /** A child run's revisions, from launch to its settled result. */
-function childLife(refs: Refs, childRunId = 'run-1'): ChildAgentRun[] {
+function childLife(refs: Refs, childRunId = 'run-1'): ChildSessionRun[] {
   const launched = childLaunchBody({
     childRunId,
     ownerScopeId: 'scope-main',
@@ -230,7 +222,7 @@ function childLife(refs: Refs, childRunId = 'run-1'): ChildAgentRun[] {
 /** Commits the first `count` revisions of a child run. */
 async function commitChild(
   authority: LocalManagedSessionAuthority,
-  life: readonly ChildAgentRun[],
+  life: readonly ChildSessionRun[],
   count: number,
 ): Promise<void> {
   for (const [index, record] of life.slice(0, count).entries()) {
@@ -944,7 +936,7 @@ describe('managed session authority child continuations (H4d)', () => {
   async function completed(
     harness: Harness,
     authority: LocalManagedSessionAuthority,
-  ): Promise<{ refs: Refs; predecessor: ChildAgentRun }> {
+  ): Promise<{ refs: Refs; predecessor: ChildSessionRun }> {
     const refs = await publishRefs(harness);
     const life = childLife(refs);
     await commitChild(authority, life, 4);
@@ -952,7 +944,7 @@ describe('managed session authority child continuations (H4d)', () => {
   }
 
   function continuation(
-    predecessor: ChildAgentRun,
+    predecessor: ChildSessionRun,
     refs: Refs,
     childRunId = 'run-2',
   ): ChildSessionRun {
@@ -1086,7 +1078,6 @@ describe('managed session authority child continuations (H4d)', () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
       const { refs, predecessor } = await completed(harness, authority);
-      enablement.workflowKind = true;
       await expect(
         authority.commitExtensionRecord(
           command('run-2:1'),
@@ -1157,7 +1148,7 @@ describe('managed session authority child continuations (H4d)', () => {
       'Child continuation must name a predecessor no other run continues.';
     await withAuthority(harness, async (authority) => {
       const { refs, predecessor } = await completed(harness, authority);
-      const first = continuation(predecessor, refs) as ChildAgentRun;
+      const first = continuation(predecessor, refs) as ChildSessionRun;
       await authority.commitExtensionRecord(
         command('run-2:1'),
         { domain: 'child_run', record: first },
@@ -1220,7 +1211,7 @@ describe('managed session authority child continuations (H4d)', () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
       const { refs, predecessor } = await completed(harness, authority);
-      const first = continuation(predecessor, refs) as ChildAgentRun;
+      const first = continuation(predecessor, refs) as ChildSessionRun;
       const dispatched = childDispatchBody(first, {
         dispatchId: 'dispatch-run-2',
         runtime: BINDING,

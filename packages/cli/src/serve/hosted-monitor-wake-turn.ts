@@ -233,7 +233,8 @@ export function withChildAgentConsumption(
     if (
       outcome === 'settled' &&
       !session.blocked &&
-      turn.source === 'child_agent' &&
+      // #13803: either child Session kind's acceptance notification.
+      (turn.source === 'child_agent' || turn.source === 'workflow') &&
       turn.turnId.endsWith(':accept:notify') &&
       session.childAgents
     ) {

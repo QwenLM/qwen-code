@@ -248,6 +248,54 @@ public class ManagedAgentService {
     public CommandAdmission createChildSession(String tenantId,
             String parentSessionId, String childRunId, String description,
             String prompt, boolean isolated) {
+        List<InputBlock> blocks = List.of(new InputBlock("input_text",
+                description.isBlank() ? prompt
+                        : "[" + description + "]\n\n" + prompt));
+        List<Map<String, Object>> input = input(blocks, false);
+        String title = description.isBlank() ? "child agent"
+                : description.length() > 256 ? description.substring(0, 256)
+                        : description;
+        return insertChildSession(tenantId, parentSessionId, childRunId,
+                title, input, isolated);
+    }
+
+    /**
+     * The workflow arm of the same creation (#13803 K1): the child's first
+     * turn carries one `workflow_launch` block — the workflow the parent
+     * launch pinned (id and revision classify, the digest binds the exact
+     * script bytes that ride the block) plus its structured arguments —
+     * instead of a prompt. Everything else is the prompt arm unchanged:
+     * the record-key-derived creation key, the one-transaction lineage,
+     * the dispatch of the admitted creation.
+     */
+    public CommandAdmission createWorkflowChildSession(String tenantId,
+            String parentSessionId, String childRunId, String definitionId,
+            long definitionRevision, String definitionDigest, String script,
+            Object args) {
+        Map<String, Object> block = new LinkedHashMap<>();
+        block.put("type", "workflow_launch");
+        Map<String, Object> definition = new LinkedHashMap<>();
+        definition.put("definitionId", definitionId);
+        definition.put("definitionRevision", definitionRevision);
+        definition.put("definitionDigest", definitionDigest);
+        block.put("definition", definition);
+        block.put("script", script);
+        if (args != null) {
+            block.put("args", args);
+        }
+        List<Map<String, Object>> input = List.of(block);
+        String title =
+                definitionId.length() > 256 ? definitionId.substring(0, 256)
+                        : definitionId;
+        return insertChildSession(tenantId, parentSessionId, childRunId,
+                title, input, false);
+    }
+
+    /** The shared child creation: parent admitted, lineage stamped, first
+     * turn minted from {@code input}, replay by the derived creation key. */
+    private CommandAdmission insertChildSession(String tenantId,
+            String parentSessionId, String childRunId, String title,
+            List<Map<String, Object>> input, boolean isolated) {
         SessionRecord parent = store.requireSession(tenantId, parentSessionId);
         if (parent.workspace() == null || !"ACTIVE".equals(parent.status())) {
             throw new ApiException(HttpStatus.CONFLICT,
@@ -255,10 +303,6 @@ public class ManagedAgentService {
                     "The parent Session cannot admit a child.");
         }
         String creationKey = childCreationKey(parentSessionId, childRunId);
-        List<InputBlock> blocks = List.of(new InputBlock("input_text",
-                description.isBlank() ? prompt
-                        : "[" + description + "]\n\n" + prompt));
-        List<Map<String, Object>> input = input(blocks, false);
         if (!input.isEmpty() && !harness.isWorkspaceFilesAvailable()) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "workspace_unavailable",
@@ -272,9 +316,6 @@ public class ManagedAgentService {
                         : parentLineage.rootSessionId(),
                 childRunId, parentLineage == null ? 1
                         : parentLineage.depth() + 1);
-        String title = description.isBlank() ? "child agent"
-                : description.length() > 256 ? description.substring(0, 256)
-                        : description;
         String childCwd = null;
         if (isolated) {
             childCwd = store.findChildWorkspaceCwd(tenantId,

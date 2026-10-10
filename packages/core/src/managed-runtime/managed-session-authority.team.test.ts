@@ -19,7 +19,7 @@ import {
   childLaunchBody,
   childSettleCompletedBody,
 } from './managed-child-operations.js';
-import { type ChildAgentRun } from './managed-child-run-record.js';
+import { type ChildSessionRun } from './managed-child-run-record.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import {
   type ManagedSessionDomain,
@@ -179,7 +179,7 @@ function childLife(
   refs: Refs,
   childRunId: string,
   childSessionId = `session-${childRunId}`,
-): ChildAgentRun[] {
+): ChildSessionRun[] {
   const launched = childLaunchBody({
     childRunId,
     ownerScopeId: 'scope-main',
@@ -229,7 +229,7 @@ function commit(
 async function commitChild(
   harness: Harness,
   authority: LocalManagedSessionAuthority,
-  life: readonly ChildAgentRun[],
+  life: readonly ChildSessionRun[],
   count: number,
 ): Promise<void> {
   for (const record of life.slice(0, count)) {

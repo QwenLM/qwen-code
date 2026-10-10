@@ -1378,4 +1378,61 @@ describe('settlePendingMonitorInputs', () => {
       await lease.release().catch(() => undefined);
     }
   });
+
+  // #13803 (K2): a workflow child's acceptance notification reads as a
+  // monitor-family source through the default sources list — the close drain
+  // never has to name it.
+  it('settles a workflow child notification through the default sources', async () => {
+    const { session, lease } = await openRootedSession();
+    try {
+      const authority = session.authority;
+      const store = session.resources;
+      await authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: 'run-1:accept:notify',
+          sessionKey,
+          contentDigest: 'b'.repeat(64),
+        },
+        {
+          inputId: 'run-1:accept:notify',
+          turnId: 'run-1:accept:notify',
+          source: 'workflow',
+          contentRef: await store.publish(
+            'managed-input',
+            Buffer.from('{"text":"<task-notification />"}', 'utf8'),
+          ),
+          deadline: null,
+          admissionRef: await store.publish(
+            'managed-admission',
+            Buffer.from('{}', 'utf8'),
+          ),
+          wakeReason: 'input',
+        },
+      );
+      const settled = await settlePendingMonitorInputs({
+        authority,
+        sink: session.sink,
+        sessionId,
+        cwd: '/workspace',
+      });
+      expect(settled).toBe(1);
+      const settledEvents = authority
+        .readEvents()
+        .filter((event) => event.kind === 'turn.settled');
+      expect(settledEvents).toHaveLength(1);
+      expect(settledEvents[0].payload).toMatchObject({
+        turnId: 'run-1:accept:notify',
+        outcome: 'cancelled',
+        stopReason: 'session_closing',
+      });
+      expect(
+        pendingSessionInputs(
+          authority.eventsInSequenceRange(1, authority.committedSequence),
+        ),
+      ).toHaveLength(0);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
 });

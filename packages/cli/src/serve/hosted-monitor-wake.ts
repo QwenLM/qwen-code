@@ -269,11 +269,11 @@ export async function settlePendingMonitorInputs(params: {
   readonly sink: ManagedSessionRecordSink;
   readonly sessionId: string;
   readonly cwd: string;
-  /** The notification sources to settle; H5 adds `channel` and H6 adds
-   * `automation` to the monitor family. */
+  /** The notification sources to settle; H5 adds `channel`, H6 adds
+   * `automation`, and #13803 adds `workflow` to the monitor family. */
   readonly sources?: readonly string[];
 }): Promise<number> {
-  const sources = params.sources ?? ['monitor', 'child_agent'];
+  const sources = params.sources ?? ['monitor', 'child_agent', 'workflow'];
   // The whole committed prefix, not a bounded page: a notification input
   // lands late in the log, and `readEvents()` alone would stop at the
   // default page and leave the Session's owed inputs unsettled — which is

@@ -16,13 +16,13 @@ import { type ManagedSessionDurableRef } from './managed-session-records.js';
 
 // The H4b enablement gates are real in this suite: `child_acceptance` sits
 // in the plain enabled list and the kind gate admits `child_agent`, so no
-// mock is needed to run commits. One case still plants a `shell` chain to
-// prove an acceptance cannot name it, and the H4c cases commit `workflow`
-// chains ahead of that kind's enablement; the flags below lift the kind
-// gate for exactly those plantings.
+// mock is needed to run commits. The workflow runtime slice (#13803) lifted
+// the gate for `workflow` as the production behavior, so the workflow cases
+// below run through the real gate as well. One case still plants a `shell`
+// chain to prove an acceptance cannot name it; the flag below lifts the
+// kind gate for exactly that planting.
 const enablement = vi.hoisted(() => ({
   shellKind: false,
-  workflowKind: false,
 }));
 
 vi.mock('./managed-session-records.js', async (importOriginal) => {
@@ -31,10 +31,7 @@ vi.mock('./managed-session-records.js', async (importOriginal) => {
   return {
     ...actual,
     assertManagedSessionChildRunKindEnabled: (kind: string) => {
-      if (
-        !(kind === 'shell' && enablement.shellKind) &&
-        !(kind === 'workflow' && enablement.workflowKind)
-      ) {
+      if (!(kind === 'shell' && enablement.shellKind)) {
         actual.assertManagedSessionChildRunKindEnabled(kind);
       }
     },
@@ -45,7 +42,6 @@ const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
   enablement.shellKind = false;
-  enablement.workflowKind = false;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -1136,28 +1132,25 @@ describe('managed session authority child_agent records', () => {
   });
 });
 
-describe('managed session authority workflow records (H4c)', () => {
-  it('refuses a workflow launch through the kind gate, committing nothing', async () => {
+describe('managed session authority workflow records (H4c, enabled by the workflow runtime slice)', () => {
+  it('admits a workflow launch through the real kind gate', async () => {
     const harness = await createHarness();
     const refs = await publishRefs(harness);
     await withAuthority(harness, async (authority) => {
-      await expect(
-        authority.commitExtensionRecord(
-          command('run-1:1'),
-          { domain: 'child_run', record: workflowLife(refs)[0] },
-          TRUSTED,
-        ),
-      ).rejects.toThrow(
-        'domain child_run kind workflow is registered but not enabled for submission.',
+      await authority.commitExtensionRecord(
+        command('run-1:1'),
+        { domain: 'child_run', record: workflowLife(refs)[0] },
+        TRUSTED,
       );
-      expect(await publishedBodies(harness, 'child_run')).toBe(0);
-      expect(authority.extensionRecord('child_run', 'run-1')).toBeUndefined();
-      expect(authority.taskViews()).toEqual([]);
+      expect(await publishedBodies(harness, 'child_run')).toBe(1);
+      expect(authority.extensionRecord('child_run', 'run-1')).toMatchObject({
+        revision: 1,
+      });
+      expect(authority.taskViews()).toMatchObject([{ kind: 'workflow' }]);
     });
   });
 
   it('chains a workflow child through acceptance and consumption, rebuilt on reopen', async () => {
-    enablement.workflowKind = true;
     const harness = await createHarness();
     const refs = await publishRefs(harness);
     const chain = workflowLife(refs);
@@ -1198,8 +1191,6 @@ describe('managed session authority workflow records (H4c)', () => {
         TRUSTED,
       );
     });
-    // Rebuild needs no gate: the gate refuses submission, never a reader.
-    enablement.workflowKind = false;
     await withAuthority(
       harness,
       async (authority) => {
@@ -1217,7 +1208,6 @@ describe('managed session authority workflow records (H4c)', () => {
   });
 
   it('binds a workflow child to the child Session commit rules', async () => {
-    enablement.workflowKind = true;
     const harness = await createHarness();
     const refs = await publishRefs(harness);
     const chain = workflowLife(refs);

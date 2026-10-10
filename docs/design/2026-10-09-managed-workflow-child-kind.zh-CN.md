@@ -2,7 +2,7 @@
 
 [English](2026-10-09-managed-workflow-child-kind.md) | [简体中文](2026-10-09-managed-workflow-child-kind.zh-CN.md)
 
-状态:已在本变更中实现。已落地:`managed-child_run` 的 `workflow` 记录体 kind,在两种语言中均已登记并校验,但不开放提交;以及累计 child launch 预算,超出时以 `budget_exhausted` 拒绝。仍为设计:产出 `workflow` 记录的 workflow 运行时,以及 Workspace 隔离策略,二者各有后续切片(见"后续工作")。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 **H4c** 切片,即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段,由 [#13743](https://github.com/QwenLM/qwen-code/issues/13743) 跟踪。它承接 H4a([记录契约](2026-10-06-managed-child-agent-runtime.md),#13505)与 H4b([child Session 运行时](2026-10-07-managed-child-session-runtime.md),#13550)。更早的 [H4 问题框架](2026-10-04-managed-child-agents.md) 仍是背景;凡它与 H4a、H4b 或本文档冲突之处,以后者为准。
+状态:已在本变更中实现。已落地:`managed-child_run` 的 `workflow` 记录体 kind,在两种语言中均已登记并校验,但不开放提交;以及累计 child launch 预算,超出时以 `budget_exhausted` 拒绝。workflow 运行时已由后续切片交付([设计](2026-10-10-managed-workflow-child-runtime.zh-CN.md));仍为设计的只剩 Workspace 隔离策略(见"后续工作")。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 **H4c** 切片,即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段,由 [#13743](https://github.com/QwenLM/qwen-code/issues/13743) 跟踪。它承接 H4a([记录契约](2026-10-06-managed-child-agent-runtime.md),#13505)与 H4b([child Session 运行时](2026-10-07-managed-child-session-runtime.md),#13550)。更早的 [H4 问题框架](2026-10-04-managed-child-agents.md) 仍是背景;凡它与 H4a、H4b 或本文档冲突之处,以后者为准。
 
 ## 问题与范围
 
@@ -120,8 +120,8 @@ Schema version 1。链以 `childRunId` 为键,与 `child_agent` 相同。[`child
 
 ## 后续工作
 
-| 切片            | 范围                                                                                                                                                                                             |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Workflow 运行时 | Workflow 工具的 Managed 准入、workflow launch envelope、child Session 执行 workflow、relay 与级联放宽到 `workflow`,最后是 kind 门禁条目。                                                        |
-| 隔离            | [#13753](https://github.com/QwenLM/qwen-code/issues/13753):为 child worktree 及其合并回去提供 Workspace 能力;然后是 `worktree`(生命周期、合并策略)与 `snapshot`,并决定串行共享是否需要独立取值。 |
-| H4d–H4f、Detach | 与 H4a/H4b 交付地图相同。                                                                                                                                                                        |
+| 切片            | 范围                                                                                                                                                                                                                                                                                                        |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Workflow 运行时 | 已由 [workflow 运行时设计](2026-10-10-managed-workflow-child-runtime.zh-CN.md) 交付:Workflow 工具的 Managed 准入(内联源码,见该设计决策 1 —— 了结了本文未决问题 1)、launch envelope、child Session 执行 workflow(其 agent 在进程内运行,了结了未决问题 2)、relay 与级联放宽到 `workflow`,以及 kind 门禁条目。 |
+| 隔离            | [#13753](https://github.com/QwenLM/qwen-code/issues/13753):为 child worktree 及其合并回去提供 Workspace 能力;然后是 `worktree`(生命周期、合并策略)与 `snapshot`,并决定串行共享是否需要独立取值。                                                                                                            |
+| H4d–H4f、Detach | 与 H4a/H4b 交付地图相同。                                                                                                                                                                                                                                                                                   |

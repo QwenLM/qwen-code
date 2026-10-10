@@ -177,11 +177,16 @@ class SessionLifecycleCoordinatorTest {
     }
 
     private static void liveScope(World world, String resourceBody) {
-        jdbcLiveScope(world.jdbc, world.session, resourceBody);
+        jdbcLiveScope(world.jdbc, world.session, resourceBody, "child_agent");
+    }
+
+    private static void liveScopeKind(World world, String resourceBody,
+            String taskKind) {
+        jdbcLiveScope(world.jdbc, world.session, resourceBody, taskKind);
     }
 
     private static void jdbcLiveScope(JdbcTemplate jdbc, String session,
-            String resourceBody) {
+            String resourceBody, String taskKind) {
         jdbc.update("INSERT INTO qwen_managed_session_extension_record"
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
@@ -190,8 +195,8 @@ class SessionLifecycleCoordinatorTest {
                         + " delivery_state, created_at)"
                         + " VALUES ('scope-parent', 'run-1-key', 'tenant',"
                         + " 'workspace', ?, 'child_run', 'run-1', 'h', 1,"
-                        + " 'res-run-1', 'child_agent', 'running', 'session',"
-                        + " 'planned', 1)",
+                        + " 'res-run-1', '" + taskKind + "', 'running',"
+                        + " 'session', 'planned', 1)",
                 session);
         byte[] bytes = resourceBody.getBytes(StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO qwen_managed_session_resource"
@@ -835,6 +840,44 @@ class SessionLifecycleCoordinatorTest {
                                 lifecycleWorld.operation, "claimGeneration",
                                 lifecycleRecord.claimGeneration(), "kind",
                                 "delete"));
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
+    // #13803 (K2): the live-scope page returns workflow rows too, and the
+    // cascade cancels a workflow child through the same kind-blind funnel
+    // verbs — a row is neither invisible to the page nor cancelled through
+    // a funnel that cannot reach it.
+    @Test
+    void theCascadeCancelsAWorkflowChildThroughTheSameFunnel() {
+        World world = closingWorld("workflow-");
+        liveScopeKind(world, "{\"kind\":\"workflow\",\"childSessionId\":\""
+                + world.child + "\"}", "workflow");
+        var harness = new CascadingHarness(true, false);
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(world.store,
+                    new ManagedSessionStore(world.jdbc), harness,
+                    warmer(true, false), world.relayStore, new ObjectMapper(),
+                    admissions(world.store, warmer(true, false)),
+                    brokerProvider(null), executor, Clock.systemUTC(),
+                    world.properties);
+            try {
+                coordinator.dispatch("tenant", world.session,
+                        world.operation);
+                redispatchUntil(coordinator, world, "COMPLETED");
+                assertThat(world.store.requireSession("tenant", world.child)
+                        .status()).isEqualTo("CLOSED");
+                assertThat(harness.operations)
+                        .extracting(op -> op.get("kind"))
+                        .containsSequence("cancel", "close_scope");
+                assertThat(harness.operations.stream()
+                        .filter(op -> "close_scope".equals(op.get("kind")))
+                        .findFirst().orElseThrow())
+                        .containsEntry("started", true);
+                assertThat(harness.closed).contains(world.child,
+                        world.session);
             } finally {
                 coordinator.stopRenewals();
             }

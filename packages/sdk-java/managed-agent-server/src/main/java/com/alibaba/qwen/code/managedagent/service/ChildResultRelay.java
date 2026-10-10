@@ -21,16 +21,17 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 
 /**
  * H4b: the first cross-Session dispatcher — the child result relay. It
- * discovers child_agent runs whose delivery line still needs work,
- * drives their idempotent creation, commits the control-plane revisions
- * (dispatch, attach, result, acceptance, the delivered step), and
- * classifies what cannot be proven: a result reaching a closing or
- * closed parent is `orphaned` — recorded, never fed to a model; a fact
- * that stays unproven past its bounded retries is `unknown` — visible,
- * never re-executed. Every step reconciles from what is committed (the
- * parent's record chain, the child Session's rows) and never from its
- * own memory, so a restart of this worker, of the Java instance or of a
- * claim re-runs the same verbs idempotently.
+ * discovers child_agent and workflow runs whose delivery line still
+ * needs work, drives their idempotent creation, commits the
+ * control-plane revisions (dispatch, attach, result, acceptance, the
+ * delivered step), and classifies what cannot be proven: a result
+ * reaching a closing or closed parent is `orphaned` — recorded, never
+ * fed to a model; a fact that stays unproven past its bounded retries
+ * is `unknown` — visible, never re-executed. Every step reconciles
+ * from what is committed (the parent's record chain, the child
+ * Session's rows) and never from its own memory, so a restart of this
+ * worker, of the Java instance or of a claim re-runs the same verbs
+ * idempotently.
  */
 @Service
 public class ChildResultRelay {
@@ -244,11 +245,31 @@ public class ChildResultRelay {
         JsonNode envelope = readJson(
                 relayStore.readResource(pending.tenantId(), inputResource),
                 "child launch envelope");
-        String description = envelope.required("description").asText();
-        String prompt = envelope.required("prompt").asText();
-        var admission = sessions.createChildSession(pending.tenantId(),
-                pending.parentSessionId(), pending.childRunId(), description,
-                prompt);
+        // #13803 (K1): the record's kind selects the launch envelope —
+        // never its shape: a child_agent launch is a prompt, a workflow
+        // launch is the workflow the parent pinned and its arguments.
+        String kind = body.required("kind").asText();
+        var admission = switch (kind) {
+            case "workflow" -> {
+                JsonNode definition = envelope.required("definition");
+                JsonNode args = envelope.get("args");
+                yield sessions.createWorkflowChildSession(pending.tenantId(),
+                        pending.parentSessionId(), pending.childRunId(),
+                        definition.required("definitionId").asText(),
+                        definition.required("definitionRevision").asLong(),
+                        definition.required("definitionDigest").asText(),
+                        envelope.required("script").asText(),
+                        args == null || args.isNull() ? null
+                                : mapper.convertValue(args, Object.class));
+            }
+            case "child_agent" -> sessions.createChildSession(
+                    pending.tenantId(), pending.parentSessionId(),
+                    pending.childRunId(),
+                    envelope.required("description").asText(),
+                    envelope.required("prompt").asText());
+            default -> throw new IllegalStateException(
+                    "child result relay cannot create kind " + kind);
+        };
         relayStore.advance(row, owner, "binding", admission.sessionId(), 0,
                 null, now + LEASE_MS, now);
     }
@@ -386,13 +407,23 @@ public class ChildResultRelay {
         accept.put("kind", "accept");
         accept.put("childRunId", row.childRunId());
         if (background) {
-            Map<String, Object> notification = new LinkedHashMap<>();
-            notification.put("description", readJson(
+            JsonNode envelope = readJson(
                     relayStore.readResource(pending.tenantId(), body
                             .required("inputRef").required("resourceId")
                             .asText()),
-                    "child launch envelope").required("description")
-                    .asText());
+                    "child launch envelope");
+            // The wake's label: a child agent carries its description, a
+            // workflow names the pinned definition (#13803 K1).
+            String description = "workflow".equals(
+                    body.required("kind").asText())
+                    ? envelope.required("definition")
+                                    .required("definitionId").asText()
+                            + "@"
+                            + envelope.required("definition")
+                                    .required("definitionRevision").asLong()
+                    : envelope.required("description").asText();
+            Map<String, Object> notification = new LinkedHashMap<>();
+            notification.put("description", description);
             accept.put("notification", notification);
         }
         harness.runChildOperation(row.tenantId(), row.parentSessionId(),
