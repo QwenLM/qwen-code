@@ -2464,10 +2464,10 @@ export class LocalManagedSessionAuthority {
       }
       if (domain === 'team_message') {
         const message = parseTeamMessage(parsed.record);
-        if (
-          previous === undefined &&
-          (!takesPart(message.from) || !takesPart(message.to))
-        ) {
+        // Every revision, not only the opening: the roster only grows, so a
+        // lawful successor always passes, while one that readdresses the
+        // message is refused before its recipient is looked up below.
+        if (!takesPart(message.from) || !takesPart(message.to)) {
           reject(
             'Team message must travel between the leader and members of its team.',
           );

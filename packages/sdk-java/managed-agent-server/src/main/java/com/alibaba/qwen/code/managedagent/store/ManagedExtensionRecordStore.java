@@ -1443,8 +1443,12 @@ public class ManagedExtensionRecordStore {
         }
         if (domain.equals("team_message")) {
             String to = record.get("to").textValue();
-            require(previous != null || (takesPart(team,
-                    record.get("from").textValue()) && takesPart(team, to)),
+            // Every revision, not only the opening: the roster only grows,
+            // so a lawful successor always passes, while one that
+            // readdresses the message is refused before its recipient is
+            // looked up below.
+            require(takesPart(team, record.get("from").textValue())
+                    && takesPart(team, to),
                     "Team message must travel between the leader and members"
                             + " of its team.");
             JsonNode target = record.get("targetSessionId");

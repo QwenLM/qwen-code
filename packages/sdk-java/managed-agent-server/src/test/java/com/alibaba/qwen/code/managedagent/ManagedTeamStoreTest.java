@@ -246,6 +246,11 @@ class ManagedTeamStoreTest {
                         "leader", "carol", "planned", null)));
         commit(journal, "team_message", message("message-1", "leader",
                 "alice", "planned", null));
+        // A successor that readdresses the message to a stranger is refused
+        // as the conflict it is, before anything looks its recipient up.
+        assertRefused("a successor readdressed to a stranger", lead, ROUTE,
+                () -> commit(journal, "team_message", message("message-1",
+                        "leader", "carol", "accepting", "session-run-1")));
         assertRefused("a message to another member's Session", lead, TARGET,
                 () -> commit(journal, "team_message", message("message-1",
                         "leader", "alice", "accepting", "session-run-2")));

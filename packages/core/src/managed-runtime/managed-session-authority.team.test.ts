@@ -9,7 +9,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
-import { LocalManagedSessionAuthority } from './managed-session-authority.js';
+import {
+  LocalManagedSessionAuthority,
+  ManagedSessionConflictError,
+} from './managed-session-authority.js';
 import {
   childAttachBody,
   childDispatchBody,
@@ -823,6 +826,21 @@ describe('managed session authority team records (H4e)', () => {
         ),
       ).rejects.toThrow(routing);
       await commit(harness, authority, 'team_message', message(refs));
+      // A successor that readdresses the message to a stranger is refused
+      // as the conflict it is, before anything looks its recipient up.
+      const readdressed = commit(
+        harness,
+        authority,
+        'team_message',
+        message(refs, 'accepting', { to: 'carol' }),
+      );
+      await expect(readdressed).rejects.toBeInstanceOf(
+        ManagedSessionConflictError,
+      );
+      await expect(readdressed).rejects.toThrow(routing);
+      expect(
+        authority.extensionRecord('team_message', 'message-1'),
+      ).toMatchObject({ revision: 1, record: message(refs) });
       await expect(
         commit(
           harness,
