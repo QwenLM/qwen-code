@@ -43,6 +43,24 @@ function readTableInlineMathSpan(row: string, index: number): string | null {
   return readInlineMathSpanAt(row, index);
 }
 
+/** True when a run of exactly `runLength` backticks starts at or after `from`. */
+function hasClosingBacktickRun(
+  row: string,
+  from: number,
+  runLength: number,
+): boolean {
+  for (let index = from; index < row.length; index++) {
+    if (row[index] !== '`') continue;
+    let length = 1;
+    while (row[index + length] === '`') {
+      length += 1;
+    }
+    if (length === runLength) return true;
+    index += length - 1;
+  }
+  return false;
+}
+
 /**
  * Splits one markdown table row into its cells, honouring escaped pipes
  * (`\|`), inline code spans and inline math spans. Shared so table detection
@@ -72,7 +90,11 @@ export function splitMarkdownTableRow(row: string): string[] {
         runLength += 1;
       }
       if (activeCodeFenceLength === 0) {
-        activeCodeFenceLength = runLength;
+        // A run with no closing run of the same length is literal text, not
+        // the start of a code span, so it must not hide the row's later pipes.
+        if (hasClosingBacktickRun(row, index + runLength, runLength)) {
+          activeCodeFenceLength = runLength;
+        }
       } else if (runLength === activeCodeFenceLength) {
         activeCodeFenceLength = 0;
       }
