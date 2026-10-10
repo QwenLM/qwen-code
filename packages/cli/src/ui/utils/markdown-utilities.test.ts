@@ -4,15 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { CODE_FENCE_RE } from './pending-rendered-height.js';
 import {
   findLastSafeSplitPoint,
   splitFencedMarkdown,
   parseCodeFenceInfo,
   getEnclosingFenceInfo,
-} from './markdownUtilities.js';
+} from './markdown-utilities.js';
 
-describe('markdownUtilities', () => {
+describe('markdown-utilities', () => {
   describe('findLastSafeSplitPoint', () => {
     it('should split at the last double newline if not in a code block', () => {
       const content = 'paragraph1\n\nparagraph2\n\nparagraph3';
@@ -90,6 +91,57 @@ describe('markdownUtilities', () => {
     it('should hard split an oversized leading code block with a max length', () => {
       const content = '```ts\n' + 'a'.repeat(100);
       expect(findLastSafeSplitPoint(content, 40)).toBe(40);
+    });
+
+    it('re-arms the closed-block walk for the single-newline fallback', () => {
+      const content = '```a\nx\n\ny\n```\n```b\nz\n```TAIL';
+      expect(findLastSafeSplitPoint(content, 22)).toBe(14);
+    });
+
+    it.each(['```', '``````', '~~~'])(
+      'skips the fence regex for a backtick after the full %s delimiter',
+      (delimiter) => {
+        const content = delimiter + ' '.repeat(20000) + '`\n\nafter';
+        const scan = vi.spyOn(CODE_FENCE_RE, 'exec');
+        try {
+          expect(findLastSafeSplitPoint(content, 16384)).toBe(16384);
+          expect(scan.mock.calls.length).toBe(0);
+        } finally {
+          scan.mockRestore();
+        }
+      },
+    );
+
+    it.each([200, 2000])(
+      'scans fences once when rejecting %s internal blank lines',
+      (records) => {
+        const fenced = `\`\`\`csv\n${'x\n\n'.repeat(records)}\`\`\`\n`;
+        const content = fenced + 'a'.repeat(16500 - fenced.length);
+        const scan = vi.spyOn(CODE_FENCE_RE, 'exec');
+        try {
+          expect(findLastSafeSplitPoint(content, 16384)).toBe(fenced.length);
+          expect(scan.mock.calls.length).toBeGreaterThan(0);
+          expect(scan.mock.calls.length).toBeLessThanOrEqual(4);
+        } finally {
+          scan.mockRestore();
+        }
+      },
+    );
+
+    it('visits each fence once across many closed blocks', () => {
+      const blocks = 1000;
+      const fenced = '```csv\nx\n\n```\n'.repeat(blocks);
+      const content = fenced + 'a'.repeat(100);
+      const scan = vi.spyOn(CODE_FENCE_RE, 'exec');
+      try {
+        expect(findLastSafeSplitPoint(content, fenced.length + 10)).toBe(
+          fenced.length,
+        );
+        expect(scan.mock.calls.length).toBeGreaterThan(0);
+        expect(scan.mock.calls.length).toBeLessThanOrEqual(blocks * 2);
+      } finally {
+        scan.mockRestore();
+      }
     });
   });
 
@@ -282,5 +334,117 @@ describe('markdownUtilities', () => {
         startLine: 7,
       });
     });
+  });
+
+  describe('fence recognition', () => {
+    it.each([
+      ['~~~', '```'],
+      ['```', '~~~'],
+    ])('keeps %s open across an inner %s line', (outer, inner) => {
+      const opening = `${outer}md\nHere:\n${inner}\n`;
+      const pending = `${opening}still inside\n`;
+      const content = `${pending}${outer}\nAfter.\n`;
+      const splitPoint = content.indexOf('still');
+
+      for (const text of [pending, content]) {
+        expect(getEnclosingFenceInfo(text, splitPoint)).toEqual({
+          lang: 'md',
+          startLine: 1,
+        });
+        expect(findLastSafeSplitPoint(text, splitPoint)).toBe(splitPoint);
+        expect(splitFencedMarkdown(text, splitPoint)).toEqual({
+          before: `${opening}${outer}\n`,
+          after: `${outer}md qwen-code:start-line=3\n${text.slice(splitPoint)}`,
+        });
+      }
+      expect(
+        getEnclosingFenceInfo(content, content.indexOf('After')),
+      ).toBeNull();
+    });
+
+    it.each(['~~~x', '~~~~~x'])(
+      'advances past a same-character fence marker in the info string: %s',
+      (info) => {
+        const content = `~~~ ${info}\ncode\n~~~\nAfter`;
+        expect(getEnclosingFenceInfo(content, content.indexOf('code'))).toEqual(
+          {
+            lang: info,
+            startLine: 1,
+          },
+        );
+        expect(
+          getEnclosingFenceInfo(content, content.indexOf('After')),
+        ).toBeNull();
+      },
+    );
+
+    it('advances past a fence info string containing the other fence marker', () => {
+      const content = '``` ~~~\ncode\n```\nAfter';
+      expect(getEnclosingFenceInfo(content, content.indexOf('code'))).toEqual({
+        lang: '~~~',
+        startLine: 1,
+      });
+      expect(
+        getEnclosingFenceInfo(content, content.indexOf('After')),
+      ).toBeNull();
+    });
+
+    it.each([
+      ['~~~', 'Use `~~~` as the fence marker.'],
+      ['```', 'Use ``` as the fence marker.'],
+    ])('keeps an inline %s marker in ordinary prose', (_marker, intro) => {
+      const content = `${intro}\nMore ordinary prose follows.`;
+      const splitPoint = content.indexOf('More');
+
+      expect(getEnclosingFenceInfo(content, splitPoint)).toBeNull();
+      expect(findLastSafeSplitPoint(content, splitPoint + 8)).toBe(splitPoint);
+      expect(splitFencedMarkdown(content, splitPoint)).toEqual({
+        before: `${intro}\n`,
+        after: 'More ordinary prose follows.',
+      });
+    });
+
+    it.each(['```ts`invalid', '~~~ts`invalid'])(
+      'rejects an opening fence with a backtick in its info string: %s',
+      (opening) => {
+        const content = `${opening}\nMore ordinary prose follows.`;
+        const splitPoint = content.indexOf('More');
+
+        expect(getEnclosingFenceInfo(content, splitPoint)).toBeNull();
+        expect(findLastSafeSplitPoint(content, splitPoint + 8)).toBe(
+          splitPoint,
+        );
+        expect(splitFencedMarkdown(content, splitPoint)).toEqual({
+          before: `${opening}\n`,
+          after: 'More ordinary prose follows.',
+        });
+      },
+    );
+
+    it.each(['````', '~~~~'])(
+      'recognizes an indented %s fence after ordinary prose',
+      (delimiter) => {
+        const intro = 'Use `~~~` as the fence marker.\n';
+        const content = `${intro}  ${delimiter}ts\nline1\nline2\n  ${delimiter}\n\nAfter prose.`;
+        const splitPoint = content.indexOf('line2');
+        const afterBlock = content.indexOf('After');
+
+        expect(getEnclosingFenceInfo(content, splitPoint)).toEqual({
+          lang: 'ts',
+          startLine: 1,
+        });
+        expect(findLastSafeSplitPoint(content, splitPoint)).toBe(
+          intro.length + 2,
+        );
+        expect(splitFencedMarkdown(content, splitPoint)).toEqual({
+          before: `${intro}  ${delimiter}ts\nline1\n${delimiter}\n`,
+          after: `${delimiter}ts qwen-code:start-line=2\nline2\n  ${delimiter}\n\nAfter prose.`,
+        });
+        expect(getEnclosingFenceInfo(content, afterBlock)).toBeNull();
+        expect(findLastSafeSplitPoint(content, afterBlock + 3)).toBe(
+          afterBlock,
+        );
+      },
+    );
   });
 });
