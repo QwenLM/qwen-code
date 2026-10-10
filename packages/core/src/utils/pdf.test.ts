@@ -189,6 +189,68 @@ describe('pdf utilities', () => {
     expect(mockExecFile).toHaveBeenCalledTimes(2);
   });
 
+  it.each(['pdfinfo', 'pdftotext', 'pdftoppm'])(
+    'bounds cancelled %s even when SIGKILL produces no close event',
+    async (command) => {
+      if (command !== 'pdfinfo') mockExecResult();
+      const child = Object.assign(new EventEmitter(), {
+        pid: 123,
+        kill: vi.fn(),
+        unref: vi.fn(),
+        stdout: { destroy: vi.fn() },
+        stderr: { destroy: vi.fn() },
+      });
+      let callback!: ExecCallback;
+      mockExecFile.mockImplementationOnce(
+        (_command: unknown, _args: unknown, _options: unknown, cb: unknown) => {
+          callback = cb as ExecCallback;
+          return child as unknown as ReturnType<typeof execFile>;
+        },
+      );
+      const controller = new AbortController();
+      const operation =
+        command === 'pdfinfo'
+          ? getPDFPageCount('/test.pdf', controller.signal)
+          : command === 'pdftotext'
+            ? extractPDFText('/test.pdf', { signal: controller.signal })
+            : renderPDFPagesToImages('/test.pdf', {
+                signal: controller.signal,
+              });
+      await vi.waitFor(() => expect(callback).toBeDefined());
+      let settled = false;
+      const outcome = operation.catch((error: unknown) => {
+        settled = true;
+        return error;
+      });
+      vi.useFakeTimers();
+      try {
+        controller.abort();
+        callback(errorWith('cancelled', { name: 'AbortError' }), '', '');
+        await vi.advanceTimersByTimeAsync(999);
+        expect(child.kill).not.toHaveBeenCalled();
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(await outcome).toMatchObject({ name: 'AbortError' });
+        expect(child.unref).toHaveBeenCalledOnce();
+        expect(child.stdout.destroy).toHaveBeenCalledOnce();
+        expect(child.stderr.destroy).toHaveBeenCalledOnce();
+        if (command === 'pdftoppm') {
+          const { rm } = await import('node:fs/promises');
+          expect(rm).toHaveBeenCalledWith('/tmp/pdf-render-test', {
+            recursive: true,
+            force: true,
+          });
+        }
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   describe('PDF budget policy helpers', () => {
     it('requires pages when pdfinfo reports more than the full-text page limit', () => {
       expect(shouldRequirePDFPageRange(11, 64 * 1024)).toEqual({

@@ -362,10 +362,34 @@ describe('ReadFileTool', () => {
           expect(
             normalizeParts(result.llmContent).filter((part) => part.inlineData),
           ).toHaveLength(2);
-          expect(JSON.stringify(result.llmContent)).toContain('2 pages');
+          expect(JSON.stringify(result.llmContent)).toContain(
+            'The document has 2 pages; rendered pages 1-2.',
+          );
         }
       },
     );
+
+    it('does not probe the page count or add a notice for a complete range', async () => {
+      const file = await put('scan.pdf', '%PDF-1.7');
+      pdfMocks.renderPDFPagesToImages.mockResolvedValue({
+        success: true,
+        images: [
+          { data: 'YWJj', mimeType: 'image/jpeg' },
+          { data: 'YWJj', mimeType: 'image/jpeg' },
+        ],
+        bytesTruncated: false,
+      });
+      const result = await read(
+        { file_path: file, pages: '1-2' },
+        boundedTool({ getEffectiveInputModalities: () => ({ image: true }) }),
+      );
+      expect(result.error).toBeUndefined();
+      expect(normalizeParts(result.llmContent)).toHaveLength(2);
+      expect(JSON.stringify(result.llmContent)).not.toContain(
+        'The document has',
+      );
+      expect(pdfMocks.getPDFPageCount).not.toHaveBeenCalled();
+    });
 
     it('rejects an explicit incomplete rendered range but announces an implicit whole-page prefix', async () => {
       const file = await put('scan.pdf', '%PDF-1.7');

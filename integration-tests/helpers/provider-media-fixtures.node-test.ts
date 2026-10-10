@@ -15,7 +15,11 @@ import { promisify } from 'node:util';
 import sharp from 'sharp';
 import { mediaFixture, pdfFixture } from './provider-media-fixtures.js';
 import './provider-media-read-probe.mjs';
-import { stopFixtureProcess } from './provider-media-process-cleanup.mjs';
+import {
+  PROVIDER_MEDIA_FIXTURES_PREFIX,
+  PROVIDER_MEDIA_PROBE_PREFIX,
+  stopFixtureProcess,
+} from './provider-media-process-cleanup.mjs';
 
 for (const alreadyExited of [false, true]) {
   test(
@@ -82,7 +86,7 @@ test(
 
 test('worker read probe appends evidence across process generations', async () => {
   const temporary = await mkdtemp(
-    path.join(tmpdir(), 'qwen-e2e-home-provider-media-probe-'),
+    path.join(tmpdir(), PROVIDER_MEDIA_PROBE_PREFIX),
   );
   try {
     const file = path.join(temporary, 'proof.pdf');
@@ -129,7 +133,7 @@ test('real image fixtures decode with the expected MIME and dimensions', async (
 
 test('real PDF fixtures distinguish text extraction, Poppler rendering and size refusal', async () => {
   const temporary = await mkdtemp(
-    path.join(tmpdir(), 'qwen-e2e-home-provider-media-fixtures-'),
+    path.join(tmpdir(), PROVIDER_MEDIA_FIXTURES_PREFIX),
   );
   try {
     const text = path.join(temporary, 'text.pdf');

@@ -125,8 +125,10 @@ function execCommand(
     let completed: Parameters<typeof resolve>[0] | undefined;
     let closed = false;
     let executionError: Error | null = null;
+    let cancellationTimer: ReturnType<typeof setTimeout> | undefined;
     const finish = () => {
       if (!completed || !closed) return;
+      clearTimeout(cancellationTimer);
       try {
         options.signal?.throwIfAborted();
         if (executionError?.name === 'AbortError') throw executionError;
@@ -181,7 +183,20 @@ function execCommand(
             timedOut: false,
           };
         }
-        // Abort callbacks can precede exit; cleanup must wait for the child.
+        // Give cancellation cleanup a bound even if the child cannot close.
+        if (error?.name === 'AbortError' && !closed) {
+          cancellationTimer = setTimeout(() => {
+            child.kill('SIGKILL');
+            if (closed) return;
+            cancellationTimer = setTimeout(() => {
+              child.unref();
+              child.stdout?.destroy();
+              child.stderr?.destroy();
+              reject(options.signal?.reason ?? error);
+            }, 1000);
+          }, 1000);
+        }
+        // Abort callbacks can precede exit; normally wait before cleanup.
         queueMicrotask(finish);
       },
     );

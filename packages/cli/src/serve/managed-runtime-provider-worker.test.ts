@@ -610,6 +610,7 @@ describe('Managed Runtime provider worker', () => {
     });
     for (const prepared of [disabled, missing]) {
       const answer = await execute<Execution>(reference(prepared));
+      expect(answer.executionStatus).toBe('success');
       expect(answer.result.llmContent).toContain('Unsupported image file');
     }
     fs.writeFileSync(file, 'changed after settlement');
@@ -766,9 +767,11 @@ describe('Managed Runtime provider worker', () => {
           inputModalities: { image: true, pdf: true, audio: true, video: true },
         },
       });
-      const answer = await execute<{ result: { llmContent: unknown } }>(
-        reference(prepared),
-      );
+      const answer = await execute<{
+        executionStatus: string;
+        result: { llmContent: unknown };
+      }>(reference(prepared));
+      expect(answer.executionStatus).toBe('success');
       expect(answer.result.llmContent).toContain(
         `Unsupported ${modality} file`,
       );

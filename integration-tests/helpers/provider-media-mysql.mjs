@@ -16,7 +16,10 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { stopFixtureProcess } from './provider-media-process-cleanup.mjs';
+import {
+  PROVIDER_MEDIA_MYSQL_PREFIX,
+  stopFixtureProcess,
+} from './provider-media-process-cleanup.mjs';
 
 const root = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -38,7 +41,7 @@ if (!prepareOnly) {
   console.log(`M4_BUNDLE_SHA256 ${hash}`);
 }
 const temporary = await mkdtemp(
-  path.join(tmpdir(), 'qwen-e2e-home-provider-media-mysql-'),
+  path.join(tmpdir(), PROVIDER_MEDIA_MYSQL_PREFIX),
 );
 const datadir = path.join(temporary, 'data');
 const socket = path.join(temporary, 'mysql.sock');
@@ -60,12 +63,7 @@ try {
   }
   execFileSync(
     'mysqld',
-    [
-      '--no-defaults',
-      '--initialize-insecure',
-      `--datadir=${datadir}`,
-      `--log-error=${temporary}/mysql.log`,
-    ],
+    ['--no-defaults', '--initialize-insecure', `--datadir=${datadir}`],
     { stdio: 'pipe', timeout: 30_000, killSignal: 'SIGKILL' },
   );
   mysql = spawn(

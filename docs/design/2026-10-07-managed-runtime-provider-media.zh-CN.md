@@ -133,16 +133,22 @@ provider/1 保持 1 MiB。首版策略固定在 worker 代码内，不增加公�
 - 给现有 PDF renderer 增加可选聚合 base64 上限。更小策略也约束第一页，不能
   沿用当前“第一页总是保留”的例外。在读取/编码无法容纳的页面前停止。有明确
   page range 时拒绝不完整渲染；无 range 时只允许带明确省略后续页面提示的
-  整页前缀；一页都容纳不下则 FILE_TOO_LARGE，建议更窄范围或缩小文档。
+  整页前缀；一页都容纳不下则 FILE_TOO_LARGE，并保留具体单页超限原因，建议选择更小的页面或缩小文档。
+  已知文档页数时，显式范围的结束页按实际页数收敛并告知文档长度；
+  未知页数或真正缺页仍拒绝不完整渲染。
 - 同时检查完整含媒体 ReadFile ToolResult 的编码大小和媒体字节。不裁剪 base64，
   不切分 PDF 字节，不把成功图片替换为通用 success stub，不静默丢页。
 
 把 invocation AbortSignal 传入本次调用拥有的 `pdfinfo`、`pdftotext` 与
 `pdftoppm` 操作。`extractPDFText` 已接受 signal，但 fileUtils 必须真正传入；
 renderer 和页数 helper 增加同样的可选 signal。复用 `execCommand`/`execFile`
-取消，在返回取消前等待所属子进程退出和 renderer `finally` 清理；abort 必须
+取消，通常在返回取消前等待所属子进程退出和 renderer `finally` 清理。
+取消后最多等待 1 秒，再发送 SIGKILL；若仍未收到 close，最多再等待 1 秒，
+解除进程和 stdio 的事件循环引用并拒绝该调用，避免无限等待。renderer 的
+`finally` 仍执行清理；无法退出的 OS 进程不保证立即消失。abort 必须
 重新抛出，不能解释为提取失败再启动另一条回退。当前 helper 可以把 abort 返回成
 失败值，必须在 await 后显式检查 signal，包括进入任意回退之前。
+Web Fetch 在 PDF 提取取消时删除未使用的持久文件，并在成功删除后退还其磁盘预算；取消继续传播。
 不能把单 invocation 的 signal 绑到共享 availability probe Promise，
 它们仍是有界共享探测。测试在每种子进程
 已经启动之后取消，不能仅覆盖 ReadFile 执行前取消。
@@ -161,6 +167,8 @@ execution/status 包装做边界测试，证明已准入媒体结果不能进入
 分支。若异常结果违反此不变量，按协议故障拒绝，不改写或 ACK 已保留的终态证据；
 这是实现错误，不是普通大小拒绝。不增加第二套媒体投影 cache 或结算状态。
 同一 reference 必须暴露同一已接受模型内容；观察不能重新读取文件。
+裁剪 Hook 辅助字段后，保留能容纳的停止原因和 Hook 错误；仍然超限时，先将最大的诊断替换为明确的省略提示。fitter 修改调用方持有的 HTTP 副本，
+最终拒绝响应包装前可能已经裁剪辅助字段，调用方必须丢弃被拒绝的副本。
 尽可能复用既有 MIME/规范 base64 校验，只识别 llmContent 中已知
 inlineData 叶子，不能给任意元数据媒体豁免。Java 与 TypeScript 包装上限保持一致。
 

@@ -1998,7 +1998,11 @@ export async function processSingleFileContent(
             return mediaTooLarge(!render.success ? render.error : undefined);
           }
           if (render.success && render.images.length > 0) {
-            if (mediaLimits && pageRange) {
+            if (
+              mediaLimits &&
+              pageRange &&
+              render.images.length !== pageRange.lastPage - startPage + 1
+            ) {
               pdfPageCount = await getPDFPageCount(filePath, signal);
               signal?.throwIfAborted();
               const lastPage = Math.min(
@@ -2023,7 +2027,7 @@ export async function processSingleFileContent(
               pageRange.lastPage > pdfPageCount
             ) {
               parts.push({
-                text: `[The document has ${pdfPageCount} pages; rendered pages ${startPage}-${pdfPageCount}.]`,
+                text: `[The document has ${pdfPageCount} pages; rendered pages ${startPage}-${startPage + render.images.length - 1}.]`,
               });
             }
             // Never drop pages silently. Two ways a no-page-range read can be

@@ -28,6 +28,7 @@ import type {
 import { BrokerManagedRuntimeProvider } from '../../packages/cli/src/serve/broker-managed-runtime-provider.js';
 import { waitUntil } from './hosted-harness-process.js';
 import { mediaFixture, type MediaCase } from './provider-media-fixtures.js';
+import { PROVIDER_MEDIA_HARNESS_PREFIX } from './provider-media-process-cleanup.mjs';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -237,7 +238,7 @@ async function evidence(sessionId: string, phase: string, fields: object = {}) {
 }
 const reports: Array<Record<string, unknown>> = [];
 const harnessDirectory = await mkdtemp(
-  path.join(tmpdir(), 'qwen-e2e-home-provider-media-harness-'),
+  path.join(tmpdir(), PROVIDER_MEDIA_HARNESS_PREFIX),
 );
 const originalCwd = process.cwd();
 process.chdir(harnessDirectory);

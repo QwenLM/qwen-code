@@ -38,7 +38,7 @@ final class HostedProviderMediaProbe implements AutoCloseable {
     private final List<Map<String, Object>> sessions;
     private final EmbeddedRuntimeBroker original;
     private final Supplier<EmbeddedRuntimeBroker> restart;
-    private final Object provisioner;
+    private volatile Object provisioner;
     private final HttpClient upstream = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build();
     private final HttpClient forwarded;
     private final Map<String, Integer> dispatches = new ConcurrentHashMap<>();
@@ -188,7 +188,7 @@ final class HostedProviderMediaProbe implements AutoCloseable {
                 assertThat(process.isAlive()).as("original media worker stopped").isFalse();
             }
             restarted = restart.get();
-            injectReadProbe(restarted);
+            provisioner = injectReadProbe(restarted);
             return Map.of("brokerUrl", restarted.getBaseUri().toString());
         }
         var row = execution(session);
