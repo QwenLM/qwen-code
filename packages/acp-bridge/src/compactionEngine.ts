@@ -696,6 +696,16 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       }
       case 'tool_call':
       case 'tool_call_update': {
+        const update = data?.update;
+        const meta = update?.['_meta'] as Record<string, unknown> | undefined;
+        if (
+          meta?.['toolLifecycle'] !== undefined &&
+          update?.['status'] === undefined &&
+          update?.['content'] === undefined
+        ) {
+          this.slots.push({ kind: 'misc', event });
+          break;
+        }
         const toolCallId = data?.update?.toolCallId;
         if (!toolCallId) {
           this.slots.push({ kind: 'misc', event });
