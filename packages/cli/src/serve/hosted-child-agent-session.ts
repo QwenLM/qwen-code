@@ -11,6 +11,7 @@ import type {
   ChildAgentStopReason,
   ChildCompletion,
   ChildSessionRun,
+  ChildWorkspaceMode,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import {
   isChildSessionRun,
@@ -105,6 +106,7 @@ export interface ChildAgentLaunchParams {
   readonly description: string;
   readonly prompt: string;
   readonly definition: DefinitionPin;
+  readonly workspaceMode: ChildWorkspaceMode;
   readonly workingDirectory: string;
   readonly executionCallId: string;
 }
@@ -121,7 +123,9 @@ function digest(record: unknown): string {
  * and passes its byte length here.
  */
 export function childLaunchAdmission(params: {
-  readonly workspaceMode: 'shared' | 'snapshot' | 'worktree';
+  readonly workspaceMode: ChildWorkspaceMode;
+  /** #13753 I2: the control plane serves child Workspaces. */
+  readonly childWorkspaces: boolean;
   readonly sameDefinition: boolean;
   readonly closing: boolean;
   readonly activeInScope: number;
@@ -135,8 +139,146 @@ export function childLaunchAdmission(params: {
     launchedInScope: params.launchedInScope,
     envelopeBytes: params.envelopeBytes,
     workspaceMode: params.workspaceMode,
+    childWorkspaces: params.childWorkspaces,
     sameDefinition: params.sameDefinition,
   });
+}
+
+/** #13753 I2: what a worktree child's terminal receipt says of its merge. */
+export interface ChildWorkspaceOutcome {
+  readonly outcome: 'merged' | 'conflicted' | 'blocked' | 'discarded';
+  readonly code: string;
+  readonly conflictPaths: readonly string[];
+  /** Conflict paths the receipt left out to stay within its byte bound. */
+  readonly omittedConflictPaths: number;
+  readonly resultRef?: string;
+}
+
+const CHILD_WORKSPACE_OUTCOMES: ReadonlyArray<
+  ChildWorkspaceOutcome['outcome']
+> = ['merged', 'conflicted', 'blocked', 'discarded'];
+
+const CHILD_WORKSPACE_RESULT_REF =
+  /^refs\/qwen\/child-workspaces\/[0-9a-f]{32}\/result$/;
+
+/**
+ * Reads the `workspace` member the control plane's relay adds to a
+ * worktree child's terminal receipt. The receipt is the parent's opaque
+ * resource, so anything off-shape answers undefined rather than a guess.
+ */
+export function parseChildWorkspaceReceipt(
+  bytes: Buffer,
+): ChildWorkspaceOutcome | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(bytes.toString('utf8'));
+  } catch {
+    return undefined;
+  }
+  const workspace =
+    typeof value === 'object' && value !== null
+      ? (value as Record<string, unknown>)['workspace']
+      : undefined;
+  if (
+    typeof workspace !== 'object' ||
+    workspace === null ||
+    Array.isArray(workspace)
+  )
+    return undefined;
+  const fields = workspace as Record<string, unknown>;
+  const outcome = fields['outcome'];
+  const code = fields['code'];
+  const paths = fields['conflictPaths'];
+  const omitted = fields['omittedConflictPaths'];
+  const resultRef = fields['resultRef'];
+  if (
+    fields['mode'] !== 'worktree' ||
+    typeof outcome !== 'string' ||
+    !(CHILD_WORKSPACE_OUTCOMES as readonly string[]).includes(outcome) ||
+    typeof code !== 'string' ||
+    !/^[a-z][a-z0-9_]{0,63}$/.test(code) ||
+    (paths !== undefined &&
+      (!Array.isArray(paths) ||
+        paths.some((path) => typeof path !== 'string'))) ||
+    (omitted !== undefined &&
+      (!Number.isSafeInteger(omitted) || (omitted as number) < 0)) ||
+    (resultRef !== undefined &&
+      (typeof resultRef !== 'string' ||
+        !CHILD_WORKSPACE_RESULT_REF.test(resultRef)))
+  )
+    return undefined;
+  return {
+    outcome: outcome as ChildWorkspaceOutcome['outcome'],
+    code,
+    conflictPaths: (paths as string[] | undefined) ?? [],
+    omittedConflictPaths: (omitted as number | undefined) ?? 0,
+    ...(resultRef === undefined ? {} : { resultRef: resultRef as string }),
+  };
+}
+
+/** The rendered conflict list's own budget, whatever the paths are. */
+const CONFLICT_PATHS_TEXT_BYTES = 4 * 1024;
+
+/**
+ * The merge outcome in one model-facing sentence. Conflict paths are file
+ * names the child chose, so each is quoted (a newline stays an escape,
+ * never a line of its own) and stripped of display controls, and the list
+ * stops at its byte budget.
+ */
+export function childWorkspaceOutcomeText(
+  outcome: ChildWorkspaceOutcome | undefined,
+): string {
+  if (outcome === undefined)
+    return "the merge outcome is unavailable; inspect this Workspace before relying on the child's changes.";
+  const kept =
+    outcome.resultRef === undefined
+      ? ''
+      : `; the child's work is kept at ${outcome.resultRef}`;
+  switch (outcome.outcome) {
+    case 'merged':
+      return 'merged into this Workspace as uncommitted changes.';
+    case 'discarded':
+      return `discarded; the child's changes did not land${kept}.`;
+    case 'blocked':
+      return `merge blocked (${outcome.code}); the child's changes did not land${kept}.`;
+    default: {
+      const quoted: string[] = [];
+      let bytes = 0;
+      for (const path of outcome.conflictPaths) {
+        // JSON leaves the line and paragraph separators raw.
+        const text = stripDisplayControlChars(JSON.stringify(path))
+          .replace(/\u2028/g, '\\u2028')
+          .replace(/\u2029/g, '\\u2029');
+        bytes += Buffer.byteLength(text, 'utf8') + 2;
+        if (bytes > CONFLICT_PATHS_TEXT_BYTES) break;
+        quoted.push(text);
+      }
+      const more =
+        outcome.conflictPaths.length -
+        quoted.length +
+        outcome.omittedConflictPaths;
+      const list =
+        quoted.join(', ') +
+        (more > 0 ? `${quoted.length > 0 ? ', ' : ''}and ${more} more` : '');
+      return `merge conflicted at ${list || 'unlisted paths'}; the child's changes did not land${kept}.`;
+    }
+  }
+}
+
+/**
+ * #13753 I2: what a foreground answer ends with for a worktree run — its
+ * merge outcome, read from the receipt the acceptance names. Empty for a
+ * `shared` run. Both the live wait and the recovery gap fill use it.
+ */
+export async function childWorkspaceAnswerSuffix(
+  record: ChildAgentRun | undefined,
+  acceptance: ChildAcceptance,
+  read: (ref: ManagedSessionDurableRef) => Promise<Buffer>,
+): Promise<string> {
+  if (record?.workspaceMode !== 'worktree') return '';
+  return `\n\n[child workspace] ${childWorkspaceOutcomeText(
+    parseChildWorkspaceReceipt(await read(acceptance.terminalReceiptRef)),
+  )}`;
 }
 
 /**
@@ -166,6 +308,8 @@ export function childResultNotificationText(params: {
   readonly text: string;
   /** H4e-b1: the member name of a child run on a team roster. */
   readonly teammate?: string;
+  /** #13753 I2: a worktree child's merge outcome, already rendered. */
+  readonly workspace?: string;
 }): string {
   const head = [
     '<task-notification>',
@@ -175,6 +319,9 @@ export function childResultNotificationText(params: {
       ? []
       : [`<teammate>${escapeXml(params.teammate)}</teammate>`]),
     '<status>completed</status>',
+    ...(params.workspace === undefined
+      ? []
+      : [`<workspace>${escapeXml(params.workspace)}</workspace>`]),
     `<summary>Child agent "${escapeXml(truncateNotificationLabel(params.description))}" finished.</summary>`,
     '<result>',
   ].join('\n');
@@ -284,6 +431,7 @@ export class HostedChildAgentSession {
         existing.ownerScopeId === params.ownerScopeId &&
         existing.rootSessionId === params.rootSessionId &&
         existing.completion === params.completion &&
+        existing.workspaceMode === params.workspaceMode &&
         existing.workingDirectory === params.workingDirectory &&
         existing.run.executionCallId === params.executionCallId &&
         isDeepStrictEqual(existing.run.definition, params.definition) &&
@@ -307,6 +455,7 @@ export class HostedChildAgentSession {
         rootSessionId: params.rootSessionId,
         completion: params.completion,
         inputRef,
+        workspaceMode: params.workspaceMode,
         workingDirectory: params.workingDirectory,
         executionCallId: params.executionCallId,
         definition: params.definition,
@@ -599,6 +748,16 @@ export class HostedChildAgentSession {
       throw new Error(`Child run ${childRunId} has no result to notify.`);
     }
     const inputId = `${childRunId}:accept:notify`;
+    // #13753 I2: a worktree child's receipt reports its merge, which the
+    // waiting turn must see beside the result.
+    const workspace =
+      child.workspaceMode === 'worktree' && child.terminalReceiptRef !== null
+        ? childWorkspaceOutcomeText(
+            parseChildWorkspaceReceipt(
+              await this.store.resources.read(child.terminalReceiptRef),
+            ),
+          )
+        : undefined;
     return {
       inputId,
       turnId: inputId,
@@ -623,6 +782,7 @@ export class HostedChildAgentSession {
                 this.store.authority.extensionRecordsInDomain('team_state'),
                 childRunId,
               )?.name,
+              ...(workspace === undefined ? {} : { workspace }),
             }),
           }),
           'utf8',

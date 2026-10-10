@@ -318,6 +318,7 @@ describe('hosted child wait recovery (#13708)', () => {
         definitionRevision: 1,
         definitionDigest: authority.sessionHeader.definitionRef.digest,
       },
+      workspaceMode: 'shared',
       workingDirectory: '.',
       executionCallId: CHILD_RUN_ID,
     });
@@ -652,6 +653,7 @@ describe('hosted child wait recovery (#13708)', () => {
           definitionRevision: 1,
           definitionDigest: first.authority.sessionHeader.definitionRef.digest,
         },
+        workspaceMode: 'shared',
         workingDirectory: '.',
         executionCallId: orphanRunId,
       });
@@ -729,6 +731,7 @@ describe('hosted child wait recovery (#13708)', () => {
           definitionRevision: 1,
           definitionDigest: first.authority.sessionHeader.definitionRef.digest,
         },
+        workspaceMode: 'shared',
         workingDirectory: '.',
         executionCallId: orphanRunId,
       });
@@ -764,90 +767,116 @@ describe('hosted child wait recovery (#13708)', () => {
     }
   });
 
-  it('an admitted orphan never gets the fabricated answer: its own outcome folds', async () => {
-    await parkWedged(true);
-    const first = await open('boot-2', false);
-    try {
-      const consumption: string[] = [];
-      await settleTheChild(first);
-      await resumeTurn(first, consumption).resumeAgentWaitRuns(
-        [{ ...waitRun, functionCallId: 'call-1' }],
-        'recovered',
-        new AbortController().signal,
-      );
-      // The second kill lands exactly in the accepted window: call-2's
-      // child is admitted durably, its wait checkpoint never minted. The
-      // ledger id derives from promptId, exactly as the launcher derives it.
-      const orphanRunId = `${PROMPT_ID}:call-2`;
-      await childrenOf(first).admit({
-        childRunId: orphanRunId,
-        ownerScopeId: SESSION_ID,
-        rootSessionId: SESSION_ID,
-        completion: 'tool',
-        description: 'second audit',
-        prompt: 'review two',
-        definition: {
-          definitionId: 'hosted-agent/hosted-workspace-files/1',
-          definitionRevision: 1,
-          definitionDigest: first.authority.sessionHeader.definitionRef.digest,
-        },
-        workingDirectory: '.',
-        executionCallId: orphanRunId,
-      });
-    } finally {
-      await first.close();
-    }
-    const replacement = await open('boot-3', false);
-    try {
-      const orphanRunId = `${PROMPT_ID}:call-2`;
-      const children = childrenOf(replacement);
-      await children.dispatchStarted(orphanRunId, {
-        dispatchId: 'dispatch-2',
-        runtime: { runtimeBindingId: 'binding-2', generation: '1' },
-      });
-      await children.attach(orphanRunId, 'child-session-2');
-      await children.settleCompleted(orphanRunId, {
-        result: Buffer.from('{"review":"two diffs are clean"}', 'utf8'),
-        receipt: Buffer.from('{"stopReason":"end_turn"}', 'utf8'),
-      });
-      await children.accept(orphanRunId);
-      const consumed: string[] = [];
-      const filled = await fillParkedRoundAgentGaps({
-        managed: replacement,
-        sessionId: SESSION_ID,
-        promptId: PROMPT_ID,
-        cwd: root,
-        gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
-        children,
-        consume: (childRunId) => consumed.push(childRunId),
-      });
-      expect(filled).toBe(1);
-      const projected = await replacement.sink.project();
-      const callTwo = toolResultEntries(projected).find((entry) =>
-        entry.message?.parts?.some(
-          (part) => part.functionResponse?.id === 'call-2',
-        ),
-      );
-      expect(JSON.stringify(callTwo?.message?.parts)).toContain(
-        'two diffs are clean',
-      );
-      expect(JSON.stringify(callTwo?.message?.parts)).not.toContain(
-        'cancelled',
-      );
-      expect(children.acceptance(orphanRunId)).toBeDefined();
-      // The fill's replay-safe marks rides outside the fold gate: the
-      // relay's delivery advanced to accepted and the parent's
-      // consumption queue received the run (R1-11). The wait's own
-      // call-1 stays out of the fill — its marks belong to the wait arm
-      // that already ran them.
-      expect(children.record(orphanRunId)?.run.delivery?.state).toBe(
-        'accepted',
-      );
-      expect(consumed).toEqual([orphanRunId]);
-    } finally {
-      await replacement.close();
-    }
-  });
+  // #13753 I2: a worktree orphan's fold carries its merge outcome, as the
+  // live wait's answer does; a shared one's carries none.
+  it.each(['shared', 'worktree'] as const)(
+    'an admitted %s orphan never gets the fabricated answer: its own outcome folds',
+    async (workspaceMode) => {
+      await parkWedged(true);
+      const first = await open('boot-2', false);
+      try {
+        const consumption: string[] = [];
+        await settleTheChild(first);
+        await resumeTurn(first, consumption).resumeAgentWaitRuns(
+          [{ ...waitRun, functionCallId: 'call-1' }],
+          'recovered',
+          new AbortController().signal,
+        );
+        // The second kill lands exactly in the accepted window: call-2's
+        // child is admitted durably, its wait checkpoint never minted. The
+        // ledger id derives from promptId, exactly as the launcher derives it.
+        const orphanRunId = `${PROMPT_ID}:call-2`;
+        await childrenOf(first).admit({
+          childRunId: orphanRunId,
+          ownerScopeId: SESSION_ID,
+          rootSessionId: SESSION_ID,
+          completion: 'tool',
+          description: 'second audit',
+          prompt: 'review two',
+          definition: {
+            definitionId: 'hosted-agent/hosted-workspace-files/1',
+            definitionRevision: 1,
+            definitionDigest:
+              first.authority.sessionHeader.definitionRef.digest,
+          },
+          workspaceMode,
+          workingDirectory: '.',
+          executionCallId: orphanRunId,
+        });
+      } finally {
+        await first.close();
+      }
+      const replacement = await open('boot-3', false);
+      try {
+        const orphanRunId = `${PROMPT_ID}:call-2`;
+        const children = childrenOf(replacement);
+        await children.dispatchStarted(orphanRunId, {
+          dispatchId: 'dispatch-2',
+          runtime: { runtimeBindingId: 'binding-2', generation: '1' },
+        });
+        await children.attach(orphanRunId, 'child-session-2');
+        await children.settleCompleted(orphanRunId, {
+          result: Buffer.from('{"review":"two diffs are clean"}', 'utf8'),
+          receipt: Buffer.from(
+            JSON.stringify({
+              stopReason: 'end_turn',
+              workspace: {
+                mode: 'worktree',
+                childWorkspaceId: 'a'.repeat(32),
+                outcome: 'merged',
+                code: 'merged',
+              },
+            }),
+            'utf8',
+          ),
+        });
+        await children.accept(orphanRunId);
+        const consumed: string[] = [];
+        const filled = await fillParkedRoundAgentGaps({
+          managed: replacement,
+          sessionId: SESSION_ID,
+          promptId: PROMPT_ID,
+          cwd: root,
+          gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+          children,
+          consume: (childRunId) => consumed.push(childRunId),
+        });
+        expect(filled).toBe(1);
+        const projected = await replacement.sink.project();
+        const callTwo = toolResultEntries(projected).find((entry) =>
+          entry.message?.parts?.some(
+            (part) => part.functionResponse?.id === 'call-2',
+          ),
+        );
+        expect(JSON.stringify(callTwo?.message?.parts)).toContain(
+          'two diffs are clean',
+        );
+        expect(JSON.stringify(callTwo?.message?.parts)).not.toContain(
+          'cancelled',
+        );
+        const outcome =
+          '[child workspace] merged into this Workspace as uncommitted changes.';
+        if (workspaceMode === 'worktree')
+          expect(JSON.stringify(callTwo?.message?.parts)).toContain(outcome);
+        else
+          expect(JSON.stringify(callTwo?.message?.parts)).not.toContain(
+            '[child workspace]',
+          );
+        expect(children.acceptance(orphanRunId)).toBeDefined();
+        // The fill's replay-safe marks rides outside the fold gate: the
+        // relay's delivery advanced to accepted and the parent's
+        // consumption queue received the run (R1-11). The wait's own
+        // call-1 stays out of the fill — its marks belong to the wait arm
+        // that already ran them.
+        expect(children.record(orphanRunId)?.run.delivery?.state).toBe(
+          'accepted',
+        );
+        expect(consumed).toEqual([orphanRunId]);
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
 
   it('an oversized admitted-orphan answer folds with the truncation marker, never as an error', async () => {
     await parkWedged(true);
@@ -873,6 +902,7 @@ describe('hosted child wait recovery (#13708)', () => {
           definitionRevision: 1,
           definitionDigest: first.authority.sessionHeader.definitionRef.digest,
         },
+        workspaceMode: 'shared',
         workingDirectory: '.',
         executionCallId: orphanRunId,
       });
@@ -1067,6 +1097,7 @@ describe('hosted child wait recovery (#13708)', () => {
           definitionRevision: 1,
           definitionDigest: first.authority.sessionHeader.definitionRef.digest,
         },
+        workspaceMode: 'shared',
         workingDirectory: '.',
         executionCallId: orphanRunId,
       });
@@ -1134,6 +1165,7 @@ describe('hosted child wait recovery (#13708)', () => {
           definitionRevision: 1,
           definitionDigest: first.authority.sessionHeader.definitionRef.digest,
         },
+        workspaceMode: 'shared',
         workingDirectory: '.',
         executionCallId: orphanRunId,
       });
@@ -1427,6 +1459,7 @@ describe('hosted child wait recovery (#13708)', () => {
           definitionRevision: 1,
           definitionDigest: first.authority.sessionHeader.definitionRef.digest,
         },
+        workspaceMode: 'shared',
         workingDirectory: '.',
         executionCallId: orphanRunId,
       });
