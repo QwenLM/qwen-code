@@ -86,6 +86,7 @@ class FakeControlPlane implements ManagedChannelControlPlane {
   refuseSubmitsWithStatus = 0;
   failRegisters = 0;
   submitErrors: Array<{ status: number; code?: string }> = [];
+  receiptErrors: Array<{ status: number; code?: string }> = [];
   submitAttempts = 0;
   disconnected = false;
 
@@ -133,12 +134,19 @@ class FakeControlPlane implements ManagedChannelControlPlane {
       replayed,
     };
   }
-  async claimDeliveries() {
+  async claimDeliveries(_limit: number) {
     const claimed = this.outbox;
     this.outbox = [];
     return claimed;
   }
   async receipt(deliveryId: string, receipt: ManagedReceipt) {
+    if (this.receiptErrors.length > 0) {
+      const failure = this.receiptErrors.shift()!;
+      throw Object.assign(new Error(`HTTP ${failure.status}`), {
+        status: failure.status,
+        code: failure.code,
+      });
+    }
     this.receipts.push({ deliveryId, receipt });
   }
 }
@@ -428,6 +436,92 @@ describe('managed email inbound', () => {
     ]);
     expect(state(adapter).pending).toEqual([]);
     expect(plane.events.at(-1)).toMatchObject({ text: 'register forgot' });
+  });
+
+  it('re-registers when the control plane reports disconnected, keeping the mail (R3-3)', async () => {
+    // A disconnect answer is the poll-level registration claim too: an
+    // unfenced disconnect flipped the instance under the live adapter, and
+    // only register heals `connected` — dropping the mail as a per-message
+    // deterministic refusal would advance lastUid with nothing left to
+    // re-drive, losing every further inbound until a process restart.
+    const lines: string[] = [];
+    const adapter = make({}, { log: (line: string) => lines.push(line) });
+    await adapter.connect();
+    plane.submitErrors = [{ status: 409, code: 'channel_disconnected' }];
+    append(raw('waiting', 'disconnect flip'));
+    await adapter.tick();
+    expect(state(adapter).pending).toHaveLength(1);
+    expect(plane.registrations).toEqual([{ accountGeneration: 1 }]);
+    await adapter.tick();
+    expect(plane.registrations).toEqual([
+      { accountGeneration: 1 },
+      { accountGeneration: 1 },
+    ]);
+    expect(state(adapter).pending).toEqual([]);
+    expect(plane.events.at(-1)).toMatchObject({ text: 'disconnect flip' });
+    // The control plane answered, deterministically: the log says
+    // "refused", never "did not answer".
+    expect(lines.some((line) => line.includes('did not answer'))).toBe(false);
+    expect(lines.some((line) => line.includes('was refused'))).toBe(true);
+  });
+
+  it('keeps a refused event the provider later expunges (R3-3)', async () => {
+    // The refusal branch's pendingEvents.set is the only thing standing
+    // between this mail and a provider expunge during the disconnect:
+    // without it the re-drive rebuilds from the platform copy, finds the
+    // message gone, and drops the claim the branch exists to keep.
+    const lines: string[] = [];
+    const adapter = make({}, { log: (line: string) => lines.push(line) });
+    await adapter.connect();
+    plane.submitErrors = [{ status: 409, code: 'channel_disconnected' }];
+    const uid = append(raw('waiting', 'expunge me'));
+    await adapter.tick();
+    box.messages.delete(uid);
+    await adapter.tick();
+    expect(plane.events.at(-1)).toMatchObject({ text: 'expunge me' });
+    expect(
+      lines.some((line) => line.includes('can no longer be rebuilt')),
+    ).toBe(false);
+  });
+
+  it('stops re-driving the pending backlog once a refusal resets registration (R3-3)', async () => {
+    // The first poll-level refusal already proves no later submit this
+    // tick can converge: the rest of the backlog waits for the next
+    // poll's re-register instead of each eating a refused submit plus a
+    // retry delay.
+    const adapter = make();
+    await adapter.connect();
+    plane.submitErrors = [
+      { status: 409, code: 'channel_disconnected' },
+      { status: 409, code: 'channel_disconnected' },
+    ];
+    append(raw('one', 'first'));
+    append(raw('two', 'second'));
+    await adapter.tick();
+    expect(state(adapter).pending).toHaveLength(2);
+    expect(plane.submitAttempts).toBe(2);
+    plane.submitErrors = [{ status: 409, code: 'channel_disconnected' }];
+    const before = plane.submitAttempts;
+    await adapter.tick();
+    expect(plane.submitAttempts - before).toBe(1);
+    expect(state(adapter).pending).toHaveLength(2);
+    await adapter.tick();
+    expect(state(adapter).pending).toEqual([]);
+    expect(plane.events).toHaveLength(2);
+  });
+
+  it('drops a 409 that is not a registration refusal, visibly (R3-3)', async () => {
+    // Any other 409 verdict — a stale generation, a route conflict — is
+    // a deterministic per-message refusal: the mail is skipped, and no
+    // re-register follows.
+    const adapter = make();
+    await adapter.connect();
+    plane.submitErrors = [{ status: 409, code: 'channel_generation_stale' }];
+    append(raw('waiting', 'stale generation'));
+    await adapter.tick();
+    expect(state(adapter).pending).toEqual([]);
+    expect(plane.registrations).toEqual([{ accountGeneration: 1 }]);
+    expect(plane.events).toEqual([]);
   });
 
   it('truncates to the wire text bound even when the adapter setting is wider', async () => {
@@ -842,6 +936,121 @@ describe('managed email outbound', () => {
       'd-batch-1',
     ]);
     expect(sent).toHaveBeenCalledTimes(3);
+  });
+
+  it('re-registers when the outbox claim reports disconnected, recovering the send (R3-3)', async () => {
+    // claimDeliveries answers the same 409 channel_disconnected; without
+    // the registration reset every tick re-throws from pullOutbox with the
+    // claim lease still proving aliveness, stalling outbound until a
+    // restart heals the instance by chance.
+    const lines: string[] = [];
+    const adapter = make({}, { log: (line: string) => lines.push(line) });
+    await adapter.connect();
+    plane.outbox = [delivery()];
+    let claimFaults = 1;
+    const original = plane.claimDeliveries.bind(plane);
+    plane.claimDeliveries = async (limit: number) => {
+      if (claimFaults > 0) {
+        claimFaults -= 1;
+        throw Object.assign(new Error('HTTP 409'), {
+          status: 409,
+          code: 'channel_disconnected',
+        });
+      }
+      return original(limit);
+    };
+    await adapter.tick();
+    expect(sent).toHaveBeenCalledTimes(0);
+    expect(plane.registrations).toEqual([{ accountGeneration: 1 }]);
+    await adapter.tick();
+    expect(plane.registrations).toEqual([
+      { accountGeneration: 1 },
+      { accountGeneration: 1 },
+    ]);
+    expect(sent).toHaveBeenCalledTimes(1);
+    // The refusal log names the verdict, so a transient disconnect flap
+    // is distinguishable from a permanent 404 in the server's own log.
+    const refusal = lines.find((line) => line.includes('outbox claim'));
+    expect(refusal).toContain('409');
+    expect(refusal).toContain('channel_disconnected');
+  });
+
+  it('re-registers when the outbox claim reports the instance is gone (R3-3)', async () => {
+    const adapter = make();
+    await adapter.connect();
+    plane.outbox = [delivery()];
+    let claimFaults = 1;
+    const original = plane.claimDeliveries.bind(plane);
+    plane.claimDeliveries = async (limit: number) => {
+      if (claimFaults > 0) {
+        claimFaults -= 1;
+        // The fault precedes the delegation: the fake's claim consumes
+        // the batch, so a later throw would leave nothing to recover.
+        throw Object.assign(new Error('HTTP 404'), {
+          status: 404,
+          code: 'channel_not_found',
+        });
+      }
+      return original(limit);
+    };
+    await adapter.tick();
+    expect(sent).toHaveBeenCalledTimes(0);
+    await adapter.tick();
+    expect(plane.registrations).toEqual([
+      { accountGeneration: 1 },
+      { accountGeneration: 1 },
+    ]);
+    expect(sent).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-registers when a held receipt reports the instance is gone (R3-3)', async () => {
+    // A send whose receipt answer died leaves its accepted outcome held in
+    // state.outbound, and reportOrphanedOutbound re-drives it ahead of
+    // every outbox pull. When the instance row is gone that re-drive meets
+    // the same 404 channel_not_found as the claim route: without the
+    // poll-level arm the tick dies before pullOutbox and nothing ever
+    // re-registers — outbound wedges behind the held receipt.
+    const lines: string[] = [];
+    const adapter = make({}, { log: (line: string) => lines.push(line) });
+    await adapter.connect();
+    plane.outbox = [delivery('d-held')];
+    const original = plane.receipt.bind(plane);
+    plane.receipt = async () => {
+      throw new Error('answer lost');
+    };
+    await adapter.tick();
+    plane.receipt = original;
+    expect(state(adapter).outbound).toHaveLength(1);
+    plane.receiptErrors = [{ status: 404, code: 'channel_not_found' }];
+    plane.outbox = [delivery('d-queued')];
+    // The tick resolves: the held receipt keeps its entry and resets the
+    // generation, and the pull behind it still sends.
+    await adapter.tick();
+    expect(sent).toHaveBeenCalledTimes(2);
+    await adapter.tick();
+    expect(plane.registrations).toEqual([
+      { accountGeneration: 1 },
+      { accountGeneration: 1 },
+    ]);
+    expect(state(adapter).outbound).toEqual([]);
+    expect(plane.receipts.map((entry) => entry.deliveryId)).toEqual([
+      'd-queued',
+      'd-held',
+    ]);
+    expect(lines.some((line) => line.includes('not registered'))).toBe(true);
+  });
+
+  it('rethrows a transport failure from the outbox claim (R3-3)', async () => {
+    // A claim that did not answer is not a refusal: the tick fails and
+    // the run loop reconnects, and no spurious re-register follows.
+    const adapter = make();
+    await adapter.connect();
+    plane.outbox = [delivery()];
+    plane.claimDeliveries = async () => {
+      throw new Error('ECONNRESET');
+    };
+    await expect(adapter.tick()).rejects.toThrow('ECONNRESET');
+    expect(plane.registrations).toEqual([{ accountGeneration: 1 }]);
   });
 
   it('completes the remote disconnect while the mailbox is still owned', async () => {
