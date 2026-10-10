@@ -80,6 +80,8 @@ Legacy 子 Agent 是进程内的：Agent 工具、默认后台的顶层子 Agent
 
 后续 H4 切片（本文不排期）：带生命周期与合并策略的 `independent_worktree`；带代数/屏障的 `shared_serialized`；`workflow` 任务种类；team domain 与邮箱；跨工作区 child。
 
+**范围已裁定（2026-10-09）。** 实际交付的切分以 [H4a](2026-10-06-managed-child-agent-runtime.zh-CN.md) 的六片式地图为准。上表 H4c 行的内容已被 H4b（后台通知、关闭级联、深度与并发配额）、H4f（任务取消）与 Detach 后续工作吸收。H4c 本身成为 `workflow` kind 与 child launch 预算，隔离策略是其后单独的切片；见 [H4c 设计](2026-10-09-managed-workflow-child-kind.zh-CN.md)。
+
 ## 验证计划
 
 - 两个正文的 fixture 一致性，TypeScript 与 Java 双方回放，沿用 H0b/H0c 为 `monitor_run`、MCP 与 Hooks 固定的 fixture 文件做法。

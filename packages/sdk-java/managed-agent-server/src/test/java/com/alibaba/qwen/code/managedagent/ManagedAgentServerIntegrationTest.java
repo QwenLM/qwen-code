@@ -1400,7 +1400,10 @@ class ManagedAgentServerIntegrationTest {
         // recovery-admit with a fresh boot epoch. The budget counter
         // restarts every round, while the retry_after the coordinator would
         // write keeps growing: the pacing mirrors retryDelay under the
-        // default properties (1s initial, 1min cap).
+        // default properties (1s initial, 1min cap). The claim below stands
+        // in for the scanner firing once the backoff has elapsed — the
+        // growth assertion reads the pacing the coordinator WOULD compute
+        // from retryCount, so the schedule is written as immediately due.
         long previousDelay = 0;
         String epoch = "epoch-2";
         for (int round = 0; round < 3; round++) {
@@ -1410,7 +1413,7 @@ class ManagedAgentServerIntegrationTest {
             assertThat(delay).isGreaterThan(previousDelay);
             previousDelay = delay;
             store.scheduleTurnRetry(tenant, session.sessionId(),
-                    turn.turnId(), owner, System.currentTimeMillis() + delay);
+                    turn.turnId(), owner, 0);
             assertThat(store.claimTurn(tenant, session.sessionId(),
                     turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
             String nextEpoch = "epoch-" + (3 + round);
@@ -1938,10 +1941,18 @@ class ManagedAgentServerIntegrationTest {
         private volatile String closeAnswer = BOOT_ID;
         private final Map<String, HarnessRuntimeRecovery>
                 tenantRecoveries = new ConcurrentHashMap<>();
+        /** H6b: the automation funnel this fixture answers for. */
+        final AutomationHarnessFake automations = new AutomationHarnessFake();
 
         @Override
         public boolean isAvailable() {
             return available;
+        }
+
+        @Override
+        public Map<String, Object> runAutomationOperation(String tenantId,
+                String sessionId, Map<String, Object> body) {
+            return automations.run(sessionId, body);
         }
 
         @Override

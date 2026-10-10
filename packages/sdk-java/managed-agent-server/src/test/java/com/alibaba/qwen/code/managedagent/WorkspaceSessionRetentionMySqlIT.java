@@ -359,7 +359,10 @@ class WorkspaceSessionRetentionMySqlIT {
                 .containsEntry("result_context_revision", null)
                 .containsEntry("lifecycle_protocol_version", 0)
                 .containsEntry("lifecycle_effects_receipt_json", null)
-                .containsEntry("budget_exempt_attempt", 0);
+                .containsEntry("budget_exempt_attempt", 0)
+                // V56 grandfather: a pre-V56 operation settles on the
+                // creator-keyed facts alone.
+                .containsEntry("actor_key", null);
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         var store = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
