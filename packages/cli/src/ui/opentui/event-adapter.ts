@@ -723,11 +723,13 @@ export function createEventMapper(
         out.push({
           type: 'info',
           text:
-            `IMPORTANT: This conversation ${reasonClause}. ` +
-            `A compressed context will be sent for future messages (compressed from: ` +
-            `${formatCount(v?.originalTokenCount, v?.originalTokenCountIsEstimated)} to ` +
-            `${formatCount(v?.newTokenCount, v?.newTokenCountIsEstimated)} tokens).` +
-            warningSuffix,
+            v?.strategy === 'notes'
+              ? `Started a new context from local notes (${formatCount(v.originalTokenCount, v.originalTokenCountIsEstimated)} to ${formatCount(v.newTokenCount, v.newTokenCountIsEstimated)} tokens). Earlier evidence remains available in session history.`
+              : `IMPORTANT: This conversation ${reasonClause}. ` +
+                `A compressed context will be sent for future messages (compressed from: ` +
+                `${formatCount(v?.originalTokenCount, v?.originalTokenCountIsEstimated)} to ` +
+                `${formatCount(v?.newTokenCount, v?.newTokenCountIsEstimated)} tokens).` +
+                warningSuffix,
         });
         break;
       }

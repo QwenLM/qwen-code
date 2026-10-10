@@ -117,6 +117,7 @@ export interface IndividualToolCallDisplay {
 }
 
 export interface CompressionProps {
+  strategy?: 'summary' | 'notes';
   isPending: boolean;
   originalTokenCount: number | null;
   newTokenCount: number | null;
