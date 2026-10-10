@@ -32,7 +32,10 @@ import {
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
-import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import {
+  childWorkspaceAnswerSuffix,
+  type HostedChildAgentSession,
+} from './hosted-child-agent-session.js';
 import {
   HOSTED_TEAM_TOOL_NAMES,
   type HostedTeamSession,
@@ -399,6 +402,10 @@ export type HostedInterruptedTurnRuntime =
  * thread carrying a dangling call is a malformed request the provider
  * rejects. Retry-safe — the answered set is re-derived from the journal
  * on every attempt, exactly like the parked-Runtime counterpart above.
+ * A call that committed anything is answered by what committed. One that
+ * committed nothing is answered as never run (`uncommitted: 'all'`), only
+ * when it is a team or agent call no Runtime settlement answers
+ * (`'hosted'`), or left as it was (`'none'`).
  */
 async function answerAbandonedTurnCalls(input: {
   session: ManagedSession;
@@ -406,9 +413,11 @@ async function answerAbandonedTurnCalls(input: {
   cwd: string;
   promptId: string;
   message: string;
+  uncommitted?: 'all' | 'hosted' | 'none';
   children?: HostedChildAgentSession;
   teams?: HostedTeamSession;
-}): Promise<void> {
+}): Promise<number> {
+  const uncommitted = input.uncommitted ?? 'all';
   const records = (await input.session.sink.project()).filter(
     (entry) => entry.daemonPromptId === input.promptId,
   );
@@ -426,6 +435,7 @@ async function answerAbandonedTurnCalls(input: {
       if (call?.id && call.name && !answered.has(call.id) && !owed.has(call.id))
         owed.set(call.id, { name: call.name, messageId: record.uuid });
     }
+  let answeredNow = 0;
   for (const [functionCallId, call] of owed) {
     const callKey = hostedChildRunIdFor(input.promptId, functionCallId);
     // A background launch and a team tool write only to the journal, before
@@ -455,6 +465,14 @@ async function answerAbandonedTurnCalls(input: {
         input.teams !== undefined &&
         HOSTED_TEAM_TOOL_NAMES.includes(call.name) &&
         input.teams.committedBy(call.name, callKey);
+      if (
+        !committed &&
+        (uncommitted === 'none' ||
+          (uncommitted === 'hosted' &&
+            !HOSTED_TEAM_TOOL_NAMES.includes(call.name) &&
+            !(call.name === 'agent' && launched === undefined)))
+      )
+        continue;
       parts = convertToFunctionErrorResponse(
         call.name,
         functionCallId,
@@ -482,7 +500,60 @@ async function answerAbandonedTurnCalls(input: {
       daemonPromptId: input.promptId,
       message: { role: 'user', parts },
     });
+    answeredNow += 1;
   }
+  return answeredNow;
+}
+
+/** The interruption every settle or resume route below names. */
+const INTERRUPTED_HARNESS = 'the Harness that asked was interrupted';
+
+/**
+ * Answers, by what committed, the calls an interrupted Turn committed but
+ * never answered — a team call's writes, a background launch's admission —
+ * and leaves every other owed call as it was. Every route that only
+ * SETTLES an interrupted Turn runs it before the Turn's terminal: core's
+ * orphan repair would otherwise tell the next Turn's model to retry such
+ * a call, and the retry redoes it under a new key (a second task, a
+ * second member's child). Idempotent; returns how many calls it answered.
+ */
+export function answerCommittedTurnCalls(input: {
+  session: ManagedSession;
+  sessionId: string;
+  cwd: string;
+  promptId: string;
+  children?: HostedChildAgentSession;
+  teams?: HostedTeamSession;
+}): Promise<number> {
+  return answerAbandonedTurnCalls({
+    ...input,
+    message: INTERRUPTED_HARNESS,
+    uncommitted: 'none',
+  });
+}
+
+/**
+ * What a route that RESUMES an interrupted Turn answers before the resumed
+ * round is read: the committed calls by what committed, and every team or
+ * agent call that committed nothing as never run. No Runtime settlement
+ * ever answers those, and a resume needs its round whole: a pending file
+ * history's check refuses a round with a call unanswered, on every
+ * attempt. Runtime calls stay with the checkpoint, and an admitted child
+ * is never told it did not start. Idempotent; returns how many it answered.
+ */
+export function answerResumedTurnCalls(input: {
+  session: ManagedSession;
+  sessionId: string;
+  cwd: string;
+  promptId: string;
+  children?: HostedChildAgentSession;
+  teams?: HostedTeamSession;
+}): Promise<number> {
+  return answerAbandonedTurnCalls({
+    ...input,
+    message: INTERRUPTED_HARNESS,
+    uncommitted: 'hosted',
+  });
 }
 
 /**
@@ -719,7 +790,16 @@ export async function fillParkedRoundAgentGaps(input: {
           // must land, folded to the inline bound with its marker instead
           // of erroring the recovered Turn — the full bytes stay on the
           // acceptance record, and the exact template measures the fold.
-          const fitted = fitChildResultInline(name, callId, text, fits);
+          // A worktree child's merge outcome follows, as on the live arm.
+          const fitted = fitChildResultInline(
+            name,
+            callId,
+            text,
+            fits,
+            await childWorkspaceAnswerSuffix(record, acceptance, (ref) =>
+              input.managed.resources.read(ref),
+            ),
+          );
           if (foldOwed) {
             await writeFold(fitted);
             filled += 1;
@@ -919,6 +999,18 @@ export async function settleInterruptedTurnRuntime(input: {
         action !== undefined && action.state !== 'requested'
           ? `the approval ended ${action.state} after the Harness that asked was interrupted`
           : 'the Harness that asked was interrupted',
+      children: input.children,
+      teams: input.teams,
+    });
+  } else {
+    // A Turn whose checkpoint never bound it — a batch of team calls and
+    // background launches parks nothing — still owes its committed calls
+    // their answers; core's orphan repair keeps answering the rest.
+    await answerCommittedTurnCalls({
+      session: input.session,
+      sessionId: input.sessionId,
+      cwd: input.cwd,
+      promptId: input.promptId,
       children: input.children,
       teams: input.teams,
     });

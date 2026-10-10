@@ -28,7 +28,10 @@ import { HostedHookSession } from './hosted-hook-session.js';
 import {
   HostedWorkspaceToolTurn,
   HOSTED_AGENT_TOOL,
+  HOSTED_AGENT_WORKTREE_TOOL,
   HOSTED_CHILD_MOUNT_REFUSALS,
+  HOSTED_TEAM_AGENT_TOOL,
+  HOSTED_TEAM_AGENT_WORKTREE_TOOL,
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
@@ -107,6 +110,7 @@ function createTurn(
   hookEvents?: string[],
   promptName = 'prompt',
   hooksMountHeld = false,
+  childWorkspaces = false,
   hooksSession?: HostedHookSession,
 ): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
@@ -145,6 +149,7 @@ function createTurn(
       childAgents: {
         funnel: children,
         depth,
+        childWorkspaces,
         queueConsumption: (childRunId) => consumption.push(childRunId),
       },
       ...(hookEvents
@@ -266,6 +271,222 @@ it('declares the agent tool at the root and hides it from a child Session', asyn
   const childTurn = createTurn(1);
   const childTools = await childTurn.declarations(new AbortController().signal);
   expect(childTools.some((tool) => tool.name === 'agent')).toBe(false);
+});
+
+// #13753 I2: `isolation` exists for the model only on a host that serves
+// child Workspaces; elsewhere the declaration is H4b's, byte for byte.
+it('declares isolation only on a host that serves child Workspaces', async () => {
+  const signal = new AbortController().signal;
+  const plain = (await createTurn().declarations(signal)).find(
+    (tool) => tool.name === 'agent',
+  );
+  expect(plain).toBe(HOSTED_AGENT_TOOL);
+  expect(
+    (HOSTED_AGENT_TOOL.parametersJsonSchema as Record<string, unknown>)[
+      'properties'
+    ],
+  ).not.toHaveProperty('isolation');
+  const isolated = (
+    await createTurn(0, undefined, 'prompt', false, true).declarations(signal)
+  ).find((tool) => tool.name === 'agent');
+  expect(isolated).toBe(HOSTED_AGENT_WORKTREE_TOOL);
+  expect(HOSTED_AGENT_WORKTREE_TOOL.parametersJsonSchema).toMatchObject({
+    required: ['description', 'prompt'],
+    additionalProperties: false,
+    properties: {
+      description: { type: 'string' },
+      prompt: { type: 'string' },
+      run_in_background: { type: 'boolean' },
+      isolation: { type: 'string', enum: ['worktree'] },
+    },
+  });
+});
+
+// The team variant (H4e-b1) composes the same way: both arguments, and a
+// description that no longer calls isolated workspaces unavailable.
+it('composes isolation onto the plain and the team agent declarations', () => {
+  const unavailable = 'isolated workspaces are unavailable';
+  expect(HOSTED_AGENT_TOOL.description).toContain(unavailable);
+  expect(HOSTED_TEAM_AGENT_TOOL.description).toContain(unavailable);
+  for (const [tool, base] of [
+    [HOSTED_AGENT_WORKTREE_TOOL, HOSTED_AGENT_TOOL],
+    [HOSTED_TEAM_AGENT_WORKTREE_TOOL, HOSTED_TEAM_AGENT_TOOL],
+  ] as const) {
+    expect(tool.description).not.toContain(unavailable);
+    expect(tool.description).toContain('With isolation "worktree"');
+    const properties = (
+      tool.parametersJsonSchema as { properties: Record<string, unknown> }
+    ).properties;
+    expect(Object.keys(properties)).toEqual([
+      ...Object.keys(
+        (base.parametersJsonSchema as { properties: Record<string, unknown> })
+          .properties,
+      ),
+      'isolation',
+    ]);
+  }
+  expect(HOSTED_TEAM_AGENT_WORKTREE_TOOL.description).toContain('With name');
+  expect(
+    (
+      HOSTED_TEAM_AGENT_WORKTREE_TOOL.parametersJsonSchema as {
+        properties: Record<string, unknown>;
+      }
+    ).properties,
+  ).toHaveProperty('name');
+});
+
+it('refuses a worktree launch on a host without child Workspaces before any record', async () => {
+  const responses = await executeAgent(
+    createTurn(),
+    call({ description: 'audit', prompt: 'review', isolation: 'worktree' }),
+  );
+  expect(JSON.stringify(responses)).toContain('(workspace_mode)');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
+it('refuses an isolation other than worktree as an argument error', async () => {
+  for (const isolation of ['snapshot', 'shared', true]) {
+    const responses = await executeAgent(
+      createTurn(0, undefined, 'prompt', false, true),
+      call({ description: 'audit', prompt: 'review', isolation }),
+    );
+    expect(JSON.stringify(responses)).toContain(
+      'isolation must be \\"worktree\\" or omitted',
+    );
+  }
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
+it('records the launch isolation and replays it after the capability is gone', async () => {
+  const isolated = createTurn(0, undefined, 'prompt', false, true);
+  await executeAgent(
+    isolated,
+    call({ description: 'isolated', prompt: 'review', isolation: 'worktree' }),
+  );
+  await executeAgent(
+    isolated,
+    call({ description: 'shared', prompt: 'review' }, 'call-2'),
+  );
+  expect(children.record('prompt:call-1')?.workspaceMode).toBe('worktree');
+  expect(children.record('prompt:call-2')?.workspaceMode).toBe('shared');
+  // A re-driven batch names the committed launch: it replays, never
+  // re-admits against a host that has since lost the capability.
+  const replayed = await executeAgent(
+    createTurn(),
+    call({ description: 'isolated', prompt: 'review', isolation: 'worktree' }),
+  );
+  expect(JSON.stringify(replayed)).toContain('started in the background');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    2,
+  );
+});
+
+async function foregroundWorktreeAnswer(
+  result: string,
+  receipt: Buffer,
+): Promise<string> {
+  const turn = createTurn(0, undefined, 'prompt', false, true);
+  const childRunId = 'prompt:call-1';
+  const driving = (async () => {
+    for (;;) {
+      if (children.record(childRunId) !== undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    await children.dispatchStarted(childRunId, {
+      dispatchId: 'dispatch-1',
+      runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+    });
+    await children.attach(childRunId, '550e8400-e29b-41d4-a716-446655440001');
+    await children.settleCompleted(childRunId, {
+      result: Buffer.from(result, 'utf8'),
+      receipt,
+    });
+    await children.accept(childRunId);
+  })();
+  const responses = (
+    await Promise.all([
+      executeAgent(
+        turn,
+        call({
+          description: 'audit the diff',
+          prompt: 'review the change',
+          run_in_background: false,
+          isolation: 'worktree',
+        }),
+      ),
+      driving,
+    ])
+  )[0];
+  expect(children.record(childRunId)?.workspaceMode).toBe('worktree');
+  return (
+    (responses[0]?.functionResponse?.response as { output?: string })?.output ??
+    JSON.stringify(responses)
+  );
+}
+
+function worktreeReceipt(workspace: Record<string, unknown>): Buffer {
+  return Buffer.from(
+    JSON.stringify({
+      childSessionId: '550e8400-e29b-41d4-a716-446655440001',
+      turnId: 'turn-1',
+      status: 'completed',
+      completedAt: 1,
+      workspace: {
+        mode: 'worktree',
+        childWorkspaceId: 'a'.repeat(32),
+        ...workspace,
+      },
+    }),
+    'utf8',
+  );
+}
+
+it('ends a foreground worktree answer with its merge outcome', async () => {
+  const pin = `refs/qwen/child-workspaces/${'a'.repeat(32)}/result`;
+  const answer = await foregroundWorktreeAnswer(
+    'child result',
+    worktreeReceipt({
+      outcome: 'conflicted',
+      code: 'conflicted',
+      conflictPaths: ['src/a.ts', 'odd\nname'],
+      resultRef: pin,
+    }),
+  );
+  expect(answer).toContain('child result');
+  expect(answer).toContain(
+    `[child workspace] merge conflicted at "src/a.ts", "odd\\nname"; the child's changes did not land; the child's work is kept at ${pin}.`,
+  );
+  expect(consumption).toEqual(['prompt:call-1']);
+});
+
+it('says the outcome is unavailable for a worktree receipt off the shape', async () => {
+  const answer = await foregroundWorktreeAnswer(
+    'child result',
+    Buffer.from('{"outcome":"settled"}', 'utf8'),
+  );
+  expect(answer).toContain(
+    '[child workspace] the merge outcome is unavailable',
+  );
+});
+
+it('keeps the merge outcome when it folds an oversized worktree answer', async () => {
+  messageFitsInline.mockImplementation(
+    (_type, parts, _model) => JSON.stringify(parts).length < 65536,
+  );
+  const answer = await foregroundWorktreeAnswer(
+    'r'.repeat(64 * 1024),
+    worktreeReceipt({ outcome: 'merged', code: 'merged' }),
+  );
+  expect(answer).toContain(
+    'truncated: the full result is on the acceptance record',
+  );
+  expect(answer).toMatch(
+    /\[child workspace\] merged into this Workspace as uncommitted changes\.$/,
+  );
 });
 
 it('refuses v1-unsupported agent arguments with a named scope', async () => {
@@ -625,6 +846,7 @@ it('refuses a launch past the spent launch budget, replaying the refusal', async
         definitionRevision: 1,
         definitionDigest: session.authority.sessionHeader.definitionRef.digest,
       },
+      workspaceMode: 'shared',
       workingDirectory: '.',
       executionCallId: childRunId,
     });
@@ -906,6 +1128,7 @@ it('replays an existing background child past a full quota', async () => {
         definitionRevision: 1,
         definitionDigest: session.authority.sessionHeader.definitionRef.digest,
       },
+      workspaceMode: 'shared',
       workingDirectory: '.',
       executionCallId: `prompt:${seed}`,
     });
@@ -1108,7 +1331,7 @@ it.each(
       eventName,
       config: { type: 'command' },
     });
-    const turn = createTurn(0, undefined, 'prompt', false, hooks);
+    const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
     try {
       const result = await executeAgent(
         turn,
@@ -1177,7 +1400,7 @@ it.each([false, true])(
       session,
       original.getCatalog()!,
     );
-    const turn = createTurn(0, undefined, 'prompt', false, hooks);
+    const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
     try {
       expect(original.hasMountableToolResultHooks).toBe(true);
       await original.fire(
@@ -1235,7 +1458,7 @@ it.each(
   'admits result-Hook controls %# (background=$background)',
   async ({ descriptor, background }) => {
     const hooks = await restoredHooks(descriptor);
-    const turn = createTurn(0, undefined, 'prompt', false, hooks);
+    const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
     turn.setPromptHookRunner(async (hookConfig, eventName) => ({
       hookConfig,
       eventName,

@@ -11,12 +11,14 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.RelayRow;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.TurnLine;
+import com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -44,6 +46,7 @@ class ChildResultRelayTest {
     private RecordingHarness harness;
     private ChildResultRelay relay;
     private ChildLifecycleAdmissions childCloses;
+    private ChildWorkspaceService childWorkspaces;
     private PendingChild pending;
     private AtomicReference<RelayRow> row;
     private long now;
@@ -131,8 +134,9 @@ class ChildResultRelayTest {
         when(childCloses.closeSupported()).thenReturn(true);
         now = 1_000_000L;
         AtomicReference<Long> clock = new AtomicReference<>(now);
+        childWorkspaces = mock(ChildWorkspaceService.class);
         relay = new ChildResultRelay(store, sessions, provider, harness,
-                new ObjectMapper(), childCloses, clock::get);
+                new ObjectMapper(), childCloses, childWorkspaces, clock::get);
         pending = new PendingChild(TENANT, PARENT, RUN, 1, "planned",
                 "resource-body");
         row = new AtomicReference<>(new RelayRow(TENANT, PARENT, RUN,
@@ -205,7 +209,7 @@ class ChildResultRelayTest {
                 "{\"inputRef\":{\"resourceId\":\"resource-input\"},"
                         + "\"completion\":\"tool\"}");
         when(sessions.createChildSession(TENANT, PARENT, RUN,
-                "audit the diff", "review")).thenReturn(
+                "audit the diff", "review", false)).thenReturn(
                 new CommandAdmission(CHILD, null, "accepted", false));
         RuntimeBindingRecord binding = mock(RuntimeBindingRecord.class);
         when(binding.getBindingId()).thenReturn("binding-1");
@@ -231,7 +235,7 @@ class ChildResultRelayTest {
     @Test
     void drivesAChildFromCreationToDelivery() {
         when(sessions.createChildSession(TENANT, PARENT, RUN,
-                "audit the diff", "review")).thenReturn(
+                "audit the diff", "review", false)).thenReturn(
                 new CommandAdmission(CHILD, null, "accepted", false));
         RuntimeBindingRecord binding = mock(RuntimeBindingRecord.class);
         when(binding.getBindingId()).thenReturn("binding-1");
@@ -285,7 +289,7 @@ class ChildResultRelayTest {
         assertThat(row.get().state()).isEqualTo("orphaned");
         assertThat(harness.operations).isEmpty();
         verify(sessions, never()).createChildSession(anyString(), anyString(),
-                anyString(), anyString(), anyString());
+                anyString(), anyString(), anyString(), Mockito.anyBoolean());
         // An orphaned run closes nothing: the cascade owns that side.
         verify(childCloses, never()).admitChildClose(anyString(), anyString(),
                 anyString(), anyString());
@@ -466,7 +470,7 @@ class ChildResultRelayTest {
         assertThat(row.get().state()).isEqualTo("close_debt");
         assertThat(harness.operations).isEmpty();
         verify(sessions, never()).createChildSession(anyString(), anyString(),
-                anyString(), anyString(), anyString());
+                anyString(), anyString(), anyString(), Mockito.anyBoolean());
     }
 
     // The bounded give-up on a capability-less host settles the parent's
@@ -624,7 +628,7 @@ class ChildResultRelayTest {
         assertThat(row.get().state()).isEqualTo("unknown");
         assertThat(harness.operations).isEmpty();
         verify(sessions, never()).createChildSession(anyString(), anyString(),
-                anyString(), anyString(), anyString());
+                anyString(), anyString(), anyString(), Mockito.anyBoolean());
         verify(childCloses, never()).admitChildClose(anyString(), anyString(),
                 anyString(), anyString());
     }
@@ -1189,6 +1193,539 @@ class ChildResultRelayTest {
                 .containsExactly("attach", "attach", "fail");
     }
 
+    // ---- #13753 I2: worktree runs ----
+
+    private static final String WORKSPACE_ID = "a".repeat(32);
+
+    private void worktreeRun(String completion) {
+        when(store.readResource(TENANT, "resource-body")).thenReturn(
+                "{\"inputRef\":{\"resourceId\":\"resource-input\"},"
+                        + "\"completion\":\"" + completion + "\","
+                        + "\"workspaceMode\":\"worktree\"}");
+    }
+
+    private static ChildWorkspaceStore.Row workspaceRow(String state,
+            String finish, String outcome, List<String> conflicts,
+            String result) {
+        return new ChildWorkspaceStore.Row(TENANT, PARENT, RUN, WORKSPACE_ID,
+                "workspace", 1, "storage", ".", ".", ".", "b".repeat(40),
+                result, null, null, state, finish, outcome, conflicts, null,
+                null, null, 1, 0, 0, 0, 0);
+    }
+
+    private static ApiException refusal(String code) {
+        return new ApiException(org.springframework.http.HttpStatus.CONFLICT,
+                code, code);
+    }
+
+    @Test
+    void aWorktreeRunCreatesItsChildOnlyOnceItsWorkspaceIsReady() {
+        worktreeRun("sent");
+        when(childWorkspaces.request(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.PREPARING, null, null,
+                        List.of(), null));
+        relay.scan();
+        // Preparing: looked at again on the heartbeat, at no cost, with
+        // the Git left to the child Workspace scan.
+        verify(store).scheduleRetry(any(RelayRow.class), anyString(),
+                Mockito.eq(now + 5_000L), anyLong(), anyLong());
+        verify(store, never()).defer(any(RelayRow.class), anyString(),
+                anyLong(), any(), anyLong(), anyLong());
+        verify(sessions, never()).createChildSession(anyString(), anyString(),
+                anyString(), anyString(), anyString(), Mockito.anyBoolean());
+        assertThat(row.get().state()).isEqualTo("creating");
+
+        when(childWorkspaces.request(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                        null));
+        when(sessions.createChildSession(TENANT, PARENT, RUN,
+                "audit the diff", "review", true)).thenReturn(
+                new CommandAdmission(CHILD, null, "accepted", false));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("binding");
+        assertThat(row.get().childSessionId()).isEqualTo(CHILD);
+        verify(sessions, never()).createChildSession(anyString(), anyString(),
+                anyString(), anyString(), anyString(), Mockito.eq(false));
+    }
+
+    @Test
+    void aWorktreeRunWhoseWorkspaceCannotBeReadySettlesNeverStarted() {
+        worktreeRun("sent");
+        for (ChildWorkspaceStore.Row unusable : List.of(
+                workspaceRow(ChildWorkspaceStore.FAILED, null,
+                        "child_workspace_layout", List.of(), null),
+                workspaceRow(ChildWorkspaceStore.BLOCKED, null,
+                        "child_workspace_diverged", List.of(), null),
+                workspaceRow(ChildWorkspaceStore.READY,
+                        ChildWorkspaceStore.DISCARD, null, List.of(), null))) {
+            harness.operations.clear();
+            row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
+                    "creating", "owner", now + 30_000, 0, 0, null, now, now));
+            when(childWorkspaces.request(TENANT, PARENT, RUN))
+                    .thenReturn(unusable);
+            when(childWorkspaces.find(TENANT, PARENT, RUN))
+                    .thenReturn(unusable);
+            relay.scan();
+            assertThat(row.get().state()).as(unusable.state()).isEqualTo("done");
+            assertThat(harness.operations).as(unusable.state())
+                    .singleElement()
+                    .satisfies(fail -> assertThat(fail)
+                            .containsEntry("kind", "fail")
+                            .containsEntry("stopReason", "creation_failed")
+                            .containsEntry("started", false));
+        }
+        // Each is asked to discard (a repeated discard is the same request),
+        // so nothing it created outlives the run.
+        verify(childWorkspaces, Mockito.times(3)).requestFinish(TENANT, PARENT,
+                RUN, ChildWorkspaceStore.DISCARD);
+        verify(sessions, never()).createChildSession(anyString(), anyString(),
+                anyString(), anyString(), anyString(), Mockito.anyBoolean());
+        verify(childCloses, never()).admitChildClose(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
+    @Test
+    void aWorktreeRunOnAHostWithoutChildWorkspacesSettlesNeverStarted() {
+        worktreeRun("sent");
+        for (String code : List.of("child_workspace_unsupported",
+                "child_parent_unavailable")) {
+            harness.operations.clear();
+            row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
+                    "creating", "owner", now + 30_000, 0, 0, null, now, now));
+            when(childWorkspaces.request(TENANT, PARENT, RUN))
+                    .thenThrow(refusal(code));
+            relay.scan();
+            assertThat(row.get().state()).as(code).isEqualTo("done");
+            assertThat(row.get().lastError()).as(code).contains(code);
+            assertThat(harness.operations).as(code).singleElement()
+                    .satisfies(fail -> assertThat(fail)
+                            .containsEntry("stopReason", "creation_failed")
+                            .containsEntry("started", false));
+            Mockito.reset(childWorkspaces);
+        }
+        verify(sessions, never()).createChildSession(anyString(), anyString(),
+                anyString(), anyString(), anyString(), Mockito.anyBoolean());
+        // A row an earlier attempt admitted is still asked to discard.
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
+                "creating", "owner", now + 30_000, 0, 0, null, now, now));
+        when(childWorkspaces.request(TENANT, PARENT, RUN))
+                .thenThrow(refusal("child_workspace_unsupported"));
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.PREPARING, null, null,
+                        List.of(), null));
+        relay.scan();
+        verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.DISCARD);
+    }
+
+    @Test
+    void aWorktreeCreationRefusedAfterReadySettlesNeverStarted() {
+        worktreeRun("sent");
+        ChildWorkspaceStore.Row ready = workspaceRow(ChildWorkspaceStore.READY,
+                null, null, List.of(), null);
+        when(childWorkspaces.request(TENANT, PARENT, RUN)).thenReturn(ready);
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(ready);
+        when(sessions.createChildSession(TENANT, PARENT, RUN,
+                "audit the diff", "review", true)).thenThrow(
+                refusal("child_workspace_not_ready"));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("done");
+        assertThat(harness.operations).singleElement()
+                .satisfies(fail -> assertThat(fail)
+                        .containsEntry("stopReason", "creation_failed")
+                        .containsEntry("started", false));
+        verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.DISCARD);
+        // Any other refusal is retried as before.
+        harness.operations.clear();
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
+                "creating", "owner", now + 30_000, 0, 0, null, now, now));
+        Mockito.doThrow(refusal("child_parent_unavailable")).when(sessions)
+                .createChildSession(TENANT, PARENT, RUN, "audit the diff",
+                        "review", true);
+        relay.scan();
+        assertThat(harness.operations).isEmpty();
+        assertThat(row.get().attempts()).isEqualTo(1);
+    }
+
+    @Test
+    void aClosingParentsWorktreeChildIsAskedToDiscard() {
+        when(store.sessionStatus(TENANT, PARENT)).thenReturn("CLOSING");
+        // A shared run has no row: nothing is asked.
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("orphaned");
+        verify(childWorkspaces, never()).requestFinish(anyString(), anyString(),
+                anyString(), anyString());
+
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
+                "creating", "owner", now + 30_000, 0, 0, null, now, now));
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.PREPARING, null, null,
+                        List.of(), null));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("orphaned");
+        verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.DISCARD);
+
+        // A merge already running refuses the discard: that lands, and the
+        // run is still classified.
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
+                "creating", "owner", now + 30_000, 0, 0, null, now, now));
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.MERGING,
+                        ChildWorkspaceStore.MERGE, null, List.of(),
+                        "c".repeat(40)));
+        when(childWorkspaces.requestFinish(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.DISCARD)).thenThrow(
+                refusal("child_workspace_finishing"));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("orphaned");
+    }
+
+    @Test
+    void aWorktreeGiveUpKeepsTheMergeItsChildAsked() {
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.READY,
+                        ChildWorkspaceStore.MERGE, null, List.of(), null));
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 63, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(null);
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        assertThat(harness.operations).extracting(op -> op.get("kind"))
+                .containsExactly("fail");
+        verify(childWorkspaces, never()).requestFinish(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
+    @Test
+    void aConflictReceiptBoundsThePathsTheChildChose() throws Exception {
+        worktreeRun("tool");
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
+                        null));
+        when(store.terminalResultText(TENANT, CHILD, "turn-1"))
+                .thenReturn("child result");
+        List<String> paths = new java.util.ArrayList<>();
+        for (int index = 0; index < 100; index++) {
+            paths.add("d".repeat(700) + "/\u0001" + index);
+        }
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.CONFLICTED,
+                        ChildWorkspaceStore.MERGE, "conflicted", paths,
+                        "c".repeat(40)));
+        relay.scan();
+        var receipt = new ObjectMapper().readTree(
+                (String) harness.operations.get(0).get("receipt"));
+        var workspace = receipt.get("workspace");
+        int kept = workspace.get("conflictPaths").size();
+        assertThat(kept).isBetween(1, 99);
+        assertThat(workspace.get("omittedConflictPaths").asInt())
+                .isEqualTo(100 - kept);
+        assertThat(new ObjectMapper().writeValueAsBytes(
+                workspace.get("conflictPaths")).length)
+                .isLessThanOrEqualTo(ChildResultRelay.MAX_RECEIPT_PATH_BYTES + 2);
+        assertThat(workspace.get("conflictPaths").get(0).asText())
+                .isEqualTo(paths.get(0));
+    }
+
+    @Test
+    void aCompletedWorktreeChildMergesBeforeItsResultCommits() {
+        worktreeRun("sent");
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
+                        null));
+        when(store.terminalResultText(TENANT, CHILD, "turn-1"))
+                .thenReturn("child result");
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                        null));
+        relay.scan();
+        // The merge is asked and the child's close admitted (the merge runs
+        // once the child is closed); nothing commits while the outcome is
+        // owed, and the wait costs no attempt.
+        verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.MERGE);
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        verify(store).scheduleRetry(any(RelayRow.class), anyString(),
+                Mockito.eq(now + 5_000L), anyLong(), anyLong());
+        assertThat(harness.operations).isEmpty();
+        assertThat(row.get().state()).isEqualTo("watching");
+
+        String pin = "refs/qwen/child-workspaces/" + WORKSPACE_ID + "/result";
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.CONFLICTED,
+                        ChildWorkspaceStore.MERGE, "conflicted",
+                        List.of("src/a.ts", "b.md"), "c".repeat(40)));
+        relay.scan();
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("commit_result", "accept");
+        String receipt = (String) harness.operations.get(0).get("receipt");
+        assertThat(receipt).endsWith(",\"workspace\":{\"mode\":\"worktree\","
+                + "\"childWorkspaceId\":\"" + WORKSPACE_ID + "\","
+                + "\"outcome\":\"conflicted\",\"code\":\"conflicted\","
+                + "\"conflictPaths\":[\"src/a.ts\",\"b.md\"],"
+                + "\"resultRef\":\"" + pin + "\"}}");
+        assertThat(row.get().state()).isEqualTo("delivering");
+
+        // A later discard (the parent closing) leaves the outcome, paths and
+        // result alone, so a replayed commit carries the same bytes.
+        harness.operations.clear();
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.DISCARDED,
+                        ChildWorkspaceStore.DISCARD, "conflicted",
+                        List.of("src/a.ts", "b.md"), "c".repeat(40)));
+        relay.scan();
+        assertThat(harness.operations.get(0).get("receipt")).isEqualTo(receipt);
+    }
+
+    @Test
+    void aWorktreeReceiptReportsEachOutcome() {
+        worktreeRun("tool");
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
+                        null));
+        when(store.terminalResultText(TENANT, CHILD, "turn-1"))
+                .thenReturn("child result");
+        String pin = "refs/qwen/child-workspaces/" + WORKSPACE_ID + "/result";
+        Map<ChildWorkspaceStore.Row, String> cases = new java.util.LinkedHashMap<>();
+        cases.put(workspaceRow(ChildWorkspaceStore.MERGED,
+                ChildWorkspaceStore.MERGE, "merged", List.of(), "c".repeat(40)),
+                "\"outcome\":\"merged\",\"code\":\"merged\"}");
+        cases.put(workspaceRow(ChildWorkspaceStore.BLOCKED,
+                ChildWorkspaceStore.MERGE, "child_workspace_diverged",
+                List.of(), "c".repeat(40)),
+                "\"outcome\":\"blocked\",\"code\":\"child_workspace_diverged\","
+                        + "\"resultRef\":\"" + pin + "\"}");
+        cases.put(workspaceRow(ChildWorkspaceStore.BLOCKED,
+                ChildWorkspaceStore.MERGE, "child_workspace_unsafe_config",
+                List.of(), null),
+                "\"outcome\":\"blocked\",\"code\":\"child_workspace_unsafe_config\"}");
+        cases.put(workspaceRow(ChildWorkspaceStore.DISCARDED,
+                ChildWorkspaceStore.DISCARD, "discarded", List.of(), null),
+                "\"outcome\":\"discarded\",\"code\":\"discarded\"}");
+        cases.forEach((workspace, tail) -> {
+            harness.operations.clear();
+            row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                    "watching", "owner", now + 30_000, 0, 0, null, now, now));
+            when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(workspace);
+            relay.scan();
+            assertThat((String) harness.operations.get(0).get("receipt"))
+                    .as(workspace.outcomeCode())
+                    .endsWith(tail + "}");
+        });
+        verify(childWorkspaces, never()).requestFinish(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
+    @Test
+    void aDiscardAskedFirstKeepsItsPlaceOverTheMerge() {
+        worktreeRun("sent");
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
+                        null));
+        when(store.terminalResultText(TENANT, CHILD, "turn-1"))
+                .thenReturn("child result");
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.READY,
+                        ChildWorkspaceStore.DISCARD, null, List.of(), null));
+        when(childWorkspaces.requestFinish(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.MERGE)).thenThrow(
+                refusal("child_workspace_conflict"));
+        relay.scan();
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(harness.operations).isEmpty();
+        // Any other refusal is not the row's settled order: it surfaces.
+        Mockito.reset(childWorkspaces);
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                        null));
+        when(childWorkspaces.requestFinish(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.MERGE)).thenThrow(
+                refusal("child_workspace_not_ready"));
+        dueAgain();
+        relay.scan();
+        assertThat(harness.operations).isEmpty();
+        verify(store, atLeastOnce()).defer(any(RelayRow.class), anyString(),
+                anyLong(), any(), anyLong(), anyLong());
+    }
+
+    @Test
+    void aWorktreeMergeWaitsTheIdleIntervalOnAHostThatCannotClose() {
+        worktreeRun("sent");
+        when(childCloses.closeSupported()).thenReturn(false);
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
+                        null));
+        when(store.terminalResultText(TENANT, CHILD, "turn-1"))
+                .thenReturn("child result");
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                        null));
+        relay.scan();
+        verify(store).scheduleRetry(any(RelayRow.class), anyString(),
+                Mockito.eq(now + 300_000L), anyLong(), anyLong());
+        verify(childWorkspaces, never()).requestFinish(anyString(), anyString(),
+                anyString(), anyString());
+        assertThat(harness.operations).isEmpty();
+    }
+
+    @Test
+    void aFailedWorktreeChildDiscardsAndACompletedOneKeepsItsWork() {
+        worktreeRun("sent");
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                        null));
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "FAILED", now + 1L, "model", true,
+                        null));
+        relay.scan();
+        assertThat(harness.operations).extracting(op -> op.get("kind"))
+                .containsExactly("fail");
+        verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.DISCARD);
+
+        // A later Turn that fails while the merge an earlier completed Turn
+        // asked for waits never replaces that merge.
+        harness.operations.clear();
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.READY,
+                        ChildWorkspaceStore.MERGE, null, List.of(), null));
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        relay.scan();
+        assertThat(harness.operations).extracting(op -> op.get("kind"))
+                .containsExactly("fail");
+        verify(childWorkspaces, Mockito.times(1)).requestFinish(anyString(),
+                anyString(), anyString(), anyString());
+
+        // An over-bound answer from a completed child settles the quota
+        // and merges the work; a discard asked first keeps its place.
+        harness.operations.clear();
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                        null));
+        when(childWorkspaces.requestFinish(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.MERGE)).thenThrow(
+                refusal("child_workspace_conflict"));
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
+                        null));
+        when(store.terminalResultText(TENANT, CHILD, "turn-1"))
+                .thenReturn("x".repeat(64 * 1024 + 1));
+        relay.scan();
+        assertThat(harness.operations).extracting(op -> op.get("kind"))
+                .containsExactly("fail");
+        assertThat(harness.operations.get(0))
+                .containsEntry("stopReason", "quota_exceeded");
+        assertThat(row.get().state()).isEqualTo("done");
+        verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.MERGE);
+        verify(childWorkspaces, Mockito.times(1)).requestFinish(TENANT, PARENT,
+                RUN, ChildWorkspaceStore.DISCARD);
+    }
+
+    @Test
+    void aWorktreeGiveUpAfterACompletedTurnMergesItsWork() {
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                        null));
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 63, 0, null, now, now));
+        // A completed Turn that yields no answer retried to the budget.
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
+                        null));
+        when(store.terminalResultText(TENANT, CHILD, "turn-1"))
+                .thenReturn(null);
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.MERGE);
+        verify(childWorkspaces, never()).requestFinish(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.DISCARD);
+    }
+
+    @Test
+    void aCreationJudgedUnableToStartRetriesWhenItsChildExists() {
+        worktreeRun("sent");
+        when(childWorkspaces.request(TENANT, PARENT, RUN))
+                .thenThrow(refusal("child_workspace_unsupported"));
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                        null));
+        // The creation committed, then its answer was lost.
+        when(store.findLineageChild(TENANT, PARENT, RUN)).thenReturn(CHILD);
+        relay.scan();
+        assertThat(harness.operations).isEmpty();
+        assertThat(row.get().state()).isEqualTo("creating");
+        assertThat(row.get().attempts()).isEqualTo(1);
+        verify(childWorkspaces, never()).requestFinish(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
+    @Test
+    void aWorktreeGiveUpAsksItsWorkspaceToDiscard() {
+        when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
+                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                        null));
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 63, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(null);
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        assertThat(harness.operations).extracting(op -> op.get("kind"))
+                .containsExactly("fail");
+        verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
+                ChildWorkspaceStore.DISCARD);
+    }
+
+    @Test
+    void aSharedRunNeverTouchesChildWorkspaces() {
+        when(sessions.createChildSession(TENANT, PARENT, RUN,
+                "audit the diff", "review", false)).thenReturn(
+                new CommandAdmission(CHILD, null, "accepted", false));
+        relay.scan();
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
+                        null));
+        when(store.terminalResultText(TENANT, CHILD, "turn-1"))
+                .thenReturn("child result");
+        relay.scan();
+        assertThat((String) harness.operations.stream()
+                .filter(op -> "commit_result".equals(op.get("kind")))
+                .findFirst().orElseThrow().get("receipt"))
+                .doesNotContain("workspace");
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-2", "FAILED", now + 1L, "model", true,
+                        null));
+        relay.scan();
+        // A shared run has no row: the fail arm only looks.
+        verify(childWorkspaces, never()).request(anyString(), anyString(),
+                anyString());
+        verify(childWorkspaces, never()).requestFinish(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
     /** The retry window arrived: the parked row is due again. */
     private void dueAgain() {
         RelayRow parked = row.get();
@@ -1197,6 +1734,194 @@ class ChildResultRelayTest {
                 parked.childSessionId(), parked.state(), parked.claimedBy(),
                 now + 30_000, parked.attempts(), 0, parked.lastError(),
                 parked.createdAt(), now));
+    }
+
+    // H4f: a committed stop request is honored before any arm runs.
+    @Test
+    void aStopRequestedRunWithNothingMintedSettlesUnstarted() {
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        relay.scan();
+        verify(sessions, never()).createChildSession(anyString(),
+                anyString(), anyString(), anyString(), anyString());
+        assertThat(harness.operations).hasSize(1);
+        assertThat(harness.operations.getFirst())
+                .containsEntry("kind", "close_scope")
+                .containsEntry("childRunId", RUN)
+                .containsEntry("started", false)
+                .doesNotContainKey("childSessionId");
+        assertThat(row.get().state()).isEqualTo("done");
+        verify(childCloses, never()).admitChildClose(anyString(),
+                anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void aStopRequestedRunCancelsTheChildTurnThenSettlesCancelled() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "RUNNING", null, null, true, "epoch-1"));
+        relay.scan();
+        verify(sessions).cancelChildTurn(TENANT, PARENT, CHILD, RUN,
+                "turn-1");
+        verify(store).scheduleRetry(any(RelayRow.class), anyString(),
+                anyLong(), anyLong(), anyLong());
+        assertThat(harness.operations).isEmpty();
+        assertThat(row.get().state()).isEqualTo("watching");
+        // A Turn already cancelling is waited on, not cancelled again.
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "CANCELLING", null, null, true, "epoch-1"));
+        relay.scan();
+        verify(sessions, Mockito.times(1)).cancelChildTurn(TENANT, PARENT,
+                CHILD, RUN, "turn-1");
+        assertThat(harness.operations).isEmpty();
+
+        // The Turn ended without a result: the child's close is admitted
+        // before the cancelled settlement, never a child_failed one.
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "CANCELLED", now + 1, null, true, "epoch-1"));
+        relay.scan();
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(harness.operations).hasSize(1);
+        assertThat(harness.operations.getFirst())
+                .containsEntry("kind", "close_scope")
+                .containsEntry("started", true)
+                .doesNotContainKey("childSessionId");
+        assertThat(row.get().state()).isEqualTo("done");
+    }
+
+    @Test
+    void aCompletionThatWinsTheRaceIsDeliveredNotCancelled() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "COMPLETED", now + 1, null, true, "epoch-1"));
+        when(store.terminalResultText(TENANT, CHILD, "turn-1"))
+                .thenReturn("审阅通过");
+        relay.scan();
+        verify(sessions, never()).cancelChildTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString());
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("commit_result", "accept");
+        assertThat(row.get().state()).isEqualTo("delivering");
+    }
+
+    // The contract preserves a natural terminal outcome: a child whose
+    // Turn failed on its own settles child_failed, never cancelled.
+    @Test
+    void aNaturalFailureThatWinsTheRaceStaysFailed() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "FAILED", now + 1, "provider_error", true,
+                "epoch-1"));
+        relay.scan();
+        verify(sessions, never()).cancelChildTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString());
+        assertThat(harness.operations).hasSize(1);
+        assertThat(harness.operations.getFirst())
+                .containsEntry("kind", "fail")
+                .containsEntry("stopReason", "child_failed");
+        assertThat(row.get().state()).isEqualTo("done");
+    }
+
+    // An accepted Turn not yet dispatched takes the cancel like a running
+    // one; the cancelling one it leaves is then only waited on.
+    @Test
+    void anAcceptedTurnIsCancelledLikeARunningOne() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "ACCEPTED", null, null, false, null));
+        relay.scan();
+        verify(sessions).cancelChildTurn(TENANT, PARENT, CHILD, RUN,
+                "turn-1");
+        verify(store).scheduleRetry(any(RelayRow.class), anyString(),
+                anyLong(), anyLong(), anyLong());
+        assertThat(harness.operations).isEmpty();
+    }
+
+    // A cancel landing on a Turn mid-recovery can end it FAILED: once a
+    // cancel took effect on that Turn, the end is the stop's, and the run
+    // settles cancelled rather than child_failed.
+    @Test
+    void aFailedEndAfterThisArmsStopRequestSettlesCancelled() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "FAILED", now + 1,
+                "managed_runtime_recovery_incomplete", true, "epoch-1"));
+        when(store.turnCancelRequested(TENANT, CHILD, "turn-1"))
+                .thenReturn(true);
+        relay.scan();
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(harness.operations).hasSize(1);
+        assertThat(harness.operations.getFirst())
+                .containsEntry("kind", "close_scope")
+                .containsEntry("started", true);
+        assertThat(row.get().state()).isEqualTo("done");
+    }
+
+    @Test
+    void aMintedChildThatNeverDispatchedDiesNamed() {
+        // Creation committed its lineage, the row never learned it, and
+        // the child's Turn failed before its admission landed.
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        when(store.findLineageChild(TENANT, PARENT, RUN)).thenReturn(CHILD);
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "CANCELLED", now + 1, null, false, null));
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn("intent");
+        relay.scan();
+        verify(sessions, never()).createChildSession(anyString(),
+                anyString(), anyString(), anyString(), anyString());
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(harness.operations).hasSize(1);
+        assertThat(harness.operations.getFirst())
+                .containsEntry("kind", "close_scope")
+                .containsEntry("started", false)
+                .containsEntry("childSessionId", CHILD);
+        assertThat(row.get().state()).isEqualTo("done");
+    }
+
+    @Test
+    void anUnprovenStopOwesARetryNotAVerdict() {
+        // The settling revision is refused (a mint landed first, or the
+        // parent's writer faltered): nothing is classified, the row defers.
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        harness.refuseKind = "close_scope";
+        relay.scan();
+        assertThat(harness.operations).isEmpty();
+        assertThat(row.get().state()).isEqualTo("creating");
+        assertThat(row.get().attempts()).isEqualTo(1);
+        verify(store, never()).classify(any(RelayRow.class), anyString(),
+                anyString(), any(), anyLong());
+    }
+
+    @Test
+    void anEndedRunIsNeverStoppedAgain() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, true));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "RUNNING", null, null, true, "epoch-1"));
+        relay.scan();
+        verify(sessions, never()).cancelChildTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString());
+        assertThat(harness.operations).isEmpty();
     }
 
     // R1-66: the relay's page of sequential harness calls must not ride

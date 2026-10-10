@@ -186,6 +186,7 @@ function childLife(
     rootSessionId: sessionId,
     completion: 'sent',
     inputRef: refs.input,
+    workspaceMode: 'shared',
     workingDirectory: '.',
     executionCallId: `call-${childRunId}`,
     definition: {

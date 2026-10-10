@@ -80,7 +80,10 @@ import type {
 } from './hosted-hook-session.js';
 import type { HostedChildRunSession } from './hosted-child-run-session.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
-import { childLaunchAdmission } from './hosted-child-agent-session.js';
+import {
+  childLaunchAdmission,
+  childWorkspaceAnswerSuffix,
+} from './hosted-child-agent-session.js';
 import { sanitizeName } from '@qwen-code/qwen-code-core/agents/team/teamHelpers.js';
 import {
   HOSTED_TEAM_TOOLS,
@@ -458,6 +461,46 @@ export const HOSTED_TEAM_AGENT_TOOL: FunctionDeclaration = {
     },
   },
 };
+
+/**
+ * #13753 I2: an Agent tool declaration with `isolation`, the legacy Agent
+ * tool's name and value, for a host that serves child Workspaces. Only
+ * there does the model see it; elsewhere each declaration stays exactly
+ * as it was.
+ */
+function withWorktreeIsolation(tool: FunctionDeclaration): FunctionDeclaration {
+  const schema = tool.parametersJsonSchema as {
+    properties: Record<string, unknown>;
+  };
+  return {
+    ...tool,
+    description:
+      tool.description!.replace(
+        'Nesting, custom subagent types and isolated workspaces are unavailable in this profile.',
+        'Nesting and custom subagent types are unavailable in this profile.',
+      ) +
+      ' With isolation "worktree" the child works in its own Git worktree of this Workspace\'s repository: its changes merge back into this Workspace as uncommitted changes when it completes, before its result arrives, and the result reports the merge (merged, conflicted with its paths, or blocked); a failed or cancelled child\'s worktree is discarded.',
+    parametersJsonSchema: {
+      ...schema,
+      properties: {
+        ...schema.properties,
+        isolation: {
+          type: 'string',
+          enum: ['worktree'],
+          description:
+            'Run the child in its own Git worktree that merges back when it completes. Omit to share this Workspace directly.',
+        },
+      },
+    },
+  };
+}
+
+export const HOSTED_AGENT_WORKTREE_TOOL =
+  withWorktreeIsolation(HOSTED_AGENT_TOOL);
+export const HOSTED_TEAM_AGENT_WORKTREE_TOOL = withWorktreeIsolation(
+  HOSTED_TEAM_AGENT_TOOL,
+);
+
 function physicalToolStatus(
   response: Record<string, unknown> | undefined,
 ): 'success' | 'error' | 'cancelled' {
@@ -594,8 +637,12 @@ export function fitChildResultInline(
   callId: string,
   text: string,
   fits: (parts: Part[]) => boolean,
+  /** Kept whole after the result, folded or not (#13753 I2). */
+  suffix = '',
 ): Part[] {
-  const whole = convertToFunctionResponse(name, callId, [{ text }]);
+  const whole = convertToFunctionResponse(name, callId, [
+    { text: text + suffix },
+  ]);
   if (fits(whole)) return whole;
   const marker = '\n… (truncated: the full result is on the acceptance record)';
   for (
@@ -604,7 +651,7 @@ export function fitChildResultInline(
     head = Math.floor(head / 2)
   ) {
     const folded = convertToFunctionResponse(name, callId, [
-      { text: text.slice(0, head) + marker },
+      { text: text.slice(0, head) + marker + suffix },
     ]);
     if (fits(folded)) return folded;
   }
@@ -643,6 +690,7 @@ export class HostedWorkspaceToolTurn {
   private readonly backgroundLane?: HostedShellTurnOptions;
   private readonly childAgents?: HostedChildAgentSession;
   private readonly childDepth: number;
+  private readonly childWorkspaces: boolean;
   private readonly childConsumption: (childRunId: string) => void;
   private readonly teams?: HostedTeamSession;
 
@@ -682,6 +730,8 @@ export class HostedWorkspaceToolTurn {
       childAgents?: {
         readonly funnel: HostedChildAgentSession;
         readonly depth: number;
+        /** #13753 I2: the host serves child Workspaces. */
+        readonly childWorkspaces?: boolean;
         readonly queueConsumption: (childRunId: string) => void;
       };
       teams?: HostedTeamSession;
@@ -696,6 +746,7 @@ export class HostedWorkspaceToolTurn {
     this.backgroundLane = extras?.backgroundLane;
     this.childAgents = extras?.childAgents?.funnel;
     this.childDepth = extras?.childAgents?.depth ?? 0;
+    this.childWorkspaces = extras?.childAgents?.childWorkspaces === true;
     this.childConsumption =
       extras?.childAgents?.queueConsumption ?? (() => undefined);
     this.teams = extras?.teams;
@@ -778,10 +829,20 @@ export class HostedWorkspaceToolTurn {
       // a child's), behind the kind gate — files profiles and the public
       // files/1 flow keep their exact current vocabulary, mirrored by the
       // admission check in prepareRequests. H4e-b1's team tools follow it.
+      // #13753 I2: only a host that serves child Workspaces sees isolation.
       ...(this.teamsAdmitted()
-        ? [HOSTED_TEAM_AGENT_TOOL, ...HOSTED_TEAM_TOOLS]
+        ? [
+            this.childWorkspaces
+              ? HOSTED_TEAM_AGENT_WORKTREE_TOOL
+              : HOSTED_TEAM_AGENT_TOOL,
+            ...HOSTED_TEAM_TOOLS,
+          ]
         : this.agentsAdmitted()
-          ? [HOSTED_AGENT_TOOL]
+          ? [
+              this.childWorkspaces
+                ? HOSTED_AGENT_WORKTREE_TOOL
+                : HOSTED_AGENT_TOOL,
+            ]
           : []),
     ];
     return this.advertised;
@@ -1558,6 +1619,7 @@ export class HostedWorkspaceToolTurn {
                 'prompt',
                 'run_in_background',
                 ...(named ? ['name'] : []),
+                'isolation',
               ].includes(key),
           );
           const backgroundValue = args['run_in_background'];
@@ -1578,7 +1640,13 @@ export class HostedWorkspaceToolTurn {
             validationError =
               'Hosted child agents are unavailable on this Session profile; read work through ordinary tools instead.';
           } else if (unsupportedKey !== undefined) {
-            validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition in the shared Workspace, without nesting: fork_*, working_dir, isolation, name, model and subagent_type belong to the legacy Agent tool.`;
+            validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition, without nesting: fork_*, working_dir, name, model and subagent_type belong to the legacy Agent tool.`;
+          } else if (
+            args['isolation'] !== undefined &&
+            args['isolation'] !== 'worktree'
+          ) {
+            validationError =
+              'Hosted child agent isolation must be "worktree" or omitted.';
           } else if (backgroundIllFormed) {
             validationError =
               'Hosted child agent run_in_background must be a boolean.';
@@ -3009,9 +3077,14 @@ export class HostedWorkspaceToolTurn {
     // counting the replayed child against `count_limit` or the launch
     // budget would refuse the launch it is already running. Both counts
     // read committed records only, so a refusal re-derives on replay.
+    // #13753 I2: the launch's isolation, fixed on its record for every
+    // later revision and replay.
+    const workspaceMode =
+      request.call.args['isolation'] === 'worktree' ? 'worktree' : 'shared';
     if (children.record(childRunId) === undefined) {
       const admission = childLaunchAdmission({
-        workspaceMode: 'shared',
+        workspaceMode,
+        childWorkspaces: this.childWorkspaces,
         sameDefinition: true,
         closing: authority.currentActivation?.phase !== 'active',
         activeInScope: children.activeChildRunsOf(key.sessionId).length,
@@ -3023,7 +3096,9 @@ export class HostedWorkspaceToolTurn {
           request.call.name,
           request.call.callId,
           [],
-          `Hosted child agent refused this launch (${admission.reason}).`,
+          admission.reason === 'workspace_mode'
+            ? 'Hosted child agent refused this launch (workspace_mode): this host does not serve isolated child Workspaces; launch without isolation to share this Workspace.'
+            : `Hosted child agent refused this launch (${admission.reason}).`,
         );
         await this.commit('tool_result', refused, model);
         return refused;
@@ -3037,6 +3112,7 @@ export class HostedWorkspaceToolTurn {
       description,
       prompt,
       definition,
+      workspaceMode,
       workingDirectory: '.',
       executionCallId: childRunId,
     });
@@ -3246,11 +3322,16 @@ export class HostedWorkspaceToolTurn {
           // to the inline bound with its marker instead of parking the
           // parent — the full bytes stay on the acceptance record. The
           // fit predicate measures exactly the record this commit writes.
+          // #13753 I2: a worktree child's merge outcome follows the result
+          // and survives the fold, which cuts only the result.
           const fitted = fitChildResultInline(
             request.call.name,
             request.call.callId,
             text,
             (parts) => this.messageFitsInline('tool_result', parts, model),
+            await childWorkspaceAnswerSuffix(record, acceptance, (ref) =>
+              this.session.resources.read(ref),
+            ),
           );
           if (!journaled?.has(request.call.callId))
             await this.commit('tool_result', fitted, model);
