@@ -123,6 +123,10 @@ type Node = {
   name?: unknown;
   value?: unknown;
   left?: unknown;
+  right?: unknown;
+  consequent?: unknown;
+  alternate?: unknown;
+  expressions?: unknown;
   argument?: unknown;
   id?: unknown;
   local?: unknown;
@@ -154,6 +158,7 @@ type Scope = {
   bindings: Map<string, 'on' | '$' | 'local'>;
   functions: Map<string, Node>;
   constants?: Map<string, Node>;
+  declarations?: Map<string, Node>;
 };
 
 function node(value: unknown): Node | undefined {
@@ -237,6 +242,7 @@ function names(pattern: Node | undefined): string[] {
 
 function bindLocals(value: Node, scope: Scope): void {
   if (value.declare === true || value.type === 'TSModuleDeclaration') return;
+  if (value.type === 'VariableDeclaration' && value.kind === 'var') return;
   if (
     value.type === 'FunctionDeclaration' ||
     value.type === 'ClassDeclaration'
@@ -260,7 +266,11 @@ function bindLocals(value: Node, scope: Scope): void {
     }
   }
   if (value.type === 'VariableDeclarator') {
-    for (const name of names(node(value.id))) scope.bindings.set(name, 'local');
+    for (const name of names(node(value.id))) {
+      scope.bindings.set(name, 'local');
+      scope.declarations ??= new Map();
+      scope.declarations.set(name, value);
+    }
     const name = identifier(value.id);
     const init = node(value.init);
     if (name && init && isFunction(init)) scope.functions.set(name, init);
@@ -288,6 +298,9 @@ function bindVars(value: Node, scope: Scope): void {
     for (const variable of children(value)) {
       for (const name of names(node(variable.id))) {
         scope.bindings.set(name, 'local');
+        scope.declarations ??= new Map();
+        if (!scope.declarations.has(name))
+          scope.declarations.set(name, variable);
         const init = node(variable.init);
         if (identifier(variable.id) === name && init && isFunction(init)) {
           scope.functions.set(name, init);
@@ -519,6 +532,90 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
   }
 
   function inspect(program: Node, file: string, register?: Node): void {
+    const sources = new Map<
+      Node,
+      Map<string, Array<{ value: Node; scope: Scope }>>
+    >();
+    const calls: Array<{ value: Node; scope: Scope }> = [];
+    function declaration(scope: Scope, name: string): Node | undefined {
+      if (scope.bindings.has(name)) return scope.declarations?.get(name);
+      return scope.parent ? declaration(scope.parent, name) : undefined;
+    }
+    function recordSource(target: unknown, value: unknown, scope: Scope): void {
+      const expression = runtimeExpression(value);
+      if (!expression) return;
+      for (const name of names(node(target))) {
+        const owner = declaration(scope, name);
+        if (!owner) continue;
+        const bindings = sources.get(owner) ?? new Map();
+        const entries = bindings.get(name) ?? [];
+        entries.push({ value: expression, scope });
+        bindings.set(name, entries);
+        sources.set(owner, bindings);
+      }
+    }
+    function computedTarget(
+      input: unknown,
+      scope: Scope,
+      seen = new Set<Node>(),
+      budget = { remaining: MAX_CONSTANT_CHAIN },
+    ): boolean {
+      const value = runtimeExpression(input);
+      if (!value) return false;
+      if (seen.has(value)) return true;
+      if (budget.remaining-- <= 0) throw new RangeError('Call target limit.');
+      const visited = new Set(seen).add(value);
+      const name = identifier(value);
+      if (name) {
+        const owner = declaration(scope, name);
+        return (
+          (owner ? sources.get(owner)?.get(name) : undefined)?.some((source) =>
+            computedTarget(source.value, source.scope, visited, budget),
+          ) ?? false
+        );
+      }
+      if (
+        ['MemberExpression', 'OptionalMemberExpression'].includes(value.type)
+      ) {
+        return (
+          (value.computed === true &&
+            constantString(value.property, scope) === undefined) ||
+          (['call', 'apply', 'bind'].includes(
+            value.computed
+              ? (constantString(value.property, scope) ?? '')
+              : (identifier(value.property) ?? ''),
+          ) &&
+            computedTarget(value.object, scope, visited, budget))
+        );
+      }
+      if (
+        ['CallExpression', 'OptionalCallExpression', 'NewExpression'].includes(
+          value.type,
+        )
+      ) {
+        return computedTarget(value.callee, scope, visited, budget);
+      }
+      if (value.type === 'AssignmentExpression')
+        return computedTarget(value.right, scope, visited, budget);
+      if (value.type === 'ConditionalExpression')
+        return (
+          computedTarget(value.consequent, scope, visited, budget) ||
+          computedTarget(value.alternate, scope, visited, budget)
+        );
+      if (value.type === 'LogicalExpression')
+        return (
+          computedTarget(value.left, scope, visited, budget) ||
+          computedTarget(value.right, scope, visited, budget)
+        );
+      if (value.type === 'SequenceExpression')
+        return computedTarget(
+          (value.expressions as unknown[]).at(-1),
+          scope,
+          visited,
+          budget,
+        );
+      return false;
+    }
     const rootScope: Scope = {
       varScope: true,
       bindings: new Map(),
@@ -667,6 +764,10 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
           );
         }
       }
+      if (value.type === 'VariableDeclarator')
+        recordSource(value.id, value.init, scope);
+      if (value.type === 'AssignmentExpression')
+        recordSource(value.left, value.right, scope);
       if (value.type === 'ImportExpression') {
         diagnostic(
           'MOD_IMPORT_UNSUPPORTED',
@@ -691,6 +792,7 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
         value.type === 'OptionalCallExpression' ||
         value.type === 'NewExpression'
       ) {
+        calls.push({ value, scope });
         const callee = runtimeExpression(value.callee);
         const name = identifier(callee);
         if (
@@ -1049,6 +1151,17 @@ export async function validateMods(root: string): Promise<ModValidationReport> {
       }
     }
     walk(program, rootScope);
+    for (const { value, scope } of calls) {
+      if (diagnosticLimit || graphLimit) break;
+      if (computedTarget(value.callee, scope)) {
+        diagnostic(
+          'MOD_ANALYSIS_INCOMPLETE',
+          'A call target obtained through computed access cannot be determined statically.',
+          file,
+          value,
+        );
+      }
+    }
   }
 
   async function scan(

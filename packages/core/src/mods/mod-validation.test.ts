@@ -1112,6 +1112,82 @@ describe('validateMods', () => {
     );
   });
 
+  it.each([
+    "let key = 'constructor'; const F = [][key][key]; F('return 1')();",
+    "let key = 'constructor'; [][key][key]('return 1')();",
+    "let key = 'constructor'; const F = [][key][key]; const G = F; G('return 1')();",
+    "let key = 'constructor'; let F; F = [][key][key]; F('return 1')();",
+    "let key = 'constructor'; let F; function run() { F('return 1')(); } F = [][key][key]; run();",
+    "let key = 'constructor'; var F; { F = [][key][key]; } F('return 1')();",
+    "let key = 'constructor'; { var F = [][key][key]; } F('return 1')();",
+    "let key = 'constructor'; { var F = [][key][key]; } var F; F('return 1')();",
+    "let key = 'constructor'; { var F; } { var F = [][key][key]; } F('return 1')();",
+    "let key = 'constructor'; function run() { F('return 1')(); } { var F = [][key][key]; } var F; run();",
+    "let key = 'constructor'; const F = [][key][key]; F.call(null, 'return 1')();",
+    "let key = 'constructor'; const F = [][key][key]; F.apply(null, ['return 1'])();",
+    "let key = 'constructor'; const F = [][key][key]; F?.('return 1')();",
+    "let key = 'constructor'; const F = [][key][key]; new F('return 1');",
+    "let key = 'constructor'; const F = [][key][key]; const G = true ? F : () => {}; G('return 1')();",
+    "let key = 'constructor'; const F = [][key][key]; const G = F || (() => {}); G('return 1')();",
+    "let key = 'constructor'; const F = [][key][key]; const G = (0, F); G('return 1')();",
+    "let key = 'constructor'; const F = [][key][key]; const G = F.bind(null); G('return 1')();",
+    "let key = 'constructor'; const F = [][key][key]; const G = F; function run() { const F = () => {}; G('return 1')(); }",
+  ])(
+    'does not certify calls through unresolved computed values: %s',
+    async (body) => {
+      await source(`export function register(on) { ${body} }`);
+      const result = await validateMods(root);
+      expect(result.static).toEqual({ status: 'incomplete', complete: false });
+      expect(result.diagnostics).toContainEqual(
+        expect.objectContaining({ code: 'MOD_ANALYSIS_INCOMPLETE' }),
+      );
+    },
+  );
+
+  it.each([
+    'let key = 0; const values = [1]; let item; item = values[key];',
+    "let key = 'constructor'; const F = [][key][key]; { const F = () => {}; F(); }",
+    "let key = 'constructor'; const F = [][key][key]; function run(F) { F(); }",
+    "const key = 'map'; const F = [][key];",
+    "let key = 'constructor'; let { F, G } = { F: null, G: () => {} }; F = [][key][key]; G();",
+    "let key = 'constructor'; let [F, G] = [null, () => {}]; F = [][key][key]; G();",
+  ])('preserves data reads and shadowed call targets: %s', async (body) => {
+    await source(`export function register(on) { ${body} }`);
+    expect((await validateMods(root)).static).toEqual({
+      status: 'valid',
+      complete: true,
+    });
+  });
+
+  it('recognizes erased wrappers around computed call aliases', async () => {
+    await fs.writeFile(
+      path.join(root, 'hooks/hooks.json'),
+      JSON.stringify({ modules: ['./register.ts'] }),
+    );
+    await source(
+      "export function register(on) { let key = 'constructor'; const F = [][key][key] as unknown; const G = F!; (G as Function)('return 1')(); }",
+      'hooks/register.ts',
+    );
+    expect((await validateMods(root)).static).toEqual({
+      status: 'incomplete',
+      complete: false,
+    });
+  });
+
+  it('bounds branching call-target alias analysis', async () => {
+    const aliases = Array.from(
+      { length: 12 },
+      (_, index) => `const F${index + 1} = true ? F${index} : F${index};`,
+    );
+    await source(`const F0 = () => {}; ${aliases.join('\n')}
+      export function register(on) { F12(); }`);
+    const result = await validateMods(root);
+    expect(result.static).toEqual({ status: 'incomplete', complete: false });
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'MOD_ANALYSIS_LIMIT' }),
+    );
+  });
+
   it('inventories every direct catch handler', async () => {
     await source(
       "export function register(on) { on('tool.call', () => {}).catch(() => {}).catch((ctx) => ctx.fs.write('/x','y')); }",
