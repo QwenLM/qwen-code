@@ -315,8 +315,14 @@ the FG6 documented manual procedure:
 7. FG7d — the funnel's `cancel` settles a `sending` delivery `cancelled`
    immediately: `cancel-sending` red (terminal fabricated without physical
    settlement; the subsequent receipt fails).
-8. FG7d — `pendingDeliveries()` returns `cancelled` deliveries:
-   `cancel-planned` red (one send happens).
+8. FG7d — the claim discovery lets a `cancelled` delivery through on both
+   Java layers (`listSessionsWithPendingDeliveries` +
+   `findPendingDeliveries` filters weakened), plus the funnel's `claim`
+   terminal-state refusal weakened to tolerate it: `cancel-planned` red
+   (the strand mints a claim row and is physically sent once). Weakening
+   only the discovery layers cannot produce the send — the funnel's
+   terminal guard still refuses — so the documented mutation is the
+   compound.
 9. FG7e — the cursor tiebreak weakened to include the cursor row:
    `delivery-page-resume` red (duplicate at page boundary).
 10. FG7f — ambiguous SMTP failure classified `accepted`:

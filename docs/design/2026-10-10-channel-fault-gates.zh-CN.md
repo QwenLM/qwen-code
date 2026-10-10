@@ -108,7 +108,7 @@ Spring 跑在由 IT 杀死的子 JVM 里；adapter 驱动是可杀/可停进程�
 5. FG7c —— 租约协调器跳过 `unknown` 结算：搁浅挂在 `sending`（`adapter-kill`、`claim-reply`、`spring-kill-dispatch`、`adapter-stop`、`cancel-unsettled`、`receipt-never-arrived` 红）。
 6. FG7c —— 漏斗的 `receipt` 把 `unknown` 视作终态：迟到的诚实回执永远落不下（`adapter-stop` 红）。
 7. FG7d —— 漏斗 `cancel` 把 `sending` 投递立即结算为 `cancelled`：`cancel-sending` 红（无物理结算而捏造终态；其后回执失败）。
-8. FG7d —— `pendingDeliveries()` 返回 `cancelled` 投递：`cancel-planned` 红（发生一次发送）。
+8. FG7d —— Java 两层 claim 发现筛选（`listSessionsWithPendingDeliveries` 与 `findPendingDeliveries`）同时弱化，叠加漏斗 `claim` 终态拒绝被弱化为容忍：`cancel-planned` 红（搁浅投递铸出 claim 行并发生一次物理发送）。仅弱化发现层无法产生发送 —— 漏斗终态守卫仍拦截 —— 故本变异按组合形态记录。
 9. FG7e —— 游标决胜比较弱化为包含游标行：`delivery-page-resume` 红（页界处重复）。
 10. FG7f —— 含糊 SMTP 失败被分类为 `accepted`：`provider-ambiguous` 红（记录无回执证据而声称 `delivered`；健全形态应保持 `unknown`）。
 

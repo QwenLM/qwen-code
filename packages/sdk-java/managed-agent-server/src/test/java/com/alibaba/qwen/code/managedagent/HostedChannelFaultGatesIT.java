@@ -884,6 +884,10 @@ class HostedChannelFaultGatesIT {
                     Files.writeString(release, "go");
                     assertThat(driver.waitFor(150, TimeUnit.SECONDS))
                             .as("parked driver completion").isTrue();
+                    assertThat(driver.exitValue())
+                            .as(HostedChannelGateSupport.safeRead(caseDir
+                                    .resolve("driver-pull-parked.log")))
+                            .isZero();
                     await("both delivered", 60, () -> {
                         for (String delivery : List.of(firstDelivery,
                                 secondDelivery)) {
@@ -933,6 +937,10 @@ class HostedChannelFaultGatesIT {
                             .isEqualTo("sending");
                     Files.writeString(release, "go");
                     assertThat(driver.waitFor(120, TimeUnit.SECONDS)).isTrue();
+                    assertThat(driver.exitValue())
+                            .as(HostedChannelGateSupport.safeRead(caseDir
+                                    .resolve("driver-pull-parked.log")))
+                            .isZero();
                     await("ledger delivered", 60, () -> {
                         Map<String, Object> row = support.ledger(tenant,
                                 channelId, deliveryId);
