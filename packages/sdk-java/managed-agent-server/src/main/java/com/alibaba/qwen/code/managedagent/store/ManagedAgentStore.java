@@ -391,7 +391,8 @@ public class ManagedAgentStore implements AgentStateStore {
         String turnId = input.isEmpty() ? null : publicId("turn");
         String promptId = input.isEmpty() ? null : UUID.randomUUID().toString();
         jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
-                        + " session_id, agent_id, agent_revision, title,"
+                        + " session_id, agent_id, agent_revision,"
+                        + " agent_definition_digest, title,"
                         + " status, created_at, updated_at, workspace_id,"
                         + " workspace_generation, workspace_storage_id,"
                         + " cwd_relative, context_config_ref,"
@@ -401,7 +402,8 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " parent_session_id, root_session_id,"
                         + " parent_child_run_id, child_depth)"
                         + " SELECT tenant_id, ?, agent_id,"
-                        + " agent_revision, ?, 'ACTIVE', ?, ?,"
+                        + " agent_revision, agent_definition_digest,"
+                        + " ?, 'ACTIVE', ?, ?,"
                         + " workspace_id, workspace_generation,"
                         + " workspace_storage_id, cwd_relative,"
                         + " context_config_ref, context_revision,"

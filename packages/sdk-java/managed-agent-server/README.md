@@ -40,7 +40,8 @@ a spec operation and a registry entry ([actor-roles design](../../../docs/design
 Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
 `1`) when they are created. `POST /v1/agents`, `GET /v1/agents/{id}` and
 `POST /v1/agents/{id}` store tenant-scoped, immutable AgentDefinition
-revisions; Sessions do not use them yet. Every response carries `X-Request-Id`, which error
+revisions; a Session pinned to one executes that stored revision (see "Stored
+agent execution" below). Every response carries `X-Request-Id`, which error
 envelopes repeat as `request_id` and the logs print. Events keep the schema and
 projection versions they were accepted with. They keep their Item and Part
 identity too, except after Harness recovery retracts output: the retracted

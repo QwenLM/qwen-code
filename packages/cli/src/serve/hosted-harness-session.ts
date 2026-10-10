@@ -2330,7 +2330,12 @@ async function executeHostedTurn(
           const outcome = settledTurnOutcome(abort);
           state = outcome.state;
           stopReason = outcome.stopReason;
-          if (state === 'error' && cause instanceof HostedModelUnavailableError)
+          // A deadline expiry must keep naming the deadline: only a generic
+          // error outcome may be reclassified as a model-route failure.
+          if (
+            stopReason === 'error' &&
+            cause instanceof HostedModelUnavailableError
+          )
             stopReason = 'model_unavailable';
           if (state === 'error') {
             // The model layer surfaces any abort as a cancellation, so a
