@@ -282,6 +282,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
 export class ApiRequestEvent implements BaseTelemetryEvent {
   'event.name': 'api_request';
   'event.timestamp': string;
+  execution_id?: string;
   model: string;
   prompt_id: string;
   request_text?: string;
@@ -296,9 +297,11 @@ export class ApiRequestEvent implements BaseTelemetryEvent {
     prompt_id: string,
     request_text?: string,
     subagent_name?: string,
+    execution_id?: string,
   ) {
     this['event.name'] = 'api_request';
     this['event.timestamp'] = new Date().toISOString();
+    this.execution_id = execution_id;
     this.model = model;
     this.prompt_id = prompt_id;
     this.request_text = request_text;
@@ -310,6 +313,7 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
   'event.name': 'api_error';
   'event.timestamp': string; // ISO 8601
   response_id?: string;
+  execution_id?: string;
   model: string;
   duration_ms: number;
   prompt_id: string;
@@ -327,6 +331,7 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
   subagent_name?: string;
 
   constructor(opts: {
+    executionId?: string;
     responseId?: string;
     model: string;
     durationMs: number;
@@ -340,6 +345,7 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
     this['event.name'] = 'api_error';
     this['event.timestamp'] = new Date().toISOString();
     this.response_id = opts.responseId;
+    this.execution_id = opts.executionId;
     this.model = opts.model;
     this.duration_ms = opts.durationMs;
     this.prompt_id = opts.promptId;
@@ -382,6 +388,7 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
   'event.name': 'api_response';
   'event.timestamp': string; // ISO 8601
   response_id: string;
+  execution_id?: string;
   model: string;
   status_code?: number | string;
   duration_ms: number;
@@ -411,10 +418,12 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     response_text?: string,
     subagent_name?: string,
     ttft_ms?: number,
+    execution_id?: string,
   ) {
     this['event.name'] = 'api_response';
     this['event.timestamp'] = new Date().toISOString();
     this.response_id = response_id;
+    this.execution_id = execution_id;
     this.model = model;
     this.duration_ms = duration_ms;
     this.status_code = 200;
@@ -1752,6 +1761,18 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
   scan_duration_ms: number;
   fast_duration_ms: number;
   selector_duration_ms: number;
+  /**
+   * True only when the model selector was skipped because the deterministic
+   * fast result matched a title/keyword and its body was absent (#13003). Keeps a
+   * deliberate skip apart from a selector failure, which also reports
+   * `strategy: 'heuristic'`. Undefined when the recall had no skip decision to
+   * make — legacy mode, or a structured recall that returned before the
+   * selector was reached (empty query, empty corpus, non-positive limit) — so
+   * the metric dimension stays off a series the experiment cannot move, and
+   * `false` keeps meaning "the selector ran and was not skipped" instead of
+   * absorbing trivially fast recalls into the ablation's control arm.
+   */
+  selector_skipped: boolean | undefined;
 
   constructor(params: {
     query_length: number;
@@ -1762,6 +1783,7 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
     scan_duration_ms?: number;
     fast_duration_ms?: number;
     selector_duration_ms?: number;
+    selector_skipped?: boolean;
   }) {
     this['event.name'] = 'qwen-code.memory.recall';
     this['event.timestamp'] = new Date().toISOString();
@@ -1773,17 +1795,16 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
     this.scan_duration_ms = params.scan_duration_ms ?? 0;
     this.fast_duration_ms = params.fast_duration_ms ?? 0;
     this.selector_duration_ms = params.selector_duration_ms ?? 0;
+    this.selector_skipped = params.selector_skipped;
   }
 }
 
 /**
- * Delivery stage, orthogonal to `strategy`. `phase` says *when* a result
- * reached the model — `fast` is the deterministic result injected on the
- * initial turn when the model selector had not settled inside the initial
- * budget, `refined` is the model-selected result. `strategy` separately says
- * *how* the documents were chosen. Both dimensions are needed: a `fast`
- * delivery is always `heuristic`, but a `refined` delivery may be `model` or,
- * when the selector failed, `heuristic`.
+ * Result stage, independent of `strategy` and `delivery_point`. `fast` is a
+ * deterministic result, including a skipped selector; `refined` is a
+ * selector-stage result or its fallback. Either can be delivered on the
+ * initial turn or a later tool result. `strategy` describes document
+ * selection; a router-only fast result can be `none`.
  */
 export type MemoryRecallDeliveryPhase = 'fast' | 'refined';
 export type MemoryRecallDeliveryPoint = 'initial' | 'tool_result' | 'discarded';
@@ -1794,7 +1815,7 @@ export type MemoryRecallDiscardReason =
   | 'abort'
   | 'shutdown'
   | 'no_relevant_results'
-  /** Every document the refined result selected was already delivered by the fast phase. */
+  /** Every selected document was already delivered. */
   | 'already_delivered';
 
 export class MemoryRecallDeliveryEvent implements BaseTelemetryEvent {

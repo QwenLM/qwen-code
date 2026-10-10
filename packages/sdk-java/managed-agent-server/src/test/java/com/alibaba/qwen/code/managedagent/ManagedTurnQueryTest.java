@@ -80,9 +80,11 @@ class ManagedTurnQueryTest {
                 "turn.accepted", Map.of("input", List.of()), false,
                 "accepted:second");
 
-        assertThat(store.findLatestTurn(tenant, sessionId)).get()
+        assertThat(store.findLatestTurns(tenant, List.of(sessionId))
+                .get(sessionId))
                 .satisfies(turn -> assertThat(turn.turnId()).isEqualTo("turn_a"));
-        assertThat(store.findLatestEnvironmentEvent(tenant, sessionId)).isEmpty();
+        assertThat(store.findLatestEnvironmentEvents(tenant,
+                store.findLatestTurns(tenant, List.of(sessionId)))).isEmpty();
 
         store.appendPublicEventIfAbsent(tenant, sessionId, "turn_a",
                 "environment.ready", Map.of(), false, "ready:second");
@@ -90,7 +92,9 @@ class ManagedTurnQueryTest {
                 "environment.failed", Map.of("code", "runtime_warm_failed"),
                 false, "failed:first");
 
-        assertThat(store.findLatestEnvironmentEvent(tenant, sessionId)).get()
+        assertThat(store.findLatestEnvironmentEvents(tenant,
+                store.findLatestTurns(tenant, List.of(sessionId)))
+                .get(sessionId))
                 .satisfies(event -> {
                     assertThat(event.turnId()).isEqualTo("turn_a");
                     assertThat(event.type()).isEqualTo("environment.ready");
@@ -335,8 +339,8 @@ class ManagedTurnQueryTest {
                         + " VALUES (?, 'ws-a', 1, 'storage-a', 'ws-a',"
                         + " 'config', 'policy', 'ACTIVE')", tenant);
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES (?, 'ws-a', ?, TRUE, TRUE)", tenant,
+                        + " workspace_id, actor_id, role)"
+                        + " VALUES (?, 'ws-a', ?, 'OPERATOR')", tenant,
                 "actor-a".getBytes(StandardCharsets.UTF_8));
         String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/v1/agents/sessions").header(TENANT, tenant)
