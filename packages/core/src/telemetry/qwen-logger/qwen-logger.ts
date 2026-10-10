@@ -16,6 +16,8 @@ import type {
   StartSessionEvent,
   UserPromptEvent,
   ToolCallEvent,
+  ToolResultSizeEvent,
+  ToolResultPersistedEvent,
   ApiRequestEvent,
   ApiResponseEvent,
   ApiErrorEvent,
@@ -610,6 +612,13 @@ export class QwenLogger {
           permission: event.decision,
           success: event.success ? 1 : 0,
           duration_ms: event.duration_ms,
+          content_length: event.content_length,
+          raw_content_length: event.raw_content_length,
+          raw_estimated_tokens: event.raw_estimated_tokens,
+          processed_estimated_tokens: event.processed_estimated_tokens,
+          truncated: event.truncated,
+          applied_budget: event.applied_budget,
+          budget_source: event.budget_source,
           error_type: event.error_type,
           error_message: event.error,
         },
@@ -617,6 +626,29 @@ export class QwenLogger {
     );
 
     this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logToolResultSizeEvent(event: ToolResultSizeEvent): void {
+    const {
+      'event.name': name,
+      'event.timestamp': _timestamp,
+      ...properties
+    } = event;
+    this.enqueueLogEvent(this.createActionEvent('tool', name, { properties }));
+    this.flushIfNeeded();
+  }
+
+  logToolResultPersistedEvent(event: ToolResultPersistedEvent): void {
+    this.enqueueLogEvent(
+      this.createActionEvent('tool', 'tool_result_persisted', {
+        properties: {
+          tool_name: event.tool_name,
+          bytes_written: event.bytes_written,
+          prompt_id: event.prompt_id,
+        },
+      }),
+    );
     this.flushIfNeeded();
   }
 

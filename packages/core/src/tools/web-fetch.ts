@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { truncateToolOutput } from './truncation.js';
+import { measureToolOutput, type ToolOutputSize } from './tool-output-size.js';
 import { LRUCache } from 'mnemonist';
 import type { Config } from '../config/config.js';
 import {
@@ -88,6 +90,15 @@ interface CacheEntry {
    * binary content.
    */
   content: string;
+  persistedTextPath?: string;
+  /**
+   * Whether the producer-level truncation below actually reduced `content`.
+   * Tracked by content identity, not by the spill path: a failed spill write
+   * returns a bounded preview with no `persistedTextPath`.
+   */
+  reduced?: boolean;
+  /** Size of `content` before the producer-level truncation below. */
+  rawOutputSize?: ToolOutputSize | null;
   persistedPath?: string;
   persistedSize?: number;
   /** Sniffed mime for the persisted-file note (Content-Type may lie). */
@@ -191,16 +202,6 @@ function readHintForPath(persistedPath: string): string {
     return ` Use ${ToolNames.READ_FILE} to view it.`;
   }
   return '';
-}
-
-function truncateText(text: string): string {
-  if (text.length <= MAX_CONTENT_CHARS) {
-    return text;
-  }
-  return (
-    text.slice(0, MAX_CONTENT_CHARS) +
-    `\n\n[Content truncated: showing first ${MAX_CONTENT_CHARS.toLocaleString('en-US')} of ${text.length.toLocaleString('en-US')} characters]`
-  );
 }
 
 /**
@@ -482,7 +483,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       if (sniff.extension === 'pdf' && persistedPath) {
         const pdfText = await extractPDFText(persistedPath, { signal });
         if (pdfText.success && pdfText.text.trim()) {
-          content = truncateText(pdfText.text);
+          content = pdfText.text;
         } else if (!pdfText.success) {
           this.debugLogger.debug(
             `[WebFetchTool] PDF text extraction failed: ${pdfText.error}`,
@@ -494,23 +495,48 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       const decoded = response.body.toString('utf-8');
       try {
         const turndown = await getTurndownService();
-        content = truncateText(turndown.turndown(decoded));
+        content = turndown.turndown(decoded);
       } catch (error) {
         this.debugLogger.error(
           `[WebFetchTool] HTML conversion failed, using raw text`,
           error,
         );
-        content = truncateText(decoded);
+        content = decoded;
       }
     } else {
-      content = truncateText(response.body.toString('utf-8'));
+      content = response.body.toString('utf-8');
     }
 
     this.debugLogger.debug(
       `[WebFetchTool] network_ms=${networkMs} extract_ms=${Date.now() - extractStart}`,
     );
 
+    let persistedTextPath: string | undefined;
+    let rawOutputSize: ToolOutputSize | undefined;
+    let reduced = false;
+    if (content.length > MAX_CONTENT_CHARS) {
+      rawOutputSize = measureToolOutput(content);
+      const shortened = await truncateToolOutput(
+        this.config,
+        'web_fetch',
+        content,
+        {
+          threshold: MAX_CONTENT_CHARS,
+          lines: Number.POSITIVE_INFINITY,
+          previewChars: MAX_CONTENT_CHARS - 2000,
+          keep: 'head',
+          layer: 'producer',
+        },
+      );
+      reduced = content !== shortened.content;
+      content = shortened.content;
+      persistedTextPath = shortened.outputFile;
+    }
+
     const entry: CacheEntry = {
+      persistedTextPath,
+      reduced,
+      rawOutputSize,
       fetchedAt: Date.now(),
       status: response.status,
       statusText: response.statusText,
@@ -549,7 +575,11 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
         };
       }
 
-      const header = this.buildMetadataHeader(entry);
+      const header =
+        this.buildMetadataHeader(entry) +
+        (entry.persistedTextPath
+          ? `\nFull extracted text saved to: ${entry.persistedTextPath}. Page in with read_file using file_path, offset and limit.`
+          : '');
       const binaryNote = entry.persistedPath
         ? `\n\n[Binary content (${entry.persistedMime || entry.contentType || 'unknown'}, ${formatByteSize(entry.persistedSize ?? entry.byteLength)}) saved to ${entry.persistedPath}.${readHintForPath(entry.persistedPath)}]`
         : '';
@@ -579,11 +609,18 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       if (
         preapproved &&
         entry.contentType.includes('text/markdown') &&
-        entry.content.length <= MAX_CONTENT_CHARS
+        entry.content.length <= MAX_CONTENT_CHARS &&
+        // Length alone is not "nothing was reduced": the producer's stub lands
+        // just under the cap, and a reduced page means this content WAS cut —
+        // so hand it to the side query that answers the prompt instead. Keyed
+        // on the reduction, not the spill path: a failed spill write still
+        // returns a bounded preview, with no path to test.
+        !entry.reduced
       ) {
         return {
           llmContent: `${header}\n\n${entry.content}${binaryNote}`,
           returnDisplay: `${displaySummary}${elapsedSuffix()}`,
+          rawOutputSize: entry.rawOutputSize,
           ...(entry.persistedPath
             ? { resultFilePaths: [entry.persistedPath] }
             : {}),
@@ -648,6 +685,7 @@ ${entry.content}
         return {
           llmContent: `${header}\n\n[Content processing failed (${getErrorMessage(error)}). The raw fetched content follows.]\n\n${entry.content}${binaryNote}`,
           returnDisplay: `${displaySummary}${elapsedSuffix()} — processing failed, raw content returned`,
+          rawOutputSize: entry.rawOutputSize,
           ...(entry.persistedPath
             ? { resultFilePaths: [entry.persistedPath] }
             : {}),
@@ -661,6 +699,7 @@ ${entry.content}
       return {
         llmContent: `${header}\n\n${resultText}${binaryNote}`,
         returnDisplay: `${displaySummary}${elapsedSuffix()}`,
+        rawOutputSize: entry.rawOutputSize,
         ...(entry.persistedPath
           ? { resultFilePaths: [entry.persistedPath] }
           : {}),

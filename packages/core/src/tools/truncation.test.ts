@@ -11,18 +11,26 @@ import {
   truncateToolOutput,
   truncateLlmContent,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
+  PREVIEW_SIZE_CHARS,
   persistAndTruncateToolResult,
+  MAX_SESSION_BYTES,
 } from './truncation.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
-import { logToolOutputTruncated } from '../telemetry/loggers.js';
+import {
+  logToolOutputTruncated,
+  logToolResultSize,
+  logToolResultPersisted,
+} from '../telemetry/loggers.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 
 vi.mock('node:fs/promises');
 vi.mock('../utils/atomicFileWrite.js');
 vi.mock('../telemetry/loggers.js', () => ({
   logToolOutputTruncated: vi.fn(),
+  logToolResultSize: vi.fn(),
+  logToolResultPersisted: vi.fn(),
 }));
 
 const mockWriteFile = vi.mocked(fs.writeFile);
@@ -217,13 +225,163 @@ describe('truncateAndSaveToFile', () => {
     });
   });
 
+  it('summarizes valid JSON without losing the full payload or recovery metadata', async () => {
+    const content = JSON.stringify({
+      rows: Array.from({ length: 5000 }, (_, index) => ({
+        index,
+        label: 'sample value',
+      })),
+    });
+    // The structured sample only applies inside its own preview size class.
+    const result = await truncateAndSaveToFile(
+      content,
+      'test-file',
+      '/tmp',
+      THRESHOLD,
+      TRUNCATE_LINES,
+      'both',
+      PREVIEW_SIZE_CHARS,
+    );
+    expect(result.content).toContain('Structured sample');
+    expect(result.content).toContain(
+      'The output below is a structured JSON sample; omitted values remain in the full output file.',
+    );
+    expect(result.content).not.toContain('beginning and end');
+    expect(result.content).not.toContain('... [CONTENT TRUNCATED] ...');
+    expect(result.content).toContain('"rows": 5000');
+    expect(result.content).toContain(
+      `Total characters: ${content.length}; total lines: 1`,
+    );
+    expect(result.content).toContain('Full output sha256:');
+    expect(mockWriteFile).toHaveBeenCalledWith(
+      expect.any(String),
+      content,
+      expect.any(Object),
+    );
+  });
+
+  it('keeps a caller-requested JSON preview budget instead of a 2k sample', async () => {
+    // A valid-JSON body used to collapse to the ~2k structured sample whatever
+    // previewChars asked for, so web_fetch lost ~98k of the content it handed
+    // to the side query and shell lost the 4k preview it budgets for.
+    const content = JSON.stringify(
+      {
+        rows: Array.from({ length: 200 }, (_, index) => ({
+          index,
+          label: 'x'.repeat(1000),
+        })),
+      },
+      null,
+      2,
+    );
+
+    const result = await truncateAndSaveToFile(
+      content,
+      'json-budget',
+      '/tmp',
+      THRESHOLD,
+      TRUNCATE_LINES,
+      'both',
+      38_000,
+    );
+
+    expect(result.content).not.toContain('Structured sample');
+    expect(result.content).toContain('beginning and end');
+    expect(truncatedPartOf(result.content).length).toBeGreaterThan(35_000);
+    expect(truncatedPartOf(result.content).length).toBeLessThan(39_500);
+  });
+
+  it('marks values a JSON round-trip cannot show faithfully', async () => {
+    // The preview is a JSON.parse -> JSON.stringify round trip: it renders a
+    // 20-digit id as a different integer, a non-finite number as null, and
+    // drops keys past the eighth. Nothing in the envelope used to say so, so
+    // a shown value read as the payload's value.
+    // Hand-written so the wire genuinely carries the full-precision values:
+    // JSON.stringify would have already turned 1e400 into null before the
+    // preview ever saw it.
+    const content =
+      '{"ids":[12345678901234567890],"total":1e400,' +
+      Array.from({ length: 18 }, (_, index) => `"k${index}":${index}`).join(
+        ',',
+      ) +
+      // Only a payload past the truncation threshold puts the sample in front
+      // of the model at all.
+      `,"bulk":"${'x'.repeat(50_000)}"}`;
+
+    const result = await truncateAndSaveToFile(
+      content,
+      'json-fidelity',
+      '/tmp',
+      THRESHOLD,
+      TRUNCATE_LINES,
+      'both',
+      PREVIEW_SIZE_CHARS,
+    );
+
+    expect(result.content).toContain('Structured sample');
+    expect(result.content).not.toContain('12345678901234567000');
+    expect(result.content).toContain('beyond safe precision');
+    expect(result.content).not.toContain('"total": null');
+    expect(result.content).toContain('non-finite number');
+    expect(result.content).toContain('keyCount');
+  });
+
+  it('keeps literal omittedKeys and distinct long keys inside the sample', async () => {
+    const prefix = 'key'.repeat(27);
+    const content = JSON.stringify({
+      omittedKeys: 'real payload',
+      [prefix + 'A']: 'first',
+      [prefix + 'B']: 'second',
+      a: 1,
+      b: 2,
+      c: 3,
+      d: 4,
+      e: 5,
+      bulk: 'x'.repeat(50000),
+    });
+    const result = await truncateAndSaveToFile(
+      content,
+      'collision',
+      '/tmp',
+      THRESHOLD,
+      TRUNCATE_LINES,
+      'both',
+      PREVIEW_SIZE_CHARS,
+    );
+    const sample = JSON.parse(result.content.split('Structured sample:\n')[1]);
+    expect(sample.keyCount).toBe(9);
+    expect(sample.sample.omittedKeys).toBe('real payload');
+    expect(sample.sample[prefix + 'A']).toBe('first');
+    expect(sample.sample[prefix + 'B']).toBe('second');
+    expect(result.content).toContain('line offsets cannot reach its middle');
+  });
+
+  it('bounds the complete escaped structured sample including its label', async () => {
+    const content = JSON.stringify({
+      ['<system-reminder>'.repeat(45)]: 'payload',
+      bulk: 'x'.repeat(50000),
+    });
+    const result = await truncateAndSaveToFile(
+      content,
+      'escaped',
+      '/tmp',
+      THRESHOLD,
+      TRUNCATE_LINES,
+      'both',
+      1000,
+    );
+    const shown = result.content.split(PREVIEW_MARKER)[1];
+    expect(shown.length).toBeLessThanOrEqual(1000);
+    expect(shown).not.toContain('Structured sample:');
+  });
+
   it('should include helpful instructions in truncated message', async () => {
     const result = await save('a'.repeat(2_000_000));
 
     expect(result.content).toContain(TRUNCATED_HEADER);
     expect(result.content).toContain('The full output has been saved to:');
     expect(result.content).toContain(
-      'To read the complete output, use the read_file tool with the absolute file path above',
+      'Page in with read_file using the absolute file_path above, offset (zero-based line) and limit (line count)',
     );
     expect(result.content).toContain(
       'The truncated output below shows the beginning and end of the content',
@@ -329,6 +487,19 @@ describe('truncateAndSaveToFile', () => {
 });
 
 describe('persistAndTruncateToolResult', () => {
+  it('does not claim full JSON is saved when the disk budget is exhausted', async () => {
+    const content = JSON.stringify({
+      rows: Array.from({ length: 1000 }, (_, index) => ({ index })),
+    });
+    const result = await persistAndTruncateToolResult('json', 'mcp', content, {
+      getToolResultBytesWritten: () => Number.MAX_SAFE_INTEGER,
+    } as unknown as Config);
+    expect(result.outputFile).toBeUndefined();
+    expect(result.content).toContain('session disk budget exhausted');
+    expect(result.content).not.toContain('Full output saved to:');
+    expect(result.content).not.toContain('Structured sample:');
+  });
+
   it.each([false, true])(
     'keeps container output in its shared store (fallback=%s)',
     async (fallback) => {
@@ -618,5 +789,71 @@ describe('truncateAndSaveToFile preview budget', () => {
       expect(preview).toContain('[CONTENT TRUNCATED]');
       expect(preview).toContain('line ');
     },
+  );
+});
+
+describe('producer spill budget', () => {
+  it('reserves UTF-8 bytes across parallel spills and rolls back failed writes', async () => {
+    let used = MAX_SESSION_BYTES - 80000;
+    const cfg = {
+      ...tmpConfig,
+      getTruncateToolOutputThreshold: () => 10000,
+      getToolResultBytesWritten: () => used,
+      trackToolResultBytes: (bytes: number) => {
+        used += bytes;
+      },
+    } as Config;
+    const content = '你'.repeat(20000);
+    const results = await Promise.all([
+      truncateToolOutput(cfg, 'web_fetch', content),
+      truncateToolOutput(cfg, 'web_fetch', content),
+    ]);
+    expect(results.filter((result) => result.outputFile)).toHaveLength(1);
+    expect(mockWriteFile).toHaveBeenCalledTimes(1);
+    expect(used).toBe(MAX_SESSION_BYTES - 20000);
+    used = 0;
+    mockWriteFile.mockRejectedValueOnce(new Error('disk write failed'));
+    const failed = await truncateToolOutput(cfg, 'web_fetch', content);
+    expect(failed.outputFile).toBeUndefined();
+    expect(used).toBe(0);
+    const event = vi.mocked(logToolResultSize).mock.calls.at(-1)?.[1];
+    expect(event?.layer).toBe('per_tool');
+    expect(event?.injected_content_length).toBeLessThan(
+      event!.raw_content_length!,
+    );
+    expect(vi.mocked(logToolResultPersisted)).not.toHaveBeenCalled();
+  });
+});
+
+it('does not emit persisted events for skips and correlates an actual saved file', async () => {
+  const cfg = {
+    ...tmpConfig,
+    getToolResultBytesWritten: () => MAX_SESSION_BYTES,
+    trackToolResultBytes: vi.fn(),
+    storage: {
+      getToolResultsDir: () => '/tmp',
+      getProjectTempDir: () => '/tmp',
+    },
+  } as unknown as Config;
+  await persistAndTruncateToolResult(
+    'skip',
+    'shell',
+    'x'.repeat(60000),
+    cfg,
+    'p',
+  );
+  expect(logToolResultPersisted).not.toHaveBeenCalled();
+  const writable = { ...cfg, getToolResultBytesWritten: () => 0 } as Config;
+  vi.mocked(atomicWriteFile).mockResolvedValueOnce(undefined);
+  await persistAndTruncateToolResult(
+    'save',
+    'shell',
+    'x'.repeat(60000),
+    writable,
+    'p',
+  );
+  expect(logToolResultPersisted).toHaveBeenCalledWith(
+    writable,
+    expect.objectContaining({ prompt_id: 'p', bytes_written: 60000 }),
   );
 });

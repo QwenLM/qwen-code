@@ -120,6 +120,7 @@ describe('WebFetchTool', () => {
       trackToolResultBytes: vi.fn(),
       storage: {
         getToolResultsDir: () => toolResultsDir,
+        getProjectTempDir: () => toolResultsDir,
       },
     } as unknown as Config;
   });
@@ -352,14 +353,43 @@ describe('WebFetchTool', () => {
         para.repeat(Math.ceil(110_000 / (para.length - 7))) +
         '<p>NEEDLE-AT-END</p></body></html>';
 
-      const { sent } = await runCapturing(
+      const { sent, result } = await runCapturing(
         { body: Buffer.from(html) },
         PROCESSED_USAGE_UNSET,
         'https://example.com/large',
       );
 
-      expect(sent).toContain('[Content truncated: showing first 100,000 of');
+      expect(sent).toContain(
+        'Tool output was too large and has been truncated',
+      );
+      expect(sent).toContain('Total characters:');
+      expect(sent).toContain('offset (zero-based line) and limit (line count)');
       expect(sent).not.toContain('NEEDLE-AT-END');
+      // The producer shortened this page, so it must declare its pre-reduction
+      // size; without it the execution event falls back to raw == processed and
+      // reports truncated: false for a page that was cut.
+      expect(result.rawOutputSize?.chars).toBeGreaterThan(100_000);
+    });
+
+    it('keeps default result budgets without shrinking side-query input', async () => {
+      stubFetch({
+        contentType: 'text/markdown',
+        body: Buffer.from('# Docs\n' + 'word '.repeat(30000)),
+        finalUrl: 'https://example.com/big',
+      });
+      mockGenerateContent.mockRejectedValue(new Error('API error'));
+      const tool = new WebFetchTool(mockConfig);
+      const result = await tool
+        .build({ url: 'https://example.com/big', prompt: 'summarize' })
+        .execute(new AbortController().signal);
+      expect(tool.maxOutputChars).toBeUndefined();
+      expect((result.llmContent as string).length).toBeGreaterThan(90000);
+      expect(JSON.stringify(mockGenerateContent.mock.calls[0][0])).toContain(
+        'word',
+      );
+      expect(mockConfig.trackToolResultBytes).toHaveBeenCalledWith(
+        expect.any(Number),
+      );
     });
 
     it('should keep content past 100k of raw HTML when the text itself fits', async () => {
@@ -985,6 +1015,51 @@ describe('WebFetchTool', () => {
       });
 
       const result = await run('https://example.com/readme.md');
+
+      expect(mockGenerateContent).toHaveBeenCalled();
+      expect(result.llmContent).toContain('Summary');
+    });
+
+    it('should not pass through a preapproved page the producer already truncated', async () => {
+      // The size check cannot stand in for "nothing was reduced": truncation
+      // lands its stub just under the cap, so gating on length alone hands the
+      // side query's job to a cut-off stub and never answers `params.prompt`.
+      stubSummary({
+        contentType: 'text/markdown',
+        body: Buffer.from('# Docs\n' + 'word '.repeat(30_000)),
+        finalUrl: 'https://docs.python.org/3/library/json.md',
+      });
+
+      const result = await run('https://docs.python.org/3/library/json.md');
+
+      expect(mockGenerateContent).toHaveBeenCalled();
+      expect(result.llmContent).toContain('Summary');
+    });
+
+    it('should not pass through a preapproved page whose spill write failed', async () => {
+      // A failed spill returns a bounded preview with NO outputFile, so gating
+      // the passthrough on the spill path still lets a cut-off stub stand in
+      // for the side query's answer.
+      const blocker = path.join(toolResultsDir, 'blocker');
+      fs.writeFileSync(blocker, 'not a directory');
+      const configWithBrokenSpill = {
+        ...mockConfig,
+        storage: {
+          getToolResultsDir: () => toolResultsDir,
+          getProjectTempDir: () => path.join(blocker, 'temp'),
+        },
+      } as unknown as Config;
+      stubSummary({
+        contentType: 'text/markdown',
+        body: Buffer.from('# Docs\n' + 'word '.repeat(30_000)),
+        finalUrl: 'https://docs.python.org/3/library/json.md',
+      });
+
+      const result = await run(
+        'https://docs.python.org/3/library/json.md',
+        'summarize',
+        { config: configWithBrokenSpill },
+      );
 
       expect(mockGenerateContent).toHaveBeenCalled();
       expect(result.llmContent).toContain('Summary');

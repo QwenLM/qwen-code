@@ -207,13 +207,13 @@ describe('useReactToolScheduler in YOLO Mode', () => {
         response: expect.objectContaining({
           resultDisplay: 'YOLO Formatted tool output',
           responseParts: [
-            {
+            expect.objectContaining({
               functionResponse: {
                 id: 'yoloCall',
                 name: 'mockToolRequiresConfirmation',
                 response: { output: expectedOutput },
               },
-            },
+            }),
           ],
         }),
       }),
@@ -384,13 +384,13 @@ describe('useReactToolScheduler', () => {
         response: expect.objectContaining({
           resultDisplay: 'Formatted tool output',
           responseParts: [
-            {
+            expect.objectContaining({
               functionResponse: {
                 id: 'call1',
                 name: 'mockTool',
                 response: { output: 'Tool output' },
               },
-            },
+            }),
           ],
         }),
       }),
@@ -491,13 +491,13 @@ describe('useReactToolScheduler', () => {
           resultDisplay: message,
           contentLength: modelFacingMessage.length,
           responseParts: [
-            {
+            expect.objectContaining({
               functionResponse: {
                 id: request.callId,
                 name: ToolNames.TOOL_CALL,
                 response: { error: modelFacingMessage },
               },
-            },
+            }),
           ],
         }),
       }),
@@ -634,7 +634,7 @@ describe('useReactToolScheduler', () => {
             errorType: undefined,
             executionStatus: 'not_started',
             responseParts: [
-              {
+              expect.objectContaining({
                 functionResponse: {
                   id: request.callId,
                   name: ToolNames.TOOL_CALL,
@@ -642,7 +642,7 @@ describe('useReactToolScheduler', () => {
                     error: `${DEFERRED_TOOL_CALL_CANCELLATION_PREFIX}[Operation Cancelled] Reason: Tool call cancelled before execution.`,
                   },
                 },
-              },
+              }),
             ],
           }),
         }),
@@ -725,7 +725,7 @@ describe('useReactToolScheduler', () => {
           callId: request.callId,
           errorType: undefined,
           executionStatus: 'not_started',
-          responseParts: [cancelledPart(request)],
+          responseParts: [expect.objectContaining(cancelledPart(request))],
         }),
       }),
       expect.objectContaining({
@@ -735,7 +735,9 @@ describe('useReactToolScheduler', () => {
           callId: secondRequest.callId,
           errorType: undefined,
           executionStatus: 'not_started',
-          responseParts: [cancelledPart(secondRequest)],
+          responseParts: [
+            expect.objectContaining(cancelledPart(secondRequest)),
+          ],
         }),
       }),
     ]);
@@ -1294,13 +1296,13 @@ describe('useReactToolScheduler', () => {
       response: expect.objectContaining({
         resultDisplay: 'Display 1',
         responseParts: [
-          {
+          expect.objectContaining({
             functionResponse: {
               id: 'multi1',
               name: 'tool1',
               response: { output: 'Output 1' },
             },
-          },
+          }),
         ],
       }),
     });
@@ -1310,13 +1312,13 @@ describe('useReactToolScheduler', () => {
       response: expect.objectContaining({
         resultDisplay: 'Display 2',
         responseParts: [
-          {
+          expect.objectContaining({
             functionResponse: {
               id: 'multi2',
               name: 'tool2',
               response: { output: 'Output 2' },
             },
-          },
+          }),
         ],
       }),
     });

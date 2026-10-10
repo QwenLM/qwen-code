@@ -17,6 +17,10 @@ import {
 } from './tool-response-finalizer.js';
 import { persistAndTruncateToolResult } from './truncation.js';
 import { fnResponse } from '../test-utils/model-fixtures.js';
+import {
+  attachToolOutputProvenance,
+  getToolOutputProvenance,
+} from './tool-output-size.js';
 
 const debugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -94,6 +98,68 @@ describe('tool response finalization', () => {
       1000,
     );
     expect(JSON.stringify(result[0].responseParts)).not.toContain('Persisted');
+  });
+
+  it.each(['send', 'finalizer'] as const)(
+    'stamps only shortened parts in a mixed %s entry',
+    async (boundary) => {
+      const small = attachToolOutputProvenance(
+        [fnResponse('read_file', { output: 'small' }, 'small')],
+        {
+          callId: 'small',
+          toolName: 'read_file',
+          toolType: 'native',
+          promptId: 'p',
+          truncated: false,
+          budget: 25000,
+          budgetSource: 'global',
+        },
+      );
+      const large = attachToolOutputProvenance(
+        [fnResponse('shell', { output: 'x'.repeat(10000) }, 'large')],
+        {
+          callId: 'large',
+          toolName: 'shell',
+          toolType: 'native',
+          promptId: 'p',
+          truncated: false,
+        },
+      );
+      const inputs = [entry('mixed', [...small, ...large])];
+      const reduced =
+        boundary === 'send'
+          ? enforceFunctionResponseBudget(inputs, 1000)
+          : await finalizeToolResponses(config(1000), inputs);
+      expect(reduced[0].responseParts[0]).toBe(small[0]);
+      expect(
+        getToolOutputProvenance(reduced[0].responseParts[0]),
+      ).toMatchObject({
+        truncated: false,
+        budget: 25000,
+        budgetSource: 'global',
+      });
+      expect(
+        getToolOutputProvenance(reduced[0].responseParts[1]),
+      ).toMatchObject({
+        truncated: true,
+        budget: 1000,
+        budgetSource: 'batch',
+      });
+    },
+  );
+
+  it('keeps native search-memory exemptions through the deferred tool_call wrapper', async () => {
+    const input = [
+      {
+        ...entry('deferred', [
+          fnResponse('tool_call', { output: 'x'.repeat(10000) }, 'deferred'),
+        ]),
+        toolName: 'search_memory',
+      },
+    ];
+    expect(await finalizeToolResponses(config(1000), input)).toBe(input);
+    expect(enforceFunctionResponseBudget(input, 1000)).toBe(input);
+    expect(persist).not.toHaveBeenCalled();
   });
 
   it('leaves a batch within budget unchanged', async () => {
@@ -278,7 +344,11 @@ describe('tool response finalization', () => {
       },
     ];
 
-    const result = await finalizeToolResponses(config(100), entries);
+    const result = await finalizeToolResponses(
+      config(100),
+      entries,
+      new Map([['enter-plan', 'prompt-plan']]),
+    );
     const output = result[0].responseParts[0].functionResponse?.response?.[
       'output'
     ] as string;
@@ -291,6 +361,7 @@ describe('tool response finalization', () => {
       ToolNames.ENTER_PLAN_MODE,
       hookContext.slice(2),
       expect.anything(),
+      'prompt-plan',
     );
   });
 
@@ -540,6 +611,7 @@ describe('tool response finalization', () => {
       'shell',
       'a'.repeat(1000),
       expect.anything(),
+      undefined,
     );
     expect(persist).toHaveBeenNthCalledWith(
       2,
@@ -547,6 +619,7 @@ describe('tool response finalization', () => {
       'shell',
       'b'.repeat(1000),
       expect.anything(),
+      undefined,
     );
     expect(result[0].persistedOutputFiles).toEqual(['/tmp/duplicate-1.txt']);
     expect(result[1].persistedOutputFiles).toEqual(['/tmp/duplicate-2.txt']);

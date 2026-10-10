@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  getToolOutputProvenance,
+  measureToolOutput,
+} from '../tools/tool-output-size.js';
+import * as outputTruncation from '../tools/truncation.js';
+import * as sizeLoggers from '../telemetry/loggers.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { SpanStatusCode } from '@opentelemetry/api';
@@ -3492,7 +3498,9 @@ describe('CoreToolScheduler', () => {
     );
 
     expectStatus(completedCall, 'success');
-    expect(completedCall.response.responseParts).toEqual([
+    expect(
+      JSON.parse(JSON.stringify(completedCall.response.responseParts)),
+    ).toEqual([
       fnResponse(
         'malformedTool',
         { output: '(malformedTool completed with no output)' },
@@ -3825,7 +3833,7 @@ describe('CoreToolScheduler', () => {
         toolReturning('budgetedTool', result, { maxOutputChars: 30_000 }),
         'c',
         'p',
-        { waitForCompletion: true },
+        { waitForCompletion: true, truncateToolOutputThreshold: 25000 },
       );
       return calls[0];
     }
@@ -6368,6 +6376,12 @@ describe('CoreToolScheduler', () => {
       'halt'.length + 'batch context'.length + 2,
     );
     expect(lastCompletedCall.outcome).toBeUndefined();
+    const provenance = getToolOutputProvenance(
+      lastCompletedCall.response.responseParts[0],
+    );
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBeUndefined();
+    expect(provenance?.budget).toBeUndefined();
     expect(debugLoggerInfoSpy).toHaveBeenCalledWith(
       'PostToolBatch hook stopped batch (2 calls): halt',
     );
@@ -7144,6 +7158,38 @@ describe('CoreToolScheduler with payload', () => {
 });
 
 describe('convertToFunctionResponse', () => {
+  it('carries pre-reduction producer sizes without inventing restored raw data', () => {
+    const [produced] = convertToFunctionResponse('shell', 'call', 'preview', {
+      rawOutputSize: { chars: 40000, estimatedTokens: 10000 },
+    });
+    expect(getToolOutputProvenance(produced)).toMatchObject({
+      rawSize: { chars: 40000, estimatedTokens: 10000 },
+      truncated: true,
+    });
+    const [restored] = convertToFunctionResponse('shell', 'call', 'preview');
+    expect(getToolOutputProvenance(restored)?.rawSize).toBeUndefined();
+  });
+
+  it('leaves raw size unknown when the producer does not declare one', () => {
+    const content = [{ inlineData: { mimeType: 'image/png', data: 'BASE64' } }];
+    const cfg = {
+      getChatCompression: () => ({ imageTokenEstimate: 800 }),
+    } as Config;
+    const [part] = convertToFunctionResponse(
+      'native_image',
+      'image',
+      content,
+      {},
+      cfg,
+    );
+    // An undeclared raw size is unknown: the processed body must not be
+    // shipped as the pre-reduction raw size, or a pre-bounding producer
+    // (grep, ripGrep) would report raw == injected with truncated: false.
+    expect(getToolOutputProvenance(part)?.rawSize).toBeUndefined();
+    expect(measureToolOutput([part], cfg).estimatedTokens).toBe(816);
+    expect(getToolOutputProvenance(part)?.truncated).toBeUndefined();
+  });
+
   const toolName = 'testTool';
   const callId = 'call1';
 
@@ -7210,7 +7256,11 @@ describe('convertToFunctionResponse', () => {
       'Tool execution succeeded.',
     ],
   ])('%s', (_title, llmContent, output, parts) => {
-    expect(convertToFunctionResponse(toolName, callId, llmContent)).toEqual([
+    expect(
+      JSON.parse(
+        JSON.stringify(convertToFunctionResponse(toolName, callId, llmContent)),
+      ),
+    ).toEqual([
       {
         functionResponse: {
           name: toolName,
@@ -14939,5 +14989,76 @@ describe('CoreToolScheduler prompt_id propagation', () => {
     ).resolves.not.toThrow();
 
     await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+  });
+});
+
+describe('persistence size attribution', () => {
+  it('counts retained media with the configured estimate and bounds nested web_fetch envelopes', async () => {
+    const cfg = {
+      getTruncateToolOutputThreshold: () => 25000,
+      getChatCompression: () => ({ imageTokenEstimate: 800 }),
+    } as Config;
+    const owner = Object.assign(Object.create(CoreToolScheduler.prototype), {
+      config: cfg,
+    }) as {
+      maybePersistLargeToolResult(
+        callId: string,
+        toolName: string,
+        content: PartListUnion,
+        budgetApplied: boolean,
+        promptId: string,
+      ): Promise<{ content: PartListUnion }>;
+    };
+    const persist = vi
+      .spyOn(outputTruncation, 'persistAndTruncateToolResult')
+      .mockResolvedValue({
+        content: 'preview',
+        outputFile: '/tmp/original.txt',
+        bytesWritten: 60000,
+      });
+    const log = vi
+      .spyOn(sizeLoggers, 'logToolResultSize')
+      .mockImplementation(() => {});
+    try {
+      const image = { inlineData: { mimeType: 'image/png', data: 'BASE64' } };
+      const input = [{ text: 'x'.repeat(60000) }, image];
+      const result = await owner.maybePersistLargeToolResult(
+        'media',
+        'mcp__image',
+        input,
+        false,
+        'p',
+      );
+      expect(result.content).toEqual([{ text: 'preview' }, image]);
+      const event = log.mock.calls[0][1];
+      expect(event.raw_estimated_tokens).toBe(
+        measureToolOutput(input, cfg).estimatedTokens,
+      );
+      expect(event.injected_estimated_tokens).toBe(
+        measureToolOutput(result.content, cfg).estimatedTokens,
+      );
+      expect(event.injected_estimated_tokens).toBeGreaterThanOrEqual(800);
+      expect(event.prompt_id).toBe('p');
+      await owner.maybePersistLargeToolResult(
+        'page',
+        'web_fetch',
+        'header\n... [CONTENT TRUNCATED] ...\n' + 'x'.repeat(98000),
+        false,
+        'page-prompt',
+      );
+      expect(persist).toHaveBeenCalledTimes(2);
+      expect(log.mock.calls[1][1].prompt_id).toBe('page-prompt');
+      await owner.maybePersistLargeToolResult(
+        'already',
+        'shell',
+        '<persisted-output>' + 'x'.repeat(60000),
+        false,
+        'p',
+      );
+      expect(persist).toHaveBeenCalledTimes(2);
+    } finally {
+      persist.mockRestore();
+      log.mockRestore();
+    }
   });
 });
