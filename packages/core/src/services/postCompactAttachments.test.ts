@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { Content } from '@google/genai';
-import { extractRecentFilePaths } from './postCompactAttachments.js';
+import {
+  extractRecentFilePaths,
+  stripAnalysisBlock,
+} from './postCompactAttachments.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 function fileReadCall(path: string): Content {
@@ -1588,5 +1591,366 @@ describe('composePostCompactHistory — subagent snapshot', () => {
     const lateIdx = flat.indexOf('late');
     expect(earlyIdx).toBeLessThan(midIdx);
     expect(midIdx).toBeLessThan(lateIdx);
+  });
+});
+
+describe('stripAnalysisBlock', () => {
+  it('strips matched analysis pairs and keeps the summary after them', () => {
+    expect(stripAnalysisBlock('<analysis>r</analysis>\n\nREAL SUMMARY')).toBe(
+      'REAL SUMMARY',
+    );
+  });
+
+  it('strips a block closed with the model native think tag (#11969)', () => {
+    // A thinking model instructed to open <analysis> often closes with its
+    // native </think>; the whole answer must not count as unterminated.
+    expect(stripAnalysisBlock('<analysis>r</think>\n\nREAL SUMMARY')).toBe(
+      'REAL SUMMARY',
+    );
+  });
+
+  it('strips thinking and reasoning tag pairs', () => {
+    expect(stripAnalysisBlock('<thinking>r</thinking>\n\nREAL SUMMARY')).toBe(
+      'REAL SUMMARY',
+    );
+    expect(stripAnalysisBlock('<reasoning>r</reasoning>\n\nREAL SUMMARY')).toBe(
+      'REAL SUMMARY',
+    );
+  });
+
+  it('accepts cross-pair closers like <analysis>...</think>', () => {
+    expect(stripAnalysisBlock('<analysis>r</think>REAL SUMMARY')).toBe(
+      'REAL SUMMARY',
+    );
+  });
+
+  it('still swallows a block truncated before any summary exists', () => {
+    // Truncation inside the scratchpad produces no summary at all, and the
+    // upstream emptiness check must keep failing honestly on it.
+    expect(stripAnalysisBlock('<analysis>r cut off mid-')).toBe('');
+  });
+
+  it('still swallows a truncated native think block', () => {
+    expect(stripAnalysisBlock('<think>r cut off mid-')).toBe('');
+  });
+
+  it('pins the case-insensitive flag on both constructors', () => {
+    // Without `i`, an uppercase-tagged block reads as unterminated and the
+    // summary after it would be swallowed with the scratchpad.
+    expect(stripAnalysisBlock('<ANALYSIS>r</ANALYSIS>\n\nREAL SUMMARY')).toBe(
+      'REAL SUMMARY',
+    );
+    expect(stripAnalysisBlock('<THINK>cut off')).toBe('');
+  });
+
+  it('keeps prose that merely names a reasoning tag mid-sentence', () => {
+    // A debugging session about reasoning models is exactly the population
+    // this fallback serves, so a tag mention must not eat the summary tail.
+    expect(
+      stripAnalysisBlock(
+        'The session was about <think> tags and the fix landed.',
+      ),
+    ).toBe('The session was about <think> tags and the fix landed.');
+    expect(
+      stripAnalysisBlock('We discussed `<thinking>` blocks in the prompt.'),
+    ).toBe('We discussed `<thinking>` blocks in the prompt.');
+    expect(
+      stripAnalysisBlock(
+        'Docs say <reasoning> is native; summary follows here.',
+      ),
+    ).toBe('Docs say <reasoning> is native; summary follows here.');
+  });
+
+  it('still swallows a truncated block that starts on its own line', () => {
+    // The real truncation shape: the unterminated tag opens a line of its own
+    // and everything after it is scratchpad.
+    expect(stripAnalysisBlock('partial summary\n<analysis>cut off')).toBe(
+      'partial summary',
+    );
+  });
+
+  it('returns an empty string for an all-analysis summary', () => {
+    expect(
+      stripAnalysisBlock(
+        '<analysis>thinking, but I never produced a state_snapshot</analysis>',
+      ),
+    ).toBe('');
+  });
+
+  it('keeps the payload when the snapshot quotes an opener and a later closer', () => {
+    // A summary about reasoning-tag handling legitimately quotes tags in its
+    // body; the strip must not splice sections across the quoted pair.
+    const input =
+      '<state_snapshot>\n' +
+      '<primary_request_and_intent>The user asked why the model still emits <think> when reasoning is disabled.</primary_request_and_intent>\n' +
+      '<files_and_code_sections>\n- the parser saw a bare </think> with no opener and threw.\n</files_and_code_sections>\n' +
+      '<next_step>Land the fix.</next_step>\n' +
+      '</state_snapshot>';
+    expect(stripAnalysisBlock(input)).toBe(input);
+  });
+
+  it('keeps the envelope when a section quotes an opener at the start of a line', () => {
+    const input =
+      '<state_snapshot>\n' +
+      '<files_and_code_sections>\n- parser.ts:\n```ts\n<think>\nconst OPEN = "...";\n```\n</files_and_code_sections>\n' +
+      '<next_step>x</next_step>\n' +
+      '</state_snapshot>';
+    expect(stripAnalysisBlock(input)).toContain('<next_step>');
+    expect(stripAnalysisBlock(input)).toContain('</state_snapshot>');
+  });
+
+  it('strips the whole instructed block when a native pair sits inside it', () => {
+    const snapshot =
+      '<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>';
+    const input =
+      '<analysis>drafting\n<think>inner</think>\nstill drafting, this tail is scratchpad</analysis>\n\n' +
+      snapshot;
+    expect(stripAnalysisBlock(input)).toBe(snapshot);
+  });
+
+  it('drops drafting prose before a closed envelope', () => {
+    // The prompt contracts the envelope as the whole summary, so pre-envelope
+    // prose is scratchpad, not content.
+    const snapshot =
+      '<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>';
+    expect(
+      stripAnalysisBlock('Let me draft this summary.\n\n' + snapshot),
+    ).toBe(snapshot);
+  });
+
+  it('strips reasoning chatter after the envelope but keeps the envelope', () => {
+    const snapshot =
+      '<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>';
+    expect(
+      stripAnalysisBlock(snapshot + '\n<analysis>post-note</analysis>'),
+    ).toBe(snapshot);
+  });
+
+  it('keeps an unclosed envelope on the unchanged tag path', () => {
+    // Output truncated mid-envelope: no closed envelope to bind to, and no
+    // reasoning tag matches, so the partial envelope survives as before.
+    const input = '<state_snapshot><primary_request_and_intent>cut off mid-';
+    expect(stripAnalysisBlock(input)).toBe(input);
+  });
+
+  it('ignores an envelope quoted inside the scratchpad and binds the real one', () => {
+    // A thinking model can draft the snapshot inside its analysis block; the
+    // draft is scratchpad, only the top-level envelope is the summary.
+    const real =
+      '<state_snapshot><primary_request_and_intent>real</primary_request_and_intent></state_snapshot>';
+    const input =
+      '<analysis>drafting: <state_snapshot><primary_request_and_intent>draft</primary_request_and_intent></state_snapshot> hmm</analysis>\n\n' +
+      real;
+    expect(stripAnalysisBlock(input)).toBe(real);
+  });
+
+  it('keeps failing empty when an unclosed block swallows the envelope', () => {
+    // The model opened a reasoning block and never closed it: everything
+    // after, envelope included, is untrustworthy scratchpad by design.
+    expect(
+      stripAnalysisBlock(
+        '<analysis>never closed\n\n<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>',
+      ),
+    ).toBe('');
+  });
+
+  it('keeps the envelope when the preamble only names a tag mid-sentence', () => {
+    // A prose mention is not an open block, so it must not refuse the
+    // binding — and the matching closer quoted inside the payload must not
+    // pair with the mention across the envelope boundary.
+    const snapshot =
+      '<state_snapshot>\n' +
+      '<primary_request_and_intent>Explain why the model emits </think> natively.</primary_request_and_intent>\n' +
+      '<files_and_code_sections>\n- parser.ts\n</files_and_code_sections>\n' +
+      '<next_step>Land it.</next_step>\n' +
+      '</state_snapshot>';
+    const result = stripAnalysisBlock(
+      'Notes on <think> handling from this session.\n' + snapshot,
+    );
+    expect(result).toBe(snapshot);
+  });
+
+  it('keeps the envelope behind an unterminated native opener', () => {
+    // A native think block whose closer never arrived (chat templates often
+    // strip it) must not discard a complete envelope: the summary is valid,
+    // and failing empty here strikes the consecutive-failures breaker.
+    const snapshot =
+      '<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>';
+    expect(stripAnalysisBlock('<think>never closed\n' + snapshot)).toBe(
+      snapshot,
+    );
+  });
+
+  it('keeps the payload when the body quotes the envelope closer', () => {
+    // A summary about the compression format itself legitimately quotes the
+    // envelope tags; the binding must run to the real final closer.
+    const input =
+      '<state_snapshot>\n' +
+      '<files_and_code_sections>\n- the format ends with </state_snapshot> verbatim\n```ts\n<think>\nconst OPEN = "...";\n```\n</files_and_code_sections>\n' +
+      '<next_step>Land the fix.</next_step>\n' +
+      '</state_snapshot>';
+    expect(stripAnalysisBlock(input)).toBe(input);
+  });
+
+  it('returns prose that names both envelope tags mid-sentence unchanged', () => {
+    const input =
+      'First line of the summary.\n' +
+      'This names <state_snapshot> and </state_snapshot> inline as format notes.\n' +
+      'Final line of the summary.';
+    expect(stripAnalysisBlock(input)).toBe(input);
+  });
+
+  it('drops scratchpad after a list marker or same-line prose prefix', () => {
+    // The instructed tag is unambiguous wherever it starts; only the prefix
+    // on its line survives.
+    expect(stripAnalysisBlock('- <analysis>cut off mid-thought')).toBe('-');
+    expect(stripAnalysisBlock('draft notes <analysis>cut off')).toBe(
+      'draft notes',
+    );
+  });
+
+  it('keeps prose that names two different tag names in one sentence', () => {
+    // Without an envelope the closed pass still runs, but its opener must
+    // start a line — two mid-sentence mentions are not a reasoning block.
+    const input =
+      'We traced <think> output and stray </analysis> closers in one pass.';
+    expect(stripAnalysisBlock(input)).toBe(input);
+  });
+
+  it('strips a closed instructed block behind a same-line lead-in', () => {
+    // The line-anchored pass misses a block that opens after a lead-in like
+    // "Here is my analysis:", and the unclosed fallback would then eat the
+    // real summary that follows the block.
+    expect(
+      stripAnalysisBlock(
+        'Here is my analysis: <analysis>drafting</analysis>\n\nREAL SUMMARY',
+      ),
+    ).toBe('Here is my analysis: REAL SUMMARY');
+  });
+
+  it('keeps the envelope behind a same-line lead-in and a closed draft', () => {
+    const snapshot =
+      '<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>';
+    expect(
+      stripAnalysisBlock('Sure! <analysis>draft</analysis>\n' + snapshot),
+    ).toBe(snapshot);
+  });
+
+  it('keeps the envelope when prose names the instructed tag mid-sentence', () => {
+    // "The user was fixing the <analysis> strip regex." is a mention, not an
+    // open block; refusing the binding here discards a valid summary.
+    expect(
+      stripAnalysisBlock(
+        'The user was fixing the <analysis> strip regex.\n' +
+          '<state_snapshot>\nreal\n</state_snapshot>',
+      ),
+    ).toBe('<state_snapshot>\nreal\n</state_snapshot>');
+  });
+
+  it('ignores an envelope drafted inside a closed native think block', () => {
+    const real =
+      '<state_snapshot><primary_request_and_intent>real</primary_request_and_intent></state_snapshot>';
+    expect(
+      stripAnalysisBlock(
+        '<think>\n<state_snapshot>draft</state_snapshot>\n</think>\n' + real,
+      ),
+    ).toBe(real);
+  });
+
+  it('strips scratch drafted between two envelopes', () => {
+    expect(
+      stripAnalysisBlock(
+        '<state_snapshot>a</state_snapshot>\n' +
+          '<analysis>scratch</analysis>\n' +
+          '<state_snapshot>b</state_snapshot>',
+      ),
+    ).toBe(
+      '<state_snapshot>a</state_snapshot>\n<state_snapshot>b</state_snapshot>',
+    );
+  });
+
+  it('strips scratch between the envelope and a prose closer mention', () => {
+    const snapshot =
+      '<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>';
+    expect(
+      stripAnalysisBlock(
+        snapshot +
+          '\n<analysis>post-note</analysis>\nthe format ends with </state_snapshot>',
+      ),
+    ).toBe(snapshot + '\nthe format ends with </state_snapshot>');
+  });
+
+  it('strips a closed mid-line analysis block after the envelope', () => {
+    expect(
+      stripAnalysisBlock(
+        '<state_snapshot>real</state_snapshot>\nNote: <analysis>post</analysis> tail',
+      ),
+    ).toBe('<state_snapshot>real</state_snapshot>\nNote: tail');
+  });
+
+  it('ignores a closer quoted inside a post-envelope scratchpad', () => {
+    const snapshot = '<state_snapshot>real</state_snapshot>';
+    expect(
+      stripAnalysisBlock(
+        snapshot +
+          '\n<analysis>post-note about </state_snapshot> - yes</analysis>',
+      ),
+    ).toBe(snapshot);
+    expect(
+      stripAnalysisBlock(
+        snapshot + '\n<think>post-note about </state_snapshot></think>',
+      ),
+    ).toBe(snapshot);
+  });
+
+  it('keeps prose around an empty envelope mention', () => {
+    // An empty <state_snapshot></state_snapshot> pair is a mention, not a
+    // summary; binding it would discard the prose before it.
+    const input = 'notes\n<state_snapshot></state_snapshot> done';
+    expect(stripAnalysisBlock(input)).toBe(input);
+  });
+
+  it('strips unclosed scratch drafted before a second envelope', () => {
+    expect(
+      stripAnalysisBlock(
+        '<state_snapshot>a</state_snapshot>\n' +
+          '<analysis>scratch never closed\n' +
+          '<state_snapshot>b</state_snapshot>',
+      ),
+    ).toBe(
+      '<state_snapshot>a</state_snapshot>\n<state_snapshot>b</state_snapshot>',
+    );
+  });
+
+  it('refuses the rebind when the gap holds an unterminated instructed tag', () => {
+    const snapshot = '<state_snapshot>real</state_snapshot>';
+    expect(
+      stripAnalysisBlock(
+        snapshot + '\n<analysis>draft </state_snapshot> never closed',
+      ),
+    ).toBe(snapshot);
+  });
+
+  it('strips an unterminated instructed block after the envelope', () => {
+    expect(
+      stripAnalysisBlock(
+        '<state_snapshot>x</state_snapshot>\n<analysis>cut off',
+      ),
+    ).toBe('<state_snapshot>x</state_snapshot>');
+  });
+
+  it('strips an unterminated native block after the envelope', () => {
+    expect(
+      stripAnalysisBlock('<state_snapshot>x</state_snapshot>\n<think>cut off'),
+    ).toBe('<state_snapshot>x</state_snapshot>');
+  });
+
+  it('keeps prose naming the instructed tag before a native closer mention', () => {
+    const traced =
+      'We traced <analysis> output and stray </think> closers in one pass.';
+    expect(stripAnalysisBlock(traced)).toBe(traced);
+    const docs =
+      'Docs mention <analysis> here.\n\nREAL SUMMARY about </thinking> handling';
+    expect(stripAnalysisBlock(docs)).toBe(docs);
   });
 });

@@ -543,20 +543,181 @@ const RESUME_TRAILER =
  *    nested `<analysis>` tags, this pattern will leak content. The
  *    compression prompt is under our control, so we keep the pattern
  *    strict rather than over-engineering.
- *  - The unclosed-tag fallback (`<analysis>[\s\S]*$`) catches the case
- *    where the model started an `<analysis>` block and ran out of
- *    output tokens before closing it. Without this, the closed-tag
- *    regex above misses and the entire scratchpad leaks into history
- *    via the fallback path in `postProcessSummary`.
+ *  - The closed-block pattern accepts the reasoning tags thinking models
+ *    actually close with (`</think>` and friends), not just the literal
+ *    `</analysis>` the prompt asks for: a thinking model instructed to open
+ *    `<analysis>` often emits its native closer, and a strict single-tag
+ *    pattern then treats the whole answer as unterminated and swallows the
+ *    real summary after it (#11969). Cross-pair closers like
+ *    `<analysis>...</think>` are accepted for the same reason. The opener
+ *    must start a line, so two different tag names mentioned mid-sentence
+ *    in prose are not paired into a phantom block.
+ *  - The unclosed-tag fallback catches the case where the model started a
+ *    reasoning block and ran out of output tokens before closing it.
+ *    `<analysis>` is the tag the prompt itself instructs, so an unterminated
+ *    one is scratchpad wherever it starts and strips unanchored (a list
+ *    marker or lead-in on the same line is kept). The native tags keep the
+ *    line anchor: a mid-sentence mention like "about <think> tags" is prose
+ *    and keeps its tail.
  */
+const REASONING_TAG_NAMES = '(?:analysis|think|thinking|reasoning)';
+const CLOSED_REASONING_BLOCK = new RegExp(
+  `(?<=^|\\n)[ \\t]*<${REASONING_TAG_NAMES}>[\\s\\S]*?<\\/${REASONING_TAG_NAMES}>\\s*`,
+  'gi',
+);
+// The instructed tag also shows up closed mid-line, behind a lead-in like
+// "Here is my analysis:". The line-anchored pattern above misses those, and
+// the unclosed fallback below would then eat the real summary after the
+// block. `<analysis>` is scratchpad wherever it starts; the lead-in on its
+// line is kept. The closer here must be the matching `</analysis>`: with any
+// native closer allowed, a prose mention of `<analysis>` pairs with a later
+// `</think>` mention and deletes the text in between.
+const CLOSED_ANALYSIS_BLOCK_ANYWHERE = new RegExp(
+  `<analysis>[\\s\\S]*?<\\/analysis>\\s*`,
+  'gi',
+);
+const UNCLOSED_ANALYSIS_BLOCK = /<analysis>[\s\S]*$/i;
+// Generic-pass variant: when a reasoning closer is mentioned after the
+// opener, the opener is prose discussing the tags, not a truncated block.
+const UNCLOSED_ANALYSIS_BLOCK_PROSE =
+  /<analysis>(?![\s\S]*<\/(?:analysis|think|thinking|reasoning)>)[\s\S]*$/i;
+const UNCLOSED_REASONING_BLOCK = new RegExp(
+  `(?<=^|\\n)[ \\t]*<(?:think|thinking|reasoning)>[\\s\\S]*$`,
+  'i',
+);
+// The summary contract from `getCompressionPrompt()`: when the model emits a
+// closed envelope, the envelope alone is the payload.
+const ENVELOPE_OPEN = '<state_snapshot>';
+const ENVELOPE_CLOSE = '</state_snapshot>';
+
+// Spans of every closed reasoning block in the text, so an envelope drafted
+// inside one can be recognized as discarded scratch and skipped.
+function closedReasoningSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  for (const pattern of [
+    CLOSED_REASONING_BLOCK,
+    CLOSED_ANALYSIS_BLOCK_ANYWHERE,
+  ]) {
+    for (const match of text.matchAll(pattern)) {
+      spans.push([match.index, match.index + match[0].length]);
+    }
+  }
+  return spans;
+}
+
 export function stripAnalysisBlock(rawSummary: string): string {
-  // First pass: strip well-formed `<analysis>...</analysis>` blocks
-  // (handles multiple via `/g`, newlines via `[\s\S]`).
-  let result = rawSummary.replace(/<analysis>[\s\S]*?<\/analysis>\s*/g, '');
-  // Second pass: strip any remaining unclosed `<analysis>` tag (the
-  // model ran out of output tokens before closing). Uses an
-  // end-of-string anchor since there's no closing tag to stop at.
-  result = result.replace(/<analysis>[\s\S]*$/g, '');
+  // A closed <state_snapshot> envelope IS the summary: anything before it is
+  // drafting scratchpad, anything after it is chatter. The opener only counts
+  // at the start of a line (prose naming the tags mid-sentence is ignored).
+  // The closer binds to its last occurrence outside a closed reasoning block,
+  // so a payload quoting the closer cannot end the binding early, and a
+  // closer quoted inside a post-envelope scratchpad cannot extend it late.
+  // On the single-closer path the payload is never exposed to the tag
+  // passes; the rebind path below still runs the closed passes over a gap
+  // that can be payload interior (#13707).
+  const reasoningSpans = closedReasoningSpans(rawSummary);
+  let closeAt = -1;
+  for (const match of rawSummary.matchAll(/<\/state_snapshot>/g)) {
+    if (!reasoningSpans.some(([s, e]) => match.index >= s && match.index < e)) {
+      closeAt = match.index;
+    }
+  }
+  for (const match of rawSummary.matchAll(/(?:^|\n)[ \t]*<state_snapshot>/g)) {
+    const start = match.index + match[0].length - ENVELOPE_OPEN.length;
+    if (closeAt < start + ENVELOPE_OPEN.length) {
+      break;
+    }
+    if (!rawSummary.slice(start + ENVELOPE_OPEN.length, closeAt).trim()) {
+      continue; // an empty span is a mention, not an envelope
+    }
+    // An opener inside a closed reasoning block is a draft the model already
+    // discarded, not a summary.
+    if (reasoningSpans.some(([s, e]) => start >= s && start < e)) {
+      continue;
+    }
+    // A state_snapshot quoted inside an unclosed instructed scratchpad is a
+    // draft, so refuse the binding while the preamble still holds an
+    // `<analysis>` opener and move on to the next candidate. The refusal
+    // stays inside the preamble: the payload is never handed to the generic
+    // strip passes below. Prose that names the tag mid-sentence, with more
+    // text on the same line, is not an opener and does not refuse.
+    const preamble = rawSummary
+      .slice(0, start)
+      .replace(CLOSED_ANALYSIS_BLOCK_ANYWHERE, '')
+      .replace(CLOSED_REASONING_BLOCK, '');
+    if (/(?:^|\n)[ \t]*<analysis>|<analysis>[ \t]*(?=\n|$)/i.test(preamble)) {
+      continue;
+    }
+    const end = closeAt + ENVELOPE_CLOSE.length;
+    const suffix = rawSummary
+      .slice(end)
+      .replace(CLOSED_ANALYSIS_BLOCK_ANYWHERE, '')
+      .replace(CLOSED_REASONING_BLOCK, '')
+      .replace(UNCLOSED_ANALYSIS_BLOCK, '')
+      .replace(UNCLOSED_REASONING_BLOCK, '');
+    const firstCloseAt = rawSummary.indexOf(
+      ENVELOPE_CLOSE,
+      start + ENVELOPE_OPEN.length,
+    );
+    if (firstCloseAt === closeAt) {
+      return (rawSummary.slice(start, end) + suffix).trim();
+    }
+    // A second closer after the bound envelope is a later draft or prose
+    // naming the tag. Scratch drafted in between is not payload: rebind to
+    // the first envelope plus whatever real content the gap leaves.
+    const gapRaw = rawSummary.slice(
+      firstCloseAt + ENVELOPE_CLOSE.length,
+      closeAt,
+    );
+    const secondOpen = gapRaw.indexOf(ENVELOPE_OPEN);
+    let gap: string;
+    if (secondOpen !== -1) {
+      // The model drafted a fresh envelope in the gap: text before the new
+      // opener is scratch and gets the unclosed passes too; text from it is
+      // payload interior and gets only the closed passes, same as the
+      // single-closer path.
+      gap =
+        gapRaw
+          .slice(0, secondOpen)
+          .replace(CLOSED_ANALYSIS_BLOCK_ANYWHERE, '')
+          .replace(CLOSED_REASONING_BLOCK, '')
+          .replace(UNCLOSED_ANALYSIS_BLOCK, '')
+          .replace(UNCLOSED_REASONING_BLOCK, '') +
+        gapRaw
+          .slice(secondOpen)
+          .replace(CLOSED_ANALYSIS_BLOCK_ANYWHERE, '')
+          .replace(CLOSED_REASONING_BLOCK, '');
+    } else {
+      gap = gapRaw
+        .replace(CLOSED_ANALYSIS_BLOCK_ANYWHERE, '')
+        .replace(CLOSED_REASONING_BLOCK, '');
+      // An instructed tag still open in the gap is a scratchpad truncated
+      // mid-draft; gluing the rebound closer on here would duplicate it.
+      // Refuse this binding and let the generic passes strip the scratch.
+      if (/<analysis>/i.test(gap)) {
+        continue;
+      }
+    }
+    return (
+      rawSummary.slice(start, firstCloseAt + ENVELOPE_CLOSE.length) +
+      gap +
+      ENVELOPE_CLOSE +
+      suffix
+    ).trim();
+  }
+  // First pass: strip well-formed reasoning blocks (handles multiple via
+  // `/g`, newlines via `[\s\S]`, any of the native closer tags above). The
+  // instructed tag is stripped unanchored first, so a closed mid-line block
+  // is gone before the unclosed fallback can swallow the summary after it.
+  let result = rawSummary
+    .replace(CLOSED_ANALYSIS_BLOCK_ANYWHERE, '')
+    .replace(CLOSED_REASONING_BLOCK, '');
+  // Second pass: strip any remaining unclosed reasoning tag (the model ran
+  // out of output tokens before closing). The instructed-tag pass uses the
+  // prose-aware variant: a closer mentioned after the opener means the text
+  // is discussing tags, not thinking in a truncated block.
+  result = result.replace(UNCLOSED_ANALYSIS_BLOCK_PROSE, '');
+  result = result.replace(UNCLOSED_REASONING_BLOCK, '');
   return result.trim();
 }
 
