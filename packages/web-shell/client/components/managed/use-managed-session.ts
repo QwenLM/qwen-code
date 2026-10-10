@@ -51,7 +51,9 @@ const MAX_RETRY_DELAY_MS = 30_000;
 // Bounded re-arms of a terminally-ended bootstrap: without a bound an
 // alternating definite-4xx/success backend remounts the effect every
 // rung-zero cadence forever, re-spending the transcript read and zeroing
-// the backoff ladders each time.
+// the backoff ladders each time. Past the bound a re-arm waits for the
+// slowest rung instead of never coming: a backend that heals must still
+// be picked up without a manual reload.
 const MAX_SESSION_REARMS = 3;
 
 // Rung zero must stay exactly BASE_RETRY_DELAY_MS: ManagedSessionsPage pins
@@ -112,6 +114,7 @@ export function useManagedSession(
   // Re-arm budget, per session and reset once a bootstrap actually
   // completes (see MAX_SESSION_REARMS).
   const rearmRef = useRef(0);
+  const rearmAtRef = useRef(0);
   const rearmSessionRef = useRef<string | undefined>(undefined);
   const seqRef = useRef(0);
   // Synchronous mirror of the stream leg's standing terminal verdict: the
@@ -202,15 +205,16 @@ export function useManagedSession(
     const retire = (leg: SignalLeg) => {
       if (abort.signal.aborted) return;
       if (leg === 'stream') streamVerdictMessageRef.current = undefined;
-      // Past the re-arm bound the ended loops never run again — the poll
-      // keeps the summary live and reload() is the way back — so the
-      // standing verdict must survive the poll's successes: deleting it
-      // would paint a healthy-looking empty session with no alert and no
-      // path back.
+      // Past the re-arm bound the ended loops run again only on the
+      // slowest rung — the poll keeps the summary live and reload() is the
+      // immediate way back — so in between the standing verdict must
+      // survive the poll's successes: deleting it would paint a
+      // healthy-looking empty session with no alert.
       const budgetSpent =
         leg === 'session' &&
         endedRef.current &&
-        rearmRef.current >= MAX_SESSION_REARMS;
+        rearmRef.current >= MAX_SESSION_REARMS &&
+        Date.now() - rearmAtRef.current < MAX_RETRY_DELAY_MS;
       if (!budgetSpent) {
         setState((current) => {
           if (!current.signals?.[leg]) return current;
@@ -222,6 +226,7 @@ export function useManagedSession(
       if (leg === 'session' && endedRef.current && !budgetSpent) {
         endedRef.current = false;
         rearmRef.current += 1;
+        rearmAtRef.current = Date.now();
         setRevision((value) => value + 1);
       }
     };

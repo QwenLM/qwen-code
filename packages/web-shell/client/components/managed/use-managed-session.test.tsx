@@ -281,9 +281,8 @@ describe('useManagedSession', () => {
       expect(provider.getTranscript).toHaveBeenCalledTimes(4);
       expect(provider.subscribeEvents).not.toHaveBeenCalled();
       // The bound is spent (t=12000): the standing terminal verdict must
-      // survive the poll's successes from here on — deleting it would
-      // paint a healthy-looking empty session with no alert and no path
-      // back but reload().
+      // survive the poll's successes inside the slowest rung — deleting
+      // it would paint a healthy-looking empty session with no alert.
       expect(latest?.stoppedReason).toBe('session gone');
       expect(latest?.stoppedLeg).toBe('session');
       for (let step = 0; step < 6; step++)
@@ -293,6 +292,62 @@ describe('useManagedSession', () => {
       expect(provider.getTranscript).toHaveBeenCalledTimes(4);
       expect(provider.subscribeEvents).not.toHaveBeenCalled();
       expect(latest?.stoppedReason).toBe('session gone');
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('picks up a healed backend on the slowest rung once the re-arm bound is spent', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let sessionCalls = 0;
+      let healed = false;
+      const provider = {
+        // The alternating backend of the spec above spends the bound by
+        // t=12000 (re-arms at 3000, 6000 and 9000); then it heals for good.
+        getSession: vi.fn(() => {
+          sessionCalls += 1;
+          return !healed && sessionCalls % 2 === 1
+            ? Promise.reject(
+                Object.assign(new Error('session gone'), { status: 404 }),
+              )
+            : Promise.resolve({ sessionId: 'session-1' });
+        }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents: vi.fn(async function* () {
+          await new Promise((resolve) => setTimeout(resolve, 600_000));
+          yield* [];
+        }),
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      for (let step = 0; step < 4; step++)
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(3_000);
+        });
+      expect(provider.getTranscript).toHaveBeenCalledTimes(4);
+      expect(latest?.stoppedReason).toBe('session gone');
+      healed = true;
+      // Still inside the slowest rung after the last re-arm (t=36000):
+      // the poll's successes neither re-arm nor delete the verdict.
+      for (let step = 0; step < 8; step++)
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(3_000);
+        });
+      expect(provider.getTranscript).toHaveBeenCalledTimes(4);
+      expect(provider.subscribeEvents).not.toHaveBeenCalled();
+      expect(latest?.stoppedReason).toBe('session gone');
+      // The first poll success past the rung (t=39000) re-arms once more;
+      // the healed bootstrap completes and the stream starts.
+      for (let step = 0; step < 3; step++)
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(3_000);
+        });
+      expect(provider.getTranscript).toHaveBeenCalledTimes(5);
+      expect(provider.subscribeEvents).toHaveBeenCalledTimes(1);
+      expect(latest?.stoppedReason).toBeUndefined();
     } finally {
       restoreBackoff();
       vi.useRealTimers();
