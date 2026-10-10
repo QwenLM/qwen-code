@@ -3,6 +3,162 @@
   "payloadJson": "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"printf hi\",\"description\":\"capture\"}}",
   "canonicalInputJson": "{\"command\":\"printf hi\",\"description\":\"capture\"}",
   "argsJson": "{\"harnessSessionId\":\"session-1\",\"runtimeSessionId\":\"runtime-session-1\",\"payloadJson\":\"{\\\"toolName\\\":\\\"run_shell_command\\\",\\\"input\\\":{\\\"command\\\":\\\"printf hi\\\",\\\"description\\\":\\\"capture\\\"}}\"}",
+  "payloadVectors": [
+    {
+      "id": "background-shell",
+      "valid": true,
+      "payloadJson": "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"sleep 300\",\"description\":\"background capture\",\"is_background\":true}}",
+      "requestDigest": "sha256:c81849f53abb0083aa249bc60c1c574b7e5de6f129ef15eb132e8aa6c9f29ef9",
+      "argsDigest": "sha256:2fb0a8ddc0c746a7db94c14203c34be2559405bbe79259742d6a46db938b221e"
+    },
+    {
+      "id": "background-shell-timeout",
+      "valid": true,
+      "payloadJson": "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"sleep 300\",\"timeout\":600000,\"is_background\":true}}",
+      "requestDigest": "sha256:d1df5e4c8d8a3e9f326603c4c784b4d74330fcd508b0a33d79e517c58b47729e",
+      "argsDigest": "sha256:232a22d3e08815783a0b7cd667a15b02dbdf2487527c0aac422c024463b821cf"
+    },
+    {
+      "id": "monitor",
+      "valid": true,
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f app.log\",\"description\":\"watch the log\",\"idle_timeout_ms\":30000,\"is_monitor\":true,\"max_events\":500}}",
+      "requestDigest": "sha256:eab83c00bb3a1f4571292cfdf6570c9f4a966d635c6435c77bbde92defe8c974",
+      "argsDigest": "sha256:7027c8316a2731ecebf5f9dd4579437df411cd39646b9efd3d24b8f75aee5797"
+    },
+    {
+      "id": "monitor-minimal",
+      "valid": true,
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f app.log\",\"is_monitor\":true}}",
+      "requestDigest": "sha256:5405e318a24240a32903fa31360fec5f0f603d09179c91e1a35b976839d19e62",
+      "argsDigest": "sha256:911c9314170715ce5cc1e042f9d4322a2efca2e6737057444ad584ef2ac6c0b9"
+    },
+    {
+      "id": "background-string-flag",
+      "valid": false,
+      "payloadJson": "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"sleep 300\",\"is_background\":\"true\"}}",
+      "requestDigest": "sha256:b5eaa0c0983387c8d4c9dd15f03844f0960c22a04b2dfe56d53eab97b90dbb3b",
+      "argsDigest": "sha256:e280e95a318be2942314f9189cb77a71a9e843b57387f21926361ef2a555306a"
+    },
+    {
+      "id": "background-false-flag",
+      "valid": false,
+      "payloadJson": "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"printf hi\",\"is_background\":false}}",
+      "requestDigest": "sha256:55096daad2f54b6784c7213c20902325d0ebe4b38002519655eb16e6b6178ff1",
+      "argsDigest": "sha256:979825f64b90d9df3850567dabc993724aa8734e9b12aed127e6bf05b86bb4f0"
+    },
+    {
+      "id": "shell-unknown-key",
+      "valid": false,
+      "payloadJson": "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"printf hi\",\"is_background\":true,\"shell\":\"bash\"}}",
+      "requestDigest": "sha256:44ae05b9679d50370f3cac2eded3ab169b0024d84a37f26036310709a6c9fae9",
+      "argsDigest": "sha256:3e755585b8580a9210cbe6c6309aa5d759062bead8e33a8739851e280d05df87"
+    },
+    {
+      "id": "background-bad-timeout",
+      "valid": false,
+      "payloadJson": "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"sleep 300\",\"is_background\":true,\"timeout\":600001}}",
+      "requestDigest": "sha256:2e361a607f8b004daeb1401a0db7fe6053379ad335048a2a284203f47a1d2b2d",
+      "argsDigest": "sha256:fe59bea464d33e1d18e55464a0107793e1c57f18d6b9f696af3d677bbbf9b7ea"
+    },
+    {
+      "id": "monitor-missing-marker",
+      "valid": false,
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f app.log\"}}",
+      "requestDigest": "sha256:fb9e80ff565fce70d0b8f6cdc615192714c96f3c71ecfea2adf4bdd1c7a7dfdd",
+      "argsDigest": "sha256:858bba3697d3750ca35b16a3619c3279195ac60ebfc2f4b63fb2fbc5c06c12d1"
+    },
+    {
+      "id": "monitor-string-marker",
+      "valid": false,
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f app.log\",\"is_monitor\":\"true\"}}",
+      "requestDigest": "sha256:3dc630efb3b77dc056c54edf13a39f9fa7aac784774ed490febd3b24b0eb437a",
+      "argsDigest": "sha256:c3f0f49053360bebe684a127e65c0a3cdda1d2d96fc89a08a407a777bb7d0d70"
+    },
+    {
+      "id": "monitor-unknown-key",
+      "valid": false,
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f app.log\",\"is_monitor\":true,\"interval\":5}}",
+      "requestDigest": "sha256:c45dc7b5fa93c49a0f26dc13fa3f7e4d7107864979f125d7e5dccf0a70c0cf89",
+      "argsDigest": "sha256:f6d15d253892df32f6cebc3c454138bf884eaa2e2934a67c18ebd30c55fc78b3"
+    },
+    {
+      "id": "monitor-bad-idle-timeout",
+      "valid": false,
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f app.log\",\"is_monitor\":true,\"idle_timeout_ms\":600001}}",
+      "requestDigest": "sha256:ade6675ff565f468c51cfcd971c842e51983cdcaf9d0431cbf24f54b6cafde83",
+      "argsDigest": "sha256:a4d93e5076db20289f004061081a0f4ef4044c0641bbfb7f286f2fd42a1d160a"
+    },
+    {
+      "id": "monitor-bad-max-events",
+      "valid": false,
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f app.log\",\"is_monitor\":true,\"max_events\":10001}}",
+      "requestDigest": "sha256:dffecc5653b8a5adcfa95387dab1c1d8592c73ad49e7115f87a004d1295db44e",
+      "argsDigest": "sha256:0d02a5cd90187df5923d89b2b701c02f2e2e8b2098cb97de3fdfcc1d7c21db61"
+    },
+    {
+      "id": "monitor-empty-command",
+      "valid": false,
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"\",\"is_monitor\":true}}",
+      "requestDigest": "sha256:b1757c13f27fa16ade541fe813017af3dcad2dbd9007a97c55ae174f926c1db5",
+      "argsDigest": "sha256:543da28d6df0402acc09285b856f99c014b2051b3b38cd07162276552bad7868"
+    },
+    {
+      "id": "unknown-tool",
+      "valid": false,
+      "payloadJson": "{\"toolName\":\"write_file\",\"input\":{\"content\":\"x\"}}",
+      "requestDigest": "sha256:96b7c954f6c5fe4b2fd2a7a2677366f2ca8c8e36cae21d8a76c637be0851f66d",
+      "argsDigest": "sha256:ee2b252d1cd491425942090e06507c7337b5279df43af31ab718b1b1b5da8708"
+    },
+    {
+      "id": "monitor-idle-exponent",
+      "valid": true,
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f app.log\",\"idle_timeout_ms\":6e5,\"is_monitor\":true}}",
+      "requestDigest": "sha256:aa3d6fabd8daec37b4d3eaa2b2e60720bc4655016c3657d0b7d41660d3b2b56b",
+      "argsDigest": "sha256:3858b8f13deb1dfafb7a208efce5e43303c5e1a80e3eced5a41f0a71a9e01dce"
+    },
+    {
+      "id": "shell-timeout-decimal",
+      "valid": true,
+      "payloadJson": "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"printf hi\",\"timeout\":600000.0}}",
+      "requestDigest": "sha256:c256a5b770823a8091e1cf7f76854d405971ca42bf8d90f599f3f40dca436e39",
+      "argsDigest": "sha256:23aade92a5dd8942a163d01a85ad2af48d04c1fc3b27e6e2aeab4839a6c3d8a1"
+    },
+    {
+      "id": "monitor-max-events-exponent",
+      "valid": true,
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f app.log\",\"is_monitor\":true,\"max_events\":1e4}}",
+      "requestDigest": "sha256:5bf2c66a92e675c71ef7b70bb730a8a1d24de7a46cc9eab7585117e619d166ed",
+      "argsDigest": "sha256:033f3e2eecb32e7937ab202290fb19d236de3642c94b9b160d4d18f535f5808f"
+    },
+    {
+      "id": "monitor-idle-min-boundary",
+      "valid": true,
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f app.log\",\"idle_timeout_ms\":1,\"is_monitor\":true}}",
+      "requestDigest": "sha256:3b42f774023e574631b3f358122d6221b750e2b0c5795d0ad4eca2134df8add1",
+      "argsDigest": "sha256:fa1fa67d24670c6fdd987ef9b3c13dd02642edcf38485f1c57b56b485fa0ed09"
+    },
+    {
+      "id": "monitor-idle-boundary",
+      "valid": true,
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f app.log\",\"idle_timeout_ms\":600000,\"is_monitor\":true}}",
+      "requestDigest": "sha256:3cffe643746f9ad88d68240d5ae4936cf9c7b2a8bbc933ae2a505e29b3e27fe3",
+      "argsDigest": "sha256:3858b8f13deb1dfafb7a208efce5e43303c5e1a80e3eced5a41f0a71a9e01dce"
+    },
+    {
+      "id": "monitor-max-events-min-boundary",
+      "valid": true,
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f app.log\",\"is_monitor\":true,\"max_events\":1}}",
+      "requestDigest": "sha256:7ecef2491369c33dbb963c8973bc1b7b6489ec8e4b20fc90a7bb1bcdea13b45a",
+      "argsDigest": "sha256:709ade433a39a2588d40a43e573492ca611e327616648bb2c2e0b2ebf4ce3c82"
+    },
+    {
+      "id": "monitor-max-events-boundary",
+      "valid": true,
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f app.log\",\"is_monitor\":true,\"max_events\":10000}}",
+      "requestDigest": "sha256:ea6855bf1318a3b80dbe18c16111b07971a67d664675c23b9adcc01aa5a94ca5",
+      "argsDigest": "sha256:033f3e2eecb32e7937ab202290fb19d236de3642c94b9b160d4d18f535f5808f"
+    }
+  ],
   "bindingDigest": "0e9e44f23047cf18a9347b86e3fcd05e2d58748530cac6b044fc390341f78fe8",
   "cases": [
     {

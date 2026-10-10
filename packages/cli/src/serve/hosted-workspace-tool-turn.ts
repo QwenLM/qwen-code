@@ -1879,7 +1879,7 @@ export class HostedWorkspaceToolTurn {
           ),
           ordinal,
           inputDigest:
-            request.isShell && this.publication
+            (request.isShell || request.monitoring) && this.publication
               ? request.argsDigest.slice(7)
               : (request.inputDigest ?? request.digest.slice(7)),
           progressCursor: null,

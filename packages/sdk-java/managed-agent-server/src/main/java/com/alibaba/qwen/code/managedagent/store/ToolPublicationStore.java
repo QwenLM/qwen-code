@@ -676,7 +676,8 @@ public final class ToolPublicationStore {
                 item = value;
             }
         }
-        require(item != null && "run_shell_command".equals(text(item, "toolName"))
+        require(item != null
+                && ToolPublicationContract.PUBLISHABLE_TOOL_NAMES.contains(text(item, "toolName"))
                 && "in_progress".equals(text(item, "state"))
                 && "runtime".equals(text(item, "outcomeSource"))
                 && text(b, "modelCallId").equals(text(item, "functionCallId"))

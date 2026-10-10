@@ -30,6 +30,13 @@ const fixtures = JSON.parse(
   ),
 ) as {
   payloadJson: string;
+  payloadVectors: Array<{
+    id: string;
+    valid: boolean;
+    payloadJson: string;
+    requestDigest: string;
+    argsDigest: string;
+  }>;
   digestVectors: Array<{ id: string; binding: unknown; digest: string }>;
   tokenVector: { token: string; hash: string };
   bindingDigest: string;
@@ -80,6 +87,23 @@ describe('managed-tool-publication/1', () => {
     expect(
       createHash('sha256').update(fixtures.tokenVector.token).digest('hex'),
     ).toBe(fixtures.tokenVector.hash);
+  });
+
+  describe('publication payload families', () => {
+    const binding = parseToolPublicationBinding(fixtures.cases[0].value);
+    for (const vector of fixtures.payloadVectors) {
+      it(`${vector.id}`, () => {
+        const bound = {
+          ...binding,
+          requestDigest: vector.requestDigest,
+          reference: { ...binding.reference, argsDigest: vector.argsDigest },
+        };
+        const check = () =>
+          assertToolPublicationPayload(bound, vector.payloadJson);
+        if (vector.valid) expect(check).not.toThrow();
+        else expect(check).toThrow();
+      });
+    }
   });
 
   it('keeps original Runtime identity and both digests separate from model pairing', () => {
