@@ -1755,7 +1755,7 @@
             "$ref": "#/components/parameters/ListLimit"
           }
         ],
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/actions/{actionId}": {
@@ -1799,7 +1799,7 @@
             "$ref": "#/components/responses/Forbidden"
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/actions/{actionId}/responses": {
@@ -1842,7 +1842,7 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session's recorded owner or a Workspace OPERATOR (action_forbidden). An unbound Session with no recorded creator and no recorded create command (anonymous open-mode creation, or an unbound Session created before the V40 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL; a bound Session with no recorded owner answers through the create-command actor recorded for it, or through the Workspace role arm. The tenant filter's 403 actor_scope_mismatch also applies on this route."
+            "description": "Responding requires the Session's recorded owner or a Workspace OPERATOR (action_forbidden); a Shell Session's Actions may be answered only by its recorded owner. An unbound Session with no recorded creator and no recorded create command (anonymous open-mode creation, or an unbound Session created before the V40 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL; a bound Session with no recorded owner answers through the create-command actor recorded for it, or through the Workspace role arm. The tenant filter's 403 actor_scope_mismatch also applies on this route."
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
@@ -1863,7 +1863,7 @@
             }
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/close": {
@@ -2052,7 +2052,7 @@
             }
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/actions/get": {
@@ -2101,7 +2101,7 @@
             }
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/actions/respond": {
@@ -2136,7 +2136,7 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session's recorded owner or a Workspace OPERATOR (action_forbidden). An unbound Session with no recorded creator and no recorded create command (anonymous open-mode creation, or an unbound Session created before the V40 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL; a bound Session with no recorded owner answers through the create-command actor recorded for it, or through the Workspace role arm. The tenant filter's 403 actor_scope_mismatch also applies on this route."
+            "description": "Responding requires the Session's recorded owner or a Workspace OPERATOR (action_forbidden); a Shell Session's Actions may be answered only by its recorded owner. An unbound Session with no recorded creator and no recorded create command (anonymous open-mode creation, or an unbound Session created before the V40 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL; a bound Session with no recorded owner answers through the create-command actor recorded for it, or through the Workspace role arm. The tenant filter's 403 actor_scope_mismatch also applies on this route."
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
@@ -2152,7 +2152,7 @@
             }
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/sessions/close": {
@@ -3733,7 +3733,7 @@
         "in": "header",
         "name": "X-Qwen-Actor-Id",
         "x-qwen-implementation-status": "planned",
-        "description": "Verified actor identity. In the gateway topology it is injected by the authenticated gateway together with tenant and browser-supplied headers are stripped. In signed mode (qwenSignature) the broker authenticates it as part of the signed header set. Resource ACLs are mandatory in either mode; Action responder eligibility resolves to the Session's recorded owner or a Workspace OPERATOR and falls back to the tenant scope when neither an owner nor a create command was recorded. This header is not a browser credential."
+        "description": "Verified actor identity. In the gateway topology it is injected by the authenticated gateway together with tenant and browser-supplied headers are stripped. In signed mode (qwenSignature) the broker authenticates it as part of the signed header set. Resource ACLs are mandatory in either mode; Action responder eligibility resolves to the Session's recorded owner or a Workspace OPERATOR, except a Shell Session, which only its recorded owner may answer and falls back to the tenant scope when neither an owner nor a create command was recorded. This header is not a browser credential."
       },
       "qwenSignature": {
         "type": "apiKey",

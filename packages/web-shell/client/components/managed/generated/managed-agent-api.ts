@@ -175,7 +175,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
+        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["queryWebShellActions"];
         delete?: never;
         options?: never;
@@ -192,7 +192,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
+        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["getWebShellAction"];
         delete?: never;
         options?: never;
@@ -209,7 +209,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
+        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["respondWebShellAction"];
         delete?: never;
         options?: never;
@@ -1562,7 +1562,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
-            /** @description Responding requires the Session's recorded owner or a Workspace OPERATOR (action_forbidden). An unbound Session with no recorded creator and no recorded create command (anonymous open-mode creation, or an unbound Session created before the V40 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL; a bound Session with no recorded owner answers through the create-command actor recorded for it, or through the Workspace role arm. The tenant filter's 403 actor_scope_mismatch also applies on this route. */
+            /** @description Responding requires the Session's recorded owner or a Workspace OPERATOR (action_forbidden); a Shell Session's Actions may be answered only by its recorded owner. An unbound Session with no recorded creator and no recorded create command (anonymous open-mode creation, or an unbound Session created before the V40 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL; a bound Session with no recorded owner answers through the create-command actor recorded for it, or through the Workspace role arm. The tenant filter's 403 actor_scope_mismatch also applies on this route. */
             403: components["responses"]["Forbidden"];
             /** @description Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found). */
             404: components["responses"]["NotFound"];
