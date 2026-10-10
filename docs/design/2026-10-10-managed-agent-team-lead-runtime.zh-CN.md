@@ -126,7 +126,7 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
 2. **成员占用的活跃上限。** 成员与其他 child 共用 H4b 每个 Session 4 个活跃 child 的上限,而 Legacy 可同时运行最多 10 个 teammate。团队是否应有自己的活跃上限,待真实团队显示出需要时再定。
 3. **让成员第二次派上用场。** 一次性成员无法接收更多工作。成员续跑(H4e-a 开放问题 4)属于 H4e-b2,与承载新工作的 mailbox 一起。
 4. **在 Runtime park 之外被中断的 Hooks Session。** 现在每条恢复路径都会回答只写 journal 的调用(决策 11)。但 Hooks Session 从不接管,它的 bare load 只续跑停在 `results_ready` 的 Turn。在没有 Runtime 工作的批次(只有团队调用)中被中断的 Turn,会由 load 作答,但仍处于恢复阻塞,与任何在模型轮中途被中断的 Hooks Session 一样。团队调用扩大了这个窗口。这类 Turn 的恢复属于 Hooks 运行时。启用以接受这个窗口来解决它,与在 Shell Session 上一样(开放问题 5):H4b 的后台启动在 Hooks Session 上已经打开了这个窗口,因此在那里不声明团队工具也关不上它。
-5. **后台启动过程中的崩溃会阻塞 lead。** Harness 若在一次启动提交之后、Turn 的下一个检查点之前死掉,该 Turn 会停在 `model_output_committed`,这是替代 Harness 拒绝接管的模型起步阶段,于是协调器以 `managed_runtime_recovery_blocked` 让该 Turn 失败。lead 的 journal 仍保留这个停住的 Turn,因此之后每次加载 lead 都回答 `hosted_turn_recovery_required`:relay 无法记录正在运行的 child 的 dispatch、attach 或结果,之后的每个 Turn 也以同样方式失败。实机验收在 Shell Session 上有团队与无团队时都遇到了这一点,因此它是 H4b 恢复的限制,而不是团队的限制;开放问题 4 是同一窗口在 Hooks Session 上的形态。团队调用会扩大这个窗口,与在那里一样;启用接受它,正如 H4b 的后台启动已经接受它,因为不声明团队工具也不能为那些后台启动关上这个窗口。
+5. **后台启动过程中的崩溃会阻塞 lead。** Harness 若在一次启动提交之后、Turn 的下一个检查点之前死掉,该 Turn 会停在 `model_output_committed`,这是替代 Harness 拒绝接管的模型起步阶段,于是协调器以 `managed_runtime_recovery_blocked` 让该 Turn 失败。lead 的 journal 仍保留这个停住的 Turn,因此之后每次加载 lead 都回答 `hosted_turn_recovery_required`:relay 无法记录正在运行的 child 的 dispatch、attach 或结果,之后的每个 Turn 也以同样方式失败。实机验收在 Shell Session 上有团队与无团队时都遇到了这一点,因此它是 H4b 恢复的限制,而不是团队的限制;开放问题 4 是同一窗口在 Hooks Session 上的形态。团队调用会扩大这个窗口,与在那里一样;启用接受它,正如 H4b 的后台启动已经接受它,因为不声明团队工具也不能为那些后台启动关上这个窗口。修复由 #13847 跟踪。
 
 ## 后续工作
 
