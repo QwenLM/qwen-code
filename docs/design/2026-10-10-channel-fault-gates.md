@@ -336,7 +336,7 @@ for (decision 2).
 
 - `npm run build && npm run typecheck`, ESLint clean on the driver,
   Checkstyle and SpotBugs on both new Java classes, and the module's
-  surefire suite green (1606 tests).
+  surefire suite green (1606 tests at the first-verification baseline).
 - Both new classes green on MariaDB 10.11 locally (the CI lane is MySQL
   8.4): 19 cases firing their declared faults — every drop counter,
   `FG7B_*` trigger marker and kill marker observed — per-case selectors

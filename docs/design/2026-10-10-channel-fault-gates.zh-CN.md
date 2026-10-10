@@ -116,7 +116,7 @@ Spring 跑在由 IT 杀死的子 JVM 里；adapter 驱动是可杀/可停进程�
 
 ## 验证与验收
 
-- `npm run build && npm run typecheck`、驱动经 ESLint 干净、两个新 Java 类过 Checkstyle 与 SpotBugs、本模块 surefire 套件全绿（1606 个测试）。
+- `npm run build && npm run typecheck`、驱动经 ESLint 干净、两个新 Java 类过 Checkstyle 与 SpotBugs、本模块 surefire 套件全绿（初验基线 1606 个测试）。
 - 两个新类在本机 MariaDB 10.11 上全绿（CI 车道为 MySQL 8.4）：19 个用例全部点燃其声明的故障 —— 每个丢弃计数、`FG7B_*` 触发标记与杀死标记均被观察到 —— 按用例选择子可用、无任何注入时 channel 正常流绿。
 - 上述每个变异单独变红；源码还原；整套门禁复绿。
 - `hosted-process-ci.test.js` 在新预算下全绿，`check-failsafe-reports.js hosted` 在全车道运行后满足。

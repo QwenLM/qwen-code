@@ -9,8 +9,9 @@
 // adapter's real persisted state, so every restart is a genuine cold load.
 // Embedded: the lose-once reverse proxy in front of the control plane's
 // internal listener, the real ManagedEmailAdapter with scripted IMAP and
-// scriptable SMTP deps, and a thin HTTP control-plane client shared by the
-// driver-direct probes. Orchestrated by HostedChannelFaultGatesIT /
+// scriptable SMTP deps, and a recording control-plane client wrapping the
+// production HttpManagedChannelControlPlane (the probe/resend probes fetch
+// the surface directly). Orchestrated by HostedChannelFaultGatesIT /
 // HostedChannelProcessCrashIT, which read `resultFile` and the FG7_* markers.
 
 import assert from 'node:assert/strict';
