@@ -322,6 +322,7 @@ public final class ToolPublicationAdmissionStore {
                 && ("FINISHED".equals(candidate.get("producer_phase"))
                 || "REFERENCED".equals(candidate.get("producer_phase"))),
                 "Admission root is not verified");
+        data.lockStagedPlacement(key, publicationId);
         String resourceId = (String) candidate.get("resource_id");
         byte[] admissionBytes = data.readResource(key, publicationId, resourceId);
         JsonNode outcome = ToolPublicationContract.readJson(admissionBytes);
@@ -351,17 +352,19 @@ public final class ToolPublicationAdmissionStore {
                     "Original manifest resource conflicts");
         }
         return transactions.execute(status -> {
-            WorkspaceLifecycleStore.lockPlacement(jdbc, text(key, "tenantId"));
+            data.lockPublicationPlacement(key, publicationId);
             sessions.lockCsiOriginal(text(key, "tenantId"), text(key, "sessionId"));
             data.lockOriginalSettledResult(key, publicationId, finished);
             lockTenant(key);
             sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
                     text(key, "sessionId"), request.writerId(), request.writerGeneration(), writerToken);
-            Map<String, Object> publication = jdbc.queryForMap("SELECT producer_phase,"
+            Map<String, Object> publication = jdbc.queryForMap("SELECT producer_phase, binding_json, binding_digest,"
                     + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined, admission_resource_id,"
                     + " receipt_sequence, receipt_revision, finish_digest, terminal_resource_id"
-                    + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
-                    scope, publicationId);
+                    + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ? AND tenant_id = ?"
+                    + " AND workspace_id = ? AND session_id = ? FOR UPDATE", scope, publicationId,
+                    text(key, "tenantId"), text(key, "workspaceId"), text(key, "sessionId"));
+            ToolPublicationStore.requireLockedBinding(publication, finished.path("binding"));
             require(resourceId.equals(publication.get("admission_resource_id"))
                     && candidate.get("terminal_resource_id").equals(publication.get("terminal_resource_id"))
                     && ((Number) publication.get("quarantined")).intValue() == 0,

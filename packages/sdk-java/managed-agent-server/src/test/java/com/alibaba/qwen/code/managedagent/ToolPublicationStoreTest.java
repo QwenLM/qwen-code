@@ -402,6 +402,64 @@ class ToolPublicationStoreTest {
         return result;
     }
 
+    @ParameterizedTest
+    @CsvSource({"row-scope,apply", "row-scope,prepare", "binding-key,apply", "binding-key,prepare",
+            "binding-id,apply", "binding-id,prepare", "digest,apply", "digest,prepare",
+            "runtime-tenant,apply", "runtime-tenant,prepare", "runtime-workspace,apply", "runtime-workspace,prepare",
+            "runtime-generation,apply", "runtime-generation,prepare"})
+    void publicationTargetConflictRefusesBeforeChoosingPlacement(String conflict, String operation) {
+        reserve();
+        if ("runtime-tenant".equals(conflict) || "runtime-workspace".equals(conflict)) {
+            var discovered = bindings.findById("binding-1");
+            var repository = org.mockito.Mockito.mock(JdbcRuntimeBindingRepository.class);
+            org.mockito.Mockito.when(repository.findById("binding-1")).thenReturn(discovered);
+            org.mockito.Mockito.when(repository.usesDataSource(jdbc.getDataSource())).thenReturn(true);
+            store = new ToolPublicationStore(jdbc, manager, sessions, executions, repository,
+                    new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 10));
+        }
+        switch (conflict) {
+            case "row-scope" -> jdbc.update("UPDATE qwen_tool_publication SET tenant_id = 'other-tenant'");
+            case "binding-key", "binding-id" -> {
+                ObjectNode changed = binding.deepCopy();
+                if ("binding-key".equals(conflict)) {
+                    ((ObjectNode) changed.path("sessionKey")).put("tenantId", "other-tenant");
+                } else {
+                    changed.put("publicationId", "other-publication");
+                }
+                jdbc.update("UPDATE qwen_tool_publication SET binding_json = ?, binding_digest = ?",
+                        changed.toString(), ToolPublicationContract.bindingDigest(changed));
+            }
+            case "digest" -> jdbc.update("UPDATE qwen_tool_publication SET binding_digest = ?", "b".repeat(64));
+            case "runtime-tenant" -> jdbc.update("UPDATE qwen_runtime_binding SET tenant_id = 'other-tenant'");
+            case "runtime-workspace" -> jdbc.update("UPDATE qwen_runtime_binding SET workspace_id = 'other-workspace'");
+            case "runtime-generation" -> jdbc.update("UPDATE qwen_runtime_binding SET runtime_generation = 2");
+            default -> throw new AssertionError("Unexpected target conflict");
+        }
+        jdbc.update("DELETE FROM qwen_runtime_placement_guard");
+        var before = producerTables();
+        assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> {
+            if ("apply".equals(operation)) {
+                return store.apply(request("fence"), WRITER_TOKEN, null);
+            }
+            return csiData(new java.util.HashMap<>()).prepareAdmission(binding.path("sessionKey"), "pub-1",
+                    "writer-1", 1, WRITER_TOKEN, JSON.createObjectNode().put("schemaVersion", 1));
+        })).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("digest".equals(conflict) ? "Stored binding is corrupt"
+                        : "runtime-generation".equals(conflict) ? "Broker execution identity conflicts" : "scope conflicts");
+        assertThat(jdbc.queryForList("SELECT * FROM qwen_runtime_placement_guard")).isEmpty();
+        assertThat(producerTables()).usingRecursiveComparison().isEqualTo(before);
+    }
+
+    @Test
+    void newReservationRecreatesOnlyItsQualifiedPlacementWhenPublicSessionIsMissing() {
+        jdbc.update("DELETE FROM qwen_runtime_placement_guard");
+        assertThat(jdbc.queryForList("SELECT * FROM managed_agent_session")).isEmpty();
+        assertThat(reserve().path("state").asText()).isEqualTo("OPEN");
+        assertThat(jdbc.queryForList("SELECT tenant_id FROM qwen_runtime_placement_guard"))
+                .containsExactly(Map.of("tenant_id", "tenant-1"));
+        assertThat(reserve().path("state").asText()).isEqualTo("OPEN");
+    }
+
     @Test
     void finishPreservesTheSubmittedTerminalBytes() {
         reserve();
