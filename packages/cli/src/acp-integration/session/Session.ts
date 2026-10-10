@@ -28,6 +28,7 @@ import type {
   Part,
 } from '@google/genai';
 import {
+  createToolLifecycle,
   type Config,
   type ContentGeneratorConfig,
   type LlmChat,
@@ -8493,6 +8494,10 @@ export class Session implements SessionContext {
     }
   }
 
+  isDisposed(): boolean {
+    return this.disposed;
+  }
+
   async sendUpdate(update: SessionUpdate): Promise<void> {
     const execution = backgroundTurnContext.getStore();
     if (
@@ -13013,6 +13018,18 @@ export class Session implements SessionContext {
         },
       };
       const error = new Error(message);
+      const skippedLifecycle =
+        toolName === ToolNames.TODO_WRITE
+          ? undefined
+          : createToolLifecycle(this.config, callId, toolName);
+      const lifecycle = skippedLifecycle?.finish('error', 'not_started');
+      if (lifecycle) {
+        void this.toolCallEmitter
+          .emitLifecycle(lifecycle)
+          .catch((error) =>
+            debugLogger.debug('Failed to emit skipped tool lifecycle', error),
+          );
+      }
       try {
         queueToolResultRecord(fc, {
           callId,
@@ -13759,6 +13776,38 @@ export class Session implements SessionContext {
       executionStartedAt === undefined
         ? undefined
         : Math.round(performance.now() - executionStartedAt);
+    let lifecycleExecutionDurationMs: number | undefined;
+    let lifecycleExecuted = false;
+    let lifecycleSettled = false;
+    let lifecycleActualStatus: ToolExecutionStatus = 'not_started';
+    let lifecycleTerminalOutcome: 'success' | 'error' | 'cancelled' | undefined;
+    const toolLifecycle =
+      modelFacingToolName === ToolNames.TODO_WRITE
+        ? undefined
+        : createToolLifecycle(this.config, callId, modelFacingToolName);
+    const publishToolLifecycle = (
+      event: ReturnType<NonNullable<typeof toolLifecycle>['start']>,
+    ) => {
+      if (!event || this.disposed) return;
+      void this.toolCallEmitter
+        .emitLifecycle(event)
+        .catch((error) =>
+          debugLogger.debug('Failed to emit tool lifecycle', error),
+        );
+    };
+    const finishToolLifecycle = (
+      outcome: 'success' | 'error' | 'cancelled',
+    ) => {
+      lifecycleTerminalOutcome = outcome;
+      if (lifecycleExecuted && !lifecycleSettled) return;
+      publishToolLifecycle(
+        toolLifecycle?.finish(
+          outcome,
+          lifecycleActualStatus,
+          lifecycleExecutionDurationMs,
+        ),
+      );
+    };
     let producerObserved = false;
     let terminalStatus: 'success' | 'error' | 'cancelled' | undefined;
     // Released when the call ends, however it ends, as the core scheduler does.
@@ -13928,6 +13977,7 @@ export class Session implements SessionContext {
     ) => {
       executionStatus = opts.executionStatus;
       terminalStatus = opts.status;
+      finishToolLifecycle(opts.status);
       spanError = opts.status === 'error' ? error.message : undefined;
       cleanupAgentToolResources();
       const errorParts = errorResponse(
@@ -15878,12 +15928,54 @@ export class Session implements SessionContext {
             executeAttempted = true;
             executionStartedAt = performance.now();
             try {
-              const execute = () =>
-                invocation.execute(
-                  activeToolAbortSignal,
-                  onToolProgress,
-                  this.config.getShellExecutionConfig(),
+              const execute = () => {
+                lifecycleExecuted = true;
+                executionStartedAt = performance.now();
+                publishToolLifecycle(
+                  toolLifecycle?.start(Date.now(), toolName),
                 );
+                const settle = (
+                  result?: ToolResult,
+                  error?: unknown,
+                  threw = false,
+                ) => {
+                  lifecycleExecutionDurationMs = elapsedExecutionMs();
+                  lifecycleSettled = true;
+                  const timeout =
+                    result?.error?.type === ToolErrorType.EXECUTION_TIMEOUT ||
+                    (error as { errorType?: ToolErrorType } | undefined)
+                      ?.errorType === ToolErrorType.EXECUTION_TIMEOUT;
+                  lifecycleActualStatus =
+                    activeToolAbortSignal.aborted && !timeout
+                      ? 'cancelled'
+                      : threw || result?.error
+                        ? 'error'
+                        : 'success';
+                  if (lifecycleTerminalOutcome)
+                    finishToolLifecycle(lifecycleTerminalOutcome);
+                };
+                try {
+                  return invocation
+                    .execute(
+                      activeToolAbortSignal,
+                      onToolProgress,
+                      this.config.getShellExecutionConfig(),
+                    )
+                    .then(
+                      (result) => {
+                        settle(result);
+                        return result;
+                      },
+                      (error: unknown) => {
+                        settle(undefined, error, true);
+                        throw error;
+                      },
+                    );
+                } catch (error) {
+                  settle(undefined, error, true);
+                  throw error;
+                }
+              };
               if (toolName !== ToolNames.EXEC) {
                 if (codeModeContext) {
                   let cancelExecution: (() => void) | undefined;
@@ -16438,6 +16530,7 @@ export class Session implements SessionContext {
             );
           }
           terminalStatus = status;
+          finishToolLifecycle(status);
           const succeeded = status === 'success';
           const responseError =
             status === 'error' && toolResult.error

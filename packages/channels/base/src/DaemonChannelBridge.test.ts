@@ -1013,6 +1013,67 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it.each(['started', 'ended', 'unknown'])(
+    'ignores metadata-only tool lifecycle %s without output cards',
+    async (phase) => {
+      const events = new EventQueue();
+      const session = createFakeSession(events);
+      session.prompt.mockImplementation(async () => {
+        events.push({
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'session-1',
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'call',
+              _meta: {
+                toolLifecycle: {
+                  v: phase === 'unknown' ? 99 : 1,
+                  phase,
+                  kind: 'tool',
+                },
+              },
+            },
+          },
+        });
+        events.push({
+          id: 2,
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'session-1',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'Done.' },
+            },
+          },
+        });
+        events.push(turnCompleteEvent());
+        return { stopReason: 'end_turn' };
+      });
+      const bridge = new DaemonChannelBridge({
+        cwd: '/repo',
+        sessionFactory: vi.fn().mockResolvedValue(session),
+      });
+      const errors: Error[] = [];
+      const tools: unknown[] = [];
+      const texts: string[] = [];
+      bridge.on('error', (error) => errors.push(error));
+      bridge.on('toolCall', (event) => tools.push(event));
+      bridge.on('textChunk', (_sessionId, text) => texts.push(text));
+      await bridge.start();
+      await bridge.newSession('/repo');
+      await expect(bridge.prompt('session-1', 'run it')).resolves.toBe('Done.');
+      expect(errors).toEqual([]);
+      expect(tools).toEqual([]);
+      expect(texts).toEqual(['Done.']);
+      events.close();
+      bridge.stop();
+    },
+  );
+
   it('drops kind-less in_progress heartbeats without flagging the session as malformed', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

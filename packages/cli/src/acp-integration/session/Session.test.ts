@@ -42154,6 +42154,148 @@ describe('Session', () => {
 
   describe('runToolCalls', () => {
     it.each([false, true])(
+      'keeps code mode cancellation lifecycle open until execute settles (disposed=%s)',
+      async (disposeBeforeSettle) => {
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+        const controller = new AbortController();
+        let resolveExecution!: (result: {
+          llmContent: string;
+          returnDisplay: string;
+        }) => void;
+        const execute = vi.fn(
+          () =>
+            new Promise<{ llmContent: string; returnDisplay: string }>(
+              (resolve) => {
+                resolveExecution = resolve;
+              },
+            ),
+        );
+        mockToolRegistry.getTool.mockReturnValue(
+          mockConfirmingTool('read_file', execute),
+        );
+        vi.mocked(mockClient.requestPermission).mockResolvedValue({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        });
+        const updates = vi.spyOn(session, 'sendUpdate');
+        const internals = session as unknown as {
+          runTool: (
+            signal: AbortSignal,
+            promptId: string,
+            call: { id: string; name: string; args: Record<string, unknown> },
+            a?: undefined,
+            b?: undefined,
+            c?: undefined,
+            d?: undefined,
+            e?: undefined,
+            f?: undefined,
+            context?: { parentCallId: string; source: 'code_mode' },
+          ) => Promise<unknown>;
+          disposed: boolean;
+        };
+        const running = internals.runTool(
+          controller.signal,
+          'nested-race',
+          { id: 'nested-race-call', name: 'read_file', args: {} },
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          { parentCallId: 'parent', source: 'code_mode' },
+        );
+        await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+        controller.abort();
+        await running;
+        const events = () =>
+          updates.mock.calls
+            .map(([update]) => update._meta?.['toolLifecycle'])
+            .filter(Boolean);
+        expect(events()).toEqual([
+          expect.objectContaining({ phase: 'started' }),
+        ]);
+        if (disposeBeforeSettle) internals.disposed = true;
+        resolveExecution({
+          llmContent: 'late completion',
+          returnDisplay: 'late completion',
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(events()).toHaveLength(disposeBeforeSettle ? 1 : 2);
+        if (!disposeBeforeSettle)
+          expect(events()[1]).toMatchObject({
+            phase: 'ended',
+            executionStatus: 'cancelled',
+            outcome: 'cancelled',
+          });
+      },
+    );
+
+    it('separates approval time from actual execution lifecycle timing', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      let elapsed = 0;
+      const wall = vi
+        .spyOn(Date, 'now')
+        .mockImplementation(() => 1000 + elapsed);
+      const monotonic = vi
+        .spyOn(performance, 'now')
+        .mockImplementation(() => elapsed);
+      const updates = vi.spyOn(session, 'sendUpdate');
+      const execute = vi.fn().mockImplementation(async () => {
+        elapsed += 20;
+        return { llmContent: 'executed', returnDisplay: 'executed' };
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('mcp__inventory__lookup', execute),
+      );
+      vi.mocked(mockClient.requestPermission).mockImplementation(async () => {
+        expect(
+          updates.mock.calls.some(
+            ([update]) => update._meta?.['toolLifecycle'],
+          ),
+        ).toBe(false);
+        elapsed += 30_000;
+        return { outcome: { outcome: 'selected', optionId: 'proceed_once' } };
+      });
+      try {
+        await (session as unknown as ToolCallInternals).runToolCalls(
+          new AbortController().signal,
+          'tool-timing',
+          [{ id: 'approval-timing', name: 'mcp__inventory__lookup', args: {} }],
+        );
+        const lifecycle = updates.mock.calls
+          .map(([update]) => update._meta?.['toolLifecycle'])
+          .filter(Boolean);
+        expect(lifecycle).toEqual([
+          expect.objectContaining({
+            phase: 'started',
+            startedAt: 31_000,
+            executionStatus: 'running',
+          }),
+          expect.objectContaining({
+            phase: 'ended',
+            startedAt: 31_000,
+            endedAt: 31_020,
+            executionDurationMs: 20,
+            executionStatus: 'success',
+            outcome: 'success',
+          }),
+        ]);
+        expect(execute).toHaveBeenCalledOnce();
+        expect(updates.mock.calls.map(([update]) => update)).toContainEqual(
+          expect.objectContaining({
+            _meta: expect.objectContaining({
+              startedAt: 1000,
+              durationMs: 30_020,
+            }),
+          }),
+        );
+      } finally {
+        wall.mockRestore();
+        monotonic.mockRestore();
+      }
+    });
+
+    it.each([false, true])(
       'emits approved tool metadata before execution with preparation=%s',
       async (prepared) => {
         mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
@@ -43349,9 +43491,25 @@ describe('Session', () => {
             release.resolve();
             await vi.waitFor(() => expect(executionFinished).toBe(true));
             await new Promise<void>((resolve) => setImmediate(resolve));
-            expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(
-              updatesBeforeRelease,
-            );
+            const lateUpdates = vi
+              .mocked(mockClient.sessionUpdate)
+              .mock.calls.slice(updatesBeforeRelease)
+              .map(([params]) => params.update);
+            expect(lateUpdates).toEqual([
+              expect.objectContaining({
+                sessionUpdate: 'tool_call_update',
+                _meta: expect.objectContaining({
+                  toolLifecycle: expect.objectContaining({
+                    toolName: active.name,
+                    phase: 'ended',
+                    executionStatus: 'cancelled',
+                    outcome: 'cancelled',
+                  }),
+                }),
+              }),
+            ]);
+            expect(lateUpdates[0]).not.toHaveProperty('content');
+            expect(lateUpdates[0]).not.toHaveProperty('status');
             expect(
               mockChatRecordingService.recordToolResult,
             ).toHaveBeenCalledTimes(3);
@@ -44483,6 +44641,7 @@ describe('Session', () => {
     });
 
     it('records PostToolUse stop as an error after successful execution', async () => {
+      const lifecycleUpdates = vi.spyOn(session, 'sendUpdate');
       const logToolCallSpy = vi
         .spyOn(core, 'logToolCall')
         .mockImplementation(() => {});
@@ -44530,6 +44689,19 @@ describe('Session', () => {
         { id: 'post_stop_call', name: 'post_stop_tool', args: {} },
       ]);
 
+      expect(
+        lifecycleUpdates.mock.calls
+          .map(([update]) => update._meta?.['toolLifecycle'])
+          .filter(Boolean),
+      ).toEqual([
+        expect.objectContaining({ phase: 'started' }),
+        expect.objectContaining({
+          phase: 'ended',
+          executionStatus: 'success',
+          outcome: 'error',
+          executionDurationMs: expect.any(Number),
+        }),
+      ]);
       expect(result.parts[0].functionResponse?.response).toEqual({
         error: 'Stopped by hook',
       });
@@ -46125,7 +46297,9 @@ describe('Session', () => {
         .mock.calls.map(([params]) => params.update)
         .filter(
           (update) =>
-            'toolCallId' in update && update.toolCallId === 'shell_call',
+            'toolCallId' in update &&
+            update.toolCallId === 'shell_call' &&
+            'status' in update,
         );
       expect(
         shellUpdates.map((update) => ({
@@ -48664,7 +48838,19 @@ describe('Session', () => {
           executionStatus: 'not_started',
         },
       ]);
-      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(3);
+      const updates = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([params]) => params.update);
+      expect(
+        updates.filter(
+          (update) => !('_meta' in update && update._meta?.toolLifecycle),
+        ),
+      ).toHaveLength(3);
+      expect(
+        updates.filter(
+          (update) => '_meta' in update && update._meta?.toolLifecycle,
+        ),
+      ).toHaveLength(2);
     });
 
     it('suppresses duplicate TodoWrite calls without emitting plan updates', async () => {
