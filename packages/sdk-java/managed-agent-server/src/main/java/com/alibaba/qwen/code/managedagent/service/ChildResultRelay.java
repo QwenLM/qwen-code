@@ -211,6 +211,24 @@ public class ChildResultRelay {
                             + row.state(), now);
             return;
         }
+        // H4f: a committed stop request (a public task cancel, recorded on
+        // the run by the parent authority) is honored here, by the worker
+        // that owns the child's walk, before any arm could start, watch or
+        // fail it — never by a second driver racing this ledger row.
+        if (!"close_debt".equals(row.state())) {
+            try {
+                ChildResultRelayStore.StopState stop = relayStore.stopState(
+                        row.tenantId(), row.parentSessionId(),
+                        row.childRunId());
+                if (stop != null && stop.stopRequested() && !stop.ended()
+                        && stopChild(row, now)) {
+                    return;
+                }
+            } catch (RuntimeException error) {
+                defer(row, error, now);
+                return;
+            }
+        }
         try {
             switch (row.state()) {
                 case "creating" -> create(row, pending, now);
@@ -225,6 +243,78 @@ public class ChildResultRelay {
         } catch (RuntimeException error) {
             defer(row, error, now);
         }
+    }
+
+    /**
+     * H4f: stops a run whose stop request committed while it still runs.
+     * A run that never minted a child settles unstarted without creating
+     * one; a child whose Turn still runs has that Turn cancelled through
+     * the child's own command line and is looked at again on the
+     * heartbeat; a child whose Turn ended without a result has its close
+     * admitted and the run settles {@code cancelled} by
+     * {@code stop_requested}, with the start pairing its committed
+     * evidence proves. A Turn that completed first wins: the ordinary walk
+     * delivers its result and the request stays recorded on the settled
+     * run. Returns false exactly then.
+     */
+    private boolean stopChild(RelayRow row, long now) {
+        String child = row.childSessionId() != null ? row.childSessionId()
+                : relayStore.findLineageChild(row.tenantId(),
+                        row.parentSessionId(), row.childRunId());
+        if (child == null) {
+            // Nothing minted: the run settles unstarted. The commit-time
+            // verdict/mint gate refuses this pairing if a creation lands
+            // first, and the deferred retry then names the child.
+            settleStopped(row, null, false, true, now);
+            return true;
+        }
+        ChildResultRelayStore.TurnLine turn = relayStore.latestTurn(
+                row.tenantId(), child);
+        if (turn == null) {
+            throw new RelayRetry("child Session has no Turn yet");
+        }
+        if ("COMPLETED".equals(turn.status())) {
+            return false;
+        }
+        if (!"CANCELLED".equals(turn.status())
+                && !"FAILED".equals(turn.status())) {
+            // A Turn already cancelling owns its own delivery: look again
+            // on the heartbeat rather than re-driving the same command.
+            if (!"CANCELLING".equals(turn.status())) {
+                sessions.cancelChildTurn(row.tenantId(),
+                        row.parentSessionId(), child, row.childRunId(),
+                        turn.turnId());
+            }
+            relayStore.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                    now + LEASE_MS, now);
+            return true;
+        }
+        // The child's work ended without a result. The settling revision
+        // parses only over a chain whose attach committed, so the start
+        // pairing comes from the record's own evidence, replayed if lost.
+        boolean started = reconcileAttach(row, child);
+        boolean closed = closeChild(row, child, now);
+        settleStopped(row, child, started, closed, now);
+        return true;
+    }
+
+    /** The cancelled settlement of a stopped run, then its ledger close. */
+    private void settleStopped(RelayRow row, String child, boolean started,
+            boolean closed, long now) {
+        Map<String, Object> cancel = new LinkedHashMap<>();
+        cancel.put("operationId", UUID.randomUUID().toString());
+        cancel.put("kind", "close_scope");
+        cancel.put("childRunId", row.childRunId());
+        cancel.put("started", started);
+        if (child != null && !started) {
+            // A minted, never-started child dies named, as on the close
+            // cascade: the lineage's own close story stays discoverable.
+            cancel.put("childSessionId", child);
+        }
+        harness.runChildOperation(row.tenantId(), row.parentSessionId(),
+                cancel);
+        finishOrRetainDebt(row, child, closed, "done",
+                "stopped on its committed stop request", now);
     }
 
     /** The child Session still stands in an owning state: its row must
@@ -426,7 +516,12 @@ public class ChildResultRelay {
      * Returns false only then; anything else either admitted or had no
      * child to close. */
     private boolean closeFinishedChild(RelayRow row, long now) {
-        if (row.childSessionId() == null) {
+        return closeChild(row, row.childSessionId(), now);
+    }
+
+    /** {@link #closeFinishedChild} for a child the row may not name yet. */
+    private boolean closeChild(RelayRow row, String child, long now) {
+        if (child == null) {
             return true;
         }
         if (!childCloses.closeSupported()) {
@@ -434,17 +529,16 @@ public class ChildResultRelay {
         }
         try {
             childCloses.admitChildClose(row.tenantId(),
-                    row.parentSessionId(), row.childSessionId(),
-                    row.childRunId());
+                    row.parentSessionId(), child, row.childRunId());
         } catch (RuntimeException error) {
-            relayStore.advance(row, owner, row.state(), row.childSessionId(),
+            relayStore.advance(row, owner, row.state(), child,
                     0, "child close admission faltered",
                     now + LEASE_MS, now);
             LOG.warn("child result relay's close admission for a done child"
                             + " faltered tenant={} parent={} run={} child={}"
                             + " — owed, retried on the ledger row; failure={}",
                     row.tenantId(), row.parentSessionId(), row.childRunId(),
-                    row.childSessionId(), error.getMessage());
+                    child, error.getMessage());
             throw error;
         }
         return true;

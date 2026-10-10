@@ -132,7 +132,7 @@ class SurfaceAdmissionAcceptanceTest {
             "workspace_not_found", "workspace_forbidden",
             "workspace_unavailable", "session_operation_forbidden",
             "action_forbidden", "artifact_content_forbidden",
-            "automation_not_found");
+            "automation_not_found", "task_forbidden");
 
     @Autowired
     private MockMvc mvc;
@@ -166,6 +166,7 @@ class SurfaceAdmissionAcceptanceTest {
     private String artifactId;
     private String artifactItemId;
     private String automation;
+    private String settledTask;
 
     @BeforeAll
     void graph() throws Exception {
@@ -227,6 +228,27 @@ class SurfaceAdmissionAcceptanceTest {
         pendingActionWebRank = insertAction(tenant, bound);
         pendingActionLegacy = insertAction(tenant, legacy);
         automation = insertAutomation(tenant, bound);
+        settledTask = insertSettledTask(tenant, bound);
+    }
+
+    /** A settled child-agent task of the bound Session: the cancel probes
+     * pass every admission rule and stop at the task's own state. */
+    private String insertSettledTask(String tenant, String session) {
+        String recordKey = "a".repeat(64);
+        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+                        + " (session_scope_key, record_key, tenant_id,"
+                        + " workspace_id, session_id, domain, record_id,"
+                        + " operation_hash, revision, record_resource_id,"
+                        + " task_kind, task_state, delivery_target,"
+                        + " delivery_state, created_at, settled_at)"
+                        + " VALUES (?, ?, ?, 'ws', ?, 'child_run',"
+                        + " 'run-settled', ?, 1, 'resource-settled',"
+                        + " 'child_agent', 'completed', 'session',"
+                        + " 'consumed', 1, 2)",
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                        .sessionScopeKey(tenant, session),
+                recordKey, tenant, session, "b".repeat(64));
+        return "task_" + recordKey;
     }
 
     static Stream<SurfaceRegistry> everyRoute() {
@@ -347,6 +369,15 @@ class SurfaceAdmissionAcceptanceTest {
                         entry.capabilities().contains(
                                 Capability.SESSION_CWD_CHANGE)
                                 ? "actor_required" : "session_not_found");
+            }
+            case TASK_OPERATOR -> {
+                // The seeded task has settled, so an admitted caller meets
+                // the new-request check of the route itself, never a role.
+                expect(entry, STRANGER, 404, "session_not_found");
+                expect(entry, null, 404, "session_not_found");
+                expect(entry, READER, 403, "task_forbidden");
+                expect(entry, OPERATOR, 409, "task_action_unavailable");
+                expect(entry, OWNER_RANK, 409, "task_action_unavailable");
             }
             case OWNER -> {
                 // A stranger sees neither the Session nor, for the routes
@@ -1270,7 +1301,9 @@ class SurfaceAdmissionAcceptanceTest {
         Map<String, String> variables = new LinkedHashMap<>();
         variables.put("sessionId", session);
         variables.put("operationId", "op_0000000000000000");
-        variables.put("taskId", "task_0000000000000000");
+        variables.put("taskId", entry.capabilities().contains(
+                Capability.TASK_CANCEL) ? settledTask
+                : "task_0000000000000000");
         variables.put("turnId", "turn_0000000000000000");
         // An accepted respond consumes its Action: each surface's admitted
         // probe runs on its own, the OPERATOR and OWNER-rank arms on their
@@ -1392,6 +1425,10 @@ class SurfaceAdmissionAcceptanceTest {
                     + "\",\"taskId\":\"task_0000000000000000\"}";
             case TASK_EVENT_LIST -> "{\"sessionId\":\"" + session
                     + "\",\"taskId\":\"task_0000000000000000\"}";
+            case TASK_CANCEL -> publicSurface ? "{}"
+                    : "{\"sessionId\":\"" + session + "\",\"taskId\":\""
+                            + settledTask + "\",\"idempotencyKey\":\""
+                            + nextKey() + "\"}";
             case TURN_CANCEL -> "{\"idempotencyKey\":\"" + nextKey()
                     + "\",\"sessionId\":\"" + session
                     + "\",\"turnId\":\"turn_0000000000000000\"}";

@@ -185,6 +185,43 @@ public class ChildResultRelayStore {
         return execution.textValue();
     }
 
+    /** The run's stop request and whether its run line has ended, as
+     * the latest committed body states them (H4f). */
+    public record StopState(boolean stopRequested, boolean ended) {
+    }
+
+    /** The committed stop state of one child run, or null when no record
+     * row exists; an unreadable body owes the caller a bounded retry. */
+    public StopState stopState(String tenantId, String parentSessionId,
+            String childRunId) {
+        List<String> rows = jdbc.query(
+                "SELECT record_resource_id FROM"
+                        + " qwen_managed_session_extension_record"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND domain = 'child_run' AND record_id = ?",
+                (result, row) -> result.getString("record_resource_id"),
+                tenantId, parentSessionId, childRunId);
+        if (rows.isEmpty()) {
+            return null;
+        }
+        String text = readResource(tenantId, rows.getFirst());
+        JsonNode body;
+        try {
+            body = text == null ? null : MAPPER.readTree(text);
+        } catch (Exception error) {
+            throw new IllegalStateException("Child run " + childRunId
+                    + "'s committed record is unreadable", error);
+        }
+        if (body == null || !body.path("stopRequested").isBoolean()
+                || !body.path("run").path("state").isTextual()) {
+            throw new IllegalStateException("Child run " + childRunId
+                    + "'s committed record holds no stop line");
+        }
+        return new StopState(body.path("stopRequested").booleanValue(),
+                ManagedExtensionRecords.TERMINAL.contains(
+                        body.path("run").path("state").textValue()));
+    }
+
     /** One inline resource's bytes, or null when it is not inline-held. */
     public String readResource(String tenantId, String resourceId) {
         List<byte[]> rows = jdbc.query(

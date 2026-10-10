@@ -236,6 +236,8 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellTaskGetRequest")),
                     entry(WebShellTaskEventQueryRequest.class,
                             List.of("WebShellTaskEventQueryRequest")),
+                    entry(ApiModels.WebShellTaskCancelRequest.class,
+                            List.of("WebShellTaskCancelRequest")),
                     entry(WebShellEvent.class, List.of("WebShellEvent")),
                     entry(WebShellResyncRequired.class,
                             List.of("WebShellResyncRequired")),
@@ -1525,6 +1527,7 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/tasks/events/query").header(TENANT,
                         tenant),
                 "{\"sessionId\":\"%s\"}".formatted(sessionId));
+        exchangeTaskCancels(drift, tenant, otherTenant, sessionId, taskId);
 
         // The served task bodies say exactly what the shared fixture views
         // say, down to the settled task's start and settle times.
@@ -1574,6 +1577,119 @@ class ManagedAgentApiContractTest {
                 "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
                         .formatted(emptySession,
                                 rest.at("/data/0/id").asText()));
+    }
+
+    /**
+     * H4f: the cancel routes over a monitor task (no cancel action) and a
+     * running child-agent task row. Delivery is the coordinator's and is
+     * asserted elsewhere; here the admission answers and the read-back of
+     * the admitted task_cancel operation meet the contract.
+     */
+    private void exchangeTaskCancels(Map<String, String> drift, String tenant,
+            String otherTenant, String sessionId, String monitorTask)
+            throws Exception {
+        String recordKey = "c".repeat(64);
+        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+                        + " (session_scope_key, record_key, tenant_id,"
+                        + " workspace_id, session_id, domain, record_id,"
+                        + " operation_hash, revision, record_resource_id,"
+                        + " task_kind, task_state, runtime_state,"
+                        + " delivery_target, delivery_state, created_at,"
+                        + " started_at) VALUES (?, ?, ?, 'workspace-contract',"
+                        + " ?, 'child_run', 'run-contract', ?, 1,"
+                        + " 'resource-run-contract', 'child_agent', 'running',"
+                        + " 'ready', 'session', 'planned', 1, 2)",
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                        .sessionScopeKey(tenant, sessionId),
+                recordKey, tenant, sessionId, "d".repeat(64));
+        String childTask = "task_" + recordKey;
+        JsonNode view = json(exchange(drift, "getSessionTask", 200,
+                get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
+                        childTask).header(TENANT, tenant), null));
+        assertThat(view.get("action_capabilities").toString())
+                .isEqualTo("[\"cancel\"]");
+        String cancelPath = "/v1/agents/sessions/{id}/tasks/{task}/cancel";
+        JsonNode admitted = json(exchange(drift, "cancelSessionTask", 202,
+                post(cancelPath, sessionId, childTask).header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-task-cancel"),
+                null));
+        assertThat(admitted.get("type").asText()).isEqualTo("task_cancel");
+        assertThat(admitted.get("task_id").asText()).isEqualTo(childTask);
+        assertThat(admitted.get("replayed").asBoolean()).isFalse();
+        JsonNode replayed = json(exchange(drift, "cancelSessionTask", 202,
+                post(cancelPath, sessionId, childTask).header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-task-cancel"),
+                null));
+        assertThat(replayed.get("id").asText())
+                .isEqualTo(admitted.get("id").asText());
+        assertThat(replayed.get("replayed").asBoolean()).isTrue();
+        JsonNode readBack = json(exchange(drift, "getSessionCwdOperation", 200,
+                get("/v1/agents/sessions/{id}/operations/{operation}",
+                        sessionId, admitted.get("id").asText())
+                        .header(TENANT, tenant), null));
+        assertThat(readBack.get("task_id").asText()).isEqualTo(childTask);
+        exchange(drift, "webShellQueryCwdOperation", 200,
+                post(WEB_SHELL + "/operations/query").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"operationId\":\"%s\"}"
+                        .formatted(sessionId, admitted.get("id").asText()));
+        // The same key for another task is another request.
+        exchange(drift, "cancelSessionTask", 409,
+                post(cancelPath, sessionId, monitorTask).header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-task-cancel"),
+                null);
+        // A monitor task has no cancel path: a new key is refused.
+        exchange(drift, "cancelSessionTask", 409,
+                post(cancelPath, sessionId, monitorTask).header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-monitor-cancel"),
+                null);
+        exchange(drift, "cancelSessionTask", 400,
+                post(cancelPath, sessionId, childTask).header(TENANT, tenant),
+                null);
+        exchange(drift, "cancelSessionTask", 404,
+                post(cancelPath, sessionId, "task_missing")
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-missing-cancel"),
+                null);
+        exchange(drift, "cancelSessionTask", 404,
+                post(cancelPath, sessionId, childTask)
+                        .header(TENANT, otherTenant)
+                        .header(IDEMPOTENCY_KEY, "contract-foreign-cancel"),
+                null);
+        exchange(drift, "cancelSessionTask", 403,
+                post(cancelPath, sessionId, childTask).header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-scope-cancel")
+                        .principal(actor(otherTenant)), null);
+
+        JsonNode webShell = json(exchange(drift, "cancelWebShellTask", 202,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                ("{\"requestId\":\"contract-request\",\"sessionId\":\"%s\","
+                        + "\"taskId\":\"%s\",\"idempotencyKey\":"
+                        + "\"contract-task-cancel\"}")
+                        .formatted(sessionId, childTask)));
+        assertThat(webShell.get("operationId").asText())
+                .isEqualTo(admitted.get("id").asText());
+        assertThat(webShell.get("taskId").asText()).isEqualTo(childTask);
+        assertThat(webShell.get("replayed").asBoolean()).isTrue();
+        exchange(drift, "cancelWebShellTask", 409,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
+                        + "\"idempotencyKey\":\"contract-web-monitor\"}")
+                        .formatted(sessionId, monitorTask));
+        exchange(drift, "cancelWebShellTask", 400,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
+                        .formatted(sessionId, childTask));
+        exchange(drift, "cancelWebShellTask", 404,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                ("{\"sessionId\":\"%s\",\"taskId\":\"task_missing\","
+                        + "\"idempotencyKey\":\"contract-web-missing\"}")
+                        .formatted(sessionId));
+        exchange(drift, "cancelWebShellTask", 403,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant)
+                        .principal(actor(otherTenant)),
+                ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
+                        + "\"idempotencyKey\":\"contract-web-scope\"}")
+                        .formatted(sessionId, childTask));
     }
 
     /**

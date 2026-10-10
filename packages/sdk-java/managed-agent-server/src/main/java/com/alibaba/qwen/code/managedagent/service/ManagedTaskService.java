@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTaskEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTask;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEvent;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskPage;
@@ -17,7 +18,6 @@ import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore.EventPage;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore.TaskEvent;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
-import java.util.List;
 import java.util.regex.Pattern;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -25,15 +25,13 @@ import org.springframework.stereotype.Service;
 /**
  * The task list, detail and events of a Session (SessionTaskView), read
  * from the Stage H records its Session store holds and the per-task event
- * journal the same commits write. Cancel arrives with the slice whose tasks
- * accept one.
+ * journal the same commits write. A task advertises {@code cancel} while
+ * {@link ManagedTaskCancelService} would admit one for it (H4f).
  */
 @Service
 public class ManagedTaskService {
     private static final Pattern CURSOR = Pattern.compile(
             "^(0|[1-9][0-9]{0,18}):(task_[0-9a-f]{64})$");
-    // No H0c task advertises an action: cancel stays planned.
-    private static final List<String> NO_ACTIONS = List.of();
     private final ManagedAgentService sessions;
     private final ManagedExtensionRecordStore records;
     private final ManagedTaskEventStore events;
@@ -205,7 +203,9 @@ public class ManagedTaskService {
                 task.kind(), view.state(), view.definitionRevision(),
                 view.runtimeState(), view.createdAt(), view.startedAt(),
                 view.settledAt(), outputCursor(task.taskId(), positions),
-                positions.artifactRefs(), NO_ACTIONS);
+                positions.artifactRefs(),
+                ManagedExtensionProjection.taskActions(task.kind(),
+                        view.state()));
     }
 
     private WebShellTask webShellTask(String tenantId, String sessionId,
@@ -217,7 +217,9 @@ public class ManagedTaskService {
                 view.state(), view.definitionRevision(), view.runtimeState(),
                 view.createdAt(), view.startedAt(), view.settledAt(),
                 outputCursor(task.taskId(), positions),
-                positions.artifactRefs(), NO_ACTIONS);
+                positions.artifactRefs(),
+                ManagedExtensionProjection.taskActions(task.kind(),
+                        view.state()));
     }
 
     /** The committed tail at the view read; absent until the first event. */

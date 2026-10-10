@@ -116,7 +116,16 @@ public final class ApiModels {
             @JsonProperty("receipt_id") String receiptId,
             boolean replayed,
             @JsonProperty("action_resolution") JsonNode actionResolution,
-            @JsonProperty("failure_code") String failureCode) {
+            @JsonProperty("failure_code") String failureCode,
+            @JsonProperty("task_id") String taskId) {
+        public PublicCommandOperation(String id, String sessionId,
+                String type, String status, String admissionStage,
+                String deliveryState, String receiptId, boolean replayed,
+                JsonNode actionResolution, String failureCode) {
+            this(id, sessionId, type, status, admissionStage, deliveryState,
+                    receiptId, replayed, actionResolution, failureCode, null);
+        }
+
         public PublicCommandOperation(
                 String id,
                 String sessionId,
@@ -294,7 +303,17 @@ public final class ApiModels {
             String receiptId,
             boolean replayed,
             JsonNode actionResolution,
-            String failureCode) {
+            String failureCode,
+            String taskId) {
+        public WebShellCommandOperation(String operationId, String sessionId,
+                String type, String status, String admissionStage,
+                String deliveryState, String receiptId, boolean replayed,
+                JsonNode actionResolution, String failureCode) {
+            this(operationId, sessionId, type, status, admissionStage,
+                    deliveryState, receiptId, replayed, actionResolution,
+                    failureCode, null);
+        }
+
         public WebShellCommandOperation(
                 String operationId,
                 String sessionId,
@@ -530,6 +549,12 @@ public final class ApiModels {
 
     public record WebShellTaskGetRequest(@NotBlank String sessionId,
             @NotBlank String taskId) {
+    }
+
+    /** H4f: {@code requestId} is trace-only and stays out of the digest. */
+    public record WebShellTaskCancelRequest(@Size(max = 128) String requestId,
+            @NotBlank String sessionId, @NotBlank @Size(max = 128) String taskId,
+            @NotBlank @Size(max = 128) String idempotencyKey) {
     }
 
     public record WebShellPage<T>(List<T> data, String nextCursor,
