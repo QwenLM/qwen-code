@@ -73,7 +73,10 @@ export function goalToolResultProvenance(
     lowerToolName === ToolNames.AGENT ||
     lowerToolName === ToolNames.ADVISOR ||
     lowerToolName === ToolNames.WORKFLOW ||
-    lowerToolName === ToolNames.THREAD_READ
+    // The thread tools are gone, but transcripts recorded before their removal
+    // still carry thread_read results, and those restate another participant's
+    // recorded text -- the wrapper class, not an original observation.
+    lowerToolName === 'thread_read'
   ) {
     return { goalContext: { ...goalContext }, provenance: 'execution_output' };
   }

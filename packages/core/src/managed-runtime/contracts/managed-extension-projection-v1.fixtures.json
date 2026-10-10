@@ -8,7 +8,8 @@
     "hook_execution": null,
     "child_run": {
       "shell": "background_shell",
-      "child_agent": "child_agent"
+      "child_agent": "child_agent",
+      "workflow": "workflow"
     },
     "child_acceptance": null,
     "channel_route": null,
@@ -16,7 +17,8 @@
   },
   "additionalRecordBodies": {
     "schedule": null,
-    "automation_run": "automation_run"
+    "automation_run": "automation_run",
+    "session_message": null
   },
   "taskStates": [
     "pending",

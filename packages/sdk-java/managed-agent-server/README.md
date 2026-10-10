@@ -48,7 +48,11 @@ deltas lose their text and identity, later deltas may name other Parts, and a
 `stream.reconciled` event announces it. A client that sees one reloads the
 Items and resumes after their `snapshot_through_sequence`. A
 cursor below a Session's replay floor gets `409 cursor_expired` from the JSON
-event query and one `agent.session.resync_required` frame from either stream.
+event query and one `agent.session.resync_required` frame from either stream
+only while the Snapshot backs the floor
+(`replay_floor_sequence <= snapshot_through_sequence`); a stream reconciliation
+discards the Snapshot without lowering the floor, and during that rebuild such
+a cursor is served from the retained events.
 `GET /v1/agents/sessions/{id}/turns` lists a Session's Turns newest first with
 an opaque cursor, and `GET /v1/agents/sessions/{id}/turns/{turnId}` reads one.
 Design: [English](../../../docs/design/2026-09-27-managed-agent-api-contract.md) |
@@ -350,6 +354,33 @@ the tenant and writer headers are scope and fencing inputs, not a substitute
 for transport identity. Responses under the private prefix use
 `Cache-Control: no-store`.
 
+## Managed automation (H6)
+
+The control plane runs the H6 automation runtime for `persistent`
+definitions: a definition is created, revised, read and retired under the
+Workspace-bound Session its creator owns (`/v1/agent-automations`), a
+scanner derives each definition's due slots on this host's tz database,
+claims the definition under a lease with a fence, records every occurrence
+decision in its own ledger (V57) and fires a run as one idempotent Hosted
+Harness operation; a manual run is the same operation keyed by its
+`Idempotency-Key`. The Session journal's `schedule` and `automation_run`
+chains stay the authority; the ledger locates, leases and indexes. The
+`per_run` target and the delivery policy are refused until their slices
+land. Design:
+[managed automation runtime](../../../docs/design/2026-10-07-managed-automation-runtime.md).
+
+All settings below use the `qwen.managed-agent.automation` prefix:
+
+| Setting              | Default | Meaning                                                                                                                                                                                            |
+| -------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`            | `false` | Run the scanner and admit the mutation routes (`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED`); the read routes answer either way.                                                                        |
+| `scan-delay`         | `10s`   | Fixed delay between scanner ticks.                                                                                                                                                                 |
+| `lease`              | `60s`   | How long one scanner holds a definition; a stalled scanner yields it afterwards, and the fence it held no longer writes.                                                                           |
+| `late-tolerance`     | `5m`    | A slot older than this when the scanner sees it is late and follows the definition's catch-up policy (`none`, `latest`, `bounded`).                                                                |
+| `lookback`           | `24h`   | Slots older than this are neither fired nor recorded; it bounds every catch-up by age.                                                                                                             |
+| `max-slots-per-tick` | `1000`  | Slots **returned** per definition per tick: the walk itself follows the lookback window (its minutes are enumerated regardless), and the result set's surplus is cut at the oldest end and logged. |
+| `concurrency`        | `4`     | Non-terminal runs an `allow` definition may hold at once; beyond it an occurrence is recorded `skipped` with reason `count_limit`.                                                                 |
+
 ## Full WebShell dual-path development entry
 
 The full WebShell can keep an ordinary Qwen daemon for its existing chat,
@@ -480,8 +511,10 @@ then trusted as the actor for the request's tenant. It is disabled by default;
 never enable it where untrusted clients can reach the server.
 
 `QWEN_MANAGED_AGENT_APPROVAL_MODE` defaults to `yolo`. In `default` and
-`auto-edit`, the Session creator can list, inspect and answer pending permission
-Actions through the public API or WebShell. Responses are durable, idempotent
+`auto-edit`, any caller with a read grant on the bound Workspace can list and
+inspect pending permission Actions through the public API or WebShell;
+answering one needs the Session's recorded owner or a caller holding OPERATOR
+or above, and that read grant as well. Responses are durable, idempotent
 operations; their final result follows the committed Harness decision.
 `QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT` defaults to `10m` and accepts `1s` to `24h`.
 The approval mode is pinned at Session creation and must be confirmed by the
@@ -498,16 +531,19 @@ creation with input, including replays, while empty bound creation remains
 available. The directory mounted for a Workspace is trusted deployment data,
 not a filesystem sandbox.
 
-Later Turns may be submitted by the Session's creator under the
-same opt-in while they can still read and create in the Workspace (the
-per-caller `workspaceTurns` capability flag reflects the caller's current
-grants, the Workspace registry's `ACTIVE` state and the Workspace generation and storage the
-Session was bound to), and the creator may rename the Session. The creator may
-also cancel a running Turn while they can still read the Workspace, under the
-cancel rule below. Workspace close follows
-its separate close capability and lifecycle admission. Archive, delete and
-unarchive follow their separate retention capabilities after reliable Workspace
-close. Controlled cwd changes ship below (W2); broad Workspace capability
+Later Turns may be submitted by any caller holding OPERATOR on the bound
+Workspace under the same opt-in while the Session's creator-keyed execution
+facts hold (the Workspace registry still backs the binding and stays `ACTIVE`,
+and the actor recorded by the Workspace create command keeps OPERATOR or
+above; the WebShell adapter's per-caller `workspaceTurns` capability flag
+mirrors exactly that rule, though the public surface publishes no such
+flag), and such a caller may cancel the Session's running Turns and rename
+the Session — a readable actor below OPERATOR gets `403
+session_operation_forbidden`, and an admitted OPERATOR blocked by the shape
+or fact gates gets `409 workspace_unavailable`. Workspace close follows its
+separate close capability and lifecycle admission. Archive, delete and
+unarchive follow their separate retention capabilities after reliable
+Workspace close. Controlled cwd changes ship below (W2); broad Workspace capability
 advertisement remains gated. Shell and in-flight recovery are separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.
@@ -566,8 +602,9 @@ Design: [English](../../../docs/design/managed-agent-broker-auth.md)
 
 ### Controlled cwd change (W2)
 
-Under the same `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED` opt-in, the creator
-of a bound Session moves its relative directory within the same Workspace:
+Under the same `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED` opt-in, any caller
+holding OPERATOR on a bound Session's Workspace moves its relative directory
+within the same Workspace:
 
 ```bash
 curl -sS -X POST \
@@ -579,7 +616,11 @@ curl -sS -X POST \
 ```
 
 `202` admits a durable `cwd_change` operation; it does not activate the
-directory. The change is same-Workspace only and creator-only, requires an idle
+directory. The change is same-Workspace only and requires the caller's OPERATOR
+role plus the Session's creator-keyed execution facts (the registry still backs
+the binding and stays `ACTIVE`, and the recorded create actor keeps OPERATOR or
+above; the V56-persisted initiator is re-checked at settlement the same way, so
+demoting either actor fails the operation with `workspace_unavailable`), an idle
 Session (`409 session_context_busy` while a Turn or another operation is open)
 and a matching `expected_context_revision` (`409 context_revision_conflict`
 otherwise); a retry with the same key returns the original operation even after
@@ -592,10 +633,11 @@ or await the event. A target the mount cannot verify fails the operation with
 never retry, while a mount fault the probe cannot reach (a stale export)
 retries internally up to an 8-attempt budget and then fails the same type,
 releasing the Session back to turns and lifecycle operations. Legacy Sessions answer `400 unsupported_feature`, an unreadable
-actor `404 session_not_found` and a readable non-creator `403
+actor `404 session_not_found` and a readable actor below OPERATOR `403
 session_operation_forbidden`, matching the sibling lifecycle refusals; a
 probe refusal the turn layer would share also uses `409
-workspace_unavailable`. The WebShell adapter offers the same flow as
+workspace_unavailable`, and so does an admitted OPERATOR once the
+creator-keyed facts moved. The WebShell adapter offers the same flow as
 `/api/agent/web-shell/v1/sessions/cwd/change` plus `/operations/query`.
 Subsequent turns acquire a fresh Runtime Session and install the new context
 before tools run, so an unverifiable change can never redirect tool execution.
@@ -753,30 +795,17 @@ Foreground Shell may create detached descendants. Use this only with trusted
 local workloads. The W0e recovery above handles trusted host reboot; it
 does not provide physical isolation or recovery after worker-only death.
 Public bound Turn admission is limited to the opt-in initial file Turn described
-in G0 above and to later Turns submitted by the Session's creator under the same
-opt-in while they can still read and create in the Workspace (the per-caller
-`workspaceTurns` capability flag reflects the caller's current grants, the
-registry's `ACTIVE` state and the Workspace generation and storage the Session was bound
-to); the creator may also rename the Session. Cancelling aborts work that is
-already running, so the creator may cancel a running Turn while they can still
-read the Workspace and the deployment still enables Workspace files, even after
-their create grant is revoked, the Workspace
-starts draining or it is re-registered. A live cancel reuses the owner's
-resident Harness attachment. A cold connector cache passively re-attaches for
-the persisted cancellation after checking the frozen Session binding and exact
-identity, without depending on current creation grants, registry state or mount
-readiness. A resident passive load returns the original connection after scope
-and profile checks; a lost passive recovery reply can be retried without driving
-work. Passive recovery may adopt the original Runtime and query status without
-preparing or executing work; on the cancellation path, its lease stays owed
-through lost replies and retryable refusals until terminal success or teardown.
-New API cancellation requests still require read access, while already
-accepted cancellations continue if it is subsequently revoked. New work always
-rechecks execution authority. Broker/worker process death and an original prompt
-admission with a lost reply retain their separate recovery limitations. Later Turns run
-under the creator's Workspace grants, so any other actor keeps the existing
-refusal: `workspace_unavailable` when the actor can read the Workspace,
-`session_not_found` when they cannot. Public close follows its separate close
+in G0 above and to later Turns submitted by any caller holding OPERATOR on the
+Workspace under the same opt-in while the Session's creator-keyed execution
+facts hold (the WebShell adapter's per-caller `workspaceTurns` capability
+flag mirrors that same rule; the public surface publishes no such flag);
+such a caller may also cancel the Session's running Turns and rename the
+Session. Later Turns run
+under the creator's Workspace grants, so an actor without a read grant keeps the
+existing `session_not_found` invisibility, a readable actor below OPERATOR is
+refused `session_operation_forbidden`, and an admitted OPERATOR whose Session
+lost the creator-keyed facts meets the family's domain `workspace_unavailable`.
+Public close follows its separate close
 capability and lifecycle admission. Archive, delete and unarchive follow their
 separate retention capabilities after reliable Workspace close;
 the private Shell profile is not enabled through public creation.
@@ -860,9 +889,11 @@ history remain on their saved identities. The marker is a continuity check,
 not a backup or protection against a malicious same-UID writer. See the
 [W1 design](../../../docs/design/2026-09-29-managed-workspace-w1-recovery.md).
 Hosted Workspace cold-load validation is always enabled, independently of the Java mount-guard option. Omitted tool profile and Shell `captureBytes` use the saved definition; supplied values must match exactly. Saved approval settings remain pinned. Integrity checks run before new model work or Broker prepare/execute and cover retained private resources plus complete remote Shell output, including pages, segments and empty-stream seals. Preserve O2 recovery of original `results_ready`, consumed-final and `not_started` receipts. An incomplete receipt may produce a blocked ACK or original-history repair before load is refused, so refusal does not promise zero journal writes or ACKs. Restore validation uses a fixed committed cut, and continuation still requires current writer ownership and authorization. Missing old resources or unsupported recovery domains block loading. Passive Harness loading does not implement unknown-execution cleanup; use original Broker execution identities. Rollback to old binaries requires entry points to remain stopped because those binaries ignore the fence columns. Public
-Workspace next-turn admission for the Session's creator under the G0 opt-in
-described above has landed; public Workspace resume still requires product-route
-integration, and this internal guard is not a public resume capability yet.
+Workspace next-turn admission for any caller holding OPERATOR on the bound
+Workspace, while the Session's creator-keyed execution facts hold, under the G0 opt-in
+described above has landed; public Workspace resume still requires
+product-route integration, and this internal guard is not a public resume
+capability yet.
 
 Build the container from the repository root:
 

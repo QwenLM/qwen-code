@@ -10,6 +10,11 @@ import {
   TRAJECTORY_FILTER_MESSAGES_ZH,
 } from './trajectory/filter-messages.js';
 
+import {
+  TRAJECTORY_WINDOW_MESSAGES_EN,
+  TRAJECTORY_WINDOW_MESSAGES_ZH,
+} from './trajectory/window-messages.js';
+
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
 import {
   COLLAB_MESSAGES_EN,
@@ -139,7 +144,7 @@ const EN: Messages = {
   'managed.approval.refreshFailed': 'Pending approvals could not be refreshed.',
   'managed.approval.retry': 'Retry loading approvals',
   'managed.approval.forbidden':
-    'Only the Session creator can answer this approval.',
+    "Only the Session's owner or a Workspace operator can answer this approval.",
   'managed.approval.argumentsUnavailable':
     'Tool arguments are unavailable for this approval.',
   'managed.approval.previewComplete': (v) =>
@@ -378,9 +383,9 @@ const EN: Messages = {
   'gitMode.branchHint': 'Switches the working directory to a new branch',
   'gitMode.branchInvalidName': 'Invalid branch name',
   'gitMode.worktree': 'Worktree',
-  'gitMode.worktreeDesc': 'Isolated copy · can run in parallel',
+  'gitMode.worktreeDesc':
+    'Creates an isolated copy when you send your first message',
   'gitMode.confirmBranch': 'Create branch',
-  'gitMode.confirmWorktree': 'Create worktree',
   'gitMode.resetToCurrent': 'Reset to current branch',
   'gitLog.title': 'History',
   'gitLog.subtitle': (v) => `${v?.count ?? 0} commits`,
@@ -3382,6 +3387,7 @@ const EN: Messages = {
   'trajectory.inspector.status': 'Status',
   'trajectory.inspector.permissionTitle': 'Title',
   'trajectory.inspector.permissionPending': 'pending',
+  'trajectory.inspector.executionId': 'Execution ID',
   'trajectory.inspector.responseId': 'Response ID',
   'trajectory.inspector.promptId': 'Prompt ID',
   'trajectory.inspector.subagent': 'Subagent',
@@ -4295,6 +4301,7 @@ const EN: Messages = {
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
+  ...TRAJECTORY_WINDOW_MESSAGES_EN,
 };
 
 const ZH: Messages = {
@@ -4387,7 +4394,8 @@ const ZH: Messages = {
   'managed.approval.loadFailed': '待审批请求加载失败。',
   'managed.approval.refreshFailed': '待审批请求刷新失败。',
   'managed.approval.retry': '重新读取审批',
-  'managed.approval.forbidden': '只有此会话的创建者可以回答这项审批。',
+  'managed.approval.forbidden':
+    '只有此会话的拥有者或所属 Workspace 的操作者可以回答这项审批。',
   'managed.approval.argumentsUnavailable': '此项审批的工具参数暂不可见。',
   'managed.approval.previewComplete': (v) =>
     `输入预览：${v?.bytes ?? 0} 字节。`,
@@ -4610,9 +4618,8 @@ const ZH: Messages = {
   'gitMode.branchHint': '在工作目录中切换到新分支',
   'gitMode.branchInvalidName': '分支名不合法',
   'gitMode.worktree': 'Worktree 隔离',
-  'gitMode.worktreeDesc': '独立副本 · 可并行',
+  'gitMode.worktreeDesc': '发送首条消息时自动创建独立副本',
   'gitMode.confirmBranch': '创建分支',
-  'gitMode.confirmWorktree': '创建 Worktree',
   'gitMode.resetToCurrent': '恢复当前分支',
   'gitLog.title': '提交历史',
   'gitLog.subtitle': (v) => `${v?.count ?? 0} 条提交`,
@@ -7467,6 +7474,7 @@ const ZH: Messages = {
   'trajectory.inspector.status': '状态',
   'trajectory.inspector.permissionTitle': '标题',
   'trajectory.inspector.permissionPending': '等待处理',
+  'trajectory.inspector.executionId': '执行 ID',
   'trajectory.inspector.responseId': '响应 ID',
   'trajectory.inspector.promptId': '提示 ID',
   'trajectory.inspector.subagent': '子代理',
@@ -8310,6 +8318,7 @@ const ZH: Messages = {
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
+  ...TRAJECTORY_WINDOW_MESSAGES_ZH,
 };
 
 const MESSAGES: Record<WebShellLanguage, Messages> = {
