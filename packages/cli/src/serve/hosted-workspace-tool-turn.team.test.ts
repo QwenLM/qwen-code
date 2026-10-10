@@ -615,7 +615,8 @@ it('labels a member result notification with its name', async () => {
 });
 
 // #13841: an isolated member's result names its merge outcome beside its
-// name, and its run, so team_delete, waits until the merge records one.
+// name, and team_delete counts it as running until its run settles, which
+// for an isolated member follows the merge.
 it('labels an isolated member with its merge outcome and waits for its settle', async () => {
   const turn = createTurn({ childWorkspaces: true });
   await execute(turn, [
@@ -630,7 +631,6 @@ it('labels an isolated member with its merge outcome and waits for its settle', 
     runtime: { runtimeBindingId: 'binding-1', generation: '1' },
   });
   await children.attach(childRunId, 'session-child');
-  // The child's Turn has ended, but the relay still waits on the merge.
   expect(
     await execute(turn, [call('team_delete', {}, 'call-delete-early')]),
   ).toContain('still has running members: alice');
@@ -722,12 +722,79 @@ it('messages a running member and refuses to continue a finished one', async () 
     ),
   ]);
   expect(refused).toContain(
-    'ran as \\"alice\\" of team \\"review\\" and has finished; a team member cannot be continued yet',
+    'ran as \\"alice\\" of team \\"review\\" and has finished; a member of an open team cannot be continued yet',
   );
   expect(children.record('prompt:call-more')).toBeUndefined();
   const listing = await execute(turn, [call('task_list', {}, 'call-list')]);
   expect(listing).toContain(`alice: completed — ${alice}`);
   expect(listing).toContain(`bob: running — ${bob}`);
+  // A plain child beside the team continues as before.
+  await execute(turn, [
+    call(
+      'agent',
+      { description: 'plain', prompt: 'look', run_in_background: true },
+      'call-plain',
+    ),
+  ]);
+  await children.dispatchStarted('prompt:call-plain', {
+    dispatchId: 'dispatch-2',
+    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+  });
+  await children.attach('prompt:call-plain', 'session-plain');
+  await children.settleCompleted('prompt:call-plain', {
+    result: Buffer.from('seen', 'utf8'),
+    receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+  });
+  expect(
+    await execute(turn, [
+      call(
+        'send_message',
+        {
+          task_id: children.taskIdOf('prompt:call-plain'),
+          message: 'look again',
+        },
+        'call-plain-more',
+      ),
+    ]),
+  ).toContain('continued it as');
+  expect(children.record('prompt:call-plain-more')).toBeDefined();
+});
+
+// Once its team is deleted, nothing reads the roster for a former member,
+// so it continues as a plain child.
+it('continues a former member once its team is deleted', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await children.dispatchStarted('prompt:call-alice', {
+    dispatchId: 'dispatch-1',
+    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+  });
+  await children.attach('prompt:call-alice', 'session-alice');
+  await children.settleCompleted('prompt:call-alice', {
+    result: Buffer.from('all clean', 'utf8'),
+    receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+  });
+  expect(
+    await execute(turn, [call('team_delete', {}, 'call-delete')]),
+  ).toContain('deleted.');
+  expect(
+    await execute(turn, [
+      call(
+        'send_message',
+        {
+          task_id: children.taskIdOf('prompt:call-alice'),
+          message: 'one more thing',
+        },
+        'call-more',
+      ),
+    ]),
+  ).toContain('continued it as');
+  expect(children.record('prompt:call-more')).toMatchObject({
+    predecessorChildRunId: 'prompt:call-alice',
+  });
 });
 
 it('answers an interrupted turn by what each journal-only call committed', async () => {

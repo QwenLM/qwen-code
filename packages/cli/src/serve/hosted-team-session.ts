@@ -218,7 +218,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'task_list',
     description:
-      'List the team board, optionally filtered, followed by each member with the state of its run (and why a failed or cancelled run ended) and the task id send_message takes.',
+      'List the team board, optionally filtered, followed by each member with the state of its run (and why a failed or cancelled run ended) and the task id send_message takes while it runs.',
     parametersJsonSchema: {
       type: 'object',
       properties: {

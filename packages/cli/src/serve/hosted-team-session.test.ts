@@ -835,7 +835,7 @@ describe('the board', () => {
     ).toEqual(['prompt:call-team#1']);
   });
 
-  it('lists the board with filters and the roster with run states', async () => {
+  it('lists the board with filters and the roster with run states, stop reasons and task ids', async () => {
     await createTeam();
     await addMember('alice');
     await addMember('bob');

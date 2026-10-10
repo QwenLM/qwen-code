@@ -37,7 +37,7 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
    - **准入**在 H4b 自身的检查之外加上团队检查,H4b 的检查(父 Session 正在关闭、配额、envelope)保持不变。团队必须是 `active`;清洗后的名字不能为空、不能是 `leader`,且在名册中尚未出现;名册必须少于 10 个成员;`run_in_background` 不能为 `false`。`plan_mode_required`、`read_only`、`model` 与 `subagent_type` 仍被拒绝:计划审批属于 H4e-b3,而只读或换类型的成员需要本切片无法应用的定义(H4b 决策 11)。同一个工具批次内,成员名必须互不相同,拉起成员的批次也不能同时创建或删除团队,或启动前台 child,因为前台 child 被恢复的等待(#13708)会把成员回答成普通的后台启动。
    - **执行**先以 completion `sent` 提交 H4b 启动,再提交加入:下一个 `team_state` 修订,以命令 id `${childRunId}:join` 追加 `{ name, childRunId, planModeRequired: false }`。准入已经检查过加入所执行的每条团队规则,而 lead 自己的写入是串行的,因此加入只会在一种情况下被拒绝:run 已经结束。H4e-a 只允许存活的 run 加入名册,而 relay 是异步工作的,一次创建被拒就可能在启动后几秒内让 run 失败。此时调用以该 run 的失败作答,成员不会加入,其名字仍然空闲。
    - **没有团队时**,`name` 以工具错误被拒绝,而不是像 Legacy 那样被忽略:一个静默失效的参数,正是 H4b 决策 11 拒绝过的死开关。
-   - **生命周期。** 成员就是 H4b 的 child:它运行一轮,结果被投递,relay 关闭它的 Session;隔离成员(#13841)在提交结果之前先关闭并完成 merge。成员运行期间,lead 可以按其 task id 给它发消息(H4d-b,#13822),这些消息轮属于同一个 run(H4d-b 决策 8)。成员结束后不再接收工作:H4d-b 会把已结束的 child 续跑为一个新的 run,而名册不会列出这个 run,因此在成员可以被续跑(H4e-b2)之前,`send_message` 拒绝续跑成员。它结束后名册条目仍然保留,与 Legacy 成员一样,因此 10 的上限计的是团队整个生命周期中的成员,而同时运行的数量由 H4b 的 4 个活跃 child 上限约束,成员与其他 child 共用。
+   - **生命周期。** 成员就是 H4b 的 child:它运行一轮,结果被投递,relay 关闭它的 Session;隔离成员(#13841)在提交结果之前先关闭并完成 merge。成员运行期间,lead 可以按其 task id 给它发消息(H4d-b,#13822),这些消息轮属于同一个 run(H4d-b 决策 8)。成员结束后不再接收工作:H4d-b 会把已结束的 child 续跑为一个新的 run,而名册不会列出这个 run,因此在成员可以被续跑(H4e-b2)之前,`send_message` 拒绝续跑未删除团队的成员。团队删除后不再有人读取其名册,前成员作为普通 child 续跑,结果不带标签。它结束后名册条目仍然保留,与 Legacy 成员一样,因此 10 的上限计的是团队整个生命周期中的成员,而同时运行的数量由 H4b 的 4 个活跃 child 上限约束,成员与其他 child 共用。
    - **崩溃窗口。** 已执行的调用在崩溃后不会再次运行,因此如果 Session 在启动与加入之间停止,已启动的 child 仍会作为普通后台 child 运行,不会重复,其名字仍然空闲(开放问题 1)。它的汇报只有在 lead 的 Turn 恢复之后才能到达:在实机验收覆盖到的 Turn 上,这次崩溃阻塞了 lead,汇报从未到达(开放问题 5)。在中断 Turn 的收尾会回答该调用的地方(决策 11),它被回答为已启动,加入已提交时再回答为已加入。只有重新驱动的批次(如果某天会再次运行同一调用,即同一 `childRunId`)才会重放启动,并在 run 仍存活时完成加入。在加入之前结束的 run 以其结束回答该调用:失败回答为失败,完成回答为已结束,其结果以不带标签的形式送达。
 4. **成员通过 H4b 的通知汇报,并带上名字。** 成员的结果以与每个后台 child 相同的方式到达 lead:一个随其 acceptance 提交的 input,唤醒 lead。当该 child run 在名册中时,通知带有一个包含成员名的 `<teammate>` 元素。这对应 Legacy 的自动最终汇报。失败或被取消的成员不发送通知,与任何 H4b child 一样;`task_list` 会显示其状态(决策 6)。
 5. **任务板属于 lead。** 三个任务板工具沿用其 Legacy 的 schema 与校验,差异列在"工具"一节:
@@ -78,7 +78,7 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
 
 ## 非目标
 
-- **H4e-b2 与 H4e-b3 负责的一切**:mailbox、按名字发给成员的 `send_message`(运行中的成员可经 H4d-b 的路由按 task id 送达)、任务分配的投递、成员一侧的任务板工具、成员续跑(`send_message` 拒绝续跑已结束的成员)、计划审批与 `plan_mode_required`、`request_shutdown`、旧团队导入,以及 `team_message` 与 `team_plan` 的启用。
+- **H4e-b2 与 H4e-b3 负责的一切**:mailbox、按名字发给成员的 `send_message`(运行中的成员可经 H4d-b 的路由按 task id 送达)、任务分配的投递、成员一侧的任务板工具、成员续跑(`send_message` 拒绝续跑未删除团队中已结束的成员)、计划审批与 `plan_mode_required`、`request_shutdown`、旧团队导入,以及 `team_message` 与 `team_plan` 的启用。
 - **由 lead 的模型在成员结束前停止它**(H4f 的公开任务取消 #13823 是用户的途径)与 **detach**(它自己的后续工作)。
 - **只读、换类型或换模型的成员**,它们需要把定义字段应用到执行(D8b/D8c)。
 - **任何公共契约变更。** 不改路由、OpenAPI 或 Flyway;公共团队资源属于 #13785。
@@ -124,7 +124,7 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
 
 1. **补齐未进名册的成员。** 启动与加入之间发生崩溃且再也没有重放,会留下一个没有名册指名的、正在运行的 child。Agent 调用不写 `tool.intent`,但它的参数(包括 `name`)保存在已入 journal 的 assistant 消息中,因此恢复后可以由一个补齐流程完成加入。本切片接受这种降级结果(一个普通后台 child),补齐流程留待后定。在实机验收覆盖到的 Turn 上(其中没有 channel Turn),这次崩溃还会阻塞 lead 本身(开放问题 5),补齐流程要先等它解决。
 2. **成员占用的活跃上限。** 成员与其他 child 共用 H4b 每个 Session 4 个活跃 child 的上限,而 Legacy 可同时运行最多 10 个 teammate。团队是否应有自己的活跃上限,待真实团队显示出需要时再定。
-3. **让成员第二次派上用场。** 成员结束后不再接收工作:成员的 H4d-b 续跑被拒绝(决策 3),因为名册只列出一个 run。成员续跑(H4e-a 开放问题 4)属于 H4e-b2,与承载新工作的 mailbox 一起。
+3. **让成员第二次派上用场。** 成员结束后不再接收工作:未删除团队成员的 H4d-b 续跑被拒绝(决策 3),因为名册只列出一个 run。成员续跑(H4e-a 开放问题 4)属于 H4e-b2,与承载新工作的 mailbox 一起。
 4. **在 Runtime park 之外被中断的 Hooks Session。** 现在每条恢复路径都会回答只写 journal 的调用(决策 11)。但 Hooks Session 从不接管,它的 bare load 只续跑停在 `results_ready` 的 Turn。在没有 Runtime 工作的批次(只有团队调用)中被中断的 Turn,会由 load 作答,但仍处于恢复阻塞,与任何在模型轮中途被中断的 Hooks Session 一样。团队调用扩大了这个窗口。这类 Turn 的恢复属于 Hooks 运行时。启用以接受这个窗口来解决它,与在 Shell Session 上一样(开放问题 5):H4b 的后台启动在 Hooks Session 上已经打开了这个窗口,因此在那里不声明团队工具也关不上它。
 5. **后台启动过程中的崩溃会阻塞 lead。** Harness 若在一次启动提交之后、Turn 的下一个检查点之前死掉,该 Turn 会停在 `model_output_committed`,这是替代 Harness 拒绝接管的模型起步阶段,于是协调器以 `managed_runtime_recovery_blocked` 让该 Turn 失败。lead 的 journal 仍保留这个停住的 Turn,因此之后每次加载 lead 都回答 `hosted_turn_recovery_required`:relay 无法记录正在运行的 child 的 dispatch、attach 或结果,之后的每个 Turn 也以同样方式失败。实机验收在 Shell Session 上有团队与无团队时都遇到了这一点,因此它是 H4b 恢复的限制,而不是团队的限制;开放问题 4 是同一窗口在 Hooks Session 上的形态。团队调用会扩大这个窗口,与在那里一样;启用接受它,正如 H4b 的后台启动已经接受它,因为不声明团队工具也不能为那些后台启动关上这个窗口。修复由 #13847 跟踪。
 
