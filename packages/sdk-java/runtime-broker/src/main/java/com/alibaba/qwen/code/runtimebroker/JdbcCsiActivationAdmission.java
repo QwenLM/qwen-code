@@ -180,7 +180,9 @@ public final class JdbcCsiActivationAdmission {
             }
             if (!next.receipts().isEmpty()) {
                 JdbcCsiExecutionAdmission.verifyReceipts(connection, original,
-                        lockNativeHead(connection, original), next);
+                        lockNativeHead(connection, original), next,
+                        "commitFileHistory".equals(operation) ? previousSequence + 1 : 0,
+                        "commitFileHistory".equals(operation) ? previousRevision + 1 : 0);
             }
             require(history.activation().expiresAt() > JdbcRepositorySupport.databaseNowPrecise(connection).toEpochMilli());
             return;

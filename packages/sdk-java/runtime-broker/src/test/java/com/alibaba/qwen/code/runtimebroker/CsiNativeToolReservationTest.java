@@ -322,6 +322,44 @@ class CsiNativeToolReservationTest {
     }
 
     @Test
+    void candidateHistoryMembersNeedTheirExactSameTransactionResourceAssociation() throws Exception {
+        var prefix = prefix(capturedParts());
+        var tuples = new ArrayList<Tuple>();
+        try (Connection connection = connection()) {
+            originalSession(connection);
+            for (int index = 0; index < 3; index++) {
+                var tuple = tuple(prefix, index);
+                tuples.add(tuple);
+                prepare(connection, prefix, tuple);
+            }
+            var frozen = frozen(prefix, tuples);
+            CsiNativeToolReservation.preflightHistory(connection, original, prefix, frozen,
+                    CsiNativeToolReservation.inventory(connection, original));
+            associationTables(connection);
+            try (var statement = connection.createStatement()) {
+                statement.executeUpdate("INSERT INTO qwen_managed_session_resource_ref SELECT session_scope_key, tenant_id, workspace_id, session_id, resource_id, 99 FROM qwen_managed_session_resource");
+            }
+            var inventory = CsiNativeToolReservation.inventory(connection, original);
+            assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, frozen, inventory));
+            assertEquals(3, CsiNativeToolReservation.complete(connection, original, frozen, inventory, false, 15, 99).size());
+            for (long[] candidate : new long[][] {{16, 99}, {15, 100}, {0, 99}, {15, 0}, {-1, 99}}) {
+                assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original,
+                        frozen, inventory, false, candidate[0], candidate[1]));
+            }
+            try (var statement = connection.createStatement();
+                    var row = statement.executeQuery("SELECT COUNT(*) FROM qwen_managed_session_journal_tx")) {
+                row.next();
+                assertEquals(0, row.getInt(1));
+            }
+            try (var statement = connection.createStatement()) {
+                statement.executeUpdate("UPDATE qwen_managed_session_resource_ref SET workspace_id = 'foreign'");
+            }
+            assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original,
+                    frozen, inventory, false, 15, 99));
+        }
+    }
+
+    @Test
     void readonlyIntentPromotesOnlyEnteredResourcesAndKeepsExactRetryWithoutLateAllocation() throws Exception {
         var parts = capturedParts();
         ((ObjectNode) parts.get(3).path("functionCall")).put("name", "read_file")

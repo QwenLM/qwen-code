@@ -90,6 +90,14 @@ final class CsiNativeToolReservation {
 
     static List<ToolExecutionRecord> complete(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, boolean recovery) throws SQLException {
+        return complete(connection, original, prefix, resources, recovery, 0, 0);
+    }
+
+    static List<ToolExecutionRecord> complete(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, boolean recovery,
+            long candidateHistorySequence, long candidateHistoryRevision) throws SQLException {
+        require(candidateHistorySequence >= 0 && candidateHistoryRevision >= 0
+                && (candidateHistorySequence == 0) == (candidateHistoryRevision == 0));
         List<ToolExecutionRecord> result = new ArrayList<>();
         long recoveryByteCount = 0;
         Set<String> calls = new HashSet<>();
@@ -119,8 +127,10 @@ final class CsiNativeToolReservation {
                         JsonNode ref = JSON.valueToTree(execution.getReference());
                         require(canonical(stored).equals(canonical(ref)));
                         String batchId = id(ref, "batchId");
-                        byte[] input = bytesFor(connection, original, prefix, resources, execution.getExecutionCallId(), batchId, ref.path("inputRef"), "managed-tool-input");
-                        byte[] definition = bytesFor(connection, original, prefix, resources, execution.getExecutionCallId(), batchId, ref.path("toolDefinitionRef"), "managed-tool-definition");
+                        byte[] input = bytesFor(connection, original, prefix, resources, execution.getExecutionCallId(), batchId,
+                                ref.path("inputRef"), "managed-tool-input", candidateHistorySequence, candidateHistoryRevision);
+                        byte[] definition = bytesFor(connection, original, prefix, resources, execution.getExecutionCallId(), batchId,
+                                ref.path("toolDefinitionRef"), "managed-tool-definition", candidateHistorySequence, candidateHistoryRevision);
                         qualifyRelated(original, prefix, execution, input, definition);
                         var intent = prefix.intents().get(execution.getExecutionCallId());
                         if (intent != null) {
@@ -367,7 +377,14 @@ final class CsiNativeToolReservation {
     }
 
     private static byte[] bytesFor(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
-            CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, String executionId, String batchId, JsonNode ref, String kind)
+            CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, String executionId, String batchId,
+            JsonNode ref, String kind) throws SQLException {
+        return bytesFor(connection, original, prefix, resources, executionId, batchId, ref, kind, 0, 0);
+    }
+
+    private static byte[] bytesFor(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, String executionId, String batchId,
+            JsonNode ref, String kind, long candidateHistorySequence, long candidateHistoryRevision)
             throws SQLException {
         var frozen = prefix.fileHistory() == null ? null : prefix.fileHistory().batches().get(batchId);
         if (frozen == null) {
@@ -390,7 +407,9 @@ final class CsiNativeToolReservation {
         require(resource != null && "REFERENCED".equals(resource.state) && "MYSQL_INLINE".equals(resource.storage)
                 && resource.inlineOnly && id(ref, "resourceId").equals(resource.commandId)
                 && canonical(ref).equals(canonical(resource.ref)));
-        byte[] associated = JdbcCsiActivationAdmission.frozenResource(connection, original, ref, frozen.intentSequence());
+        byte[] associated = candidateHistorySequence > 0 && frozen.intentSequence() == candidateHistorySequence
+                ? JdbcCsiActivationAdmission.resource(connection, original, ref, candidateHistoryRevision)
+                : JdbcCsiActivationAdmission.frozenResource(connection, original, ref, frozen.intentSequence());
         require(Arrays.equals(resource.bytes, associated));
         return reference(ref, kind, ignored -> associated);
     }

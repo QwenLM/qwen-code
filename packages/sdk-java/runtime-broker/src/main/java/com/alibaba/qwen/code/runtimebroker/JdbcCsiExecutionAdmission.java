@@ -69,7 +69,13 @@ public final class JdbcCsiExecutionAdmission {
 
     static void verifyReceipts(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             JdbcCsiActivationAdmission.NativeHead head, CsiNativeActivationProof.Prefix prefix) throws SQLException {
-        receiptMembers(connection, original, head, prefix);
+        verifyReceipts(connection, original, head, prefix, 0, 0);
+    }
+
+    static void verifyReceipts(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            JdbcCsiActivationAdmission.NativeHead head, CsiNativeActivationProof.Prefix prefix,
+            long candidateHistorySequence, long candidateHistoryRevision) throws SQLException {
+        receiptMembers(connection, original, head, prefix, false, candidateHistorySequence, candidateHistoryRevision);
         head.requireCurrentTime(connection);
     }
 
@@ -100,15 +106,17 @@ public final class JdbcCsiExecutionAdmission {
 
     private static List<ToolExecutionRecord> receiptMembers(Connection connection,
             JdbcCsiFilesRetirementGuard.Original original, JdbcCsiActivationAdmission.NativeHead head,
-            CsiNativeActivationProof.Prefix prefix) throws SQLException {
-        return receiptMembers(connection, original, head, prefix, false);
+            CsiNativeActivationProof.Prefix prefix, boolean recovery) throws SQLException {
+        return receiptMembers(connection, original, head, prefix, recovery, 0, 0);
     }
 
     private static List<ToolExecutionRecord> receiptMembers(Connection connection,
             JdbcCsiFilesRetirementGuard.Original original, JdbcCsiActivationAdmission.NativeHead head,
-            CsiNativeActivationProof.Prefix prefix, boolean recovery) throws SQLException {
+            CsiNativeActivationProof.Prefix prefix, boolean recovery,
+            long candidateHistorySequence, long candidateHistoryRevision) throws SQLException {
         CsiNativeToolReservation.requireReady(connection, original);
-        var members = CsiNativeToolReservation.complete(connection, original, prefix, CsiNativeToolReservation.inventory(connection, original), recovery);
+        var members = CsiNativeToolReservation.complete(connection, original, prefix,
+                CsiNativeToolReservation.inventory(connection, original), recovery, candidateHistorySequence, candidateHistoryRevision);
         for (var member : members) {
             grant(connection, original, member, head);
         }
