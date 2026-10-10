@@ -18,7 +18,7 @@
 
 被阻塞的轮次归还挂载——绝不归还 Runtime Session：
 
-- 新增 broker 内部端点 `POST /tool-sessions/{runtimeSessionId}:release-mount`。`RuntimeBrokerService.releaseMount` 只解析驻留的 Session Context（死亡 Daemon 的残留归 LOST 族的清扫），校验 Harness 身份，并在该 Session 有活动操作时以 `409 runtime_session_busy` 拒绝——一切未结算行都算，背景进程也算：drain 的排除集之所以存在，是因为它有先停掉或结算的 sweep，而这条路径不跑 sweep。门禁读取的是检查时刻 broker 已登记的状态；它不为晚一瞬到达的违约并发准入设防。`RuntimeTransport.releaseMount` 默认失败关闭；只有 `WorkspaceRuntimeTransport` 实现它：`WorkspaceExecutionStore.release` 清空持有者列。Runtime Session 行保持 `READY`，绝不 `RELEASED`——恢复舰队保留其可收养身份（`release` 会永久落 `RELEASED`，绝不能在这里运行）。
+- 新增 broker 内部端点 `POST /tool-sessions/{runtimeSessionId}:release-mount`。`RuntimeBrokerService.releaseMount` 只解析驻留的 Session Context（死亡 Daemon 的残留归 LOST 族的清扫），校验 Harness 身份，并在该 Session 有任何未证实事项时以 `409 runtime_session_busy` 拒绝——在飞 control、任何未结算执行（背景进程也算；drain 的排除集只因它有先停掉或结算的 sweep 才存在，本路径不跑 sweep），以及已结算但 publication 交付未关闭的执行（`deliveryStatus: pending`——效果已清、证据未闭，正是 operator-recovery 协议所断言的家族）。门禁读取的是检查时刻 broker 已登记的状态；它不为晚一瞬到达的违约并发准入设防。`RuntimeTransport.releaseMount` 默认失败关闭；只有 `WorkspaceRuntimeTransport` 实现它：`WorkspaceExecutionStore.release` 清空持有者列。Runtime Session 行保持 `READY`，绝不 `RELEASED`——恢复舰队保留其可收养身份（`release` 会永久落 `RELEASED`，绝不能在这里运行）。
 - Daemon 侧，`executeHostedTurn` 捕获三个 recovery-required 错误，在重抛前调用工具轮新增的 `releaseForRecoveryBlock()`；阻塞判定本身不变。`releaseForRecoveryBlock()` 镜像 `finish()` 的 lane 条件——只覆盖 plain lane（`broker.acquire()`），不碰 Hook lane 的共享 acquisition 与 MCP lane 的会话级挂载——并调用新增的 `HostedWorkspaceBroker.releaseMount()`。归还也在没有 acquired 标记时运行：应答在 Broker 已提交 claim 之后丢失时，挂载与正常获租时一样被持住，而存储按持有者条件的清除在未授予时是 no-op。归还失败只记日志，绝不抛出——阻塞判定必须送达会话——并按有界节奏重试（两次）：因未结算执行被拒 busy 的挂载，在这些行结算后被释放；工作永不结算的会话则诚实地保持冻结。
 
 无挂载会话之后的完整 `release()` 会走传输层的无持有者捷径：`RELEASING && !isHeld` 本来就表示「挂载所围的一切都结束了」，而挂载释放只是把这件事提前弄真。捷径跳过的 worker 侧 detach 随 binding 消亡，行仍诚实地落定 `RELEASED`。
@@ -34,7 +34,7 @@
 
 - Daemon 单元见证（`packages/cli/src/serve/hosted-workspace-tool-turn.test.ts`）：已获租轮次的归还恰好调用一次 `releaseMount`，绝不调用 `release`；归还被拒只记日志、不抛出，并恰好再重试两次才保持亏欠；busy 后结算的挂载在重试中被归还；应答在授予后丢失的 acquire 仍执行归还；Hook/MCP lane 不归还任何东西。
 - 路由见证（`packages/cli/src/serve/hosted-harness-session.test.ts`）：prompt 驱动的工具轮分别经 Tool/MCP/Hook 三个错误族进入 recovery-blocked，每次恰好释放挂载一次，绝不触发完整释放，且仍准确上报 `recoveryBlocked`。
-- Broker 服务单测：驻留挂载释放保持 `READY` 且完整释放计数为零；跨 Harness 应答 `runtime_session_conflict`；非驻留 Session 应答 `runtime_reconciliation_required`；未结算执行、在飞 control、以及主行已结算但背景进程仍在跑，各自应答 `runtime_session_busy`；非 Workspace 持有的 transport 应答 501 `workspace_mount_release_unsupported`。
+- Broker 服务单测：驻留挂载释放保持 `READY` 且完整释放计数为零；跨 Harness 应答 `runtime_session_conflict`；非驻留 Session 应答 `runtime_reconciliation_required`；未结算执行、在飞 control、已结算但背景进程仍在跑、以及已结算但 publication 交付未关闭，各自应答 `runtime_session_busy`；非 Workspace 持有的 transport 应答 501 `workspace_mount_release_unsupported`。
 - 真栈 IT（`HostedWorkspaceConcurrencyIT#mountReleaseFreesHeldStorageAndKeepsTheSessionReady`）：持有者占用时竞争 acquire 应答 `workspace_busy`；有未结算执行时窄释放拒绝 `runtime_session_busy`，结算后成功；挂载行持有者列清空；Runtime Session 保持 `READY`；竞争方获得挂载；持有者随后的完整释放完成。
 - 用 issue 的复现方法重跑物理 rig：block 模式下全本轮次 2.6 秒在首次 acquire 即获租并结算，被阻塞会话与此前完全一致地上报 blocked（`workspace_busy` 计数为 0，修复前为 207）；control 模式不变；仅撤下 `await toolTurn?.releaseForRecoveryBlock();` 一行即按修复前 journal 指纹恢复楔死（机制恢复的见证——无 `:release-mount` 调用，挂载等待日志在案），恢复该行后楔死再次消失（rig 证据保存在 `.qwen/issues/13800-repro/`）。
 

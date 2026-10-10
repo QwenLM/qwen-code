@@ -588,6 +588,29 @@ public final class JdbcToolExecutionRepository
                         excludingExecutionCallIds));
     }
 
+    @Override
+    public boolean hasPendingDeliveryByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId) {
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT execution_call_id FROM qwen_tool_execution"
+                            + " WHERE binding_id = ? AND runtime_generation = ?"
+                            + " AND runtime_session_key = ?"
+                            + " AND execution_state = 'SETTLED'"
+                            + " AND result_json LIKE ?")) {
+                statement.setString(1, bindingId);
+                statement.setLong(2, runtimeGeneration);
+                statement.setString(3, JdbcRepositorySupport.valueKey(
+                        runtimeSessionId));
+                statement.setString(4,
+                        "%\"deliveryStatus\":\"pending\"%");
+                try (ResultSet result = statement.executeQuery()) {
+                    return result.next();
+                }
+            }
+        });
+    }
+
     static boolean hasActiveByRuntimeSession(Connection connection,
             String bindingId, long runtimeGeneration, String runtimeSessionId)
             throws SQLException {

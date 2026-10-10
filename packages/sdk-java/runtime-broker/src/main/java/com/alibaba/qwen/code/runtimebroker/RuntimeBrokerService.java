@@ -1588,13 +1588,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
      * full release path — and its RELEASED-forever verdict — never runs
      * here. A Session with an active operation keeps its mount honestly,
      * the same freeze the fleet promises while anything is unproven —
-     * every kind of unsettled row counts, background processes included:
-     * the drain excludes them because its sweep stops or settles them
-     * first, and this path runs no sweep. The gate reads the state as
-     * registered at this instant; it does not fence a concurrent
-     * out-of-contract admission landing one instant later. Resident-only:
-     * a Session this Broker does not hold (a dead Daemon's residue)
-     * belongs to the LOST family's own sweep, not to this path.
+     * every kind of unsettled row counts, background processes included
+     * (the drain excludes them because its sweep stops or settles them
+     * first, and this path runs no sweep), and a settled execution whose
+     * output delivery is still open counts too: the publication's
+     * discharged effect needs its evidence closed before the Workspace
+     * sees another owner, which is exactly what the operator-recovery
+     * family asserts. The gate reads the state as registered at this
+     * instant; it does not fence a concurrent out-of-contract admission
+     * landing one instant later. Resident-only: a Session this Broker
+     * does not hold (a dead Daemon's residue) belongs to the LOST
+     * family's own sweep, not to this path.
      */
     public CompletionStage<Boolean> releaseMount(String harnessSessionId,
             String runtimeSessionId) {
@@ -1617,6 +1621,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
             try {
                 if (context.hasActiveControl()
                         || executionRepository.hasActiveByRuntimeSession(
+                                context.binding().getBindingId(),
+                                context.binding().getGeneration(), runtimeId)
+                        || executionRepository.hasPendingDeliveryByRuntimeSession(
                                 context.binding().getBindingId(),
                                 context.binding().getGeneration(), runtimeId)) {
                     throw conflict("runtime_session_busy",

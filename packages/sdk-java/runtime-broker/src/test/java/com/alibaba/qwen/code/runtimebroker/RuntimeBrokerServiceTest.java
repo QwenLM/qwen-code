@@ -384,6 +384,69 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void mountReleaseStaysBusyBehindAnExecutionWhoseDeliveryIsStillOpen()
+            throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        Map<String, Object> capture = new LinkedHashMap<>();
+        capture.put("captureStatus", "detached");
+        capture.put("captureReason", null);
+        capture.put("manifest", null);
+        capture.put("previewTruncated", false);
+        capture.put("deliveryStatus", "pending");
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("executionStatus", "success");
+        result.put("responseParts", java.util.List.of(Map.of("text", "done")));
+        result.put("capture", capture);
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token,
+                        "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant",
+                                        "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId",
+                                execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+
+            @Override
+            public Map<String, Object> receipt(ToolExecutionRecord execution) {
+                throw new AssertionError("Detached family has no publication receipt to compare");
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap"));
+            Map<String, Object> reference = Map.of("sessionId", "holder",
+                    "promptId", "prompt", "callId", "call", "argsDigest",
+                    "sha256:" + "a".repeat(64));
+            fixture.transport.executeV3Result = CompletableFuture
+                    .completedFuture(Map.of("state", "prepared"));
+            fixture.transport.statusResult = CompletableFuture
+                    .completedFuture(Map.of("state", "settled", "result", result));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "holder", "holder", "key", reference, digest, "pub-1"));
+            join(fixture.service.startExecution("holder", "holder",
+                    prepared.getExecutionCallId(), payload, "pub-1", "token"));
+            ToolExecutionRecord settled = awaitExecution(
+                    fixture.executionRepository,
+                    prepared.getExecutionCallId(),
+                    ToolExecutionRecord.State.SETTLED);
+            assertEquals("pending", ((Map<?, ?>) settled.getResult()
+                    .get("capture")).get("deliveryStatus").toString());
+            // The tool work discharged, but its publication evidence is
+            // not closed: the operator-recovery family needs the mount
+            // held until then, busy exactly like an unsettled execution.
+            RuntimeBrokerException busy = failure(
+                    fixture.service.releaseMount("holder", "holder"));
+            assertEquals("runtime_session_busy", busy.getCode());
+            assertEquals(0, fixture.transport.releaseMountCalls.get());
+        }
+    }
+
+    @Test
     void releaseMountFailsClosedOnATransportWithoutWorkspaceOwnership() {
         RuntimeTransport bare = new RuntimeTransport() {
             @Override
