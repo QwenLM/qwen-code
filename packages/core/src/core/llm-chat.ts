@@ -2819,7 +2819,12 @@ export class LlmChat {
           completedToolCallIds: this.completedToolCallIds,
         });
       }
+      const cancellationReason = this.getLastTurnCancellationReason();
+      const confirmationId = this.getLastTurnCancellationConfirmationId();
       this.setHistory(newHistory, this.completedToolCallIds);
+      if (cancellationReason) {
+        this.markLastTurnCancelled(cancellationReason, confirmationId);
+      }
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
       try {

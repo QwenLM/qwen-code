@@ -331,6 +331,43 @@ describe('LlmChat', async () => {
       chat.addHistory(userText('new work'));
       expect(chat.getLastTurnCancellationConfirmationId()).toBeUndefined();
     });
+
+    it('keeps the mark when tryCompress rewrites history', async () => {
+      chat.setHistory([userText('unfinished')]);
+      chat.markLastTurnCancelled();
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce(
+        compressResult(
+          CompressionStatus.COMPRESSED,
+          [userText('summary')],
+          100_000,
+          30_000,
+        ),
+      );
+      const info = await chat.tryCompress('prompt-keep-mark', true);
+      expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(chat.isLastTurnCancelled()).toBe(true);
+    });
+
+    it('keeps an unknown cancellation confirmation when tryCompress rewrites history', async () => {
+      chat.setHistory([userText('unfinished')]);
+      chat.markLastTurnCancelled('unknown', 'daemon-1');
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce(
+        compressResult(
+          CompressionStatus.COMPRESSED,
+          [userText('summary')],
+          100_000,
+          30_000,
+        ),
+      );
+      await chat.tryCompress('prompt-keep-confirmation', true);
+      expect(chat.getLastTurnCancellationConfirmationId()).toBe('daemon-1');
+    });
   });
 
   beforeEach(() => {
