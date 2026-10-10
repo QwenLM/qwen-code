@@ -13776,6 +13776,287 @@ describe('Hosted Harness Runtime turn takeover', () => {
     return { server, loaded };
   }
 
+  /**
+   * Drives a Workspace turn to the parked agent wait through the
+   * PRODUCTION admission itself (R1-8): the model launches a foreground
+   * `agent` call, `acceptChildAgent`'s `commitAwaitAgent` lands the
+   * durable wait, and the owner's death is staged by failing the
+   * cancellation-time abandoned fold — the checkpoint stays at
+   * `await_agent` and the journal keeps every step of the admission.
+   */
+  async function parkAgentWaitTurn(): Promise<{ clientId: string }> {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    acquireSpy = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+      .mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    const originalWrite = ManagedSessionRecordSink.prototype.write;
+    const sabotage = vi
+      .spyOn(ManagedSessionRecordSink.prototype, 'write')
+      .mockImplementation(async function (
+        this: ManagedSessionRecordSink,
+        record,
+      ) {
+        if (
+          record.type === 'tool_result' &&
+          record.daemonPromptId === PROMPT_ID
+        )
+          throw new Error('settlement unavailable');
+        return originalWrite.call(this, record);
+      });
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+    });
+    expect(created.status).toBe(200);
+    const agentCall = {
+      name: 'agent',
+      callId: 'call-1',
+      args: {
+        description: 'audit the diff',
+        prompt: 'review the change',
+        run_in_background: false,
+      },
+      isClientInitiated: false,
+      prompt_id: PROMPT_ID,
+    };
+    state.model.mockImplementationOnce(
+      async ({ toolTurn, signal }) =>
+        toolTurn!.execute(
+          [agentCall],
+          [
+            {
+              functionCall: {
+                id: 'call-1',
+                name: 'agent',
+                args: agentCall.args,
+              },
+            },
+          ],
+          'test-model',
+          signal,
+        ) as never,
+    );
+    const prompt = [{ type: 'text', text: 'launch the audit' }];
+    const payloadDigest = `sha256:${createHash('sha256')
+      .update(JSON.stringify(prompt))
+      .digest('hex')}`;
+    const admitted = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({ prompt, promptId: PROMPT_ID, payloadDigest });
+    expect(admitted.status).toBe(202);
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const latestCheckpointState = async () => {
+      const journal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        key,
+      );
+      const checkpoint = journal.events.findLast(
+        (event) => event.kind === 'checkpoint.committed',
+      );
+      if (checkpoint === undefined) return undefined;
+      return JSON.parse(
+        (
+          await resources.read(
+            assertManagedSessionDurableRef(
+              checkpoint.payload['stateRef'],
+              'checkpoint',
+            ),
+          )
+        ).toString(),
+      );
+    };
+    // The wait is durable exactly when the admission's checkpoint names it:
+    // anything earlier (the Session's initial checkpoint) must not pass.
+    await vi.waitFor(
+      async () => {
+        expect((await latestCheckpointState())?.continuation.phase).toBe(
+          'await_agent',
+        );
+      },
+      { timeout: 10_000 },
+    );
+    // The owner "crashes": the cancellation reaches the abandoned fold,
+    // whose write was sabotaged — the wait stays parked, and the durable
+    // record is exactly what the library-level wedge hand-mints.
+    await headers(supertest(server).post(`/session/${SESSION_ID}/cancel`)).set(
+      'X-Qwen-Client-Id',
+      created.body.clientId as string,
+    );
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: 10_000 },
+    );
+    sabotage.mockRestore();
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+    const savedState = await latestCheckpointState();
+    expect(savedState.continuation.phase).toBe('await_agent');
+    expect(savedState.agentWait.runs).toMatchObject([
+      {
+        childRunId: `${PROMPT_ID}:call-1`,
+        functionCallId: 'call-1',
+        consumed: false,
+      },
+    ]);
+    return { clientId: created.body.clientId as string };
+  }
+
+  it('admits a continue for the parked agent wait (R1-8)', async () => {
+    await parkAgentWaitTurn();
+    const { server, loaded } = await loadReplacement(
+      false,
+      'hosted-workspace-shell/1',
+    );
+    expect(loaded.status).toBe(200);
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as {
+      phase: string;
+      checkpointId: string;
+      activationId: string;
+      executions: Array<Record<string, unknown>>;
+    };
+    expect(recovery.phase).toBe('await_agent');
+    expect(recovery.executions).toMatchObject([
+      {
+        functionCallId: 'call-1',
+        outcome: 'known',
+        status: { state: 'executing' },
+      },
+    ]);
+    // The gate this PR exists for: reverting it makes this answer 409
+    // hosted_turn_recovery_required while the parent stays wedged.
+    const continued = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(continued.status).toBe(200);
+    // The re-driven Turn now waits on the ledger for a child that never
+    // settles in this test: abandon it the way a live cancel would, so
+    // the test leaves nothing in flight.
+    await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/cancel`),
+    ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    await vi.waitFor(
+      async () => {
+        const status = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  it('settles the parked agent wait through the cancel route (R1-8)', async () => {
+    await parkAgentWaitTurn();
+    const { server, loaded } = await loadReplacement(
+      true,
+      'hosted-workspace-shell/1',
+    );
+    expect(loaded.status).toBe(200);
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as {
+      phase: string;
+      checkpointId: string;
+      activationId: string;
+    };
+    expect(recovery.phase).toBe('await_agent');
+    const cancelled = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.body.accepted).toBe(true);
+    // The cancelled takeover folded the live arm's abandoned answer and
+    // advanced the checkpoint past its wait — exactly once.
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const journal = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      key,
+    );
+    expect(
+      journal.events.filter(
+        (event) =>
+          event.kind === 'turn.settled' &&
+          event.payload['turnId'] === PROMPT_ID,
+      ),
+    ).toHaveLength(1);
+    const checkpoint = journal.events.findLast(
+      (event) => event.kind === 'checkpoint.committed',
+    )!;
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const savedState = JSON.parse(
+      (
+        await resources.read(
+          assertManagedSessionDurableRef(
+            checkpoint.payload['stateRef'],
+            'checkpoint',
+          ),
+        )
+      ).toString(),
+    );
+    // The cancelled terminal advanced the checkpoint past the wait and
+    // closed the Turn boundary — no carried group survives the turn's end
+    // (encode drops the key for a null group, so the field is absent).
+    expect(savedState.continuation.phase).toBe('before_model');
+    expect(savedState.agentWait ?? null).toBeNull();
+    const transcript = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    expect(JSON.stringify(transcript.body)).toContain(
+      'cancelled before the child agent finished',
+    );
+    expect(JSON.stringify(transcript.body)).toContain('"turn_complete"');
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
   it.each(
     (['continue', 'cancel'] as const).flatMap((route) =>
       (['closing', 'authorizing', 'detached'] as const).map((phase) => ({

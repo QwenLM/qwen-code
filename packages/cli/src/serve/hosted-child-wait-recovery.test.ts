@@ -12,11 +12,14 @@
  * result never consumed, and close/delete could never pay the cascade debt
  * because the parent never became attachable again.
  *
- * Each case drives the real chain: a live authority parks at the durable
- * wait, a replacement authority over the same store classifies the parked
- * Turn through recoverHostedRuntimeTurn, and the resume arm folds what the
- * checkpoint still owes — the same authority + checkpoint + journal the
- * continue/cancel routes act on.
+ * The suite pins the mechanism's own code: a live authority parks at the
+ * durable wait, a replacement authority over the same store classifies
+ * through recoverHostedRuntimeTurn, and the settle/fill/resume helpers
+ * shared by every settle path fold what the checkpoint still owes. The
+ * routes themselves are driven end-to-end — including one wedge minted
+ * by the production admission — in hosted-harness-session.test.ts
+ * (R1-8); the wedge here is minted by direct harness commits, which the
+ * route cases prove reaches the same stored shape.
  */
 
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -51,7 +54,10 @@ import './hosted-workspace-broker.js';
 
 const SESSION_ID = '22222222-2222-4222-8222-222222222222';
 const PROMPT_ID = '33333333-3333-4333-8333-333333333333';
-const CHILD_RUN_ID = 'prompt:call-1';
+// The production derivation (hostedChildRunIdFor), never the mock
+// Broker's hardcoded runtimeSessionId ('prompt') — an id no production
+// launch would mint is off the surface the fill derives from (R1-8).
+const CHILD_RUN_ID = `${PROMPT_ID}:call-1`;
 const DIGEST = 'a'.repeat(64);
 
 const broker = vi.hoisted(() => ({
@@ -171,10 +177,13 @@ describe('hosted child wait recovery (#13708)', () => {
     );
   }
 
-  /** A replacement-process ToolTurn: resume arm, real commit channel. */
-  function resumeTurn(session: ManagedSession): HostedWorkspaceToolTurn {
-    const consumption: string[] = [];
-    void consumption;
+  /** A replacement-process ToolTurn: resume arm, real commit channel.
+   * The caller keeps `consumption` so the resume arm's replay-safe mark
+   * is asserted, never collected silently (R1-11). */
+  function resumeTurn(
+    session: ManagedSession,
+    consumption: string[],
+  ): HostedWorkspaceToolTurn {
     return new HostedWorkspaceToolTurn(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
       session,
@@ -338,6 +347,7 @@ describe('hosted child wait recovery (#13708)', () => {
     await parkWedged();
     const replacement = await open('boot-2', false);
     try {
+      const consumption: string[] = [];
       const outcome = await recoverHostedRuntimeTurn({
         session: replacement,
         sessionId: SESSION_ID,
@@ -353,7 +363,7 @@ describe('hosted child wait recovery (#13708)', () => {
       // The relay keeps working against the attached daemon: the child
       // settles, then the resume arm folds its answer into the tool call.
       await settleTheChild(replacement);
-      await resumeTurn(replacement).resumeAgentWaitRuns(
+      await resumeTurn(replacement, consumption).resumeAgentWaitRuns(
         [waitRun],
         'recovered',
         new AbortController().signal,
@@ -378,6 +388,13 @@ describe('hosted child wait recovery (#13708)', () => {
       }
       const children = childrenOf(replacement);
       expect(children.acceptance(CHILD_RUN_ID)).toBeDefined();
+      // The replay-safe marks ran outside the fold's journaled gate:
+      // the relay's accepted delivery and the parent's consumption
+      // queue both advanced (R1-11).
+      expect(children.record(CHILD_RUN_ID)?.run.delivery?.state).toBe(
+        'accepted',
+      );
+      expect(consumption).toEqual([CHILD_RUN_ID]);
     } finally {
       await replacement.close();
     }
@@ -418,7 +435,8 @@ describe('hosted child wait recovery (#13708)', () => {
 
     const replacement = await open('boot-2', false);
     try {
-      await resumeTurn(replacement).resumeAgentWaitRuns(
+      const consumption: string[] = [];
+      await resumeTurn(replacement, consumption).resumeAgentWaitRuns(
         [waitRun],
         'recovered',
         new AbortController().signal,
@@ -445,9 +463,10 @@ describe('hosted child wait recovery (#13708)', () => {
     await parkWedged();
     const replacement = await open('boot-2', false);
     try {
+      const consumption: string[] = [];
       const abort = new AbortController();
       abort.abort();
-      await resumeTurn(replacement).resumeAgentWaitRuns(
+      await resumeTurn(replacement, consumption).resumeAgentWaitRuns(
         [waitRun],
         'recovered',
         abort.signal,
@@ -467,10 +486,13 @@ describe('hosted child wait recovery (#13708)', () => {
         ]);
       }
       // The abandoned child is not revoked: its run record stands for the
-      // relay to keep driving.
+      // relay to keep driving. The abandoned fold pays no accepted
+      // delivery — there is none — so the resume arm leaves the
+      // consumption queue untouched here.
       const record = childrenOf(replacement).record(CHILD_RUN_ID);
       expect(record).toBeDefined();
       expect(record?.run.state).not.toBe('cancelled');
+      expect(consumption).toEqual([]);
     } finally {
       await replacement.close();
     }
@@ -520,8 +542,9 @@ describe('hosted child wait recovery (#13708)', () => {
     // carried all-consumed shape — then this owner dies too.
     const first = await open('boot-2', false);
     try {
+      const consumption: string[] = [];
       await settleTheChild(first);
-      await resumeTurn(first).resumeAgentWaitRuns(
+      await resumeTurn(first, consumption).resumeAgentWaitRuns(
         [{ ...waitRun, functionCallId: 'call-1' }],
         'recovered',
         new AbortController().signal,
@@ -588,8 +611,9 @@ describe('hosted child wait recovery (#13708)', () => {
     const orphanRunId = `${PROMPT_ID}:call-2`;
     const first = await open('boot-2', false);
     try {
+      const consumption: string[] = [];
       await settleTheChild(first);
-      await resumeTurn(first).resumeAgentWaitRuns(
+      await resumeTurn(first, consumption).resumeAgentWaitRuns(
         [{ ...waitRun, functionCallId: 'call-1' }],
         'recovered',
         new AbortController().signal,
@@ -620,6 +644,10 @@ describe('hosted child wait recovery (#13708)', () => {
     }
     const replacement = await open('boot-3', false);
     try {
+      // The poll's wait is the behavior this case is named for: the
+      // ledger read must fire more than once, never a single read that
+      // gives up (R1-36).
+      const ledgerReads = vi.spyOn(HostedChildAgentSession.prototype, 'record');
       const driving = (async () => {
         await new Promise((resolve) => setTimeout(resolve, 600));
         await settleOrphan(replacement, orphanRunId, 'two late diffs clean');
@@ -634,6 +662,10 @@ describe('hosted child wait recovery (#13708)', () => {
       });
       await driving;
       expect(filled).toBe(1);
+      const orphanReads = ledgerReads.mock.calls.filter(
+        ([runId]) => runId === orphanRunId,
+      ).length;
+      expect(orphanReads).toBeGreaterThan(1);
       const projected = await replacement.sink.project();
       const callTwo = toolResultEntries(projected).find((entry) =>
         entry.message?.parts?.some(
@@ -656,8 +688,9 @@ describe('hosted child wait recovery (#13708)', () => {
     const orphanRunId = `${PROMPT_ID}:call-2`;
     const first = await open('boot-2', false);
     try {
+      const consumption: string[] = [];
       await settleTheChild(first);
-      await resumeTurn(first).resumeAgentWaitRuns(
+      await resumeTurn(first, consumption).resumeAgentWaitRuns(
         [{ ...waitRun, functionCallId: 'call-1' }],
         'recovered',
         new AbortController().signal,
@@ -713,8 +746,9 @@ describe('hosted child wait recovery (#13708)', () => {
     await parkWedged(true);
     const first = await open('boot-2', false);
     try {
+      const consumption: string[] = [];
       await settleTheChild(first);
-      await resumeTurn(first).resumeAgentWaitRuns(
+      await resumeTurn(first, consumption).resumeAgentWaitRuns(
         [{ ...waitRun, functionCallId: 'call-1' }],
         'recovered',
         new AbortController().signal,
@@ -755,6 +789,7 @@ describe('hosted child wait recovery (#13708)', () => {
         receipt: Buffer.from('{"stopReason":"end_turn"}', 'utf8'),
       });
       await children.accept(orphanRunId);
+      const consumed: string[] = [];
       const filled = await fillParkedRoundAgentGaps({
         managed: replacement,
         sessionId: SESSION_ID,
@@ -762,6 +797,7 @@ describe('hosted child wait recovery (#13708)', () => {
         cwd: root,
         gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
         children,
+        consume: (childRunId) => consumed.push(childRunId),
       });
       expect(filled).toBe(1);
       const projected = await replacement.sink.project();
@@ -777,6 +813,15 @@ describe('hosted child wait recovery (#13708)', () => {
         'cancelled',
       );
       expect(children.acceptance(orphanRunId)).toBeDefined();
+      // The fill's replay-safe marks rides outside the fold gate: the
+      // relay's delivery advanced to accepted and the parent's
+      // consumption queue received the run (R1-11). The wait's own
+      // call-1 stays out of the fill — its marks belong to the wait arm
+      // that already ran them.
+      expect(children.record(orphanRunId)?.run.delivery?.state).toBe(
+        'accepted',
+      );
+      expect(consumed).toEqual([orphanRunId]);
     } finally {
       await replacement.close();
     }
@@ -787,8 +832,9 @@ describe('hosted child wait recovery (#13708)', () => {
     const orphanRunId = `${PROMPT_ID}:call-2`;
     const first = await open('boot-2', false);
     try {
+      const consumption: string[] = [];
       await settleTheChild(first);
-      await resumeTurn(first).resumeAgentWaitRuns(
+      await resumeTurn(first, consumption).resumeAgentWaitRuns(
         [{ ...waitRun, functionCallId: 'call-1' }],
         'recovered',
         new AbortController().signal,
@@ -856,10 +902,11 @@ describe('hosted child wait recovery (#13708)', () => {
     await parkWedged(true);
     const replacement = await open('boot-2', false);
     try {
+      const consumption: string[] = [];
       // The admitted wait folds first — only then does the round's true gap
       // stand out: call-2, which the dead loop never even admitted.
       await settleTheChild(replacement);
-      await resumeTurn(replacement).resumeAgentWaitRuns(
+      await resumeTurn(replacement, consumption).resumeAgentWaitRuns(
         [{ ...waitRun, functionCallId: 'call-1' }],
         'recovered',
         new AbortController().signal,
@@ -908,12 +955,13 @@ describe('hosted child wait recovery (#13708)', () => {
     }
   });
 
-  it('after the re-entry the session settles the turn and stands clean for the next', async () => {
+  it('after the re-entry the durable basis stands clean for the next turn', async () => {
     await parkWedged();
     const replacement = await open('boot-2', false);
     try {
+      const consumption: string[] = [];
       await settleTheChild(replacement);
-      await resumeTurn(replacement).resumeAgentWaitRuns(
+      await resumeTurn(replacement, consumption).resumeAgentWaitRuns(
         [waitRun],
         'recovered',
         new AbortController().signal,
@@ -973,13 +1021,79 @@ describe('hosted child wait recovery (#13708)', () => {
     }
   });
 
+  it('a failed admitted orphan folds its terminal cause, never the never-admitted answer (R1-10)', async () => {
+    await parkWedged(true);
+    const orphanRunId = `${PROMPT_ID}:call-2`;
+    const first = await open('boot-2', false);
+    try {
+      const consumption: string[] = [];
+      await settleTheChild(first);
+      await resumeTurn(first, consumption).resumeAgentWaitRuns(
+        [{ ...waitRun, functionCallId: 'call-1' }],
+        'recovered',
+        new AbortController().signal,
+      );
+      await childrenOf(first).admit({
+        childRunId: orphanRunId,
+        ownerScopeId: SESSION_ID,
+        rootSessionId: SESSION_ID,
+        completion: 'tool',
+        description: 'second audit',
+        prompt: 'review two',
+        definition: {
+          definitionId: 'hosted-agent/hosted-workspace-files/1',
+          definitionRevision: 1,
+          definitionDigest: first.authority.sessionHeader.definitionRef.digest,
+        },
+        workingDirectory: '.',
+        executionCallId: orphanRunId,
+      });
+      // The orphan failed before its parent died: the poll's third exit
+      // must fold that terminal cause, not mint a never-admitted record.
+      await childrenOf(first).settleFailed(orphanRunId, {
+        stopReason: 'quota_exceeded',
+        reason: 'byte_limit',
+        started: false,
+      });
+    } finally {
+      await first.close();
+    }
+    const replacement = await open('boot-3', false);
+    try {
+      const filled = await fillParkedRoundAgentGaps({
+        managed: replacement,
+        sessionId: SESSION_ID,
+        promptId: PROMPT_ID,
+        cwd: root,
+        gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+        children: childrenOf(replacement),
+      });
+      expect(filled).toBe(1);
+      const projected = await replacement.sink.project();
+      const callTwo = toolResultEntries(projected).find((entry) =>
+        entry.message?.parts?.some(
+          (part) => part.functionResponse?.id === 'call-2',
+        ),
+      );
+      expect(JSON.stringify(callTwo?.message?.parts)).toContain(
+        'Child agent run failed',
+      );
+      expect(JSON.stringify(callTwo?.message?.parts)).not.toContain(
+        'interrupted before this child agent was admitted',
+      );
+    } finally {
+      await replacement.close();
+    }
+  });
+
   it('a background-completion orphan folds the started receipt, never a poll (R1-24)', async () => {
     await parkWedged(true);
     const orphanRunId = `${PROMPT_ID}:call-2`;
     const first = await open('boot-2', false);
     try {
+      const consumption: string[] = [];
       await settleTheChild(first);
-      await resumeTurn(first).resumeAgentWaitRuns(
+      await resumeTurn(first, consumption).resumeAgentWaitRuns(
         [{ ...waitRun, functionCallId: 'call-1' }],
         'recovered',
         new AbortController().signal,

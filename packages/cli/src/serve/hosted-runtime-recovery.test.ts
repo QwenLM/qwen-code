@@ -387,6 +387,12 @@ describe('recoverHostedRuntimeTurn', () => {
           },
         ],
       });
+      // The wire field is required on every entry; this phase has no
+      // Runtime session to name, so the hosted runtime-session identity
+      // of the parked Turn rides it (R1-32).
+      expect(turn.report.executions[0]?.runtimeSessionId).toBe(
+        hostedRuntimeSessionId(PROMPT_ID),
+      );
     } finally {
       await replacement.close();
     }
@@ -441,6 +447,9 @@ describe('recoverHostedRuntimeTurn', () => {
         outcome: 'known',
         status: { state: 'executing' },
       });
+      expect(turn.report.executions[0]?.runtimeSessionId).toBe(
+        hostedRuntimeSessionId(PROMPT_ID),
+      );
     } finally {
       await replacement.close();
     }

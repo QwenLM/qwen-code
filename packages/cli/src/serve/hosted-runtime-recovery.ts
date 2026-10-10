@@ -529,6 +529,11 @@ export async function fillParkedRoundAgentGaps(input: {
   // filling THAT round writes a fabricated answer for a call with no
   // agent story at all.
   const namedRounds = new Set(waitRuns.map((run) => run.modelMessageId));
+  // The wait's own calls are never gaps either: their folds and their
+  // replay-safe marks belong to the wait-arm channel (settle / resume),
+  // and an admitted-but-unsettled wait run polled here would hang the
+  // fill forever.
+  const waitedCalls = new Set(waitRuns.map((run) => run.functionCallId));
   const projected = await input.managed.sink.project();
   const assistant = projected
     .filter(
@@ -590,6 +595,7 @@ export async function fillParkedRoundAgentGaps(input: {
     const callId = part.functionCall?.id;
     const name = part.functionCall?.name;
     if (typeof callId !== 'string' || typeof name !== 'string') continue;
+    if (waitedCalls.has(callId)) continue;
     // The journaled set gates only the fold, never the replay-safe marks —
     // both sibling arms in this diff document and follow the same rule.
     const foldOwed = !journaled.has(callId);
