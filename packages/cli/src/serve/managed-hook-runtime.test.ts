@@ -1276,7 +1276,12 @@ describe('ManagedHookRuntime', () => {
       async () => {
         expect(await instance.control('runtime-session', call)).toMatchObject({
           state: 'settled',
-          result: { success: false, outcome: 'timeout', duration: 0 },
+          result: {
+            success: false,
+            outcome: 'timeout',
+            duration: 0,
+            notStarted: true,
+          },
         });
       },
       { timeout: 3000 },
@@ -1442,7 +1447,7 @@ describe('ManagedHookRuntime', () => {
       async () => {
         expect(await instance.control('runtime-session', call)).toMatchObject({
           state: 'settled',
-          result: { outcome: 'cancelled' },
+          result: { outcome: 'cancelled', duration: 0, notStarted: true },
         });
       },
       { timeout: 3000 },
@@ -1452,6 +1457,84 @@ describe('ManagedHookRuntime', () => {
       readFile(path.join(directory, 'counter'), 'utf8'),
     ).rejects.toThrow();
     await instance.close();
+  });
+
+  it('marks a pre-dispatch cancel as a proven non-execution', async () => {
+    const modulePath = path.join(directory, 'pre-dispatch-handler.mjs');
+    await writeFile(
+      modulePath,
+      `import { appendFileSync } from 'node:fs';
+       export const registered = { handlerRevision: 1, callback: async (input) => {
+         appendFileSync(input.cwd + '/counter', 'ran\\n');
+         return { continue: true };
+       } };`,
+    );
+    // Park the execution after the module has evaluated: the second
+    // sessionDirectory read is the last await before the dispatch check.
+    let releaseDirectory: ((value: string) => void) | undefined;
+    let directories = 0;
+    const instance = new ManagedHookRuntime(
+      { ...key, workspaceGeneration: '1' },
+      (id) => {
+        directories++;
+        if (directories === 2)
+          return new Promise<string>((resolve) => {
+            releaseDirectory = resolve;
+          });
+        return Promise.resolve(
+          id === 'runtime-session' ? directory : undefined,
+        );
+      },
+      {
+        version: 1,
+        catalogs: [
+          {
+            ...pin,
+            tenantId: key.tenantId,
+            workspaceId: key.workspaceId,
+            hooks: [
+              {
+                ...definition(),
+                config: { type: 'function', timeout: 5000 },
+                handler: {
+                  handlerId: 'pre-dispatch',
+                  handlerRevision: 1,
+                  modulePath,
+                  exportName: 'registered',
+                },
+              },
+            ],
+          },
+        ],
+      },
+    );
+    runtimes.push(instance);
+    const call = request();
+    await instance.control('runtime-session', call);
+    // Parked at the post-import directory read: the module has evaluated
+    // and the callback wrapper is built, but nothing has dispatched.
+    await vi.waitFor(() => expect(releaseDirectory).toBeDefined());
+    await instance.control('runtime-session', {
+      kind: 'hook-cancel',
+      sessionKey: key,
+      operationId: 'cancel',
+      targetOperationId: call.operationId,
+    });
+    releaseDirectory!(directory);
+    // The callback provably never dispatched, so the receipt carries the
+    // notStarted marker the Harness fence classifier requires.
+    expect(await settled(instance)).toMatchObject({
+      state: 'settled',
+      result: {
+        success: false,
+        outcome: 'cancelled',
+        duration: 0,
+        notStarted: true,
+      },
+    });
+    await expect(
+      readFile(path.join(directory, 'counter'), 'utf8'),
+    ).rejects.toThrow();
   });
 
   it('keeps oversized output as a bounded failure receipt without replay', async () => {

@@ -313,7 +313,7 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
     for (const prior of revisions.values()) requireSameRef(prior, ref);
     revisions.set(revision, ref);
     references.set(ref.resourceId, revisions);
-    const nested = nestedResourceRefs(ref, stored.bytes);
+    const nested = collectNestedResourceRefs(ref, stored.bytes);
     pending.push(...nested.map((ref) => ({ revision, ref })));
   }
   if (resources.size !== references.size) {
@@ -499,7 +499,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       const staged = this.staged.get(ref.resourceId);
       if (staged !== undefined) {
         requireSameRef(staged.ref, ref);
-        pending.push(...nestedResourceRefs(ref, staged.bytes));
+        pending.push(...collectNestedResourceRefs(ref, staged.bytes));
       }
     }
     return [...closure.values()].map((ref) => {
@@ -1694,7 +1694,12 @@ function parseRestoreHead(value: unknown): RestoreHead {
   };
 }
 
-function nestedResourceRefs(
+/**
+ * Every ref a committed resource closes over transitively. Exported so the
+ * envelope-closure invariant (a `managed-input` carrying attachment refs)
+ * has a directly testable seam.
+ */
+export function collectNestedResourceRefs(
   ref: ManagedSessionDurableRef,
   bytes: Buffer,
 ): ManagedSessionDurableRef[] {
@@ -1720,6 +1725,23 @@ function nestedResourceRefs(
     if (ref.kind === 'managed-hook-message-chunks')
       return collectRefs((record as { parts: unknown[] }).parts);
     return collectRefs([record]);
+  }
+  // An input's envelope embeds what it admits — a channel attachment's ref
+  // among them. The commit closes over those bytes exactly like an
+  // explicit ref, or a reopened reader finds the envelope but 404s on its
+  // attachments (R8 P1). A body this parse cannot represent has no refs
+  // to close over by definition.
+  if (ref.kind === 'managed-input') {
+    try {
+      return collectRefs([
+        parseManagedSessionRecordJson(
+          bytes.toString('utf8'),
+          MANAGED_SESSION_LIMITS.maxEventBytes,
+        ),
+      ]);
+    } catch {
+      return [];
+    }
   }
   return [];
 }

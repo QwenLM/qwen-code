@@ -42,7 +42,7 @@ public final class ManagedExtensionRecords {
             "tool.receipt", "checkpoint.committed", "context.compacted",
             "cancel.requested", "turn.settled", "config.bound",
             "lifecycle.changed", "domain.committed", "message.delta",
-            "message.retracted");
+            "message.retracted", "operation.replayed");
     public static final int MAX_ID_BYTES = 512;
     public static final int MAX_TEXT_BYTES = 4096;
     public static final int MAX_GRANT_PHASES = 16;
@@ -143,6 +143,12 @@ public final class ManagedExtensionRecords {
     /** Run states after which no observation, output or run change may land. */
     static final List<String> TERMINAL = List.of("settled", "failed",
             "cancelled");
+
+    /** The terminal run states, as every binding and mirror rule names them. */
+    public static boolean isTerminalRunState(String state) {
+        return TERMINAL.contains(state);
+    }
+
     private static final Set<String> GRANT_KEYS = Set.of("sessionKey",
             "operationId", "domain", "operationRevision", "ownerId",
             "workspaceGeneration", "resourceScope", "leaseDurationMs",
@@ -163,13 +169,15 @@ public final class ManagedExtensionRecords {
             "stopReason", "stopRequested", "exitCode", "exitSignal", "run");
     private static final List<String> CHILD_FIXED = List.of("kind", "shellId",
             "ownerScopeId", "commandRef");
+    // The closed keys of both child Session kinds: a workflow child rides
+    // the child agent's lifecycle field for field.
     private static final Set<String> CHILD_AGENT_KEYS = Set.of("kind",
             "childRunId", "ownerScopeId", "rootSessionId", "depth",
             "completion", "inputRef", "workspaceMode", "workingDirectory",
             "childSessionId", "predecessorChildRunId", "resultVersion",
             "resultRef", "terminalReceiptRef", "stopReason", "stopRequested",
             "run");
-    // The fields that no revision of a child agent may change.
+    // The fields that no revision of a child Session run may change.
     // `resultVersion` is not here on purpose: the parser forces it to 1,
     // so no two revisions can ever differ on it, and a fixed-key entry
     // for it could never refuse.
@@ -177,6 +185,12 @@ public final class ManagedExtensionRecords {
             "childRunId", "ownerScopeId", "rootSessionId", "depth",
             "completion", "inputRef", "workspaceMode", "workingDirectory",
             "predecessorChildRunId");
+    // The child run kinds a child Session of its own executes (H4a, H4c).
+    // The dispatch and every rule that holds for both kinds name them
+    // through this set rather than as "not a Shell", so a kind added to the
+    // contract joins no child Session rule until it is listed here.
+    private static final Set<String> CHILD_SESSION_KINDS = Set.of(
+            "child_agent", "workflow");
     private static final List<String> CHILD_WORKSPACE_MODES = List.of(
             "shared", "snapshot", "worktree");
     private static final String CHILD_WORKSPACE_MODES_TEXT =
@@ -414,13 +428,20 @@ public final class ManagedExtensionRecords {
         require(!"reserved".equals(state)
                 || execution == null && delivery.isNull(),
                 "run has nothing dispatched while reserved");
-        require(!"outcome_unknown".equals(execution)
-                && !"corrupt".equals(execution)
-                || "recovery_blocked".equals(state),
+        // The one failure that needs no proof: the run stopped inside its
+        // turn, so `failed` names the turn and `outcome_unknown` names what
+        // could not be known, and the pair stays visible (F3).
+        require(!("outcome_unknown".equals(execution)
+                        || "corrupt".equals(execution))
+                || "recovery_blocked".equals(state)
+                || "outcome_unknown".equals(execution)
+                        && "failed".equals(state),
                 "run stays recovery_blocked while its execution is unproven");
         require(!TERMINAL.contains(state) || execution == null
                 || "settled".equals(execution)
-                || "not_started_proven".equals(execution),
+                || "not_started_proven".equals(execution)
+                || "failed".equals(state)
+                        && "outcome_unknown".equals(execution),
                 "run ends only with an execution proven to have ended");
         require(!"settled".equals(state)
                 || !"not_started_proven".equals(execution),
@@ -706,8 +727,9 @@ public final class ManagedExtensionRecords {
 
     /**
      * Checks the body of a managed-child_run schema version 1 record by its
-     * own {@code kind} field: {@code "shell"} (H3) or {@code "child_agent"}
-     * (H4), each a closed shape (see managed-child-run-record.ts for the
+     * own {@code kind} field: {@code "shell"} (H3), or one of the child
+     * Session kinds {@code "child_agent"} (H4a) and {@code "workflow"}
+     * (H4c), each a closed shape (see managed-child-run-record.ts for the
      * same rules).
      */
     public static void requireChildRun(JsonNode child) {
@@ -717,19 +739,39 @@ public final class ManagedExtensionRecords {
                 requireChildShell(child);
                 return;
             }
-            if ("child_agent".equals(kind.textValue())) {
-                requireChildAgent(child);
+            if (CHILD_SESSION_KINDS.contains(kind.textValue())) {
+                requireChildSession(child);
                 return;
             }
         }
-        require(false, "Child run kind must be one of shell, child_agent in"
-                + " schema version 1");
+        require(false, "Child run kind must be one of shell, child_agent,"
+                + " workflow in schema version 1");
     }
 
-    /** The task kind one child run projects, by its own kind. */
+    /**
+     * Whether a child Session of its own executes {@code child}, a body
+     * {@link #requireChildRun} accepts. Every rule that holds for both child
+     * Session kinds asks this rather than "not a Shell" (see
+     * isChildSessionRun in managed-child-run-record.ts).
+     */
+    public static boolean isChildSessionRun(JsonNode child) {
+        return CHILD_SESSION_KINDS.contains(child.get("kind").textValue());
+    }
+
+    /**
+     * The task kind one child run projects, by its own kind. Each kind is
+     * named, so an unlisted kind is refused rather than projected as a
+     * child agent by default.
+     */
     public static String childRunTaskKind(JsonNode child) {
-        return "shell".equals(child.get("kind").textValue())
-                ? "background_shell" : "child_agent";
+        String kind = child.get("kind").textValue();
+        return switch (kind) {
+            case "shell" -> "background_shell";
+            case "child_agent" -> "child_agent";
+            case "workflow" -> "workflow";
+            default -> throw new InvalidRecordException(
+                    "Child run kind " + kind + " projects no task kind.");
+        };
     }
 
     /** The identity that keys a child run's revision chain, by its kind. */
@@ -862,18 +904,20 @@ public final class ManagedExtensionRecords {
     }
 
     /**
-     * Checks the body of a managed-child_run schema version 1 record
-     * ({@code kind: "child_agent"}): one child Session per record (H4 of
-     * #12827; the checks run in the same order as the TypeScript validator
-     * so both report the same clause of a doubly broken body).
+     * Checks the body of a managed-child_run schema version 1 record of a
+     * child Session kind ({@code kind: "child_agent"} or
+     * {@code "workflow"}): one child Session per record under one shared
+     * shape (H4 of #12827; the checks run in the same order as the
+     * TypeScript validator so both report the same clause of a doubly
+     * broken body).
      */
-    private static void requireChildAgent(JsonNode child) {
+    private static void requireChildSession(JsonNode child) {
         closed(child, CHILD_AGENT_KEYS, "childRun");
         JsonNode run = child.get("run");
         requireRun(run);
-        // A child agent is started by one tool call; its result travels
-        // the session delivery line its relay scans, never an effect
-        // identity or an external delivery.
+        // A child Session run is started by one tool call; its result
+        // travels the session delivery line its relay scans, never an
+        // effect identity or an external delivery.
         require(!run.get("executionCallId").isNull()
                 && run.get("effectId").isNull()
                 && run.get("deliveryId").isNull(),
@@ -883,6 +927,12 @@ public final class ManagedExtensionRecords {
         require(!delivery.isNull()
                 && "session".equals(delivery.get("target").textValue()),
                 "Child run delivery must target the parent session");
+        // A workflow run exists to run one workflow revision, so the
+        // launch itself names it: the pin is required from the opening
+        // revision on, never merely by the dispatch.
+        require(!"workflow".equals(child.get("kind").textValue())
+                || !run.get("definition").isNull(),
+                "Workflow run must pin its workflow definition from launch");
         // The launched definition is pinned no later than the dispatch
         // that admits the creation; the shared successor rule makes it
         // unaddable after that dispatch, so an absence is unrepairable.
@@ -1055,8 +1105,9 @@ public final class ManagedExtensionRecords {
 
     /**
      * Whether {@code child} may open its chain: a Shell's run opens with no
-     * stop request and no output; a child agent's run opens with the
-     * delivery planned, no Session created, no result and no stop request.
+     * stop request and no output; a child Session run (either kind) opens
+     * with the delivery planned, no Session created, no result and no stop
+     * request.
      */
     public static boolean isChildRunStart(JsonNode child) {
         if (!accepts(() -> requireChildRun(child))
@@ -1067,8 +1118,9 @@ public final class ManagedExtensionRecords {
         if ("shell".equals(child.get("kind").textValue())) {
             return child.get("outputRef").isNull();
         }
-        return "planned".equals(text(child.get("run").get("delivery"),
-                "state"))
+        return isChildSessionRun(child)
+                && "planned".equals(text(child.get("run").get("delivery"),
+                        "state"))
                 && child.get("childSessionId").isNull()
                 && child.get("resultRef").isNull()
                 && child.get("terminalReceiptRef").isNull();
@@ -1115,6 +1167,9 @@ public final class ManagedExtensionRecords {
                 return same(previous, next);
             }
             return true;
+        }
+        if (!isChildSessionRun(previous)) {
+            return false;
         }
         // Once the run is terminal the record changes only its delivery
         // line: the run's own freeze confines movement to the delivery, and
@@ -1578,11 +1633,11 @@ public final class ManagedExtensionRecords {
                 .isEmpty(), label + " must be a non-empty string");
         String value = node.textValue();
         long loneSurrogates = 0;
+        boolean control = false;
         for (int index = 0; index < value.length(); index++) {
             char character = value.charAt(index);
-            require(character > 0x1f
-                    && (character < 0x7f || character > 0x9f),
-                    label + " must not contain control characters");
+            control |= character <= 0x1f
+                    || (character >= 0x7f && character <= 0x9f);
             if (Character.isHighSurrogate(character)) {
                 if (index + 1 < value.length()
                         && Character.isLowSurrogate(value.charAt(index + 1))) {
@@ -1594,9 +1649,12 @@ public final class ManagedExtensionRecords {
                 loneSurrogates++;
             }
         }
+        // The byte budget is checked before the control rule, the order
+        // boundedString applies, so an input breaking both reports one clause.
         require(value.getBytes(StandardCharsets.UTF_8).length
                 + 2L * loneSurrogates <= MAX_TEXT_BYTES,
                 label + " exceeds " + MAX_TEXT_BYTES + " UTF-8 bytes");
+        require(!control, label + " must not contain control characters");
         return value;
     }
 

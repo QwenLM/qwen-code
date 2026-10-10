@@ -129,6 +129,7 @@ function importHookModule(
                   ? 'timeout'
                   : 'cancelled',
               duration: 0,
+              notStarted: true,
             },
           });
           finish(undefined, module as Record<string, unknown>);
@@ -891,7 +892,12 @@ export class ManagedHookRuntime {
             entry.view = {
               operationId: control.operationId,
               state: 'settled',
-              result: { success: false, outcome: 'cancelled', duration: 0 },
+              result: {
+                success: false,
+                outcome: 'cancelled',
+                duration: 0,
+                notStarted: true,
+              },
             };
             return;
           }
@@ -950,7 +956,12 @@ export class ManagedHookRuntime {
         entry.view = {
           operationId: control.operationId,
           state: 'settled',
-          result: { success: false, outcome: 'cancelled', duration: 0 },
+          result: {
+            success: false,
+            outcome: 'cancelled',
+            duration: 0,
+            notStarted: true,
+          },
         };
         return;
       }
