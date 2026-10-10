@@ -470,9 +470,10 @@ function recoveredBackgroundLaunchAnswer(
  * A call that did run before the interruption is never told it did not
  * (H4e-b1): a background launch whose admission committed answers its
  * started receipt, and a team call that committed answers from its
- * records — the model would otherwise redo it under a new call. Without
- * a `message`, only those committed calls are answered and every other
- * owed call is left as it was.
+ * records — the model would otherwise redo it under a new call. A call
+ * that committed nothing is answered as never run with `message` — every
+ * such call, or with `hostedOnly` only the team and agent calls no Runtime
+ * settlement answers — and without a `message` it is left as it was.
  */
 async function answerAbandonedTurnCalls(input: {
   session: ManagedSession;
@@ -480,6 +481,7 @@ async function answerAbandonedTurnCalls(input: {
   cwd: string;
   promptId: string;
   message?: string;
+  hostedOnly?: boolean;
   children?: HostedChildAgentSession;
 }): Promise<number> {
   const records = (await input.session.sink.project()).filter(
@@ -541,7 +543,12 @@ async function answerAbandonedTurnCalls(input: {
         : convertToFunctionResponse(call.name, functionCallId, [
             { text: team.text },
           ]);
-    } else if (input.message === undefined) {
+    } else if (
+      input.message === undefined ||
+      (input.hostedOnly === true &&
+        !isHostedTeamTool(call.name) &&
+        !(call.name === 'agent' && launched === undefined))
+    ) {
       continue;
     } else {
       parts = convertToFunctionErrorResponse(
@@ -592,6 +599,29 @@ export function answerCommittedTurnCalls(input: {
   children?: HostedChildAgentSession;
 }): Promise<number> {
   return answerAbandonedTurnCalls(input);
+}
+
+/**
+ * H4e-b1: what a route that RESUMES an interrupted Turn answers before the
+ * resumed round is read — the committed calls from their records, and
+ * every team or agent call that committed nothing as never run. No
+ * Runtime settlement ever answers those, and a resume needs its round
+ * whole: the file-history gate refuses a round with a call unanswered,
+ * which would refuse the Session on every attempt. Runtime calls stay
+ * with the checkpoint. Idempotent; returns how many calls it answered.
+ */
+export function answerResumedTurnCalls(input: {
+  session: ManagedSession;
+  sessionId: string;
+  cwd: string;
+  promptId: string;
+  children?: HostedChildAgentSession;
+}): Promise<number> {
+  return answerAbandonedTurnCalls({
+    ...input,
+    message: 'the Harness that asked was interrupted',
+    hostedOnly: true,
+  });
 }
 
 /**

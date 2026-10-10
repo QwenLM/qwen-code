@@ -18368,6 +18368,14 @@ describe('Hosted Harness Runtime turn takeover', () => {
           }
           return originalWrite.call(this, item);
         });
+        // A team call after the crash point never runs: it commits nothing.
+        const later = {
+          name: 'task_create',
+          callId: 'call-2',
+          args: { subject: 'Audit', description: 'a' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        };
         const team = {
           name: 'team_create',
           callId: 'call-0',
@@ -18378,8 +18386,8 @@ describe('Hosted Harness Runtime turn takeover', () => {
         state.model.mockImplementationOnce(
           async ({ toolTurn, signal }) =>
             toolTurn!.execute(
-              [team, CALL],
-              [team, CALL].map((call) => ({
+              [team, CALL, later],
+              [team, CALL, later].map((call) => ({
                 functionCall: {
                   id: call.callId,
                   name: call.name,
@@ -18528,6 +18536,12 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(
           resumed!.some((part) => part.functionResponse?.id === CALL.callId),
         ).toBe(true);
+        expect(
+          JSON.stringify(
+            resumed!.find((part) => part.functionResponse?.id === 'call-2')
+              ?.functionResponse?.response,
+          ),
+        ).toContain('The tool call never ran');
         await vi.waitFor(
           async () => {
             const status = await replacementHeaders(
@@ -18755,6 +18769,14 @@ describe('Hosted Harness Runtime turn takeover', () => {
             prompt_id: PROMPT_ID,
           },
           siblingCall,
+          // A team call after the crash point never runs: it commits nothing.
+          {
+            name: 'task_create',
+            callId: 'call-3',
+            args: { subject: 'Fix the auth module', description: 'f' },
+            isClientInitiated: false,
+            prompt_id: PROMPT_ID,
+          },
         ];
         state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
           await toolTurn!.declarations(signal);
@@ -18830,6 +18852,12 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(answer).toContain(expected);
         if (sibling === 'agent-unnamed')
           expect(answer).not.toContain('Teammate');
+        expect(
+          JSON.stringify(
+            resumed!.find((part) => part.functionResponse?.id === 'call-3')
+              ?.functionResponse?.response,
+          ),
+        ).toContain('The tool call never ran');
         expect(
           resumed!.some(
             (part) => part.functionResponse?.id === 'model-shell-call',
@@ -18960,6 +18988,14 @@ describe('Hosted Harness Runtime turn takeover', () => {
                 isClientInitiated: false,
                 prompt_id: PROMPT_ID,
               };
+        // A sibling after the crash point never runs: it commits nothing.
+        const third = {
+          name: 'task_create',
+          callId: 'call-c',
+          args: { subject: 'Fix the auth module', description: 'f' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        };
         const fc = (call: {
           callId: string;
           name: string;
@@ -18972,8 +19008,8 @@ describe('Hosted Harness Runtime turn takeover', () => {
           if (kind === 'task_create')
             await toolTurn!.execute([team], [fc(team)], 'test-model', signal);
           await toolTurn!.execute(
-            [read, second],
-            [fc(read), fc(second)],
+            [read, second, third],
+            [fc(read), fc(second), fc(third)],
             'test-model',
             signal,
           );
@@ -19064,6 +19100,12 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).toContain(
           'The turn was interrupted after this call committed. Task #1 created',
         );
+        expect(
+          JSON.stringify(
+            resumed!.find((part) => part.functionResponse?.id === 'call-c')
+              ?.functionResponse?.response,
+          ),
+        ).toContain('The tool call never ran');
         expect(retried).toBe(0);
         expect(domainCommits('team_task')).toBe(1);
       } finally {

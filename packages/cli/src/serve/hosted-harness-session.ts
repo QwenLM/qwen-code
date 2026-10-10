@@ -145,6 +145,7 @@ import {
 import { HostedTextDeltaStream } from './hosted-text-deltas.js';
 import {
   answerCommittedTurnCalls,
+  answerResumedTurnCalls,
   fillParkedRoundAgentGaps,
   isDurableBlockedVerdict,
   originalRuntimeBroker,
@@ -3603,13 +3604,14 @@ export function registerHostedHarnessSessionRoutes(
       const takeover = !lifecycle && !session.hooks && takeoverFlags;
       // H4e-b1: a Hooks Session recovers only through this load (it never
       // takes over), and the file-history gate below needs every call of
-      // the pending round answered. A committed team call or background
-      // launch the dead Harness never answered is answered from its
-      // records first, or the gate would refuse this Session on every
-      // load. A failed answer leaves the gate's retriable refusal.
+      // the pending round answered. The team and agent calls the dead
+      // Harness never answered are answered first — a committed one from
+      // its records, any other as never run — or the gate would refuse
+      // this Session on every load. A failed answer leaves the gate's
+      // retriable refusal.
       if (session.hooks && !lifecycle && unsettled !== undefined) {
         try {
-          await answerCommittedTurnCalls({
+          await answerResumedTurnCalls({
             session: managed,
             sessionId,
             cwd,
@@ -3921,11 +3923,12 @@ export function registerHostedHarnessSessionRoutes(
             : null);
         // H4e-b1: the resume below reads only the round's journaled
         // results. A sibling the Runtime does not own (a team call, a
-        // background launch) that committed before the Harness died is
-        // answered from its records first; core's orphan repair would
-        // otherwise have the model retry it, and the retry redoes it.
+        // background launch) is answered first: from its records when it
+        // committed before the Harness died — core's orphan repair would
+        // otherwise have the model retry it, and the retry redoes it — and
+        // as never run otherwise, so the round the resume needs is whole.
         if (promptId)
-          await answerCommittedTurnCalls({
+          await answerResumedTurnCalls({
             session: managed,
             sessionId,
             cwd,
@@ -5754,11 +5757,12 @@ export function registerHostedHarnessSessionRoutes(
             }
           }
           // H4e-b1: a sibling the Runtime reconciliation does not own (a
-          // team call, a background launch) that committed before the
-          // Harness died is answered from its records before the resumed
-          // round reads it — core's orphan repair would have the model
-          // retry it, and the retry redoes the work.
-          const answered = await answerCommittedTurnCalls({
+          // team call, a background launch) is answered before the resumed
+          // round reads it: from its records when it committed before the
+          // Harness died — core's orphan repair would have the model retry
+          // it, and the retry redoes the work — and as never run otherwise,
+          // or the pending file history's check refuses the resume.
+          const answered = await answerResumedTurnCalls({
             session: session.managed,
             sessionId,
             cwd: session.cwd,

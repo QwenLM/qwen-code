@@ -37,6 +37,7 @@ import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-ru
 import { resetManagedRuntimeDispatchGatesForTest } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-dispatch-gate.js';
 import type { HarnessAgentWaitRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import {
+  answerResumedTurnCalls,
   fillParkedRoundAgentGaps,
   recoverHostedRuntimeTurn,
   settleCancelledAgentWaitRuns,
@@ -1636,6 +1637,60 @@ describe('hosted child wait recovery (#13708)', () => {
     },
     10_000,
   );
+
+  // H4e-b1: a resuming route answers only the calls no Runtime settlement
+  // ever will: a team or agent call that committed nothing is told it never
+  // ran, a Runtime call stays with the checkpoint, and an admitted
+  // foreground child is never told it did not start.
+  it('answers a resumed Turn whole except its Runtime calls and admitted children', async () => {
+    const session = await open('boot-1', true);
+    try {
+      await park(session, false);
+      await session.sink.write({
+        uuid: 'assistant-1',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'assistant',
+        cwd: root,
+        version: 'test',
+        daemonPromptId: PROMPT_ID,
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'call-1', name: 'agent', args: {} } },
+            { functionCall: { id: 'call-2', name: 'read_file', args: {} } },
+            { functionCall: { id: 'call-3', name: 'task_create', args: {} } },
+            { functionCall: { id: 'call-4', name: 'agent', args: {} } },
+          ],
+        },
+      });
+      expect(
+        await answerResumedTurnCalls({
+          session,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          children: childrenOf(session),
+        }),
+      ).toBe(2);
+      const answers = new Map(
+        toolResultEntries(await session.sink.project()).flatMap((entry) =>
+          (entry.message?.parts ?? []).map((part) => [
+            part.functionResponse?.id,
+            JSON.stringify(part.functionResponse?.response),
+          ]),
+        ),
+      );
+      // call-1 is the admitted foreground child the wait owns.
+      expect(answers.has('call-1')).toBe(false);
+      expect(answers.has('call-2')).toBe(false);
+      expect(answers.get('call-3')).toContain('The tool call never ran');
+      expect(answers.get('call-4')).toContain('The tool call never ran');
+    } finally {
+      await session.close();
+    }
+  });
 
   it('the interrupted-turn settlement does not wait on an admitted orphan (R3-1)', async () => {
     await parkWedged(true);

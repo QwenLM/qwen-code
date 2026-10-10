@@ -55,7 +55,7 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
 10. **按 domain 启用,并在实机验收之后。** 每个团队 domain 恰好承载一项能力。因此与 `child_run`(H4b 决策 10)不同,普通的启用列表就是合适的门禁,不新增按能力的门禁。这回答了 #13745 分诊提出的门禁形态问题。H4e-b1 落地运行时时 `team_state` 与 `team_task` 仍保持关闭,测试像 H4e-a 的测试套件那样放开门禁;它的最后一步在真实 Hosted 环境上完成实机验收之后,才把两者加入 `MANAGED_SESSION_ENABLED_DOMAINS`,这是 #13803 在 #13532 之后采用的顺序。`team_message` 与 `team_plan` 保持关闭。`verifyWorkspaceRestore` 的重开白名单放行 `team_state` 与 `team_task`。Java 只需要决策 9 的预览列表:它的 store 自 H4e-a 起就已校验团队记录体,因此 server 先行顺序成立。
 11. **按调用的键找到它的提交,恢复据此作答。** 每次团队写入都以由其调用派生的命令 id 提交:`team_create` 与 `task_create` 为 `${callKey}`,加入为 `${childRunId}:join`,`task_update` 的各个修订为 `${callKey}:${n}`,`team_delete` 为 `${callKey}:closing` 与 `${callKey}:deleted`。在计算一次写入之前,漏斗先用 authority 的 `committedExtensionOperation` 查询其命令 id。已提交的命令视为完成,由其已提交的记录回答调用。只有尚未提交的命令才按当前状态计算。查询必须放在前面,因为按当前状态重建的记录可能与已提交的不同:`task_create` 会分配下一个编号,而 `task_update` 后面的修订会已经包含同一调用较早添加的边。authority 会把已提交命令 id 下改变了的记录体作为冲突拒绝。这不需要任何记录字段:命令 id 就是该调用自身的持久痕迹。
 
-- **恢复只作答,不重新执行。** 被中断的一轮在结算或续跑时不会重新执行其中的调用,而且每条这样做的路径都会在模型下次读到这一轮之前,按 journal 回答其中已提交的调用:channel 漏斗(`settleInterruptedTurnRuntime`)、没有 park 的一轮的取消接管、park 中一轮的 cancel 与 continue 路由、Hooks 或 publication Session 的 bare load 续跑,以及崩溃的 wake 一轮的善后。没有这一回答,core 的 orphan 修复会让模型重试这个调用。准入已提交的后台启动回答已启动回执;如果它从未加入且其 run 已失败,则回答该失败(决策 3)。团队调用按其已提交的命令作答:`team_create` 与 `task_create` 回答它们开启了什么;`team_delete` 回答 `deleted`,或回答 `closing` 并提示再调用一次 `team_delete`;提交过任何内容的 `task_update` 提示先读 `task_list`。什么都没提交的调用保持其路径原有的回答:在 checkpoint 已绑定这一轮的 channel 漏斗中为从未运行,其他情况下由 core 的 orphan 修复作答。告诉模型一个已提交的调用从未运行,会让它以新的键重做:多出第二个任务,或第二个同名成员。
+- **恢复只作答,不重新执行。** 被中断的一轮在结算或续跑时不会重新执行其中的调用,而且每条这样做的路径都会在模型下次读到这一轮之前,按 journal 回答其中已提交的调用:channel 漏斗(`settleInterruptedTurnRuntime`)、没有 park 的一轮的取消接管、park 中一轮的 cancel 与 continue 路由、Hooks 或 publication Session 的 bare load 续跑,以及崩溃的 wake 一轮的善后。没有这一回答,core 的 orphan 修复会让模型重试这个调用。准入已提交的后台启动回答已启动回执;如果它从未加入且其 run 已失败,则回答该失败(决策 3)。团队调用按其已提交的命令作答:`team_create` 与 `task_create` 回答它们开启了什么;`team_delete` 回答 `deleted`,或回答 `closing` 并提示再调用一次 `team_delete`;提交过任何内容的 `task_update` 提示先读 `task_list`。什么都没提交的团队或 agent 调用,由每条续跑这一轮的路径(bare load、Hooks Session 的文件历史门、continue 路由)回答为从未运行:续跑需要这一轮完整,否则文件历史检查会拒绝它,而且没有任何 Runtime 结算会回答这样的调用。只结算这一轮的路径保持原样:在 checkpoint 已绑定这一轮的 channel 漏斗中为从未运行,其他情况下由 core 的 orphan 修复作答。告诉模型一个已提交的调用从未运行,会让它以新的键重做:多出第二个任务,或第二个同名成员。
 - **再次进入。** 这一查询仍保证调用以同一个键再次进入时不会重复写入。团队调用不写 `tool.intent`,因此 hook 恢复以其回答判断它是否派发:与 live 路径的标记一致,回答不是错误的团队调用即为已运行。
 
 ## 工具
@@ -124,6 +124,7 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
 1. **补齐未进名册的成员。** 启动与加入之间发生崩溃,会留下一个没有名册指名的、正在运行的 child,因为恢复从不重新执行该调用。agent 与团队调用不写 `tool.intent`,但这一轮的 assistant 记录保留了调用的参数(包括 `name`),因此恢复后可以由一个补齐流程完成加入。本切片接受这种降级结果(一个普通后台 child),补齐流程留待后定。
 2. **成员占用的活跃上限。** 成员与其他 child 共用 H4b 每个 Session 4 个活跃 child 的上限,而 Legacy 可同时运行最多 10 个 teammate。团队是否应有自己的活跃上限,待真实团队显示出需要时再定。
 3. **让成员第二次派上用场。** 一次性成员无法接收更多工作。成员续跑(H4e-a 开放问题 4)属于 H4e-b2,与承载新工作的 mailbox 一起。
+4. **在 Runtime park 之外被中断的 Hooks Session。** Hooks Session 从不接管,它的 bare load 只续跑停在 `results_ready` 的一轮。在没有 Runtime 工作的批次(只有团队调用)中被中断的一轮,会由 load 作答,但仍处于恢复阻塞,与 main 上任何在模型轮中途被中断的 Hooks Session 一样。团队调用扩大了这个窗口。这类一轮的恢复属于 Hooks 运行时,启用那一步应在团队于 Hooks Session 上运行之前解决它。
 
 ## 后续工作
 
