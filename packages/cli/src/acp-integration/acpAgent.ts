@@ -183,6 +183,7 @@ import {
   SessionSourceService,
   SessionSourceError,
 } from '@qwen-code/qwen-code-core';
+import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { isDeepStrictEqual } from 'node:util';
@@ -10552,7 +10553,6 @@ class QwenAgent implements Agent {
         }
         const fhs = session.getConfig().getFileHistoryService();
         const snapshots = fhs.getSnapshots();
-        const rewindableTurnCount = session.getRewindableUserTurnCount();
         const prefix = (sessionId as string) + '########';
         const results = await Promise.all(
           snapshots
@@ -10562,7 +10562,7 @@ class QwenAgent implements Agent {
                 s.promptId.startsWith(prefix) &&
                 /^\d+$/.test(s.promptId.slice(prefix.length)),
             )
-            .filter(({ idx }) => idx < rewindableTurnCount)
+            .filter(({ s }) => session.getRewindCutPoint(s.promptId) >= 0)
             .map(async ({ s, idx }) => {
               const stats = await fhs.getDiffStats(s.promptId);
               return {
@@ -14082,7 +14082,12 @@ class QwenAgent implements Agent {
           }
 
           const rewindFiles = params['rewindFiles'] !== false;
-          const historyBeforeRewind = session.captureHistorySnapshot();
+          const historyBeforeRewind = session
+            .captureHistorySnapshot()
+            .map((content) => ({
+              ...content,
+              rewindId: getApiHistoryPromptId(content),
+            }));
           let rewindResult;
           let releaseHistoryMutation: () => void;
           try {

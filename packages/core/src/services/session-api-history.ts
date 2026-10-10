@@ -32,6 +32,16 @@ export function getApiHistoryPromptId(content: Content): string | undefined {
   return (content as IdentifiedContent)[API_HISTORY_PROMPT_ID];
 }
 
+/** Record-derived rewind keys are not file-checkpoint prompt IDs. */
+export function getRecordRewindId(record: ChatRecord): string | undefined {
+  if (typeof record.promptId === 'string' && record.promptId.length > 0) {
+    return record.promptId;
+  }
+  return typeof record.uuid === 'string' && record.uuid.length > 0
+    ? `legacy-record:${record.uuid}`
+    : undefined;
+}
+
 /** Returns the unique matching entry at or after `startIndex`, or -1. */
 export function findApiHistoryPromptIndex(
   history: readonly Content[],
@@ -101,7 +111,7 @@ function appendApiHistoryRecord(
 
   const message = copyContentForApiHistory(record.message);
   if (record.type === 'user' && !record.subtype) {
-    markApiHistoryPrompt(message, record.promptId);
+    markApiHistoryPrompt(message, getRecordRewindId(record));
   }
   // Session multi-agent records (`agent_mention` / `agent_message`) need no
   // branch: their `message` is the enveloped model text, pushed below as its

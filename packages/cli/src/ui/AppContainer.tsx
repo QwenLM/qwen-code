@@ -159,7 +159,7 @@ import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
 import {
   computeApiTruncationIndex,
-  isIdentifiedRetainedTurn,
+  isRetainedUserTurn,
   isRealUserTurn,
 } from './utils/historyMapping.js';
 import { waitForGoalRuntime } from './utils/goal-runtime.js';
@@ -4262,7 +4262,9 @@ export const AppContainer = (props: AppContainerProps) => {
         const needsConversation =
           option === 'conversation' || option === 'both';
         const llmClient = needsConversation ? config.getLlmClient() : null;
+        const recordingService = config.getChatRecordingService();
         let apiTruncateIndex = -1;
+        let recordingTurnIndex = -1;
         let conversationSkippedNoClient = false;
         if (needsConversation) {
           if (!llmClient) {
@@ -4291,10 +4293,7 @@ export const AppContainer = (props: AppContainerProps) => {
               historyManager.addItem(
                 {
                   type: 'error',
-                  text: isIdentifiedRetainedTurn(
-                    historyManager.history,
-                    userItem.id,
-                  )
+                  text: isRetainedUserTurn(historyManager.history, userItem.id)
                     ? t(
                         'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.',
                       )
@@ -4309,6 +4308,27 @@ export const AppContainer = (props: AppContainerProps) => {
                 return;
               }
               return;
+            }
+            if (recordingService) {
+              const rewindId =
+                userItem.type === 'user'
+                  ? (userItem.promptId ?? userItem.rewindId)
+                  : undefined;
+              recordingTurnIndex = rewindId
+                ? recordingService.getRewindTurnIndex(rewindId)
+                : -1;
+              if (recordingTurnIndex < 0) {
+                historyManager.addItem(
+                  {
+                    type: 'error',
+                    text: t('Rewind failed: {{error}}', {
+                      error: 'This turn has no unique recorded boundary.',
+                    }),
+                  },
+                  Date.now(),
+                );
+                return;
+              }
             }
           }
         }
@@ -4413,8 +4433,8 @@ export const AppContainer = (props: AppContainerProps) => {
             Date.now(),
           );
 
-          config.getChatRecordingService()?.rewindRecording(
-            targetTurnIndex,
+          recordingService?.rewindRecording(
+            recordingTurnIndex,
             { truncatedCount: effectiveLength - truncatedUi.length },
             !hasRestoreFailure
               ? config

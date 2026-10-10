@@ -800,6 +800,7 @@ describe('AppContainer State Management', () => {
     noLlmClient?: boolean;
     history?: HistoryItem[];
     contextFilePaths?: string[];
+    recordedTurnIndex?: number;
   };
 
   const renderRewindHarness = (options: RewindHarnessOptions = {}) => {
@@ -881,8 +882,14 @@ describe('AppContainer State Management', () => {
     } as unknown as ReturnType<Config['getFileHistoryService']>);
 
     const rewindRecording = vi.fn();
+    const getRewindTurnIndex = vi.fn(
+      (promptId: string) =>
+        options.recordedTurnIndex ??
+        ['prompt-1', 'prompt-2', 'prompt-3'].indexOf(promptId),
+    );
     vi.spyOn(mockConfig, 'getChatRecordingService').mockReturnValue({
       rewindRecording,
+      getRewindTurnIndex,
     } as unknown as NonNullable<ReturnType<Config['getChatRecordingService']>>);
 
     if (options.contextFilePaths) {
@@ -910,6 +917,7 @@ describe('AppContainer State Management', () => {
       getHistoryShallow,
       truncateHistory,
       rewindRecording,
+      getRewindTurnIndex,
       snapshots,
     };
   };
@@ -7462,6 +7470,67 @@ describe('AppContainer State Management', () => {
         }),
         expect.any(Number),
       );
+    });
+
+    it.each(['promptId', 'rewindId'] as const)(
+      'resolves the recorded boundary independently through %s',
+      async (field) => {
+        const key = field === 'promptId' ? 'prompt-2' : 'legacy-record:target';
+        const target: HistoryItem = {
+          id: 3,
+          type: 'user',
+          text: 'second prompt',
+          [field]: key,
+        };
+        const harness = renderRewindHarness({
+          history: [
+            rewindUserItem(1, 'first prompt', 'prompt-1'),
+            { id: 2, type: 'gemini', text: 'first response' },
+            target,
+          ],
+          apiHistory: [
+            apiUser('first prompt', 'prompt-1'),
+            apiModel('first response'),
+            apiUser('second prompt', key),
+          ],
+          recordedTurnIndex: 3,
+        });
+        await runRewind(target, 'conversation');
+        expect(harness.getRewindTurnIndex).toHaveBeenCalledWith(key);
+        expect(harness.truncateHistory).toHaveBeenCalledWith(2);
+        expect(harness.rewindRecording).toHaveBeenCalledWith(
+          3,
+          expect.any(Object),
+          expect.any(Array),
+        );
+        expect(harness.rewind).not.toHaveBeenCalled();
+      },
+    );
+
+    it('refuses an unlinked recorded boundary before changing files or conversation', async () => {
+      const harness = renderRewindHarness({ recordedTurnIndex: -1 });
+      await runRewind(harness.target, 'both');
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.setText).not.toHaveBeenCalled();
+      expect(harness.rewindRecording).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Rewind failed: This turn has no unique recorded boundary.',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('keeps conversation rewind available when recording is disabled', async () => {
+      const harness = renderRewindHarness();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
+      await runRewind(harness.target, 'conversation');
+      expect(harness.truncateHistory).toHaveBeenCalledWith(2);
+      expect(harness.loadHistory).toHaveBeenCalled();
+      expect(harness.rewindRecording).not.toHaveBeenCalled();
     });
 
     it('truncates conversation when both-mode file restore succeeds', async () => {
