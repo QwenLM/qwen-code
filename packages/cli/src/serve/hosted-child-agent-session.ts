@@ -54,6 +54,7 @@ import {
   managedTaskId,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
+import { hostedTeamMembership } from './hosted-team-session.js';
 import {
   stripDisplayControlChars,
   truncateNotificationLabel,
@@ -163,11 +164,16 @@ export function childResultNotificationText(params: {
   readonly taskId: string;
   readonly description: string;
   readonly text: string;
+  /** H4e-b1: the member name of a child run on a team roster. */
+  readonly teammate?: string;
 }): string {
   const head = [
     '<task-notification>',
     `<task-id>${escapeXml(params.taskId)}</task-id>`,
     '<kind>child_agent</kind>',
+    ...(params.teammate === undefined
+      ? []
+      : [`<teammate>${escapeXml(params.teammate)}</teammate>`]),
     '<status>completed</status>',
     `<summary>Child agent "${escapeXml(truncateNotificationLabel(params.description))}" finished.</summary>`,
     '<result>',
@@ -613,6 +619,10 @@ export class HostedChildAgentSession {
               text: (await this.store.resources.read(resultRef)).toString(
                 'utf8',
               ),
+              teammate: hostedTeamMembership(
+                this.store.authority.extensionRecordsInDomain('team_state'),
+                childRunId,
+              )?.name,
             }),
           }),
           'utf8',
