@@ -89,6 +89,7 @@ import {
   type AgentApprovalRequestEvent,
   type AgentToolCallEvent,
   type AgentToolResultEvent,
+  type AgentToolOutputUpdateEvent,
 } from './agent-events.js';
 
 const boundaryObserveMock = vi.hoisted(() =>
@@ -734,6 +735,164 @@ describe('AgentCore approval response deduplication', () => {
     );
     return { core, errorSpy };
   }
+
+  it('emits one late lifecycle terminal after synthetic cancellation without a second tool result', async () => {
+    const { core } = buildCore('late-synthetic', { tools: ['*'] });
+    const results = recordToolEvents(core).results;
+    const outputs: AgentToolOutputUpdateEvent[] = [];
+    core
+      .getEventEmitter()
+      .on(AgentEventType.TOOL_OUTPUT_UPDATE, (event) => outputs.push(event));
+    let settle!: (
+      callId: string,
+      status: 'cancelled',
+      duration: number,
+    ) => void;
+    const schedule = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        const options = (
+          this as unknown as {
+            schedulerOptions: {
+              onToolExecutionStarted: (callId: string, epoch: number) => void;
+              onToolExecutionSettled: typeof settle;
+            };
+          }
+        ).schedulerOptions;
+        settle = options.onToolExecutionSettled;
+        options.onToolExecutionStarted('late-call', 100);
+      });
+    try {
+      const controller = new AbortController();
+      const running = core.processFunctionCalls(
+        [{ id: 'late-call', name: 'read_file', args: {} }],
+        controller,
+        'late-prompt',
+        1,
+        [{ name: 'read_file' }],
+      );
+      await vi.waitFor(() => expect(outputs).toHaveLength(1));
+      controller.abort();
+      await running;
+      expect(results).toHaveLength(1);
+      expect(results[0].lifecycle).toBeUndefined();
+      settle('late-call', 'cancelled', 20);
+      settle('late-call', 'cancelled', 20);
+      expect(results).toHaveLength(1);
+      expect(outputs.map((event) => event.lifecycle)).toEqual([
+        expect.objectContaining({ phase: 'started' }),
+        expect.objectContaining({
+          phase: 'ended',
+          outcome: 'cancelled',
+          executionStatus: 'cancelled',
+          executionDurationMs: 20,
+        }),
+      ]);
+    } finally {
+      schedule.mockRestore();
+    }
+  });
+
+  it('keeps output and PID intact for lifecycle-only updates and ignores late terminal output', () => {
+    const { core } = buildCore('output');
+    const emitter = core.getEventEmitter();
+    const update = {
+      subagentId: 'output-agent',
+      round: 1,
+      callId: 'call',
+      outputChunk: 'visible output',
+      pid: 42,
+      timestamp: 100,
+    };
+    emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, update);
+    const base = {
+      v: 1 as const,
+      kind: 'tool' as const,
+      executionId: 'execution',
+      sessionId: 'output-session',
+      callId: 'call',
+      toolName: 'read',
+    };
+    emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+      ...update,
+      outputChunk: '',
+      pid: 99,
+      lifecycle: {
+        ...base,
+        phase: 'started',
+        executionStatus: 'running',
+        startedAt: 100,
+      },
+    });
+    expect(core.getLiveOutputs().get('call')).toBe('visible output');
+    expect(core.getShellPids().get('call')).toBe(42);
+    emitter.emit(AgentEventType.TOOL_RESULT, {
+      subagentId: 'output-agent',
+      round: 1,
+      callId: 'call',
+      name: 'read',
+      success: false,
+      timestamp: 110,
+    });
+    emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+      ...update,
+      outputChunk: '',
+      lifecycle: {
+        ...base,
+        phase: 'ended',
+        executionStatus: 'cancelled',
+        outcome: 'cancelled',
+        startedAt: 100,
+        endedAt: 120,
+        executionDurationMs: 20,
+      },
+    });
+    expect(core.getLiveOutputs().has('call')).toBe(false);
+    expect(core.getShellPids().has('call')).toBe(false);
+  });
+
+  it.each(['undeclared', 'allowlist'])(
+    'records %s rejection as not_started with original owner',
+    async (reason) => {
+      let owner = 'original-owner';
+      const { core } = buildCore(
+        'rejected',
+        { tools: ['*'], executionAllowedTools: [] },
+        { getSessionId: () => owner },
+      );
+      const events = recordToolEvents(core);
+      core.getEventEmitter().on(AgentEventType.TOOL_CALL, () => {
+        owner = 'rotated-owner';
+      });
+      const result = await core.processFunctionCalls(
+        [{ id: 'rejected-call', name: 'read_file', args: {} }],
+        new AbortController(),
+        'prompt-rejected',
+        1,
+        reason === 'undeclared' ? [] : [{ name: 'read_file' }],
+      );
+      expect(result.results).toHaveLength(1);
+      expect(events.results).toHaveLength(1);
+      expect(events.results[0].success).toBe(false);
+      expect(events.results[0].error).toContain(
+        reason === 'undeclared' ? 'not found' : 'not allowed',
+      );
+      expect(events.results[0].lifecycle).toMatchObject({
+        kind: 'tool',
+        phase: 'ended',
+        callId: 'rejected-call',
+        toolName: 'read_file',
+        sessionId: 'original-owner',
+        subagentId: events.results[0].subagentId,
+        executionStatus: 'not_started',
+        outcome: 'error',
+      });
+      expect(events.results[0].lifecycle).not.toHaveProperty('startedAt');
+      expect(events.results[0].lifecycle).not.toHaveProperty(
+        'executionDurationMs',
+      );
+    },
+  );
 
   const request = (
     slug: string,
@@ -1550,6 +1709,7 @@ describe('AgentCore.prepareTools', () => {
     const isPermissionDeferredSpy = vi.fn().mockReturnValue(false);
     const isDeferredAndHiddenSpy = vi.fn().mockReturnValue(false);
     const config = {
+      getSessionId: vi.fn().mockReturnValue('test-owner'),
       getDebugLogger: vi.fn().mockReturnValue({ debug: debugSpy }),
       getToolRegistry: vi.fn().mockReturnValue({
         warmAll: vi.fn().mockResolvedValue(undefined),

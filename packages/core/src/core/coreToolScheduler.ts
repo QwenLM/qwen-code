@@ -1452,6 +1452,12 @@ function withPostToolBatchStop(
 }
 
 interface CoreToolSchedulerOptions {
+  onToolExecutionStarted?: (callId: string, startedAt: number) => void;
+  onToolExecutionSettled?: (
+    callId: string,
+    status: ToolExecutionStatus,
+    durationMs: number,
+  ) => void;
   config: Config;
   outputUpdateHandler?: OutputUpdateHandler;
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
@@ -5967,8 +5973,20 @@ export class CoreToolScheduler {
               callId,
             });
             executionStatus = 'error';
-            const execute = () =>
-              invocation.execute(
+            const execute = () => {
+              executionStartedAt = performance.now();
+              try {
+                this.schedulerOptions.onToolExecutionStarted?.(
+                  callId,
+                  Date.now(),
+                );
+              } catch (error) {
+                debugLogger.warn(
+                  'Tool lifecycle start observer failed:',
+                  error,
+                );
+              }
+              return invocation.execute(
                 execSignal,
                 liveOutputCallback,
                 shellExecutionConfig,
@@ -5976,6 +5994,7 @@ export class CoreToolScheduler {
                 setPromoteAbortControllerCallback,
                 canPromoteForegroundShell,
               );
+            };
             return scheduledCall.request.name === ToolNames.EXEC ||
               scheduledCall.request.name === ToolNames.TOOL_SEARCH
               ? runWithToolCallRuntime(
@@ -6012,12 +6031,25 @@ export class CoreToolScheduler {
               callId,
             });
             executionStatus = 'error';
-            const execute = () =>
-              invocation.execute(
+            const execute = () => {
+              executionStartedAt = performance.now();
+              try {
+                this.schedulerOptions.onToolExecutionStarted?.(
+                  callId,
+                  Date.now(),
+                );
+              } catch (error) {
+                debugLogger.warn(
+                  'Tool lifecycle start observer failed:',
+                  error,
+                );
+              }
+              return invocation.execute(
                 execSignal,
                 liveOutputCallback,
                 shellExecutionConfig,
               );
+            };
             return scheduledCall.request.name === ToolNames.EXEC ||
               scheduledCall.request.name === ToolNames.TOOL_SEARCH
               ? runWithToolCallRuntime(
@@ -6193,6 +6225,15 @@ export class CoreToolScheduler {
           ? 'error'
           : 'success';
       executionSettled = true;
+      try {
+        this.schedulerOptions.onToolExecutionSettled?.(
+          callId,
+          executionStatus,
+          elapsedExecutionMs() ?? 0,
+        );
+      } catch (error) {
+        debugLogger.warn('Tool lifecycle end observer failed:', error);
+      }
       if (execSpan) {
         const completedExecSpan = execSpan;
         execSpan = undefined;
@@ -7153,6 +7194,15 @@ export class CoreToolScheduler {
       if (executionThrew) {
         executionStatus = aborted ? 'cancelled' : 'error';
         executionSettled = true;
+        try {
+          this.schedulerOptions.onToolExecutionSettled?.(
+            callId,
+            executionStatus,
+            elapsedExecutionMs() ?? 0,
+          );
+        } catch (error) {
+          debugLogger.warn('Tool lifecycle end observer failed:', error);
+        }
       }
       const exceptionErrorType =
         explicitErrorType ??
