@@ -625,45 +625,48 @@ describe('pdf utilities', () => {
       expectError(await renderPDFPagesToImages('/test.pdf'), 'corrupted');
     });
 
-    it('keeps the render result when descriptor cleanup fails', async () => {
-      vi.mocked(execPDFCommandFromHandle).mockResolvedValue({
-        stdout: '',
-        stderr: '',
-        code: 0,
-        maxBufferExceeded: false,
-        timedOut: false,
-      });
-      vi.mocked(open).mockResolvedValue({
-        fd: 8,
-        stat: async () => ({
+    it.skipIf(!['linux', 'darwin'].includes(process.platform))(
+      'keeps the render result when descriptor cleanup fails',
+      async () => {
+        vi.mocked(execPDFCommandFromHandle).mockResolvedValue({
+          stdout: '',
+          stderr: '',
+          code: 0,
+          maxBufferExceeded: false,
+          timedOut: false,
+        });
+        vi.mocked(open).mockResolvedValue({
+          fd: 8,
+          stat: async () => ({
+            dev: 1,
+            ino: 2,
+            isDirectory: () => true,
+            isFile: () => false,
+          }),
+          close: async () => undefined,
+        } as unknown as FileHandle);
+        vi.mocked(lstat).mockResolvedValue({
           dev: 1,
           ino: 2,
           isDirectory: () => true,
-          isFile: () => false,
-        }),
-        close: async () => undefined,
-      } as unknown as FileHandle);
-      vi.mocked(lstat).mockResolvedValue({
-        dev: 1,
-        ino: 2,
-        isDirectory: () => true,
-      } as unknown as Awaited<ReturnType<typeof lstat>>);
-      mockReaddir.mockResolvedValue([] as never);
-      vi.mocked(rm).mockRejectedValueOnce(
-        Object.assign(new Error('EACCES'), { code: 'EACCES' }),
-      );
+        } as unknown as Awaited<ReturnType<typeof lstat>>);
+        mockReaddir.mockResolvedValue([] as never);
+        vi.mocked(rm).mockRejectedValueOnce(
+          Object.assign(new Error('EACCES'), { code: 'EACCES' }),
+        );
 
-      const result = await renderPDFPagesToImages({ fd: 3 } as FileHandle);
+        const result = await renderPDFPagesToImages({ fd: 3 } as FileHandle);
 
-      expect(result).toEqual({
-        success: false,
-        error: expect.stringMatching(/no image output/),
-      });
-      expect(rm).toHaveBeenCalledWith('/tmp/pdf-render-test', {
-        recursive: true,
-        force: true,
-      });
-    });
+        expect(result).toEqual({
+          success: false,
+          error: expect.stringMatching(/no image output/),
+        });
+        expect(rm).toHaveBeenCalledWith('/tmp/pdf-render-test', {
+          recursive: true,
+          force: true,
+        });
+      },
+    );
 
     it('errors when pdftoppm produces no images', async () => {
       mockRendered([]);
