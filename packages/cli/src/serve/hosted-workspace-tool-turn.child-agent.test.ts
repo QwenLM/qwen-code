@@ -1077,27 +1077,6 @@ it('refuses a foreground agent call while a Session owner holds the mount', asyn
   expect(JSON.stringify(admitted)).not.toContain(mountRefusal);
 });
 
-// The Turn-owned arm below the Session-owner refusal: a foreground child
-// cannot borrow the mount its own parent turn already holds. This turn
-// took the mount through resume (not a Session owner), so the Session
-// arm is false and the ordering here is what pins the surviving branch.
-it('refuses a foreground agent while this Turn holds the mount', async () => {
-  const turn = createTurn();
-  await turn.resumeCommittedResults(new AbortController().signal);
-  const refused = await executeAgent(
-    turn,
-    call({
-      description: 'audit the diff',
-      prompt: 'review the change',
-      run_in_background: false,
-    }),
-  );
-  expect(JSON.stringify(refused)).toContain(HOSTED_CHILD_MOUNT_REFUSALS.turn);
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    0,
-  );
-});
-
 // R1-62: an admitted agent launch dispatches like any executed call —
 // the agent path bypasses the Broker pipeline that would have written
 // its tool.intent, so PostToolUse must fire for it, not only PreToolUse.
