@@ -22,9 +22,11 @@ CSI mount 将观察、根目录查询及目录解析包在该原始根目录作�
 
 既有 CSI attestation 路由消费观察；既有 context 安装与 runtime-provider 目录选择消费解析；既有 sibling-directory 所有权检查消费根目录查询。它们的路由作用域仍分别属于原 live worker 与已安装 Session。普通 context mount 保留原实现。worker 启动在路由登记或监听失败后关闭 CSI mount；worker 退出在早先清理失败时也通过等待完成的清理关闭 executor、监听器与 mount。
 
+只有已知挂载根目录且它不同于调用方目录时，sibling 所有权判断才允许调用方使用私有目录豁免。挂载根目录被阻断或身份不确定时，不能将无法解析的 sibling 转化为读取许可，包括阻断发生在已接纳的工具调用内部时。启动与关闭保留原始错误消息，并通过 `AggregateError` 保留同时发生的清理失败；executor 关闭结束后，无论成功或失败，都尝试清理监听器与 mount。mount close 同样保留子目录和根目录描述符的双重失败。
+
 ## 文件与拆分边界
 
-生产改动仅包含 `managed-csi-root-directory.ts`、`managed-csi-mount.ts` 及 `managed-runtime-attestation-worker.ts` 的清理部分，并附带同目录测试与本设计文档对。排除源分支的 boot-v4/v5 支持、私有 file-profile 检查和移动到 core 的路径校验器。既有 boot-v1/v2/v3 解析、路由及选择入口保持原状。
+生产改动仅包含 `managed-csi-root-directory.ts`、`managed-csi-mount.ts`、`managed-context-worker.ts` 的 sibling 所有权判断及 `managed-runtime-attestation-worker.ts` 的清理部分，并附带同目录测试与本设计文档对。排除源分支的 boot-v4/v5 支持、私有 file-profile 检查和移动到 core 的路径校验器。既有 boot-v1/v2/v3 解析、路由及选择入口保持原状。
 
 ## 验证与验收
 
@@ -37,5 +39,7 @@ Darwin 测试可使用实际拥有的目录与描述符，并明确标记合成�
 ## 风险与剩余工作
 
 前后检查无法发现两次观察之间所有先替换再恢复事件。持有目录描述符可防止被替换的父路径名重定向遍历，但不能提供不可变文件系统快照。返回的路径名只是经验证的目录选择，不是未来 I/O 的能力凭证。回调必须等全部自身工作完成后返回，且不能保留或关闭借用的描述符。
+
+持有的描述符也会在健康 worker 拥有它期间使卷保持 busy。需要卸载存活 worker 卷的退休或 NodeUnpublish 消费方必须等待描述符释放；Kubernetes 在容器退出后的常规 unpublish 不受影响。本切片不实现该退休协调。
 
 本切片不提供私有 Read/Write/Edit、file history、不可变 native 授权、SQL 迁移、receipt-tail 恢复、聚合 DRAINED、后代进程终止、CSI NodeUnpublish、原子 RELEASED 或安全卷复用。这些仍保留在 #13526，分别受独立验收门槛约束。没有线协议格式或数据库迁移。

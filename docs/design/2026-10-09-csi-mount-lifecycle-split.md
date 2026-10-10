@@ -22,9 +22,11 @@ Resolution accepts only normalized Workspace-relative directory syntax, includin
 
 The existing CSI attestation route consumes observation. Existing context installation and runtime-provider directory selection consume resolution, while the existing sibling-directory ownership check consumes root lookup. Their route scopes remain the same live worker and installed Session scopes. Ordinary context mounts keep their implementation. Worker startup closes the CSI mount after route-registration or listener failures; worker shutdown closes the executor, listener and mount through joined cleanup even when earlier cleanup fails.
 
+Sibling ownership grants the caller a private-directory exemption only when the mount root is known and differs from the caller's directory. A fenced or uncertain root must not turn an unresolved sibling into permission to read it, including when the fence occurs inside an already-admitted tool call. Startup and shutdown retain the original error message and preserve simultaneous cleanup failures in an `AggregateError`; shutdown attempts both listener and mount cleanup after executor shutdown settles. Mount close likewise retains both child and root descriptor failures.
+
 ## Files and extraction boundary
 
-Production changes are limited to `managed-csi-root-directory.ts`, `managed-csi-mount.ts` and the cleanup portions of `managed-runtime-attestation-worker.ts`, with collocated tests and this design pair. Source boot-v4/v5 support, private file-profile checks and the relocated core path validator are excluded. Existing boot-v1/v2/v3 parsing, routes and selectors remain unchanged.
+Production changes are limited to `managed-csi-root-directory.ts`, `managed-csi-mount.ts`, the sibling-ownership decision in `managed-context-worker.ts` and the cleanup portions of `managed-runtime-attestation-worker.ts`, with collocated tests and this design pair. Source boot-v4/v5 support, private file-profile checks and the relocated core path validator are excluded. Existing boot-v1/v2/v3 parsing, routes and selectors remain unchanged.
 
 ## Verification and acceptance
 
@@ -37,5 +39,7 @@ Tests on Darwin may use actual owned directories and descriptors with explicitly
 ## Risks and remaining work
 
 Before/after checks cannot detect every replace-and-restore event between observations. Holding a directory descriptor prevents a changed parent pathname from redirecting the walk, but does not provide an immutable filesystem snapshot. A returned pathname is a verified directory selection, not a capability for future I/O. Callbacks must join all their work before returning and must neither retain nor close the borrowed descriptor.
+
+The retained descriptor also keeps the volume busy while the healthy worker owns it. Retirement or NodeUnpublish consumers that unmount a live worker's volume must wait for descriptor release; normal Kubernetes unpublish after container exit is unaffected. This slice does not implement that retirement coordination.
 
 This slice does not provide private Read/Write/Edit, file history, immutable native authorization, SQL migrations, receipt-tail recovery, aggregate DRAINED, descendant termination, CSI NodeUnpublish, atomic RELEASED or safe volume reuse. Those remain in #13526 with their separate acceptance gates. There is no wire-format or database migration.

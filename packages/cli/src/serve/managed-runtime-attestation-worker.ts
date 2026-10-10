@@ -241,8 +241,7 @@ export async function startManagedRuntimeAttestationWorker(
       registerManagedCsiAckRoute(app, csiBoot, executor);
     }
   } catch (error) {
-    await csiMount?.close();
-    throw error;
+    return closeCsiMountAfterError(csiMount, error);
   }
   const server = createServer(
     ownedManagedRuntimeRouteGate(
@@ -303,18 +302,16 @@ export async function startManagedRuntimeAttestationWorker(
       );
     });
   } catch (error) {
-    await csiMount?.close();
-    throw error;
+    return closeCsiMountAfterError(csiMount, error);
   }
 
   const address = server.address() as AddressInfo | null;
   if (!address) {
-    try {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    } finally {
-      await csiMount?.close();
-    }
-    throw new Error('Managed Runtime worker listener is unavailable.');
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    return closeCsiMountAfterError(
+      csiMount,
+      new Error('Managed Runtime worker listener is unavailable.'),
+    );
   }
   const ready =
     boot.version === 2
@@ -334,22 +331,55 @@ export async function startManagedRuntimeAttestationWorker(
     ready,
     close: () => {
       closing ??= (async () => {
+        const errors: unknown[] = [];
         try {
           await executor.close();
-        } finally {
-          try {
-            await new Promise<void>((resolve, reject) => {
-              server.close((error) => (error ? reject(error) : resolve()));
-              server.closeAllConnections();
-            });
-          } finally {
-            await csiMount?.close();
-          }
+        } catch (error) {
+          errors.push(error);
         }
+        const cleanup = await Promise.allSettled([
+          new Promise<void>((resolve, reject) => {
+            server.close((error) => (error ? reject(error) : resolve()));
+            server.closeAllConnections();
+          }),
+          csiMount?.close(),
+        ]);
+        errors.push(
+          ...cleanup.flatMap((result) =>
+            result.status === 'rejected' ? [result.reason] : [],
+          ),
+        );
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1)
+          throw new AggregateError(
+            errors,
+            errors[0] instanceof Error
+              ? errors[0].message
+              : 'Managed Runtime worker shutdown failed.',
+            { cause: errors[0] },
+          );
       })();
       return closing;
     },
   };
+}
+
+async function closeCsiMountAfterError(
+  mount: ManagedCsiMount | undefined,
+  error: unknown,
+): Promise<never> {
+  try {
+    await mount?.close();
+  } catch (cleanupError) {
+    throw new AggregateError(
+      [error, cleanupError],
+      error instanceof Error
+        ? error.message
+        : 'Managed Runtime worker startup failed.',
+      { cause: error },
+    );
+  }
+  throw error;
 }
 
 export async function readManagedRuntimeContainerBoot(

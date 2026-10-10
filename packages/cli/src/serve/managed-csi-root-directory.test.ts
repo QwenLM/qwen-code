@@ -160,6 +160,23 @@ describe.runIf(process.platform !== 'win32')('CSI root directory fd', () => {
     await expect(handle!.stat()).rejects.toMatchObject({ code: 'EBADF' });
   });
 
+  it('refuses a same-device replacement planted before the root is opened', async () => {
+    const owned = await fixture();
+    const nativeOpen = fs.open;
+    let handle: FileHandle | undefined;
+    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      await fs.rename(owned.root, path.join(owned.parent, 'original'));
+      await fs.mkdir(owned.root);
+      handle = await nativeOpen(...args);
+      expect((await handle.stat({ bigint: true })).ino).not.toBe(
+        owned.stats.ino,
+      );
+      return handle;
+    });
+    await expect(owned.open()).rejects.toThrow('unavailable');
+    await expect(handle!.stat()).rejects.toMatchObject({ code: 'EBADF' });
+  });
+
   it('closes an acquired fd when fstat fails before the pin is published', async () => {
     const owned = await fixture();
     const nativeOpen = fs.open;

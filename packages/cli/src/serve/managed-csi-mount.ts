@@ -168,12 +168,19 @@ export class ManagedCsiMount extends ManagedContextMount {
     this.#closed = true;
     this.#closing ??= (async () => {
       await Promise.all(this.#observations);
-      await this.#directory?.then(
-        (directory) => directory.close(),
-        (error: unknown) => {
-          if (error instanceof ManagedCsiRootDirectoryCleanupError) throw error;
-        },
-      );
+      try {
+        await this.#directory?.then(
+          (directory) => directory.close(),
+          (error: unknown) => {
+            if (error instanceof ManagedCsiRootDirectoryCleanupError)
+              throw error;
+          },
+        );
+      } catch (error) {
+        if (this.#closeFailure)
+          throw new AggregateError([this.#closeFailure, error], UNAVAILABLE);
+        throw error;
+      }
       if (this.#closeFailure) throw this.#closeFailure;
     })();
     return this.#closing;
@@ -309,11 +316,6 @@ async function verifyChildren(
 ): Promise<void> {
   for (const child of children) {
     if (
-      !sameDirectory(
-        child.stats,
-        await child.handle.stat({ bigint: true }),
-        device,
-      ) ||
       !sameDirectory(
         child.stats,
         await fs.lstat(child.address, { bigint: true }),
