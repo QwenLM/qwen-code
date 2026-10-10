@@ -709,7 +709,7 @@ describe('OpenAIContentConverter', () => {
 
     it('holds a long confirmed opening tag until its closing tag arrives', () => {
       const stream = contentOnlyStream();
-      const text = `<thinking>${'x'.repeat(200)}</thinking>`;
+      const text = 'x'.repeat(200);
 
       const opening = send(stream, {
         content: `<thinking>${'x'.repeat(200)}`,
@@ -717,7 +717,7 @@ describe('OpenAIContentConverter', () => {
       const closing = send(stream, { content: '</thinking>' }, 'stop');
 
       expect(partsOf(opening)).toEqual([]);
-      expect(partsOf(closing)).toEqual([{ text }]);
+      expect(partsOf(closing)).toEqual([{ text, thought: true }]);
     });
 
     it.each([
@@ -749,19 +749,50 @@ describe('OpenAIContentConverter', () => {
     });
 
     it.each([
-      ['split literal block', ['<thi', 'nk>literal</think>']],
-      ['empty block with a separate finish chunk', ['<think>\n\n</think>', '']],
+      ['split literal block', ['<thi', 'nk>literal</think>'], 'literal'],
+      [
+        'empty block with a separate finish chunk',
+        ['<think>\n\n</think>', ''],
+        '\n\n',
+      ],
       [
         'two split valid blocks',
         ['<think>\n\n', '</think><thi', 'nk>literal</think>'],
+        '\n\nliteral',
       ],
-      ['long empty block', [`<thinking>${' '.repeat(128)}</thinking>`, '']],
-    ])('preserves content-only %s', (_name, chunks) => {
+      [
+        'long empty block',
+        [`<thinking>${' '.repeat(128)}</thinking>`, ''],
+        ' '.repeat(128),
+      ],
+    ])('demotes content-only %s', (_name, chunks, thought) => {
       const parts = sendAll(contentOnlyStream(), chunks);
 
-      expect(parts.map((part) => part.text).join('')).toBe(chunks.join(''));
-      expect(parts.every((part) => part.thought !== true)).toBe(true);
+      expect(parts.map((part) => part.text).join('')).toBe(thought);
+      expect(parts.every((part) => part.thought === true)).toBe(true);
     });
+
+    it.each([
+      ['opener', '<thi', 'nking>second reasoning</thinking>Answer'],
+      ['body', '<thinking>second reasoning', '</thinking>Answer'],
+    ])(
+      'holds nonempty thought blocks split inside the next %s',
+      (_name, tail, next) => {
+        const stream = contentOnlyStream();
+        const thought = 'first reasoning '.repeat(20);
+        const first = send(stream, {
+          content: `<thinking>${thought}</thinking>${tail}`,
+        });
+
+        expect(partsOf(first)).toEqual([]);
+        const last = send(stream, { content: next }, 'stop');
+        expect(partsOf(last)).toEqual([
+          { text: thought, thought: true },
+          { text: 'second reasoning', thought: true },
+          { text: 'Answer' },
+        ]);
+      },
+    );
 
     it.each([
       [
@@ -778,7 +809,13 @@ describe('OpenAIContentConverter', () => {
     ])('preserves balanced nested literals %s', (_name, chunks) => {
       const parts = sendAll(contentOnlyStream(), chunks);
 
-      expect(parts.map((part) => part.text).join('')).toBe(chunks.join(''));
+      if (_name === 'at the start of the stream') {
+        expect(parts).toEqual([
+          { text: 'outer <think>literal</think>', thought: true },
+        ]);
+      } else {
+        expect(parts.map((part) => part.text).join('')).toBe(chunks.join(''));
+      }
     });
 
     it('rejects an unclosed outer block containing a balanced nested block', () => {
@@ -2596,6 +2633,21 @@ describe('OpenAIContentConverter', () => {
   });
 
   describe('OpenAI -> Gemini tagged thinking content', () => {
+    const sendContentOnly = (chunks: string[]) => {
+      const ctx = {
+        ...withStreamParser(),
+        responseParsingOptions: { contentOnlyThinkingTagLeaks: true },
+      };
+      return chunks.flatMap(
+        (content, index) =>
+          streamParts(
+            ctx,
+            { content },
+            index === chunks.length - 1 ? 'stop' : null,
+          ) ?? [],
+      );
+    };
+
     const responseParts = (
       content: string,
       ctx: RequestContext = withTaggedThinkingOptions(),
@@ -2626,13 +2678,49 @@ describe('OpenAIContentConverter', () => {
       expect(responseParts(content)).toEqual(expected);
     });
 
-    it('should leave tags visible when tagged thinking parsing is disabled', () => {
-      const parts = responseParts('<think>visible xml example</think>', {
-        ...requestContext,
-        responseParsingOptions: { contentOnlyThinkingTagLeaks: true },
-      });
+    it.each([
+      [
+        '<think>reason</think>Use </think> to close.',
+        'reason',
+        'Use </think> to close.',
+      ],
+      ['<think >plan</think >answer', 'plan', 'answer'],
+    ])('demotes only the leading block of %s', (text, thought, answer) => {
+      const options = { contentOnlyThinkingTagLeaks: true };
+      expect(
+        responseParts(text, {
+          ...requestContext,
+          responseParsingOptions: options,
+        }),
+      ).toEqual([{ text: thought, thought: true }, { text: answer }]);
+      expect(sendContentOnly([text.slice(0, 8), text.slice(8)])).toEqual([
+        { text: thought, thought: true },
+        { text: answer },
+      ]);
+    });
 
-      expect(parts).toEqual([{ text: '<think>visible xml example</think>' }]);
+    it('preserves literal tags arriving after content-only demotion', () => {
+      const parts = sendContentOnly([
+        '<think>reason</think>',
+        'Use </thi',
+        'nk> to close. <think>literal</think>',
+      ]);
+      expect(
+        parts
+          .filter((part) => !part.thought)
+          .map((part) => part.text)
+          .join(''),
+      ).toBe('Use </think> to close. <think>literal</think>');
+    });
+
+    it('keeps truncated non-streaming content on its existing path', () => {
+      const text = '<think>truncated';
+      expect(
+        responseParts(text, {
+          ...requestContext,
+          responseParsingOptions: { contentOnlyThinkingTagLeaks: true },
+        }),
+      ).toEqual([{ text }]);
     });
 
     it('should parse streaming tags split across chunks', () => {

@@ -1278,6 +1278,32 @@ function canBeStandaloneThinkingTagPrefix(text: string): boolean {
   });
 }
 
+/** Tracks balance while classifying an unfinished content-only prefix. */
+function scanThinkingTagBalance(rest: string): {
+  balanced: boolean;
+  hasNestedOpening: boolean;
+  remaining: string;
+} {
+  let depth = 1;
+  let hasNestedOpening = false;
+  for (;;) {
+    const nextTag = THINKING_TAG_PATTERN.exec(rest);
+    if (!nextTag) return { balanced: false, hasNestedOpening, remaining: rest };
+
+    const closing = nextTag[0].startsWith('</');
+    depth += closing ? -1 : 1;
+    if (depth === 0) {
+      return {
+        balanced: true,
+        hasNestedOpening,
+        remaining: rest.slice(nextTag.index + nextTag[0].length),
+      };
+    }
+    hasNestedOpening ||= !closing;
+    rest = rest.slice(nextTag.index + nextTag[0].length);
+  }
+}
+
 function classifyContentOnlyThinkingTagPrefix(
   text: string,
   streamFinished: boolean,
@@ -1326,21 +1352,60 @@ function classifyContentOnlyThinkingTagPrefix(
     }
   }
 
-  let depth = 1;
-  let hasNestedOpening = false;
-  for (;;) {
-    const nextTag = THINKING_TAG_PATTERN.exec(rest);
-    if (!nextTag) break;
-
-    const closing = nextTag[0].startsWith('</');
-    depth += closing ? -1 : 1;
-    if (depth === 0) return 'clean';
-    hasNestedOpening ||= !closing;
-    rest = rest.slice(nextTag.index + nextTag[0].length);
+  const { balanced, hasNestedOpening, remaining } =
+    scanThinkingTagBalance(rest);
+  if (balanced) {
+    const following = remaining.trimStart();
+    if (
+      following &&
+      !following.startsWith('</') &&
+      (LEADING_THINKING_TAG_PATTERN.test(following) ||
+        canBeStandaloneThinkingTagPrefix(following))
+    ) {
+      return streamFinished ? 'leaked' : 'pending';
+    }
+    return 'clean';
   }
-
   if (!hasNestedOpening) return 'pending';
   return streamFinished ? 'leaked' : 'suspicious';
+}
+
+function demoteLeadingThinkingBlocks(text: string): Part[] | undefined {
+  const parts: Part[] = [];
+  let remaining = text;
+  for (;;) {
+    const opening = LEADING_THINKING_TAG_PATTERN.exec(remaining)?.[0];
+    if (!opening || opening.trimStart().startsWith('</')) return undefined;
+    let depth = 1;
+    let closing: RegExpMatchArray | undefined;
+    const body = remaining.slice(opening.length);
+    for (const tag of body.matchAll(/<\/?think(?:ing)?\s*>/gi)) {
+      depth += tag[0].startsWith('</') ? -1 : 1;
+      if (depth === 0) {
+        closing = tag;
+        break;
+      }
+    }
+    if (!closing || closing.index === undefined) return undefined;
+    const thought = body.slice(0, closing.index);
+    if (thought) parts.push({ text: thought, thought: true });
+    remaining = body.slice(closing.index + closing[0].length);
+    if (!remaining) return parts;
+    if (
+      LEADING_THINKING_TAG_PATTERN.test(remaining) &&
+      !remaining.trimStart().startsWith('</')
+    )
+      continue;
+    // A split next opener must remain held with its completed predecessor.
+    if (
+      /\S/.test(remaining) &&
+      canBeStandaloneThinkingTagPrefix(remaining) &&
+      !remaining.trimStart().startsWith('</')
+    )
+      return undefined;
+    parts.push({ text: remaining });
+    return parts;
+  }
 }
 
 function throwProtocolTagLeak(requestContext: RequestContext): never {
@@ -1366,9 +1431,17 @@ export function convertOpenAIResponseToLlm(
 
   if (choice) {
     const parts: Part[] = [];
-    const textParts = choice.message.content
-      ? convertOpenAITextToParts(choice.message.content, requestContext)
-      : [];
+    let textParts: Part[] = [];
+    if (choice.message.content) {
+      const demoted =
+        requestContext.responseParsingOptions?.contentOnlyThinkingTagLeaks ===
+          true && !reasoningText
+          ? demoteLeadingThinkingBlocks(choice.message.content)
+          : undefined;
+      textParts =
+        demoted ??
+        convertOpenAITextToParts(choice.message.content, requestContext);
+    }
 
     // Handle reasoning content (thoughts).
     // Tagged thinking providers may put thoughts in content, while other
@@ -1543,7 +1616,19 @@ export function convertOpenAIChunkToLlm(
       const taggedThinkingCandidate =
         (requestContext.pendingThinkingTagCandidate?.text ?? '') +
         normalizedContent;
-      if (
+      const demoted =
+        requestContext.responseParsingOptions?.contentOnlyThinkingTagLeaks ===
+          true &&
+        !requestContext.hasStructuredReasoningContent &&
+        !reasoningText &&
+        requestContext.hasVisibleContent !== true &&
+        !requestContext.hasTaggedThinkingThought
+          ? demoteLeadingThinkingBlocks(taggedThinkingCandidate)
+          : undefined;
+      if (demoted) {
+        requestContext.pendingThinkingTagCandidate = undefined;
+        contentParts = demoted;
+      } else if (
         requestContext.responseParsingOptions
           ?.taggedThinkingTagsAfterReasoning &&
         (requestContext.hasStructuredReasoningContent || reasoningText) &&
@@ -1572,7 +1657,9 @@ export function convertOpenAIChunkToLlm(
 
     if (
       choice.finish_reason &&
-      requestContext.responseParsingOptions?.taggedThinkingTagsAfterReasoning &&
+      (requestContext.responseParsingOptions
+        ?.taggedThinkingTagsAfterReasoning ||
+        requestContext.responseParsingOptions?.contentOnlyThinkingTagLeaks) &&
       requestContext.taggedThinkingParser?.hasUnclosedThought()
     ) {
       throwProtocolTagLeak(requestContext);
@@ -1732,7 +1819,7 @@ export function convertOpenAIChunkToLlm(
       requestContext.hasStructuredReasoningContent === true;
     const detectContentOnlyThinkingTagLeaks =
       requestContext.responseParsingOptions?.contentOnlyThinkingTagLeaks ===
-      true;
+        true && !requestContext.hasTaggedThinkingThought;
     const contentOnlyThinkingState =
       hasStructuredReasoning ||
       requestContext.hasVisibleContent === true ||
