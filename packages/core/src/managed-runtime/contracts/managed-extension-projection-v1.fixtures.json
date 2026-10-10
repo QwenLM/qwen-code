@@ -17,7 +17,8 @@
   },
   "additionalRecordBodies": {
     "schedule": null,
-    "automation_run": "automation_run"
+    "automation_run": "automation_run",
+    "session_message": null
   },
   "taskStates": [
     "pending",
