@@ -750,7 +750,49 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       this.assertCurrentActivation();
       const latest = this.authority.latestCheckpoint;
       if (latest?.boundary !== HARNESS_DURABLE_WAIT_BOUNDARY) {
-        return null;
+        // The wait already advanced: the carried all-consumed group on
+        // model_output_committed. Restating a consumed run replays
+        // silently under the parking activation, but a fresh activation
+        // owes the Turn-bound commits its identity — `consumeRuntimeResults`
+        // no-ops on this phase, so without the adoption here the next
+        // `commitAwaitRuntimeBatch` would throw "Runtime work cannot
+        // continue a prior activation" (R2-1).
+        const previous = (
+          await this.requireRunnableAuthorization().catch(() => undefined)
+        )?.checkpoint;
+        if (
+          previous === undefined ||
+          previous.continuation.phase !== 'model_output_committed' ||
+          previous.agentWait === null ||
+          !previous.agentWait.runs.every((run) => run.consumed) ||
+          !previous.agentWait.runs.some((run) => run.childRunId === childRunId)
+        ) {
+          return null;
+        }
+        if (previous.identity.activationId === this.activation.activationId) {
+          return previous;
+        }
+        const identity = this.nextCheckpointIdentity();
+        const adopted: HarnessCheckpointV1 = {
+          ...previous,
+          resume: {
+            ...previous.resume,
+            throughSequence: identity.coveredSequence,
+          },
+          identity: {
+            ...previous.identity,
+            checkpointId: identity.checkpointId,
+            coveredSequence: identity.coveredSequence,
+            previousCheckpointId: identity.previousCheckpointId,
+            activationId: this.activation.activationId,
+          },
+        };
+        await this.commitHarnessCheckpoint(
+          `harness:model_output_committed:${this.activation.activationId}:${childRunId}:${identity.coveredSequence}`,
+          adopted,
+          null,
+        );
+        return adopted;
       }
       const previous = (await this.requireRunnableAuthorization()).checkpoint;
       if (previous.continuation.phase !== 'await_agent') {

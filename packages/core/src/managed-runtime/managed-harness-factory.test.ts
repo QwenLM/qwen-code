@@ -1719,6 +1719,35 @@ describe('agent wait', () => {
     await session.close();
   });
 
+  it('adopts the takeover activation on the carried all-consumed replay (R2-1)', async () => {
+    const session = await open(await createWorkspace());
+    const { handle, turn } = await modelOutputCommittedTurn(session);
+    await handle.commitAwaitAgent([agentWaitRun('run-1')], turn);
+    // The last fold lands first — under the dead owner's identity — and
+    // only then does the takeover arrive (the mirror order of the case
+    // above).
+    const advanced = await handle.resolveAwaitAgent('run-1');
+    expect(advanced?.continuation.phase).toBe('model_output_committed');
+    expect(session.authority.latestCheckpoint?.boundary).toBeNull();
+    const takeover = await session.replaceActivation();
+    const successor = createManagedHarnessHandle(session);
+    // The consumed restatement replays silently same-activation, but a
+    // fresh one owes the Turn-bound commits its identity: adopting on the
+    // replay is what the model's next Runtime batch rides.
+    const restated = await successor.resolveAwaitAgent('run-1');
+    expect(restated?.identity.activationId).toBe(takeover.activationId);
+    expect(restated?.continuation.phase).toBe('model_output_committed');
+    // The production shape: the batch carries the turn binding, exactly
+    // like the live ToolTurn does — this is where an unadopted identity
+    // throws "Runtime work cannot continue a prior activation."
+    const batch = await successor.commitAwaitRuntimeBatch(
+      [await runtimeCommit(session)],
+      turn,
+    );
+    expect(batch.kind).toBe('durable_wait');
+    await session.close();
+  });
+
   it('resolves nothing outside the agent wait', async () => {
     const session = await open(await createWorkspace());
     const { handle } = await modelOutputCommittedTurn(session);

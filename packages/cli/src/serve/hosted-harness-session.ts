@@ -5636,6 +5636,16 @@ export function registerHostedHarnessSessionRoutes(
                 'recovered',
                 abort.signal,
               );
+            } else {
+              // The carried all-consumed shape: the takeover owes the
+              // Turn's identity to the next Turn-bound commit — restate
+              // the last resolve so this handle adopts it; without it the
+              // model's next Runtime batch dies as prior-activation work
+              // (R2-1).
+              const lastRun =
+                continueAuthorization.checkpoint.agentWait.runs.at(-1);
+              if (lastRun !== undefined)
+                await harness.resolveAwaitAgent(lastRun.childRunId);
             }
             // Outstanding or not: a crash past the last fold (the carried
             // all-consumed group) can strand sibling calls the dead loop
@@ -5663,11 +5673,32 @@ export function registerHostedHarnessSessionRoutes(
               'Recovered Runtime turn has no journaled tool results.',
             );
           }
-          // Reconcile the pending file-history obligation the recovered turn
-          // left behind before inference — a text-only continuation never
-          // re-acquires, so without this the marker outlives the turn and
-          // wedges every later cold load.
-          await toolTurn.resumeCommittedResults(abort.signal);
+          if (
+            continueAuthorization.status === 'runnable' &&
+            continueAuthorization.checkpoint.agentWait !== null
+          ) {
+            // An agent-wait resume has no Runtime results to consume and
+            // must NOT claim the Workspace mount in advance of any tool
+            // work: the unconditional acquire would make the parent refuse
+            // its own later foreground agent call (R2-3). The pending
+            // file-history obligation dies with the Turn the terminal
+            // record will close, exactly like the interrupted settle.
+            const savedHistory = await readHostedFileHistory(session.managed);
+            if (savedHistory?.pendingTurn === promptId) {
+              await commitHostedFileHistory(session.managed, {
+                schemaVersion: 1,
+                state: savedHistory.state,
+                pendingTurn: null,
+                pendingUndo: null,
+              });
+            }
+          } else {
+            // Reconcile the pending file-history obligation the recovered
+            // turn left behind before inference — a text-only continuation
+            // never re-acquires, so without this the marker outlives the
+            // turn and wedges every later cold load.
+            await toolTurn.resumeCommittedResults(abort.signal);
+          }
           const result = await runHostedHarnessTextTurn({
             sessionId,
             cwd,
@@ -5864,7 +5895,14 @@ export function registerHostedHarnessSessionRoutes(
           // the same way the Runtime family's cancellation settles its
           // pending items — no unpaired functionCall survives into a later
           // Turn's history. A crash past the last fold can strand sibling
-          // calls the all-consumed group no longer names.
+          // calls the all-consumed group no longer names. A cancelled
+          // takeover never waits on an admitted foreground orphan either:
+          // the abandoned-wait fold is the live arm's own answer for an
+          // aborted wait — pre-aborting here settles at once while the
+          // child keeps its ledger, instead of holding the cancel (and its
+          // HTTP reply) hostage to the orphan's terminal (R2-2).
+          const cancelFillAbort = new AbortController();
+          cancelFillAbort.abort();
           await fillParkedRoundAgentGaps({
             managed: session.managed,
             sessionId,
@@ -5872,7 +5910,7 @@ export function registerHostedHarnessSessionRoutes(
             cwd: session.cwd,
             gapText: HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
             children: session.childAgents,
-            signal: session.active?.abort.signal,
+            signal: cancelFillAbort.signal,
             consume: (childRunId) => session.childConsumption.add(childRunId),
           });
         } else {
