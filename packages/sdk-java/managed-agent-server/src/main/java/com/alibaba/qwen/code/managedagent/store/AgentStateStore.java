@@ -63,6 +63,32 @@ public interface AgentStateStore {
         throw new UnsupportedOperationException("Child Session creation is unavailable");
     }
 
+    /**
+     * The isolation slice (#13753 I1): the same creation, bound to the
+     * child run's ready child Workspace. The child's row takes the
+     * Workspace's directory instead of the parent's; the creating
+     * transaction locks the Workspace row and refuses unless it is ready,
+     * unfinished, prepared from the parent's current Workspace and storage,
+     * and names {@code childCwdRelative}.
+     */
+    default StoreModels.Admission insertChildSessionCommand(String tenantId,
+            String parentSessionId, String idempotencyKey,
+            String requestDigest, String title, List<Map<String, Object>> input,
+            String payloadDigest, StoreModels.SessionLineage lineage,
+            String childCwdRelative) {
+        throw new UnsupportedOperationException("Child Session creation is unavailable");
+    }
+
+    /**
+     * The child directory a child run's Workspace recorded, or null before
+     * its layout was recorded. Readiness is the creating transaction's to
+     * check, so a replay still answers once the Workspace moved on.
+     */
+    default String findChildWorkspaceCwd(String tenantId,
+            String parentSessionId, String childRunId) {
+        return null;
+    }
+
     /** The replay of {@link #insertChildSessionCommand}: same key and
      * digest answers the original admission; either mismatch conflicts. */
     default StoreModels.Admission replayChildSessionCommand(String tenantId,

@@ -325,6 +325,40 @@ public class ManagedAgentStore implements AgentStateStore {
             String parentSessionId, String idempotencyKey,
             String requestDigest, String title, List<Map<String, Object>> input,
             String payloadDigest, StoreModels.SessionLineage lineage) {
+        return insertChildSession(tenantId, parentSessionId, idempotencyKey,
+                requestDigest, title, input, payloadDigest, lineage, null);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertChildSessionCommand(String tenantId,
+            String parentSessionId, String idempotencyKey,
+            String requestDigest, String title, List<Map<String, Object>> input,
+            String payloadDigest, StoreModels.SessionLineage lineage,
+            String childCwdRelative) {
+        if (childCwdRelative == null) {
+            throw new IllegalArgumentException("An isolated child needs its Workspace directory");
+        }
+        return insertChildSession(tenantId, parentSessionId, idempotencyKey,
+                requestDigest, title, input, payloadDigest, lineage,
+                childCwdRelative);
+    }
+
+    @Override
+    public String findChildWorkspaceCwd(String tenantId,
+            String parentSessionId, String childRunId) {
+        List<String> rows = jdbc.queryForList("SELECT child_cwd_relative FROM"
+                        + " qwen_managed_child_workspace WHERE tenant_id = ?"
+                        + " AND parent_session_id = ? AND child_run_id = ?",
+                String.class, tenantId, parentSessionId, childRunId);
+        return rows.isEmpty() ? null : rows.getFirst();
+    }
+
+    private Admission insertChildSession(String tenantId,
+            String parentSessionId, String idempotencyKey,
+            String requestDigest, String title, List<Map<String, Object>> input,
+            String payloadDigest, StoreModels.SessionLineage lineage,
+            String childCwdRelative) {
         SessionRecord parent = requireSessionForUpdate(tenantId,
                 parentSessionId);
         if (parent.workspace() == null || !"ACTIVE".equals(parent.status())) {
@@ -374,6 +408,11 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ApiException(HttpStatus.CONFLICT, "child_run_settled",
                     "The child run already settled; creation owes no more Session.");
         }
+        if (childCwdRelative != null) {
+            requireReadyChildWorkspace(tenantId, parentSessionId,
+                    lineage.parentChildRunId(), parent.workspace(),
+                    childCwdRelative);
+        }
         long now = clock.millis();
         String sessionId = UUID.randomUUID().toString();
         String turnId = input.isEmpty() ? null : publicId("turn");
@@ -391,17 +430,16 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " SELECT tenant_id, ?, agent_id,"
                         + " agent_revision, ?, 'ACTIVE', ?, ?,"
                         + " workspace_id, workspace_generation,"
-                        + " workspace_storage_id, cwd_relative,"
-                        + " context_config_ref, context_revision,"
+                        + " workspace_storage_id, "
+                        + (childCwdRelative == null ? "cwd_relative" : "?")
+                        + ", context_config_ref, context_revision,"
                         + " workspace_config_ref, workspace_policy_ref,"
                         + " tool_profile, creator_actor_key, approval_mode,"
                         + " ?, ?, ?, ?"
                         + " FROM managed_agent_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
-                sessionId, title, now, now,
-                lineage.parentSessionId(), lineage.rootSessionId(),
-                lineage.parentChildRunId(), lineage.depth(),
-                tenantId, parentSessionId);
+                childInsertArgs(sessionId, title, now, childCwdRelative,
+                        lineage, tenantId, parentSessionId));
         jdbc.update("INSERT INTO managed_agent_consumer_progress"
                         + " (tenant_id, session_id, consumer_name,"
                         + " covered_sequence, updated_at) VALUES"
@@ -446,6 +484,47 @@ public class ManagedAgentStore implements AgentStateStore {
                     acceptedData(turnId, input), false, null, now);
         }
         return new Admission(sessionId, turnId, false, true);
+    }
+
+    private static Object[] childInsertArgs(String sessionId, String title,
+            long now, String childCwdRelative,
+            StoreModels.SessionLineage lineage, String tenantId,
+            String parentSessionId) {
+        List<Object> args = new ArrayList<>(List.of(sessionId, title, now, now));
+        if (childCwdRelative != null) {
+            args.add(childCwdRelative);
+        }
+        args.addAll(List.of(lineage.parentSessionId(), lineage.rootSessionId(),
+                lineage.parentChildRunId(), lineage.depth(), tenantId,
+                parentSessionId));
+        return args.toArray();
+    }
+
+    /**
+     * Decision 13 of the isolation slice: an isolated child binds only to
+     * a ready, unfinished child Workspace prepared from the parent's
+     * current Workspace and storage. The locking read serializes the
+     * creation against a finish request, which locks the same row.
+     */
+    private void requireReadyChildWorkspace(String tenantId,
+            String parentSessionId, String childRunId, ContextBinding parent,
+            String childCwdRelative) {
+        List<Boolean> ready = jdbc.query("SELECT state, finish_request,"
+                        + " workspace_id, workspace_generation, storage_id,"
+                        + " child_cwd_relative FROM qwen_managed_child_workspace"
+                        + " WHERE parent_session_id = ? AND child_run_id = ?"
+                        + " AND tenant_id = ? FOR UPDATE",
+                (row, index) -> "ready".equals(row.getString("state"))
+                        && row.getString("finish_request") == null
+                        && parent.getWorkspaceId().equals(row.getString("workspace_id"))
+                        && parent.getWorkspaceGeneration() == row.getLong("workspace_generation")
+                        && parent.getStorageId().equals(row.getString("storage_id"))
+                        && childCwdRelative.equals(row.getString("child_cwd_relative")),
+                parentSessionId, childRunId, tenantId);
+        if (ready.size() != 1 || !ready.getFirst()) {
+            throw new ApiException(HttpStatus.CONFLICT, "child_workspace_not_ready",
+                    "The child run's Workspace is not ready to bind a child Session.");
+        }
     }
 
     @Override

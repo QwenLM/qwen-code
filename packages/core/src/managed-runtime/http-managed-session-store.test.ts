@@ -2750,53 +2750,64 @@ describe('HTTP Managed Session store', () => {
     await session.close().catch(() => undefined);
   });
 
-  it('treats the verdict/mint gate refusal as rollbackable and commits the corrected retry', async () => {
-    const server = new FakeManagedSessionStore();
-    const { stores, session } = await bootStoresAndSession(server);
-    const defaultImpl = server.fetch.getMockImplementation()!;
-    let armed = true;
-    let attempts = 0;
-    server.fetch.mockImplementation(async (input, init) => {
-      if (requestUrl(input).endsWith('/transactions:commit')) {
-        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        if (body['operation'] === 'message.commit') {
-          attempts++;
-          if (armed) {
-            armed = false;
-            return jsonResponse(
-              {
-                error: {
-                  code: 'child_run_lineage_minted',
-                  message: 'the verdict does not name the minted Session',
+  it.each([
+    // The verdict/mint gate (R24).
+    'child_run_lineage_minted',
+    // A session message the store's lineage refuses (H4d).
+    'session_message_lineage_refused',
+  ])(
+    'treats the %s refusal as rollbackable and commits the corrected retry',
+    async (code) => {
+      const server = new FakeManagedSessionStore();
+      const { stores, session } = await bootStoresAndSession(server);
+      const defaultImpl = server.fetch.getMockImplementation()!;
+      let armed = true;
+      let attempts = 0;
+      server.fetch.mockImplementation(async (input, init) => {
+        if (requestUrl(input).endsWith('/transactions:commit')) {
+          const body = JSON.parse(String(init?.body)) as Record<
+            string,
+            unknown
+          >;
+          if (body['operation'] === 'message.commit') {
+            attempts++;
+            if (armed) {
+              armed = false;
+              return jsonResponse(
+                {
+                  error: {
+                    code,
+                    message: 'the store refused the revision',
+                  },
                 },
-              },
-              409,
-            );
+                409,
+              );
+            }
           }
         }
-      }
-      return defaultImpl(input, init);
-    });
-    const messageRef = await stores.resourceStore.publish(
-      'managed-message',
-      Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
-    );
-    // The gate's refusal is a rollbackable non-commit, never the write
-    // failure that latches the authority's log shut behind it (R24).
-    await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
-      ManagedSessionCommitRejectedError,
-    );
-    expect(session.authority.writesStopped).toBe(false);
-    // The corrected retry commits on the same resident authority.
-    await appendMessage(session, 2, messageRef);
-    expect(session.authority.writesStopped).toBe(false);
-    expect(attempts).toBe(2);
-    const landed = server.commits.filter(
-      (body) => body['operation'] === 'message.commit',
-    ).length;
-    expect(landed).toBe(1);
-    await session.close();
-  });
+        return defaultImpl(input, init);
+      });
+      const messageRef = await stores.resourceStore.publish(
+        'managed-message',
+        Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
+      );
+      // The refusal is a rollbackable non-commit, never the write failure
+      // that latches the authority's log shut behind it.
+      await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
+        ManagedSessionCommitRejectedError,
+      );
+      expect(session.authority.writesStopped).toBe(false);
+      // The corrected retry commits on the same resident authority.
+      await appendMessage(session, 2, messageRef);
+      expect(session.authority.writesStopped).toBe(false);
+      expect(attempts).toBe(2);
+      const landed = server.commits.filter(
+        (body) => body['operation'] === 'message.commit',
+      ).length;
+      expect(landed).toBe(1);
+      await session.close();
+    },
+  );
 
   it('surfaces a typed 409 for a resource missing server-side and keeps staged bytes for retry', async () => {
     const server = new FakeManagedSessionStore();

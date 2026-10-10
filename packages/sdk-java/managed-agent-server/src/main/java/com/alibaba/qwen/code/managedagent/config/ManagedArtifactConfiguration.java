@@ -57,6 +57,16 @@ public class ManagedArtifactConfiguration {
     }
 
     /**
+     * The child Workspace scan's own tick (#13753 I1): its steps run Git
+     * for up to the Git timeout each, which must stall neither the relay
+     * nor the shared recoveries.
+     */
+    @Bean
+    public ThreadPoolTaskScheduler childWorkspaceScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("child-workspace-").build();
+    }
+
+    /**
      * The recovery tick runs blocking JDBC, so it must never share the
      * one-thread default pool. Gated exactly like the Broker bean that carries
      * the tick: a deployment with the Broker off must not pay for an idle
