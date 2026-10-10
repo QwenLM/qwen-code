@@ -847,7 +847,11 @@ class ManagedSessionStoreHttpClient {
               // The verdict/mint gate's refusal is a rollbackable
               // non-commit: the corrected retry must reach the backend
               // without the authority latching a write failure behind it.
-              error.remoteCode === 'child_run_lineage_minted')) ||
+              error.remoteCode === 'child_run_lineage_minted' ||
+              // So is a session message the lineage refuses: only the
+              // store holds a child's lineage, so the authority could not
+              // refuse it first, and the Session's log stays writable.
+              error.remoteCode === 'session_message_lineage_refused')) ||
             (this.lifecycleAuthority &&
               (error.status === 403 ||
                 (error.status === 409 &&

@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { Config, type ConfigParameters } from '../config/config.js';
 import { Storage } from '../config/storage.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import {
   resetDebugLoggingState,
   setDebugLogSession,
@@ -3097,6 +3098,9 @@ describe('SessionWriterLease', () => {
       getResumedSessionData: () => authoritative,
       getProjectRoot: () => fixture.projectRoot,
       getCliVersion: () => 'test',
+      getModel: () => 'test',
+      getAuthType: () => undefined,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
       getFastModel: () => undefined,
       isInteractive: () => false,
     } as unknown as Config;

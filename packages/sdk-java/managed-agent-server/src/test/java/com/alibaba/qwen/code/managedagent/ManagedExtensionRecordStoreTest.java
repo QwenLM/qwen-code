@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTask;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.ManagedTaskService;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
@@ -206,6 +207,84 @@ class ManagedExtensionRecordStoreTest {
         assertThat(records.listRecords(TENANT, sessionId, "child_acceptance")
                 .get(0).required("run").required("delivery")
                 .required("state").textValue()).isEqualTo("consumed");
+    }
+
+    @Test
+    void closesAScheduleOverItsPromptResource() throws Exception {
+        ObjectNode schedule = ((ObjectNode) ManagedAutomationRecordContractTest
+                .fixtures().get("templates").get("schedule")).deepCopy();
+        // The template's promptRef names a resource this Session never held.
+        String unheld = UUID.randomUUID().toString();
+        ExtensionRecordJournal unheldJournal = journal(unheld);
+        schedule.put("targetSessionId", unheld);
+        assertRefused("a Schedule citing a prompt the Session does not hold",
+                unheld, ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> unheldJournal.commit(unheldJournal.requestDomain(
+                        "schedule-1", "schedule", schedule, List.of(), 1_000)));
+        CommitResource prompt = hookResource("prompt-x", "managed-prompt",
+                "{\"prompt\":\"nightly build\"}".getBytes(StandardCharsets.UTF_8));
+        schedule.set("promptRef", hookRef(prompt));
+        String sessionId = UUID.randomUUID().toString();
+        // H6b: a persistent definition lives in its target Session.
+        ExtensionRecordJournal foreign = journal(sessionId);
+        assertRefused("a persistent Schedule targeting another Session",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must be this Session",
+                () -> foreign.commit(foreign.requestDomain("schedule-1",
+                        "schedule", schedule, List.of(prompt), 1_000)));
+        schedule.put("targetSessionId", sessionId);
+        commitDomain(journal(sessionId), "schedule-1", "schedule", schedule,
+                List.of(prompt));
+    }
+
+    @Test
+    void bindsAutomationRunsToTheirLiveDefinition() throws Exception {
+        JsonNode templates = ManagedAutomationRecordContractTest.fixtures()
+                .get("templates");
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        CommitResource prompt = hookResource("prompt-a",
+                "managed-automation-prompt",
+                "Run it.".getBytes(StandardCharsets.UTF_8));
+        ObjectNode schedule = ((ObjectNode) templates.get("schedule")).deepCopy();
+        schedule.set("promptRef", hookRef(prompt));
+        schedule.put("targetSessionId", sessionId);
+        ObjectNode run = ((ObjectNode) templates.get("automation_run")).deepCopy();
+        run.put("scheduleId", "schedule-1");
+        run.put("definitionRevision", 1);
+        run.put("targetSessionId", sessionId);
+        String occurrenceKey = run.get("occurrenceKey").asText();
+        run.put("automationRunId", AutomationLedgerStore.automationRunId(
+                "schedule-1", occurrenceKey));
+        // H6b: no definition, a stale revision and an underived id refuse
+        // before anything is written; the bound run commits.
+        assertRefused("a run without its definition", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must bind to its live definition",
+                () -> journal.commit(journal.requestDomain("run-1",
+                        "automation_run", run, List.of(), 1_000)));
+        commitDomain(journal, "schedule-1", "schedule", schedule,
+                List.of(prompt));
+        ObjectNode stale = run.deepCopy();
+        stale.put("definitionRevision", 2);
+        assertRefused("a run at a stale definition revision", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must bind to its live definition",
+                () -> journal.commit(journal.requestDomain("run-stale",
+                        "automation_run", stale, List.of(), 1_000)));
+        ObjectNode renamed = run.deepCopy();
+        renamed.put("automationRunId", "run-1");
+        assertRefused("a run whose id is not derived", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must be derived from its definition and occurrence",
+                () -> journal.commit(journal.requestDomain("run-renamed",
+                        "automation_run", renamed, List.of(), 1_000)));
+        commitDomain(journal, "run-1", "automation_run", run, List.of());
+        assertThat(records.findTask(TENANT, sessionId,
+                ManagedExtensionProjection.taskId(ManagedExtensionProjection
+                        .recordKey(sessionId, "automation_run",
+                                run.get("automationRunId").asText())))
+                .orElseThrow().kind()).isEqualTo("automation_run");
     }
 
     @Test
@@ -598,7 +677,7 @@ class ManagedExtensionRecordStoreTest {
     }
 
     /** Commits a child agent through its settled result. */
-    private static void settleChildAgentChain(String sessionId,
+    static void settleChildAgentChain(String sessionId,
             String completion, ExtensionRecordJournal journal,
             CommitResource inputResource, CommitResource resultResource,
             CommitResource receiptResource) {
@@ -609,7 +688,7 @@ class ManagedExtensionRecordStoreTest {
 
     /** Commits a child Session run through its settled result, each body
      * shaped into its kind by {@code shape}. */
-    private static void settleChildSessionChain(String sessionId,
+    static void settleChildSessionChain(String sessionId,
             String completion, ExtensionRecordJournal journal,
             CommitResource inputResource, CommitResource resultResource,
             CommitResource receiptResource,
@@ -666,7 +745,7 @@ class ManagedExtensionRecordStoreTest {
         return body;
     }
 
-    private static ObjectNode childAgent(String sessionId, String completion,
+    static ObjectNode childAgent(String sessionId, String completion,
             String state, String execution, String runtimeBinding,
             CommitResource inputResource) {
         ObjectNode body = JsonNodeFactory.instance.objectNode();
@@ -835,7 +914,7 @@ class ManagedExtensionRecordStoreTest {
                 hookRef(seg2));
         return delivery;
     }
-    private static ObjectNode childRun(String state, String execution,
+    static ObjectNode childRun(String state, String execution,
             String runtimeBinding, CommitResource argsResource) {
         ObjectNode body = JsonNodeFactory.instance.objectNode();
         body.put("kind", "shell");
@@ -1640,7 +1719,7 @@ class ManagedExtensionRecordStoreTest {
                 Base64.getEncoder().encodeToString(bytes));
     }
 
-    private static void commitDomain(ExtensionRecordJournal journal, String commandId,
+    static void commitDomain(ExtensionRecordJournal journal, String commandId,
             String domain, JsonNode record, List<CommitResource> resources) {
         CommitTransactionRequest request = journal.requestDomain(commandId, domain, record, resources, 1000);
         journal.commit(request);
@@ -1727,12 +1806,12 @@ class ManagedExtensionRecordStoreTest {
                 "extension-writer-token-0123456789").bytes()).isEqualTo("[]".getBytes(StandardCharsets.UTF_8));
     }
 
-    private static CommitResource hookResource(String id, String kind, byte[] bytes) {
+    static CommitResource hookResource(String id, String kind, byte[] bytes) {
         return new CommitResource(id, kind, 1, bytes.length, ExtensionRecordJournal.sha256(bytes),
                 Base64.getEncoder().encodeToString(bytes));
     }
 
-    private static ObjectNode hookRef(CommitResource resource) {
+    static ObjectNode hookRef(CommitResource resource) {
         return JsonNodeFactory.instance.objectNode().put("resourceId", resource.resourceId()).put("kind", resource.kind())
                 .put("schemaVersion", resource.schemaVersion()).put("byteLength", resource.byteLength()).put("digest", resource.digest());
     }
