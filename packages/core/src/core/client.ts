@@ -4922,10 +4922,11 @@ export class LlmClient {
             modelRequestAccepted = false;
             hasToolCalls = false;
             loopGuardFedCallIds.clear();
-            agentOutput.restartAttempt(
+            const preserveText =
               event.type === LlmEventType.Retry &&
-                event.isContinuation === true,
-            );
+              event.isContinuation === true;
+            agentOutput.restartAttempt(preserveText);
+            messageDisplay?.restartAttempt(preserveText);
           }
           if (event.type === LlmEventType.Content) {
             agentOutput.appendText(event.value);
