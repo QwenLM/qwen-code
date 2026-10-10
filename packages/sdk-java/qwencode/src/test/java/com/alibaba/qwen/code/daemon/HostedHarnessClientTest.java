@@ -1170,6 +1170,96 @@ class HostedHarnessClientTest {
         }
     }
 
+    @Test
+    void automationOperationRejectsANonSettledState() {
+        server.createContext(
+                "/session/" + SESSION_ID + "/automations/operations",
+                exchange -> sendJson(exchange, 202, "{\"state\":\"running\","
+                        + "\"operationId\":\"op-1\"}", true));
+
+        try (HostedHarnessClient client = newClient()) {
+            MutationOutcomeUnknownException failure = assertThrows(
+                    MutationOutcomeUnknownException.class,
+                    () -> client.runAutomationOperation(
+                            mockRef(), Map.of("operationId", "op-1")));
+            assertTrue(failure.getCause().getMessage()
+                    .contains("did not settle the automation operation"));
+        }
+    }
+
+    @Test
+    void automationOperationRejectsACrossedOperationEcho() {
+        server.createContext(
+                "/session/" + SESSION_ID + "/automations/operations",
+                exchange -> sendJson(exchange, 202, "{\"state\":\"settled\","
+                        + "\"operationId\":\"op-other\"}", true));
+
+        try (HostedHarnessClient client = newClient()) {
+            MutationOutcomeUnknownException failure = assertThrows(
+                    MutationOutcomeUnknownException.class,
+                    () -> client.runAutomationOperation(
+                            mockRef(), Map.of("operationId", "op-1")));
+            assertTrue(failure.getCause().getMessage()
+                    .contains("settled a different automation operation"));
+        }
+    }
+
+    @Test
+    void automationOperationRejectsNonSuccessStatuses() {
+        // A codeless intermediary 503 is an ambiguous answer, retried as
+        // unknown; a refusal with a code flows out translated.
+        server.createContext(
+                "/session/" + SESSION_ID + "/automations/operations",
+                exchange -> sendJson(exchange, 503, "Service Unavailable",
+                        true));
+
+        try (HostedHarnessClient client = newClient()) {
+            MutationOutcomeUnknownException failure = assertThrows(
+                    MutationOutcomeUnknownException.class,
+                    () -> client.runAutomationOperation(
+                            mockRef(), Map.of("operationId", "op-1")));
+            assertTrue(failure.getCause() instanceof DaemonHttpException);
+        }
+    }
+
+    @Test
+    void automationOperationCarriesAservicedRefusalCode() {
+        server.createContext(
+                "/session/" + SESSION_ID + "/automations/operations",
+                exchange -> sendJson(exchange, 409, "{\"error\":\"x\","
+                        + "\"code\":\"automation_retired\"}", true));
+
+        try (HostedHarnessClient client = newClient()) {
+            DaemonHttpException failure = assertThrows(
+                    DaemonHttpException.class,
+                    () -> client.runAutomationOperation(
+                            mockRef(), Map.of("operationId", "op-1")));
+            assertEquals(409, failure.getStatusCode());
+            assertEquals("automation_retired", failure.getErrorCode());
+        }
+    }
+
+    @Test
+    void automationOperationCarriesTheSettledAnswerThrough() {
+        server.createContext(
+                "/session/" + SESSION_ID + "/automations/operations",
+                exchange -> sendJson(exchange, 202, "{\"state\":\"settled\","
+                        + "\"operationId\":\"op-1\",\"replayed\":true}",
+                        true));
+
+        try (HostedHarnessClient client = newClient()) {
+            Map<String, Object> answer = client.runAutomationOperation(
+                    mockRef(), Map.of("operationId", "op-1"));
+            assertEquals("settled", answer.get("state"));
+            assertEquals(Boolean.TRUE, answer.get("replayed"));
+        }
+    }
+
+    private static HarnessSessionRef mockRef() {
+        return new HarnessSessionRef(SESSION_ID, CLIENT_ID, BOOT_ID,
+                "/workspace", null, null, null);
+    }
+
     private HostedHarnessClient newClient() {
         return HostedHarnessClient.builder()
                 .baseUri(baseUri)

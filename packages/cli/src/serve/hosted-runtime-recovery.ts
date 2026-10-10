@@ -28,6 +28,7 @@ import {
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
 import {
+  hostedRuntimeSessionId,
   journaledToolResultIds,
   truncateHostedGlobResponse,
 } from './hosted-workspace-tool-turn.js';
@@ -148,7 +149,7 @@ function isTransientStoreBlock(
   );
 }
 
-async function originalRuntimeBroker(
+export async function originalRuntimeBroker(
   session: ManagedSession,
   promptId: string,
   items: readonly HarnessToolItem[],
@@ -183,7 +184,7 @@ async function originalRuntimeBroker(
       ) as { hookCatalog?: unknown; mcpServers?: unknown };
       if (definition.hookCatalog || definition.mcpServers)
         throw new RecoveryDeclined();
-      owners.add(promptId);
+      owners.add(hostedRuntimeSessionId(promptId));
       continue;
     }
     if (ref.kind !== 'managed-tool-input') throw new RecoveryDeclined();
@@ -762,7 +763,7 @@ export async function recoverHostedRuntimeTurn(input: {
             functionCallId: run.functionCallId,
             toolName: run.toolName,
             executionCallId: run.childRunId,
-            runtimeSessionId: promptId,
+            runtimeSessionId: hostedRuntimeSessionId(promptId),
             outcome: 'known',
             status: { state: run.consumed ? 'settled' : 'executing' },
           })),
