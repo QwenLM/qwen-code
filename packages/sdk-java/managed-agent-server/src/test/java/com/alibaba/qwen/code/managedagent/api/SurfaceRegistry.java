@@ -85,6 +85,10 @@ public enum SurfaceRegistry {
             "/v1/agents/sessions/{sessionId}/tasks/{taskId}/events",
             Surface.PUBLIC, RuleClass.READER,
             EnumSet.of(Capability.TASK_EVENT_LIST)),
+    PUBLIC_TASK_CANCEL(Method.POST,
+            "/v1/agents/sessions/{sessionId}/tasks/{taskId}/cancel",
+            Surface.PUBLIC, RuleClass.TASK_OPERATOR,
+            EnumSet.of(Capability.TASK_CANCEL)),
     // ManagedActionController: Action read and respond routes.
     PUBLIC_ACTION_LIST(Method.GET,
             "/v1/agents/sessions/{sessionId}/actions",
@@ -195,6 +199,9 @@ public enum SurfaceRegistry {
             "/api/agent/web-shell/v1/tasks/events/query",
             Surface.WEBSHELL, RuleClass.READER,
             EnumSet.of(Capability.TASK_EVENT_LIST)),
+    WEBSHELL_TASK_CANCEL(Method.POST, "/api/agent/web-shell/v1/tasks/cancel",
+            Surface.WEBSHELL, RuleClass.TASK_OPERATOR,
+            EnumSet.of(Capability.TASK_CANCEL)),
     WEBSHELL_SESSION_LIST(Method.POST, "/api/agent/web-shell/v1/sessions/query",
             Surface.WEBSHELL, RuleClass.READER,
             EnumSet.of(Capability.SESSION_LIST)),
@@ -494,6 +501,7 @@ public enum SurfaceRegistry {
         TASK_LIST,
         TASK_GET,
         TASK_EVENT_LIST,
+        TASK_CANCEL,
         TRANSCRIPT_QUERY,
         ACTION_LIST,
         ACTION_GET,
@@ -617,6 +625,19 @@ public enum SurfaceRegistry {
          * and cwd has no legacy arm ({@code 400 unsupported_feature}).
          */
         OPERATOR,
+        /**
+         * Task cancel (H4f): the read grant ({@code 404 session_not_found}
+         * below it), the task itself ({@code 404 task_not_found}), then
+         * OPERATOR or above on the bound Workspace ({@code 403
+         * task_forbidden} below it). No shape gate and no creator-keyed
+         * facts: the delivery records a stop request on the parent's own
+         * journal and runs no new work, so an admitted caller meets the
+         * route's own new-request checks ({@code 409
+         * session_not_active}, {@code task_action_unavailable} or {@code
+         * session_operation_active}). The legacy arm admits every caller
+         * that can read the Session.
+         */
+        TASK_OPERATOR,
         /**
          * The lifecycle family (close, archive, unarchive and delete —
          * D4's OWNER): the Session's recorded owner ({@code
