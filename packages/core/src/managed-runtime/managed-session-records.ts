@@ -136,6 +136,8 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     'child_acceptance',
     'channel_route',
     'channel_delivery',
+    // H4d-b: produced by send_message and the control plane's relay.
+    'session_message',
   ];
 
 /**
@@ -202,11 +204,10 @@ export function assertManagedSessionChildRunKindEnabled(kind: string): void {
 
 /**
  * Whether a child Session run may continue a completed one (H4d). Both
- * languages validate continuations and the rules they obey, but submission
- * waits for the runtime that revives a child with its history: H4b's relay
- * would run a committed continuation as a fresh child.
+ * languages validate continuations and the rules they obey; H4d-b's relay
+ * revives a continuation with its chain's history, so submission is open.
  */
-export const MANAGED_SESSION_CHILD_CONTINUATIONS_ENABLED = false;
+export const MANAGED_SESSION_CHILD_CONTINUATIONS_ENABLED = true;
 
 /**
  * The continuation gate. This stands beside {@link
