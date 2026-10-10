@@ -22,6 +22,28 @@ The workflow (`qwen-triage.yml` `verify` job) guarantees:
   verified head to cite is `git rev-parse HEAD^2`.
 - **Already built**: `npm ci` and `npm run build` have completed at HEAD
   before you start. Do not redo them; rebuild only what your A/B needs.
+- **Java toolchain, only when `QWEN_VERIFY_JAVA=1`.** The lane sets that
+  variable only when the diff touches `packages/sdk-java/` and the toolchain
+  install succeeded. You then have Temurin JDK 21 (`JAVA_HOME`) and Maven
+  3.9.11 on `PATH`. `MAVEN_ARGS` points Maven at a local repository warmed
+  from these POMs. `qwencode` and `runtime-broker` were installed from
+  **this** checkout (the merge ref) into that repository. The exit codes are
+  the last line of `java-prepare.log` in the directory that holds
+  `$QWEN_VERIFY_CONTEXT` (`qwencode=<n> runtime-broker=<n>`). Do not download
+  a JDK or Maven yourself. If either code is non-zero, reinstall that module
+  from the tree before testing it.
+  The module versions are fixed and are not SNAPSHOT, so the repository holds
+  one copy. Before building the **base** side of an A/B, reinstall the
+  siblings from the base worktree, or copy the repository and pass a
+  separate `-Dmaven.repo.local` to the base side. Install HEAD's versions
+  again before any further HEAD measurement.
+  This is JDK 21 only, with no database. MariaDB/MySQL failsafe integration
+  tests and the hosted harness need a database and a bundled `dist/cli.js`;
+  leave them under _Not covered_. The Java 11/17 matrix stays on
+  `sdk-java.yml`.
+  If the diff touches `packages/sdk-java/` and `QWEN_VERIFY_JAVA` is unset,
+  the toolchain install failed. Put the Java side under _Not covered_ and do
+  not install a JDK yourself.
 - **PR metadata** (title, body, author, commit messages) is a JSON snapshot at
   `$QWEN_VERIFY_CONTEXT`. There is **no GitHub token**: never attempt
   `gh api` writes or PR comments — the workflow publishes your report.
@@ -1144,8 +1166,10 @@ or contract version too.
   daemon-served Web Shell it renders (`packages/web-shell/` and the serve
   routes it calls): read
   `references/android.md` before scoping. The `node:22-bookworm` verify
-  image ships no JDK and no Android SDK, and the lane passes no `/dev/kvm`
-  into the container. The Linux `aapt2` that AGP 8.2 downloads is x86-64
+  image ships no Android SDK, and the lane passes no `/dev/kvm` into the
+  container. JDK 21 is provisioned only for a diff that touches
+  `packages/sdk-java/` (see the environment contract) and does not make an
+  APK build possible. The Linux `aapt2` that AGP 8.2 downloads is x86-64
   only, so an arm64 Linux sandbox cannot even build the APK. In the CI
   lane, measure what the container actually has, and expect device-level
   claims to go under _Not covered_. The local recipe is in that reference:
@@ -1153,13 +1177,15 @@ or contract version too.
   run, and how to drive the WebView through CDP. Check the Android workflow's
   trigger filters even for web-shell-only changes; report _lane never ran_
   when untriggered, and name any Android behaviour left _Not covered_.
-- **Java-centred PRs** (`packages/sdk-java/`) in the CI lane: the
-  `node:22-bookworm` verify image ships no JDK. Measure `command -v java`
-  first. If it is absent, list the Java side under _Not covered_; when the
-  central claim lives in Java, the verdict is `inconclusive`, never
-  `merge-ready`. Measured example: a sandbox run with no JDK left roughly
-  900 Java lines unexecuted (SQL contention, stale release, settlement, a
-  migration), and a later maintainer round had to cover them.
+- **Java-centred PRs** (`packages/sdk-java/`) in the CI lane: JDK 21 and
+  Maven are provisioned for these diffs, gated on `QWEN_VERIFY_JAVA=1` (see
+  the environment contract). Measure `command -v java` first. If it is
+  absent, the toolchain install failed: list the Java side under _Not
+  covered_; when the central claim lives in Java, the verdict is
+  `inconclusive`, never `merge-ready`. Measured example: a sandbox run
+  with no JDK left roughly 900 Java lines unexecuted (SQL contention,
+  stale release, settlement, a migration), and a later maintainer round
+  had to cover them.
 
 ## Artifact contract (the workflow collects and publishes these)
 

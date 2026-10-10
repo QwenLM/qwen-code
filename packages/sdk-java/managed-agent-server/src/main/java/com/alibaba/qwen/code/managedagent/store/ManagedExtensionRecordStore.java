@@ -657,7 +657,7 @@ public class ManagedExtensionRecordStore {
                     requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
                 }
             }
-            require("shell".equals(record.get("kind").textValue())
+            require(!ManagedExtensionRecords.isChildSessionRun(record)
                     || record.get("depth").longValue() != 1
                     || record.get("rootSessionId").textValue()
                             .equals(sessionId),
@@ -772,7 +772,7 @@ public class ManagedExtensionRecordStore {
             require(childRunResource != null,
                     "Child acceptance must name a child Session run of this Session.");
             JsonNode child = readBody(resources.apply(childRunResource));
-            require(!"shell".equals(child.get("kind").textValue()),
+            require(ManagedExtensionRecords.isChildSessionRun(child),
                     "Child acceptance must name a child Session run of this Session.");
             require("settled".equals(child.get("run").get("state").textValue())
                     && "completed".equals(child.get("stopReason").textValue()),
@@ -802,8 +802,8 @@ public class ManagedExtensionRecordStore {
                     "Child acceptance must bind the result and receipt its"
                             + " child run committed.");
         }
-        if (domain.equals("child_run") && !"shell".equals(
-                record.get("kind").textValue())) {
+        if (domain.equals("child_run")
+                && ManagedExtensionRecords.isChildSessionRun(record)) {
             // H4b decision 7 (the reverse of the acceptance's check): the
             // acceptance record is authoritative — the run's delivery may
             // reach accepted/consumed only after its acceptance chain
