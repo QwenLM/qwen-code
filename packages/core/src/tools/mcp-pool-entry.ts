@@ -173,6 +173,7 @@ export class PoolEntry {
   private maxIdleTimer?: NodeJS.Timeout;
   private firstIdleAt?: number;
   private restartInFlight?: Promise<void>;
+  private cleanupInFlight?: Promise<void>;
   /**
    * set
    * SYNCHRONOUSLY at the top of `doRestart` (before any side effects).
@@ -387,6 +388,85 @@ export class PoolEntry {
             `Transitioning to 'failed'; evicting from pool.entries + ` +
             `pooledConnections (W122 R20).`,
         );
+        // Ordering fix: chain `updateGlobalStatus` AFTER
+        // `sweepAndDisconnect` resolves. Pre-fix the followup
+        // called `updateGlobalStatus` synchronously BEFORE the void
+        // sweep had run, so the sweep's later `client.disconnect()`
+        // — which unconditionally writes
+        // `updateMCPServerStatus(name, DISCONNECTED)` at
+        // `mcp-client.ts:250` — overwrote the aggregate we just set.
+        // For a multi-fingerprint server with an alive sibling,
+        // global map flapped CONNECTED (sync) → DISCONNECTED (sweep
+        // tail), self-healing only on the next sibling status event.
+        // Now: keep the synchronous best-effort write (covers any
+        // reader between now and sweep settle), AND chain a second
+        // `updateGlobalStatus` onto the sweep so it lands AFTER
+        // `client.disconnect()`'s stale write. Both calls are
+        // idempotent — `aggregateStatusByName` reads only `localStatus`
+        // of remaining entries, and our entry is removed from
+        // `pool.entries` by `onClosed` below before either runs the
+        // second time.
+        //
+        // `void` on the chain is intentional — we can't await in a
+        // sync listener, and best-effort is the right shape for
+        // wrapper-grandchild SIGTERM cleanup (the transport is
+        // already dead via the McpClient.onerror that triggered us).
+        // Errors inside the chain log at warn/error via
+        // `sweepAndDisconnect`'s own catches.
+        this.cleanupInFlight = Promise.resolve()
+          .then(() => this.sweepAndDisconnect('silent_drop'))
+          .then(
+            (result) => {
+              // surface orphan-process
+              // pressure to operators. Two failure shapes worth a
+              // structured `warn` here:
+              //   (a) `pidSweepError`: pid-discovery itself threw
+              //       (pgrep blocked by sandbox, ESRCH at root pid,
+              //       etc.). We may have leaked descendants we never
+              //       enumerated.
+              //   (b) Partial signal: discovery succeeded but
+              //       `sigtermPids` killed fewer than discovered
+              //       (some children already exited between listing
+              //       and signaling, OR EPERM on a child the daemon
+              //       doesn't own). Less alarming than (a) but still
+              //       worth surfacing during silent drops.
+              // Pre-fix `void` discarded both signals; the only
+              // observability path was tailing `--debug warn+` for
+              // the inner `sweepAndDisconnect` log line out of band.
+              const partialSignal =
+                result.descendantsFound !== undefined &&
+                result.descendantsSignaled !== undefined &&
+                result.descendantsSignaled < result.descendantsFound;
+              if (result.pidSweepError !== undefined || partialSignal) {
+                //
+                // log `'unknown'` instead of `0` when the count fields are
+                // undefined. They are undefined ONLY in the
+                // `pidSweepError` branch (the throw happened before
+                // assignment); operators triaging the warn should be able
+                // to distinguish "0 found" (sweep succeeded, no children
+                // — unusual but possible if grandchildren already exited)
+                // from "not measured" (sweep itself threw, count is
+                // genuinely unknown). Logging `0` for both was factually
+                // ambiguous.
+                debugLogger.warn(
+                  `PoolEntry ${this.id} silent-drop sweep observability: ` +
+                    `descendantsFound=${result.descendantsFound ?? 'unknown'}, ` +
+                    `descendantsSignaled=${result.descendantsSignaled ?? 'unknown'}, ` +
+                    `pidSweepError=${result.pidSweepError?.message ?? 'none'}. ` +
+                    `Possible orphan-process pressure — operator should ` +
+                    `check for lingering subprocess descendants of the dead ` +
+                    `transport.`,
+                );
+              }
+              this.updateGlobalStatus();
+            },
+            () => {
+              // sweepAndDisconnect catches its own errors; this branch
+              // is unreachable in practice. Defense against a future
+              // refactor that makes the helper rejectable.
+              this.updateGlobalStatus();
+            },
+          );
         // Emit BEFORE subscriber detach so subscribers receive the
         // 'failed' event and can route any pending callTool promises
         // to MCPCallInterruptedError. Mirrors forceShutdown's
@@ -416,83 +496,6 @@ export class PoolEntry {
         for (const [sid] of [...this.subscribers]) {
           this.detach(sid);
         }
-        // Ordering fix: chain `updateGlobalStatus` AFTER
-        // `sweepAndDisconnect` resolves. Pre-fix the followup
-        // called `updateGlobalStatus` synchronously BEFORE the void
-        // sweep had run, so the sweep's later `client.disconnect()`
-        // — which unconditionally writes
-        // `updateMCPServerStatus(name, DISCONNECTED)` at
-        // `mcp-client.ts:250` — overwrote the aggregate we just set.
-        // For a multi-fingerprint server with an alive sibling,
-        // global map flapped CONNECTED (sync) → DISCONNECTED (sweep
-        // tail), self-healing only on the next sibling status event.
-        // Now: keep the synchronous best-effort write (covers any
-        // reader between now and sweep settle), AND chain a second
-        // `updateGlobalStatus` onto the sweep so it lands AFTER
-        // `client.disconnect()`'s stale write. Both calls are
-        // idempotent — `aggregateStatusByName` reads only `localStatus`
-        // of remaining entries, and our entry is removed from
-        // `pool.entries` by `onClosed` below before either runs the
-        // second time.
-        //
-        // `void` on the chain is intentional — we can't await in a
-        // sync listener, and best-effort is the right shape for
-        // wrapper-grandchild SIGTERM cleanup (the transport is
-        // already dead via the McpClient.onerror that triggered us).
-        // Errors inside the chain log at warn/error via
-        // `sweepAndDisconnect`'s own catches.
-        void this.sweepAndDisconnect('silent_drop').then(
-          (result) => {
-            // surface orphan-process
-            // pressure to operators. Two failure shapes worth a
-            // structured `warn` here:
-            //   (a) `pidSweepError`: pid-discovery itself threw
-            //       (pgrep blocked by sandbox, ESRCH at root pid,
-            //       etc.). We may have leaked descendants we never
-            //       enumerated.
-            //   (b) Partial signal: discovery succeeded but
-            //       `sigtermPids` killed fewer than discovered
-            //       (some children already exited between listing
-            //       and signaling, OR EPERM on a child the daemon
-            //       doesn't own). Less alarming than (a) but still
-            //       worth surfacing during silent drops.
-            // Pre-fix `void` discarded both signals; the only
-            // observability path was tailing `--debug warn+` for
-            // the inner `sweepAndDisconnect` log line out of band.
-            const partialSignal =
-              result.descendantsFound !== undefined &&
-              result.descendantsSignaled !== undefined &&
-              result.descendantsSignaled < result.descendantsFound;
-            if (result.pidSweepError !== undefined || partialSignal) {
-              //
-              // log `'unknown'` instead of `0` when the count fields are
-              // undefined. They are undefined ONLY in the
-              // `pidSweepError` branch (the throw happened before
-              // assignment); operators triaging the warn should be able
-              // to distinguish "0 found" (sweep succeeded, no children
-              // — unusual but possible if grandchildren already exited)
-              // from "not measured" (sweep itself threw, count is
-              // genuinely unknown). Logging `0` for both was factually
-              // ambiguous.
-              debugLogger.warn(
-                `PoolEntry ${this.id} silent-drop sweep observability: ` +
-                  `descendantsFound=${result.descendantsFound ?? 'unknown'}, ` +
-                  `descendantsSignaled=${result.descendantsSignaled ?? 'unknown'}, ` +
-                  `pidSweepError=${result.pidSweepError?.message ?? 'none'}. ` +
-                  `Possible orphan-process pressure — operator should ` +
-                  `check for lingering subprocess descendants of the dead ` +
-                  `transport.`,
-              );
-            }
-            this.updateGlobalStatus();
-          },
-          () => {
-            // sweepAndDisconnect catches its own errors; this branch
-            // is unreachable in practice. Defense against a future
-            // refactor that makes the helper rejectable.
-            this.updateGlobalStatus();
-          },
-        );
         // Synchronous best-effort: covers any aggregator-reader
         // racing between now and the sweep's tail. Mirrors
         // forceShutdown line 606. With the chained call above this
@@ -539,6 +542,10 @@ export class PoolEntry {
     return this.state === 'closed' || this.state === 'failed';
   }
 
+  waitForCleanup(): Promise<void> | undefined {
+    return this.cleanupInFlight;
+  }
+
   /**
    * Mark the initial spawn complete. Caller (pool) must call this
    * after constructing the entry, performing the initial discovery,
@@ -580,7 +587,10 @@ export class PoolEntry {
   attach(
     sessionId: string,
     view: SessionMcpView,
-    opts?: { skipReplay?: boolean; release?: () => void },
+    opts?: {
+      skipReplay?: boolean;
+      release?: (handle: PooledConnection) => void;
+    },
   ): PooledConnection {
     if (this.state === 'closed' || this.state === 'failed') {
       throw new Error(
@@ -637,6 +647,12 @@ export class PoolEntry {
 
     const handle = new PooledConnectionImpl(this, sessionId, opts?.release);
     this.subscriberHandles.set(sessionId, handle);
+    // Dispose the superseded handle for this seat: release() clears its
+    // listeners and marks it inert so a stale handle cannot update config or
+    // observe events. Its pool release callback no-ops by handle identity,
+    // and the only non-pooled caller builds a fresh entry per acquire, so this
+    // never tears down the entry the new handle is attached to.
+    previousHandle?.release();
     return handle;
   }
 
@@ -670,7 +686,13 @@ export class PoolEntry {
    * registrations via `view.teardown()` and removes the ref.
    * Caller (pool) starts the drain timer when `refs.size === 0`.
    */
-  detach(sessionId: string): void {
+  detach(sessionId: string, expectedHandle?: PooledConnection): boolean {
+    if (
+      expectedHandle &&
+      this.subscriberHandles.get(sessionId) !== expectedHandle
+    ) {
+      return false;
+    }
     const view = this.subscribers.get(sessionId);
     if (view) {
       try {
@@ -684,6 +706,7 @@ export class PoolEntry {
     this.subscribers.delete(sessionId);
     this.subscriberHandles.delete(sessionId);
     this.refs.delete(sessionId);
+    return true;
   }
 
   /**
@@ -765,7 +788,9 @@ export class PoolEntry {
   async forceShutdown(
     reason: 'drain_timer' | 'max_idle' | 'manual',
   ): Promise<void> {
-    if (this.state === 'closed' || this.state === 'failed') return;
+    if (this.state === 'closed' || this.state === 'failed') {
+      return this.cleanupInFlight;
+    }
     // flip state to
     // `'closed'` SYNCHRONOUSLY before any await. Pre-fix this
     // assignment lived at line 361, after `await listDescendantPids`
@@ -775,6 +800,13 @@ export class PoolEntry {
     // entry mid-teardown (zombie connection). Now any concurrent
     // attach sees 'closed' immediately and rejects.
     this.state = 'closed';
+    // Publish before notifying subscribers, so reentrant acquires and shutdown
+    // callers share the same teardown barrier even before the sweep starts.
+    this.cleanupInFlight = Promise.resolve().then(async () => {
+      await this.sweepAndDisconnect(reason);
+      this.updateGlobalStatus();
+      this.onClosed(this.id);
+    });
     // missed sibling of
     // C4 fix. Pre-fix `localStatus = DISCONNECTED` happened AFTER
     // `await sweepAndDisconnect` — during that async yield,
@@ -818,12 +850,7 @@ export class PoolEntry {
     // helper unifies the sweep+disconnect pattern across
     // `forceShutdown` AND `doRestart` (both pre- and failure-
     // paths) so future changes to either step happen in one place.
-    await this.sweepAndDisconnect(reason);
-    // state + localStatus already set synchronously above.
-    // Just propagate the now-stable status into
-    // the module-global map for cross-name aggregators.
-    this.updateGlobalStatus();
-    this.onClosed(this.id);
+    await this.cleanupInFlight;
   }
 
   /**
@@ -859,6 +886,7 @@ export class PoolEntry {
    */
   private async sweepAndDisconnect(reason: string): Promise<SweepResult> {
     const result: SweepResult = {};
+    debugLogger.debug(`Sweeping pool entry ${this.id} (reason=${reason})`);
     try {
       const rootPid = this.client.getTransportPid?.();
       if (rootPid !== undefined) {
@@ -1278,7 +1306,7 @@ class PooledConnectionImpl implements PooledConnection {
     // Pool-supplied release callback. Wired by `pool.acquire` to call
     // `pool.release(id, sessionId)` so subscribers can `handle.release()`
     // without needing a pool reference.
-    private readonly releaseCallback?: () => void,
+    private readonly releaseCallback?: (handle: PooledConnection) => void,
   ) {}
 
   get id(): ConnectionId {
@@ -1355,6 +1383,6 @@ class PooledConnectionImpl implements PooledConnection {
     // review P1 #1 fix: prior to wiring this callback, calling
     // handle.release() was a no-op and leaked refs until the
     // session's `releaseSession` bulk-cleanup fired.
-    this.releaseCallback?.();
+    this.releaseCallback?.(this);
   }
 }

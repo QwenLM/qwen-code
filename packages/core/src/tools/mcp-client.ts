@@ -115,6 +115,21 @@ const AUTOMATIC_MCP_OAUTH_TIMEOUT_MS = 60_000;
  * hang teardown (see `disconnect()`).
  */
 const TERMINATE_SESSION_TIMEOUT_MS = 2_000;
+/**
+ * Bound non-stdio `transport.close()` / `client.close()` during disconnect,
+ * so hung transport I/O cannot leave the pool's cleanup barrier unresolved.
+ * SDK stdio close already bounds its graceful waits before SIGKILL; it must
+ * finish that native escalation rather than be cut short by this deadline.
+ */
+const TRANSPORT_CLOSE_TIMEOUT_MS = 3_000;
+/**
+ * Worst-case wall-clock budget for `McpClient.disconnect()`: the bounded
+ * session termination plus the two bounded closes. This also covers stdio's
+ * native 4-second close plus the bounded 3-second client close. The pool's
+ * cleanup barrier must outlast either path.
+ */
+export const MCP_TEARDOWN_TIMEOUT_MS =
+  TERMINATE_SESSION_TIMEOUT_MS + 2 * TRANSPORT_CLOSE_TIMEOUT_MS;
 
 const invocationContextTransports = new WeakSet<Transport>();
 const invocationContextClients = new WeakSet<Client>();
@@ -548,11 +563,20 @@ export class McpClient {
     private readonly workspaceContext: WorkspaceContext,
     private readonly debugMode: boolean,
     private readonly sendSdkMcpMessage?: SendSdkMcpMessage,
+    options: { trackTransportClose?: boolean } = {},
   ) {
     this.client = createMcpClient(
       `qwen-cli-mcp-client-${this.serverName}`,
       this.serverConfig,
     );
+    const onClose = this.client.onclose;
+    this.client.onclose = () => {
+      onClose?.();
+      if (this.isDisconnecting || !options.trackTransportClose) return;
+      // EOF/process exit does not invoke the SDK's onerror callback.
+      this.lastTransportError ??= new Error('MCP transport closed');
+      this.updateStatus(MCPServerStatus.DISCONNECTED);
+    };
   }
 
   /**
@@ -815,7 +839,8 @@ export class McpClient {
     this.status = MCPServerStatus.DISCONNECTED;
     updateMCPServerStatus(this.serverName, MCPServerStatus.DISCONNECTED);
     this.isDisconnecting = true;
-    if (this.transport) {
+    const transport = this.transport;
+    if (transport) {
       // Streamable HTTP only: the SDK's `transport.close()` aborts local
       // state but leaves the server-side session alive. Per spec, a client
       // that no longer needs a session SHOULD terminate it explicitly
@@ -827,7 +852,7 @@ export class McpClient {
       // multi-session servers accumulate orphaned sessions. Best-effort —
       // a dead/unreachable server must not block teardown. Must run BEFORE
       // `close()` aborts the transport's request machinery.
-      const streamableTransport = this.transport as {
+      const streamableTransport = transport as {
         terminateSession?: () => Promise<void>;
       };
       if (typeof streamableTransport.terminateSession === 'function') {
@@ -852,9 +877,37 @@ export class McpClient {
           );
         }
       }
-      await this.transport.close();
+      try {
+        if (transport instanceof StdioClientTransport) {
+          // The SDK waits up to 2s for EOF, then 2s for SIGTERM before
+          // SIGKILL. A shorter outer timeout lets callers exit while that
+          // final signal is still pending, orphaning the owned child.
+          await transport.close();
+        } else {
+          await runWithTimeout(
+            transport.close(),
+            TRANSPORT_CLOSE_TIMEOUT_MS,
+            `transport.close for server '${this.serverName}'`,
+          );
+        }
+      } finally {
+        try {
+          // stdio close can return before the process close event. Settle
+          // SDK requests now, before reusing the client for another transport.
+          if (this.client.transport === transport) transport.onclose?.();
+        } finally {
+          transport.onclose = undefined;
+          transport.onerror = undefined;
+          transport.onmessage = undefined;
+          if (this.transport === transport) this.transport = undefined;
+        }
+      }
     }
-    this.client.close();
+    await runWithTimeout(
+      Promise.resolve(this.client.close()),
+      TRANSPORT_CLOSE_TIMEOUT_MS,
+      `client.close for server '${this.serverName}'`,
+    );
     this.instructions = undefined;
   }
 
