@@ -62,6 +62,92 @@ export function buildUnifiedDiff(oldText: string, newText: string): string {
   return result.reverse().join('\n');
 }
 
+export function buildContextBoundedDiff(
+  oldText: string,
+  newText: string,
+): string {
+  const omitted = '\\ Diff omitted because it is too large to display safely.';
+  if (oldText.length + newText.length > 100_000) return omitted;
+  const oldLines = splitLines(oldText);
+  const newLines = splitLines(newText);
+  const context = 3;
+  let prefix = 0;
+  while (
+    prefix < oldLines.length &&
+    prefix < newLines.length &&
+    oldLines[prefix] === newLines[prefix]
+  ) {
+    prefix++;
+  }
+  if (prefix === oldLines.length && prefix === newLines.length) {
+    return oldText === newText
+      ? ''
+      : `\\ Trailing newline ${newText.endsWith('\n') ? 'added' : 'removed'} at end of file.`;
+  }
+  let suffix = 0;
+  while (
+    suffix < oldLines.length - prefix &&
+    suffix < newLines.length - prefix &&
+    oldLines[oldLines.length - suffix - 1] ===
+      newLines[newLines.length - suffix - 1]
+  ) {
+    suffix++;
+  }
+  const start = Math.max(0, prefix - context);
+  const skippedSuffix = Math.max(0, suffix - context);
+  if (
+    (oldLines.length - skippedSuffix - start) *
+      (newLines.length - skippedSuffix - start) >
+    MAX_DIFF_PRODUCT
+  ) {
+    return omitted;
+  }
+  const rows = buildUnifiedDiff(
+    oldLines
+      .slice(start, oldLines.length - skippedSuffix)
+      .map((line) => `${line}\n`)
+      .join(''),
+    newLines
+      .slice(start, newLines.length - skippedSuffix)
+      .map((line) => `${line}\n`)
+      .join(''),
+  ).split('\n');
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].startsWith(' ')) continue;
+    const from = Math.max(0, i - context);
+    const to = Math.min(rows.length, i + context + 1);
+    const previous = ranges.at(-1);
+    if (previous && from <= previous.end) previous.end = to;
+    else ranges.push({ start: from, end: to });
+  }
+  const result: string[] = [];
+  let oldLine = start + 1;
+  let newLine = start + 1;
+  let cursor = 0;
+  for (const range of ranges) {
+    while (cursor < range.start) {
+      oldLine++;
+      newLine++;
+      cursor++;
+    }
+    const hunk = rows.slice(range.start, range.end);
+    const oldCount = hunk.filter((row) => !row.startsWith('+')).length;
+    const newCount = hunk.filter((row) => !row.startsWith('-')).length;
+    result.push(
+      `@@ -${oldCount ? oldLine : oldLine - 1},${oldCount} +${newCount ? newLine : newLine - 1},${newCount} @@`,
+      ...hunk,
+    );
+    if (result.length > 1_000 || result.join('\n').length > 100_000) {
+      return omitted;
+    }
+    oldLine += oldCount;
+    newLine += newCount;
+    cursor = range.end;
+  }
+  return result.join('\n');
+}
+
 interface UnifiedDiffLine {
   type: 'add' | 'del' | 'context' | 'header';
   content: string;

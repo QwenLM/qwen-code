@@ -4,6 +4,12 @@ Qwen Code offers five distinct permission modes that allow you to flexibly contr
 
 ## Permission Modes Comparison
 
+In Web Shell and Desktop, edit approval previews show changed lines with up to
+three unchanged lines of context on each side. The pending edit tool card uses
+the same compact preview. Hunk headers and line numbers identify where each
+change belongs in the file; distant unchanged sections are omitted. Oversized
+approval previews retain their existing display safety limits.
+
 | Mode                 | File Editing                | Shell Commands              | Best For                                                                                               | Risk Level |
 | -------------------- | --------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------ | ---------- |
 | **Plan**​            | ❌ Read-only analysis only  | ❌ Not executed             | • Code exploration <br>• Planning complex changes <br>• Safe code review                               | Lowest     |

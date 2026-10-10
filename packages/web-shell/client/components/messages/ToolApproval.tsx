@@ -25,7 +25,7 @@ import {
   type SessionContentGenerator,
 } from './AssistantMessage';
 import styles from './ToolApproval.module.css';
-import { buildUnifiedDiff } from '../../utils/unifiedDiff';
+import { buildContextBoundedDiff } from '../../utils/unifiedDiff';
 import { DiffView } from './tools/DiffView';
 import { useWebShellCustomization } from '../../customization';
 
@@ -542,24 +542,9 @@ export function ToolApproval({
             .map((block) => {
               const oldText = block.oldText ?? '';
               const newText = block.newText ?? '';
-              // Approval cards render into an [role=alertdialog] and stay
-              // synchronous — a giant edit here freezes the panel and makes
-              // the deletion/addition rows unreadable at a glance. Gate on
-              // the raw payload before running the LCS; the transcript
-              // completed-edit view calls buildUnifiedDiff directly and
-              // keeps its previous coarse rendering.
-              const OMITTED =
-                ' Diff omitted because it is too large to display safely.';
-              const tooManyChars = oldText.length + newText.length > 100_000;
-              const oldLines = oldText ? oldText.split('\n').length : 0;
-              const newLines = newText ? newText.split('\n').length : 0;
-              const tooManyLines = oldLines + newLines > 1_000;
               return {
                 path: block.path,
-                diff:
-                  tooManyChars || tooManyLines
-                    ? OMITTED
-                    : buildUnifiedDiff(oldText, newText),
+                diff: buildContextBoundedDiff(oldText, newText),
               };
             }),
     [request.content, hostOwnsEditDiffPreview],

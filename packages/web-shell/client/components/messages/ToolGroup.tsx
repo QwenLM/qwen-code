@@ -26,7 +26,10 @@ import {
 import { SubAgentPanel } from './tools/SubAgentPanel';
 import { ParallelAgentsGroup } from './tools/ParallelAgentsGroup';
 import { DiffView } from './tools/DiffView';
-import { buildUnifiedDiff } from '../../utils/unifiedDiff';
+import {
+  buildContextBoundedDiff,
+  buildUnifiedDiff,
+} from '../../utils/unifiedDiff';
 import { ShellToolOutput } from './tools/ShellToolOutput';
 import {
   extractTodosFromToolCall,
@@ -176,10 +179,16 @@ export function extractDiff(tool: ACPToolCall): string {
   const rawFileDiff = getRawFileDiff(tool);
   if (rawFileDiff) return rawFileDiff;
 
+  // Pending previews stay compact; settled and confirmed diffs retain full context.
+  const buildDiff =
+    tool.status === 'pending' || tool.status === 'in_progress'
+      ? buildContextBoundedDiff
+      : buildUnifiedDiff;
+
   if (tool.content) {
     const diffBlock = tool.content.find((b) => b.type === 'diff');
     if (diffBlock && diffBlock.type === 'diff') {
-      return buildUnifiedDiff(diffBlock.oldText || '', diffBlock.newText || '');
+      return buildDiff(diffBlock.oldText || '', diffBlock.newText || '');
     }
   }
 
@@ -195,7 +204,7 @@ export function extractDiff(tool: ACPToolCall): string {
     typeof previewNewText === 'string' ||
     typeof previewOldText === 'string'
   ) {
-    return buildUnifiedDiff(
+    return buildDiff(
       typeof previewOldText === 'string' ? previewOldText : '',
       typeof previewNewText === 'string' ? previewNewText : '',
     );

@@ -138,6 +138,35 @@ function pressKey(target: Element, key: string): void {
 }
 
 describe('ToolApproval accessibility', () => {
+  it('shows a compact approval diff with original file line numbers', () => {
+    const oldLines = Array.from(
+      { length: 200 },
+      (_, i) => `fixture_line_${i + 1}`,
+    );
+    const newLines = [...oldLines];
+    newLines[99] = 'changed_line_100';
+    render(false, {
+      ...request,
+      content: [
+        {
+          type: 'diff',
+          path: 'example.txt',
+          oldText: `${oldLines.join('\n')}\n`,
+          newText: `${newLines.join('\n')}\n`,
+        },
+      ],
+    });
+    const diff = container!.querySelector('[aria-label="File diff"]')!;
+    expect(diff.children).toHaveLength(9);
+    expect(diff.textContent).toContain('@@ -97,7 +97,7 @@');
+    expect(diff.textContent).toContain('fixture_line_100');
+    expect(diff.textContent).toContain('changed_line_100');
+    expect(diff.textContent).toContain('fixture_line_97');
+    expect(diff.textContent).toContain('fixture_line_103');
+    expect(diff.textContent).not.toContain('fixture_line_200');
+    expect(optionButtons()).toHaveLength(2);
+  });
+
   it.each([false, true])(
     'preserves edit approval changes and warnings (host owns preview: %s)',
     (hostOwnsEditDiffPreview) => {
@@ -282,12 +311,7 @@ describe('ToolApproval accessibility', () => {
     );
   });
 
-  it('omits oversized edit diffs at the approval boundary', () => {
-    // The approval card renders synchronously into an [role=alertdialog], so
-    // an outsized edit would freeze the panel and drown the accessible
-    // description — surface a short notice instead. The transcript
-    // completed-edit path stays coarse but visible; the cap belongs to the
-    // approval boundary, not to buildUnifiedDiff itself.
+  it('shows compact edits in long files at the approval boundary', () => {
     const bigOld = 'line\n'.repeat(2_000);
     const bigNew = 'line\n'.repeat(2_000) + 'extra';
     const adapted = extractPendingPermission([
@@ -330,15 +354,13 @@ describe('ToolApproval accessibility', () => {
         </WebShellCustomizationProvider>,
       ),
     );
-    expect(container!.textContent).toContain(
-      'Diff omitted because it is too large to display safely.',
-    );
-    expect(container!.textContent).not.toContain('line\nline\nline\nline');
+    expect(container!.textContent).toContain('@@ -1998,3 +1998,4 @@');
+    expect(container!.textContent).toContain('extra');
+    expect(container!.textContent).not.toContain('Diff omitted');
   });
 
   it('omits edit diffs that exceed the character budget while staying under the line budget', () => {
-    // The sibling test above uses many short lines, so it only ever trips
-    // `tooManyLines`. The char gate decides on its own for any edit with
+    // The char gate decides on its own for any edit with
     // ≤1000 total lines and >100_000 total chars — 400 long lines per side is
     // 800 lines but ~119k chars, and also lands on n*m = 160_000, i.e. under
     // MAX_DIFF_PRODUCT, so nothing else would have stopped the LCS table.
