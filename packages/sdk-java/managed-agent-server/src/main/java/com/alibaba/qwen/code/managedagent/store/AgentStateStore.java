@@ -259,6 +259,61 @@ public interface AgentStateStore {
             Long resultContextRevision) {
     }
 
+    /**
+     * H4f: admits a public task cancel, or returns the operation the same
+     * actor already admitted under the key. The caller has validated the
+     * key and checked current access; under the Session lock this replays
+     * a retained key first, then — only for a new request — requires an
+     * active Session ({@code 409 session_not_active}), the task's
+     * {@code cancel} action ({@code 409 task_action_unavailable}) and no
+     * other open operation ({@code 409 session_operation_active}).
+     */
+    default OperationAdmission beginTaskCancelOperation(String tenantId,
+            String sessionId, String taskId, String actorDigest,
+            String idempotencyKey, String requestDigest) {
+        throw new UnsupportedOperationException("Task cancel is unavailable");
+    }
+
+    /** Task cancels due for delivery: pending, or leased past their lease. */
+    default List<OperationTarget> findDeliverableTaskCancels(int limit) {
+        return List.of();
+    }
+
+    /** Parked (recovery_blocked) task cancels due for reconciliation. */
+    default List<OperationTarget> findParkedTaskCancels(int limit) {
+        return List.of();
+    }
+
+    /**
+     * Records a task cancel's outcome: {@code completed} with a receipt,
+     * {@code failed} or {@code recovery_blocked} with its code (the latter
+     * parked until {@code retryAt}). A leased claim ({@code owner} set)
+     * settles only while it is still current; a parked operation
+     * ({@code owner} null) only while it is still parked.
+     *
+     * @return false when the claim or the parking is no longer current
+     */
+    default boolean settleTaskCancel(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            TaskCancelOutcome outcome, long retryAt) {
+        throw new UnsupportedOperationException("Task cancel is unavailable");
+    }
+
+    /** A task cancel's recorded outcome: its public status and code. */
+    record TaskCancelOutcome(String status, String failureCode) {
+        public static TaskCancelOutcome completed() {
+            return new TaskCancelOutcome("completed", null);
+        }
+
+        public static TaskCancelOutcome failed(String failureCode) {
+            return new TaskCancelOutcome("failed", failureCode);
+        }
+
+        public static TaskCancelOutcome recoveryBlocked(String failureCode) {
+            return new TaskCancelOutcome("recovery_blocked", failureCode);
+        }
+    }
+
     Optional<OperationRecord> findOperation(String tenantId,
             String sessionId, String operationId);
 

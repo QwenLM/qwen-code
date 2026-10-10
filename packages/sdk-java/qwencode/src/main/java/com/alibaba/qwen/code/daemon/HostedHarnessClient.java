@@ -57,7 +57,7 @@ public final class HostedHarnessClient implements AutoCloseable {
     private static final Set<String> RUNTIME_RECOVERY_OUTCOMES =
             Set.of("known", "unknown");
     private static final Set<String> RUNTIME_RECOVERY_PHASES =
-            Set.of("await_runtime", "results_ready");
+            Set.of("await_runtime", "await_agent", "results_ready");
     private static final Set<String> RUNTIME_EXECUTION_STATES =
             Set.of("prepared", "executing", "cancel_requested", "settled");
     private static final AtomicLong CLIENT_SEQUENCE = new AtomicLong();
