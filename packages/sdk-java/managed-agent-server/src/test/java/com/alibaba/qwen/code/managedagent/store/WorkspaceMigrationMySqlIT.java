@@ -5,11 +5,16 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
+import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.sql.Connection;
 import java.time.Clock;
 import java.time.Duration;
@@ -20,11 +25,13 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -32,6 +39,7 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 
 class WorkspaceMigrationMySqlIT {
+    @TempDir Path temp;
     private JdbcTemplate admin;
     private JdbcTemplate jdbc;
     private DriverManagerDataSource data;
@@ -63,7 +71,7 @@ class WorkspaceMigrationMySqlIT {
         assertThat(jdbc.queryForList("SELECT version FROM flyway_schema_history"
                 + " WHERE installed_rank > ? AND success = TRUE ORDER BY installed_rank",
                 String.class, lastRank)).containsExactly("48", "49", "50",
-                "51", "52", "53", "54", "55", "56", "57", "60");
+                "51", "52", "53", "54", "55", "56", "57", "60", "61", "62", "63");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Integer.class)).isZero();
     }
@@ -217,6 +225,84 @@ class WorkspaceMigrationMySqlIT {
 
     @Test
     @Timeout(30)
+    void migrationAndAnotherStoragesWriterUseCompatibleTenantLocks() throws Exception {
+        Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
+        seed("tenant", "journal", "ACTIVE");
+        jdbc.update("UPDATE managed_agent_session SET workspace_storage_id = 'journal-storage'");
+        temp = temp.toRealPath();
+        Path source = Files.createDirectory(temp.resolve("source"));
+        Path target = Files.createDirectory(temp.resolve("target"));
+        Path history = Files.createDirectory(temp.resolve("history"));
+        Path runtime = Files.createDirectory(temp.resolve("runtime"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+        var properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount("tenant", "storage", source.toString())));
+        var manager = new DataSourceTransactionManager(data);
+        var guard = new WorkspaceStorageGuard(jdbc, manager, properties, path ->
+                new WorkspaceStorageGuard.Identity(path.toRealPath().toString(), "test-host", "device",
+                        path.getFileName().toString(), "2026-10-07T00:00:00Z"));
+        guard.register("tenant", "storage", UUID.randomUUID().toString());
+        var request = WorkspaceRecoveryStore.JSON.createObjectNode().put("version", 1)
+                .put("migrationOperationId", UUID.randomUUID().toString()).put("tenantId", "tenant").put("storageId", "storage")
+                .put("fenceOperationId", UUID.randomUUID().toString()).put("captureOperationId", UUID.randomUUID().toString())
+                .put("mountRevision", 1).put("sourceRoot", source.toString()).put("targetRoot", target.toString())
+                .put("bundleRoot", temp.resolve("bundle").toString()).put("fileHistoryRoot", history.toString())
+                .put("stateDirectory", runtime.toString()).put("nodeExecutable", "/test/node").put("cliEntry", "/test/cli.js");
+        var held = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var gated = new AtomicBoolean();
+        var migrationJdbc = new JdbcTemplate(data) {
+            @Override
+            public <T> T queryForObject(String sql, Class<T> type, Object... arguments) {
+                T result = super.queryForObject(sql, type, arguments);
+                if (sql.startsWith("SELECT tenant_id FROM qwen_tool_publication_tenant")
+                        && gated.compareAndSet(false, true)) {
+                    held.countDown();
+                    try {
+                        assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+                    } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError(error);
+                    }
+                }
+                return result;
+            }
+        };
+        var transaction = new TransactionTemplate(manager);
+        transaction.setTimeout(15);
+        var sessions = new ManagedSessionStore(jdbc);
+        try (var pool = Executors.newFixedThreadPool(2)) {
+            var migration = pool.submit(() -> new WorkspaceMigrationStore(migrationJdbc, manager, guard,
+                    new InMemoryRuntimeBindingRepository(), request.toString().getBytes(StandardCharsets.UTF_8), true));
+            try {
+                assertThat(held.await(5, TimeUnit.SECONDS)).isTrue();
+                var writer = pool.submit(() -> transaction.execute(status -> sessions.acquireWriter("tenant", "journal",
+                        "a".repeat(64), new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 30000L))));
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                String blocked = "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE DB = DATABASE()"
+                        + " AND COMMAND = 'Query' AND TIME >= 1 AND (INFO LIKE 'INSERT INTO qwen_runtime_placement_guard%'"
+                        + " OR INFO LIKE 'INSERT INTO qwen_tool_publication_tenant%')";
+                while (jdbc.queryForObject(blocked, Integer.class) == 0) {
+                    assertThat(writer).isNotDone();
+                    assertThat(System.nanoTime()).isLessThan(deadline);
+                    Thread.sleep(20);
+                }
+                release.countDown();
+                assertThat(migration.get(5, TimeUnit.SECONDS).inspect().path("state").asText()).isEqualTo("RETIRING");
+                assertThat(writer.get(5, TimeUnit.SECONDS).writerGeneration()).isEqualTo(1);
+            } finally {
+                release.countDown();
+            }
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT workspace_storage_id FROM managed_agent_session"
+                + " WHERE tenant_id = 'tenant' AND session_id = 'journal'", String.class)).isEqualTo("journal-storage");
+    }
+
+    @Test
+    @Timeout(30)
     void headlessRetirementDoesNotBlockAnotherTenantsWriter() throws Exception {
         Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
         seed("tenant-a", "headless", "DELETED");
@@ -238,8 +324,8 @@ class WorkspaceMigrationMySqlIT {
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 30000L)));
         try (var pool = Executors.newSingleThreadExecutor()) {
             transaction.executeWithoutResult(status -> {
-                ToolPublicationRetentionStore.lockTenant(jdbc, "tenant-a");
                 WorkspaceMigrationAdmission.lockTenant(jdbc, "tenant-a");
+                ToolPublicationRetentionStore.lockTenant(jdbc, "tenant-a");
                 var source = WorkspaceRecoveryStore.currentSource(jdbc, "tenant-a", "storage", "headless", true);
                 assertThat(source.path("head").isNull()).isTrue();
                 assertThat(source.path("retirement").path("operationId").asText()).isEqualTo("delete");

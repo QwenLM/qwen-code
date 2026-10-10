@@ -121,6 +121,7 @@ class Issue13181QueryBudgetTest {
         List<Long> itemReads = new ArrayList<>();
         List<Long> partReads = new ArrayList<>();
         List<Long> snapshotWrites = new ArrayList<>();
+        List<Long> csiProbes = new ArrayList<>();
         List<Long> totals = new ArrayList<>();
         for (int batch = 0; batch < batches; batch++) {
             fixture.ledger.reset();
@@ -135,6 +136,7 @@ class Issue13181QueryBudgetTest {
                     "from managed_agent_item_part where"));
             snapshotWrites.add(fixture.ledger.count("into managed_agent_snapshot")
                     + fixture.ledger.count("update managed_agent_snapshot set"));
+            csiProbes.add(fixture.ledger.count("select csi_guard from managed_agent_session"));
             totals.add(fixture.ledger.total());
         }
         System.out.println("[issue-13181] materializeNextBatch per batch:"
@@ -159,9 +161,10 @@ class Issue13181QueryBudgetTest {
                 .containsExactly(1L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 2L);
         // Hot path 1 is bounded the same way hot path 3 is: the whole
         // batch's statement count is pinned, so any added per-row read
-        // shows here.
+        // shows here. The CSI exclusion costs one current probe per batch.
+        assertThat(csiProbes).containsExactly(1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L);
         assertThat(totals)
-                .containsExactly(35L, 35L, 35L, 35L, 35L, 35L, 35L, 35L, 17L);
+                .containsExactly(36L, 36L, 36L, 36L, 36L, 36L, 36L, 36L, 18L);
         // Batch 1 covers session.created plus nine tool events; the last
         // batch sees all 81 items (80 tool plus the text delta's assistant).
         assertThat(itemRowsRead)
@@ -343,8 +346,9 @@ class Issue13181QueryBudgetTest {
                 .isZero();
         // The empty tick — the scheduler's hottest path — is pinned whole:
         // the event read, the session lock, the progress lock, and the
-        // snapshot read.
-        assertThat(fixture.ledger.total()).isEqualTo(4);
+        // snapshot read, plus one current CSI exclusion probe.
+        assertThat(fixture.ledger.count("select csi_guard from managed_agent_session")).isEqualTo(1);
+        assertThat(fixture.ledger.total()).isEqualTo(5);
         // The not-aged exit must leave the deferral marker untouched —
         // clearing or re-stamping it would stop the aged reselection from
         // ever converging the snapshot.

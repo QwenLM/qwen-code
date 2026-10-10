@@ -27,6 +27,7 @@ import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.MigrationVersion;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
  * The embedded Broker writes through the runtime-broker repositories into
@@ -72,11 +73,16 @@ class RuntimeBrokerFlywaySchemaTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"11", "13"})
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"11", "13", "50", "51", "52", "53", "54", "55", "56", "57", "62"})
     void migrationsPreserveRowsWrittenByOldBinaries(String version) throws SQLException {
         DataSource source = migrate(dataSource(), MigrationVersion.fromVersion(version));
         RuntimeProvisionRequest request = JdbcRepositoryContract.writeLegacyRows(source, "upgrade");
+        var jdbc = new JdbcTemplate(source);
+        var applied = jdbc.queryForList("SELECT * FROM flyway_schema_history ORDER BY installed_rank");
+        int lastRank = jdbc.queryForObject("SELECT MAX(installed_rank) FROM flyway_schema_history", Integer.class);
         migrate(source, MigrationVersion.LATEST);
+        assertThat(jdbc.queryForList("SELECT * FROM flyway_schema_history"
+                + " WHERE installed_rank <= ? ORDER BY installed_rank", lastRank)).isEqualTo(applied);
         JdbcRuntimeBindingRepository bindings = new JdbcRuntimeBindingRepository(source,
                 new AesGcmSecretProtector("key", new byte[32]));
         RuntimeBindingRecord binding = bindings.findOrCreate(request);
@@ -84,6 +90,11 @@ class RuntimeBrokerFlywaySchemaTest {
         assertThat(binding.getVersion()).isEqualTo(3);
         assertThat(binding.getLossEvidence()).isNull();
         assertThat(binding.getStopEvidence()).isNull();
+        try (var connection = source.getConnection(); var statement = connection.createStatement();
+                var row = statement.executeQuery("SELECT first_activation_journal_revision FROM qwen_runtime_binding")) {
+            assertThat(row.next()).isTrue();
+            assertThat(row.getObject(1)).isNull();
+        }
         RuntimeSessionRecord session = new JdbcRuntimeSessionRepository(source)
                 .findById(request.getScope(), "upgrade-session");
         assertThat(session.getBindingId()).isEqualTo("upgrade-binding");
@@ -95,9 +106,28 @@ class RuntimeBrokerFlywaySchemaTest {
             assertThat(execution.getExecutionCallId()).isEqualTo("upgrade-" + state);
             assertThat(execution.getVersion()).isEqualTo(5);
             assertThat(execution.getAbandonedAt()).isNull();
+            assertThat(jdbc.queryForObject("SELECT native_authorization_json FROM qwen_tool_execution"
+                    + " WHERE execution_call_id = ?", String.class, execution.getExecutionCallId())).isNull();
             if (execution.isSettled()) {
                 assertThat(execution.getResult()).containsEntry("executionStatus", "success");
             }
+        }
+    }
+
+    @Test
+    void standaloneUpgradeAddsNullablePinWithoutBackfillingLegacyAuthority() throws SQLException {
+        DataSource source = dataSource();
+        JdbcRuntimeBrokerSchema.initialize(source);
+        JdbcRepositoryContract.writeLegacyRows(source, "standalone-upgrade");
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE qwen_runtime_binding DROP COLUMN first_activation_journal_revision");
+        }
+        JdbcRuntimeBrokerSchema.initialize(source);
+        try (var connection = source.getConnection(); var statement = connection.createStatement();
+                var row = statement.executeQuery("SELECT record_version, first_activation_journal_revision FROM qwen_runtime_binding")) {
+            assertThat(row.next()).isTrue();
+            assertThat(row.getLong(1)).isEqualTo(3);
+            assertThat(row.getObject(2)).isNull();
         }
     }
 

@@ -5,6 +5,12 @@
  */
 
 import { createHash } from 'node:crypto';
+import { normalizeWorkspaceRelativePath } from '@qwen-code/qwen-code-core/managed-runtime/managed-workspace-relative-path.js';
+export {
+  InvalidWorkspaceRelativePathError,
+  normalizeWorkspaceRelativePath,
+  WORKSPACE_ROOT,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-workspace-relative-path.js';
 
 // TypeScript half of the W0a Workspace binding contract; the Java half is the
 // com.alibaba.qwen.code.runtimebroker.managedworkspace package in
@@ -13,24 +19,13 @@ import { createHash } from 'node:crypto';
 // byte identical. The Runtime worker uses it through the managed-context/1
 // envelope.
 
-export const WORKSPACE_ROOT = '.';
 export const CONTEXT_BINDING_DOMAIN_TAG = 'qwen-managed-context-binding-v1';
 
-const MAXIMUM_CWD_CODE_POINTS = 1024;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const STORAGE_ID_PATTERN = /^[\x21-\x7E]{1,256}$/;
 const REFERENCE_PATTERN = /^[\x21-\x7E]{1,512}$/;
 const DECIMAL_PATTERN = /^[1-9][0-9]{0,18}$/;
 const INT64_MAX = 9223372036854775807n;
-
-export class InvalidWorkspaceRelativePathError extends Error {
-  readonly code = 'invalid_cwd';
-
-  constructor() {
-    super('cwdRelative is not a valid Workspace-relative directory.');
-    this.name = 'InvalidWorkspaceRelativePathError';
-  }
-}
 
 export interface ManagedContextBinding {
   readonly tenantId: string;
@@ -43,47 +38,6 @@ export interface ManagedContextBinding {
   readonly contextConfigRef: string;
   /** Decimal text, at least 1. */
   readonly contextRevision: string;
-}
-
-/**
- * Returns the normal form of a Workspace-relative directory: empty and `.`
- * segments are dropped and nothing else changes. The check is lexical; the
- * Runtime still verifies the directory on disk.
- */
-export function normalizeWorkspaceRelativePath(value: string): string {
-  if (
-    typeof value !== 'string' ||
-    value.length > MAXIMUM_CWD_CODE_POINTS * 2 ||
-    !isWellFormed(value)
-  ) {
-    throw new InvalidWorkspaceRelativePathError();
-  }
-  const codePoints = [...value].length;
-  if (
-    codePoints < 1 ||
-    codePoints > MAXIMUM_CWD_CODE_POINTS ||
-    hasControlCharacter(value) ||
-    value.includes('\\') ||
-    value.startsWith('/')
-  ) {
-    throw new InvalidWorkspaceRelativePathError();
-  }
-  const kept: string[] = [];
-  for (const segment of value.split('/')) {
-    if (segment === '..') {
-      throw new InvalidWorkspaceRelativePathError();
-    }
-    if (segment !== '' && segment !== '.') {
-      kept.push(segment);
-    }
-  }
-  const normalized = kept.length === 0 ? WORKSPACE_ROOT : kept.join('/');
-  // Checked on the normal form: dropping a leading "." segment would
-  // otherwise turn ./C:x into the drive path C:x.
-  if (/^[A-Za-z]:/.test(normalized)) {
-    throw new InvalidWorkspaceRelativePathError();
-  }
-  return normalized;
 }
 
 /**
@@ -182,24 +136,4 @@ function isNormalized(value: unknown): boolean {
   } catch {
     return false;
   }
-}
-
-function isWellFormed(value: string): boolean {
-  try {
-    encodeURIComponent(value);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// Unicode category Cc: C0 controls, DEL and C1 controls.
-function hasControlCharacter(value: string): boolean {
-  for (const character of value) {
-    const codePoint = character.codePointAt(0) ?? 0;
-    if (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) {
-      return true;
-    }
-  }
-  return false;
 }

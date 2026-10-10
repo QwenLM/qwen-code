@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.Body;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidRecordException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredResource;
+import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.StreamReadConstraints;
@@ -193,11 +194,11 @@ public class ManagedExtensionRecordStore {
     }
 
     /**
-     * What one journal transaction carries: the tool receipts, and the
-     * payload of its last activation.changed event (null when it has none),
-     * collected during the same pass so the commit does not parse twice.
+     * Collects the parsed records in the same pass;
+     * the legacy cache still uses the last activation payload.
      */
-    record ApplyResult(List<JsonNode> receipts, JsonNode lastActivation) {
+    record ApplyResult(List<JsonNode> receipts, JsonNode lastActivation,
+            List<JsonNode> records) {
     }
 
     /**
@@ -215,22 +216,37 @@ public class ManagedExtensionRecordStore {
     ApplyResult apply(String tenantId, String workspaceId, String sessionId,
             long firstSequence, int eventCount, byte[] recordBytes,
             Function<String, StoredResource> resources) {
+        return apply(tenantId, workspaceId, sessionId, firstSequence, eventCount, recordBytes, resources, null);
+    }
+
+    ApplyResult applyNativeCsi(String tenantId, String workspaceId, String sessionId,
+            long firstSequence, int eventCount, byte[] recordBytes,
+            Function<String, StoredResource> resources) {
+        return apply(tenantId, workspaceId, sessionId, firstSequence, eventCount, recordBytes, resources,
+                CsiNativeActivationProof.records(recordBytes));
+    }
+
+    private ApplyResult apply(String tenantId, String workspaceId, String sessionId,
+            long firstSequence, int eventCount, byte[] recordBytes,
+            Function<String, StoredResource> resources, List<JsonNode> nativeRecords) {
         String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
                 .split("\n");
         List<JsonNode> receipts = new ArrayList<>();
+        List<JsonNode> records = new ArrayList<>();
         int applied = 0;
         JsonNode lastActivation = null;
         boolean shaped = true;
         boolean managed = false;
         String lastSubtype = null;
         for (int index = 0; index < lines.length; index++) {
-            JsonNode record = parse(lines[index]);
+            JsonNode record = nativeRecords == null ? parse(lines[index]) : nativeRecords.get(index);
             if (record == null) {
                 throw new ApiException(HttpStatus.BAD_REQUEST,
                         ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
                         "Record line " + (index + 1) + " is not a JSON object"
                                 + " the Session authority can read.");
             }
+            records.add(record);
             String subtype = record.path("subtype").textValue();
             lastSubtype = subtype;
             if (!EVENT_SUBTYPE.equals(subtype)) {
@@ -313,7 +329,8 @@ public class ManagedExtensionRecordStore {
         require(applied == 0 || shaped && COMMIT_SUBTYPE.equals(lastSubtype),
                 "A transaction with a Stage H record holds only its events,"
                         + " then its commit marker.");
-        return new ApplyResult(receipts, lastActivation);
+        return new ApplyResult(List.copyOf(receipts), lastActivation,
+                List.copyOf(records));
     }
 
     /** A never-started verdict and the creation mint share one seam:

@@ -15,16 +15,31 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
-/** Offline intent/seal only; never starts, stops or releases a worker. */
+/** Offline intent/seal and read-only evidence; never starts, stops or releases a worker. */
 public final class WorkspaceCsiRetirementMain {
     private WorkspaceCsiRetirementMain() {
     }
 
     public static void main(String[] args) throws Exception {
+        if (args.length == 2 && "inventory".equals(args[0])
+                || args.length == 3 && "file-checkpoint".equals(args[0])) {
+            var source = new DriverManagerDataSource(required("K2_JDBC_URL"), required("K2_JDBC_USER"),
+                    required("K2_JDBC_PASSWORD"));
+            var bindings = new JdbcRuntimeBindingRepository(source, AesGcmSecretProtector.fromBase64(
+                    required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID"),
+                    required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY")));
+            ObjectMapper json = new ObjectMapper();
+            var snapshots = new WorkspaceCsiCheckpointSnapshotStore(source, bindings, json);
+            var result = "inventory".equals(args[0]) ? snapshots.exportRetirementInventory(args[1])
+                    : snapshots.exportOriginalExecution(args[1], args[2]);
+            System.out.println(json.writeValueAsString(result));
+            return;
+        }
         if (!(args.length == 4 && "inspect".equals(args[0]))
                 && !(args.length == 7 && "begin".equals(args[0]))) {
             throw new IllegalArgumentException("Usage: inspect <registration-json> <binding> <generation>"
-                    + " | begin <registration-json> <binding> <generation> <reservation> <revision> <retirement>");
+                    + " | begin <registration-json> <binding> <generation> <reservation> <revision> <retirement>"
+                    + " | inventory <retirement> | file-checkpoint <retirement> <execution>");
         }
         ObjectMapper json = JsonMapper.builder().enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
                 .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)

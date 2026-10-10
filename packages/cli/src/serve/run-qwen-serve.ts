@@ -27,7 +27,10 @@ import express, {
   type Response,
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
-import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
+import {
+  validateHostedHarnessProfile,
+  HOSTED_CSI_SESSION_STORE_URL_ENV,
+} from './hosted-harness-profile.js';
 import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from './hosted-harness-contract.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import { readSshWorkspace } from './ssh-workspace-store.js';
@@ -3431,12 +3434,16 @@ async function runQwenServeImpl(
     (optsIn.profile === 'hosted-harness'
       ? process.env[HOSTED_HARNESS_CAPABILITY_DIGEST_ENV]
       : undefined);
+  const hostedCsiSessionStoreUrl =
+    optsIn.hostedCsiSessionStoreUrl ??
+    process.env[HOSTED_CSI_SESSION_STORE_URL_ENV];
   validateHostedHarnessProfile({
     ...optsIn,
     token,
     requireAuth:
       optsIn.profile === 'hosted-harness' ? true : optsIn.requireAuth,
     hostedHarnessCapabilityDigest,
+    hostedCsiSessionStoreUrl,
   });
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
   const launchMemoryProjectScopeValue =
@@ -3573,6 +3580,7 @@ async function runQwenServeImpl(
     ),
     token,
     hostedHarnessCapabilityDigest,
+    hostedCsiSessionStoreUrl,
     promptDeadlineMs,
     writerIdleTimeoutMs,
     workspace: rawWorkspace,
@@ -10143,6 +10151,9 @@ async function runQwenServeImpl(
               ?.locals?.['conversationRuntimeActivity'] as
               | { sealAndWait?: () => Promise<void> }
               | undefined;
+            const initiallyMountedCsiStop = initiallyMountedApp?.locals?.[
+              'stopHostedCsiSessions'
+            ] as (() => Promise<void>) | undefined;
             // Calling an async function runs through its first await
             // synchronously. Seal an already-mounted runtime before close()
             // yields so no management request can enter the shutdown window.
@@ -10157,6 +10168,7 @@ async function runQwenServeImpl(
               initiallyMountedSessionMaintenance?.sealMaintenanceAndWait?.();
             const initialConversationActivityWait =
               initiallyMountedConversationActivity?.sealAndWait?.();
+            const initialCsiWait = initiallyMountedCsiStop?.();
             let processRegistryShutdown: Promise<Error | undefined> | undefined;
             const startProcessRegistryShutdown = () => {
               processRegistryShutdown ??= managedProcessRegistry
@@ -10340,6 +10352,11 @@ async function runQwenServeImpl(
                 ) {
                   await conversationActivity?.sealAndWait?.();
                 }
+                const csiStop = appForCleanup?.locals?.[
+                  'stopHostedCsiSessions'
+                ] as (() => Promise<void>) | undefined;
+                await initialCsiWait;
+                if (csiStop !== initiallyMountedCsiStop) await csiStop?.();
                 stopTrustPolicyMonitor(appForCleanup);
                 const waitForTrustPolicyIdle = appForCleanup?.locals?.[
                   'waitForTrustPolicyIdle'

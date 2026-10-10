@@ -843,6 +843,113 @@ describe('Managed Tool worker admission seal', () => {
     );
   });
 
+  it('uses the composer history for mutation, retains retry results and refuses external changes', async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), 'qwen-composer-history-'),
+    );
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(
+      path.join(directory, 'global'),
+    );
+    const file = path.join(directory, 'note.txt');
+    await writeFile(file, 'before');
+    const history = new ManagedRuntimeFileHistory(
+      reference.sessionId,
+      directory,
+      null,
+    );
+    await history.ready();
+    await history.prepare(reference.promptId, ['note.txt']);
+    const invoke = vi.fn(async () => {
+      await writeFile(file, 'after');
+      return { llmContent: 'written', returnDisplay: 'written' };
+    });
+    const executor = new ManagedToolExecutor(async () => ({
+      sessionId: reference.sessionId,
+      directory,
+      fileHistory: history,
+      admitsDirectory: () => true,
+      tools: new Map([
+        [
+          'write_file',
+          {
+            build: () => ({ execute: invoke }),
+          } as unknown as AnyDeclarativeTool,
+        ],
+      ]),
+    }));
+    try {
+      const result = await executor.execute(reference, 'write_file', {
+        file_path: file,
+      });
+      expect(result.executionStatus).toBe('success');
+      expect(await readFile(file, 'utf8')).toBe('after');
+      expect(history.state().snapshots).toHaveLength(1);
+      expect(history.state().files['note.txt']?.digest).toBe(
+        `sha256:${createHash('sha256').update('after').digest('hex')}`,
+      );
+      expect(
+        await executor.execute(reference, 'write_file', { file_path: file }),
+      ).toEqual(result);
+      expect(invoke).toHaveBeenCalledTimes(1);
+      await writeFile(file, 'outside change');
+      const refused = await executor.execute(
+        { ...reference, callId: 'later-call' },
+        'write_file',
+        { file_path: file },
+      );
+      expect(refused.executionStatus).toBe('error');
+      expect(invoke).toHaveBeenCalledTimes(1);
+      expect(await readFile(file, 'utf8')).toBe('outside change');
+    } finally {
+      await executor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['missing', 'foreign'] as const)(
+    'refuses a %s retained composer history before mutation',
+    async (fault) => {
+      const directory = await mkdtemp(
+        path.join(os.tmpdir(), 'qwen-composer-history-refusal-'),
+      );
+      const invoke = vi.fn();
+      const executor = new ManagedToolExecutor(async () => ({
+        sessionId: reference.sessionId,
+        directory,
+        retainedFileHistory: {} as NonNullable<
+          ManagedToolSet['retainedFileHistory']
+        >,
+        fileHistory:
+          fault === 'foreign'
+            ? new ManagedRuntimeFileHistory('foreign-owner', directory, null)
+            : undefined,
+        admitsDirectory: () => true,
+        tools: new Map([
+          [
+            'write_file',
+            {
+              build: () => ({ execute: invoke }),
+            } as unknown as AnyDeclarativeTool,
+          ],
+        ]),
+      }));
+      try {
+        expect(
+          (
+            await executor.execute(reference, 'write_file', {
+              file_path: path.join(directory, 'note.txt'),
+            })
+          ).executionStatus,
+        ).toBe('error');
+        expect(invoke).not.toHaveBeenCalled();
+        expect(existsSync(path.join(directory, 'note.txt'))).toBe(false);
+      } finally {
+        await executor.close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('keeps original history snapshots without resolving a new Workspace', async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), 'qwen-worker-history-seal-'),

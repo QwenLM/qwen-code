@@ -11,6 +11,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.LinkedHashMap;
+import java.util.Base64;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -21,6 +22,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Function;
+import java.util.function.BiFunction;
 
 /**
  * Private HTTP face of the merged Runtime Broker for a Hosted Harness.
@@ -50,6 +52,12 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
     public RuntimeBrokerHttpServer(InetSocketAddress address, String token,
             RuntimeBrokerService service, boolean allowNonLoopback)
             throws IOException {
+        this(address, token, service, allowNonLoopback, null);
+    }
+
+    public RuntimeBrokerHttpServer(InetSocketAddress address, String token,
+            RuntimeBrokerService service, boolean allowNonLoopback,
+            BiFunction<String, Map<String, Object>, Map<String, Object>> nativeReadback) throws IOException {
         if (address == null || service == null) {
             throw new IllegalArgumentException(
                     "address and service are required");
@@ -74,10 +82,52 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         });
         server.setExecutor(executor);
         server.createContext(ROUTE_PREFIX, this::handle);
+        if (nativeReadback != null) {
+            server.createContext(CsiNativeReadbackProtocol.PATH, exchange -> handleNative(exchange, nativeReadback));
+        }
     }
 
     public void start() {
         server.start();
+    }
+
+    private static void handleNative(HttpExchange exchange,
+            BiFunction<String, Map<String, Object>, Map<String, Object>> readback) {
+        exchange.getResponseHeaders().set("Cache-Control", "no-store");
+        try {
+            if (!"POST".equals(exchange.getRequestMethod()) || exchange.getRequestURI().getRawQuery() != null
+                    || !CsiNativeReadbackProtocol.PATH.equals(exchange.getRequestURI().getRawPath())) {
+                throw notFound();
+            }
+            List<String> authorization = exchange.getRequestHeaders().get("Authorization");
+            if (authorization == null || authorization.size() != 1
+                    || authorization.getFirst().length() > 519
+                    || !authorization.getFirst().matches("Bearer [A-Za-z0-9._~+/-]{1,512}=*")) {
+                throw new RuntimeBrokerException(401, "csi_native_readback_unauthorized", "Original Runtime authentication failed.", false);
+            }
+            String contentType = exchange.getRequestHeaders().getFirst("Content-Type");
+            if (contentType == null || !"application/json".equals(contentType.split(";", 2)[0].trim())
+                    || !"no-store".equals(exchange.getRequestHeaders().getFirst("Cache-Control"))) {
+                throw new IllegalArgumentException("Invalid native readback headers");
+            }
+            String length = exchange.getRequestHeaders().getFirst("Content-Length");
+            if (length != null && (!length.matches("0|[1-9][0-9]{0,9}")
+                    || Long.parseLong(length) > CsiNativeReadbackProtocol.REQUEST_LIMIT)) {
+                throw tooLarge();
+            }
+            byte[] bytes;
+            try (var input = exchange.getRequestBody()) {
+                bytes = input.readNBytes(CsiNativeReadbackProtocol.REQUEST_LIMIT + 1);
+            }
+            if (bytes.length > CsiNativeReadbackProtocol.REQUEST_LIMIT) {
+                throw tooLarge();
+            }
+            var request = CsiNativeReadbackProtocol.request(bytes);
+            var response = readback.apply(authorization.getFirst().substring(7), request);
+            sendJson(exchange, 200, CsiNativeReadbackProtocol.response(response, request));
+        } catch (Throwable error) {
+            sendError(exchange, error);
+        }
     }
 
     public URI getBaseUri() {
@@ -131,6 +181,10 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             if ("POST".equals(exchange.getRequestMethod())
                     && "/executions:prepare".equals(relative)) {
                 executionRequest(exchange, true);
+                return;
+            }
+            if ("POST".equals(exchange.getRequestMethod()) && "/executions:read-batch".equals(relative)) {
+                readBatch(exchange);
                 return;
             }
             if ("POST".equals(exchange.getRequestMethod())
@@ -189,9 +243,14 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             Map<String, Object> response = new LinkedHashMap<>(envelope(harnessSessionId,
                     runtimeSessionId, "acquired", true));
             RuntimeScope scope = record.getSession().getScope();
-            response.put("scope", Map.of("tenantId", scope.getTenantId(),
+            var savedScope = new LinkedHashMap<String, Object>(Map.of("tenantId", scope.getTenantId(),
                     "workspaceId", scope.getWorkspaceId(), "workspaceGeneration", scope.getWorkspaceGeneration(),
                     "capabilityDigest", scope.getCapabilityDigest()));
+            if (CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())) {
+                savedScope.put("canonicalCwd", scope.getCanonicalCwd());
+                savedScope.put("isolationClass", scope.getIsolationClass());
+            }
+            response.put("scope", savedScope);
             response.put("runtime", Map.of("bindingId", record.getBindingId(),
                     "generation", Long.toString(record.getRuntimeGeneration())));
             return response;
@@ -230,6 +289,9 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                     "harnessSessionId", "control request");
             Map<String, Object> operation = requiredObject(body, "operation",
                     "control request");
+            if (CsiFileHistoryProtocol.isOperation(operation)) {
+                exchange.getResponseHeaders().set("Cache-Control", "no-store");
+            }
             complete(exchange, service.control(harnessSessionId,
                     runtimeSessionId, operation, lifecycleAuthority(exchange)), result -> envelope(
                             harnessSessionId, runtimeSessionId, "result",
@@ -255,7 +317,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
     }
 
     private void executionRequest(HttpExchange exchange, boolean prepare) throws IOException {
-        Map<String, Object> body = requestBody(exchange, "execution request");
+        Map<String, Object> body = requestBody(exchange, "execution request", prepare);
         requireProtocol(body);
         JsonCodec.requiredString(body, "requestId", "execution request");
         String idempotencyKey = JsonCodec.requiredString(body,
@@ -281,6 +343,13 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 preparedFields.add("toolProtocol");
                 preparedFields.add("publicationId");
             }
+            if (body.containsKey("inputBytesBase64") || body.containsKey("toolDefinitionBytesBase64")) {
+                if (body.containsKey("toolProtocol")) {
+                    throw new RuntimeBrokerException(400, "runtime_reference_invalid", "Private CSI allocation is not tool v3", false);
+                }
+                preparedFields.add("inputBytesBase64");
+                preparedFields.add("toolDefinitionBytesBase64");
+            }
             if (!body.keySet().equals(preparedFields)) {
                 throw new RuntimeBrokerException(400, "runtime_broker_invalid_request",
                         "Prepared execution fields are invalid.", false);
@@ -294,7 +363,10 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             throw new RuntimeBrokerException(409, "runtime_reference_conflict",
                     "Execution envelope differs from its reference", false);
         }
-        complete(exchange, prepare
+        complete(exchange, prepare && body.containsKey("inputBytesBase64")
+                        ? service.prepareCsiExecution(harnessSessionId, runtimeSessionId, idempotencyKey, reference,
+                                inlineBytes(body, "inputBytesBase64"), inlineBytes(body, "toolDefinitionBytesBase64"))
+                        : prepare
                         ? service.prepareExecution(harnessSessionId, runtimeSessionId, idempotencyKey,
                         reference, "v3".equals(body.get("toolProtocol")) ? digest : null,
                         "v3".equals(body.get("toolProtocol"))
@@ -302,6 +374,52 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                         : service.createExecution(harnessSessionId, runtimeSessionId, idempotencyKey, reference),
                 record -> executionEnvelope(harnessSessionId,
                         runtimeSessionId, record));
+    }
+
+    private void readBatch(HttpExchange exchange) throws IOException {
+        Map<String, Object> body = requestBody(exchange, "private batch read", true);
+        var fields = new java.util.HashSet<>(Set.of("protocolVersion", "requestId", "harnessSessionId", "runtimeSessionId", "promptId", "batchId"));
+        if (body.containsKey("recoveryOwner")) {
+            fields.add("recoveryOwner");
+            var owner = JsonCodec.parseObject(JsonCodec.encode(body.get("recoveryOwner")), "private recovery owner");
+            if (!owner.keySet().equals(Set.of("writerId", "writerGeneration", "activationId", "activationEpoch"))
+                    || !(owner.get("writerGeneration") instanceof Number generation) || generation.longValue() <= 0
+                    || !(owner.get("activationEpoch") instanceof Number epoch) || epoch.longValue() <= 0
+                    || !generation.toString().matches("[1-9][0-9]{0,15}") || generation.longValue() > 9007199254740991L
+                    || !epoch.toString().matches("[1-9][0-9]{0,15}") || epoch.longValue() > 9007199254740991L) {
+                throw new RuntimeBrokerException(400, "runtime_broker_invalid_request", "Private recovery owner fields are invalid", false);
+            }
+            JsonCodec.requiredString(owner, "writerId", "private recovery owner");
+            JsonCodec.requiredString(owner, "activationId", "private recovery owner");
+        }
+        if (!body.keySet().equals(fields)) {
+            throw new RuntimeBrokerException(400, "runtime_broker_invalid_request", "Private batch read fields are invalid", false);
+        }
+        requireProtocol(body);
+        JsonCodec.requiredString(body, "requestId", "private batch read");
+        complete(exchange, service.readCsiBatch(JsonCodec.requiredString(body, "harnessSessionId", "private batch read"),
+                JsonCodec.requiredString(body, "runtimeSessionId", "private batch read"),
+                JsonCodec.requiredString(body, "promptId", "private batch read"),
+                JsonCodec.requiredString(body, "batchId", "private batch read"), body.containsKey("recoveryOwner")
+                        ? JsonCodec.parseObject(JsonCodec.encode(body.get("recoveryOwner")), "private recovery owner") : null), Function.identity());
+    }
+
+    private static byte[] inlineBytes(Map<String, Object> body, String field) {
+        if (!(body.get(field) instanceof String encoded)) {
+            throw new RuntimeBrokerException(400, "runtime_broker_invalid_request", "Private CSI inline bytes are invalid", false);
+        }
+        try {
+            if (encoded.length() > 87384) {
+                throw tooLarge();
+            }
+            byte[] bytes = Base64.getDecoder().decode(encoded);
+            if (bytes.length == 0 || bytes.length > 64 * 1024 || !Base64.getEncoder().encodeToString(bytes).equals(encoded)) {
+                throw new IllegalArgumentException("Noncanonical inline bytes");
+            }
+            return bytes;
+        } catch (IllegalArgumentException error) {
+            throw new RuntimeBrokerException(400, "runtime_broker_invalid_request", "Private CSI inline bytes are invalid", false);
+        }
     }
 
     private void execution(HttpExchange exchange, String suffix)
@@ -510,6 +628,11 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
 
     private static Map<String, Object> requestBody(HttpExchange exchange,
             String context) throws IOException {
+        return requestBody(exchange, context, false);
+    }
+
+    private static Map<String, Object> requestBody(HttpExchange exchange,
+            String context, boolean strict) throws IOException {
         String rawLength = exchange.getRequestHeaders().getFirst(
                 "Content-Length");
         if (rawLength != null) {
@@ -531,6 +654,13 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         }
         if (bytes.length > MAXIMUM_REQUEST_BYTES) {
             throw tooLarge();
+        }
+        if (strict) {
+            try {
+                CsiNativeActivationProof.readObject(bytes);
+            } catch (RuntimeException invalid) {
+                throw new RuntimeBrokerException(400, "runtime_broker_invalid_request", "Execution JSON is invalid", false);
+            }
         }
         return JsonCodec.parseObject(bytes, context);
     }

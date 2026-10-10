@@ -5,8 +5,8 @@
  */
 
 import os from 'node:os';
-import type { Stats } from 'node:fs';
-import type { FileHandle } from 'node:fs/promises';
+import { constants, type Stats } from 'node:fs';
+import { open, type FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import { globSync } from 'glob';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
@@ -25,6 +25,11 @@ import type {
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import type { ToolWriteOrigin } from './tool-write-origin.js';
+import {
+  FileReadOpenError,
+  type FileReadRequest,
+  type FileReadSource,
+} from '../utils/file-read-source.js';
 
 export type LineEnding = 'crlf' | 'lf';
 
@@ -127,7 +132,31 @@ export type FileEncodingType = (typeof FileEncoding)[keyof typeof FileEncoding];
 /**
  * Interface for file system operations that may be delegated to different implementations
  */
+export type TextFileObservation =
+  | { kind: 'missing' }
+  | { kind: 'file'; response: ReadTextFileResponse; stats: Stats };
+
+export interface TextFileMutation {
+  readonly original: TextFileObservation;
+  write(params: CoreWriteTextFileRequest): Promise<Stats>;
+}
+
+export interface TextFileIo {
+  inspect(path: string, signal?: AbortSignal): Promise<TextFileObservation>;
+  withMutation<T>(
+    path: string,
+    signal: AbortSignal,
+    operation: (mutation: TextFileMutation) => Promise<T>,
+  ): Promise<T>;
+}
+
 export interface FileSystemService {
+  readonly textFileIo?: TextFileIo;
+  withReadFile?<T>(
+    request: FileReadRequest,
+    operation: (source: FileReadSource) => Promise<T>,
+  ): Promise<T>;
+
   readTextFile(params: CoreReadTextFileRequest): Promise<ReadTextFileResponse>;
 
   readTextFileFromHandle?(
@@ -365,6 +394,39 @@ export async function encodeTextFileContentAsync(
  * Standard file system implementation
  */
 export class StandardFileSystemService implements FileSystemService {
+  async withReadFile<T>(
+    request: FileReadRequest,
+    operation: (source: FileReadSource) => Promise<T>,
+  ): Promise<T> {
+    request.signal?.throwIfAborted();
+    if (
+      !['linux', 'darwin'].includes(os.platform()) ||
+      request.mediaDelivery === 'omni'
+    ) {
+      return operation({ kind: 'path', path: request.path });
+    }
+    let fileHandle: FileHandle;
+    try {
+      fileHandle = await open(
+        request.path,
+        constants.O_RDONLY | constants.O_NONBLOCK,
+      );
+    } catch (error) {
+      throw new FileReadOpenError(error);
+    }
+    try {
+      let stats: Stats;
+      try {
+        stats = await fileHandle.stat();
+      } catch (error) {
+        throw new FileReadOpenError(error);
+      }
+      return await operation({ kind: 'descriptor', fileHandle, stats });
+    } finally {
+      await fileHandle.close();
+    }
+  }
+
   async readTextFile(
     params: CoreReadTextFileRequest,
   ): Promise<ReadTextFileResponse> {

@@ -9020,19 +9020,11 @@ describe('Hosted Harness no-tool session', () => {
       body,
     );
     expect(created.status).toBe(200);
+    let createdDeclarations: string[] | undefined;
     state.model.mockImplementationOnce(async ({ toolTurn }) => {
-      expect(
-        (await toolTurn!.declarations(new AbortController().signal)).map(
-          (tool) => tool.name,
-        ),
-      ).toEqual([
-        'read_file',
-        'write_file',
-        'edit',
-        'run_shell_command',
-        // H4b: a Shell-laned root Session advertises its Agent tool.
-        'agent',
-      ]);
+      createdDeclarations = (
+        await toolTurn!.declarations(new AbortController().signal)
+      ).map((tool) => tool.name!);
       return { text: 'text without side effects', model: 'test-model' };
     });
     const prompt = [{ type: 'text', text: 'hello' }];
@@ -9057,6 +9049,24 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 10_000 },
     );
+    expect(createdDeclarations).toEqual([
+      'read_file',
+      'write_file',
+      'edit',
+      'run_shell_command',
+      'monitor',
+      'agent',
+    ]);
+    const journal = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+    );
+    const settled = journal.events.filter(
+      (event) =>
+        event.kind === 'turn.settled' && event.payload['turnId'] === PROMPT_ID,
+    );
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.payload['outcome']).toBe('completed');
     expect(acquire).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',

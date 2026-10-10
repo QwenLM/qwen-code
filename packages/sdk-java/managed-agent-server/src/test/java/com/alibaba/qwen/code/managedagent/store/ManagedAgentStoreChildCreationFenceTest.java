@@ -127,4 +127,19 @@ class ManagedAgentStoreChildCreationFenceTest {
     void mintsWhenNoRunRowExistsYet() {
         assertThat(mint("run-fresh").sessionId()).isNotBlank();
     }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"CLOSING", "CLOSED", "DELETED"})
+    void replaysOriginalChildAfterOrdinaryParentCloses(String status) {
+        StoreModels.Admission original = mint("run-before-close");
+        jdbc.update("UPDATE managed_agent_session SET status = ?"
+                + " WHERE tenant_id = 'tenant' AND session_id = ?", status, parent);
+        StoreModels.Admission replay = transactions.execute(ignored -> store
+                .replayChildSessionCommand("tenant", parent, "create-run-before-close",
+                        "digest-run-before-close"));
+        assertThat(replay.sessionId()).isEqualTo(original.sessionId());
+        assertThat(replay.replayed()).isTrue();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session",
+                Integer.class)).isEqualTo(2);
+    }
 }

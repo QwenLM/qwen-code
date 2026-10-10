@@ -79,6 +79,13 @@ import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.j
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import {
+  HOSTED_TURN_DEADLINE,
+  settledTurnOutcome,
+  createHostedChatRecord as record,
+  runHostedHarnessTurn,
+  unansweredPrompts,
+} from './hosted-harness-turn.js';
+import {
   HostedHookSession,
   HostedHookInputConflictError,
   HostedHookRecoveryRequiredError,
@@ -209,29 +216,6 @@ const RESTORE_CONTAINER_KINDS = new Set([
   'managed-hook-message-chunks',
 ]);
 const debugLogger = createDebugLogger('HOSTED_HARNESS_SESSION');
-
-/**
- * The prompt deadline timer and the cancel route abort the same controller,
- * so the deadline aborts with a distinguishing reason; settlement reads it
- * back to keep an expiry from being recorded as a user cancellation.
- */
-const HOSTED_TURN_DEADLINE = new Error(
-  'The Hosted Harness Turn deadline expired.',
-);
-
-/**
- * The terminal classification of a turn whose runner threw. A deadline
- * expiry is an attributable failure, never a cancellation.
- */
-function settledTurnOutcome(abort: AbortController): {
-  state: 'cancelled' | 'error';
-  stopReason: string;
-} {
-  if (!abort.signal.aborted) return { state: 'error', stopReason: 'error' };
-  return abort.signal.reason === HOSTED_TURN_DEADLINE
-    ? { state: 'error', stopReason: 'deadline_exceeded' }
-    : { state: 'cancelled', stopReason: 'cancelled' };
-}
 
 interface HostedSession {
   managed: ManagedSession;
@@ -520,25 +504,6 @@ function identity(
     : undefined;
 }
 
-function record(
-  session: HostedSession,
-  sessionId: string,
-  type: ChatRecord['type'],
-  parentUuid: string | null,
-  fields: Partial<ChatRecord>,
-): ChatRecord {
-  return {
-    uuid: randomUUID(),
-    parentUuid,
-    sessionId,
-    timestamp: new Date().toISOString(),
-    type,
-    cwd: session.cwd,
-    version: 'hosted-harness/1',
-    ...fields,
-  };
-}
-
 function hasAcceptedInput(session: HostedSession, promptId: string): boolean {
   return acceptedInputSequence(session, promptId) !== undefined;
 }
@@ -562,35 +527,6 @@ function acceptedInputSequence(
       sequence = event.sequence;
   }
   return sequence;
-}
-
-/**
- * The prompts whose turns settled without an answer (`error` or
- * `cancelled`). Turn results are `turn.settled` journal events, not
- * projected messages, so they never reach any record-based exclusion in
- * the model runner: the history is filtered against the journal here —
- * what ended without an answer is over, and its instruction never merges
- * into a later turn the way a crashing text turn's naked user record
- * otherwise would (the no-toolProfile path's older design already did
- * this; tool-profile Sessions now follow it).
- */
-function unansweredPrompts(session: HostedSession): Set<string> {
-  const authority = session.managed.authority;
-  const prompts = new Set<string>();
-  for (const event of authority.eventsInSequenceRange(
-    1,
-    authority.committedSequence,
-  )) {
-    if (
-      event.kind === 'turn.settled' &&
-      (event.payload['outcome'] === 'error' ||
-        event.payload['outcome'] === 'cancelled')
-    ) {
-      const turnId = event.payload['turnId'];
-      if (typeof turnId === 'string') prompts.add(turnId);
-    }
-  }
-  return prompts;
 }
 
 /** Which input sources ride the wake pump — the one predicate the probe,
@@ -2152,232 +2088,65 @@ async function executeHostedTurn(
   onTurnResult?: (result: ChatRecord) => void,
   onResumeReady?: () => void,
 ): Promise<ChatRecord> {
-  const authority = session.managed.authority;
-  const harness = createManagedHarnessHandle(session.managed);
-  let turnResult: ChatRecord | undefined;
-  let toolTurn: HostedWorkspaceToolTurn | undefined;
-  const running = new ManagedHookActivationController(session.managed).runTurn(
+  return runHostedHarnessTurn({
+    session,
+    sessionId,
+    cwd,
     promptId,
-    async (modelScope) =>
-      harness.run(async () => {
-        const projected = await session.managed.sink.project();
-        const settledPrompts = new Set(
-          authority
-            .eventsInSequenceRange(1, authority.committedSequence)
-            .filter((event) => event.kind === 'turn.settled')
-            .map((event) => event.payload['turnId']),
-        );
-        const unanswered = unansweredPrompts(session);
-        const history = (
-          session.toolProfile
-            ? projected.filter(
-                (entry) =>
-                  settledPrompts.has(entry.daemonPromptId) ||
-                  (resumeFromToolResults && entry.daemonPromptId === promptId),
-              )
-            : projected
-        ).filter(
-          (entry) =>
-            !(
-              entry.type === 'user' &&
-              entry.daemonPromptId !== undefined &&
-              unanswered.has(entry.daemonPromptId)
-            ),
-        );
-        let parentUuid = projected.at(-1)?.uuid ?? null;
-        if (!resumeFromToolResults) {
-          const user = record(session, sessionId, 'user', parentUuid, {
-            daemonPromptId: promptId,
-            message: { role: 'user', parts: [{ text }] },
-          });
-          await session.managed.sink.write(user);
-          parentUuid = user.uuid;
-        }
-        const messageRecord = (
-          type: 'assistant' | 'tool_result',
-          parts: Part[],
-          model: string,
-          identity?: { uuid: string; timestamp: string },
-        ) =>
-          record(session, sessionId, type, parentUuid, {
-            daemonPromptId: promptId,
-            model,
-            message: { role: type === 'assistant' ? 'model' : 'user', parts },
-            ...identity,
-          });
-        const deltas = session.toolProfile
-          ? new HostedTextDeltaStream(session.managed, promptId)
-          : undefined;
-        const commit = async (
-          type: 'assistant' | 'tool_result',
-          parts: Part[],
-          model: string,
-          identity?: { uuid: string; timestamp: string },
-        ) => {
-          const message = messageRecord(type, parts, model, identity);
-          if (type === 'assistant' && deltas) {
-            const streamed = deltas.takeMessageId();
-            if (streamed !== undefined) message.uuid = streamed;
-          }
-          await session.managed.sink.write(message);
-          parentUuid = message.uuid;
-          return message.uuid;
-        };
-        const workspaceContext: HostedWorkspaceContextSlot = {
-          read: () => session.workspaceContext,
-          write: (context) => {
-            session.workspaceContext = context;
-          },
-          invalidate: () => {
-            session.workspaceContext = undefined;
-          },
-        };
-        toolTurn =
-          session.toolProfile && brokerOptions
-            ? new HostedWorkspaceToolTurn(
-                brokerOptions,
-                session.managed,
-                harness,
-                promptId,
-                commit,
-                (type, parts, model) =>
-                  Buffer.byteLength(
-                    JSON.stringify(messageRecord(type, parts, model)),
-                  ) <=
-                  HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
-                session.publication,
-                session.shell,
-                session.approval && {
-                  settings: session.approval,
-                  waiters: session.waiters,
+    text,
+    abort,
+    historyMode: session.toolProfile ? 'settled' : 'all',
+    createToolTurn:
+      session.toolProfile && brokerOptions
+        ? (harness, commit, messageFitsInline, workspaceContext) =>
+            new HostedWorkspaceToolTurn(
+              brokerOptions,
+              session.managed,
+              harness,
+              promptId,
+              commit,
+              messageFitsInline,
+              session.publication,
+              session.shell,
+              session.approval && {
+                settings: session.approval,
+                waiters: session.waiters,
+              },
+              {
+                mcp: session.mcp,
+                hooks: session.hooks,
+                profile: session.toolProfile,
+                context: workspaceContext,
+                childRuns: session.childRuns,
+                monitors: session.monitors,
+                backgroundLane: session.backgroundLane,
+                childAgents: session.childAgents && {
+                  funnel: session.childAgents,
+                  depth: session.childDepth ?? 0,
+                  queueConsumption: (childRunId) =>
+                    session.childConsumption.add(childRunId),
                 },
-                {
-                  mcp: session.mcp,
-                  hooks: session.hooks,
-                  profile: session.toolProfile,
-                  context: workspaceContext,
-                  childRuns: session.childRuns,
-                  monitors: session.monitors,
-                  backgroundLane: session.backgroundLane,
-                  childAgents: session.childAgents && {
-                    funnel: session.childAgents,
-                    depth: session.childDepth ?? 0,
-                    queueConsumption: (childRunId) =>
-                      session.childConsumption.add(childRunId),
-                  },
-                },
-              )
-            : undefined;
-        if (resumeFromToolResults) {
-          if (!toolTurn)
-            throw new HostedToolRecoveryRequiredError(
-              'Tool turn is unavailable.',
-            );
-          try {
-            await toolTurn.resumeCommittedResults(abort.signal);
-          } catch (cause) {
-            if (isRetryableWorkspaceAcquisition(cause)) throw cause;
-            throw new HostedToolRecoveryRequiredError(cause);
-          }
-          onResumeReady?.();
+              },
+            )
+        : undefined,
+    resumeFromToolResults,
+    onTurnResult,
+    onResumeReady,
+    onCompleted: async () => {
+      if (!session.childAgents || session.childConsumption.size === 0) return;
+      try {
+        for (const childRunId of [...session.childConsumption].sort()) {
+          await session.childAgents.markConsumed(childRunId);
+          session.childConsumption.delete(childRunId);
         }
-        let state: 'completed' | 'cancelled' | 'error' = 'completed';
-        let stopReason = 'end_turn';
-        try {
-          const result = await runHostedHarnessTextTurn({
-            sessionId,
-            cwd,
-            history,
-            prompt: text,
-            promptId,
-            signal: abort.signal,
-            modelScope,
-            workspaceContext,
-            ...(session.hooks ? { hooks: session.hooks } : {}),
-            ...(toolTurn ? { toolTurn } : {}),
-            ...(resumeFromToolResults ? { resumeFromToolResults } : {}),
-            ...(deltas ? { textDeltas: deltas } : {}),
-          });
-          await commit(
-            'assistant',
-            result.parts ?? [{ text: result.text }],
-            result.model,
-          );
-        } catch (cause) {
-          if (
-            cause instanceof HostedToolRecoveryRequiredError ||
-            cause instanceof HostedMcpRecoveryRequiredError ||
-            cause instanceof HostedHookRecoveryRequiredError
-          )
-            throw cause;
-          const outcome = settledTurnOutcome(abort);
-          state = outcome.state;
-          stopReason = outcome.stopReason;
-          if (state === 'error') {
-            // The model layer surfaces any abort as a cancellation, so a
-            // deadline expiry names the deadline, not the thrown cause.
-            writeStderrLineSafe(
-              stopReason === 'deadline_exceeded'
-                ? `qwen serve: Hosted Harness turn ${promptId} exceeded its deadline.`
-                : 'qwen serve: Hosted Harness turn ' +
-                    promptId +
-                    ' failed: ' +
-                    String(cause),
-            );
-          }
-        }
-        await toolTurn?.finish();
-        turnResult = record(session, sessionId, 'system', null, {
-          subtype: 'turn_result',
-          systemPayload: { promptId, state, stopReason, endedAt: Date.now() },
-        });
-        onTurnResult?.(turnResult);
-        await session.managed.sink.write(turnResult);
-        // H4b: the tool-arm results this turn answered are consumed
-        // facts only once the turn's own settlement commits durably — a
-        // crash before this point leaves accepted-not-consumed evidence
-        // (H4b decision 6), never a consumed claim without a settled
-        // Turn; each id leaves the owed set as it commits, so a commit
-        // that dies mid-flush keeps the remainder owed, never widened
-        // and never silently dropped.
-        if (
-          state === 'completed' &&
-          session.childAgents &&
-          session.childConsumption.size > 0
-        ) {
-          // The settlement above is already durable: a rejected consume
-          // commit must not turn this completed turn into a reported
-          // failure. The failing id — and every id after it — stays owed
-          // for the next completed turn or recovery.
-          try {
-            const consumed = [...session.childConsumption].sort();
-            for (const childRunId of consumed) {
-              await session.childAgents.markConsumed(childRunId);
-              session.childConsumption.delete(childRunId);
-            }
-          } catch (cause) {
-            writeStderrLineSafe(
-              'qwen serve: Hosted acceptance consumption faltered (owed ids kept): ' +
-                String(cause),
-            );
-          }
-        }
-      }),
-  );
-  // Session availability must not gate on publisher cleanup: the drain is
-  // unbounded, and a stalled Session Store would otherwise leave the Session
-  // permanently unavailable and undeletable. Each turn owns its publisher,
-  // so a next turn shares no listener or capture state with this drain.
-  await running.finally(() => {
-    void toolTurn?.close().catch((cause: unknown) => {
-      session.blocked = true;
-      writeStderrLineSafe(
-        'qwen serve: Hosted Shell publisher cleanup failed: ' + String(cause),
-      );
-    });
+      } catch (cause) {
+        writeStderrLineSafe(
+          'qwen serve: Hosted acceptance consumption faltered (owed ids kept): ' +
+            String(cause),
+        );
+      }
+    },
   });
-  if (!turnResult) throw new Error('Hosted turn did not settle.');
-  return turnResult;
 }
 
 export function registerHostedHarnessSessionRoutes(
@@ -2385,7 +2154,7 @@ export function registerHostedHarnessSessionRoutes(
   contract: HostedHarnessContract,
   cwd: string,
   brokerOptions?: HostedWorkspaceBrokerOptions,
-): void {
+): { owns: (id: string) => boolean } {
   const sessions = new Map<string, HostedSession>();
   const opening = new Set<string>();
   const epoch = contract.bootId.replaceAll('-', '_');
@@ -6764,4 +6533,10 @@ export function registerHostedHarnessSessionRoutes(
   app.delete('/session/:id', (req, res) => {
     void close(req, res, true);
   });
+  return {
+    owns: (id) =>
+      [...sessions.keys(), ...opening].some(
+        (candidate) => candidate.toLowerCase() === id.toLowerCase(),
+      ),
+  };
 }

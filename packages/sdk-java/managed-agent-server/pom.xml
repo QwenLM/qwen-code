@@ -149,6 +149,14 @@
                             <mainClass>com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryCommand</mainClass>
                         </configuration>
                     </execution>
+                    <execution>
+                        <id>csi-runtime</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>csi-runtime</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRuntimeMain</mainClass>
+                        </configuration>
+                    </execution>
                 </executions>
             </plugin>
             <plugin>

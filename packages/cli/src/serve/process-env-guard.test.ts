@@ -184,6 +184,18 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/managed-csi-file-worker.ts',
+    {
+      reason:
+        'Private CSI construction captures the original Kubernetes Downward API Pod identity once for all four selected-runtime routes, before mount observation and listener startup.',
+      accesses: {
+        'key:QWEN_NODE_NAME': 1,
+        'key:QWEN_POD_NAMESPACE': 1,
+        'key:QWEN_POD_UID': 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/managed-csi-worker.ts',
     {
       reason:
@@ -314,10 +326,11 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'daemon environment into the TLS trust probe child. NODE_TLS_REJECT_UNAUTHORIZED is read to skip the ' +
         'worker TLS trust check when it disables verification: workers inherit the variable unscrubbed and dial ' +
         'via fetch, which honors it, so the strict probe would flag an outage that never happens. ' +
-        'The Hosted Harness capability digest is a process-scoped contract fixed at daemon bootstrap.',
+        'The Hosted Harness capability digest and private CSI Session Store URL are process-scoped contracts fixed at daemon bootstrap.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:HOSTED_HARNESS_CAPABILITY_DIGEST_ENV': 1,
+        'computed:HOSTED_CSI_SESSION_STORE_URL_ENV': 1,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_PROMPT_DEADLINE_MS_ENV': 1,

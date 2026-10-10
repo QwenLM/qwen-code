@@ -108,6 +108,48 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void cachedPrivateCsiAcquireRechecksAdmissionWithoutAnotherWorkerCall() {
+        var scope = new RuntimeScope("tenant", "workspace", "3", "/workspace",
+                CsiFilesRetirementProfile.CAPABILITY_DIGEST, "session");
+        for (RuntimeBindingRecord.State state : List.of(RuntimeBindingRecord.State.READY,
+                RuntimeBindingRecord.State.DRAINING)) {
+            try (Fixture fixture = new Fixture(scope)) {
+                String id = java.util.UUID.randomUUID().toString();
+                RuntimeSessionRecord ready = join(fixture.service.acquire(id, id, "bootstrap"));
+                assertSame(ready, join(fixture.service.acquire(id, id, "bootstrap")));
+                RuntimeBindingRecord claimed = fixture.bindingRepository.claimOperation(
+                        ready.getBindingId(), "broker", Duration.ofMinutes(1));
+                assertEquals(state, fixture.bindingRepository.compareAndSet(claimed,
+                        claimed.withDrainRequested(true, START).withState(state, claimed.getLease(), START)).getState());
+
+                assertEquals("runtime_admission_closed", failure(fixture.service.acquire(id, id, "bootstrap")).getCode());
+                assertSame(ready, fixture.sessionRepository.findById(scope, id));
+                assertEquals(1, fixture.transport.acquireCalls.get());
+                assertEquals(1, fixture.provisioner.calls.get());
+            }
+        }
+    }
+
+    @Test
+    void privateCsiAcquireCannotReturnReadyAfterDrainStartsDuringWorkerCall() {
+        var scope = new RuntimeScope("tenant", "workspace", "3", "/workspace",
+                CsiFilesRetirementProfile.CAPABILITY_DIGEST, "session");
+        try (Fixture fixture = new Fixture(scope)) {
+            String id = java.util.UUID.randomUUID().toString();
+            var worker = new CompletableFuture<Void>();
+            fixture.transport.acquireResult = worker;
+            var acquire = fixture.service.acquire(id, id, "bootstrap");
+            RuntimeBindingRecord claimed = fixture.bindingRepository.claimOperation(
+                    "binding-1", "broker", Duration.ofMinutes(1));
+            fixture.bindingRepository.compareAndSet(claimed, claimed.withDrainRequested(true, START));
+            worker.complete(null);
+
+            assertEquals("runtime_admission_closed", failure(acquire).getCode());
+            assertEquals(1, fixture.transport.acquireCalls.get());
+        }
+    }
+
+    @Test
     void hookRecoveryUsesTheOriginalBindingAndNeverAcquiresAReplacement() {
         try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
             RuntimeSessionRecord original = join(fixture.service.acquire("harness-a", "runtime-a", "bootstrap"));
@@ -2053,6 +2095,71 @@ class RuntimeBrokerServiceTest {
                             Map.of("kind", "status")));
             assertEquals("runtime_control_operation_invalid",
                     error.getCode());
+        }
+    }
+
+    @Test
+    void privateCsiDispatchRejectsShellBeforeAuthorizationOrWorkerIo() throws Exception {
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                CsiFilesRetirementProfile.CAPABILITY_DIGEST, "session");
+        try (Fixture fixture = new Fixture(scope)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"echo blocked\"}}";
+            String digest = "sha256:" + java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            var prepared = join(fixture.service.prepareExecution("harness", "runtime", "private-shell",
+                    Map.of("sessionId", "runtime", "promptId", "turn", "callId", "call", "argsDigest", digest)));
+            assertEquals("runtime_payload_invalid", failure(fixture.service.startExecution(
+                    "harness", "runtime", prepared.getExecutionCallId(), payload)).getCode());
+            var current = fixture.executionRepository.findByExecutionCallId(prepared.getExecutionCallId());
+            assertEquals(ToolExecutionRecord.State.PREPARED, current.getState());
+            assertEquals(0, current.getDispatchGeneration());
+            assertNull(current.getAuthorizedDispatchGeneration());
+            assertEquals(0, fixture.transport.executeCalls.get());
+            assertEquals(0, fixture.transport.executeV3Calls.get());
+        }
+    }
+
+    @Test
+    void privateCsiFileDispatchRefusesBeforeClaimingOrCallingTheWorker() throws Exception {
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                CsiFilesRetirementProfile.CAPABILITY_DIGEST, "session");
+        try (Fixture fixture = new Fixture(scope)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            for (String toolName : List.of("read_file", "write_file", "edit")) {
+                String payload = "{\"toolName\":\"" + toolName + "\",\"input\":{\"file_path\":\"marker.txt\"}}";
+                String digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                        .digest(payload.getBytes(StandardCharsets.UTF_8)));
+                var prepared = join(fixture.service.prepareExecution("harness", "runtime", "private-" + toolName,
+                        Map.of("sessionId", "runtime", "promptId", "turn", "callId", toolName, "argsDigest", digest)));
+                for (int attempt = 0; attempt < 2; attempt++) {
+                    var error = failure(fixture.service.startExecution("harness", "runtime", prepared.getExecutionCallId(), payload));
+                    assertEquals(501, error.getStatusCode());
+                    assertEquals("csi_file_dispatch_unavailable", error.getCode());
+                    assertFalse(error.isRetryable());
+                    assertSame(prepared, fixture.executionRepository.findByExecutionCallId(prepared.getExecutionCallId()));
+                }
+            }
+            assertEquals(0, fixture.transport.executeCalls.get());
+            assertEquals(0, fixture.transport.executeV3Calls.get());
+            assertEquals(0, fixture.transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void privateCsiSessionNeverForwardsGenericRuntimeControl() {
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                CsiFilesRetirementProfile.CAPABILITY_DIGEST, "session");
+        try (Fixture fixture = new Fixture(scope)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            for (Map<String, Object> operation : List.<Map<String, Object>>of(Map.of("kind", "manifest"),
+                    Map.of("kind", "history"), Map.of("kind", "raw-file-history", "action", "prepare",
+                            "promptId", "file-turn", "paths", List.of("file.txt")),
+                    Map.of("kind", "raw-file-history", "action", "rewind", "promptId", "file-turn"))) {
+                assertEquals("csi_control_not_qualified", failure(fixture.service.control("harness", "runtime",
+                        operation)).getCode());
+            }
+            assertNull(fixture.transport.lastControl);
         }
     }
 

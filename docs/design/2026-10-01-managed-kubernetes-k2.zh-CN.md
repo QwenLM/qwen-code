@@ -2,12 +2,15 @@
 
 [English](2026-10-01-managed-kubernetes-k2.md) | [简体中文](2026-10-01-managed-kubernetes-k2.zh-CN.md)
 
-状态：完整 CSI 开发增量已并入 draft PR #13289 的本地工作树。私有 reservation、
-创建前准入、可信 API 原 Pod 身份、封口、原结果结算、checkpoint 与持久 ACK 均有实现。
+状态（2026-10-06）：PR [#13289](https://github.com/QwenLM/qwen-code/pull/13289)
+已以 `69d5db2ff2424da01ac6f14e4c484773aae7204c` 合入。私有 reservation、创建前准入、
+可信 API 原 Pod 身份、封口、原结果结算、checkpoint 与持久 ACK 组件均有实现。
 当前可信创建与 ACK 入口见[持久 ACK 设计](2026-10-03-csi-durable-worker-ack.zh-CN.md)；
-下文早期关闭 CREATE 的描述属于各阶段历史快照，旧三参构造仍保持关闭。
-公开 Kubernetes Workspace selector、完整物理退役和卷交接仍未开放。
-各阶段历史结果不代替最新主线整合后的验收；本次整合验证和审查进行中。
+旧三参构造仍关闭。聚合退役、可信物理 stop/unpublish、安全卷交接和公开 Kubernetes
+Workspace 选择仍未完成。[K2 补全设计](2026-10-06-kubernetes-k2-retirement-handoff.zh-CN.md)
+基于 main `4bffa678bced8b14c25c85e3ba4226b7b752414d` 记录下一阶段提案。
+下文实现与验证陈述均为历史阶段快照，不是后续版本的完整 K2 验收。
+剩余工作见 [#13395](https://github.com/QwenLM/qwen-code/issues/13395)。
 本文延续 #12380 的 [K1](2026-10-01-managed-kubernetes-runtime.zh-CN.md)。
 
 ## 当前证据与缺口

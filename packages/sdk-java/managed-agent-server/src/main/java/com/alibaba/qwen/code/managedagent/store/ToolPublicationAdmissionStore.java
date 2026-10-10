@@ -352,6 +352,7 @@ public final class ToolPublicationAdmissionStore {
         }
         return transactions.execute(status -> {
             WorkspaceLifecycleStore.lockPlacement(jdbc, text(key, "tenantId"));
+            sessions.lockCsiOriginal(text(key, "tenantId"), text(key, "sessionId"));
             data.lockOriginalSettledResult(key, publicationId, finished);
             lockTenant(key);
             sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),

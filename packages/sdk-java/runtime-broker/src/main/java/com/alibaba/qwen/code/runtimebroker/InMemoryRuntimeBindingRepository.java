@@ -162,6 +162,30 @@ public final class InMemoryRuntimeBindingRepository
     }
 
     @Override
+    public synchronized RuntimeSessionRecord requireSessionAdmission(RuntimeSessionRepository sessions,
+            RuntimeSessionRecord expected) {
+        if (expected == null || expected.getState() != RuntimeSessionRecord.State.READY) {
+            throw new IllegalArgumentException("Admission check requires a READY Session");
+        }
+        RuntimeBindingRecord binding = findById(expected.getBindingId());
+        RuntimeAdmission.requireReady(binding, expected.getRuntimeGeneration());
+        requireAdmission(binding.getRequest());
+        if (!binding.getRequest().getScope().equals(expected.getSession().getScope())) {
+            throw new IllegalArgumentException("Session scope differs from binding");
+        }
+        synchronized (sessions) {
+            RuntimeSessionRecord current = sessions.findById(expected.getSession().getScope(),
+                    expected.getRuntimeSessionId());
+            if (current == null || !current.sameIdentity(expected)
+                    || current.getState() != RuntimeSessionRecord.State.READY) {
+                throw new RuntimeBrokerException(409, "runtime_session_not_ready",
+                        "Runtime Session is not ready", false);
+            }
+            return current;
+        }
+    }
+
+    @Override
     public synchronized ToolExecutionRecord admitExecution(
             RuntimeSessionRepository sessions, ToolExecutionRepository executions,
             ToolExecutionRecord candidate) {

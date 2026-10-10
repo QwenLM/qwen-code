@@ -14,14 +14,18 @@ import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
-import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
+import type { HostedToolTurn } from './hosted-harness-turn.js';
 import {
   HostedHookRecoveryRequiredError,
   type HostedHookSession,
   type HostedPromptHookRunner,
 } from './hosted-hook-session.js';
 import type { ManagedHookDispatcher } from '@qwen-code/qwen-code-core/hooks/hookEventHandler.js';
-import type { ManagedHookModelScope } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
+import type {
+  ManagedHookModelScope,
+  ManagedMainModelAttempt,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
+import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { createHostedPromptHookRunner } from './hosted-hook-model.js';
 import {
   HookEventName,
@@ -71,14 +75,23 @@ export async function runHostedHarnessTextTurn(input: {
   hooks?: HostedHookSession;
   modelScope?: ManagedHookModelScope;
   toolTurn?: Pick<
-    HostedWorkspaceToolTurn,
-    'execute' | 'consumeResults' | 'declarations' | 'setPromptHookRunner'
+    HostedToolTurn,
+    'execute' | 'consumeResults' | 'declarations'
   > &
     Partial<
-      Pick<HostedWorkspaceToolTurn, 'resumeHookResults' | 'hookStopReason'>
+      Pick<
+        HostedToolTurn,
+        'setPromptHookRunner' | 'resumeHookResults' | 'hookStopReason'
+      >
     >;
   workspaceContext?: { read(): string | undefined };
   textDeltas?: HostedHarnessTextDeltas;
+  completeFinalOutput?: (
+    attempt: ManagedMainModelAttempt,
+    usage: unknown[],
+    parts: Part[],
+    model: string,
+  ) => Promise<void>;
 }): Promise<HostedHarnessModelResult> {
   const settings = loadSettings(input.cwd, {
     skipLoadEnvironment: true,
@@ -378,6 +391,7 @@ export async function runHostedHarnessTextTurn(input: {
       const modelOccurrence =
         completeAttempt?.attemptId ?? `${input.promptId}:${round}`;
       const usage: unknown[] = [];
+      let finalOutputHandled = false;
       try {
         for await (const event of client.sendMessageStream(
           request,
@@ -443,6 +457,33 @@ export async function runHostedHarnessTextTurn(input: {
         }
         if (!finished)
           throw new Error('Hosted Harness model turn did not finish.');
+        if (
+          input.completeFinalOutput &&
+          completeAttempt &&
+          input.toolTurn &&
+          pendingToolResults &&
+          !input.hooks &&
+          calls.length === 0
+        ) {
+          const output = client.getHistory().at(-1);
+          if (
+            output?.role !== 'model' ||
+            !output.parts ||
+            output.parts.some((part) => part.functionCall)
+          )
+            throw new Error('Hosted final model output is unavailable.');
+          finalOutputHandled = true;
+          try {
+            await input.completeFinalOutput(
+              completeAttempt,
+              usage,
+              structuredClone(output.parts),
+              config.getModel(),
+            );
+          } catch (cause) {
+            throw new HostedToolRecoveryRequiredError(cause);
+          }
+        }
       } catch (cause) {
         if (
           modelFailure &&
@@ -462,7 +503,7 @@ export async function runHostedHarnessTextTurn(input: {
         }
         throw cause;
       } finally {
-        await completeAttempt?.(finished, usage);
+        if (!finalOutputHandled) await completeAttempt?.(finished, usage);
       }
       if (pendingToolResults && input.toolTurn) {
         await input.toolTurn.consumeResults();

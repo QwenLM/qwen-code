@@ -215,15 +215,16 @@ class WorkspaceSessionRetentionMySqlIT {
         publication(tenant, session);
         var deletion = deleteClaim(store, tenant, session);
         String digest = "c".repeat(64);
+        var receiptSource = new ManagedToolResultStore.Source("result-1", tenant,
+                "workspace", session, "execution", 1, 1, mapper.createObjectNode(), mapper.createObjectNode(),
+                mapper.createArrayNode(), digest);
         jdbc.update("INSERT INTO managed_agent_tool_result (result_id, scope_key, execution_key, tenant_id, workspace_id,"
                 + " session_id, source_json, source_digest, work_state, claim_generation, claim_until)"
-                + " VALUES ('result-1', ?, ?, ?, 'workspace', ?, '{}', ?, 'LEASED', 1, ?)",
+                + " VALUES ('result-1', ?, ?, ?, 'workspace', ?, ?, ?, 'LEASED', 1, ?)",
                 ManagedToolResultStore.identity("s", tenant, session).substring(2), digest, tenant, session,
-                digest, System.currentTimeMillis() + 60_000);
+                mapper.valueToTree(receiptSource).toString(), digest, System.currentTimeMillis() + 60_000);
         var projection = new ManagedToolResultStore(jdbc, new DataSourceTransactionManager(source), store);
-        var claim = new ManagedToolResultStore.Claim(new ManagedToolResultStore.Source("result-1", tenant,
-                "workspace", session, "execution", 1, 1, mapper.createObjectNode(), mapper.createObjectNode(),
-                mapper.createArrayNode(), digest), 1);
+        var claim = new ManagedToolResultStore.Claim(receiptSource, 1);
         var result = new ManagedToolResultStore.Projection(mapper.createObjectNode(), "pub-1", mapper.createObjectNode(),
                 mapper.createObjectNode(), List.of(), "policy");
         var publicLocked = new CountDownLatch(1);

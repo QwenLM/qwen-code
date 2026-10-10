@@ -114,19 +114,89 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 || client.followRedirects() != HttpClient.Redirect.NEVER) {
             throw new IllegalArgumentException("CSI seed must bind the lease.");
         }
-        var boot = ManagedCsiProtocol.boot(request, seed, storage);
+        boolean files = ManagedCsiFilesProtocol.selects(request);
+        var boot = files ? ManagedCsiFilesProtocol.boot(request, seed, storage) : ManagedCsiProtocol.boot(request, seed, storage);
         var expectedPod = BrokerValues.immutableMap(pod);
         ManagedCsiProtocol.validatePodIdentity(expectedPod, (String) storage.get("namespace"));
-        return post(lease, ManagedCsiProtocol.ATTEST_PATH,
-                encodeToolRequest(ManagedCsiProtocol.attestationRequest(boot), BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
+        return post(lease, files ? ManagedCsiFilesProtocol.ATTEST_PATH : ManagedCsiProtocol.ATTEST_PATH,
+                encodeToolRequest(files ? ManagedCsiFilesProtocol.attestationRequest(boot)
+                        : ManagedCsiProtocol.attestationRequest(boot), BODY_LIMIT_BYTES), BODY_LIMIT_BYTES,
+                files ? seed.getGatewayIncarnation() : null)
                 .thenApply(bytes -> {
                     try {
-                        return ManagedCsiProtocol.verifyAttestation(ManagedContextProtocol.parse(bytes), boot, expectedPod);
+                        return files ? ManagedCsiFilesProtocol.verifyAttestation(ManagedCsiFilesProtocol.parse(bytes), boot, expectedPod)
+                                : ManagedCsiProtocol.verifyAttestation(ManagedContextProtocol.parse(bytes), boot, expectedPod);
                     } catch (RuntimeException failure) {
                         throw new RuntimeBrokerException(409, "workspace_csi_identity_conflict",
                                 "Workspace CSI attestation conflicts.", false);
                     }
                 });
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> attestCsiFiles(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            Map<String, Object> boot, Map<String, Object> pod) {
+        if (lease == null || seed == null || !seed.matches(lease)
+                || !ManagedCsiFilesProtocol.selects(request) || client.followRedirects() != HttpClient.Redirect.NEVER) {
+            throw new IllegalArgumentException("Original CSI file boot must bind the lease.");
+        }
+        var originalBoot = BrokerValues.immutableMap(boot);
+        ManagedCsiFilesProtocol.validateBoot(originalBoot);
+        var storage = ProviderRuntimeProtocol.object(originalBoot.get("storage"));
+        var expected = ManagedCsiFilesProtocol.boot(request, seed, storage,
+                originalBoot.containsKey("authority") ? ProviderRuntimeProtocol.object(originalBoot.get("authority")) : null);
+        if (!BrokerValues.sameJsonMap(originalBoot, expected)) {
+            throw new IllegalArgumentException("Original CSI file boot differs.");
+        }
+        var expectedPod = BrokerValues.immutableMap(pod);
+        ManagedCsiProtocol.validatePodIdentity(expectedPod, (String) storage.get("namespace"));
+        return post(lease, ManagedCsiFilesProtocol.ATTEST_PATH,
+                encodeToolRequest(ManagedCsiFilesProtocol.attestationRequest(originalBoot), BODY_LIMIT_BYTES), BODY_LIMIT_BYTES,
+                seed.getGatewayIncarnation()).thenApply(bytes -> {
+                    try {
+                        return ManagedCsiFilesProtocol.verifyAttestation(ManagedCsiFilesProtocol.parse(bytes), originalBoot, expectedPod);
+                    } catch (RuntimeException failure) {
+                        throw new RuntimeBrokerException(409, "workspace_csi_identity_conflict",
+                                "Workspace CSI attestation conflicts.", false);
+                    }
+                });
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> csiFileHistory(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> boot,
+            ContextBinding binding, Map<String, Object> operation) {
+        if (lease == null || seed == null || !seed.matches(lease)
+                || !ManagedCsiFilesProtocol.selects(request) || client.followRedirects() != HttpClient.Redirect.NEVER) {
+            throw new IllegalArgumentException("Original CSI file history must bind the lease.");
+        }
+        var originalBoot = BrokerValues.immutableMap(boot);
+        ManagedCsiFilesProtocol.validateBoot(originalBoot);
+        var storage = ProviderRuntimeProtocol.object(originalBoot.get("storage"));
+        var expectedBoot = ManagedCsiFilesProtocol.boot(request, seed, storage,
+                originalBoot.containsKey("authority") ? ProviderRuntimeProtocol.object(originalBoot.get("authority")) : null);
+        if (!BrokerValues.sameJsonMap(originalBoot, expectedBoot)) {
+            throw new IllegalArgumentException("Original CSI file boot differs.");
+        }
+        var expected = CsiFileHistoryProtocol.request(originalBoot, request, binding, operation);
+        return post(lease, CsiFileHistoryProtocol.PATH,
+                encodeToolRequest(expected, CsiNativeReadbackProtocol.REQUEST_LIMIT), 64 * 1024,
+                seed.getGatewayIncarnation()).thenApply(bytes -> CsiFileHistoryProtocol.response(bytes, expected));
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> csiFileExecute(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> boot,
+            ContextBinding binding, String executionId) {
+        if (lease == null || seed == null || !seed.matches(lease)
+                || !ManagedCsiFilesProtocol.selects(request) || client.followRedirects() != HttpClient.Redirect.NEVER) {
+            throw new IllegalArgumentException("Original CSI execution must bind the lease.");
+        }
+        var expected = CsiNativeReadbackProtocol.executeRequest(boot, request, binding, executionId);
+        return post(lease, CsiNativeReadbackProtocol.EXECUTE_PATH,
+                encodeToolRequest(expected, CsiNativeReadbackProtocol.REQUEST_LIMIT), 64 * 1024,
+                seed.getGatewayIncarnation()).thenApply(bytes -> CsiNativeReadbackProtocol.executeResult(bytes, expected));
     }
 
     @Override
@@ -167,12 +237,19 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                     "seed must bind the lease");
         }
         if (request.isManagedContext()) {
+            boolean files = ManagedCsiFilesProtocol.selects(request);
+            if (files && client.followRedirects() != HttpClient.Redirect.NEVER) {
+                throw new IllegalArgumentException("CSI file attestation requires redirects disabled.");
+            }
             Map<String, Object> boot = ManagedContextProtocol.boot(request, seed);
-            return post(lease, ManagedContextProtocol.ATTEST_PATH,
-                    encodeToolRequest(ManagedContextProtocol.attestationRequest(boot),
-                            BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
+            Map<String, Object> body = ManagedContextProtocol.attestationRequest(boot);
+            return post(lease, files ? ManagedCsiFilesProtocol.CONTEXT_ATTEST_PATH : ManagedContextProtocol.ATTEST_PATH,
+                    encodeToolRequest(files ? ManagedCsiFilesProtocol.wrapContext(request, body) : body,
+                            BODY_LIMIT_BYTES), BODY_LIMIT_BYTES, files ? seed.getGatewayIncarnation() : null)
                     .thenApply(bytes -> {
-                        ManagedContextProtocol.verify(ManagedContextProtocol.parse(bytes),
+                        var actual = files ? ManagedCsiFilesProtocol.unwrapContext(request, ManagedCsiFilesProtocol.parse(bytes))
+                                : ManagedContextProtocol.parse(bytes);
+                        ManagedContextProtocol.verify(actual,
                                 ManagedContextProtocol.attestationResponse(boot));
                         return new RuntimeAttestation(seed.getProvisionalRuntimeId(),
                                 seed.getGatewayIncarnation(), seed.getLeaseId(),
@@ -265,15 +342,24 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                     "session must belong to a READY Runtime binding");
         }
         String sessionId = session.getRuntimeSessionId();
+        boolean files = ManagedCsiFilesProtocol.selects(request);
+        if (files && (!request.getIsolationKey().equals(sessionId) || !".".equals(binding.getCwdRelative())
+                || !CsiFilesRetirementProfile.CONTEXT_CONFIG_REF.equals(binding.getContextConfigRef())
+                || client.followRedirects() != HttpClient.Redirect.NEVER)) {
+            throw new IllegalArgumentException("CSI file context must belong to the original Session profile.");
+        }
         ManagedContextProtocol.boot(request, seed);
         Map<String, Object> body = ManagedContextProtocol.installation(request,
                 operationId, sessionId, binding);
         Map<String, Object> expected = ManagedContextProtocol.receipt(seed,
                 operationId, sessionId, binding);
-        return post(lease, ManagedContextProtocol.CONTEXT_PATH,
-                encodeToolRequest(body, BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
+        return post(lease, files ? ManagedCsiFilesProtocol.CONTEXT_PATH : ManagedContextProtocol.CONTEXT_PATH,
+                encodeToolRequest(files ? ManagedCsiFilesProtocol.wrapContext(request, body) : body, BODY_LIMIT_BYTES),
+                BODY_LIMIT_BYTES, files ? seed.getGatewayIncarnation() : null)
                 .thenApply(bytes -> {
-                    Map<String, Object> receipt = ManagedContextProtocol.parse(bytes);
+                    Map<String, Object> receipt = files
+                            ? ManagedCsiFilesProtocol.unwrapContext(request, ManagedCsiFilesProtocol.parse(bytes))
+                            : ManagedContextProtocol.parse(bytes);
                     ManagedContextProtocol.verify(receipt, expected);
                     return receipt;
                 });
@@ -1041,6 +1127,11 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private CompletionStage<byte[]> post(RuntimeLease lease, String path,
             byte[] encoded, int responseLimit) {
+        return post(lease, path, encoded, responseLimit, null);
+    }
+
+    private CompletionStage<byte[]> post(RuntimeLease lease, String path,
+            byte[] encoded, int responseLimit, String expectedIncarnation) {
         HttpRequest httpRequest = HttpRequest.newBuilder(
                 lease.getEndpoint().resolve(path))
                 .timeout(requestTimeout)
@@ -1094,7 +1185,9 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                     .firstValue("Cache-Control").orElse(""))
                     || !jsonContentType(response.headers()
                             .firstValue("Content-Type").orElse(""))
-                    || response.headers().firstValue("Content-Encoding").isPresent()) {
+                    || response.headers().firstValue("Content-Encoding").isPresent()
+                    || expectedIncarnation != null && !expectedIncarnation.equals(response.headers()
+                            .firstValue("X-Qwen-Managed-Runtime-Incarnation").orElse(""))) {
                 result.completeExceptionally(protocol(
                         "Managed Runtime " + operation
                                 + " response is invalid."));

@@ -9,6 +9,9 @@ import type { ServeOptions } from './types.js';
 import { isHostedHarnessCapabilityDigest } from './hosted-harness-contract.js';
 import { isLoopbackBind } from './loopback-binds.js';
 
+export const HOSTED_CSI_SESSION_STORE_URL_ENV =
+  'QWEN_HOSTED_CSI_SESSION_STORE_URL';
+
 export function validateHostedHarnessProfile(
   opts: Omit<ServeOptions, 'workspace'>,
 ): void {
@@ -27,7 +30,8 @@ export function validateHostedHarnessProfile(
     if (
       opts.managedRuntimeBrokerUrl === undefined &&
       opts.managedRuntimeBrokerToken === undefined &&
-      opts.hostedHarnessCapabilityDigest === undefined
+      opts.hostedHarnessCapabilityDigest === undefined &&
+      opts.hostedCsiSessionStoreUrl === undefined
     ) {
       return;
     }
@@ -84,5 +88,28 @@ export function validateHostedHarnessProfile(
     throw new Error(
       '--profile hosted-harness requires a sha256 capability digest.',
     );
+  }
+  if (opts.hostedCsiSessionStoreUrl !== undefined) {
+    if (
+      !opts.managedRuntimeBrokerUrl ||
+      !opts.managedRuntimeBrokerToken?.trim()
+    ) {
+      throw new Error(
+        'Private CSI attachment requires the original Runtime Broker.',
+      );
+    }
+    const url = new URL(opts.hostedCsiSessionStoreUrl);
+    if (
+      (url.protocol !== 'https:' && url.protocol !== 'http:') ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      (url.protocol === 'http:' && !isLoopbackBind(url.hostname))
+    ) {
+      throw new Error(
+        'Private CSI Session Store requires HTTPS or loopback HTTP without URL credentials.',
+      );
+    }
   }
 }

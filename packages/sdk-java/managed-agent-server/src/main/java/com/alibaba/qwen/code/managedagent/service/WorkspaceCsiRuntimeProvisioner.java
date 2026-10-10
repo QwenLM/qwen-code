@@ -1,21 +1,24 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.VERSION;
-import static com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.bytes;
-import static com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.context;
-import static com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.digest;
-import static com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.dns;
-import static com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.lease;
-import static com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.map;
-import static com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.name;
-import static com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.require;
-import static com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.same;
-import static com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.text;
-import static com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.uuid;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.VERSION;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.FILES_VERSION;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.FILES_AUTHORITY_VERSION;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.bytes;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.context;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.digest;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.dns;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.lease;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.map;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.name;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.require;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.same;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.text;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.uuid;
 
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.ManagedCsiFilesProtocol;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.KubernetesRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -28,6 +31,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -63,6 +67,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
     private final List<WorkerArtifact> artifacts;
     private final Duration timeout;
     private final RuntimeTransport transport;
+    private final Map<String, Object> authority;
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final ThreadLocal<Long> deadline = new ThreadLocal<>();
     private final Map<RuntimeProvisionSeed, RuntimeBindingRecord> claims = new ConcurrentHashMap<>();
@@ -94,10 +99,25 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
                 image, command, timeout, artifacts, new HttpRuntimeTransport());
     }
 
+    public WorkspaceCsiRuntimeProvisioner(WorkspaceCsiReservationStore storage,
+            JdbcRuntimeBindingRepository bindings, WorkspaceCsiRegistration registration, KubernetesRuntimeClient api,
+            WorkspaceCsiResourceGuard guard, String image, List<String> command, Duration timeout,
+            List<WorkerArtifact> artifacts, String authorityOrigin) {
+        this(storage, bindings, registration, Objects.requireNonNull(api), Objects.requireNonNull(guard), image, command,
+                timeout, artifacts, new HttpRuntimeTransport(), ManagedCsiFilesProtocol.authority(authorityOrigin));
+    }
+
     WorkspaceCsiRuntimeProvisioner(WorkspaceCsiReservationStore storage,
             JdbcRuntimeBindingRepository bindings, WorkspaceCsiRegistration registration, KubernetesRuntimeClient api,
             WorkspaceCsiResourceGuard guard, String image, List<String> command, Duration timeout,
             List<WorkerArtifact> artifacts, RuntimeTransport transport) {
+        this(storage, bindings, registration, api, guard, image, command, timeout, artifacts, transport, null);
+    }
+
+    WorkspaceCsiRuntimeProvisioner(WorkspaceCsiReservationStore storage,
+            JdbcRuntimeBindingRepository bindings, WorkspaceCsiRegistration registration, KubernetesRuntimeClient api,
+            WorkspaceCsiResourceGuard guard, String image, List<String> command, Duration timeout,
+            List<WorkerArtifact> artifacts, RuntimeTransport transport, Map<String, Object> authority) {
         this.storage = Objects.requireNonNull(storage);
         this.bindings = Objects.requireNonNull(bindings);
         this.registration = Objects.requireNonNull(registration);
@@ -108,6 +128,8 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
         this.artifacts = List.copyOf(artifacts);
         this.timeout = Objects.requireNonNull(timeout);
         this.transport = Objects.requireNonNull(transport);
+        this.authority = authority == null ? null : ManagedCsiFilesProtocol.authority((String) authority.get("origin"));
+        require(authority == null || same(authority, this.authority));
         require(!timeout.isZero() && !timeout.isNegative() && timeout.compareTo(Duration.ofMinutes(5)) <= 0);
         if (api != null) {
             require(guard != null && image != null && image.matches("[^\\s]+@sha256:[0-9a-f]{64}")
@@ -156,7 +178,9 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
             }
             var original = admitted(request, seed);
             var reservation = storage.inspect(registration);
-            var boot = com.alibaba.qwen.code.runtimebroker.ManagedCsiProtocol.boot(request, seed, storageTuple(reservation));
+            var boot = ManagedCsiFilesProtocol.selects(request) && authority != null
+                    ? ManagedCsiFilesProtocol.boot(request, seed, storageTuple(reservation), authority)
+                    : WorkspaceCsiRuntimeIdentity.boot(request, seed, storageTuple(reservation));
             require(bytes(boot).length <= 32 * 1024);
             var protection = protection(await(guard.verify()));
             verifyArtifacts();
@@ -186,10 +210,17 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
                     value.put("artifacts", artifactPins());
                     value.put("bootDigest", digest(boot));
                     value.put("podSpecDigest", digest(pod.get("spec")));
-                    var receipt = attest(request, seed, placement, storageTuple(reservation));
+                    var receipt = attest(request, seed, placement, boot);
                     value.put("mount", receipt.get("mount"));
+                    boolean files = ManagedCsiFilesProtocol.selects(request);
+                    if (files) {
+                        value.put("profileIdentity", ManagedCsiFilesProtocol.identity(request));
+                        if (boot.containsKey("authority")) {
+                            value.put("authority", boot.get("authority"));
+                        }
+                    }
                     value.put("identity", digest(value));
-                    var handle = new RuntimeResourceHandle(kind(), VERSION, value);
+                    var handle = new RuntimeResourceHandle(kind(), files ? boot.containsKey("authority") ? FILES_AUTHORITY_VERSION : FILES_VERSION : VERSION, value);
                     ownedHandle.set(handle);
                     observe(request, seed, handle, true);
                     admitted(request, seed, original);
@@ -234,7 +265,8 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
 
     @Override
     public boolean supportsStartupRecovery(RuntimeResourceHandle handle) {
-        return api != null && handle != null && kind().equals(handle.getKind()) && handle.getVersion() == VERSION;
+        return api != null && handle != null && kind().equals(handle.getKind())
+                && (handle.getVersion() == VERSION || handle.getVersion() == FILES_VERSION || handle.getVersion() == FILES_AUTHORITY_VERSION);
     }
 
     @Override
@@ -289,7 +321,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
         expectedStorage.put("reservationRevision", "1");
         require(same(expectedStorage, value.get("storage")));
         checkObservation(request, seed, handle);
-        var receipt = attest(request, seed, placement, map(value.get("storage")));
+        var receipt = attest(request, seed, placement, WorkspaceCsiRuntimeIdentity.boot(request, seed, handle));
         require(same(receipt.get("mount"), value.get("mount")));
         checkObservation(request, seed, handle);
         var lease = lease(seed, placement);
@@ -305,8 +337,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
         verifyArtifacts();
         var pod = get("pods", name(seed));
         checkObject(pod, pod(request, seed), (String) placement.get("podUid"));
-        checkObject(get("secrets", name(seed)), secret(seed, com.alibaba.qwen.code.runtimebroker.ManagedCsiProtocol.boot(
-                request, seed, map(value.get("storage")))), (String) placement.get("secretUid"));
+        checkObject(get("secrets", name(seed)), secret(seed, WorkspaceCsiRuntimeIdentity.boot(request, seed, handle)), (String) placement.get("secretUid"));
         require(digest(pod.get("spec")).equals(value.get("podSpecDigest")));
         var running = running(pod);
         require(running != null && same(placement(seed, pod, (String) placement.get("secretUid"), running,
@@ -314,12 +345,25 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
     }
 
     private Map<String, Object> attest(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
-            Map<String, Object> placement, Map<String, Object> tuple) {
+            Map<String, Object> placement, Map<String, Object> boot) {
         var lease = lease(seed, placement);
         remainingMillis();
-        await(transport.attest(lease, request, seed));
+        var context = await(transport.attest(lease, request, seed));
+        boolean files = ManagedCsiFilesProtocol.selects(request);
+        if (files) {
+            require(context != null && seed.getProvisionalRuntimeId().equals(context.getRuntimeInstanceId())
+                    && seed.getGatewayIncarnation().equals(context.getRuntimeIncarnation())
+                    && seed.getLeaseId().equals(context.getLeaseId()) && seed.getEpoch() == context.getEpoch()
+                    && request.getScope().equals(context.getScope())
+                    && seed.getProvisionRequestId().equals(context.getProvisionRequestId())
+                    && request.getStorageId().equals(context.getStorageId()));
+        }
         remainingMillis();
-        return await(transport.attestCsi(lease, request, seed, tuple, WorkspaceCsiRuntimeIdentity.pod(placement)));
+        var expectedPod = WorkspaceCsiRuntimeIdentity.pod(placement);
+        var receipt = await(files && boot.containsKey("authority")
+                ? transport.attestCsiFiles(lease, request, seed, boot, expectedPod)
+                : transport.attestCsi(lease, request, seed, map(boot.get("storage")), expectedPod));
+        return files ? ManagedCsiFilesProtocol.verifyAttestation(receipt, boot, expectedPod) : receipt;
     }
 
     private RuntimeBindingRecord admitted(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
@@ -344,7 +388,8 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
             throw closed();
         }
         require(request != null && seed != null && request.isManagedContext() && kind().equals(request.getProvisionerKind())
-                && "workspace".equals(request.getScope().getIsolationClass()) && request.getIsolationKey() == null
+                && (ManagedCsiFilesProtocol.selects(request)
+                        || "workspace".equals(request.getScope().getIsolationClass()) && request.getIsolationKey() == null)
                 && registration.tenantId().equals(request.getScope().getTenantId())
                 && registration.storageId().equals(request.getStorageId()) && registration.mountRoot().equals(request.getScope().getCanonicalCwd())
                 && !registration.mountRoot().startsWith("/tmp") && !registration.mountRoot().startsWith("/var/run"));

@@ -4,11 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as fs from 'node:fs';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { checkTeamMemorySecrets } from './team-memory-secret-guard.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  checkTeamMemorySecrets,
+  checkWorkspaceTeamMemorySecrets,
+} from './team-memory-secret-guard.js';
 import { getTeamAutoMemoryRoot } from './paths.js';
 
 describe('checkTeamMemorySecrets', () => {
@@ -55,6 +59,39 @@ describe('checkTeamMemorySecrets', () => {
     expect(
       checkTeamMemorySecrets(outsideFile, `token=${secret}`, projectRoot),
     ).toBeNull();
+  });
+
+  it('classifies no-follow workspace paths without pathname I/O or a host git root', () => {
+    const file = path.join(projectRoot, '.qwen/team-memory/note.md');
+    const exists = vi.spyOn(fs, 'existsSync');
+    const realpath = vi.spyOn(fs, 'realpathSync');
+    syncBuiltinESMExports();
+    try {
+      expect(
+        checkWorkspaceTeamMemorySecrets(file, secret, projectRoot),
+      ).toMatch(/team memory is shared/i);
+      expect(
+        checkWorkspaceTeamMemorySecrets(file, 'safe note', projectRoot),
+      ).toBeNull();
+      for (const relative of [
+        '.qwen/team-memory-other/note.md',
+        '.qwen/team-memory/../outside.md',
+        'src/note.md',
+      ])
+        expect(
+          checkWorkspaceTeamMemorySecrets(
+            path.join(projectRoot, relative),
+            secret,
+            projectRoot,
+          ),
+        ).toBeNull();
+      expect(exists).not.toHaveBeenCalled();
+      expect(realpath).not.toHaveBeenCalled();
+    } finally {
+      exists.mockRestore();
+      realpath.mockRestore();
+      syncBuiltinESMExports();
+    }
   });
 
   it('blocks secrets written through a symlink into team memory', () => {

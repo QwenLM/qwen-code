@@ -103,6 +103,7 @@ export interface HttpManagedSessionStores {
   readonly publication: HttpToolPublicationOwner;
   readonly toolResultResources: DurableToolResultResourceStore;
   assertWritable(): Promise<void>;
+  stopLocal(): Promise<void>;
   close(): Promise<void>;
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void;
   authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void>;
@@ -154,6 +155,7 @@ export function createHttpManagedSessionStores(
       read: (ref) => client.readResource(ref),
     },
     assertWritable: () => client.assertWritable(),
+    stopLocal: () => client.stopLocal(),
     close: () => client.seal(),
     setLifecycleAuthority: (authority) =>
       client.setLifecycleAuthority(authority),
@@ -165,7 +167,10 @@ export function createHttpManagedSessionStores(
 /** Fixed inline observation; never opens the HTTP store or acquires a writer. */
 export function readOnlyManagedSessionSnapshot(value: unknown) {
   const snapshot = asRecord(value, 'snapshot');
-  if (snapshot['format'] !== 'qwen-csi-receipt-checkpoint-snapshot/1') {
+  if (
+    snapshot['format'] !== 'qwen-csi-receipt-checkpoint-snapshot/1' &&
+    snapshot['format'] !== 'qwen-csi-session-checkpoint-snapshot/1'
+  ) {
     throw corrupt('snapshot format is unsupported.');
   }
   const sessionKey = assertManagedSessionKey(
@@ -588,6 +593,7 @@ class ManagedSessionStoreHttpClient {
   private renewingAuthority?: ManagedSessionLifecycleAuthority;
   private renewTimer: NodeJS.Timeout | undefined;
   private sealed = false;
+  private locallyStopped = false;
   private lifecycleAuthority?: ManagedSessionLifecycleAuthority;
 
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void {
@@ -678,7 +684,7 @@ class ManagedSessionStoreHttpClient {
   }
 
   async acquireWriter(): Promise<void> {
-    if (this.grant !== undefined || this.sealed) {
+    if (this.grant !== undefined || this.sealed || this.locallyStopped) {
       throw new ManagedSessionRecordError(
         'the HTTP Managed Session writer is already opened or sealed.',
       );
@@ -1149,6 +1155,12 @@ class ManagedSessionStoreHttpClient {
     this.resources.clear();
   }
 
+  async stopLocal(): Promise<void> {
+    this.locallyStopped = true;
+    this.stopRenewal();
+    await this.renewPromise?.catch(() => undefined);
+  }
+
   private async ensureWriter(): Promise<void> {
     const grant = this.requireGrant();
     if (grant.leaseUntil - Date.now() <= this.leaseDurationMs / 3) {
@@ -1157,6 +1169,13 @@ class ManagedSessionStoreHttpClient {
   }
 
   private renewWriter(): Promise<void> {
+    if (this.locallyStopped) {
+      return Promise.reject(
+        new ManagedSessionRecordError(
+          'the HTTP Managed Session writer is locally stopped.',
+        ),
+      );
+    }
     if (this.renewPromise !== undefined) {
       if (
         this.lifecycleAuthority?.operationId ===
@@ -1194,7 +1213,7 @@ class ManagedSessionStoreHttpClient {
 
   private scheduleRenewal(): void {
     this.stopRenewal();
-    if (this.sealed || this.grant === undefined) return;
+    if (this.sealed || this.locallyStopped || this.grant === undefined) return;
     const delay = Math.max(
       250,
       Math.min(
@@ -1227,7 +1246,7 @@ class ManagedSessionStoreHttpClient {
   }
 
   private requireGrant(): WriterGrant {
-    if (this.grant === undefined || this.sealed) {
+    if (this.grant === undefined || this.sealed || this.locallyStopped) {
       throw new ManagedSessionRecordError(
         'the HTTP Managed Session writer is not active.',
       );
@@ -1333,6 +1352,11 @@ class ManagedSessionStoreHttpClient {
     timeoutMs = this.requestTimeoutMs,
     accept = 'application/json',
   ): Promise<Response> {
+    if (this.locallyStopped) {
+      throw new ManagedSessionRecordError(
+        'the HTTP Managed Session writer is locally stopped.',
+      );
+    }
     let response: Response;
     try {
       response = await this.fetchFn(`${this.sessionUrl()}${path}`, {
@@ -1713,6 +1737,29 @@ export function collectNestedResourceRefs(
   if (ref.kind === 'managed-checkpoint') {
     const parsed = tryParseHarnessCheckpointV1(bytes);
     return parsed.ok ? collectRefs([parsed.checkpoint]) : [];
+  }
+  if (ref.kind === 'managed-file_history') {
+    const record = parseManagedSessionRecordJson(
+      bytes.toString('utf8'),
+      MANAGED_SESSION_LIMITS.maxEventBytes,
+    );
+    if (
+      record === null ||
+      typeof record !== 'object' ||
+      Array.isArray(record) ||
+      record['schemaVersion'] !== 2 ||
+      record['profile'] !== 'csi-files-retirement/1'
+    )
+      return [];
+    const preparation = record['preparation'];
+    if (preparation === null) return [];
+    if (
+      !preparation ||
+      typeof preparation !== 'object' ||
+      Array.isArray(preparation)
+    )
+      throw corrupt('CSI history preparation is invalid.');
+    return collectRefs([preparation['invocations'], preparation['intentRef']]);
   }
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||

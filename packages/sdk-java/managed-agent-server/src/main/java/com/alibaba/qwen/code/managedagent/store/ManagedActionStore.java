@@ -156,6 +156,7 @@ public class ManagedActionStore {
             if (!"action.changed".equals(event.path("kind").asText())) {
                 continue;
             }
+            ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
             JsonNode envelope = event.deepCopy();
             ((com.fasterxml.jackson.databind.node.ObjectNode) envelope).remove("subject");
             if (event.has("subject")) {
@@ -391,6 +392,7 @@ public class ManagedActionStore {
             JsonNode body,
             long now) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         // Serialize admission with journal projection and other Session commands.
         jdbc.queryForObject(
                 "SELECT session_id FROM managed_agent_session WHERE tenant_id = ? AND session_id ="
@@ -530,9 +532,11 @@ public class ManagedActionStore {
 
     public List<OperationTarget> deliverable(long now) {
         return jdbc.query(
-                "SELECT tenant_id, session_id, operation_id FROM managed_agent_operation WHERE"
+                "SELECT o.tenant_id, o.session_id, o.operation_id FROM managed_agent_operation o WHERE"
                         + " operation_kind = 'ACTION_RESPONSE' AND ((delivery_state = 'PENDING' AND"
                         + " available_at <= ?) OR (delivery_state = 'LEASED' AND lease_until < ?))"
+                        + " AND NOT EXISTS (SELECT 1 FROM managed_agent_session s WHERE s.tenant_id = o.tenant_id"
+                        + " AND s.session_id = o.session_id AND s.csi_guard = TRUE)"
                         + " ORDER BY available_at LIMIT 50",
                 (r, row) -> new OperationTarget(r.getString(1), r.getString(2), r.getString(3)),
                 now,
@@ -546,6 +550,7 @@ public class ManagedActionStore {
             String errorCode,
             String decisionReceiptId,
             long now) {
+        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, op.tenantId(), op.sessionId());
         jdbc.update(
                 "UPDATE managed_agent_operation SET state = ?, admission_stage ="
                     + " 'HARNESS_CONFIRMED', delivery_state = 'CONFIRMED', receipt_id = ?,"

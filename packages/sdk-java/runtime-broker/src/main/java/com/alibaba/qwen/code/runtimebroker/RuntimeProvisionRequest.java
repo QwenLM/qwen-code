@@ -52,6 +52,10 @@ public final class RuntimeProvisionRequest {
         return storageId;
     }
 
+    public String requestKey() {
+        return JdbcRepositorySupport.requestKey(this);
+    }
+
     public boolean isManagedContext() {
         return storageId != null;
     }

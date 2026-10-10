@@ -9,6 +9,7 @@ import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -34,12 +35,11 @@ public class ApiExceptionHandler {
     }
 
     @ExceptionHandler(RuntimeBrokerException.class)
-    public ResponseEntity<Map<String, Object>> runtime(RuntimeBrokerException error,
+    public ResponseEntity<Map<String, Object>> broker(RuntimeBrokerException error,
             HttpServletRequest request, HttpServletResponse response) {
-        HttpStatus status = HttpStatus.resolve(error.getStatusCode());
         Map<String, Object> details = new LinkedHashMap<>(error.getDetails());
         details.put("retryable", error.isRetryable());
-        return response(request, response, status == null ? HttpStatus.CONFLICT : status,
+        return response(request, response, HttpStatusCode.valueOf(error.getStatusCode()),
                 error.getCode(), error.getMessage(), details);
     }
 
@@ -110,13 +110,13 @@ public class ApiExceptionHandler {
 
     private static ResponseEntity<Map<String, Object>> response(
             HttpServletRequest request, HttpServletResponse response,
-            HttpStatus status, String code, String message) {
+            HttpStatusCode status, String code, String message) {
         return response(request, response, status, code, message, Map.of());
     }
 
     private static ResponseEntity<Map<String, Object>> response(
             HttpServletRequest request, HttpServletResponse response,
-            HttpStatus status, String code, String message,
+            HttpStatusCode status, String code, String message,
             Map<String, Object> details) {
         // An SSE stream that already started cannot switch to an envelope.
         if (response.isCommitted()) {

@@ -364,6 +364,8 @@ export interface ServeOptions {
   managedRuntimeBrokerToken?: string;
   /** Deployment-generated digest for the Hosted Harness private contract. */
   hostedHarnessCapabilityDigest?: string;
+  /** Trusted startup URL for the operator-only original CSI attachment. */
+  hostedCsiSessionStoreUrl?: string;
   /**
    * Per-SSE-connection idle deadline.
    */
