@@ -1001,6 +1001,31 @@ it('refuses a foreground agent call while this Turn holds the mount', async () =
   );
 });
 
+// Pins the arm order the comment at the Turn-owned arm depends on. With both
+// holds live, the Session-scoped arm must answer: a Session-owned mount
+// survives the Turn, so the Turn arm's background and fresh-turn advice
+// cannot release it and would be dead advice. Swapping the arms keeps this
+// refusing, but with the wrong remedy.
+it('answers a foreground child with the Session refusal when both holds are live', async () => {
+  const turn = createTurnWithOwnerMount('hooks', true);
+  await turn.resumeCommittedResults(new AbortController().signal);
+  const refused = await executeAgent(
+    turn,
+    call({
+      description: 'audit the diff',
+      prompt: 'review the change',
+      run_in_background: false,
+    }),
+  );
+  expect(JSON.stringify(refused)).toContain(mountRefusal);
+  expect(JSON.stringify(refused)).not.toContain(
+    HOSTED_CHILD_MOUNT_REFUSALS.turn,
+  );
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
 // The 1292-refusal must key off the Session's actual mount owners, not
 // only the turn's own `acquired` flag: the Hook catalog or MCP owner can
 // retain the mount until their Session-scoped close, and an agent-only
