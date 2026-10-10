@@ -1555,10 +1555,52 @@ public final class RuntimeBrokerService implements AutoCloseable {
             });
         }
         // Yield between pages even when every status completes synchronously.
-        return scanned.thenComposeAsync(ignored -> batch.size() < 100
-                ? CompletableFuture.completedFuture(context)
-                : scanExecutions(context, session,
-                        batch.get(batch.size() - 1).getExecutionCallId()));
+        return scanned.thenComposeAsync(ignored -> {
+            if (batch.size() < 100) {
+                observeScannedBackgroundProcesses(context);
+                return CompletableFuture.completedFuture(context);
+            }
+            return scanExecutions(context, session,
+                    batch.get(batch.size() - 1).getExecutionCallId());
+        });
+    }
+
+    /**
+     * A background `:process` row stays PREPARED for the process's life, so
+     * the reconcile filter above never reaches it — after the last page,
+     * observe each live one from durable evidence: a provable exit settles
+     * the row here, and anything else keeps it holding. Every observation
+     * is fire-and-forget (an acquire never waits on it) and per-row
+     * isolated (a store fault or a broken control must never fail an
+     * acquire); the release sweep or a later scan asks again. The release
+     * sweep's per-row prelude in {@code settleUnprovenBackgroundRows} is
+     * the same shape, kept separate because it owns the in-memory index
+     * and the status→terminate→status follow-up.
+     */
+    private void observeScannedBackgroundProcesses(SessionContext context) {
+        List<ToolExecutionRecord> rows;
+        try {
+            rows = durableBackgroundProcessRows(context);
+        } catch (RuntimeException listing) {
+            return;
+        }
+        for (ToolExecutionRecord row : rows) {
+            if (row.isTerminal()) {
+                continue;
+            }
+            ToolExecutionRecord invocation;
+            try {
+                invocation = requireExecution(context, referenceString(
+                        row.getReference(), "processOf"));
+            } catch (RuntimeException missing) {
+                continue;
+            }
+            ToolExecutionRecord parent = invocation;
+            CompletableFuture.completedFuture(null)
+                    .thenComposeAsync(ignored -> observeProcessRow(context,
+                            parent, row))
+                    .exceptionally(failure -> null);
+        }
     }
 
     public CompletionStage<Boolean> release(String harnessSessionId,
