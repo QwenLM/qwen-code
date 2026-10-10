@@ -211,6 +211,18 @@ class JdbcRuntimeRetentionTest {
     }
 
     @Test
+    void corruptHistoricalEvidenceSkipsTheRowAndContinues() throws Exception {
+        Fixture fixture = new Fixture();
+        RuntimeBindingRecord corrupt = fixture.binding("corrupt", "legacy", false, "RELEASED");
+        fixture.execute("UPDATE qwen_runtime_binding SET loss_evidence_json = ? WHERE binding_id = ?",
+                "{", corrupt.getBindingId());
+        fixture.binding("healthy", "legacy", false, "RELEASED");
+
+        assertEquals(List.of(0, 0, 1), fixture.complete(100, NO_REFERENCES));
+        assertEquals(1, fixture.count("qwen_runtime_binding"));
+    }
+
+    @Test
     void expiredClaimsAllowRetirementButIncompleteClaimsRetainEvidence() throws Exception {
         Fixture fixture = new Fixture();
         RuntimeBindingRecord expired = fixture.binding("expired", "legacy", false, "RELEASED");

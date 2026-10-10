@@ -89,8 +89,10 @@ public final class JdbcRuntimeRetention {
         RuntimeBindingRecord binding;
         try {
             binding = bindings.findByIdForUpdate(connection, candidate.bindingId());
-        } catch (IllegalArgumentException | IllegalStateException invalidEvidence) {
-            // Invalid historical evidence must neither be deleted nor hold up the sweep.
+        } catch (RuntimeException invalidEvidence) {
+            // Mapping throws RuntimeBrokerException, ClassCastException and
+            // DateTimeParseException as well as IllegalStateException. Skip the
+            // row so one corrupt history record cannot stall the keyset.
             return skipped(afterBinding);
         }
         Instant now = JdbcRepositorySupport.databaseNowPrecise(connection);
