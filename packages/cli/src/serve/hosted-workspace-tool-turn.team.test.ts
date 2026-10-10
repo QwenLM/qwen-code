@@ -22,7 +22,9 @@ import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js
 import {
   HostedWorkspaceToolTurn,
   HOSTED_AGENT_TOOL,
+  HOSTED_AGENT_WORKTREE_TOOL,
   HOSTED_TEAM_AGENT_TOOL,
+  HOSTED_TEAM_AGENT_WORKTREE_TOOL,
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
@@ -110,6 +112,7 @@ function createTurn(
     depth?: number;
     hookEvents?: string[];
     funnel?: HostedTeamSession;
+    childWorkspaces?: boolean;
   } = {},
 ): HostedWorkspaceToolTurn {
   const hookEvents = options.hookEvents;
@@ -146,6 +149,7 @@ function createTurn(
       childAgents: {
         funnel: children,
         depth: options.depth ?? 0,
+        childWorkspaces: options.childWorkspaces === true,
         queueConsumption: () => undefined,
       },
       teams: options.funnel ?? teams,
@@ -293,6 +297,43 @@ it('declares the team tools only beside the root Agent tool, behind both gates',
     expect(closed).toContain(HOSTED_AGENT_TOOL);
     expect(closed.some((tool) => team.includes(tool.name!))).toBe(false);
   }
+});
+
+// #13753 I2: a host that serves child Workspaces adds isolation to the
+// team's Agent tool too, and a member may run isolated like any child.
+it('composes worktree isolation with team membership', async () => {
+  const signal = new AbortController().signal;
+  const capable = await createTurn({ childWorkspaces: true }).declarations(
+    signal,
+  );
+  expect(capable).toContain(HOSTED_TEAM_AGENT_WORKTREE_TOOL);
+  expect(capable).not.toContain(HOSTED_TEAM_AGENT_TOOL);
+  enablement.teamState = false;
+  expect(
+    await createTurn({ childWorkspaces: true }).declarations(signal),
+  ).toContain(HOSTED_AGENT_WORKTREE_TOOL);
+  enablement.teamState = true;
+
+  const plain = createTurn();
+  await execute(plain, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  expect(
+    await execute(plain, [
+      member('bob', 'call-bob', { isolation: 'worktree' }),
+    ]),
+  ).toContain('(workspace_mode)');
+  expect(children.record('prompt:call-bob')).toBeUndefined();
+  expect(roster()).toEqual([]);
+
+  const answer = await execute(createTurn({ childWorkspaces: true }), [
+    member('alice', 'call-alice', { isolation: 'worktree' }),
+  ]);
+  expect(answer).toContain('joined team \\"review\\" as \\"alice\\"');
+  expect(children.record('prompt:call-alice')).toMatchObject({
+    workspaceMode: 'worktree',
+    completion: 'sent',
+  });
 });
 
 it('keeps refusing name while the team domains are disabled', async () => {
@@ -664,6 +705,7 @@ it('answers an interrupted turn by what each journal-only call committed', async
       definitionRevision: 1,
       definitionDigest: authority.sessionHeader.definitionRef.digest,
     },
+    workspaceMode: 'shared',
     workingDirectory: '.',
     executionCallId: 'prompt:call-alice',
   });
