@@ -1110,6 +1110,13 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
    * is what lets dedup recognise an oversized echo.
    */
   embeddedResourceFingerprints?: Array<string | undefined>;
+  /**
+   * Index-aligned with `embeddedResources`: for an entry whose untruncated
+   * uri exceeded the text bound, the fingerprint of that untruncated uri;
+   * `undefined` for the rest. The skeleton cascade truncates an oversized
+   * stored uri, so this is what lets dedup recognise an oversized-uri echo.
+   */
+  embeddedResourceUriFingerprints?: Array<string | undefined>;
   streaming?: boolean;
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */
