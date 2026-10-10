@@ -9,6 +9,7 @@ import type { SessionSourcesSnapshot } from './session-sources.js';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 
 import { type Config } from '../config/config.js';
+import type { RequestLifecycleRecord } from '../telemetry/request-lifecycle.js';
 import {
   backgroundTurnContext,
   type BackgroundNotificationTurn,
@@ -469,6 +470,12 @@ export interface ChatRecord {
   usageMetadata?: GenerateContentResponseUsageMetadata;
   /** Model used for this response */
   model?: string;
+  /** Effective session settings when user input reaches the recorder. */
+  executionContext?: {
+    modelId: string;
+    authType?: string;
+    approvalMode: ApprovalMode;
+  };
   /** Context window size of the model used for this response */
   contextWindowSize?: number;
   /**
@@ -851,7 +858,7 @@ export function sessionModelPayloadsEqual(
  * Stored payload for UI telemetry replay.
  */
 export interface UiTelemetryRecordPayload {
-  uiEvent: UiEvent;
+  uiEvent: UiEvent | RequestLifecycleRecord;
 }
 
 /**
@@ -2312,6 +2319,14 @@ export class ChatRecordingService {
     this.resetExternalRecordIndex();
   }
 
+  private getExecutionContext(): NonNullable<ChatRecord['executionContext']> {
+    return {
+      modelId: this.config.getModel(),
+      authType: this.config.getAuthType(),
+      approvalMode: this.config.getApprovalMode(),
+    };
+  }
+
   /**
    * Records a user message.
    * Queues the write immediately on the serialized async writer.
@@ -2334,6 +2349,7 @@ export class ChatRecordingService {
       this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
+        executionContext: this.getExecutionContext(),
         ...(daemonPromptId ? { daemonPromptId } : {}),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
@@ -2396,6 +2412,7 @@ export class ChatRecordingService {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
+        executionContext: this.getExecutionContext(),
         subtype: 'mid_turn_user_message',
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
@@ -3097,7 +3114,7 @@ export class ChatRecordingService {
   /**
    * Records a UI telemetry event for replaying metrics on resume.
    */
-  recordUiTelemetryEvent(uiEvent: UiEvent): void {
+  recordUiTelemetryEvent(uiEvent: UiEvent | RequestLifecycleRecord): void {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),

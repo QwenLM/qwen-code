@@ -57,7 +57,7 @@ public final class HostedHarnessClient implements AutoCloseable {
     private static final Set<String> RUNTIME_RECOVERY_OUTCOMES =
             Set.of("known", "unknown");
     private static final Set<String> RUNTIME_RECOVERY_PHASES =
-            Set.of("await_runtime", "results_ready");
+            Set.of("await_runtime", "await_agent", "results_ready");
     private static final Set<String> RUNTIME_EXECUTION_STATES =
             Set.of("prepared", "executing", "cancel_requested", "settled");
     private static final AtomicLong CLIENT_SEQUENCE = new AtomicLong();
@@ -320,6 +320,43 @@ public final class HostedHarnessClient implements AutoCloseable {
                 ref.getHarnessClientId(), operation);
         return parseManagedRuntimeAdmission(response, stablePromptId,
                 operation, "continuation");
+    }
+
+    /**
+     * H6b/H6c: one automation operation onto the Session's journal (the
+     * control plane's verbs). The Hosted side commits through its funnel and
+     * answers 202 with the settled result; a non-2xx answer surfaces as a
+     * {@link DaemonHttpException} the caller translates, and anything
+     * ambiguous is an unknown outcome to retry, never to guess at.
+     */
+    public Map<String, Object> runAutomationOperation(HarnessSessionRef session,
+            Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/automations/operations";
+        HttpSupport.Response response = sendMutation(
+                sessionPath(ref.getHarnessSessionId())
+                        + "/automations/operations",
+                body, ref.getHarnessClientId(), operation);
+        DaemonClient.requireStatus(response, 202, operation);
+        try {
+            Map<String, Object> json = JsonSupport.parseObject(
+                    response.getBody(), "automation operation response");
+            String state = JsonSupport.requiredString(json, "state",
+                    "automation operation");
+            if (!"settled".equals(state)) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness did not settle the automation operation");
+            }
+            String operationId = JsonSupport.requiredString(json,
+                    "operationId", "automation operation");
+            if (!operationId.equals(body.get("operationId"))) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness settled a different automation operation");
+            }
+            return json;
+        } catch (DaemonProtocolException e) {
+            throw new MutationOutcomeUnknownException(operation, e);
+        }
     }
 
     /**
