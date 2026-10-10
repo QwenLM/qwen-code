@@ -5204,10 +5204,18 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 15_000, interval: 100 },
     );
-    expect(
-      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
-        .status,
-    ).toBe(204);
+    // The settled record lands while the pump's busy epoch is still
+    // closing out, so the close can answer 409 for one more tick — a
+    // refused close is a no-op, and the retry converges (F10's gate).
+    await vi.waitFor(
+      async () => {
+        expect(
+          (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+            .status,
+        ).toBe(204);
+      },
+      { timeout: 10_000 },
+    );
   });
 
   // R1-32: the reopen verifier must admit the child_acceptance domain —
@@ -5255,10 +5263,18 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 15_000, interval: 100 },
     );
-    expect(
-      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
-        .status,
-    ).toBe(204);
+    // The settled record lands while the pump's busy epoch is still
+    // closing out, so the close can answer 409 for one more tick — a
+    // refused close is a no-op, and the retry converges (F10's gate).
+    await vi.waitFor(
+      async () => {
+        expect(
+          (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+            .status,
+        ).toBe(204);
+      },
+      { timeout: 10_000 },
+    );
   });
 
   // An array-valued `lineage` must not be silently accepted as a root

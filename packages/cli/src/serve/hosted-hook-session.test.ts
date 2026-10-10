@@ -1729,25 +1729,31 @@ it('reads each saved Stop plan once however many turns check it', async () => {
   expect(plans()).toBe(24);
 });
 
-it('drains a long settled history without rescanning it per occurrence', async () => {
-  catalog = {
-    ...catalog,
-    hooks: [{ ...catalog.hooks[0], eventName: HookEventName.Notification }],
-  };
-  for (let index = 0; index < 30; index++)
-    await hooks.fire(
-      HookEventName.Notification,
-      `notification-${index}`,
-      { message: `${index}` },
-      signal(),
-    );
-  const scans = vi.spyOn(session.authority, 'extensionRecordsInDomain');
-  const commits = vi.spyOn(session.authority, 'commitExtensionRecord');
-  await hooks.drain();
-  expect(commits).not.toHaveBeenCalled();
-  // A fixed number of passes over the history, not one per occurrence.
-  expect(scans.mock.calls.length).toBeLessThanOrEqual(3);
-});
+it(
+  'drains a long settled history without rescanning it per occurrence',
+  // 30 serialized fires each poll the Broker on a 100 ms tick and re-read a
+  // growing journal; a contended CI runner needs well over the 60 s default.
+  { timeout: 180_000 },
+  async () => {
+    catalog = {
+      ...catalog,
+      hooks: [{ ...catalog.hooks[0], eventName: HookEventName.Notification }],
+    };
+    for (let index = 0; index < 30; index++)
+      await hooks.fire(
+        HookEventName.Notification,
+        `notification-${index}`,
+        { message: `${index}` },
+        signal(),
+      );
+    const scans = vi.spyOn(session.authority, 'extensionRecordsInDomain');
+    const commits = vi.spyOn(session.authority, 'commitExtensionRecord');
+    await hooks.drain();
+    expect(commits).not.toHaveBeenCalled();
+    // A fixed number of passes over the history, not one per occurrence.
+    expect(scans.mock.calls.length).toBeLessThanOrEqual(3);
+  },
+);
 
 it('settles an occurrence whose children were committed after an earlier status check', async () => {
   await hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());

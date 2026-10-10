@@ -1025,11 +1025,14 @@ async function* readSseRaw(
   }
 }
 
+// The frame budget starts at 15 s: a contended CI runner (many vitest
+// workers per CPU) stalls the event loop for seconds, and a 2 s budget
+// aborts healthy streams. Call sites that assert silence pass their own.
 /** Read the next N RAW data frames (with `id:` lines) from an SSE response. */
 async function takeRawFrames(
   res: Response,
   n: number,
-  timeoutMs = 2000,
+  timeoutMs = 15_000,
 ): Promise<string[]> {
   const out: string[] = [];
   const ac = new AbortController();
@@ -1050,7 +1053,7 @@ async function takeRawFrames(
 async function takeFrames(
   res: Response,
   n: number,
-  timeoutMs = 2000,
+  timeoutMs = 15_000,
 ): Promise<unknown[]> {
   const out: unknown[] = [];
   const ac = new AbortController();
@@ -1071,7 +1074,7 @@ function frameReader(res: Response) {
   const ac = new AbortController();
   const iterator = readSse(res, ac.signal)[Symbol.asyncIterator]();
   return {
-    async next(timeoutMs = 2000): Promise<unknown> {
+    async next(timeoutMs = 15_000): Promise<unknown> {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
@@ -1095,7 +1098,7 @@ function frameReader(res: Response) {
 
 async function waitUntil(
   predicate: () => boolean | Promise<boolean>,
-  timeoutMs = 2000,
+  timeoutMs = 15_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
