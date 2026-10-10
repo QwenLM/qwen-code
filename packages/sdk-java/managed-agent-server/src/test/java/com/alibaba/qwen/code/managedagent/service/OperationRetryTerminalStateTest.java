@@ -23,6 +23,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
@@ -41,6 +42,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpStatus;
 
 /**
@@ -77,7 +79,7 @@ class OperationRetryTerminalStateTest {
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-close", OperationKind.CLOSE, "digest", "RUNNING",
                 "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner", 1,
-                attemptCount, null, null, null, null, 0, lifecycleProtocol);
+                attemptCount, null, null, null, null, 0, lifecycleProtocol, null);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         when(store.claimOperation(eq("tenant"), eq("session"),
                 eq("op-close"), anyString(), any(Duration.class)))
@@ -95,10 +97,18 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(true);
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
                         runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
                         CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         if (lifecycleProtocol == 1) {
             when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
             when(harness.supportsLifecycle()).thenReturn(true);
@@ -147,10 +157,18 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(false);
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
                         mock(RuntimeWarmer.class),
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
                         CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -190,10 +208,18 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(false);
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
                         mock(RuntimeWarmer.class),
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
                         CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -239,10 +265,18 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(true);
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
                         mock(RuntimeWarmer.class),
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
                         CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -282,10 +316,18 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(false);
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
                         mock(RuntimeWarmer.class),
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
                         CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -327,10 +369,18 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(true);
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
                         mock(RuntimeWarmer.class),
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
                         CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-delete");
 
@@ -379,9 +429,18 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(CompletableFuture.completedFuture(null));
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -412,7 +471,7 @@ class OperationRetryTerminalStateTest {
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-close", OperationKind.CLOSE, "digest", "RUNNING",
                 "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner", 1,
-                10, null, null, null, null, 0, lifecycleProtocol);
+                10, null, null, null, null, 0, lifecycleProtocol, null);
         when(store.claimOperation(eq("tenant"), eq("session"),
                 eq("op-close"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
@@ -430,9 +489,18 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(true);
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -483,9 +551,18 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(true);
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -539,9 +616,18 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(true);
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -592,9 +678,18 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(true);
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -639,9 +734,18 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(true);
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -687,9 +791,18 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(CompletableFuture.completedFuture(null));
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -745,9 +858,18 @@ class OperationRetryTerminalStateTest {
                                 true)));
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         coordinator.setWorkspaceLifecycleStore(lifecycle);
         try {
             coordinator.dispatch("tenant", "session", "op-close");
@@ -794,9 +916,18 @@ class OperationRetryTerminalStateTest {
                                 true)));
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -843,9 +974,18 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(true);
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         coordinator.setWorkspaceLifecycleStore(mock(
                 com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class));
         try {
@@ -879,7 +1019,7 @@ class OperationRetryTerminalStateTest {
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-close", OperationKind.CLOSE, "digest", "RUNNING",
                 "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner", 1,
-                10, null, null, null, null, 0, 1);
+                10, null, null, null, null, 0, 1, null);
         when(store.claimOperation(eq("tenant"), eq("session"),
                 eq("op-close"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
@@ -896,9 +1036,18 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(CompletableFuture.completedFuture(null));
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         coordinator.setWorkspaceLifecycleStore(mock(
                 com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class));
         try {
@@ -933,7 +1082,7 @@ class OperationRetryTerminalStateTest {
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-delete", OperationKind.DELETE, "digest", "RUNNING",
                 "JAVA_DURABLE", "LEASED", "CLOSED", null, "owner", 1,
-                10, null, null, null, null, 0, 0);
+                10, null, null, null, null, 0, 0, null);
         when(store.claimOperation(eq("tenant"), eq("session"),
                 eq("op-delete"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
@@ -951,9 +1100,18 @@ class OperationRetryTerminalStateTest {
                         eq("op-delete"), anyString(), eq(1L), eq(false));
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-delete");
 
@@ -997,9 +1155,18 @@ class OperationRetryTerminalStateTest {
                 .failedFuture(new RuntimeException("warmer down")));
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -1041,9 +1208,18 @@ class OperationRetryTerminalStateTest {
                         eq("op-close"), anyString(), eq(1L), anyString());
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -1086,9 +1262,18 @@ class OperationRetryTerminalStateTest {
                                 + " stop."));
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-delete");
 
@@ -1144,9 +1329,18 @@ class OperationRetryTerminalStateTest {
                         "Session was retired by another operation"));
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-delete");
 
@@ -1185,10 +1379,18 @@ class OperationRetryTerminalStateTest {
                 .thenThrow(new IllegalStateException("lock wait timeout"));
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
                         mock(RuntimeWarmer.class),
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
                         CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -1238,9 +1440,18 @@ class OperationRetryTerminalStateTest {
                                 + " operation"));
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -1269,7 +1480,7 @@ class OperationRetryTerminalStateTest {
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-close", OperationKind.CLOSE, "digest", "RUNNING",
                 "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner", 1,
-                10, null, null, null, null, 0, lifecycleProtocol);
+                10, null, null, null, null, 0, lifecycleProtocol, null);
         when(store.claimOperation(eq("tenant"), eq("session"),
                 eq("op-close"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
@@ -1284,9 +1495,18 @@ class OperationRetryTerminalStateTest {
                         eq("op-close"), anyString(), eq(1L), anyString());
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -1323,10 +1543,18 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(true);
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
                         mock(RuntimeWarmer.class),
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
                         CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -1472,7 +1700,7 @@ class OperationRetryTerminalStateTest {
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-action", OperationKind.ACTION_RESPONSE, "digest",
                 "RUNNING", "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner",
-                3, 10, null, null, null, null, 10, 0);
+                3, 10, null, null, null, null, 10, 0, null);
         JsonNode body = actionBody();
         when(sessions.claimOperation(eq("tenant"), eq("session"),
                 eq("op-action"), anyString(), any(Duration.class)))
@@ -1520,7 +1748,7 @@ class OperationRetryTerminalStateTest {
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-action", OperationKind.ACTION_RESPONSE, "digest",
                 "RUNNING", "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner",
-                3, 10, null, null, null, null, 10, 0);
+                3, 10, null, null, null, null, 10, 0, null);
         JsonNode body = actionBody();
         when(sessions.claimOperation(eq("tenant"), eq("session"),
                 eq("op-action"), anyString(), any(Duration.class)))
@@ -1686,9 +1914,18 @@ class OperationRetryTerminalStateTest {
         properties.getDispatch().setMaxOperationRetries(3);
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), properties);
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        properties);
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -1735,9 +1972,18 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(CompletableFuture.completedFuture(null));
 
         SessionLifecycleCoordinator coordinator =
-                new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
-                        Clock.systemUTC(), new ManagedAgentProperties());
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -1958,7 +2204,7 @@ class OperationRetryTerminalStateTest {
         return new OperationRecord("tenant", "session", "op-close",
                 OperationKind.CLOSE, "digest", "RUNNING", "JAVA_DURABLE",
                 "LEASED", "ACTIVE", null, "owner", 1, attemptCount, null,
-                null, null, null, budgetExemptAttempt, lifecycleProtocol);
+                null, null, null, budgetExemptAttempt, lifecycleProtocol, null);
     }
 
     private static OperationRecord actionOperation(int attemptCount) {
