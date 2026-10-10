@@ -345,7 +345,12 @@ describe('session agent routes', () => {
       enabled = false;
       vi.advanceTimersByTime(5_000);
       await new Promise((resolve) => setImmediate(resolve));
-      expect(bridge.cancelSession).toHaveBeenCalledWith('agent-session');
+      // Teardown is infrastructure, not a person's stop: without the meta
+      // the bridge decodes the cancel as user intent and refuses recovery.
+      expect(bridge.cancelSession).toHaveBeenCalledWith('agent-session', {
+        sessionId: 'agent-session',
+        _meta: { 'qwen.cancelReason': 'interrupted' },
+      });
       expect(bridge.closeSession).toHaveBeenCalledWith('agent-session');
       expect(bridge.closeSession).not.toHaveBeenCalledWith('chat-session');
     } finally {

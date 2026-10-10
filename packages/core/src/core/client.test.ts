@@ -5345,6 +5345,31 @@ describe('Gemini Client (client.ts)', () => {
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
+    it('carries the cancellation basis to the chat created by compression', async () => {
+      const originalChat = client.getChat();
+      originalChat.markLastTurnCancelled();
+      compressLiveChatTo(summaryHistory());
+
+      await client.tryCompressChat('p-cancelled');
+
+      expect(client.getChat()).not.toBe(originalChat);
+      expect(client.getChat().isLastTurnCancelled()).toBe(true);
+      expect(client.getChat().getLastTurnCancellationReason()).toBe('user');
+    });
+
+    it('carries an unknown-intent confirmation id to the compressed chat', async () => {
+      const originalChat = client.getChat();
+      originalChat.markLastTurnCancelled('unknown', 'daemon-1');
+      compressLiveChatTo(summaryHistory());
+
+      await client.tryCompressChat('p-unknown');
+
+      expect(
+        client.getChat().getLastTurnCancellationConfirmationId(),
+      ).toBe('daemon-1');
+      expect(client.getChat().isLastTurnCancelled()).toBe(false);
+    });
+
     it('preserves Compact SessionStart additionalContext on the new chat', async () => {
       const hookSystem = sessionStartHook('Compact hook context');
       stubHookSystem(hookSystem);

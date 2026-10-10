@@ -24,7 +24,7 @@ Retry、Continue 和恢复工具交互会重用原用户记录。写入权限获
 
 ## 验证与验收
 
-使用受控本地 provider 和真实构建的 daemon：执行一次 read_file，挂起下一次 provider 响应，主动 Cancel，重启后请求继续。必须拒绝继续且不请求 provider。配对 SIGKILL 对照不持久化终态，仍必须允许继续并正常执行。另检查实时状态、之后相同但未回答的输入、废弃分支、压缩、replay:none/recent/all、相同长度替换、未知或重复标识、历史缺口。
+使用受控本地 provider 和真实构建的 daemon：执行一次 read_file，挂起下一次 provider 响应，主动 Cancel，停止 daemon，重启后先重新挂载持久化会话（`POST /session/:id/resume`），再请求继续。必须拒绝继续且不请求 provider。配对 SIGKILL 对照不持久化终态，仍必须允许继续并正常执行。未重新挂载时直接冷调用 `POST /session/:id/continue` 两个分支都返回 `404 session_not_found`，不能作为验收证据。另检查实时状态、之后相同但未回答的输入、废弃分支、压缩、replay:none/recent/all、相同长度替换、未知或重复标识、历史缺口。
 
 另验证连接关闭和 prompt 超时仍可恢复，直接 ACP 取消仍属主动取消。Bridge Retry 测试先让第一轮以 `turn_error` 结束，再重试该错误输入、中断新尝试，确认旧终态不能抑制恢复；主动取消新尝试时应抑制恢复，分别覆盖有无压缩。被取消输入的尝试测试使用直接 ACP Session retry：cancelled `turn_complete` 之后通过 bridge 重新提交属于新输入，不能证明尝试取代旧绑定。数字类型的异常输入标识不能使索引缓存字节统计变成非有限值。持久化尝试记录写入失败时，恢复执行必须在调用 provider 前停止。
 
