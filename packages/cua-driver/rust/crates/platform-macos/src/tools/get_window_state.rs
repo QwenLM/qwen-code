@@ -81,6 +81,10 @@ fn def() -> &'static ToolDef {
                 "app_context": { "type": "boolean", "description": "Capture the app interaction context with native compact AX projection." },
                 "query": { "type": "string", "description": "Case-insensitive filter for tree_markdown and structured elements. Returns matching actionable rows plus their actionable ancestors without renumbering element_index values." },
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
+                "include_child_windows": {
+                    "type": "boolean",
+                    "description": "macOS 14.2+: include child content in this screenshot only. Default false. Keeps the target window frame and AX scope."
+                },
                 "include_screenshot": {
                     "type": "boolean",
                     "description": "Default true — returns a grounding screenshot alongside the tree. Set false to skip the grab and return the tree only (the cheap path when you're just re-indexing before an element ax action; saves the image tokens + screen-grab latency). screenshot_out_file still forces a capture to disk."
@@ -247,6 +251,7 @@ impl Tool for GetWindowStateTool {
         // still forces a capture (an explicit "write the frame to disk").
         let include_screenshot = args.get("include_screenshot").and_then(|v| v.as_bool());
         let should_capture = include_screenshot != Some(false) || screenshot_out_file.is_some();
+        let include_child_windows = args.bool_or("include_child_windows", false);
         // Internal direct-tool mode used by verify_state. Registry ingress
         // strips underscore-prefixed arguments before public dispatch; only
         // a trusted direct in-process invocation can enable this mode.
@@ -417,7 +422,12 @@ impl Tool for GetWindowStateTool {
                 let bounds = crate::windows::window_bounds_by_id(window_id)
                     .filter(|b| b.width > 0.0 && b.height > 0.0)
                     .ok_or(super::px_frame::PxFrameError::WindowNotFound { window_id })?;
-                let raw = crate::capture::screenshot_window_bytes(window_id).map_err(|e| {
+                let capture = if include_child_windows {
+                    crate::capture::screenshot_window_bytes_with_children(window_id)
+                } else {
+                    crate::capture::screenshot_window_bytes(window_id)
+                };
+                let raw = capture.map_err(|e| {
                     super::px_frame::PxFrameError::CaptureUnavailable {
                         window_id,
                         reason: e.to_string(),
