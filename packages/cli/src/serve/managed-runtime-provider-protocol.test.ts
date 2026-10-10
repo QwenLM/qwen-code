@@ -5,14 +5,24 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+vi.mock('@opentui/core', () => ({
+  SyntaxStyle: {
+    fromStyles: (styles: Record<string, unknown>) => ({ styles }),
+  },
+}));
+
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
+import { renderDiffBody } from '../ui/opentui/diff-render.js';
+import { buildPermissionRequestContent } from '../acp-integration/session/permissionUtils.js';
 import {
   MANAGED_RUNTIME_PROVIDER_PROTOCOL,
   ManagedRuntimeProviderProtocolError,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
   MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
+  PROVIDER_DIFF_STUB,
   fitManagedRuntimeProviderResult,
   managedRuntimeProviderLimit,
   parseManagedRuntimeProviderOperation,
@@ -534,6 +544,7 @@ describe('managed-runtime-provider/1', () => {
   describe('fitManagedRuntimeProviderResult', () => {
     const budget = 64 * 1024;
     const execute = { kind: 'execute', reference } as const;
+    const confirmation = { kind: 'confirmation', reference } as const;
     const NOTICE =
       /\n\[Managed Runtime provider omitted (\d+) characters here to fit the \d+-byte wire limit\.\]\n/;
     /** The characters a cut field kept, and the count its notice reports. */
@@ -554,6 +565,37 @@ describe('managed-runtime-provider/1', () => {
       expect(fitManagedRuntimeProviderResult(execute, small, budget)).toBe(
         small,
       );
+      const smallConfirmation = {
+        type: 'exec',
+        title: 'Run',
+        command: 'ls',
+        rootCommand: 'ls',
+      };
+      expect(
+        fitManagedRuntimeProviderResult(
+          confirmation,
+          smallConfirmation,
+          budget,
+        ),
+      ).toBe(smallConfirmation);
+      const smallEditConfirmation: Record<string, unknown> = {
+        type: 'edit',
+        title: 'Edit',
+        fileName: 'f.txt',
+        filePath: '/w/f.txt',
+        fileDiff: 'd',
+        originalContent: null,
+        newContent: 'n',
+      };
+      expect(
+        fitManagedRuntimeProviderResult(
+          confirmation,
+          smallEditConfirmation,
+          budget,
+        ),
+      ).toBe(smallEditConfirmation);
+      expect(smallEditConfirmation['hideModify']).toBeUndefined();
+      expect(smallEditConfirmation['warnings']).toBeUndefined();
       const prepareResult = { description: 'x'.repeat(budget * 2) };
       expect(
         fitManagedRuntimeProviderResult(
@@ -961,6 +1003,306 @@ describe('managed-runtime-provider/1', () => {
       expect(status.result.executionStatus).toBe('success');
       expect(status.progress).toEqual([]);
       expect(status.firstAvailableSeq).toBe(status.lastSeq + 1);
+    });
+
+    it('stubs display fields and preserves newContent intact when overflow is absorbable by display fields alone', () => {
+      const inputNewContent = 'n'.repeat(budget / 2);
+      const editDetails: {
+        type: string;
+        title: string;
+        fileName: string;
+        filePath: string;
+        fileDiff: string;
+        originalContent: string | null;
+        newContent: string;
+        hideModify: boolean;
+        warnings?: string[];
+      } = {
+        type: 'edit',
+        title: 'Edit',
+        fileName: 'file.txt',
+        filePath: '/workspace/file.txt',
+        fileDiff: 'd'.repeat(budget),
+        originalContent: null,
+        newContent: inputNewContent,
+        hideModify: false,
+      };
+      fitManagedRuntimeProviderResult(confirmation, editDetails, budget);
+      expect(
+        Buffer.byteLength(JSON.stringify(editDetails), 'utf8'),
+      ).toBeLessThanOrEqual(budget);
+      expect(editDetails.hideModify).toBe(true);
+      expect(editDetails.fileDiff).toBe(PROVIDER_DIFF_STUB);
+      expect(editDetails.newContent).toBe(inputNewContent);
+      expect(editDetails.originalContent).toBeNull();
+      expect(Array.isArray(editDetails.warnings)).toBe(true);
+      expect(
+        editDetails.warnings?.some((w: string) => /truncat|omitted/.test(w)),
+      ).toBe(true);
+      const rendered = renderDiffBody(editDetails.fileDiff);
+      expect(
+        rendered.some((row) => row.some((seg) => /omitted/.test(seg.text))),
+      ).toBe(true);
+      expect(
+        parseManagedRuntimeProviderResult(confirmation, editDetails, session),
+      ).toEqual(editDetails);
+    });
+
+    it('preserves a small real fileDiff and stubs originalContent when originalContent absorbs overflow', () => {
+      const realDiff = '@@ -1 +1 @@\n-a\n+b';
+      const editDetails: {
+        type: string;
+        title: string;
+        fileName: string;
+        filePath: string;
+        fileDiff: string;
+        originalContent: string | null;
+        newContent: string;
+        hideModify: boolean;
+        warnings?: string[];
+      } = {
+        type: 'edit',
+        title: 'Edit',
+        fileName: 'file.txt',
+        filePath: '/workspace/file.txt',
+        fileDiff: realDiff,
+        originalContent: 'o'.repeat(budget * 2),
+        newContent: 'n'.repeat(budget / 2),
+        hideModify: false,
+      };
+      fitManagedRuntimeProviderResult(confirmation, editDetails, budget);
+      expect(
+        Buffer.byteLength(JSON.stringify(editDetails), 'utf8'),
+      ).toBeLessThanOrEqual(budget);
+      expect(editDetails.fileDiff).toBe(realDiff);
+      expect(editDetails.originalContent).toBeNull();
+      expect(editDetails.newContent).toBe('n'.repeat(budget / 2));
+      expect(editDetails.hideModify).toBe(true);
+      const content = buildPermissionRequestContent(
+        editDetails as unknown as Parameters<
+          typeof buildPermissionRequestContent
+        >[0],
+      );
+      const diffBlock = content.find(
+        (c: { type: string }) => c.type === 'diff',
+      ) as { type: string; oldText: string; newText: string } | undefined;
+      expect(diffBlock).toBeDefined();
+      expect(diffBlock?.oldText).toBe('');
+      expect(
+        parseManagedRuntimeProviderResult(confirmation, editDetails, session),
+      ).toEqual(editDetails);
+    });
+
+    it('preserves a real fileDiff and cuts newContent when originalContent is dropped and newContent absorbs overflow', () => {
+      const realDiff =
+        '--- a/file.txt\n+++ b/file.txt\n@@ -1,3 +1,3 @@\n context\n-old line\n+new line\n context';
+      const editDetails: {
+        type: string;
+        title: string;
+        fileName: string;
+        filePath: string;
+        fileDiff: string;
+        originalContent: string | null;
+        newContent: string;
+        hideModify: boolean;
+        warnings?: string[];
+      } = {
+        type: 'edit',
+        title: 'Edit',
+        fileName: 'file.txt',
+        filePath: '/workspace/file.txt',
+        fileDiff: realDiff,
+        originalContent: 'o'.repeat(budget * 2),
+        newContent: 'n'.repeat(budget * 2),
+        hideModify: false,
+      };
+      fitManagedRuntimeProviderResult(confirmation, editDetails, budget);
+      expect(
+        Buffer.byteLength(JSON.stringify(editDetails), 'utf8'),
+      ).toBeLessThanOrEqual(budget);
+      expect(editDetails.fileDiff).toBe(realDiff);
+      expect(editDetails.originalContent).toBeNull();
+      expect(editDetails.newContent).toContain(
+        'Managed Runtime provider omitted',
+      );
+      expect(editDetails.hideModify).toBe(true);
+      expect(
+        parseManagedRuntimeProviderResult(confirmation, editDetails, session),
+      ).toEqual(editDetails);
+    });
+
+    it('preserves pre-existing warnings when fitting an over-budget edit confirmation', () => {
+      const editDetails: {
+        type: string;
+        title: string;
+        fileName: string;
+        filePath: string;
+        fileDiff: string;
+        originalContent: string | null;
+        newContent: string;
+        hideModify: boolean;
+        warnings?: string[];
+      } = {
+        type: 'edit',
+        title: 'Edit',
+        fileName: 'file.txt',
+        filePath: '/workspace/file.txt',
+        fileDiff: 'd'.repeat(budget),
+        originalContent: null,
+        newContent: 'n'.repeat(budget / 2),
+        hideModify: false,
+        warnings: ['review protected file'],
+      };
+      fitManagedRuntimeProviderResult(confirmation, editDetails, budget);
+      expect(editDetails.warnings).toEqual([
+        'review protected file',
+        expect.stringMatching(/truncat/),
+      ]);
+    });
+
+    it('stubs display fields and cuts bulk newContent head-and-tail when over budget', () => {
+      const editDetails: {
+        type: string;
+        title: string;
+        fileName: string;
+        filePath: string;
+        fileDiff: string;
+        originalContent: string;
+        newContent: string;
+        hideModify: boolean;
+        warnings?: string[];
+      } = {
+        type: 'edit',
+        title: 'Edit',
+        fileName: 'file.txt',
+        filePath: '/workspace/file.txt',
+        fileDiff: 'd'.repeat(budget),
+        originalContent: 'o'.repeat(budget),
+        newContent: 'n'.repeat(budget),
+        hideModify: false,
+      };
+      const fitted = fitManagedRuntimeProviderResult(
+        confirmation,
+        editDetails,
+        budget,
+      );
+      expect(fitted).toBe(editDetails);
+      expect(
+        Buffer.byteLength(JSON.stringify(editDetails), 'utf8'),
+      ).toBeLessThanOrEqual(budget);
+      expect(editDetails.hideModify).toBe(true);
+      expect(Array.isArray(editDetails.warnings)).toBe(true);
+      expect(
+        editDetails.warnings?.some((w: string) => /truncat|omitted/.test(w)),
+      ).toBe(true);
+      expect(editDetails.fileDiff).toBe(PROVIDER_DIFF_STUB);
+      expect(editDetails.originalContent).toBeNull();
+      expect(editDetails.newContent.startsWith('n')).toBe(true);
+      expect(editDetails.newContent.endsWith('n')).toBe(true);
+      expect(editDetails.newContent).toContain(
+        'Managed Runtime provider omitted',
+      );
+      expect(
+        parseManagedRuntimeProviderResult(confirmation, editDetails, session),
+      ).toEqual(editDetails);
+    });
+
+    it('preserves originalContent: null when fitting an edit confirmation for a new file', () => {
+      const editDetails = {
+        type: 'edit',
+        title: 'Create',
+        fileName: 'new.txt',
+        filePath: '/workspace/new.txt',
+        fileDiff: 'd'.repeat(budget),
+        originalContent: null,
+        newContent: 'n'.repeat(budget),
+        hideModify: false,
+      };
+      fitManagedRuntimeProviderResult(confirmation, editDetails, budget);
+      expect(
+        Buffer.byteLength(JSON.stringify(editDetails), 'utf8'),
+      ).toBeLessThanOrEqual(budget);
+      expect(editDetails.originalContent).toBeNull();
+      expect(editDetails.fileDiff).toBe(PROVIDER_DIFF_STUB);
+      expect(editDetails.hideModify).toBe(true);
+      expect(
+        parseManagedRuntimeProviderResult(confirmation, editDetails, session),
+      ).toEqual(editDetails);
+    });
+
+    it('cuts bulk command in an exec confirmation', () => {
+      const execDetails: {
+        type: string;
+        title: string;
+        command: string;
+        rootCommand: string;
+        warnings?: string[];
+      } = {
+        type: 'exec',
+        title: 'Run',
+        command: 'echo ' + 'x'.repeat(budget * 2),
+        rootCommand: 'echo',
+      };
+      fitManagedRuntimeProviderResult(confirmation, execDetails, budget);
+      expect(
+        Buffer.byteLength(JSON.stringify(execDetails), 'utf8'),
+      ).toBeLessThanOrEqual(budget);
+      expect(execDetails.command.startsWith('echo x')).toBe(true);
+      expect(execDetails.command.endsWith('x')).toBe(true);
+      expect(execDetails.command).toContain('Managed Runtime provider omitted');
+      expect(execDetails.rootCommand).toBe('echo');
+      expect(Array.isArray(execDetails.warnings)).toBe(true);
+      expect(
+        execDetails.warnings?.some((w: string) => /truncat|omitted/.test(w)),
+      ).toBe(true);
+      expect(
+        parseManagedRuntimeProviderResult(confirmation, execDetails, session),
+      ).toEqual(execDetails);
+    });
+
+    it('preserves pre-existing warnings when fitting an over-budget exec confirmation', () => {
+      const execDetails: {
+        type: string;
+        title: string;
+        command: string;
+        rootCommand: string;
+        warnings?: string[];
+      } = {
+        type: 'exec',
+        title: 'Run',
+        command: 'echo ' + 'x'.repeat(budget * 2),
+        rootCommand: 'echo',
+        warnings: ['Command contains command substitution: $(whoami)'],
+      };
+      fitManagedRuntimeProviderResult(confirmation, execDetails, budget);
+      expect(
+        Buffer.byteLength(JSON.stringify(execDetails), 'utf8'),
+      ).toBeLessThanOrEqual(budget);
+      expect(execDetails.warnings).toEqual([
+        'Command contains command substitution: $(whoami)',
+        expect.stringMatching(/truncat/),
+      ]);
+      expect(
+        parseManagedRuntimeProviderResult(confirmation, execDetails, session),
+      ).toEqual(execDetails);
+    });
+
+    it('cuts bulk prompt in an info confirmation', () => {
+      const infoDetails = {
+        type: 'info',
+        title: 'Info',
+        prompt: 'p'.repeat(budget * 2),
+      };
+      fitManagedRuntimeProviderResult(confirmation, infoDetails, budget);
+      expect(
+        Buffer.byteLength(JSON.stringify(infoDetails), 'utf8'),
+      ).toBeLessThanOrEqual(budget);
+      expect(infoDetails.prompt.startsWith('p')).toBe(true);
+      expect(infoDetails.prompt.endsWith('p')).toBe(true);
+      expect(infoDetails.prompt).toContain('Managed Runtime provider omitted');
+      expect(
+        parseManagedRuntimeProviderResult(confirmation, infoDetails, session),
+      ).toEqual(infoDetails);
     });
   });
 });

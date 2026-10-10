@@ -59,13 +59,11 @@ Content-Encoding。TypeScript 客户端保留限长原因。这些诊断信息�
 
 `bind-history`、`checkpoint` 和 `history` 的控制请求与响应限制为 8 MiB，其他操作为
 1 MiB。工具参数还受 core 既有的 256 KiB 规范化 JSON 限制；满足外层信封限制并不绕过
-参数限制。`execute`、`status` 或 `cancel` 的结果超出所属操作响应预算时会被适配而非
-拒绝：worker 先淘汰最旧的 progress 事件（通过 `firstAvailableSeq`/`progressGap`
-告知），再把大文本字段按首尾截断并内联标记，shell 展示置 `truncated`；若大文本
-全部截到最短，仍放不下截断够不到的部分，则在截断任何文本之前，先丢弃结构化的展示
-（例如 edit 的文件 diff，它只供界面使用），再丢弃同样只供客户端界面使用的 artifacts，
-最后丢弃 hook 结果；截断完全够不到的内容
-（内联媒体）会让模型内容变为明确的占位存根。截断按 JSON
+参数限制。`execute`、`status`、`cancel` 或 `confirmation` 的结果超出所属操作响应预算时会被适配而非
+拒绝：对于执行、状态与取消等观察类结果，worker 先淘汰最旧的 progress 事件（通过
+`firstAvailableSeq`/`progressGap` 告知），再把大文本字段按首尾截断并内联标记，shell
+展示置 `truncated`；对于 `confirmation` 结果，按变体收集大文本字段（`exec` 收集 `command`，`info` 收集 `prompt`）；对于 `edit` 确认，先将 `originalContent`（若为字符串）置为 `null`，且仅在结果仍超出预算且截断大块槽位无法吸收剩余超额时才将 `fileDiff` 替换为省略提示 diff 存根，以尽可能保留 `fileDiff` 并保证 `newContent` 完整保留，若仍超出预算再对剩余大文本字段进行首尾截断；当序列化后的信封仍超出传输限制时，路由应答 413 `managed_runtime_provider_too_large`；各变体必填字段与变体结构永不移除，`originalContent: null` 得以保留，被裁剪的 `edit` 确认会带回 `hideModify: true` 并在 `warnings` 中提示内容被截断；与观察类结果不同，confirmation 不进行 progress 淘汰，也不设置 `truncated` 标记。
+对于观察类结果，若大文本全部截到最短仍放不下截断够不到的部分，则在截断任何文本之前，先丢弃结构化展示（与 artifacts 一样，其同样只供客户端界面使用），再丢弃 artifacts，最后丢弃 hook 结果；截断完全够不到的内容（内联媒体）会让模型内容变为明确的占位存根。截断按 JSON
 编码后的 UTF-8 字节计量，与线上限制的单位一致；删除时以完整码点为单位，因此不会拆开
 代理对；标记注明省略了多少个字符（按码点计）。多个字段同时超长时，截到同一个大小，
 不会出现一个字段被清空、另一个字段仍保留大部分文本的情况。因此已结算的执行始终保有终态观察，

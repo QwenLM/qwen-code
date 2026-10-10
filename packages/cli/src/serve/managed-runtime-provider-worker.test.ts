@@ -1569,6 +1569,80 @@ const timer = setInterval(() => {
     expect(body).toContain('Managed Runtime provider omitted');
   });
 
+  it('fits an oversized edit confirmation at the route (issue #13038)', async () => {
+    await begin();
+    const output = path.join(workspace, 'output.txt');
+    const ref = reference(
+      await prepare(
+        'write_file',
+        { file_path: output, content: 'new contents\n' },
+        'write',
+      ),
+    );
+    const limit = managedRuntimeProviderLimit('confirmation');
+    const oversizedConfirmation = {
+      type: 'edit',
+      title: 'Edit',
+      fileName: 'large.txt',
+      filePath: path.join(workspace, 'large.txt'),
+      fileDiff: 'd'.repeat(limit),
+      originalContent: 'o'.repeat(limit / 2),
+      newContent: 'n'.repeat(limit / 2),
+      hideModify: false,
+    };
+    vi.spyOn(ManagedToolRuntime.prototype, 'confirmation').mockReturnValue(
+      oversizedConfirmation as unknown as ReturnType<
+        ManagedToolRuntime['confirmation']
+      >,
+    );
+    const response = await post({ kind: 'confirmation', reference: ref });
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(Buffer.byteLength(body)).toBeLessThanOrEqual(limit);
+    expect(body).toContain('Managed Runtime provider omitted');
+    const parsed = JSON.parse(body);
+    expect(parsed.result).toMatchObject({
+      type: 'edit',
+      hideModify: true,
+    });
+    expect(typeof parsed.result.fileDiff).toBe('string');
+    expect(typeof parsed.result.newContent).toBe('string');
+    expect(Array.isArray(parsed.result.warnings)).toBe(true);
+  });
+
+  it('fits an oversized exec confirmation at the route and includes warnings', async () => {
+    await begin();
+    const ref = reference(
+      await prepare('run_shell_command', { command: 'echo hello\n' }, 'exec'),
+    );
+    const limit = managedRuntimeProviderLimit('confirmation');
+    const oversizedConfirmation = {
+      type: 'exec',
+      title: 'Run command',
+      command: 'echo ' + 'x'.repeat(limit * 2),
+      rootCommand: 'echo',
+    };
+    vi.spyOn(ManagedToolRuntime.prototype, 'confirmation').mockReturnValue(
+      oversizedConfirmation as unknown as ReturnType<
+        ManagedToolRuntime['confirmation']
+      >,
+    );
+    const response = await post({ kind: 'confirmation', reference: ref });
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(Buffer.byteLength(body)).toBeLessThanOrEqual(limit);
+    expect(body).toContain('Managed Runtime provider omitted');
+    const parsed = JSON.parse(body);
+    expect(parsed.result).toMatchObject({
+      type: 'exec',
+    });
+    expect(typeof parsed.result.command).toBe('string');
+    expect(Array.isArray(parsed.result.warnings)).toBe(true);
+    expect(
+      parsed.result.warnings.some((w: string) => /truncat|omitted/.test(w)),
+    ).toBe(true);
+  });
+
   it('refuses an unfitted manifest whose envelope exceeds the wire limit', async () => {
     await acquire();
     const manifest = await control<ReturnType<ManagedToolRuntime['manifest']>>({
