@@ -1055,26 +1055,6 @@ public class ManagedAgentService {
         }
     }
 
-    /**
-     * H4f: who may cancel a task. A bound Session's tasks run under its
-     * Workspace, so the caller needs OPERATOR there, as for cancelling a
-     * Turn; a readable caller below it gets {@code 403 task_forbidden}.
-     * Unlike the Turn rule, the Session's executable shape is not an
-     * authorization fact: a Session that stopped serving work answers the
-     * new-request state checks instead. An unbound Session has no role
-     * model beyond its read access.
-     */
-    /**
-     * Whether the relay's stop arm requested this child Turn's cancel: the
-     * durable evidence that the Turn's end, whatever status it took, came
-     * after the stop rather than racing ahead of it.
-     */
-    public boolean childTurnStopRequested(String tenantId,
-            String parentSessionId, String childRunId, String turnId) {
-        return store.findCommand(tenantId, CANCEL, childStopKey(
-                parentSessionId, childRunId, turnId)).isPresent();
-    }
-
     // The tenant-wide command namespace is shared with callers' keys,
     // which are visible ASCII only (validateIdempotencyKey): the space
     // makes this key one no caller can claim first.
@@ -1085,6 +1065,15 @@ public class ManagedAgentService {
                 "turnId", turnId));
     }
 
+    /**
+     * H4f: who may cancel a task. A bound Session's tasks run under its
+     * Workspace, so the caller needs OPERATOR there, as for cancelling a
+     * Turn; a readable caller below it gets {@code 403 task_forbidden}.
+     * Unlike the Turn rule, the Session's executable shape is not an
+     * authorization fact: a Session that stopped serving work answers the
+     * new-request state checks instead. An unbound Session has no role
+     * model beyond its read access.
+     */
     void requireTaskCanceller(SessionRecord session, String actorId) {
         if (session.workspace() != null
                 && !workspaces.accessOf(session.tenantId(), actorId,

@@ -191,7 +191,7 @@ operation 模型；本变更选择接受它可见。此后 D4 已把共用命令
 `delivery_state: confirmed` 和任务权威方签发的 `receipt_id`。`failed` 和 `recovery_blocked`
 携带 `admission_stage: java_durable` 和 `delivery_state: blocked` —— 投递已经停止，
 确定未被接受或尚未对账的命令不会再被认领和驱动 —— 且不带 `receipt_id`；`failed` 另带
-`failure_code`。`blocked` 表示在对账之前不再尝试投递；目前没有其他 operation 类型产生该值。
+`failure_code`。`blocked` 表示在对账之前不再尝试投递；无法证明清理结果的 Workspace 关闭（`recovery_blocked`）同样携带该值。
 
 任务只有在取消使物理执行结算后才变为 `cancelled`。自然完成若在竞争中胜出，保留自身的终态；命令受理不能覆盖它。物理结果未知会使任务成为 `recovery_blocked`，这与 operation 的受理结果相互独立。
 

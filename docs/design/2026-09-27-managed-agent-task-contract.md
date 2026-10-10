@@ -313,8 +313,8 @@ no `receipt_id`. `completed` carries `admission_stage: harness_confirmed`,
 `delivery_state: blocked` — delivery has stopped, so a definitively rejected
 or unreconciled command is never claimed and driven again — and no
 `receipt_id`; `failed` adds `failure_code`. `blocked` means delivery is
-not attempted again without reconciliation; no other operation kind produces
-it today.
+not attempted again without reconciliation; a Workspace close that cannot
+prove its cleanup (`recovery_blocked`) carries it too.
 
 The task becomes `cancelled` only when cancellation physically settles it. A
 natural completion that wins the race keeps its own terminal outcome; command

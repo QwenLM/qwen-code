@@ -59,7 +59,7 @@
 1. **v1 只取消 `child_agent` 任务，并在任务视图中如实声明。**
    - `ManagedExtensionProjection.taskActions(kind, state)` 是唯一规则：只有处于 `pending`、`running`、`waiting`、`degraded` 的 `child_agent` 任务才公布 `cancel`。
    - 其余类型，以及任何终态或 `recovery_blocked` 的任务，不公布任何动作；对它们的新取消请求得到 `409 task_action_unavailable`。
-   - 任务视图与准入复查读同一个函数，且 Session 不处于 `ACTIVE` 时视图不公布任何动作，所以公布的动作与路由的任务检查、Session 检查一致。与另一个开放操作的争用（`409 session_operation_active`）是暂时的，不反映在视图中。
+   - 任务视图与准入复查读同一个函数，且 Session 不处于 `ACTIVE` 时视图不公布任何动作，所以公布的动作与路由的任务检查、Session 检查一致。与另一个开放操作的争用（`409 session_operation_active`）以及 Workspace 存储迁移栅栏（`409 workspace_unavailable`）都是暂时的，不反映在视图中。
    - 契约第 4.2 节允许 `recovery_blocked` 的任务公布 `cancel`；v1 有意不这样做，因为等待恢复对账的 run 尚无定义好的停止路径。
    - 已记录停止请求的任务仍公布 `cancel`：请求可以合并（契约第 4.4 节），且每个操作各自得到结果。
 
@@ -120,16 +120,16 @@
      | 尚未铸造 child（账本与谱系都为空）                              | 不创建 child，直接以 `close_scope` `started: false` 结算。若创建先落地，判定/铸造提交门会拒绝该结算，重试时就会写出 child 的名字。                                                                |
      | child 的 Turn 为 `ACCEPTED` 或 `RUNNING`                        | 通过 child 自己的持久 Turn 取消（`ManagedAgentService.cancelChildTurn`，以父会话、run 与 Turn 为键）取消该 Turn，然后在心跳时再看。                                                               |
      | child 的 Turn 为 `CANCELLING`                                   | 在心跳时等待：该 Turn 自己掌握结果，再驱动取消也不会生效。                                                                                                                                        |
-     | child 的 Turn 为 `CANCELLED`，或在本分支请求取消之后为 `FAILED` | 从已提交证据得出启动配对（`reconcileAttach`，会重放丢失的 dispatch 或 attach），先接纳 child 的关闭，再以 `close_scope` 结算。已铸造但从未启动的 child 具名结束；无法关闭的主机照旧保留关闭债务。 |
-     | child 的 Turn 先 `COMPLETED`，或未经本分支取消而 `FAILED`       | child 的自然结果优先（契约第 4.4 节）：走普通流程交付结果，或以 `child_failed` 结算为 `failed`。已结算的 run 保留已记录的请求。                                                                   |
+     | child 的 Turn 为 `CANCELLED`，或在取消已对其生效之后为 `FAILED` | 从已提交证据得出启动配对（`reconcileAttach`，会重放丢失的 dispatch 或 attach），先接纳 child 的关闭，再以 `close_scope` 结算。已铸造但从未启动的 child 具名结束；无法关闭的主机照旧保留关闭债务。 |
+     | child 的 Turn 先 `COMPLETED`，或没有任何取消到达而 `FAILED`     | child 的自然结果优先（契约第 4.4 节）：走普通流程交付结果，或以 `child_failed` 结算为 `failed`。已结算的 run 保留已记录的请求。                                                                   |
 
-   - 落在恢复中的 Turn 上的取消可能让它以 `FAILED` 而非 `CANCELLED` 结束。停止分支凭自己的持久证据区分两种 `FAILED`：它写下的 child Turn 取消命令，以父会话、run 与 Turn 为键。键中的空格使其不会被调用者在租户级共享命令命名空间里的可见 ASCII key 抢占。
+   - 落在恢复中的 Turn 上的取消可能让它以 `FAILED` 而非 `CANCELLED` 结束。停止分支凭“取消已对该 Turn 生效”的持久证据区分两种 `FAILED`：该 Turn 进入过 `CANCELLING`，且 child Session 在同一事务中记录了 `turn.cancel.requested`。在已结束的 Turn 上接纳的取消命令不会记录任何东西，所以抢在停止之前的自然失败仍为 `child_failed`。停止分支自己的取消命令以父会话、run 与 Turn 为键，键中的空格使其不会被调用者在租户级共享命令命名空间里的可见 ASCII key 抢占。
    - 中继在有限次尝试内无法完成的停止（无法证明的 attach 链、反复失败的关闭）会走中继既有的放弃链：结算为 `failed`，账本行归为 `unknown`，与中继无法完成的任何 run 相同。这条路径属于 H4b，本次未改。
    - 请求停止后才完成的 run 保留该请求，因此 H4d 的续接拒绝把它作为前驱（`continueChildRun` 不接受已请求停止的前驱）。
    - 只有这次结算才会让任务变为 `cancelled`。在此之前任务状态不变，child 处于预配或已挂接时其 runtime 显示为 `draining`（未绑定的 pending run 仍为 `unbound`）。正在等待该 child 的前台父会话，会由现有等待器答复 "Child agent run cancelled (stop_requested)"。
 
 7. **`unknown` 投递的运维方案（H4b 未决问题 1）。**
-   - `child_run` 的投递只会在 run 已带结果结算之后才变为 `unknown`，所以对应任务已是终态，没有 `cancel`。
+   - `child_run` 记录的投递只会在中继领取到结果之后才变为 `unknown`；而被归为 `unknown` 的中继账本行属于已终态的 run（放弃链与“记录已结算”路径都会先提交或发现终态 revision）。无论哪种情况，任务都已是终态，没有 `cancel`。
    - H4f 不为它新增运维动词：投递保持可见的 `unknown`，永不喂给模型、永不重新执行，父 Session 关闭时会把其账本行归为 `orphaned`。
    - 存活的 run 不会被困在 `unknown` 账本行后面：中继的放弃链总是先提交终态 `fail`，再做归类。
    - 运维在各种情况下的手段：
@@ -164,14 +164,16 @@
 
 ## 验证
 
-- **存储，基于 H2 与 Flyway**（`ManagedTaskCancelOperationTest`，8 个测试）：
+- **存储，基于 H2 与 Flyway**（`ManagedTaskCancelOperationTest`，10 个测试）：
   - 准入、重放与摘要冲突，包括跨 actor 的情形；
   - 保留的 key 在 Session 变为 `CLOSING` 后仍能重放；
   - 存储迁移栅栏拒绝新的取消，而保留的 key 仍能重放；
   - 各状态下的动作规则；
   - 双向的"每个 Session 一个开放操作"（取消会挡住关闭），以及两个竞争的 key 恰好只准入一个；
   - 停放的取消不会被再次认领、不算开放，且只在停放状态下对账；
-  - 认领下每种结果写入契约规定的状态字段。
+  - 认领下每种结果写入契约规定的状态字段，且失败的取消永久离开 blocked 扫描区间；
+  - 真实 SQL 上的中继证据：只有对 Turn 生效的取消才留下 `turn.cancel.requested`，在已结束的 Turn 上接纳的取消不留任何东西，带空格的内部 key 可正常往返；
+  - 停止状态按记录主键从已提交记录体读取。
 - **投递**（`TaskCancelCoordinatorTest`，10 个测试）：
   - 从记录得出完成，以及无需发送的合并；
   - 不发送即得出 `task_already_settled`；
@@ -184,7 +186,7 @@
   - 不创建即以未启动结算；
   - 先取消 Turn、对 `CANCELLING` 的 Turn 只等待，再在接纳关闭后以 `close_scope` `started: true` 结算；
   - 抢先完成的情形，以及保持 `child_failed` 的自然失败；
-  - 本分支请求取消之后以 `FAILED` 结束的 Turn 结算为 `cancelled`，`ACCEPTED` 的 Turn 像运行中的一样被取消；
+  - 取消生效之后以 `FAILED` 结束的 Turn 结算为 `cancelled`，`ACCEPTED` 的 Turn 像运行中的一样被取消；
   - 已铸造但从未 dispatch 的 child 具名结束；
   - 被拒绝的结算会延后而不是归类；
   - 已结束的 run 永不再次停止。

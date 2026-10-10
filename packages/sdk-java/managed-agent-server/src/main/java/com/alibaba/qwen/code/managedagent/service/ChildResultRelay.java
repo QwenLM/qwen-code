@@ -253,12 +253,12 @@ public class ChildResultRelay {
      * one; a child whose Turn is accepted or running has that Turn
      * cancelled through the child's own command line, and a cancelling
      * Turn is only waited on, both on the heartbeat; a child whose Turn
-     * was cancelled — or failed after this arm requested its cancel — has
+     * was cancelled — or failed after a cancel took effect on it — has
      * its close admitted and the run settles {@code cancelled} by
      * {@code stop_requested}, with the start pairing its committed
      * evidence proves. A natural outcome that arrived first wins — a
-     * completed Turn delivers its result, a failed one this arm never
-     * stopped settles {@code child_failed} — through the ordinary walk,
+     * completed Turn delivers its result, a failed one no cancel reached
+     * settles {@code child_failed} — through the ordinary walk,
      * and the request stays recorded on the settled run. Returns false
      * exactly then.
      */
@@ -278,15 +278,13 @@ public class ChildResultRelay {
         if (turn == null) {
             throw new RelayRetry("child Session has no Turn yet");
         }
-        // A COMPLETED Turn, or a FAILED one this arm never asked to stop,
-        // is the child's own outcome and keeps its ordinary settlement. A
-        // Turn whose cancel this arm requested may still end FAILED (a
-        // cancel that lands mid-recovery fails the Turn), and that end is
-        // the stop's: it settles cancelled like a CANCELLED one.
-        boolean stoppedHere = ("FAILED".equals(turn.status())
-                || "CANCELLED".equals(turn.status()))
-                && sessions.childTurnStopRequested(row.tenantId(),
-                        row.parentSessionId(), row.childRunId(),
+        // A COMPLETED Turn, or a FAILED one no cancel ever reached, is the
+        // child's own outcome and keeps its ordinary settlement. A Turn a
+        // cancel took effect on (it entered CANCELLING) may still end
+        // FAILED — a cancel landing mid-recovery fails the Turn — and that
+        // end is the stop's: it settles cancelled like a CANCELLED one.
+        boolean stoppedHere = "FAILED".equals(turn.status())
+                && relayStore.turnCancelRequested(row.tenantId(), child,
                         turn.turnId());
         if ("COMPLETED".equals(turn.status())
                 || "FAILED".equals(turn.status()) && !stoppedHere) {

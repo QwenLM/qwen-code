@@ -1313,8 +1313,8 @@ class ChildResultRelayTest {
         assertThat(harness.operations).isEmpty();
     }
 
-    // A cancel landing on a Turn mid-recovery can end it FAILED: once this
-    // arm requested that Turn's cancel, the end is the stop's, and the run
+    // A cancel landing on a Turn mid-recovery can end it FAILED: once a
+    // cancel took effect on that Turn, the end is the stop's, and the run
     // settles cancelled rather than child_failed.
     @Test
     void aFailedEndAfterThisArmsStopRequestSettlesCancelled() {
@@ -1325,7 +1325,7 @@ class ChildResultRelayTest {
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "FAILED", now + 1,
                 "managed_runtime_recovery_incomplete", true, "epoch-1"));
-        when(sessions.childTurnStopRequested(TENANT, PARENT, RUN, "turn-1"))
+        when(store.turnCancelRequested(TENANT, CHILD, "turn-1"))
                 .thenReturn(true);
         relay.scan();
         verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);

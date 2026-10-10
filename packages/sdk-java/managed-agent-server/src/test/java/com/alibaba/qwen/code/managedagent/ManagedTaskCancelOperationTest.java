@@ -7,6 +7,8 @@ import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore.TaskCancelOutcome;
+import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
@@ -324,19 +326,87 @@ class ManagedTaskCancelOperationTest {
         assertThat(failed.deliveryState()).isEqualTo("BLOCKED");
         assertThat(failed.failureCode()).isEqualTo("task_already_settled");
         assertThat(failed.receiptId()).isNull();
-        // Terminal for good: no scan of the blocked index range reads it
-        // again, however far the clock moves.
-        assertThat(jdbc.queryForObject("SELECT available_at FROM"
-                + " managed_agent_operation WHERE operation_id = ?",
-                Long.class, admitted.operationId())).isEqualTo(Long.MAX_VALUE);
-        assertThat(store.findParkedTaskCancels(10)).isEmpty();
-        assertThat(store.findDeliverableOperations(now.get(), 10)).isEmpty();
+        // Terminal for good: the blocked range of the pending index that
+        // the per-second scans walk never holds it, however far the clock
+        // moves.
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                + " managed_agent_operation WHERE delivery_state = 'BLOCKED'"
+                + " AND available_at <= ?", Integer.class,
+                Long.MAX_VALUE - 1)).isZero();
         assertThat(store.claimOperation(TENANT, sessionId,
                 admitted.operationId(), "owner-2", Duration.ofSeconds(30)))
                 .isEmpty();
         assertThat(store.settleTaskCancel(TENANT, sessionId,
                 admitted.operationId(), null, 0,
                 TaskCancelOutcome.completed(), 0)).isFalse();
+    }
+
+    // The relay's evidence on real SQL: only a cancel that took effect on
+    // the Turn (it entered CANCELLING) leaves turn.cancel.requested; one
+    // admitted on a Turn that had already ended leaves nothing, so a natural
+    // end that raced ahead of the stop stays natural. The internal key,
+    // with its space, round-trips through the command table.
+    @Test
+    void onlyAnEffectiveCancelIsTheStopsEvidence() {
+        for (String[] turn : new String[][] {{"turn-live", "RUNNING"},
+                {"turn-ended", "FAILED"}}) {
+            jdbc.update("INSERT INTO managed_agent_turn (tenant_id,"
+                    + " session_id, turn_id, prompt_id, input_json,"
+                    + " payload_digest, status, created_at, updated_at)"
+                    + " VALUES (?, ?, ?, ?, '[]', 'digest', ?, 0, 0)", TENANT,
+                    sessionId, turn[0], UUID.randomUUID().toString(), turn[1]);
+        }
+        ChildResultRelayStore relay = new ChildResultRelayStore(jdbc);
+        String liveKey = "child-stop sha256:" + "1".repeat(64);
+        String endedKey = "child-stop sha256:" + "2".repeat(64);
+        assertThat(store.insertCancelCommand(TENANT, "CANCEL_TURN", liveKey,
+                "digest-live", sessionId, "turn-live").commandEffect())
+                .isTrue();
+        assertThat(store.insertCancelCommand(TENANT, "CANCEL_TURN",
+                endedKey, "digest-ended", sessionId, "turn-ended")
+                .commandEffect()).isFalse();
+        assertThat(relay.turnCancelRequested(TENANT, sessionId, "turn-live"))
+                .isTrue();
+        assertThat(relay.turnCancelRequested(TENANT, sessionId,
+                "turn-ended")).isFalse();
+        assertThat(store.findCommand(TENANT, "CANCEL_TURN", liveKey))
+                .isPresent();
+        assertThat(store.findCommand(TENANT, "CANCEL_TURN", endedKey))
+                .isPresent();
+    }
+
+    // The stop arm's heartbeat read goes by the record's primary key and
+    // reads the committed body's stop request and run line.
+    @Test
+    void theStopStateReadsTheCommittedBody() {
+        String recordKey = ManagedExtensionProjection.recordKey(sessionId,
+                "child_run", "run-stop");
+        String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+                        + " (session_scope_key, record_key, tenant_id,"
+                        + " workspace_id, session_id, domain, record_id,"
+                        + " operation_hash, revision, record_resource_id,"
+                        + " task_kind, task_state, created_at) VALUES (?, ?, ?,"
+                        + " 'workspace', ?, 'child_run', 'run-stop', ?, 2,"
+                        + " 'resource-stop', 'child_agent', 'running', 1)",
+                scope, recordKey, TENANT, sessionId, recordKey);
+        byte[] body = ("{\"kind\":\"child_agent\",\"stopRequested\":true,"
+                + "\"run\":{\"state\":\"running\"}}")
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        jdbc.update("INSERT INTO qwen_managed_session_resource"
+                        + " (session_scope_key, tenant_id, workspace_id,"
+                        + " session_id, resource_id, kind, schema_version,"
+                        + " byte_length, sha256, storage_kind, inline_bytes,"
+                        + " publish_command_id, state, created_at) VALUES (?,"
+                        + " ?, 'workspace', ?, 'resource-stop',"
+                        + " 'managed-child-run', 1, ?, ?, 'MYSQL_INLINE', ?,"
+                        + " 'command', 'REFERENCED', CURRENT_TIMESTAMP)",
+                scope, TENANT, sessionId, body.length, "c".repeat(64), body);
+        ChildResultRelayStore relay = new ChildResultRelayStore(jdbc);
+        assertThat(relay.stopState(TENANT, sessionId, "run-stop"))
+                .isEqualTo(new ChildResultRelayStore.StopState(true, false));
+        assertThat(relay.stopState(TENANT, sessionId, "run-missing"))
+                .isNull();
     }
 
     private void task(String taskId, String domain, String kind,
