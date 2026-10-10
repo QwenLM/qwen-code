@@ -1028,6 +1028,31 @@ describe('NativeLspService', () => {
       expect(didOpenUris.length).toBe(countAfterFirst);
     }));
 
+  test('rejects when every document symbol request fails', () =>
+    inTempDir('lsp-all-failed-', async (dir) => {
+      const uri = writeDoc(dir, 'main.ts', TS_TEXT);
+      const requestError = new Error('server unavailable');
+      const connection = makeConnection({
+        request: vi.fn(async () => {
+          throw requestError;
+        }),
+      });
+      const handle = makeHandle(connection, TS, ['typescript']);
+      const service = workspaceService(dir, managerFor(TS, handle, true));
+      await expect(service.documentSymbols(uri)).rejects.toBe(requestError);
+    }));
+
+  test('preserves empty document symbol results when a server responds', () =>
+    inTempDir('lsp-empty-results-', async (dir) => {
+      const uri = writeDoc(dir, 'main.ts', TS_TEXT);
+      const connection = makeConnection({
+        request: vi.fn(async () => []),
+      });
+      const handle = makeHandle(connection, TS, ['typescript']);
+      const service = workspaceService(dir, managerFor(TS, handle, true));
+      await expect(service.documentSymbols(uri)).resolves.toEqual([]);
+    }));
+
   test('should retry document operations for slow servers after fresh didOpen', () =>
     inTempDirWithFakeTimers('lsp-retry-doc-', async (dir) => {
       const uri = writeDoc(dir, 'Main.java', JAVA_TEXT);

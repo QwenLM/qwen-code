@@ -976,11 +976,27 @@ export class NativeLspService {
   /**
    * Workspace symbol search across all ready LSP servers.
    */
+  private throwIfAllRequestsFailed(
+    requestAttempted: boolean,
+    requestSucceeded: boolean,
+    lastRequestError: unknown,
+    operation: string,
+  ): void {
+    if (requestAttempted && !requestSucceeded) {
+      throw lastRequestError instanceof Error
+        ? lastRequestError
+        : new Error(`All LSP ${operation} requests failed`);
+    }
+  }
+
   async workspaceSymbols(
     query: string,
     limit = 50,
   ): Promise<LspSymbolInformation[]> {
     const results: LspSymbolInformation[] = [];
+    let requestAttempted = false;
+    let requestSucceeded = false;
+    let lastRequestError: unknown;
 
     for (const [serverName, handle] of Array.from(
       this.serverManager.getHandles(),
@@ -993,9 +1009,11 @@ export class NativeLspService {
         const warmedUp = this.serverManager.isTypescriptServer(handle)
           ? false
           : await this.warmupWorkspaceSymbols(serverName, handle);
+        requestAttempted = true;
         let response = await handle.connection.request('workspace/symbol', {
           query,
         });
+        requestSucceeded = true;
         if (
           !this.serverManager.isTypescriptServer(handle) &&
           Array.isArray(response) &&
@@ -1016,6 +1034,7 @@ export class NativeLspService {
             query,
           });
         }
+        requestSucceeded = true;
         if (!Array.isArray(response)) {
           continue;
         }
@@ -1032,6 +1051,7 @@ export class NativeLspService {
           }
         }
       } catch (error) {
+        lastRequestError = error;
         debugLogger.warn(
           `LSP workspace/symbol failed for ${serverName}:`,
           error,
@@ -1039,6 +1059,12 @@ export class NativeLspService {
       }
     }
 
+    this.throwIfAllRequestsFailed(
+      requestAttempted,
+      requestSucceeded,
+      lastRequestError,
+      'workspace/symbol',
+    );
     return results.slice(0, limit);
   }
 
@@ -1055,6 +1081,9 @@ export class NativeLspService {
       textDocument: { uri: location.uri },
       position: location.range.start,
     };
+    let requestAttempted = false;
+    let requestSucceeded = false;
+    let lastRequestError: unknown;
 
     for (const [name, handle] of handles) {
       try {
@@ -1065,10 +1094,12 @@ export class NativeLspService {
           location.uri,
         );
 
+        requestAttempted = true;
         let response = await handle.connection.request(
           'textDocument/definition',
           requestParams,
         );
+        requestSucceeded = true;
 
         if (
           this.isEmptyResponse(response) &&
@@ -1100,6 +1131,7 @@ export class NativeLspService {
           return definitions.slice(0, limit);
         }
       } catch (error) {
+        lastRequestError = error;
         debugLogger.warn(
           `LSP textDocument/definition failed for ${name}:`,
           error,
@@ -1107,6 +1139,12 @@ export class NativeLspService {
       }
     }
 
+    this.throwIfAllRequestsFailed(
+      requestAttempted,
+      requestSucceeded,
+      lastRequestError,
+      'textDocument/definition',
+    );
     return [];
   }
 
@@ -1238,6 +1276,9 @@ export class NativeLspService {
   ): Promise<LspSymbolInformation[]> {
     const handles = this.getReadyHandles(serverName);
     const requestParams = { textDocument: { uri } };
+    let requestAttempted = false;
+    let requestSucceeded = false;
+    let lastRequestError: unknown;
 
     for (const [name, handle] of handles) {
       try {
@@ -1248,10 +1289,12 @@ export class NativeLspService {
           uri,
         );
 
+        requestAttempted = true;
         let response = await handle.connection.request(
           'textDocument/documentSymbol',
           requestParams,
         );
+        requestSucceeded = true;
 
         if (
           this.isEmptyResponse(response) &&
@@ -1298,6 +1341,7 @@ export class NativeLspService {
           return symbols.slice(0, limit);
         }
       } catch (error) {
+        lastRequestError = error;
         debugLogger.warn(
           `LSP textDocument/documentSymbol failed for ${name}:`,
           error,
@@ -1305,6 +1349,12 @@ export class NativeLspService {
       }
     }
 
+    this.throwIfAllRequestsFailed(
+      requestAttempted,
+      requestSucceeded,
+      lastRequestError,
+      'textDocument/documentSymbol',
+    );
     return [];
   }
 
@@ -1321,6 +1371,9 @@ export class NativeLspService {
       textDocument: { uri: location.uri },
       position: location.range.start,
     };
+    let requestAttempted = false;
+    let requestSucceeded = false;
+    let lastRequestError: unknown;
 
     for (const [name, handle] of handles) {
       try {
@@ -1331,10 +1384,12 @@ export class NativeLspService {
           location.uri,
         );
 
+        requestAttempted = true;
         let response = await handle.connection.request(
           'textDocument/implementation',
           requestParams,
         );
+        requestSucceeded = true;
 
         if (
           this.isEmptyResponse(response) &&
@@ -1369,6 +1424,7 @@ export class NativeLspService {
           return implementations.slice(0, limit);
         }
       } catch (error) {
+        lastRequestError = error;
         debugLogger.warn(
           `LSP textDocument/implementation failed for ${name}:`,
           error,
@@ -1376,6 +1432,12 @@ export class NativeLspService {
       }
     }
 
+    this.throwIfAllRequestsFailed(
+      requestAttempted,
+      requestSucceeded,
+      lastRequestError,
+      'textDocument/implementation',
+    );
     return [];
   }
 
@@ -1630,6 +1692,9 @@ export class NativeLspService {
   ): Promise<LspCallHierarchyIncomingCall[]> {
     const targetServer = serverName ?? item.serverName;
     const handles = this.getReadyHandles(targetServer);
+    let requestAttempted = false;
+    let requestSucceeded = false;
+    let lastRequestError: unknown;
     if (handles.length !== 1) throw new StaleCallHierarchyItemError();
 
     for (const [name, handle] of handles) {
@@ -1643,12 +1708,14 @@ export class NativeLspService {
       revision.checkpoint();
       this.validateCallHierarchyItem(item, revision);
       try {
+        requestAttempted = true;
         const response = await handle.connection.request(
           'callHierarchy/incomingCalls',
           {
             item: this.normalizer.toCallHierarchyItemParams(item),
           },
         );
+        requestSucceeded = true;
         revision.checkpoint();
         this.validateCallHierarchyItem(item, revision);
         if (!Array.isArray(response)) {
@@ -1669,6 +1736,7 @@ export class NativeLspService {
           return calls.slice(0, limit);
         }
       } catch (error) {
+        lastRequestError = error;
         revision.checkpoint();
         this.validateCallHierarchyItem(item, revision);
         if (error instanceof StaleCallHierarchyItemError) throw error;
@@ -1679,6 +1747,12 @@ export class NativeLspService {
       }
     }
 
+    this.throwIfAllRequestsFailed(
+      requestAttempted,
+      requestSucceeded,
+      lastRequestError,
+      'callHierarchy/incomingCalls',
+    );
     return [];
   }
 
@@ -1692,6 +1766,9 @@ export class NativeLspService {
   ): Promise<LspCallHierarchyOutgoingCall[]> {
     const targetServer = serverName ?? item.serverName;
     const handles = this.getReadyHandles(targetServer);
+    let requestAttempted = false;
+    let requestSucceeded = false;
+    let lastRequestError: unknown;
     if (handles.length !== 1) throw new StaleCallHierarchyItemError();
 
     for (const [name, handle] of handles) {
@@ -1705,12 +1782,14 @@ export class NativeLspService {
       revision.checkpoint();
       this.validateCallHierarchyItem(item, revision);
       try {
+        requestAttempted = true;
         const response = await handle.connection.request(
           'callHierarchy/outgoingCalls',
           {
             item: this.normalizer.toCallHierarchyItemParams(item),
           },
         );
+        requestSucceeded = true;
         revision.checkpoint();
         this.validateCallHierarchyItem(item, revision);
         if (!Array.isArray(response)) {
@@ -1731,6 +1810,7 @@ export class NativeLspService {
           return calls.slice(0, limit);
         }
       } catch (error) {
+        lastRequestError = error;
         revision.checkpoint();
         this.validateCallHierarchyItem(item, revision);
         if (error instanceof StaleCallHierarchyItemError) throw error;
@@ -1741,6 +1821,12 @@ export class NativeLspService {
       }
     }
 
+    this.throwIfAllRequestsFailed(
+      requestAttempted,
+      requestSucceeded,
+      lastRequestError,
+      'callHierarchy/outgoingCalls',
+    );
     return [];
   }
 
@@ -1805,6 +1891,9 @@ export class NativeLspService {
   ): Promise<LspFileDiagnostics[]> {
     const handles = this.getReadyHandles(serverName);
     const results: LspFileDiagnostics[] = [];
+    let requestAttempted = false;
+    let requestSucceeded = false;
+    let lastRequestError: unknown;
 
     for (const [name, handle] of handles) {
       const connection = handle.connection;
@@ -1869,12 +1958,14 @@ export class NativeLspService {
 
       try {
         // Request workspace diagnostics if supported
+        requestAttempted = true;
         const response = await handle.connection.request(
           'workspace/diagnostic',
           {
             previousResultIds: [],
           },
         );
+        requestSucceeded = true;
 
         if (response && typeof response === 'object') {
           const responseObj = response as Record<string, unknown>;
@@ -1895,6 +1986,7 @@ export class NativeLspService {
           }
         }
       } catch (error) {
+        lastRequestError = error;
         debugLogger.warn(`LSP workspace/diagnostic failed for ${name}:`, error);
       }
 
@@ -1903,6 +1995,12 @@ export class NativeLspService {
       }
     }
 
+    this.throwIfAllRequestsFailed(
+      requestAttempted,
+      requestSucceeded,
+      lastRequestError,
+      'workspace/diagnostic',
+    );
     return results.slice(0, limit);
   }
 
