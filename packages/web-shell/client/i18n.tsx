@@ -4268,9 +4268,9 @@ const EN: Messages = {
   'localControl.disabledHint':
     'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
   'localControl.openSettings': 'Open Settings',
-  'browserNotifications.label': 'Browser task notifications',
+  'browserNotifications.label': 'Task notifications',
   'browserNotifications.description':
-    'Notify when the current chat or a split-view chat finishes or fails while this page is in the background or unfocused. Shows the session title, prompt and reply excerpts. Saved for this browser site only; the page must remain open.',
+    'Notify when the current chat or a split-view chat finishes, fails, needs approval or waits for your answer while this page is in the background or unfocused. Completed turns show prompt and reply excerpts; action reminders show the session title and waiting status. Saved for this browser site only; the page must remain open.',
   'browserNotifications.prompt': (v) => `Prompt: ${v?.text ?? ''}`,
   'browserNotifications.reply': (v) => `Reply: ${v?.text ?? ''}`,
   'browserNotifications.completed': 'This turn has completed.',
@@ -4278,7 +4278,22 @@ const EN: Messages = {
     'This turn failed. Return to view the details.',
   'browserNotifications.ended':
     'This turn has ended. Return to check the result.',
+  'browserNotifications.approval':
+    'This session needs your approval. Return to review the request.',
+  'browserNotifications.question':
+    'This session is waiting for your answer. Return to respond.',
   'browserNotifications.allow': 'Allow notifications',
+  'browserNotifications.enable': 'Enable notifications',
+  'browserNotifications.helpEnabled': 'Enabled for this site.',
+  'browserNotifications.helpWaiting': 'Notifications are not authorized yet.',
+  'browserNotifications.helpWhen':
+    'While this page is in the background or you switch to another tab, get reminders when the current chat needs approval, waits for your answer, finishes or fails. Clicking a notification returns to its chat without approving or answering.',
+  'browserNotifications.helpSystem':
+    'If no reminders appear, follow the steps below to check system notifications.',
+  'browserNotifications.helpMac':
+    'Open System Settings → Notifications. Select your browser (for Chrome, also check Google Chrome Helper (Alerts) if listed), enable notifications and desktop banners/alerts. Check Focus and whether notifications are allowed during screen sharing.',
+  'browserNotifications.helpWindows':
+    'Open Settings → System → Notifications (Windows 10: Notifications & actions). Enable notifications and your browser, including notification banners. Turn off Do not disturb / Focus assist, or allow your browser through its rules.',
   'browserNotifications.enabled': 'Enabled.',
   'browserNotifications.disabled': 'Disabled.',
   'browserNotifications.waiting': 'Waiting for browser permission.',
@@ -8293,15 +8308,28 @@ const ZH: Messages = {
   'localControl.disabledHint':
     '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
   'localControl.openSettings': '打开设置',
-  'browserNotifications.label': '浏览器任务通知',
+  'browserNotifications.label': '任务通知',
   'browserNotifications.description':
-    '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束或失败。通知包含会话标题、提问和回复摘录。仅保存在此浏览器站点；网页需保持打开。',
+    '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束、失败、需要审批或等待回答。回合结束通知包含提问和回复摘录；待处理提醒只显示会话标题和等待状态。仅保存在此浏览器站点；网页需保持打开。',
   'browserNotifications.prompt': (v) => `提问：${v?.text ?? ''}`,
   'browserNotifications.reply': (v) => `回复：${v?.text ?? ''}`,
   'browserNotifications.completed': '本轮已完成。',
   'browserNotifications.failed': '本轮执行失败，请返回查看。',
   'browserNotifications.ended': '本轮已结束，请返回查看结果。',
+  'browserNotifications.approval': '此会话需要你的审批，请返回查看请求。',
+  'browserNotifications.question': '此会话正在等待你的回答，请返回处理。',
   'browserNotifications.allow': '允许通知',
+  'browserNotifications.enable': '开启通知',
+  'browserNotifications.helpEnabled': '已为此站点开启通知。',
+  'browserNotifications.helpWaiting': '尚未获得浏览器通知授权。',
+  'browserNotifications.helpWhen':
+    '页面在后台或者切换到其他页签时，当前聊天需要审批、等待回答、回合结束或失败会发送提醒，点击通知返回对应聊天，不会自动审批或回答。',
+  'browserNotifications.helpSystem':
+    '如果没有收到提醒，请按下方指引检查系统通知',
+  'browserNotifications.helpMac':
+    '打开“系统设置 → 通知”，选择浏览器（Chrome 如列有 Google Chrome Helper (Alerts)，也需检查），开启允许通知及桌面横幅／提醒。检查专注模式，以及屏幕共享时是否允许通知。',
+  'browserNotifications.helpWindows':
+    '打开“设置 → 系统 → 通知”（Windows 10 为“通知和操作”），开启通知及浏览器通知，并允许显示通知横幅。关闭“请勿打扰／专注助手”，或在其规则中允许浏览器通知。',
   'browserNotifications.enabled': '已开启。',
   'browserNotifications.disabled': '未开启。',
   'browserNotifications.waiting': '等待浏览器授权。',

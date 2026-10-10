@@ -14,6 +14,8 @@ import {
   assistantBlockRendersAsSystemNotice,
   splitInsightSegments,
 } from '../../adapters/transcriptToMessages.js';
+import { extractPendingPermission } from '../../adapters/transcriptAdapter.js';
+import { isAskUserPermission } from '../../utils/askUserPermission.js';
 import type {
   DaemonConnectionState,
   DaemonProductSessionContext,
@@ -33,11 +35,18 @@ export interface TurnNotificationContent {
   sessionTitle?: string;
   promptText?: string;
   responseText?: string;
+  attention?: 'approval' | 'question';
 }
 
 export interface TurnNotification extends TurnNotificationContent {
   key: string;
-  outcome: 'completed' | 'failed' | 'ended' | 'cancelled';
+  outcome:
+    | 'completed'
+    | 'failed'
+    | 'ended'
+    | 'cancelled'
+    | 'approval'
+    | 'question';
 }
 
 export interface TurnNotificationObserver {
@@ -219,6 +228,20 @@ export function getTurnNotificationContent(
   blocks: readonly DaemonTranscriptBlock[],
   sessionTitle: string | undefined,
 ): TurnNotificationContent | undefined {
+  if (event.type === 'permission_request') {
+    const requestId = (event.data as { requestId?: unknown } | undefined)
+      ?.requestId;
+    const request = extractPendingPermission(
+      blocks.filter(
+        (block) => block.kind === 'permission' && block.requestId === requestId,
+      ),
+    );
+    if (!request) return;
+    return {
+      sessionTitle,
+      attention: isAskUserPermission(request) ? 'question' : 'approval',
+    };
+  }
   if (event.type !== 'turn_complete' && event.type !== 'turn_error') return;
   const content: TurnNotificationContent = { sessionTitle };
   const promptId = (event.data as { promptId?: unknown } | undefined)?.promptId;
@@ -280,14 +303,16 @@ export function createTurnNotificationObserver(
   const handled = new Set<string>();
   const keyFor = (scope: string, promptId: string) =>
     JSON.stringify([scope, promptId]);
-  const consume = (scope: string, promptId: string) => {
-    const key = keyFor(scope, promptId);
-    scopes.get(scope)?.pending.delete(promptId);
+  const claim = (key: string) => {
     if (handled.has(key)) return false;
     handled.add(key);
     if (handled.size > MAX_RECENT_TURNS)
       handled.delete(handled.values().next().value!);
     return true;
+  };
+  const consume = (scope: string, promptId: string) => {
+    scopes.get(scope)?.pending.delete(promptId);
+    return claim(keyFor(scope, promptId));
   };
   return {
     retain(scope) {
@@ -339,6 +364,23 @@ export function createTurnNotificationObserver(
         (envelopeSessionId !== undefined && envelopeSessionId !== sessionId)
       )
         return;
+      if (event.type === 'permission_request') {
+        const requestId = value['requestId'];
+        if (replay || typeof requestId !== 'string' || !requestId.trim())
+          return;
+        const key = JSON.stringify([scope, 'permission', requestId]);
+        if (handled.has(key)) return;
+        try {
+          const resolvedContent =
+            typeof content === 'function' ? content() : content;
+          if (!resolvedContent?.attention) return;
+          const { attention, ...details } = resolvedContent;
+          if (claim(key)) notify({ ...details, key, outcome: attention });
+        } catch {
+          // Notification observers must never interrupt session event handling.
+        }
+        return;
+      }
       if (
         event.type === 'mid_turn_message_injected' &&
         Array.isArray(value['messageIds'])

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type {
   DaemonEvent,
+  DaemonPermissionTranscriptBlock,
   DaemonTextTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import {
@@ -15,7 +16,81 @@ function terminal(promptId = 'p', stopReason = 'end_turn'): DaemonEvent {
   };
 }
 
+function permission(requestId = 'p'): DaemonEvent {
+  return {
+    type: 'permission_request',
+    data: { sessionId: 's', requestId },
+  };
+}
+
 describe('turn notification observer', () => {
+  it.each(['approval', 'question'] as const)(
+    'notifies once per %s request without consuming its turn',
+    (attention) => {
+      const notify = vi.fn();
+      const observer = createTurnNotificationObserver(notify);
+      observer.retain('scope');
+      observer.retain('scope');
+      observer.admit('scope', 'p', 'Original prompt');
+      const content = vi.fn(() => ({ attention, sessionTitle: 'Session' }));
+      observer.observe('scope', 's', permission(), false, content);
+      observer.observe('scope', 's', permission(), false, content);
+      expect(content).toHaveBeenCalledOnce();
+      expect(notify).toHaveBeenCalledExactlyOnceWith({
+        key: JSON.stringify(['scope', 'permission', 'p']),
+        sessionTitle: 'Session',
+        outcome: attention,
+      });
+      observer.observe('scope', 's', permission('second'), false, content);
+      observer.observe('scope', 's', terminal(), true);
+      expect(notify).toHaveBeenCalledTimes(3);
+      expect(notify).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          outcome: 'completed',
+          promptText: 'Original prompt',
+        }),
+      );
+    },
+  );
+
+  it('ignores replay, invalid identities, and requests without an unresolved projection', () => {
+    const notify = vi.fn();
+    const observer = createTurnNotificationObserver(notify);
+    observer.retain('scope');
+    const content = vi.fn(() => ({ attention: 'approval' as const }));
+    observer.observe('scope', 's', permission(), true, content);
+    observer.observe('scope', 'other', permission(), false, content);
+    observer.observe(
+      'scope',
+      's',
+      { ...permission(), sessionId: 'other' },
+      false,
+      content,
+    );
+    observer.observe('scope', 's', permission(' '), false, content);
+    observer.observe('unmounted', 's', permission(), false, content);
+    observer.observe('scope', 's', permission(), false, () => undefined);
+    expect(content).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+    observer.observe('scope', 's', permission(), false, content);
+    expect(notify).toHaveBeenCalledOnce();
+  });
+
+  it('isolates failing action notifications and scopes the request cache', () => {
+    const notify = vi.fn(() => {
+      throw new Error('unavailable');
+    });
+    const observer = createTurnNotificationObserver(notify);
+    observer.retain('scope');
+    observer.retain('other');
+    const content = { attention: 'question' as const };
+    expect(() =>
+      observer.observe('scope', 's', permission(), false, content),
+    ).not.toThrow();
+    observer.observe('scope', 's', permission(), false, content);
+    observer.observe('other', 's', permission(), false, content);
+    expect(notify).toHaveBeenCalledTimes(2);
+  });
   it.each([
     ['end_turn', 'completed'],
     ['cancelled', 'cancelled'],
@@ -232,6 +307,70 @@ describe('turn notification observer', () => {
 });
 
 describe('turn notification content', () => {
+  const approvalBlock = (
+    toolCall: unknown,
+    resolved?: string,
+  ): DaemonPermissionTranscriptBlock => ({
+    id: 'permission-p',
+    kind: 'permission',
+    requestId: 'p',
+    sessionId: 's',
+    title: 'Sensitive command or question',
+    options: [],
+    preview: { kind: 'generic' },
+    toolCall,
+    resolved,
+    clientReceivedAt: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+
+  it.each([
+    [{ name: 'Bash', input: { command: 'private command' } }, 'approval'],
+    [
+      {
+        _meta: { toolName: 'AskUserQuestion' },
+        rawInput: { questions: [{ question: 'Private question?' }] },
+      },
+      'question',
+    ],
+    [{ input: { questions: [{ question: 'Legacy question?' }] } }, 'question'],
+    [
+      { _meta: { toolName: 'other_tool' }, args: { questions: [] } },
+      'approval',
+    ],
+  ] as const)(
+    'classifies the same pending request as the UI without copying its details (%s)',
+    (toolCall, attention) => {
+      const content = getTurnNotificationContent(
+        permission(),
+        [approvalBlock(toolCall)],
+        'Session title',
+      );
+      expect(content).toEqual({ sessionTitle: 'Session title', attention });
+    },
+  );
+
+  it('requires the matching unresolved permission block', () => {
+    expect(
+      getTurnNotificationContent(
+        permission('other'),
+        [approvalBlock({})],
+        'Session',
+      ),
+    ).toBeUndefined();
+    expect(
+      getTurnNotificationContent(
+        permission(),
+        [approvalBlock({}, 'allowed')],
+        'Session',
+      ),
+    ).toBeUndefined();
+    expect(
+      getTurnNotificationContent(permission(), [], 'Session'),
+    ).toBeUndefined();
+  });
+
   const block = (
     text: string,
     extra: Partial<DaemonTextTranscriptBlock> = {},
