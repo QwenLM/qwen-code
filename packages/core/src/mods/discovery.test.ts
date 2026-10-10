@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -65,6 +65,45 @@ describe('Mod discovery', () => {
       expect(await loadModSource(root)).toBeUndefined();
     },
   );
+
+  it.each(['absolute', 'relative-outside'])(
+    'skips ignored %s Claude hook manifests without probing outside files',
+    async (kind) => {
+      const outside = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-mod-outside-')),
+      );
+      const realRoot = await fs.realpath(root);
+      const hooks = path.join(outside, 'classic-hooks.json');
+      const probe = vi.spyOn(fs, 'lstat');
+      try {
+        await fs.writeFile(hooks, 'Not JSON; this file must not be read.');
+        await write('qwen-extension.json', { name: 'classic' });
+        await write('.claude-plugin/plugin.json', {
+          name: 'classic',
+          hooks: kind === 'absolute' ? hooks : path.relative(realRoot, hooks),
+        });
+        await expect(loadModSource(root)).resolves.toBeUndefined();
+        expect(probe).not.toHaveBeenCalledWith(hooks);
+      } finally {
+        probe.mockRestore();
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('uses the Qwen hooks path ahead of an ignored Claude hooks path', async () => {
+    await write('qwen-extension.json', {
+      name: 'mixed',
+      hooks: './custom/hooks.json',
+    });
+    await write('.claude-plugin/plugin.json', {
+      name: 'mixed',
+      hooks: '../classic-hooks.json',
+    });
+    await write('custom/hooks.json', { modules: ['./entry.js'] });
+    await write('custom/entry.js', 'export function register() {}');
+    expect(await loadModSource(root)).toBe('export function register() {}');
+  });
 
   it.each([
     [[], /one relative/],

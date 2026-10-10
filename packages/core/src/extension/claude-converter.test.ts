@@ -674,6 +674,38 @@ describe('convertClaudePluginPackage', () => {
     ).toBe(`${pluginSourceDir}/scripts/post-install.sh`);
   });
 
+  it.each(['absolute', 'relative-outside'])(
+    'keeps a converted ordinary plugin usable with ignored %s hooks',
+    async (kind) => {
+      const hooks =
+        kind === 'absolute'
+          ? path.join(testDir, 'classic-hooks.json')
+          : '../classic-hooks.json';
+      const { result } = await layoutAndConvert(
+        'ordinary-external-hooks',
+        { name: 'ordinary', hooks },
+        { 'commands/ordinary.md': '# Ordinary command' },
+      );
+
+      expect(result.config.hooks).toBeUndefined();
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(result.convertedDir, '.claude-plugin/plugin.json'),
+            'utf8',
+          ),
+        ).hooks,
+      ).toBe(hooks);
+      expect(
+        fs.readFileSync(
+          path.join(result.convertedDir, 'commands/ordinary.md'),
+          'utf8',
+        ),
+      ).toBe('# Ordinary command');
+      await expect(loadModSource(result.convertedDir)).resolves.toBeUndefined();
+    },
+  );
+
   it.each([false, true])(
     'preserves marketplace Mod hooks with an existing plugin manifest: %s',
     async (hasManifest) => {

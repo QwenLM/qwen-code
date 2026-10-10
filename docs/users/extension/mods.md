@@ -98,8 +98,9 @@ this version. Safe mode, bare mode and `disableAllHooks` also prevent loading.
 Restart after changing plugin code or extension activation. An already loaded
 command checks activation again before execution and refuses a disabled plugin.
 Native Qwen extensions with an absolute or external hooks manifest path continue
-to use only the classic hook loader; Mod manifests must be relative paths inside
-the extension.
+to use only the classic hook loader. Claude hooks paths that conversion already
+ignores because they are absolute or outside the extension are also skipped by
+Mod discovery. Mod manifests must be relative paths inside the extension.
 
 The reader accepts regular files up to 256 KiB inside the installed extension and
 rejects symbolic links within that root. Each guest has a 64 MiB memory limit,

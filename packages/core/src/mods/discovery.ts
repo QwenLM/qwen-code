@@ -91,6 +91,13 @@ export async function loadModSource(
       : typeof claude?.['hooks'] === 'string'
         ? claude['hooks']
         : 'hooks/hooks.json';
+  // Claude conversion ignores these paths; discovery must not revive them.
+  if (
+    path.isAbsolute(hooksPath) ||
+    !isContainedFile(root, path.resolve(root, hooksPath))
+  ) {
+    return undefined;
+  }
   const hooks = await readManifest(root, hooksPath);
   if (!hooks || !Object.hasOwn(hooks, 'modules')) return undefined;
   const modules = hooks['modules'];
