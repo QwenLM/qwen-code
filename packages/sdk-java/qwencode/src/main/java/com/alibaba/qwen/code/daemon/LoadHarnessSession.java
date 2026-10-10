@@ -13,6 +13,20 @@ public final class LoadHarnessSession {
     private final boolean cancellationTakeover;
     private final boolean suppressChildAgents;
     private Map<String, Object> lifecycleAuthority;
+    private boolean childWorkspaces;
+
+    /**
+     * #13753 I2: a copy that tells the Hosted side this control plane
+     * serves child Workspaces (see {@link CreateHarnessSession.Builder#childWorkspaces}).
+     */
+    public LoadHarnessSession withChildWorkspaces(boolean value) {
+        LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
+                passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
+                suppressChildAgents);
+        copy.lifecycleAuthority = lifecycleAuthority;
+        copy.childWorkspaces = value;
+        return copy;
+    }
 
     public LoadHarnessSession forLifecycle(String operationId, long claimGeneration) {
         if (operationId == null || !operationId.matches("[A-Za-z0-9._:-]{1,128}") || claimGeneration < 1) {
@@ -22,6 +36,7 @@ public final class LoadHarnessSession {
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
         copy.lifecycleAuthority = Map.of("operationId", operationId, "claimGeneration", claimGeneration);
+        copy.childWorkspaces = childWorkspaces;
         return copy;
     }
 
@@ -114,6 +129,9 @@ public final class LoadHarnessSession {
         }
         if (cancellationTakeover) {
             result.put("cancellationTakeover", true);
+        }
+        if (childWorkspaces) {
+            result.put("childWorkspaces", true);
         }
         return result;
     }

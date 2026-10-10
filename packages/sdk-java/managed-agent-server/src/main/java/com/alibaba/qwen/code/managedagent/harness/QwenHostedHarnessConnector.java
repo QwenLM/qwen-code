@@ -42,6 +42,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final DaemonApprovalMode approvalMode;
     private final ManagedActionStore actions;
     private final WriterCredentialPolicy credentials;
+    /** #13753 I2: this control plane serves child Workspaces (startup checks the shape). */
+    private final boolean childWorkspaces;
     private volatile HostedHarnessClient client;
     private final ReentrantLock clientLock = new ReentrantLock();
     // Sessions whose takeover load reported parked Runtime work that no
@@ -75,6 +77,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         this.actions = actions;
         this.workspaceExecution = workspaceExecution;
         this.credentials = new WriterCredentialPolicy(properties);
+        this.childWorkspaces = properties.getRuntimeBroker().isChildWorkspacesEnabled();
         if (this.properties.getToken() == null
                 || this.properties.getToken().isBlank()
                 || this.properties.getCapabilityDigest() == null
@@ -158,6 +161,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             ref = client().loadSession(new LoadHarnessSession(session.sessionId(), managedSessionStore(session),
                     false, toolProfile(session), false, false,
                     WorkspaceToolProfiles.isShell(toolProfile(session)))
+                    .withChildWorkspaces(childWorkspaces)
                     .forLifecycle(operation.operationId(), operation.claimGeneration()));
             attachments.put(key, ref);
         }
@@ -652,7 +656,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                                                             session.tenantId(),
                                                             session.sessionId())))
                             .approvalTimeoutMs(properties.getApprovalTimeout().toMillis())
-                            .toolProfile(toolProfile(session));
+                            .toolProfile(toolProfile(session))
+                            .childWorkspaces(childWorkspaces);
             if (WorkspaceToolProfiles.isShell(toolProfile(session))) {
                 builder.suppressChildAgents();
             }
@@ -699,7 +704,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         return client().loadSession(new LoadHarnessSession(session.sessionId(), store,
                 passiveManagedRuntimeRecovery, profile,
                 driveRuntimeRecovery, cancellationTakeover,
-                WorkspaceToolProfiles.isShell(profile)));
+                WorkspaceToolProfiles.isShell(profile))
+                .withChildWorkspaces(childWorkspaces));
     }
 
     @Override
