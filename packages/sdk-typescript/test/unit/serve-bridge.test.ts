@@ -686,6 +686,7 @@ describe('serve-bridge', () => {
         defaultSessionId: 'test-session',
         fetchReply: () => jsonResponse(200, {}),
       });
+      const cancel = vi.spyOn(state.client, 'cancel');
 
       const { createPromptCollector } = await import(
         '../../src/daemon-mcp/serve-bridge/sse.js'
@@ -710,6 +711,50 @@ describe('serve-bridge', () => {
       await cancelTool.handler({}, {});
       expect(collector.resolved).toBe(true);
       expect(collector.interrupted).toBe(true);
+      expect(cancel).toHaveBeenCalledWith('test-session');
+    });
+
+    it('cancels a stalled collector as interrupted after 30 seconds', async () => {
+      vi.useFakeTimers();
+      try {
+        const { state } = makeMockState({
+          defaultSessionId: 'test-session',
+        });
+        state.eventStreams.set('test-session', {
+          sessionId: 'test-session',
+          abortCtrl: new AbortController(),
+          activeCollector: null,
+          lastActivityMs: Date.now(),
+        });
+        vi.spyOn(state.client, 'prompt').mockResolvedValue({
+          stopReason: 'end_turn',
+        });
+        const cancel = vi
+          .spyOn(state.client, 'cancel')
+          .mockResolvedValue(undefined);
+
+        const { agentTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+        );
+        const promptTool = agentTools(state).find(
+          (t: { name: string }) => t.name === 'prompt',
+        );
+        const prompt = promptTool.handler({ prompt: 'test' }, {});
+
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        const result = await prompt;
+        expect(cancel).toHaveBeenCalledWith('test-session', undefined, {
+          cancelReason: 'interrupted',
+        });
+        expect(result.isError).toBe(true);
+        expect(JSON.parse(result.content[0].text)).toMatchObject({
+          stop_reason: 'timeout',
+        });
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

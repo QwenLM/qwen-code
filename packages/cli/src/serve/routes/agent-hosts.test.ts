@@ -590,13 +590,32 @@ it('reads a cancellation from either ack shape', () => {
     cancelled: false,
   });
   expect(readHostAck(undefined)).toEqual({ ok: false, cancelled: false });
+  for (const cancelReason of ['user', 'interrupted'] as const) {
+    expect(readHostAck({ ok: false, cancelled: true, cancelReason })).toEqual({
+      ok: false,
+      cancelled: true,
+      cancelReason,
+    });
+  }
+  expect(readHostAck({ cancelled: true, cancelReason: 'invalid' })).toEqual({
+    ok: false,
+    cancelled: true,
+  });
 });
 
 it('reports a cancelled run in the heartbeat leases', async () => {
   heartbeat.mockResolvedValue(V2_HOST);
   orchestrator.renewLease
-    .mockReturnValueOnce({ ok: false, reason: 'cancelled' } as never)
-    .mockReturnValueOnce({ ok: true, cancelled: true } as never)
+    .mockReturnValueOnce({
+      ok: false,
+      reason: 'cancelled',
+      cancelReason: 'user',
+    } as never)
+    .mockReturnValueOnce({
+      ok: true,
+      cancelled: true,
+      cancelReason: 'interrupted',
+    } as never)
     .mockReturnValueOnce({ ok: true });
 
   const response = await setup().beat({
@@ -611,8 +630,8 @@ it('reports a cancelled run in the heartbeat leases', async () => {
   });
 
   expect(response.body.leases).toEqual([
-    { runId: 'run-1', ok: false, cancelled: true },
-    { runId: 'run-2', ok: false, cancelled: true },
+    { runId: 'run-1', ok: false, cancelled: true, cancelReason: 'user' },
+    { runId: 'run-2', ok: false, cancelled: true, cancelReason: 'interrupted' },
     { runId: 'run-3', ok: true },
   ]);
 });
@@ -622,22 +641,32 @@ it('answers events and results of a cancelled run with 409 cancelled', async () 
   orchestrator.acceptHostEvents.mockReturnValue({
     ok: false,
     reason: 'cancelled',
+    cancelReason: 'user',
   });
   const events = await app.events({ ...LEASE, sequence: 1, events: [] });
   expect(events.status).toBe(409);
-  expect(events.body).toEqual({ error: 'cancelled', cancelled: true });
+  expect(events.body).toEqual({
+    error: 'cancelled',
+    cancelled: true,
+    cancelReason: 'user',
+  });
 
   orchestrator.completeHostTurn.mockResolvedValue({
     ok: false,
     reason: 'unknown_run',
     cancelled: true,
+    cancelReason: 'interrupted',
   });
   const result = await app.result({
     ...LEASE,
     result: { status: 'completed', outputText: 'late' },
   });
   expect(result.status).toBe(409);
-  expect(result.body).toEqual({ error: 'unknown_run', cancelled: true });
+  expect(result.body).toEqual({
+    error: 'unknown_run',
+    cancelled: true,
+    cancelReason: 'interrupted',
+  });
 });
 
 it('gives a claimed turn back when the Host hung up before it was written', async () => {

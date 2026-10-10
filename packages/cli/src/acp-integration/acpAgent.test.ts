@@ -2475,6 +2475,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         waitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
         cancelMcpAppCalls: ReturnType<typeof vi.fn>;
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
+        cancelPromptAdmission: ReturnType<typeof vi.fn>;
         enqueueBackgroundNotification: ReturnType<typeof vi.fn>;
         appendExternalRecord: ReturnType<typeof vi.fn>;
         enableLiveScreenContext: ReturnType<typeof vi.fn>;
@@ -5966,6 +5967,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
           cancelMcpAppCalls: vi.fn(),
           cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+          cancelPromptAdmission: vi.fn(
+            (controller: AbortController, reason: string) =>
+              controller.abort(reason),
+          ),
           enqueueBackgroundNotification: vi
             .fn()
             .mockResolvedValue({ accepted: true }),
@@ -7313,43 +7318,52 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('acknowledges prompt cancellation after the tracked prompt settles', async () => {
-    const sessionId = '11111111-1111-1111-1111-111111111111';
-    await setupSessionMocks(sessionId);
-    const { agent, agentPromise } = await bootAcpAgent();
-    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    let finishPrompt: ((value: unknown) => void) | undefined;
-    lastSessionMock?.prompt.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          finishPrompt = resolve;
-        }),
-    );
-    const prompt = agent.prompt({ sessionId, prompt: [] });
+  it.each([
+    [undefined, 'qwen:user-cancel'],
+    [{ 'qwen.cancelReason': 'interrupted' }, 'qwen:prompt-interrupted'],
+  ])(
+    'acknowledges prompt cancellation after the tracked prompt settles with metadata=%s',
+    async (meta, reason) => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      await setupSessionMocks(sessionId);
+      const { agent, agentPromise } = await bootAcpAgent();
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      let finishPrompt: ((value: unknown) => void) | undefined;
+      lastSessionMock?.prompt.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finishPrompt = resolve;
+          }),
+      );
+      const prompt = agent.prompt({ sessionId, prompt: [] });
 
-    await vi.waitFor(() => expect(lastSessionMock?.prompt).toHaveBeenCalled());
-    const cancellationSignal = lastSessionMock?.prompt.mock.calls[0]?.[2] as
-      | AbortSignal
-      | undefined;
+      await vi.waitFor(() =>
+        expect(lastSessionMock?.prompt).toHaveBeenCalled(),
+      );
+      const cancellationSignal = lastSessionMock?.prompt.mock.calls[0]?.[2] as
+        | AbortSignal
+        | undefined;
 
-    let cancellationSettled = false;
-    const cancellation = agent
-      .extMethod(PROMPT_CANCEL_METHOD, { sessionId })
-      .finally(() => {
-        cancellationSettled = true;
-      });
-    await vi.waitFor(() => expect(cancellationSignal?.aborted).toBe(true));
-    expect(cancellationSettled).toBe(false);
-    expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
-    expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
+      let cancellationSettled = false;
+      const cancellation = agent
+        .extMethod(PROMPT_CANCEL_METHOD, { sessionId, _meta: meta })
+        .finally(() => {
+          cancellationSettled = true;
+        });
+      await vi.waitFor(() => expect(cancellationSignal?.aborted).toBe(true));
+      expect(cancellationSignal?.reason).toBe(reason);
+      expect(cancellationSettled).toBe(false);
+      expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+      expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
 
-    finishPrompt?.({ stopReason: 'cancelled' });
-    await expect(cancellation).resolves.toEqual({ cancelled: true });
-    await prompt;
+      finishPrompt?.({ stopReason: 'cancelled' });
+      await expect(cancellation).resolves.toEqual({ cancelled: true });
+      await prompt;
 
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('acknowledges cancellation as a no-op when no prompt call is active', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
@@ -7400,6 +7414,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     await agent.cancel({ sessionId: callerSessionId });
     expect(admissionSignal?.aborted).toBe(true);
+    expect(admissionSignal?.reason).toBe('qwen:user-cancel');
 
     releaseAdmission();
     await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
@@ -26134,6 +26149,10 @@ describe('QwenAgent sessionIdContext binding', () => {
       setModel: overrides.setModel ?? vi.fn().mockResolvedValue(undefined),
       cancelPendingPrompt:
         overrides.cancelPendingPrompt ?? vi.fn().mockResolvedValue(undefined),
+      cancelPromptAdmission: vi.fn(
+        (controller: AbortController, reason: string) =>
+          controller.abort(reason),
+      ),
       releaseTodoStopGuardQueuedPromptWait:
         overrides.releaseTodoStopGuardQueuedPromptWait ??
         vi.fn().mockReturnValue(true),
@@ -26529,6 +26548,10 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
           getConfig: vi.fn().mockReturnValue(innerConfig),
           cancelMcpAppCalls: vi.fn(),
           cancelPendingPrompt: liveCancelPendingPrompt,
+          cancelPromptAdmission: vi.fn(
+            (controller: AbortController, reason: string) =>
+              controller.abort(reason),
+          ),
           beginClose: liveBeginClose,
           beginCloseIfAvailable: liveBeginCloseIfAvailable,
           waitForCloseGateToRelease: liveWaitForCloseGateToRelease,
@@ -27845,6 +27868,34 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     await agentPromise;
   });
 
+  it('passes explicit client close intent through the close gate', async () => {
+    const recording = makeRecordingService();
+    const { agent, agentPromise } = await bootAgent(
+      makeLiveSessionInnerConfig(recording),
+    );
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const admission = new AbortController();
+    (
+      agent as unknown as {
+        activePromptCalls: Map<string, Set<{ controller: AbortController }>>;
+      }
+    ).activePromptCalls.set(
+      liveSessionId,
+      new Set([{ controller: admission }]),
+    );
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+        sessionId: liveSessionId,
+        cancelReason: 'user',
+      }),
+    ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
+    expect(liveBeginClose).toHaveBeenCalledWith('user');
+    expect(admission.signal.reason).toBe('qwen:user-cancel');
+    expect(liveCancelPendingPrompt).toHaveBeenCalledOnce();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('does not abort an active generation when the close gate is unavailable', async () => {
     const recording = makeRecordingService();
     const innerConfig = makeLiveSessionInnerConfig(recording);
@@ -28324,6 +28375,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         waitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
         cancelMcpAppCalls: ReturnType<typeof vi.fn>;
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
+        cancelPromptAdmission: ReturnType<typeof vi.fn>;
         sendUpdate: ReturnType<typeof vi.fn>;
         dispose: ReturnType<typeof vi.fn>;
         shouldHintAskUserQuestionRestore?: ReturnType<typeof vi.fn>;
@@ -28768,6 +28820,10 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
         cancelMcpAppCalls: vi.fn(),
         cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+        cancelPromptAdmission: vi.fn(
+          (controller: AbortController, reason: string) =>
+            controller.abort(reason),
+        ),
         assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
         isTurnIdle: vi.fn().mockReturnValue(true),
         sendUpdate: opts.recoveredGoalSendError
@@ -31464,6 +31520,10 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
       cancelMcpAppCalls: vi.fn(),
       cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      cancelPromptAdmission: vi.fn(
+        (controller: AbortController, reason: string) =>
+          controller.abort(reason),
+      ),
       waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       isTurnIdle: vi.fn().mockReturnValue(true),
       dispose: replacementDispose,

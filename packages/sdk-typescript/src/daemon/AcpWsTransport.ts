@@ -597,7 +597,13 @@ export class AcpWsTransport implements DaemonTransport {
         onAbort = () => {
           this.pending.delete(id);
           if (sessionId && method === 'session/prompt') {
-            this.sendNotification('session/cancel', { sessionId });
+            this.sendNotification('session/cancel', {
+              sessionId,
+              _meta: {
+                'qwen.cancelReason':
+                  signal.reason === 'qwen:user-cancel' ? 'user' : 'interrupted',
+              },
+            });
           }
           reject(new DOMException('The operation was aborted', 'AbortError'));
         };

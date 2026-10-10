@@ -163,34 +163,40 @@ function controlError(
 }
 
 describe('Query', () => {
-  it('sends continue_last_turn control request and returns the payload', async () => {
-    const transport = new MockTransport();
-    const query = new Query(transport, {
-      timeout: { controlRequest: 1000 },
-    });
+  it.each([undefined, 'legacy-daemon'])(
+    'sends continue_last_turn with confirmation=%s and returns the payload',
+    async (confirmCancellation) => {
+      const transport = new MockTransport();
+      const query = new Query(transport, {
+        timeout: { controlRequest: 1000 },
+      });
 
-    const initializeRequest = await transport.waitForWrite(0);
-    expect(initializeRequest.request.subtype).toBe(
-      ControlRequestType.INITIALIZE,
-    );
-    transport.pushMessage(controlSuccess(initializeRequest, null));
-    await query.initialized;
+      const initializeRequest = await transport.waitForWrite(0);
+      expect(initializeRequest.request.subtype).toBe(
+        ControlRequestType.INITIALIZE,
+      );
+      transport.pushMessage(controlSuccess(initializeRequest, null));
+      await query.initialized;
 
-    const continuePromise = query.continueLastTurn();
-    const continueRequest = await transport.waitForWrite(1);
-    expect(continueRequest.request).toEqual({
-      subtype: ControlRequestType.CONTINUE_LAST_TURN,
-    });
+      const continuePromise = query.continueLastTurn(
+        confirmCancellation === undefined ? undefined : { confirmCancellation },
+      );
+      const continueRequest = await transport.waitForWrite(1);
+      expect(continueRequest.request).toEqual({
+        subtype: ControlRequestType.CONTINUE_LAST_TURN,
+        ...(confirmCancellation === undefined ? {} : { confirmCancellation }),
+      });
 
-    const payload = {
-      accepted: true,
-      interruption: 'interrupted_prompt',
-    };
-    transport.pushMessage(controlSuccess(continueRequest, payload));
+      const payload = {
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      };
+      transport.pushMessage(controlSuccess(continueRequest, payload));
 
-    await expect(continuePromise).resolves.toEqual(payload);
-    await query.close();
-  });
+      await expect(continuePromise).resolves.toEqual(payload);
+      await query.close();
+    },
+  );
 
   it('rejects continueLastTurn when the transport closes before the response', async () => {
     const transport = new MockTransport();

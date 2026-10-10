@@ -9,12 +9,23 @@ import type {
   AgentAdapterEvent,
   SessionAgentPermissionPrompt,
 } from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
+import {
+  INTERRUPTED_PROMPT_ABORT_REASON,
+  PROMPT_CANCEL_REASON_META_KEY,
+  USER_CANCEL_ABORT_REASON,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import { AGENT_SESSION_SOURCE_TYPE } from '../../../runtime/agent-session-source.js';
 import { createQwenAcpAdapter, type QwenAcpAdapterBridge } from './qwen-acp.js';
 
 const WS = '/ws';
 const AGENT_ID = 'ag_alice';
 const SESSION_ID = 'agent-session-1';
+
+/** The cancel a run's stop reaches the bridge with, reason included. */
+const cancelCall = (reason: 'user' | 'interrupted') => [
+  SESSION_ID,
+  { sessionId: SESSION_ID, _meta: { [PROMPT_CANCEL_REASON_META_KEY]: reason } },
+];
 
 /** A session event stream the test feeds by hand. */
 function eventFeed() {
@@ -205,7 +216,9 @@ describe('createQwenAcpAdapter', () => {
 
     controller.abort();
     await vi.waitFor(() =>
-      expect(bridge.cancelSession).toHaveBeenCalledWith(SESSION_ID),
+      expect(bridge.cancelSession).toHaveBeenCalledWith(
+        ...cancelCall('interrupted'),
+      ),
     );
     // The open question is answered `cancelled`, so the turn can wind down.
     await vi.waitFor(() =>
@@ -300,8 +313,43 @@ describe('createQwenAcpAdapter', () => {
     controller.abort();
     // The turn never reaches its terminal; the run still ends.
     await expect(result).resolves.toMatchObject({ status: 'cancelled' });
-    expect(bridge.cancelSession).toHaveBeenCalledWith(SESSION_ID);
+    expect(bridge.cancelSession).toHaveBeenCalledWith(
+      ...cancelCall('interrupted'),
+    );
   });
+
+  it.each<[string, 'user' | 'interrupted']>([
+    [USER_CANCEL_ABORT_REASON, 'user'],
+    [INTERRUPTED_PROMPT_ABORT_REASON, 'interrupted'],
+  ])(
+    "tells the bridge a run stopped by %s is not a person's stop",
+    async (reason, expected) => {
+      const { bridge, turn } = thinkingBridge();
+      const adapter = createQwenAcpAdapter({
+        bridge: bridge as unknown as QwenAcpAdapterBridge,
+        workspaceCwd: WS,
+        agentId: AGENT_ID,
+        idleCloseMs: 60_000,
+        cancelSettleMs: 300,
+        sessionExists: async () => true,
+      });
+      const controller = new AbortController();
+      const result = adapter.runTurn({
+        prompt: 'think hard',
+        nativeSessionId: SESSION_ID,
+        cwd: WS,
+        signal: controller.signal,
+        onEvent: () => {},
+        awaitPermission: () => new Promise<string>(() => {}),
+      });
+      await vi.waitFor(() => expect(turn.promptId).toBeDefined());
+      controller.abort(reason);
+      await expect(result).resolves.toMatchObject({ status: 'cancelled' });
+      expect(bridge.cancelSession).toHaveBeenCalledWith(
+        ...cancelCall(expected),
+      );
+    },
+  );
 
   it('reports the JSON-RPC error detail when the prompt fails', async () => {
     const { bridge } = thinkingBridge();

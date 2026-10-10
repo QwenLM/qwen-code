@@ -181,12 +181,15 @@ import {
   LOAD_REPLAY_VERSION,
   MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
+  PROMPT_CANCEL_REASON_META_KEY,
+  USER_CANCEL_ABORT_REASON,
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
   SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   activeWorkCloseRetryDelayMs,
+  getPromptCancelAbortReason,
   isValidTrustedModelPrompt,
   sessionCloseDrainBudgetMs,
 } from './bridgeTypes.js';
@@ -2320,6 +2323,7 @@ const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 // trigger a continuation that skips `continueLastTurn()`'s accept/reject
 // pre-check. Mirrors how `DAEMON_RETRY_META_KEY` is stripped and re-armed.
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
+const DAEMON_CONFIRM_CANCELLATION_META_KEY = 'qwen.daemon.confirmCancellation';
 /**
  * Backstop timeout for `qwen/control/session/recap`. The underlying
  * side-query is single-attempt with `maxOutputTokens: 300`, so a
@@ -3762,7 +3766,12 @@ export function createSessionControlPlane(
       'qwen-code.daemon.acp_channel.unsettled_session_count': unsettled.length,
     });
     for (const entry of unsettled) {
-      void bridgeApi.cancelSession(entry.sessionId).catch(() => undefined);
+      void bridgeApi
+        .cancelSession(entry.sessionId, {
+          sessionId: entry.sessionId,
+          _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+        })
+        .catch(() => undefined);
     }
     // Terminating the channel starts its exit check (see
     // `onChannelTerminationStart`).
@@ -4160,7 +4169,12 @@ export function createSessionControlPlane(
           entry.backgroundTurn ||
           entry.goalTurnActive
         ) {
-          void bridgeApi.cancelSession(sessionId).catch(() => undefined);
+          void bridgeApi
+            .cancelSession(sessionId, {
+              sessionId,
+              _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+            })
+            .catch(() => undefined);
         }
       }
     }
@@ -4272,9 +4286,18 @@ export function createSessionControlPlane(
     pending: PendingPromptEntry,
     notification: CancelNotification,
   ): Promise<void> => {
-    if (pending.cancelForwardInitial) {
+    const reason =
+      getPromptCancelAbortReason(notification._meta) ===
+      USER_CANCEL_ABORT_REASON
+        ? 'user'
+        : 'interrupted';
+    if (
+      pending.cancelForwardInitial &&
+      !(pending.cancelForwardReason === 'interrupted' && reason === 'user')
+    ) {
       return pending.cancelForwardInitial;
     }
+    const previousDrain = pending.cancelForwardDrain;
     const initial = (async () => {
       try {
         const extension = entry.connection
@@ -4324,13 +4347,16 @@ export function createSessionControlPlane(
       throw error;
     });
     pending.cancelForwardInitial = initial;
+    pending.cancelForwardReason = reason;
     // The same-revision extension resolves only after cancellation is handled
     // (or the target prompt has already settled). ACP-compatible custom agents
     // that do not implement it receive one standard session/cancel notification.
     // The FIFO tail awaits this promise so no extension request remains in flight
     // when prompt ownership advances, except when the prompt deadline invokes the
     // documented DAEMON-003 overlap policy.
-    pending.cancelForwardDrain = initial;
+    pending.cancelForwardDrain = previousDrain
+      ? Promise.allSettled([previousDrain, initial]).then(() => {})
+      : initial;
     void initial.catch(() => {});
     return initial;
   };
@@ -4887,7 +4913,12 @@ export function createSessionControlPlane(
           entry.workspaceChangeFence === undefined
         )
           return;
-        void bridgeApi.cancelSession(sessionId).catch(() => undefined);
+        void bridgeApi
+          .cancelSession(sessionId, {
+            sessionId,
+            _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+          })
+          .catch(() => undefined);
       },
     );
     const connection = harness.createConnection(client, channel);
@@ -6918,6 +6949,7 @@ export function createSessionControlPlane(
       throwOnFailure?: boolean;
       requireFlush?: boolean;
       timeoutMs?: number;
+      cancelReason?: 'user';
     },
   ): Promise<boolean> => {
     if (!ci || ci.channel !== entry.channel) {
@@ -6941,6 +6973,7 @@ export function createSessionControlPlane(
             opts?.timeoutMs ?? initTimeoutMs,
           ),
           ...(opts?.requireFlush === true ? { requireFlush: true } : {}),
+          ...(opts?.cancelReason ? { cancelReason: opts.cancelReason } : {}),
         },
       );
       const observedCloseRequest = opts?.timeoutMs
@@ -9556,6 +9589,10 @@ export function createSessionControlPlane(
         {
           throwOnFailure: true,
           requireFlush: closeOpts?.requireAgentClose === true,
+          cancelReason:
+            closeOpts?.cause === 'workspace_runtime_stop'
+              ? undefined
+              : closeOpts?.cancelReason,
           ...(closeOpts?.agentCloseTimeoutMs !== undefined
             ? { timeoutMs: closeOpts.agentCloseTimeoutMs }
             : {}),
@@ -11329,6 +11366,7 @@ export function createSessionControlPlane(
                   // only `continueSession` (via the trusted `isContinue` flag
                   // below) re-arms it after this strip.
                   delete meta[DAEMON_CONTINUE_META_KEY];
+                  delete meta[DAEMON_CONFIRM_CANCELLATION_META_KEY];
                   delete meta[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY];
                   delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
                   delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
@@ -11365,6 +11403,9 @@ export function createSessionControlPlane(
                   }
                   if (isContinue) {
                     meta[DAEMON_CONTINUE_META_KEY] = true;
+                    if (typeof context?.confirmCancellation === 'string')
+                      meta[DAEMON_CONFIRM_CANCELLATION_META_KEY] =
+                        context.confirmCancellation;
                   }
                   if (isRestoreAskUserQuestion) {
                     meta[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] = true;
@@ -11599,6 +11640,13 @@ export function createSessionControlPlane(
                   if (byId.get(sessionId) === entry) {
                     void forwardRunningPromptCancel(entry, pendingEntry, {
                       sessionId,
+                      _meta: {
+                        [PROMPT_CANCEL_REASON_META_KEY]:
+                          abortSignal.reason === USER_CANCEL_ABORT_REASON ||
+                          pendingEntry.userCancelRequested
+                            ? 'user'
+                            : 'interrupted',
+                      },
                     }).catch((err) => {
                       writeStderrLine(
                         `[pending-prompt] cancel forward failed after removePendingPrompt session=${sessionId}: ${extractErrorMessage(err)}`,
@@ -11815,11 +11863,20 @@ export function createSessionControlPlane(
               entry.activePromptId === runningPrompt.promptId
                 ? forwardRunningPromptCancel(entry, runningPrompt, notif)
                 : Promise.resolve();
+            // The abort reason, not `notif`, is what `onAbort` translates back
+            // into forwarded cancel metadata, so a cancel that lands before
+            // dispatch (gate false, no direct forward) must still carry the
+            // caller-declared provenance instead of being re-labelled 'user'.
+            // A user cancel after an earlier interruption cannot rewrite that
+            // immutable reason, so it is latched on the entry for `onAbort`.
+            if (
+              getPromptCancelAbortReason(notif._meta) ===
+              USER_CANCEL_ABORT_REASON
+            ) {
+              runningPrompt.userCancelRequested = true;
+            }
             runningPrompt.abortController.abort(
-              new DOMException(
-                'Prompt cancelled before dispatch',
-                'AbortError',
-              ),
+              getPromptCancelAbortReason(notif._meta),
             );
             await forwarding;
             return;
@@ -13824,7 +13881,14 @@ export function createSessionControlPlane(
       const decision = await requestSessionStatus<{
         accepted: boolean;
         interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
-      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionContinue);
+        cancellationConfirmationId?: string;
+      }>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionContinue,
+        typeof context?.confirmCancellation === 'string'
+          ? { confirmCancellation: context.confirmCancellation }
+          : undefined,
+      );
 
       if (!decision.accepted) {
         return decision;
@@ -13878,6 +13942,9 @@ export function createSessionControlPlane(
             : {}),
           ...(promptId !== undefined ? { promptId } : {}),
           continue: true,
+          ...(typeof context?.confirmCancellation === 'string'
+            ? { confirmCancellation: context.confirmCancellation }
+            : {}),
         },
       );
       promptPromise.catch((err) => {
@@ -14707,9 +14774,22 @@ export function createSessionControlPlane(
       // Abort the prompt: for 'queued' prompts the FIFO will skip
       // dispatch on the `signal.aborted` check; for 'running' prompts
       // this triggers the cancel path.
-      target.abortController.abort(
-        new DOMException('Prompt removed by user', 'AbortError'),
-      );
+      target.userCancelRequested = true;
+      if (
+        target.abortController.signal.aborted &&
+        target.dispatched === true &&
+        entry.activePromptId === target.promptId
+      ) {
+        void forwardRunningPromptCancel(entry, target, {
+          sessionId,
+          _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'user' },
+        }).catch((err) => {
+          writeStderrLine(
+            `[pending-prompt] cancel upgrade failed after removePendingPrompt session=${sessionId}: ${extractErrorMessage(err)}`,
+          );
+        });
+      }
+      target.abortController.abort(USER_CANCEL_ABORT_REASON);
       if (target.state === 'queued') {
         // A queued prompt never dispatches once aborted — safe to drop
         // from the list immediately.

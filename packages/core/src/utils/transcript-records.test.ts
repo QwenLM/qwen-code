@@ -497,6 +497,7 @@ describe('validateTranscriptRecord', () => {
     code_mode_tool_result: true,
     realtime_message: true,
     turn_result: true,
+    turn_attempt: true,
     managed_session_header_v1: true,
     managed_session_event_v1: true,
     managed_session_commit_v1: true,

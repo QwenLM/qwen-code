@@ -273,6 +273,16 @@ import {
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
+  getLastApiHistoryPromptId,
+  restoreApiHistoryPromptIds,
+} from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import {
+  isTodoStopGuardPromptText,
+  TODO_STOP_GUARD_PROMPT_PREFIX,
+  TODO_STOP_GUARD_PROMPT_BODY_SUFFIX,
+  TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX,
+} from '@qwen-code/qwen-code-core/services/api-user-prompt.js';
+import {
   CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
@@ -306,6 +316,8 @@ import {
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+  USER_CANCEL_ABORT_REASON,
+  INTERRUPTED_PROMPT_ABORT_REASON,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
 import {
@@ -490,7 +502,6 @@ const debugLogger = createDebugLogger('SESSION');
 const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
 /** Idempotency keys `appendExternalRecord` remembers (oldest dropped first). */
 const MAX_EXTERNAL_RECORD_KEYS = 1_024;
-const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
 const GOAL_HELD_RECOVERY_COMMANDS =
@@ -559,37 +570,6 @@ function readDaemonInputAnnotations(
   );
   return annotations.length > 0 ? structuredClone(annotations) : undefined;
 }
-const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
-const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
-  ' todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
-const TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX =
-  ' This is the final automatic continuation. Before ending, either complete/update the todos or report the completed progress and the exact blocker.';
-// Content has no private metadata slot, so history cleanup recognizes only
-// these exact templates; byte-identical user text is intentionally ambiguous.
-function isTodoStopGuardPromptText(text: unknown): text is string {
-  if (typeof text !== 'string') return false;
-  if (!text.startsWith(TODO_STOP_GUARD_PROMPT_PREFIX)) return false;
-
-  const remainder = text.slice(TODO_STOP_GUARD_PROMPT_PREFIX.length);
-  const separator = remainder.indexOf(' ');
-  if (separator <= 0) return false;
-  const countText = remainder.slice(0, separator);
-  const count = Number(countText);
-  if (
-    !Number.isSafeInteger(count) ||
-    count <= 0 ||
-    String(count) !== countText
-  ) {
-    return false;
-  }
-
-  const body = `${countText}${TODO_STOP_GUARD_PROMPT_BODY_SUFFIX}`;
-  return (
-    remainder === body ||
-    remainder === body + TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX
-  );
-}
-
 /**
  * ACP rewind's binding of the shared user-prompt classifier
  * (`isApiUserPrompt` in core). The three deltas from the TUI binding are
@@ -1709,6 +1689,11 @@ interface AgentResponseCapture {
   turnResult?: {
     finalText: string;
   };
+  /**
+   * Persists a restore prompt's turn attempt once the restore no-op bail has
+   * re-checked history, so a restore that runs nothing writes no attempt.
+   */
+  restoreTurnAttempt?: () => Promise<void>;
   agentOutput: AgentOutputMessageCapture;
 }
 
@@ -2191,6 +2176,12 @@ function isCallerCausedModelRefusal(error: Error): boolean {
 export class Session implements SessionContext {
   private readonly mcpAppCalls = new Map<string, AbortController>();
   private pendingPrompt: AbortController | null = null;
+  private readonly userPromptCancellations = new WeakMap<AbortSignal, number>();
+  /** Turn signal -> the admission signal whose abort it copied. */
+  private readonly promptCancellationSources = new WeakMap<
+    AbortSignal,
+    AbortSignal
+  >();
   private activeGoalProposalTurn?: AgentResponseCapture['goalProposalTurn'];
   /**
    * Tracks the completion of the current prompt so that the next prompt
@@ -2319,6 +2310,7 @@ export class Session implements SessionContext {
   // on a session whose registries are already unregistered.
   private disposed = false;
   private closing = false;
+  private closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
   private historyMutationActive = false;
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
@@ -2968,7 +2960,9 @@ export class Session implements SessionContext {
         const pauseReason =
           turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
             ? GOAL_PAUSE_REASON_SESSION_DISPOSED
-            : turn.controller.signal.reason === USER_CANCEL_ABORT_REASON
+            : turn.controller.signal.reason === USER_CANCEL_ABORT_REASON ||
+                turn.controller.signal.reason ===
+                  INTERRUPTED_PROMPT_ABORT_REASON
               ? GOAL_PAUSE_REASON_USER_INTERRUPT
               : managedSessionBlock
                 ? GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED
@@ -3016,9 +3010,10 @@ export class Session implements SessionContext {
           }`,
         );
       }
-      const cancelledByUser =
+      const cancelledTurn =
         result?.stopReason === 'cancelled' &&
-        turn.controller.signal.reason === USER_CANCEL_ABORT_REASON;
+        (turn.controller.signal.reason === USER_CANCEL_ABORT_REASON ||
+          turn.controller.signal.reason === INTERRUPTED_PROMPT_ABORT_REASON);
       // A turn preempted by a newly arrived user prompt is a handoff, not a
       // failure. `this.pendingPrompt` is the goal turn's own controller while
       // a goal turn is in flight, so a new prompt aborts it with
@@ -3036,7 +3031,7 @@ export class Session implements SessionContext {
       // update and the card, with no test able to see it.
       const pauseReason = supersededByNewPrompt
         ? undefined
-        : cancelledByUser
+        : cancelledTurn
           ? GOAL_PAUSE_REASON_USER_INTERRUPT
           : result?.stopReason === 'max_tokens'
             ? GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT
@@ -4571,7 +4566,7 @@ export class Session implements SessionContext {
     };
   }
 
-  beginClose(): () => void {
+  beginClose(cancelReason?: 'user'): () => void {
     if (this.closing) {
       throw RequestError.invalidParams(
         undefined,
@@ -4579,6 +4574,10 @@ export class Session implements SessionContext {
       );
     }
     this.closing = true;
+    this.closeAbortReason =
+      cancelReason === 'user'
+        ? USER_CANCEL_ABORT_REASON
+        : SESSION_DISPOSE_ABORT_REASON;
 
     let resolveGate!: () => void;
     const completion = new Promise<void>((resolve) => {
@@ -4597,6 +4596,7 @@ export class Session implements SessionContext {
       resolveGate();
       if (this.disposed) return;
       this.closing = false;
+      this.closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
       void this.#drainGoalQueue();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
@@ -4957,7 +4957,10 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config.getLlmClient()!.setHistory(structuredClone(history));
+    const client = this.config.getLlmClient()!;
+    const restored = structuredClone(history);
+    restoreApiHistoryPromptIds(client.getChat().getHistoryShallow(), restored);
+    client.setHistory(restored);
     this.clearActiveTodoPlanRevision();
     // Restoring history discards the timeline the active-todo reminder
     // described: clear the chain head so the next turn starts fresh instead
@@ -4977,7 +4980,44 @@ export class Session implements SessionContext {
     );
   }
 
-  async cancelPendingPrompt(): Promise<void> {
+  #classifyPromptCancelAbortReason(requestedReason: string): string {
+    if (this.disposed) return SESSION_DISPOSE_ABORT_REASON;
+    return this.closing ? this.closeAbortReason : requestedReason;
+  }
+
+  cancelPromptAdmission(
+    controller: AbortController,
+    requestedReason: string,
+  ): void {
+    const reason = this.#classifyPromptCancelAbortReason(requestedReason);
+    // AbortSignal.reason cannot change once aborted; retain later human intent
+    // on this admission only, without transferring it to another prompt.
+    if (
+      reason === USER_CANCEL_ABORT_REASON &&
+      !this.userPromptCancellations.has(controller.signal)
+    ) {
+      this.userPromptCancellations.set(controller.signal, Date.now());
+    }
+    controller.abort(reason);
+  }
+
+  #isUserPromptCancellation(signal?: AbortSignal): boolean {
+    if (signal === undefined) return false;
+    if (
+      signal.reason === USER_CANCEL_ABORT_REASON ||
+      this.userPromptCancellations.has(signal)
+    ) {
+      return true;
+    }
+    // A user cancel that upgrades an already-aborted admission lands only on
+    // the admission signal; the turn signal copied its first reason.
+    const source = this.promptCancellationSources.get(signal);
+    return source !== undefined && this.#isUserPromptCancellation(source);
+  }
+
+  async cancelPendingPrompt(
+    requestedAbortReason: string = USER_CANCEL_ABORT_REASON,
+  ): Promise<void> {
     const hadPrompt = !!this.pendingPrompt;
     const hadCron = !!this.cronAbortController;
     const hadNotification =
@@ -5003,9 +5043,7 @@ export class Session implements SessionContext {
 
     this.todoStopGuard.suspend();
     const abortReason =
-      this.closing || this.disposed
-        ? SESSION_DISPOSE_ABORT_REASON
-        : USER_CANCEL_ABORT_REASON;
+      this.#classifyPromptCancelAbortReason(requestedAbortReason);
     for (const capture of this.channelTaskCaptures) {
       capture.controller.abort(abortReason);
     }
@@ -5115,7 +5153,15 @@ export class Session implements SessionContext {
         : undefined;
     if (channelTask) this.channelTaskCaptures.add(channelTask);
     const recordAdmissionCancellation = () => {
-      if (turnRecording) turnRecording.cancelledAt ??= Date.now();
+      if (
+        turnRecording &&
+        this.#isUserPromptCancellation(admissionCancellation)
+      ) {
+        turnRecording.cancelledAt ??= admissionCancellation
+          ? (this.userPromptCancellations.get(admissionCancellation) ??
+            Date.now())
+          : Date.now();
+      }
     };
     admissionCancellation?.addEventListener(
       'abort',
@@ -5138,6 +5184,7 @@ export class Session implements SessionContext {
       if (channelTask && result.stopReason === 'end_turn') {
         result = await this.#waitForChannelTaskResult(channelTask, result);
       }
+      recordAdmissionCancellation();
       await this.#settleTurnRecording(
         result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
         turnRecording,
@@ -5145,13 +5192,16 @@ export class Session implements SessionContext {
       );
       return result;
     } catch (error) {
+      recordAdmissionCancellation();
       const pendingSend = turnRecording?.abortController;
       const abortReason =
         pendingSend?.signal.aborted === true
           ? pendingSend.signal.reason
           : undefined;
       // Mirror the send-loop's controlled-cancellation contract: explicit
-      // user cancels and session disposal settle as `cancelled`. A
+      // user cancels, a forwarded infrastructure interruption (response
+      // close, prompt deadline, teardown) and session disposal settle as
+      // `cancelled`. A
       // successor-prompt abort does so only when the thrown error is the
       // abort itself; the send loop deliberately excludes NEW_PROMPT from
       // controlled cancellation so infrastructure failures are not hidden
@@ -5165,8 +5215,13 @@ export class Session implements SessionContext {
           MANAGED_RUNTIME_OUTCOME_UNKNOWN;
       const controlledAbort =
         !managedOutcomeUnknown &&
-        (abortReason === USER_CANCEL_ABORT_REASON ||
+        ((this.closing &&
+          admissionCancellation?.aborted === true &&
+          (this.#isUserPromptCancellation(admissionCancellation) ||
+            admissionCancellation.reason === SESSION_DISPOSE_ABORT_REASON)) ||
+          abortReason === USER_CANCEL_ABORT_REASON ||
           abortReason === SESSION_DISPOSE_ABORT_REASON ||
+          abortReason === INTERRUPTED_PROMPT_ABORT_REASON ||
           (abortReason === NEW_PROMPT_ABORT_REASON &&
             this.#isAbortError(error)));
       if (controlledAbort) {
@@ -5313,6 +5368,16 @@ export class Session implements SessionContext {
       );
     }
     await this.assertCanStartTurn();
+    const recordsRetryAttempt =
+      (params as { retry?: boolean }).retry === true ||
+      params._meta?.[DAEMON_RETRY_META_KEY] === true ||
+      params._meta?.[DAEMON_CONTINUE_META_KEY] === true;
+    if (invocationContext?.promptId && recordsRetryAttempt) {
+      await turnRecording?.recordingService?.recordTurnAttempt(
+        getLastApiHistoryPromptId(this.#getCurrentChat().getHistoryShallow()),
+        invocationContext.promptId,
+      );
+    }
     if (
       this.liveScreenContextTool ||
       this.liveTaskTools.length > 0 ||
@@ -5390,7 +5455,15 @@ export class Session implements SessionContext {
     pendingSend.signal.addEventListener('abort', recordCancellation, {
       once: true,
     });
-    const cancelPendingSend = () => pendingSend.abort(USER_CANCEL_ABORT_REASON);
+    const cancelPendingSend = () => {
+      if (admissionCancellation && !pendingSend.signal.aborted) {
+        this.promptCancellationSources.set(
+          pendingSend.signal,
+          admissionCancellation,
+        );
+      }
+      pendingSend.abort(admissionCancellation?.reason);
+    };
     if (admissionCancellation) {
       admissionCancellation.addEventListener('abort', cancelPendingSend, {
         once: true,
@@ -5548,6 +5621,22 @@ export class Session implements SessionContext {
       ...(turnRecording ? { turnResult: turnRecording.finalAnswer } : {}),
       agentOutput: new AgentOutputMessageCapture(this.config),
     };
+    const restoreAttemptPromptId = invocationContext?.promptId;
+    const restoreAttemptRecorder = turnRecording?.recordingService;
+    if (
+      restoreAttemptPromptId &&
+      restoreAttemptRecorder &&
+      !recordsRetryAttempt
+    ) {
+      // Written after #executePromptInner's restore no-op bail, which is
+      // where the restorable-question check is no longer racing history.
+      responseCapture.restoreTurnAttempt = async () => {
+        await restoreAttemptRecorder.recordTurnAttempt(
+          getLastApiHistoryPromptId(this.#getCurrentChat().getHistoryShallow()),
+          restoreAttemptPromptId,
+        );
+      };
+    }
     // One server-side channel classification, consumed by both the
     // rejection gate below and the guard-mode selection in
     // #executePromptInner. Only the authenticated channel-prompt marker
@@ -5567,8 +5656,33 @@ export class Session implements SessionContext {
     let rejectedByLoopProtection = false;
     let promptResult: PromptResponse | undefined;
     let promptFailureMessage: string | undefined;
+    let bindCancelledHistory: (() => void) | undefined;
     if (turnRecording) turnRecording.startedAt = Date.now();
     try {
+      const recoveryCompletion = this.pendingPromptCompletion;
+      const recoverySessionId = this.config.getSessionId();
+      const recoveryChat = this.#getCurrentChat();
+      const recoveryUserPushCount = recoveryChat.getUserContentPushCount?.();
+      let cancelledHistoryBound = false;
+      bindCancelledHistory = () => {
+        const currentChat = this.#getCurrentChat();
+        const baselinePushCount =
+          currentChat === recoveryChat ? recoveryUserPushCount : 0;
+        // Cancellation clears pendingPrompt; its completion still owns the history.
+        if (
+          !cancelledHistoryBound &&
+          this.pendingPromptCompletion === recoveryCompletion &&
+          (this.#isUserPromptCancellation(pendingSend.signal) ||
+            this.#isUserPromptCancellation(admissionCancellation)) &&
+          !this.config.getManagedSessionBlock?.() &&
+          recoverySessionId === this.config.getSessionId() &&
+          baselinePushCount !== undefined &&
+          currentChat.getUserContentPushCount() > baselinePushCount
+        ) {
+          cancelledHistoryBound = true;
+          currentChat.markLastTurnCancelled?.();
+        }
+      };
       const reasoningMeta = (params as { _meta?: Record<string, unknown> })
         ._meta;
       if (
@@ -5637,6 +5751,7 @@ export class Session implements SessionContext {
           proposalTurn.settlementBlocked !== true;
       }
       await this.#settleGoalProposal(responseCapture);
+      bindCancelledHistory();
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
@@ -5703,6 +5818,7 @@ export class Session implements SessionContext {
         }
       }
       const stillOwnsPendingPrompt = this.pendingPrompt === pendingSend;
+      bindCancelledHistory?.();
       releasePendingSend();
       const shouldDrainAutomaticQueues =
         // Loop-detected turns resolved end_turn (and drained) before loop
@@ -5774,6 +5890,9 @@ export class Session implements SessionContext {
     return buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
+      cancelledLastTurn: chat.isLastTurnCancelled?.(),
+      cancellationConfirmationId:
+        chat.getLastTurnCancellationConfirmationId?.(),
       apiHistory: fullHistory
         ? chat.getHistory()
         : (chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
@@ -5804,6 +5923,11 @@ export class Session implements SessionContext {
     // task capture is queued for no admission-side reason.
     return {
       kind: recoveryPlan?.kind ?? 'clean',
+      ...(recoveryPlan?.cancellationConfirmationId
+        ? {
+            cancellationConfirmationId: recoveryPlan.cancellationConfirmationId,
+          }
+        : {}),
       canContinue:
         recoveryPlan?.canContinue === true &&
         !this.closing &&
@@ -5824,9 +5948,10 @@ export class Session implements SessionContext {
    * tracked like any other prompt; `prompt()` then re-detects/strips
    * authoritatively. Powers `qwen/control/session/continue`.
    */
-  async continueLastTurn(): Promise<{
+  async continueLastTurn(confirmCancellation?: string): Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+    cancellationConfirmationId?: string;
   }> {
     const recovery = this.getRecoveryStatus();
     if (!recovery.canContinue && recovery.kind !== 'clean') {
@@ -5858,7 +5983,13 @@ export class Session implements SessionContext {
       });
     }
     return {
-      accepted: recovery.canContinue,
+      accepted:
+        recovery.canContinue &&
+        confirmCancellation === recovery.cancellationConfirmationId,
+      ...(recovery.cancellationConfirmationId &&
+      confirmCancellation !== recovery.cancellationConfirmationId
+        ? { cancellationConfirmationId: recovery.cancellationConfirmationId }
+        : {}),
       interruption:
         recovery.kind === 'interrupted_prompt' ||
         recovery.kind === 'interrupted_turn'
@@ -6236,6 +6367,11 @@ export class Session implements SessionContext {
               (params as { _meta?: Record<string, unknown> })._meta?.[
                 DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY
               ] === true;
+            const continuedPromptId = continuesCurrentWorkChain
+              ? getLastApiHistoryPromptId(
+                  this.#getCurrentChat().getHistoryShallow(),
+                )
+              : undefined;
             if (
               isRestoreAskUserQuestion &&
               !findRestorableAskUserQuestion(
@@ -6249,6 +6385,11 @@ export class Session implements SessionContext {
               // snapshots, `conversation_finished` — so each such no-op
               // restore doesn't persist phantom records.
               return { stopReason: 'end_turn' };
+            }
+            if (isRestoreAskUserQuestion) {
+              // A resumed attempt must supersede an old cancellation before
+              // model execution; a failed write rejects the prompt.
+              await responseCapture.restoreTurnAttempt?.();
             }
             if (
               !isRetry &&
@@ -6291,7 +6432,11 @@ export class Session implements SessionContext {
               );
             } else if (isContinue) {
               const recoveryPlan = this.#getRecoveryPlan(true);
-              if (!recoveryPlan?.continuation) {
+              if (
+                !recoveryPlan?.continuation ||
+                promptMetadata?.['qwen.daemon.confirmCancellation'] !==
+                  recoveryPlan.cancellationConfirmationId
+              ) {
                 // History moved between continueLastTurn()'s accept and this
                 // re-detection (e.g. a concurrent turn settled it). Nothing to
                 // continue; log so an abandoned continuation is diagnosable.
@@ -6901,7 +7046,11 @@ export class Session implements SessionContext {
                 turnCount++;
                 if (pendingSend.signal.aborted) {
                   this.todoStopGuard.suspend();
-                  this.#getCurrentChat().addHistory(nextMessage);
+                  const chat = this.#getCurrentChat();
+                  chat.addHistory(nextMessage);
+                  if (this.#isUserPromptCancellation(pendingSend.signal)) {
+                    chat.markLastTurnCancelled?.();
+                  }
                   if (restorePostAnswerNoticesAttached) {
                     this.#clearPendingRestoreNotices();
                   }
@@ -6952,6 +7101,16 @@ export class Session implements SessionContext {
                       pendingSend.signal,
                       {
                         modelOverride: fullTurnModelOverride,
+                        historyPromptId:
+                          turnCount === 1 &&
+                          goalTurn?.origin !== 'runtime' &&
+                          !nextMessage?.parts?.some(
+                            (part) => part.functionResponse,
+                          )
+                            ? continuesCurrentWorkChain
+                              ? continuedPromptId
+                              : promptId
+                            : undefined,
                         consumeInitialMemory:
                           isFreshUserTurn && turnCount === 1,
                       },
@@ -7103,13 +7262,16 @@ export class Session implements SessionContext {
                   }
 
                   // Explicit user cancellation and session disposal are
-                  // controlled aborts. Other AbortErrors still surface so
+                  // controlled aborts, and so is the bridge's forwarded
+                  // interruption token. Other AbortErrors still surface so
                   // infrastructure failures are not hidden as cancellations.
                   const isControlledCancellation =
                     pendingSend.signal.aborted &&
                     (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
                       pendingSend.signal.reason ===
-                        SESSION_DISPOSE_ABORT_REASON);
+                        SESSION_DISPOSE_ABORT_REASON ||
+                      pendingSend.signal.reason ===
+                        INTERRUPTED_PROMPT_ABORT_REASON);
                   if (isControlledCancellation) {
                     this.todoStopGuard.suspend();
                     return { stopReason: 'cancelled' };
@@ -8244,7 +8406,8 @@ export class Session implements SessionContext {
         const isControlledCancellation =
           pendingSend.signal.aborted &&
           (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
-            pendingSend.signal.reason === SESSION_DISPOSE_ABORT_REASON);
+            pendingSend.signal.reason === SESSION_DISPOSE_ABORT_REASON ||
+            pendingSend.signal.reason === INTERRUPTED_PROMPT_ABORT_REASON);
         if (isControlledCancellation) {
           this.todoStopGuard.suspend();
           return {
@@ -8712,15 +8875,14 @@ export class Session implements SessionContext {
     if (recording === null) return;
     const cancelledAt =
       state === 'cancelled' ? recording.cancelledAt : undefined;
-    if (cancelledAt !== undefined && response) {
+    const noticeAt =
+      state === 'cancelled' ? (cancelledAt ?? Date.now()) : undefined;
+    if (noticeAt !== undefined && response) {
       response._meta = {
         ...response._meta,
         'qwen.promptCancelled': {
-          cancelledAt,
-          elapsedMs: Math.max(
-            0,
-            cancelledAt - (recording.startedAt ?? cancelledAt),
-          ),
+          cancelledAt: noticeAt,
+          elapsedMs: Math.max(0, noticeAt - (recording.startedAt ?? noticeAt)),
         },
       };
     }
@@ -8735,7 +8897,9 @@ export class Session implements SessionContext {
       ...(recording.startedAt !== undefined
         ? { startedAt: recording.startedAt }
         : {}),
-      ...(cancelledAt !== undefined ? { cancelledAt } : {}),
+      ...(cancelledAt !== undefined
+        ? { cancelledAt, cancelReason: 'user' as const }
+        : {}),
       endedAt: Date.now(),
       promptText: recording.promptText,
       ...(recording.promptTextTruncated ? { promptTextTruncated: true } : {}),
@@ -8752,7 +8916,7 @@ export class Session implements SessionContext {
     };
     try {
       recording.recordingService?.recordTurnResult(payload);
-      if (cancelledAt !== undefined) {
+      if (state === 'cancelled') {
         await recording.recordingService?.flush();
       }
     } catch (recordError) {
@@ -8826,6 +8990,7 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     options: {
       skipCompression?: boolean;
+      historyPromptId?: string;
       modelOverride?: string;
       getModelOverride?: () => string | undefined;
       prepareBeforeCompression?: () => Promise<BeforeModelSendDecision>;
@@ -9009,9 +9174,14 @@ export class Session implements SessionContext {
     const goalPermit = goalTurnContext.getStore();
     let sourceStream: AsyncGenerator<StreamEvent>;
     try {
-      sourceStream = goalPermit
-        ? await chat.sendMessageStream(model, request, promptId, goalPermit)
-        : await chat.sendMessageStream(model, request, promptId);
+      sourceStream =
+        options.historyPromptId !== undefined
+          ? await chat.sendMessageStream(model, request, promptId, goalPermit, {
+              promptId: options.historyPromptId,
+            })
+          : goalPermit
+            ? await chat.sendMessageStream(model, request, promptId, goalPermit)
+            : await chat.sendMessageStream(model, request, promptId);
     } catch (error) {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
       throw error;

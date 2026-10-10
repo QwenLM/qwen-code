@@ -54,13 +54,43 @@ describe('projectChatRecordsToDaemonTranscript', () => {
     });
   });
 
+  it('restores an interrupted terminal marker without changing persisted provenance', () => {
+    const records = [
+      record('cancel-1', null, {
+        type: 'system',
+        subtype: 'turn_result',
+        message: undefined,
+        systemPayload: {
+          promptId: 'p1',
+          state: 'cancelled',
+          startedAt: 1000,
+          endedAt: 3000,
+        },
+      }),
+    ];
+    const persisted = structuredClone(records);
+
+    const projection = projectChatRecordsToDaemonTranscript(records);
+
+    expect(projection.complete).toBe(true);
+    expect(projection.blocks).toHaveLength(1);
+    expect(projection.blocks[0]).toMatchObject({
+      kind: 'prompt_cancelled',
+      promptId: 'p1',
+      elapsedMs: 2000,
+      serverTimestamp: 3000,
+      sourceRecordIds: ['cancel-1'],
+    });
+    expect(records).toEqual(persisted);
+  });
+
   it.each([
     { state: 'completed', cancelledAt: 2000 },
     { state: 'error', cancelledAt: 2000 },
-    { state: 'cancelled' },
+    { state: 'cancelled', endedAt: '3000' },
     { state: 'cancelled', cancelledAt: '2000' },
     { state: 'cancelled', cancelledAt: 2000, startedAt: '1000' },
-  ])('does not invent a user cancellation for %j', (payload) => {
+  ])('ignores non-cancelled or malformed terminal metadata %j', (payload) => {
     const projection = projectChatRecordsToDaemonTranscript([
       record('cancel-1', null, {
         type: 'system',

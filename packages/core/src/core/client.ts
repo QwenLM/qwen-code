@@ -631,6 +631,12 @@ export class LlmClient {
       await this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
       const chat = this.getChat();
       chat.setCompletedToolCallIds(restoreRuntime.completedToolCallIds);
+      if (restoreRuntime.cancelledLastTurn) chat.markLastTurnCancelled();
+      else if (restoreRuntime.cancellationConfirmationId)
+        chat.markLastTurnCancelled(
+          'unknown',
+          restoreRuntime.cancellationConfirmationId,
+        );
       if (restoreRuntime.resumeTokenCounts) {
         const counts = restoreRuntime.resumeTokenCounts;
         uiTelemetryService.setLastPromptTokenCount(counts.promptTokenCount);
@@ -661,6 +667,12 @@ export class LlmClient {
       await this.restoreLoadedSkillsFromHistory(resumedHistory);
       const chat = this.getChat();
       chat.setCompletedToolCallIds(restored.completedToolCallIds);
+      if (restored.cancelledLastTurn) chat.markLastTurnCancelled();
+      else if (restored.cancellationConfirmationId)
+        chat.markLastTurnCancelled(
+          'unknown',
+          restored.cancellationConfirmationId,
+        );
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
           resumeTokenCounts.promptTokenCount,
@@ -2043,10 +2055,17 @@ export class LlmClient {
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
-    this.getChat().setHistory(
+    const chat = this.getChat();
+    const cancellationReason =
+      chat.getLastTurnCancellationReason?.() ??
+      (chat.isLastTurnCancelled() ? 'user' : undefined);
+    const confirmationId = chat.getLastTurnCancellationConfirmationId?.();
+    chat.setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
-      this.getChat().getCompletedToolCallIds(),
+      chat.getCompletedToolCallIds(),
     );
+    if (cancellationReason)
+      chat.markLastTurnCancelled(cancellationReason, confirmationId);
   }
 
   /**
@@ -5806,6 +5825,13 @@ export class LlmClient {
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
     const previousChat = this.getChat();
+    // Capture before tryCompress: its setHistory clears the per-instance
+    // basis, and the swap below starts a fresh chat without one.
+    const cancellationReason =
+      previousChat.getLastTurnCancellationReason?.() ??
+      (previousChat.isLastTurnCancelled?.() ? 'user' : undefined);
+    const cancellationConfirmationId =
+      previousChat.getLastTurnCancellationConfirmationId?.();
     const info = await previousChat.tryCompress(
       prompt_id,
       force,
@@ -5816,6 +5842,15 @@ export class LlmClient {
       const compressedHistory =
         previousChat.getHistoryShallow?.() ?? previousChat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
+      // The cancellation basis is per-instance and does not ride along with
+      // the shared history (a new chat starts unmarked); carry it across
+      // the swap like refreshStartupContextReminder does.
+      if (cancellationReason) {
+        this.getChat().markLastTurnCancelled(
+          cancellationReason,
+          cancellationConfirmationId,
+        );
+      }
       this.getChat().setCompletedToolCallIds(
         previousChat.getCompletedToolCallIds(),
       );

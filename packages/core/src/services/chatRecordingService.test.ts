@@ -1610,6 +1610,17 @@ describe('ChatRecordingService', () => {
       ).toBe(valid);
     });
 
+    it('requires a cancelled outcome and timestamp for explicit user intent', () => {
+      const cancelled = { state: 'cancelled', cancelledAt: 0 };
+      expect(isValid(cancelled)).toBe(true);
+      expect(isValid({ ...cancelled, cancelReason: 'user' })).toBe(true);
+      expect(isValid({ ...cancelled, cancelReason: 'interrupted' })).toBe(
+        false,
+      );
+      expect(isValid({ cancelReason: 'user', cancelledAt: 0 })).toBe(false);
+      expect(isValid({ state: 'cancelled', cancelReason: 'user' })).toBe(false);
+    });
+
     it('caps promptId, stopReason, and originatorClientId in turn_result payloads', () => {
       const oversized = 'x'.repeat(TURN_RESULT_IDENTIFIER_MAX_CHARS + 1);
       expect(isValid({ promptId: oversized })).toBe(false);
@@ -1651,6 +1662,23 @@ describe('ChatRecordingService', () => {
       expect(record.type).toBe('system');
       expect(record.subtype).toBe('turn_result');
       expect(record.systemPayload).toEqual(payload);
+    });
+
+    it('persists a resumed turn attempt without duplicating its user message', async () => {
+      user('retry me', undefined, undefined, 'client-1', 'daemon-1');
+      await svc.recordTurnAttempt('client-1', 'daemon-2');
+      const [original, attempt] = await flushedAll();
+      expect(attempt).toMatchObject({
+        type: 'system',
+        subtype: 'turn_attempt',
+        parentUuid: original.uuid,
+        promptId: 'client-1',
+        daemonPromptId: 'daemon-2',
+      });
+      expect(attempt.message).toBeUndefined();
+      expect(writes().filter((record) => record.type === 'user')).toHaveLength(
+        1,
+      );
     });
 
     it('refuses to append payloads the bounded contract rejects', async () => {

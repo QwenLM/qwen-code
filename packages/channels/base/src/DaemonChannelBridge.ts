@@ -69,7 +69,7 @@ export interface DaemonChannelSessionClient {
     resume?: boolean;
   }): AsyncGenerator<DaemonChannelEvent>;
   detach?(): Promise<void>;
-  cancel(): Promise<void>;
+  cancel(options?: { cancelReason?: 'user' | 'interrupted' }): Promise<void>;
   setModel(modelId: string): Promise<Record<string, unknown>>;
   respondToPermission(
     requestId: string,
@@ -607,6 +607,16 @@ export class DaemonChannelBridge
     let rollbackUploadedAttachments = false;
     const uploadAttachment = session.uploadAttachment?.bind(session);
     const removeAttachment = session.removeAttachment?.bind(session);
+    // The signal reason is a provenance string for the daemon; the session
+    // client rejects with it verbatim, but callers above still classify and
+    // render the AbortError a bare abort() produced. Shared by the upload and
+    // prompt legs so the two cannot drift.
+    const asAbortError = (error: unknown): unknown =>
+      controller.signal.aborted &&
+      typeof error === 'string' &&
+      error === controller.signal.reason
+        ? new DOMException('This operation was aborted', 'AbortError')
+        : error;
 
     try {
       const prompt: Array<Record<string, unknown>> = [];
@@ -668,7 +678,7 @@ export class DaemonChannelBridge
           }
         } catch (error) {
           rollbackUploadedAttachments = true;
-          throw error;
+          throw asAbortError(error);
         }
       } else {
         // Daemons without `session_attachments` take images inline.
@@ -704,7 +714,7 @@ export class DaemonChannelBridge
       prompt.push({ type: 'text', text });
       if (controller.signal.aborted) {
         rollbackUploadedAttachments = true;
-        controller.signal.throwIfAborted();
+        throw new DOMException('aborted', 'AbortError');
       }
       // Always presented: the daemon validates it for the channel-turn
       // classification as well as the display projection, and channel
@@ -717,7 +727,7 @@ export class DaemonChannelBridge
       // would leak. Non-admission is certain at this point; roll back.
       if (controller.signal.aborted) {
         rollbackUploadedAttachments = true;
-        throw controller.signal.reason;
+        throw new DOMException('aborted', 'AbortError');
       }
 
       let result: { stopReason?: string; [key: string]: unknown };
@@ -751,7 +761,7 @@ export class DaemonChannelBridge
         if (isDefinitePromptAdmissionRejection(error)) {
           rollbackUploadedAttachments = true;
         }
-        throw error;
+        throw asAbortError(error);
       }
       // Prefer turn_complete for deterministic chunk collection (SSE path).
       // Fall back to one event-loop tick for non-SSE prompt paths (blocking
@@ -839,12 +849,19 @@ export class DaemonChannelBridge
     return session.shellCommand(command, signal);
   }
 
-  async cancelSession(sessionId: string): Promise<void> {
+  async cancelSession(
+    sessionId: string,
+    options?: { cancelReason?: 'user' | 'interrupted' },
+  ): Promise<void> {
     const session = this.ensureSession(sessionId);
     this.resolveTurnBarrier(sessionId);
-    this.abortActivePrompts(sessionId);
+    this.abortActivePrompts(sessionId, options?.cancelReason ?? 'user');
     this.activePrompts.delete(sessionId);
-    await session.cancel();
+    if (options) {
+      await session.cancel(options);
+    } else {
+      await session.cancel();
+    }
   }
 
   async discardSession(
@@ -873,7 +890,7 @@ export class DaemonChannelBridge
         // Fall back to cancellation for clients that cannot detach cleanly.
       }
     }
-    await session.cancel();
+    await session.cancel({ cancelReason: 'interrupted' });
   }
 
   async setSessionModel(
@@ -922,9 +939,11 @@ export class DaemonChannelBridge
     for (const sessionId of Array.from(this.sessions.keys())) {
       const session = this.sessions.get(sessionId);
       if (session) {
-        void session.cancel().catch((error: unknown) => {
-          this.lastError = error;
-        });
+        void session
+          .cancel({ cancelReason: 'interrupted' })
+          .catch((error: unknown) => {
+            this.lastError = error;
+          });
       }
       this.dropSession(sessionId, 'bridge_stopped', false);
     }
@@ -1482,13 +1501,18 @@ export class DaemonChannelBridge
       : fallback;
   }
 
-  private abortActivePrompts(sessionId: string): void {
+  private abortActivePrompts(
+    sessionId: string,
+    reason: 'user' | 'interrupted' = 'interrupted',
+  ): void {
     const promptControllers = this.activePromptControllers.get(sessionId);
     if (!promptControllers) {
       return;
     }
     for (const controller of promptControllers) {
-      controller.abort();
+      controller.abort(
+        reason === 'user' ? 'qwen:user-cancel' : 'qwen:prompt-interrupted',
+      );
     }
     this.activePromptControllers.delete(sessionId);
   }

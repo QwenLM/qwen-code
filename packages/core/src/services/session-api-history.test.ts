@@ -12,9 +12,54 @@ import { detectTurnInterruption } from '../core/turn-interruption.js';
 import {
   buildApiHistoryFromConversation,
   buildSessionHistoryFromConversation,
+  getLastApiHistoryPromptId,
+  getApiHistoryPromptId,
+  restoreApiHistoryPromptIds,
+  isLastApiPromptCancelled,
+  markApiHistoryPrompt,
 } from './session-api-history.js';
 
+import {
+  TODO_STOP_GUARD_PROMPT_PREFIX,
+  TODO_STOP_GUARD_PROMPT_BODY_SUFFIX,
+} from './api-user-prompt.js';
+
 const permit = { goalId: 'goal', revision: 1, turnId: 'turn' };
+
+describe('wire history ownership', () => {
+  it('restores only the unchanged prefix and leaves edited and newer input unowned', () => {
+    const original: Content[] = [
+      { role: 'user', parts: [{ text: 'first' }] },
+      { role: 'user', parts: [{ text: 'second' }] },
+      { role: 'user', parts: [{ text: 'third' }] },
+    ];
+    original.forEach((entry, index) =>
+      markApiHistoryPrompt(entry, `client-${index}`),
+    );
+    const restored = structuredClone(original);
+    restored[1]!.parts = [{ text: 'edited' }];
+    restored.push({ role: 'user', parts: [{ text: 'new input' }] });
+    restoreApiHistoryPromptIds(original, restored);
+    expect(restored.map(getApiHistoryPromptId)).toEqual([
+      'client-0',
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(getLastApiHistoryPromptId(restored)).toBeUndefined();
+  });
+
+  it('does not certify duplicate source ownership during unchanged restore', () => {
+    const original: Content[] = [
+      { role: 'user', parts: [{ text: 'same' }] },
+      { role: 'user', parts: [{ text: 'same' }] },
+    ];
+    original.forEach((entry) => markApiHistoryPrompt(entry, 'ambiguous'));
+    const restored = structuredClone(original);
+    restoreApiHistoryPromptIds(original, restored);
+    expect(restored.map(getApiHistoryPromptId)).toEqual([undefined, undefined]);
+  });
+});
 
 describe('completed local slash commands', () => {
   function commandRecords(command = '/docs'): ChatRecord[] {
@@ -607,6 +652,67 @@ describe('trailingSystemNotifications provenance signal', () => {
         messages: [delivered, notificationRecord()],
       }).trailingSystemNotifications,
     ).toBe(1);
+  });
+});
+
+describe('cancelled prompt identity with automatic tails', () => {
+  const guard = `${TODO_STOP_GUARD_PROMPT_PREFIX}1${TODO_STOP_GUARD_PROMPT_BODY_SUFFIX}`;
+  it.each([
+    guard,
+    '<task-notification><task-id>t</task-id><status>completed</status><summary>ready</summary></task-notification>',
+  ])(
+    'retains the client identity through an untagged automatic tail (%s)',
+    (text) => {
+      const original: Content = { role: 'user', parts: [{ text: 'work' }] };
+      markApiHistoryPrompt(original, 'client-1');
+      const history: Content[] = [
+        original,
+        { role: 'user', parts: [{ text }] },
+      ];
+      expect(getLastApiHistoryPromptId(history)).toBe('client-1');
+      expect(
+        isLastApiPromptCancelled(history, [
+          { kind: 'prompt', promptId: 'client-1', daemonPromptId: 'daemon-1' },
+          { kind: 'attempt', promptId: 'client-1', daemonPromptId: 'daemon-2' },
+          {
+            kind: 'result',
+            promptId: 'daemon-2',
+            state: 'cancelled',
+            cancelledAt: 100,
+            cancelReason: 'user',
+          },
+        ]),
+      ).toBe(true);
+      markApiHistoryPrompt(history[1]!, 'real-newer-input');
+      expect(getLastApiHistoryPromptId(history)).toBe('real-newer-input');
+      expect(isLastApiPromptCancelled(history, [])).toBe(false);
+    },
+  );
+  it('keeps untagged ordinary newer user input as an unknown ownership boundary', () => {
+    const original: Content = { role: 'user', parts: [{ text: 'work' }] };
+    markApiHistoryPrompt(original, 'client-1');
+    expect(
+      getLastApiHistoryPromptId([
+        original,
+        { role: 'user', parts: [{ text: 'new real input' }] },
+      ]),
+    ).toBeUndefined();
+  });
+  it('honors an authoritative zero count for an automatic-looking tail', () => {
+    const original: Content = { role: 'user', parts: [{ text: 'work' }] };
+    markApiHistoryPrompt(original, 'client-1');
+    expect(
+      getLastApiHistoryPromptId(
+        [
+          original,
+          {
+            role: 'user',
+            parts: [{ text: '<task-notification>ready</task-notification>' }],
+          },
+        ],
+        0,
+      ),
+    ).toBeUndefined();
   });
 });
 

@@ -5,6 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { USER_CANCEL_ABORT_REASON } from '@qwen-code/acp-bridge/bridgeTypes';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -93,12 +94,14 @@ function fakeCoordinator(queue: HostTurnAssignment[]) {
     eventStatus: number;
     /** Answer events (and results) with 409 `{cancelled: true}`. */
     cancelled: boolean;
+    cancelReason?: 'user' | 'interrupted';
     /** runIds the heartbeat reports cancelled. */
     cancelledLeases: Set<string>;
     decisions: HostDecision[];
   } = {
     eventStatus: 200,
     cancelled: false,
+    cancelReason: 'user',
     cancelledLeases: new Set(),
     decisions: [],
   };
@@ -113,7 +116,12 @@ function fakeCoordinator(queue: HostTurnAssignment[]) {
         host: { id: 'host-1' },
         leases: (body.runs ?? []).map((run: { runId: string }) =>
           state.cancelledLeases.has(run.runId)
-            ? { runId: run.runId, ok: false, cancelled: true }
+            ? {
+                runId: run.runId,
+                ok: false,
+                cancelled: true,
+                cancelReason: state.cancelReason,
+              }
             : { runId: run.runId, ok: true },
         ),
         decisions: state.decisions,
@@ -137,7 +145,11 @@ function fakeCoordinator(queue: HostTurnAssignment[]) {
     if (state.cancelled && runRoute) {
       if (url.endsWith('/result')) results.push(body);
       return Response.json(
-        { error: 'cancelled', cancelled: true },
+        {
+          error: 'cancelled',
+          cancelled: true,
+          cancelReason: state.cancelReason,
+        },
         { status: 409 },
       );
     }
@@ -811,7 +823,7 @@ const PROMPT: SessionAgentPermissionPrompt = {
 };
 
 /** An adapter that streams once, then waits for its turn to be aborted. */
-function adapterUntilAborted(order: string[]) {
+function adapterUntilAborted(order: string[], userCancellation = true) {
   return {
     program: 'claude' as const,
     async runTurn(turn: AgentAdapterTurnInput) {
@@ -820,6 +832,9 @@ function adapterUntilAborted(order: string[]) {
         turn.signal.addEventListener(
           'abort',
           () => {
+            expect(turn.signal.reason === USER_CANCEL_ABORT_REASON).toBe(
+              userCancellation,
+            );
             order.push('adapter aborted');
             resolve();
           },
@@ -853,19 +868,25 @@ it('stops a run the heartbeat reports cancelled: adapter first, then the relay, 
   });
 }, 15_000);
 
-it('stops a run when events come back 409 cancelled', async () => {
-  const order: string[] = [];
-  const coordinator = fakeCoordinator([assignment('run-1')]);
-  coordinator.state.cancelled = true;
-  getAdapter.mockReturnValue(adapterUntilAborted(order));
-  await withHost(coordinator, async () => {
-    await vi.waitFor(() => expect(order).toEqual(['adapter aborted']), {
-      timeout: 5_000,
+it.each(['user', 'interrupted', undefined] as const)(
+  'preserves cancellation provenance from events (%s)',
+  async (cancelReason) => {
+    const order: string[] = [];
+    const coordinator = fakeCoordinator([assignment('run-1')]);
+    coordinator.state.cancelled = true;
+    coordinator.state.cancelReason = cancelReason;
+    getAdapter.mockReturnValue(
+      adapterUntilAborted(order, cancelReason === 'user'),
+    );
+    await withHost(coordinator, async () => {
+      await vi.waitFor(() => expect(order).toEqual(['adapter aborted']), {
+        timeout: 5_000,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(coordinator.results).toEqual([]);
     });
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(coordinator.results).toEqual([]);
-  });
-});
+  },
+);
 
 it('discards a result the coordinator refuses as cancelled, without retrying', async () => {
   const coordinator = fakeCoordinator([assignment('run-1')]);

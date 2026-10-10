@@ -2797,7 +2797,9 @@ export abstract class ChannelBase {
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       const cancelled = await Promise.race([
-        promptBridge.cancelSession(sessionId).then(() => true),
+        promptBridge
+          .cancelSession(sessionId, { cancelReason: 'interrupted' })
+          .then(() => true),
         new Promise<boolean>((resolve) => {
           graceTimer = setTimeout(() => resolve(false), LOOP_CANCEL_GRACE_MS);
           graceTimer.unref?.();
@@ -2854,8 +2856,12 @@ export abstract class ChannelBase {
     reason: 'cancel_command' | 'clear' | 'steer' = 'cancel_command',
   ): Promise<boolean> {
     const active = this.activePrompts.get(sessionId);
+    const cancel = () =>
+      reason === 'steer'
+        ? this.bridge.cancelSession(sessionId, { cancelReason: 'interrupted' })
+        : this.bridge.cancelSession(sessionId);
     if (!active) {
-      return this.bridge.cancelSession(sessionId).then(
+      return cancel().then(
         () => true,
         (err) => {
           this.logCancelSessionFailure(sessionId, err);
@@ -2868,7 +2874,7 @@ export abstract class ChannelBase {
     }
     const cancelRequested =
       active.cancelRequested ??
-      this.bridge.cancelSession(sessionId).then(
+      cancel().then(
         () => true,
         (err) => {
           this.logCancelSessionFailure(sessionId, err);
@@ -7161,11 +7167,13 @@ export abstract class ChannelBase {
               );
               // Fire-and-forget, but LOG the IPC failure rather than swallow it, so a
               // best-effort cancel that fails isn't silently invisible to operators.
-              void this.bridge.cancelSession(sessionId).catch((err) => {
-                process.stderr.write(
-                  `[${this.name}] cancelSession failed for session=${sessionId} (steer): ${err instanceof Error ? err.message : err}\n`,
-                );
-              });
+              void this.bridge
+                .cancelSession(sessionId, { cancelReason: 'interrupted' })
+                .catch((err) => {
+                  process.stderr.write(
+                    `[${this.name}] cancelSession failed for session=${sessionId} (steer): ${err instanceof Error ? err.message : err}\n`,
+                  );
+                });
               // Emitted before the bridge cancel settles: steer supersedes the
               // turn at the channel level (cancelled is already set above), so
               // the event reflects that intent, not the bridge RPC outcome.

@@ -74,6 +74,7 @@ class Session {
   private monitorStartedQueue: MonitorStartedQueueItem[] = [];
   private monitorQueue: MonitorQueueItem[] = [];
   private pendingContinueTurn: boolean = false;
+  private continueCancellationConfirmation?: string;
   private continueTurnInProgress: boolean = false;
   private readonly sessionAbortController: AbortController;
   private activeTurnAbortController: AbortController | null = null;
@@ -341,7 +342,8 @@ class Session {
       settings: this.settings,
       permissionMode: this.config.getApprovalMode(),
       onInterrupt: () => this.handleInterrupt(),
-      onContinueLastTurn: () => this.requestContinueLastTurn(),
+      onContinueLastTurn: (confirmation) =>
+        this.requestContinueLastTurn(confirmation),
     });
     this.dispatcher = new ControlDispatcher(this.controlContext);
     this.controlService = new ControlService(
@@ -534,7 +536,9 @@ class Session {
    * continuation turn on the work queue. Returns the control reply
    * payload; the continuation itself runs serialized with user messages.
    */
-  private async requestContinueLastTurn(): Promise<Record<string, unknown>> {
+  private async requestContinueLastTurn(
+    confirmCancellation?: string,
+  ): Promise<Record<string, unknown>> {
     await this.waitForInitialization();
 
     if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
@@ -560,6 +564,9 @@ class Session {
       sessionId: this.sessionId,
       apiHistory: historyTail,
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
+      cancelledLastTurn: chat.isLastTurnCancelled?.(),
+      cancellationConfirmationId:
+        chat.getLastTurnCancellationConfirmationId?.(),
     });
     debugLogger.info('[Session] requestContinueLastTurn recovery', {
       sessionId: this.sessionId,
@@ -583,6 +590,19 @@ class Session {
       return { accepted: false, interruption };
     }
 
+    if (confirmCancellation !== recoveryPlan.cancellationConfirmationId) {
+      return {
+        accepted: false,
+        interruption,
+        ...(recoveryPlan.cancellationConfirmationId
+          ? {
+              cancellationConfirmationId:
+                recoveryPlan.cancellationConfirmationId,
+            }
+          : {}),
+      };
+    }
+    this.continueCancellationConfirmation = confirmCancellation;
     this.pendingContinueTurn = true;
     this.ensureProcessingStarted();
     debugLogger.info('[Session] continue_last_turn accepted', {
@@ -613,6 +633,7 @@ class Session {
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
         continueInterrupted: true,
+        confirmCancellation: this.continueCancellationConfirmation,
         captureMonitorNotifications: false,
         captureMonitorRegistrations: false,
         recoverableCancellation: true,

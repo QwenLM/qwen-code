@@ -598,6 +598,172 @@ describe('SessionTranscriptReader', () => {
       'session-transcript-cursor-key',
     );
 
+  it.each([
+    [false, 0, 'user'],
+    [true, 0, 'user'],
+    [false, undefined, undefined],
+    [false, 0, undefined],
+  ])(
+    'restores cancellation independently of replay with compression=%s, cancelledAt=%s, cancelReason=%s',
+    async (compressed, cancelledAt, cancelReason) => {
+      const user = {
+        ...record('u1', null, 'unfinished'),
+        promptId: `${sessionId}########1`,
+        daemonPromptId: 'daemon-cancelled',
+      };
+      const compression = sys('compression', 'u1', 'chat_compression', {
+        compressedHistory: [user.message],
+        promptIds: [user.promptId],
+        info: {
+          originalTokenCount: 100,
+          newTokenCount: 20,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      const terminal = sys(
+        'terminal',
+        compressed ? 'compression' : 'u1',
+        'turn_result',
+        {
+          promptId: user.daemonPromptId,
+          state: 'cancelled',
+          cancelledAt,
+          cancelReason,
+          endedAt: 1,
+        },
+      );
+      await writeRecords([
+        user,
+        ...(compressed ? [compression] : []),
+        terminal,
+      ]);
+      for (const options of [NONE, recent(1), all(false)]) {
+        const projection = await svc().readRestoreProjection(
+          sessionId,
+          options,
+        );
+        expect(projection?.runtime.cancelledLastTurn === true).toBe(
+          cancelReason === 'user',
+        );
+        expect(projection?.runtime.cancellationConfirmationId).toBe(
+          cancelledAt !== undefined && cancelReason === undefined
+            ? user.daemonPromptId
+            : undefined,
+        );
+        expect(structuredClone(projection?.runtime.apiHistory)).toEqual([
+          user.message,
+        ]);
+      }
+    },
+  );
+  it('keeps index byte accounting finite for a malformed prompt identity', async () => {
+    await writeRecords([
+      {
+        ...record('u1', null, 'unfinished'),
+        promptId: 123,
+      } as unknown as ChatRecord,
+    ]);
+    const reader = newReader();
+    await reader.readRestoreProjection(sessionId, NONE);
+    expect(
+      Number.isFinite(getSessionTranscriptIndexCacheStatsForTest().byteSize),
+    ).toBe(true);
+  });
+
+  it.each([
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ])(
+    'uses the latest resumed attempt with compression=%s and new cancellation=%s',
+    async (compressed, cancelled) => {
+      const user = {
+        ...record('u1', null, 'unfinished'),
+        promptId: 'client-1',
+        daemonPromptId: 'daemon-1',
+      };
+      const oldTerminal = sys('old-terminal', 'u1', 'turn_result', {
+        promptId: 'daemon-1',
+        state: 'cancelled',
+        cancelledAt: 1,
+        cancelReason: 'user',
+        endedAt: 2,
+      });
+      const attempt = sys(
+        'attempt',
+        'old-terminal',
+        'turn_attempt',
+        undefined,
+        {
+          promptId: user.promptId,
+          daemonPromptId: 'daemon-2',
+        },
+      );
+      const compression = sys('compression', 'attempt', 'chat_compression', {
+        compressedHistory: [user.message],
+        promptIds: [user.promptId],
+        info: {
+          originalTokenCount: 100,
+          newTokenCount: 20,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      const terminal = sys(
+        'new-terminal',
+        compressed ? 'compression' : 'attempt',
+        'turn_result',
+        {
+          promptId: 'daemon-2',
+          state: 'cancelled',
+          cancelledAt: 3,
+          cancelReason: 'user',
+          endedAt: 4,
+        },
+      );
+      await writeRecords([
+        user,
+        oldTerminal,
+        attempt,
+        ...(compressed ? [compression] : []),
+        ...(cancelled ? [terminal] : []),
+      ]);
+      for (const options of [NONE, recent(1), all(false)]) {
+        const projection = await coldProjection(options);
+        expect(projection?.runtime.cancelledLastTurn === true).toBe(cancelled);
+        expect(structuredClone(projection?.runtime.apiHistory)).toEqual([
+          user.message,
+        ]);
+      }
+    },
+  );
+
+  it('does not use an abandoned branch cancellation for a replacement prompt', async () => {
+    const user = {
+      ...record('u1', null, 'unfinished'),
+      promptId: `${sessionId}########1`,
+      daemonPromptId: 'old-daemon',
+    };
+    const terminal = sys('terminal', 'u1', 'turn_result', {
+      promptId: 'old-daemon',
+      state: 'cancelled',
+      cancelledAt: 0,
+      cancelReason: 'user',
+      endedAt: 1,
+    });
+    const replacement = {
+      ...record('u2', null, 'unfinished'),
+      promptId: `${sessionId}########2`,
+      daemonPromptId: 'new-daemon',
+    };
+    await writeRecords([user, terminal, replacement]);
+    const projection = await svc().readRestoreProjection(sessionId, NONE);
+    expect(projection?.runtime.cancelledLastTurn).not.toBe(true);
+    expect(structuredClone(projection?.runtime.apiHistory)).toEqual([
+      replacement.message,
+    ]);
+  });
+
   it.each([false, true])(
     'restores completed slash commands consistently with compression=%s',
     async (compressed) => {
