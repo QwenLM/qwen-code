@@ -1581,6 +1581,54 @@ public final class RuntimeBrokerService implements AutoCloseable {
         });
     }
 
+    /**
+     * Frees only the Workspace execution mount the Session holds, for the
+     * recovery-blocked turn that parks alive forever by contract: the
+     * Session row keeps its READY identity for the recovery fleet, so the
+     * full release path — and its RELEASED-forever verdict — never runs
+     * here. A Session with an active operation keeps its mount honestly,
+     * the same freeze the fleet promises while anything is unproven —
+     * every kind of unsettled row counts, background processes included:
+     * the drain excludes them because its sweep stops or settles them
+     * first, and this path runs no sweep. The gate reads the state as
+     * registered at this instant; it does not fence a concurrent
+     * out-of-contract admission landing one instant later. Resident-only:
+     * a Session this Broker does not hold (a dead Daemon's residue)
+     * belongs to the LOST family's own sweep, not to this path.
+     */
+    public CompletionStage<Boolean> releaseMount(String harnessSessionId,
+            String runtimeSessionId) {
+        requireOpen();
+        String harnessId = BrokerValues.requireId(harnessSessionId,
+                "harnessSessionId");
+        String runtimeId = BrokerValues.requireId(runtimeSessionId,
+                "runtimeSessionId");
+        CompletableFuture<SessionContext> local = sessions.get(runtimeId);
+        if (local == null) {
+            return failed(unavailable("runtime_reconciliation_required",
+                    "Runtime Session is not active in this Broker process"));
+        }
+        return local.thenCompose(context -> {
+            if (!context.session().getHarnessSessionId().equals(harnessId)) {
+                throw conflict("runtime_session_conflict",
+                        "Runtime Session belongs to another Harness Session");
+            }
+            context.lock();
+            try {
+                if (context.hasActiveControl()
+                        || executionRepository.hasActiveByRuntimeSession(
+                                context.binding().getBindingId(),
+                                context.binding().getGeneration(), runtimeId)) {
+                    throw conflict("runtime_session_busy",
+                            "Runtime Session has an active operation");
+                }
+            } finally {
+                context.unlock();
+            }
+            return transport.releaseMount(context.lease(), context.session());
+        });
+    }
+
     private CompletionStage<Boolean> releasedSession(
             String harnessSessionId, String runtimeSessionId) {
         return persistedSession(harnessSessionId, runtimeSessionId)

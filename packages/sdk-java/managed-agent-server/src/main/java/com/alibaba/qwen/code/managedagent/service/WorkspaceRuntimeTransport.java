@@ -376,6 +376,21 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 });
     }
 
+    @Override
+    public CompletionStage<Boolean> releaseMount(RuntimeLease lease, RuntimeSession session) {
+        if (!managed(session)) {
+            return RuntimeTransport.super.releaseMount(lease, session);
+        }
+        // Only the execution mount: the Session row stays READY so the
+        // recovery fleet can still adopt this identity, and the worker-side
+        // detach a full release would run is left to it — a mount-free
+        // Session's later full release takes the absent-holder shortcut
+        // above, which now reads exactly what it names.
+        Context context = context(lease, session, false);
+        ownership.release(context.binding(), context.session());
+        return CompletableFuture.completedFuture(true);
+    }
+
     private Context context(RuntimeLease lease, RuntimeSession session, boolean authorize) {
         return context(lease, session, authorize, false);
     }

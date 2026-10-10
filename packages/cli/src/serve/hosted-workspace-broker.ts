@@ -619,6 +619,20 @@ export class HostedWorkspaceBroker {
       throw new Error('Runtime Session release is unconfirmed.');
   }
 
+  // Frees only the Workspace execution mount: unlike release(), the
+  // Runtime Session keeps its READY identity for the recovery fleet — a
+  // recovery-blocked turn hands its mount back through here (#13800),
+  // never through a full release, whose RELEASED-forever verdict would
+  // strand the Session's later runtime recovery outright.
+  async releaseMount(): Promise<void> {
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:release-mount`,
+      {},
+    );
+    if (response['mountReleased'] !== true)
+      throw new Error('Runtime Session mount release is unconfirmed.');
+  }
+
   private async request(
     path: string,
     body?: Record<string, unknown>,

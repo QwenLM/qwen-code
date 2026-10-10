@@ -76,6 +76,7 @@ import {
   HostedHookRecoveryRequiredError,
   HostedHookSession,
 } from './hosted-hook-session.js';
+import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import {
   HostedWorkspaceBroker,
@@ -6033,6 +6034,110 @@ describe('Hosted Harness no-tool session', () => {
     expect(parked.run.reason).toBe('runtime_lost');
     expect(parked.run.execution).toBe('outcome_unknown');
   });
+
+  it.each([
+    ['Tool', () => new HostedToolRecoveryRequiredError(new Error('x'))],
+    ['MCP', () => new HostedMcpRecoveryRequiredError()],
+    ['Hook', () => new HostedHookRecoveryRequiredError()],
+  ] as const)(
+    'returns the Workspace mount when a tool turn goes recovery blocked through a %s error',
+    async (_label, blockError) => {
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+        async function (this: HostedWorkspaceBroker) {
+          this.runtime = {
+            bindingId: 'binding',
+            generation: '1',
+            workspaceGeneration: '1',
+          };
+        },
+      );
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockResolvedValue(
+        '55555555-5555-4555-8555-555555555555',
+      );
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+        executionStatus: 'success',
+        responseParts: [{ text: 'original result' }],
+      });
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'fileHistory',
+      ).mockResolvedValue({
+        ownerSessionId: SESSION_ID,
+        snapshots: [],
+        files: {},
+      });
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'workspaceContext',
+      ).mockResolvedValue([]);
+      const release = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'release')
+        .mockResolvedValue();
+      const releaseMount = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+        .mockResolvedValue();
+      state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+        const call = {
+          name: 'read_file',
+          callId: 'blocked-tool',
+          args: { file_path: 'gone.txt' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        };
+        await toolTurn!.execute(
+          [call],
+          [
+            {
+              functionCall: {
+                id: call.callId,
+                name: call.name,
+                args: call.args,
+              },
+            },
+          ],
+          'test-model',
+          signal,
+        );
+        throw blockError();
+      });
+      const server = await app(true);
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+      });
+      expect(created.status).toBe(200);
+      const clientId = created.body.clientId as string;
+      const prompt = [{ type: 'text', text: 'read gone' }];
+      const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ prompt, promptId: PROMPT_ID, payloadDigest })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(true);
+        },
+        { timeout: 10_000 },
+      );
+      // #13800: the blocked turn's mount lease must go back — a leaked
+      // lease wedged every later tool turn on the same storage — while the
+      // Runtime Session stays READY for the recovery fleet: releaseMount
+      // exactly once, the RELEASED-forever full release never.
+      expect(releaseMount).toHaveBeenCalledTimes(1);
+      expect(release).not.toHaveBeenCalled();
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
+    },
+  );
 
   type DetachedFamily = 'child_run' | 'monitor_run';
 

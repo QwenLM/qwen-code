@@ -699,6 +699,7 @@ export class HostedWorkspaceToolTurn {
     signal?: AbortSignal,
   ): Promise<void> {
     this.uncertain = true;
+    this.acquireAttempted = true;
     let waitAborted = false;
     try {
       let queued = false;
@@ -3611,6 +3612,67 @@ export class HostedWorkspaceToolTurn {
     } catch (cause) {
       this.uncertain = true;
       throw new HostedToolRecoveryRequiredError(cause);
+    }
+  }
+
+  // The recovery-blocked exit ends the turn's Workspace exclusion the way
+  // finish() does on the settled path: the block verdict parks the Session,
+  // but the mount lease belongs to the turn, and a turn that never runs
+  // again must not hold it against every later Session on the same storage
+  // (#13800: one leaked lease wedged every unrelated tool turn). Only the
+  // mount goes back: the Runtime Session keeps its READY identity for the
+  // recovery fleet, so this is releaseMount(), never the RELEASED-forever
+  // full release(). The Hook lane's shared acquisition and the MCP lane's
+  // session-scoped mount own their release discipline, so only the plain
+  // lane releases here. The handback runs on an attempted, unsettled
+  // acquire too: a reply lost after the Broker committed the claim holds
+  // the mount exactly like a settled grant, and the store's
+  // holder-conditioned clear is a no-op when nothing was granted — while
+  // a turn that never reached acquire provably holds nothing and never
+  // calls out. A failed release is logged, never thrown: the block verdict
+  // must still reach the Session. A busy mount means this turn's
+  // executions are still unproven — the fleet's freeze, honestly kept —
+  // so the handback retries on a bounded cadence for when those rows
+  // settle; a Session whose work never settles keeps its freeze, and the
+  // LOST family sweeps anything longer.
+  blockMountRetry?: Promise<void>;
+  private releasedForBlock = false;
+  private acquireAttempted = false;
+
+  async releaseForRecoveryBlock(): Promise<void> {
+    if (this.mcp || this.hooks || this.releasedForBlock) return;
+    if (!this.acquired && !this.acquireAttempted) return;
+    if (await this.attemptMountHandback())
+      this.blockMountRetry = (async () => {
+        for (const gap of [1000, 3000]) {
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, gap);
+            timer.unref();
+          });
+          if (this.releasedForBlock) return;
+          if (!(await this.attemptMountHandback())) return;
+        }
+      })();
+  }
+
+  // Answers whether another attempt is worth scheduling: only the busy
+  // refusal, whose unsettled executions settle on their own clock. A
+  // transport failure or a terminal refusal settles nothing by waiting.
+  private async attemptMountHandback(): Promise<boolean> {
+    try {
+      await this.broker.releaseMount();
+      this.acquired = false;
+      this.releasedForBlock = true;
+      return false;
+    } catch (cause) {
+      writeStderrLineSafe(
+        `qwen serve: Hosted Harness turn ${this.promptId} could not release the Workspace mount after its recovery block: ${String(cause)}`,
+      );
+      return (
+        cause instanceof HostedWorkspaceBrokerRejection &&
+        cause.status === 409 &&
+        cause.code === 'runtime_session_busy'
+      );
     }
   }
 

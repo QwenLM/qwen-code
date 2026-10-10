@@ -247,6 +247,184 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void mountReleaseKeepsTheReadyIdentityWithoutAFullRelease() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap"));
+            // #13800: the recovery-blocked turn hands back only its mount;
+            // the READY identity its recovery fleet would adopt is untouched.
+            assertTrue(join(fixture.service.releaseMount("holder", "holder")));
+            assertEquals(RuntimeSessionRecord.State.READY,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder").getState());
+            assertEquals(1, fixture.transport.releaseMountCalls.get());
+            assertEquals(0, fixture.transport.releaseCalls.get());
+        }
+    }
+
+    @Test
+    void mountReleaseRefusesACrossedHarnessAndANonResidentSession() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap"));
+            RuntimeBrokerException crossed = failure(
+                    fixture.service.releaseMount("other", "holder"));
+            assertEquals("runtime_session_conflict", crossed.getCode());
+            RuntimeBrokerException cold = failure(
+                    fixture.service.releaseMount("holder", "stranger"));
+            assertEquals("runtime_reconciliation_required", cold.getCode());
+            assertEquals(0, fixture.transport.releaseMountCalls.get());
+        }
+    }
+
+    @Test
+    void mountReleaseStaysBusyWhileAnExecutionIsUnsettled() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap"));
+            fixture.transport.executeResult = new CompletableFuture<>();
+            join(fixture.service.createExecution("holder", "holder",
+                    "idempotency", reference("holder", "digest")));
+            // The fleet's freeze while anything is unproven: the narrow
+            // handback refuses instead of clearing an exclusion live work
+            // still needs.
+            RuntimeBrokerException busy = failure(
+                    fixture.service.releaseMount("holder", "holder"));
+            assertEquals("runtime_session_busy", busy.getCode());
+            assertEquals(0, fixture.transport.releaseMountCalls.get());
+        }
+    }
+
+    @Test
+    void mountReleaseStaysBusyWhileAControlIsInFlight() throws Exception {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap"));
+            fixture.transport.controlEntered = new CountDownLatch(1);
+            fixture.transport.continueControl = new CountDownLatch(1);
+            CompletableFuture<Object> control = CompletableFuture.supplyAsync(
+                    () -> join(fixture.service.control("holder", "holder",
+                            Map.of("kind", "manifest"))));
+            assertTrue(fixture.transport.controlEntered.await(2,
+                    TimeUnit.SECONDS));
+            try {
+                RuntimeBrokerException busy = failure(
+                        fixture.service.releaseMount("holder", "holder"));
+                assertEquals("runtime_session_busy", busy.getCode());
+                assertEquals(0, fixture.transport.releaseMountCalls.get());
+            } finally {
+                fixture.transport.continueControl.countDown();
+            }
+            join(control);
+        }
+    }
+
+    @Test
+    void mountReleaseStaysBusyBehindASettledExecutionWhoseBackgroundProcessStillRuns()
+            throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        Map<String, Object> detachedCapture = new LinkedHashMap<>();
+        detachedCapture.put("captureStatus", "detached");
+        detachedCapture.put("captureReason", null);
+        detachedCapture.put("manifest", null);
+        detachedCapture.put("previewTruncated", false);
+        detachedCapture.put("deliveryStatus", "pending");
+        Map<String, Object> detachedResult = new LinkedHashMap<>();
+        detachedResult.put("executionStatus", "success");
+        detachedResult.put("responseParts",
+                java.util.List.of(Map.of("text", "started")));
+        detachedResult.put("capture", detachedCapture);
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token,
+                        "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant",
+                                        "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId",
+                                execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+
+            @Override
+            public Map<String, Object> receipt(ToolExecutionRecord execution) {
+                throw new AssertionError("Detached family has no publication receipt to compare");
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap"));
+            Map<String, Object> reference = Map.of("sessionId", "holder",
+                    "promptId", "prompt", "callId", "call", "argsDigest",
+                    "sha256:" + "a".repeat(64));
+            fixture.transport.executeV3Result = CompletableFuture
+                    .completedFuture(Map.of("state", "prepared"));
+            fixture.transport.statusResult = CompletableFuture
+                    .completedFuture(
+                            Map.of("state", "settled", "result", detachedResult));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "holder", "holder", "key", reference, digest, "pub-1"));
+            join(fixture.service.startExecution("holder", "holder",
+                    prepared.getExecutionCallId(), payload, "pub-1", "token"));
+            ToolExecutionRecord settled = awaitExecution(
+                    fixture.executionRepository,
+                    prepared.getExecutionCallId(),
+                    ToolExecutionRecord.State.SETTLED);
+            assertEquals("detached",
+                    ((Map<?, ?>) settled.getResult().get("capture"))
+                            .get("captureStatus"));
+            // The main row settles on the detached evidence; the process
+            // row it admitted stays active — and THIS path runs no sweep,
+            // so it keeps the mount, unlike the drain's excluded set.
+            assertTrue(fixture.executionRepository.hasActiveByRuntimeSession(
+                    prepared.getBindingId(), prepared.getRuntimeGeneration(),
+                    "holder"));
+            RuntimeBrokerException busy = failure(
+                    fixture.service.releaseMount("holder", "holder"));
+            assertEquals("runtime_session_busy", busy.getCode());
+            assertEquals(0, fixture.transport.releaseMountCalls.get());
+        }
+    }
+
+    @Test
+    void releaseMountFailsClosedOnATransportWithoutWorkspaceOwnership() {
+        RuntimeTransport bare = new RuntimeTransport() {
+            @Override
+            public CompletionStage<Void> acquire(RuntimeLease lease,
+                    RuntimeSession session) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public CompletionStage<Object> control(RuntimeLease lease,
+                    RuntimeSession session, Map<String, Object> operation) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public CompletionStage<Map<String, Object>> execute(
+                    RuntimeLease lease, RuntimeSession session,
+                    Map<String, Object> reference) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public CompletionStage<Map<String, Object>> cancel(
+                    RuntimeLease lease, RuntimeSession session,
+                    Map<String, Object> reference) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public CompletionStage<Boolean> release(RuntimeLease lease,
+                    RuntimeSession session) {
+                throw new UnsupportedOperationException();
+            }
+        };
+        // A non-Workspace transport can never vouch for a mount: answered
+        // 501, so a `mountReleased: true` without a release is impossible.
+        RuntimeBrokerException failure = failure(bare.releaseMount(null, null));
+        assertEquals("workspace_mount_release_unsupported", failure.getCode());
+    }
+
+    @Test
     void failedAcquireCanRetryTheSameSessionIdentity() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             fixture.transport.acquireResult = CompletableFuture.failedFuture(
@@ -5604,6 +5782,9 @@ class RuntimeBrokerServiceTest {
                 CompletableFuture.completedFuture(Map.of("state", "settled"));
         volatile CompletableFuture<Boolean> releaseResult =
                 CompletableFuture.completedFuture(true);
+        final AtomicInteger releaseMountCalls = new AtomicInteger();
+        volatile CompletableFuture<Boolean> releaseMountResult =
+                CompletableFuture.completedFuture(true);
 
         @Override
         public CompletionStage<Void> acquire(RuntimeLease lease,
@@ -5730,6 +5911,15 @@ class RuntimeBrokerServiceTest {
             lastLease = lease;
             lastSession = session;
             return releaseResult;
+        }
+
+        @Override
+        public CompletionStage<Boolean> releaseMount(RuntimeLease lease,
+                RuntimeSession session) {
+            releaseMountCalls.incrementAndGet();
+            lastLease = lease;
+            lastSession = session;
+            return releaseMountResult;
         }
     }
 
