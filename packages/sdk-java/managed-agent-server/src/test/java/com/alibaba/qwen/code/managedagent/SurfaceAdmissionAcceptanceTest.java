@@ -231,6 +231,60 @@ class SurfaceAdmissionAcceptanceTest {
         settledTask = insertSettledTask(tenant, bound);
     }
 
+    // A6: a retained key replays only while current access holds — a
+    // caller who lost the role or the Session gets 403 or 404, never the
+    // replay of their own admitted cancel.
+    @Test
+    void aRetainedCancelKeyNeverBypassesCurrentAccess() throws Exception {
+        String session = createSession(tenant, OWNER, true);
+        String recordKey = "e".repeat(64);
+        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+                        + " (session_scope_key, record_key, tenant_id,"
+                        + " workspace_id, session_id, domain, record_id,"
+                        + " operation_hash, revision, record_resource_id,"
+                        + " task_kind, task_state, delivery_target,"
+                        + " delivery_state, created_at)"
+                        + " VALUES (?, ?, ?, 'ws', ?, 'child_run',"
+                        + " 'run-retained', ?, 1, 'resource-retained',"
+                        + " 'child_agent', 'running', 'session', 'planned', 1)",
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                        .sessionScopeKey(tenant, session),
+                recordKey, tenant, session, "f".repeat(64));
+        String key = nextKey();
+        java.util.function.Supplier<MockHttpServletRequestBuilder> cancel =
+                () -> post("/v1/agents/sessions/{session}/tasks/{task}/cancel",
+                        session, "task_" + recordKey)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", key)
+                        .principal(actor(tenant, OPERATOR));
+        String admitted = JSON.readTree(mvc.perform(cancel.get())
+                .andExpect(status().isAccepted()).andReturn().getResponse()
+                .getContentAsString()).path("id").asText();
+        assertThat(JSON.readTree(mvc.perform(cancel.get())
+                .andExpect(status().isAccepted()).andReturn().getResponse()
+                .getContentAsString()).path("id").asText())
+                .isEqualTo(admitted);
+        byte[] operator = OPERATOR.getBytes(StandardCharsets.UTF_8);
+        jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
+                + " AND actor_id = ?", tenant, operator);
+        try {
+            assertThat(mvc.perform(cancel.get())
+                    .andExpect(status().isForbidden()).andReturn()
+                    .getResponse().getContentAsString())
+                    .contains("task_forbidden");
+        } finally {
+            jdbc.update("UPDATE managed_workspace_access SET role ="
+                    + " 'OPERATOR' WHERE tenant_id = ? AND workspace_id ="
+                    + " 'ws' AND actor_id = ?", tenant, operator);
+        }
+        jdbc.update("UPDATE managed_agent_session SET status = 'DELETED'"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        assertThat(mvc.perform(cancel.get())
+                .andExpect(status().isNotFound()).andReturn().getResponse()
+                .getContentAsString()).contains("session_not_found");
+    }
+
     /** A settled child-agent task of the bound Session: the cancel probes
      * pass every admission rule and stop at the task's own state. */
     private String insertSettledTask(String tenant, String session) {

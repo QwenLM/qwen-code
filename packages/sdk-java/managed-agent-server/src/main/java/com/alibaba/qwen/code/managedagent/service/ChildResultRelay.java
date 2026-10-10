@@ -251,15 +251,16 @@ public class ChildResultRelay {
      * H4f: stops a run whose stop request committed while it still runs.
      * A run that never minted a child settles unstarted without creating
      * one; a child whose Turn is accepted or running has that Turn
-     * cancelled through the child's own command line, and any other live
-     * Turn (cancelling, blocked on recovery) is only waited on, both on
-     * the heartbeat; a child whose Turn was cancelled has its close
-     * admitted and the run settles {@code cancelled} by
+     * cancelled through the child's own command line, and a cancelling
+     * Turn is only waited on, both on the heartbeat; a child whose Turn
+     * was cancelled — or failed after this arm requested its cancel — has
+     * its close admitted and the run settles {@code cancelled} by
      * {@code stop_requested}, with the start pairing its committed
      * evidence proves. A natural outcome that arrived first wins — a
-     * completed Turn delivers its result, a failed one settles
-     * {@code child_failed} — through the ordinary walk, and the request
-     * stays recorded on the settled run. Returns false exactly then.
+     * completed Turn delivers its result, a failed one this arm never
+     * stopped settles {@code child_failed} — through the ordinary walk,
+     * and the request stays recorded on the settled run. Returns false
+     * exactly then.
      */
     private boolean stopChild(RelayRow row, long now) {
         String child = row.childSessionId() != null ? row.childSessionId()
@@ -277,17 +278,24 @@ public class ChildResultRelay {
         if (turn == null) {
             throw new RelayRetry("child Session has no Turn yet");
         }
-        // The stop's own Turn cancel ends CANCELLED; COMPLETED or FAILED
-        // is the child's own outcome and keeps its ordinary settlement.
+        // A COMPLETED Turn, or a FAILED one this arm never asked to stop,
+        // is the child's own outcome and keeps its ordinary settlement. A
+        // Turn whose cancel this arm requested may still end FAILED (a
+        // cancel that lands mid-recovery fails the Turn), and that end is
+        // the stop's: it settles cancelled like a CANCELLED one.
+        boolean stoppedHere = ("FAILED".equals(turn.status())
+                || "CANCELLED".equals(turn.status()))
+                && sessions.childTurnStopRequested(row.tenantId(),
+                        row.parentSessionId(), row.childRunId(),
+                        turn.turnId());
         if ("COMPLETED".equals(turn.status())
-                || "FAILED".equals(turn.status())) {
+                || "FAILED".equals(turn.status()) && !stoppedHere) {
             return false;
         }
-        if (!"CANCELLED".equals(turn.status())) {
+        if (!"CANCELLED".equals(turn.status()) && !stoppedHere) {
             // Only an accepted or running Turn takes the cancel; one that
-            // is already cancelling, or blocked on its own recovery, owns
-            // its outcome — look again on the heartbeat rather than
-            // re-driving a command that can have no effect.
+            // is already cancelling owns its outcome — look again on the
+            // heartbeat rather than re-driving a command with no effect.
             if ("ACCEPTED".equals(turn.status())
                     || "RUNNING".equals(turn.status())) {
                 sessions.cancelChildTurn(row.tenantId(),

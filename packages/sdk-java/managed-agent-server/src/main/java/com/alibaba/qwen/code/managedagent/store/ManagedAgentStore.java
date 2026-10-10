@@ -1533,14 +1533,19 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " completed_at = ?";
             }
             case "failed" -> {
+                // A failed cancel is terminal yet keeps the contract's
+                // blocked delivery state: its available_at moves past
+                // every scan of the blocked index range for good.
                 arguments.add(outcome.failureCode());
+                arguments.add(Long.MAX_VALUE);
                 arguments.add(now);
                 arguments.add(now);
                 yield "UPDATE managed_agent_operation SET state = 'FAILED',"
                         + " admission_stage = 'JAVA_DURABLE',"
                         + " delivery_state = 'BLOCKED', error_code = ?,"
-                        + " lease_owner = NULL, lease_until = NULL,"
-                        + " updated_at = ?, completed_at = ?";
+                        + " available_at = ?, lease_owner = NULL,"
+                        + " lease_until = NULL, updated_at = ?,"
+                        + " completed_at = ?";
             }
             case "recovery_blocked" -> {
                 arguments.add(outcome.failureCode());

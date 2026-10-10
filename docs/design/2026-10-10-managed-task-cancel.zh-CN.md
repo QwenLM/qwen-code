@@ -60,6 +60,7 @@
    - `ManagedExtensionProjection.taskActions(kind, state)` 是唯一规则：只有处于 `pending`、`running`、`waiting`、`degraded` 的 `child_agent` 任务才公布 `cancel`。
    - 其余类型，以及任何终态或 `recovery_blocked` 的任务，不公布任何动作；对它们的新取消请求得到 `409 task_action_unavailable`。
    - 任务视图与准入复查读同一个函数，且 Session 不处于 `ACTIVE` 时视图不公布任何动作，所以公布的动作与路由的任务检查、Session 检查一致。与另一个开放操作的争用（`409 session_operation_active`）是暂时的，不反映在视图中。
+   - 契约第 4.2 节允许 `recovery_blocked` 的任务公布 `cancel`；v1 有意不这样做，因为等待恢复对账的 run 尚无定义好的停止路径。
    - 已记录停止请求的任务仍公布 `cancel`：请求可以合并（契约第 4.4 节），且每个操作各自得到结果。
 
 2. **准入按 A6 顺序执行，授权在此确定。**
@@ -101,6 +102,8 @@
    - run 存活而请求仍不可见时，按调度退避重试，最多 16 次。默认 1 秒到 1 分钟的退避下，15 次等待合计约十分钟。
    - 预算按认领次数（操作的 claim generation）计算，而不是按已完成的重试计算；投递运行期间每过租约的三分之一续租一次。因此一次超过租约的挂起尝试（例如 Harness 冷加载）既不会在自己运行时被重新认领，也逃不出预算；超出预算的认领只按记录停放，不再发送。
    - 之后操作变为 `recovery_blocked`，附 `task_cancel_unconfirmed`，`java_durable`、`blocked`。
+   - Harness 自身的拒绝（父会话等待恢复时的 `hosted_turn_recovery_required`、`hosted_children_unavailable`）同样不能证明任何一方，因此也消耗同一份预算；在此期间开放的取消占住 Session 的操作槽位，与契约对开放取消的规定一致。
+   - `failed` 的取消是终态，但保留契约规定的 `blocked` 投递状态，因此其 `available_at` 移到最大值：任何对 blocked 索引区间的扫描都不会再读到它。
    - 停放的取消每五分钟重读一次记录：
      - 此后记录到了停止请求（另一个取消或关闭级联），则完成；
      - run 结束且没有请求，则失败；
@@ -109,17 +112,20 @@
    - 读不到记录的对账会把操作再停放一整个复查周期，所以一条读不出的记录不会钉在停放扫描的队首；该扫描走 `(delivery_state, available_at)` 索引。
 
 6. **中继负责物理停止 child。**
-   - 对已提交记录带有 `stopRequested` 且尚未结束的 run，新的停止分支先于其他所有分支执行。中继本就负责 child 的整条流程，所以不会有第二个驱动者争抢其账本行。
+   - 对已提交记录带有 `stopRequested` 且尚未结束的 run，新的停止分支在中继的“父会话关闭中”与“记录已结算”两个提前出口之后、在创建、绑定、观察或判失败 child 的分支之前执行。中继本就负责 child 的整条流程，所以不会有第二个驱动者争抢其账本行。
    - 停止分支按 child 的情况处理：
 
-     | child                                    | 停止分支                                                                                                                                                                                          |
-     | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-     | 尚未铸造 child（账本与谱系都为空）       | 不创建 child，直接以 `close_scope` `started: false` 结算。若创建先落地，判定/铸造提交门会拒绝该结算，重试时就会写出 child 的名字。                                                                |
-     | child 的 Turn 为 `ACCEPTED` 或 `RUNNING` | 通过 child 自己的持久 Turn 取消（`ManagedAgentService.cancelChildTurn`，以父会话、run 与 Turn 为键）取消该 Turn，然后在心跳时再看。                                                               |
-     | child 的 Turn 处于其他存活状态           | 在心跳时等待：已处于 `CANCELLING` 或卡在自身恢复中的 Turn 自己掌握结果，再驱动取消也不会生效。                                                                                                    |
-     | child 的 Turn 为 `CANCELLED`             | 从已提交证据得出启动配对（`reconcileAttach`，会重放丢失的 dispatch 或 attach），先接纳 child 的关闭，再以 `close_scope` 结算。已铸造但从未启动的 child 具名结束；无法关闭的主机照旧保留关闭债务。 |
-     | child 的 Turn 先 `COMPLETED` 或 `FAILED` | child 的自然结果优先（契约第 4.4 节）：走普通流程交付结果，或以 `child_failed` 结算为 `failed`。已结算的 run 保留已记录的请求。                                                                   |
+     | child                                                           | 停止分支                                                                                                                                                                                          |
+     | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+     | 尚未铸造 child（账本与谱系都为空）                              | 不创建 child，直接以 `close_scope` `started: false` 结算。若创建先落地，判定/铸造提交门会拒绝该结算，重试时就会写出 child 的名字。                                                                |
+     | child 的 Turn 为 `ACCEPTED` 或 `RUNNING`                        | 通过 child 自己的持久 Turn 取消（`ManagedAgentService.cancelChildTurn`，以父会话、run 与 Turn 为键）取消该 Turn，然后在心跳时再看。                                                               |
+     | child 的 Turn 为 `CANCELLING`                                   | 在心跳时等待：该 Turn 自己掌握结果，再驱动取消也不会生效。                                                                                                                                        |
+     | child 的 Turn 为 `CANCELLED`，或在本分支请求取消之后为 `FAILED` | 从已提交证据得出启动配对（`reconcileAttach`，会重放丢失的 dispatch 或 attach），先接纳 child 的关闭，再以 `close_scope` 结算。已铸造但从未启动的 child 具名结束；无法关闭的主机照旧保留关闭债务。 |
+     | child 的 Turn 先 `COMPLETED`，或未经本分支取消而 `FAILED`       | child 的自然结果优先（契约第 4.4 节）：走普通流程交付结果，或以 `child_failed` 结算为 `failed`。已结算的 run 保留已记录的请求。                                                                   |
 
+   - 落在恢复中的 Turn 上的取消可能让它以 `FAILED` 而非 `CANCELLED` 结束。停止分支凭自己的持久证据区分两种 `FAILED`：它写下的 child Turn 取消命令，以父会话、run 与 Turn 为键。键中的空格使其不会被调用者在租户级共享命令命名空间里的可见 ASCII key 抢占。
+   - 中继在有限次尝试内无法完成的停止（无法证明的 attach 链、反复失败的关闭）会走中继既有的放弃链：结算为 `failed`，账本行归为 `unknown`，与中继无法完成的任何 run 相同。这条路径属于 H4b，本次未改。
+   - 请求停止后才完成的 run 保留该请求，因此 H4d 的续接拒绝把它作为前驱（`continueChildRun` 不接受已请求停止的前驱）。
    - 只有这次结算才会让任务变为 `cancelled`。在此之前任务状态不变，child 处于预配或已挂接时其 runtime 显示为 `draining`（未绑定的 pending run 仍为 `unbound`）。正在等待该 child 的前台父会话，会由现有等待器答复 "Child agent run cancelled (stop_requested)"。
 
 7. **`unknown` 投递的运维方案（H4b 未决问题 1）。**
@@ -132,7 +138,7 @@
      - 无法证实的投递：关闭 Session。
 
 8. **B12：WebShell 请求携带仅用于追踪的 `requestId`。**
-   - 字段可选、可为 null，最长 128 字符。它经 `RequestIdFilter.useClientId` 成为 `202` 的 `X-Request-Id`（规约现已声明该响应头），且不进入摘要。
+   - 字段可选、可为 null，最长 128 字符，且不进入摘要。可放入请求头的值（可见 ASCII）经 `RequestIdFilter.useClientId` 成为 `202` 的 `X-Request-Id`（规约现已声明该响应头）；其他值会像其他 WebShell 命令一样被替换为服务端生成的 id。
    - `WebShellLifecycleRequest` 的同类缺口按 B12 的说法，留给让客户端发送生命周期命令的那次变更。
 
 9. **child 任务的流（#13746 F2）不需要新日志。**
@@ -160,7 +166,7 @@
 
 - **存储，基于 H2 与 Flyway**（`ManagedTaskCancelOperationTest`，8 个测试）：
   - 准入、重放与摘要冲突，包括跨 actor 的情形；
-  - 保留的 key 在 Session 变为 `CLOSING` 后仍能重放，而 `DELETED` 的 Session 答复 `404`（服务层的访问检查在任何重放之前给出，A6 允许这样）；
+  - 保留的 key 在 Session 变为 `CLOSING` 后仍能重放；
   - 存储迁移栅栏拒绝新的取消，而保留的 key 仍能重放；
   - 各状态下的动作规则；
   - 双向的"每个 Session 一个开放操作"（取消会挡住关闭），以及两个竞争的 key 恰好只准入一个；
@@ -174,11 +180,11 @@
   - 慢投递会续租；
   - 没有取消路径的类型；
   - 停放对账永不重发；读不到记录的对账等待一整个复查周期。
-- **中继**（`ChildResultRelayTest`，新增 8 个测试）：
+- **中继**（`ChildResultRelayTest`，新增 9 个测试）：
   - 不创建即以未启动结算；
   - 先取消 Turn、对 `CANCELLING` 的 Turn 只等待，再在接纳关闭后以 `close_scope` `started: true` 结算；
   - 抢先完成的情形，以及保持 `child_failed` 的自然失败；
-  - 卡在自身恢复中的 Turn 只等待，`ACCEPTED` 的 Turn 被取消；
+  - 本分支请求取消之后以 `FAILED` 结束的 Turn 结算为 `cancelled`，`ACCEPTED` 的 Turn 像运行中的一样被取消；
   - 已铸造但从未 dispatch 的 child 具名结束；
   - 被拒绝的结算会延后而不是归类；
   - 已结束的 run 永不再次停止。
@@ -190,7 +196,7 @@
 - **契约：**
   - `ManagedAgentApiContractTest` 覆盖两条路由：`202`、重放、跨面重放、冲突、动作拒绝、`400`（包括 WebShell 的未知字段，以及答复 `invalid_idempotency_key` 的超长 key）、`404`、租户过滤器的 `403`，以及带 `task_id` 的操作回读。
   - `PlannedTaskContractTest` 现在把两条路由钉为 `partial`，并校验 `requestId` 实例。
-  - `SurfaceRegistry` 以新的规则类 `TASK_OPERATOR` 登记两条路由，`SurfaceAdmissionAcceptanceTest` 在两个面上探测：读权限之下为 `404`，reader 得 `403 task_forbidden`，OPERATOR 与 owner 级调用者被准入并得到路由自身的 `409`。
+  - `SurfaceRegistry` 以新的规则类 `TASK_OPERATOR` 登记两条路由，`SurfaceAdmissionAcceptanceTest` 在两个面上探测：读权限之下为 `404`，reader 得 `403 task_forbidden`，OPERATOR 与 owner 级调用者被准入并得到路由自身的 `409`。同一套件还钉住保留的 key 永远不能绕过当前访问权：准入它的 OPERATOR 可以重放，降为 reader 后得到 `403 task_forbidden`，Session 删除后得到 `404 session_not_found`。
 - **未运行：**
   - 带真实 Hosted Harness 与真实 child Session 的产品栈运行；
   - #12380 F 阶段针对该类型的故障轮次（取消应答丢失、结算过程中取消、与父会话关闭竞争的取消、所有者消失后取消）。上述单元套件对照录制的控制面调用覆盖了这些时序，但并非在真实栈上。

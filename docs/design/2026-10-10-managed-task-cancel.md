@@ -49,6 +49,7 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`),
    - `ManagedExtensionProjection.taskActions(kind, state)` is the single rule. It advertises `cancel` exactly for a `child_agent` task in `pending`, `running`, `waiting` or `degraded`.
    - Every other kind, and any terminal or `recovery_blocked` task, advertises no action. A new cancel for it answers `409 task_action_unavailable`.
    - The task view and the admission recheck read the same function, and the view advertises no action in a Session that is not `ACTIVE`, so the advertised action and the route's task and Session checks agree. Contention with another open operation (`409 session_operation_active`) is transient and is not reflected in the view.
+   - Contract section 4.2 lets a `recovery_blocked` task advertise `cancel`; v1 deliberately does not, because the stop path for a run waiting on recovery reconciliation is not defined yet.
    - A task whose stop is already recorded still advertises `cancel`: requests coalesce (contract section 4.4) and each operation gets its own outcome.
 
 2. **Admission runs in the A6 order, with authorization decided here.**
@@ -90,6 +91,8 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`),
    - A live run whose request is still not visible retries with the dispatch backoff, up to 16 attempts. With the 1 s to 1 min defaults the 15 waits add up to about ten minutes.
    - The budget counts claims (the operation's claim generation), not completed retries, and a delivery renews its lease every third of the lease while it runs. An attempt that hangs past the lease (for example on a cold Harness load) is therefore neither re-claimed underneath itself nor able to escape the budget; a claim past the budget parks on the record without sending.
    - After that the operation becomes `recovery_blocked` with `task_cancel_unconfirmed`, `java_durable`, `blocked`.
+   - The Harness's own refusals (`hosted_turn_recovery_required` while the parent waits on recovery, `hosted_children_unavailable`) are not proof either way, so they spend the same budget; for that window the open cancel holds the Session's operation slot, as the contract says an open cancel does.
+   - A `failed` cancel is terminal but keeps the contract's `blocked` delivery state, so its `available_at` moves to the maximum: no scan of the blocked index range reads it again.
    - Every five minutes the parked cancel re-reads the record:
      - a stop request recorded since (another cancel, the close cascade) completes it;
      - an end without one fails it;
@@ -98,17 +101,20 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`),
    - A reconciliation that cannot read the record parks the operation again for a whole recheck, so one unreadable record never pins the head of the parked scan, which reads through the `(delivery_state, available_at)` index.
 
 6. **The relay stops the child physically.**
-   - Its new stop arm runs before any other arm for a run whose committed record has `stopRequested` and has not ended. The relay already owns the child's walk, so no second driver races its ledger row.
+   - Its new stop arm runs for a run whose committed record has `stopRequested` and has not ended, after the relay's parent-closing and settled-record early-outs and before the arms that create, bind, watch or fail the child. The relay already owns the child's walk, so no second driver races its ledger row.
    - What the arm does depends on the child:
 
-     | Child                                           | Stop arm                                                                                                                                                                                                                                                            |
-     | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-     | No child minted (ledger and lineage both empty) | Settle `close_scope` `started: false` without creating one. The verdict/mint commit gate refuses this if a creation lands first, and the retry then names the child.                                                                                                |
-     | Child Turn `ACCEPTED` or `RUNNING`              | Cancel that Turn through the child's own durable Turn cancel (`ManagedAgentService.cancelChildTurn`, keyed by parent, run and Turn), then look again on the heartbeat.                                                                                              |
-     | Child Turn in any other live status             | Wait on the heartbeat: a Turn already `CANCELLING`, or blocked on its own recovery, owns its outcome, and re-driving a cancel there could have no effect.                                                                                                           |
-     | Child Turn `CANCELLED`                          | Get the start pairing from committed evidence (`reconcileAttach`, which replays a lost dispatch or attach). Admit the child's close, then settle `close_scope`. A minted child that never started dies named. A close-incapable host keeps the close debt as today. |
-     | Child Turn `COMPLETED` or `FAILED` first        | The child's natural outcome wins (contract section 4.4): the ordinary walk delivers the result, or settles `failed` by `child_failed`. The settled run keeps the recorded request.                                                                                  |
+     | Child                                                                   | Stop arm                                                                                                                                                                                                                                                            |
+     | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+     | No child minted (ledger and lineage both empty)                         | Settle `close_scope` `started: false` without creating one. The verdict/mint commit gate refuses this if a creation lands first, and the retry then names the child.                                                                                                |
+     | Child Turn `ACCEPTED` or `RUNNING`                                      | Cancel that Turn through the child's own durable Turn cancel (`ManagedAgentService.cancelChildTurn`, keyed by parent, run and Turn), then look again on the heartbeat.                                                                                              |
+     | Child Turn `CANCELLING`                                                 | Wait on the heartbeat: the Turn owns its outcome, and re-driving the cancel could have no effect.                                                                                                                                                                   |
+     | Child Turn `CANCELLED`, or `FAILED` after this arm requested its cancel | Get the start pairing from committed evidence (`reconcileAttach`, which replays a lost dispatch or attach). Admit the child's close, then settle `close_scope`. A minted child that never started dies named. A close-incapable host keeps the close debt as today. |
+     | Child Turn `COMPLETED`, or `FAILED` without this arm's cancel           | The child's natural outcome wins (contract section 4.4): the ordinary walk delivers the result, or settles `failed` by `child_failed`. The settled run keeps the recorded request.                                                                                  |
 
+   - A cancel that lands on a Turn mid-recovery can end it `FAILED` rather than `CANCELLED`. The arm tells the two `FAILED` ends apart by its own durable evidence: the child Turn cancel command it wrote, keyed by parent, run and Turn. A space in that key keeps it out of reach of callers' visible-ASCII keys in the tenant-wide command namespace.
+   - A stop the relay cannot finish within its bounded attempts (an attach chain it cannot prove, a close that keeps faltering) ends through the relay's existing give-up chain: `failed` with the ledger row classified `unknown`, as for any run the relay cannot finish. That path is H4b's and is unchanged here.
+   - A run that completed after its stop request keeps the request, so H4d's continuation refuses it as a predecessor (`continueChildRun` admits no stop-requested predecessor).
    - The task becomes `cancelled` only through that settlement. Until then its state stays as it was, and its runtime reads `draining` while the child is provisioning or attached (an unbound pending run keeps `unbound`). A foreground parent waiting on the child is answered "Child agent run cancelled (stop_requested)" by its existing waiter.
 
 7. **The `unknown` delivery's operator story (H4b open question 1).**
@@ -121,7 +127,7 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`),
      - an unproven delivery: close the Session.
 
 8. **B12: the WebShell request carries a trace-only `requestId`.**
-   - The field is optional, nullable and at most 128 characters. It becomes the `202`'s `X-Request-Id` through `RequestIdFilter.useClientId`, which the spec now declares, and it stays out of the digest.
+   - The field is optional, nullable and at most 128 characters, and stays out of the digest. A header-safe value (visible ASCII) becomes the `202`'s `X-Request-Id` through `RequestIdFilter.useClientId`, which the spec now declares; any other value is replaced by a server-chosen id, as on the other WebShell commands.
    - `WebShellLifecycleRequest`'s matching gap stays with the change that makes the client send lifecycle commands, as B12 says.
 
 9. **Child task streams (#13746 F2) need no new journal.**
@@ -149,7 +155,7 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`),
 
 - **Store, on H2 with Flyway** (`ManagedTaskCancelOperationTest`, 8 tests):
   - admission, replay and digest conflict, including across actors;
-  - a retained key replaying through a `CLOSING` Session, and a `DELETED` one answering `404` (the service's access check answers it before any replay, as A6 allows);
+  - a retained key replaying through a `CLOSING` Session;
   - the storage-migration fence refusing a new cancel while a retained key still replays;
   - the action rule per state;
   - one open operation per Session in both directions (a cancel blocks close), and two competing keys admitting exactly one;
@@ -163,11 +169,11 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`),
   - a slow delivery renewing its lease;
   - a kind without a cancel path;
   - parked reconciliation that never re-sends, and one that cannot read the record waiting a whole recheck.
-- **Relay** (`ChildResultRelayTest`, 8 new tests):
+- **Relay** (`ChildResultRelayTest`, 9 new tests):
   - unstarted settlement without creation;
   - Turn cancel, a `CANCELLING` Turn only waited on, then a `close_scope` `started: true` settlement with the close admitted;
   - a completion that wins the race, and a natural failure that stays `child_failed`;
-  - a Turn blocked on its recovery only waited on, and an `ACCEPTED` one cancelled;
+  - a `FAILED` end after the arm requested the cancel settling `cancelled`, and an `ACCEPTED` Turn cancelled like a running one;
   - a minted, never-dispatched child that dies named;
   - a refused settlement that defers instead of classifying;
   - an ended run that is never stopped again.
@@ -179,7 +185,7 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`),
 - **Contract:**
   - `ManagedAgentApiContractTest` serves both routes: `202`, replay, cross-surface replay, conflict, action refusal, `400` (including an unknown WebShell field and an overlong key answering `invalid_idempotency_key`), `404`, the tenant filter's `403`, and the operation read-back carrying `task_id`.
   - `PlannedTaskContractTest` now pins both routes as `partial` and checks the `requestId` instances.
-  - `SurfaceRegistry` gains both routes under a new `TASK_OPERATOR` rule class, which `SurfaceAdmissionAcceptanceTest` probes on both surfaces: `404` below read, `403 task_forbidden` for a reader, and an OPERATOR or owner-rank caller admitted to the route's own `409`.
+  - `SurfaceRegistry` gains both routes under a new `TASK_OPERATOR` rule class, which `SurfaceAdmissionAcceptanceTest` probes on both surfaces: `404` below read, `403 task_forbidden` for a reader, and an OPERATOR or owner-rank caller admitted to the route's own `409`. The same suite pins that a retained key never bypasses current access: the admitting OPERATOR replays, then gets `403 task_forbidden` once demoted to reader and `404 session_not_found` once the Session is deleted.
 - **Not run:**
   - a product-stack run with a live Hosted Harness and a real child Session;
   - the #12380 Stage F fault round for this kind (lost cancel reply, cancel during settlement, cancel racing the parent close, cancel after the owner is gone). The unit suites above cover each of those orderings against the recorded control-plane calls, not on a real stack.

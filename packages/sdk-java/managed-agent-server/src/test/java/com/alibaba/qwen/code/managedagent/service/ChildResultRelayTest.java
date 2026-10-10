@@ -1295,28 +1295,45 @@ class ChildResultRelayTest {
         assertThat(row.get().state()).isEqualTo("done");
     }
 
-    // Only an accepted or running Turn takes the cancel: any other live
-    // status owns its own outcome and is waited on without re-driving.
+    // An accepted Turn not yet dispatched takes the cancel like a running
+    // one; the cancelling one it leaves is then only waited on.
     @Test
-    void aTurnBlockedOnItsRecoveryIsWaitedOn() {
+    void anAcceptedTurnIsCancelledLikeARunningOne() {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
                 new ChildResultRelayStore.StopState(true, false));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
-                "turn-1", "RECOVERY_BLOCKED", null, null, true, "epoch-1"));
-        relay.scan();
-        verify(sessions, never()).cancelChildTurn(anyString(), anyString(),
-                anyString(), anyString(), anyString());
-        verify(store).scheduleRetry(any(RelayRow.class), anyString(),
-                anyLong(), anyLong(), anyLong());
-        assertThat(harness.operations).isEmpty();
-        // An accepted Turn not yet dispatched is cancelled like a running one.
-        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "ACCEPTED", null, null, false, null));
         relay.scan();
         verify(sessions).cancelChildTurn(TENANT, PARENT, CHILD, RUN,
                 "turn-1");
+        verify(store).scheduleRetry(any(RelayRow.class), anyString(),
+                anyLong(), anyLong(), anyLong());
+        assertThat(harness.operations).isEmpty();
+    }
+
+    // A cancel landing on a Turn mid-recovery can end it FAILED: once this
+    // arm requested that Turn's cancel, the end is the stop's, and the run
+    // settles cancelled rather than child_failed.
+    @Test
+    void aFailedEndAfterThisArmsStopRequestSettlesCancelled() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
+                new ChildResultRelayStore.StopState(true, false));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "FAILED", now + 1,
+                "managed_runtime_recovery_incomplete", true, "epoch-1"));
+        when(sessions.childTurnStopRequested(TENANT, PARENT, RUN, "turn-1"))
+                .thenReturn(true);
+        relay.scan();
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(harness.operations).hasSize(1);
+        assertThat(harness.operations.getFirst())
+                .containsEntry("kind", "close_scope")
+                .containsEntry("started", true);
+        assertThat(row.get().state()).isEqualTo("done");
     }
 
     @Test

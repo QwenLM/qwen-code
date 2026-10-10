@@ -257,13 +257,14 @@ public class TaskCancelCoordinator {
 
     private void retryOrPark(OperationRecord operation, String failure) {
         if (operation.claimGeneration() >= ATTEMPT_BUDGET) {
-            store.settleTaskCancel(operation.tenantId(),
+            boolean parked = store.settleTaskCancel(operation.tenantId(),
                     operation.sessionId(), operation.operationId(), owner,
                     operation.claimGeneration(),
                     TaskCancelOutcome.recoveryBlocked(UNCONFIRMED),
                     Math.addExact(clock.millis(), PARKED_RECHECK.toMillis()));
-            LOG.warn("Task cancel parks unconfirmed tenant={} session={}"
-                            + " operation={} attempts={} failure={}",
+            LOG.warn("Task cancel {} unconfirmed tenant={} session={}"
+                            + " operation={} claims={} failure={}",
+                    parked ? "parks" : "lost its claim before parking",
                     operation.tenantId(), operation.sessionId(),
                     operation.operationId(), operation.claimGeneration(),
                     failure);

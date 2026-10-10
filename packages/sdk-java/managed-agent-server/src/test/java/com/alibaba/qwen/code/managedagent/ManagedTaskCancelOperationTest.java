@@ -324,6 +324,13 @@ class ManagedTaskCancelOperationTest {
         assertThat(failed.deliveryState()).isEqualTo("BLOCKED");
         assertThat(failed.failureCode()).isEqualTo("task_already_settled");
         assertThat(failed.receiptId()).isNull();
+        // Terminal for good: no scan of the blocked index range reads it
+        // again, however far the clock moves.
+        assertThat(jdbc.queryForObject("SELECT available_at FROM"
+                + " managed_agent_operation WHERE operation_id = ?",
+                Long.class, admitted.operationId())).isEqualTo(Long.MAX_VALUE);
+        assertThat(store.findParkedTaskCancels(10)).isEmpty();
+        assertThat(store.findDeliverableOperations(now.get(), 10)).isEmpty();
         assertThat(store.claimOperation(TENANT, sessionId,
                 admitted.operationId(), "owner-2", Duration.ofSeconds(30)))
                 .isEmpty();

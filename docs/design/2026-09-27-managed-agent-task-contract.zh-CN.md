@@ -169,7 +169,7 @@ operation 模型；本变更选择接受它可见。此后 D4 已把共用命令
 1. 校验键：缺失返回 `400 invalid_request`，格式错误返回 `400 invalid_idempotency_key`。
 2. 检查当前访问权：Session 或任务不可读时返回 `404`；可读但无权取消时返回 `403 task_forbidden`。
 3. 在 tenant/Session/operation-kind/actor/key 域内查找保留的幂等记录。请求摘要包含任务 ID，排除仅用于 trace 的请求 ID。摘要不同返回 `409 idempotency_conflict`；相同则返回同一 operation ID、其最新持久状态及 `replayed: true`。
-4. 仅对新请求依次检查任务支持（`400 unsupported_feature`）、Session 是否为 `active`（否则 `409 session_not_active`，包括 `closing`、`closed`、`archived` 和 `deleting`），最后检查 `action_capabilities` 是否含 `cancel`（否则 `409 task_action_unavailable`）。
+4. 仅对新请求依次检查任务支持（`400 unsupported_feature`）、Session 是否为 `active`（否则 `409 session_not_active`，包括 `closing`、`closed`、`archived` 和 `deleting`），然后检查 `action_capabilities` 是否含 `cancel`（否则 `409 task_action_unavailable`），最后对绑定 Workspace 的 Session 检查其 Workspace 没有被存储迁移栅栏占住（否则 `409 workspace_unavailable`，与所有同类绑定准入一致；由 H4f 加入）。
 5. 原子地复核新请求准入条件并创建 operation，让竞争请求与 Session/任务状态转换串行化。同键并发中已有请求先成功时，按第 3 步处理，不作为新请求。准入还要求该 Session 上没有其他未完成（`pending` 或 `running`）的 operation：取消 operation 与生命周期命令共用同一张持久 operation 表，后者每个 Session 只允许一个未完成的 operation，因此任何未完成的 operation 都会返回 `409 session_operation_active`，而一个未完成的取消同样会阻塞 close、archive 和 delete。
 
 因此，保留的键可以跨越能力和状态变化，但绝不绕过当前访问权检查。资源缺失/已删除或权限撤销仍可返回 `404` 或 `403`；重放承诺以访问权和记录仍保留为前提。合法同键重试不会仅因支持被关闭或任务已结算，就变成新请求的 `400` 或 `409`。
@@ -251,6 +251,7 @@ operation）时，创建不同 operation。它们的物理停止请求可以合�
 | `409` | `task_action_unavailable`  | 使用新键时 `action_capabilities` 不含 `cancel`，包括已结算的任务。新增。                                                                                   |
 | `409` | `session_not_active`       | 新取消请求指向非 active 的 Session。                                                                                                                       |
 | `409` | `session_operation_active` | 新取消请求到达时 Session 上有另一个未完成的 operation，与生命周期路由相同。                                                                                |
+| `409` | `workspace_unavailable`    | 新取消请求指向绑定 Workspace 的 Session，而其 Workspace 被存储迁移栅栏占住，与同类绑定准入相同（H4f）。                                                    |
 | `409` | `idempotency_conflict`     | 同一个键用于不同的请求。                                                                                                                                   |
 
 按 API 契约第 10 节，无权读取任务的调用方收到 `404`，而不是 `403`。只读路由唯一会返回的 `403` 是租户过滤器的

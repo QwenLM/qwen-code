@@ -787,7 +787,7 @@ export interface components {
             deliveryState: "pending" | "leased" | "confirmed" | "blocked";
             receiptId?: string;
             actionResolution?: components["schemas"]["WebShellActionResolution"];
-            /** @description Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Workspace close recovery_blocked reports original resource identity or unsettled execution; the Session remains closing. */
+            /** @description Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Task cancel failures are task_already_settled (the run ended before the stop request was recorded), task_action_unavailable and task_not_found; a recovery_blocked task cancel reports task_cancel_unconfirmed. Workspace close recovery_blocked reports original resource identity or unsettled execution; the Session remains closing. */
             failureCode?: string;
             replayed: boolean;
         } & (unknown & unknown & unknown & unknown & unknown);
@@ -914,7 +914,7 @@ export interface components {
          */
         TaskRuntimeState: "unbound" | "provisioning" | "ready" | "draining" | "lost";
         /**
-         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task (since 1.40, child_agent tasks in pending, running, waiting or degraded); whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
+         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task (since 1.40, child_agent tasks in pending, running, waiting or degraded, in an active Session); whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
          * @enum {string}
          */
         TaskActionCapability: "cancel" | "send_input" | "read_output";
@@ -1004,7 +1004,7 @@ export interface components {
             limit?: number;
         };
         WebShellTaskCancelRequest: {
-            /** @description Trace correlation only; excluded from the request digest, so a retry with another requestId still replays. */
+            /** @description Trace correlation only; excluded from the request digest, so a retry with another requestId still replays. A header-safe value (1 to 128 visible ASCII characters) is echoed as X-Request-Id; any other value is replaced by a server-chosen id. */
             requestId?: string | null;
             /** Format: uuid */
             sessionId: string;

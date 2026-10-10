@@ -274,7 +274,10 @@ in this order (A6):
    then that the Session is `active` (`409 session_not_active` otherwise,
    including `closing`, `closed`, `archived` and `deleting`), then that
    `action_capabilities` includes `cancel`
-   (`409 task_action_unavailable` otherwise).
+   (`409 task_action_unavailable` otherwise), then, for a Workspace-bound
+   Session, that no storage migration fence holds its Workspace
+   (`409 workspace_unavailable` otherwise, as every sibling bound admission
+   answers; added by H4f).
 5. Atomically recheck new-request admission conditions and create the
    operation, serializing competing requests with Session/task transitions.
    A concurrent same-key winner is handled by step 3, not as a new request.
@@ -387,6 +390,7 @@ routes already return, the tenant filter's `invalid_tenant` and
 | `409`  | `task_action_unavailable`  | A new key while `action_capabilities` lacks `cancel`, which includes settled tasks. New.                                                                                                                        |
 | `409`  | `session_not_active`       | A new cancel request targets a Session that is not active.                                                                                                                                                      |
 | `409`  | `session_operation_active` | A new cancel request while another operation is open on the Session, as on the lifecycle routes.                                                                                                                |
+| `409`  | `workspace_unavailable`    | A new cancel request on a Workspace-bound Session whose Workspace is fenced by a storage migration, as on the sibling bound admissions (H4f).                                                                   |
 | `409`  | `idempotency_conflict`     | The key was used with a different request.                                                                                                                                                                      |
 
 A caller that cannot read a task gets `404`, not `403`, as API contract

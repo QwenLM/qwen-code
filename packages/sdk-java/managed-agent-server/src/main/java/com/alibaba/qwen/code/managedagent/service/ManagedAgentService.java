@@ -398,9 +398,7 @@ public class ManagedAgentService {
     public CommandAdmission cancelChildTurn(String tenantId,
             String parentSessionId, String childSessionId, String childRunId,
             String turnId) {
-        String key = "child-stop-" + digests.digest(Map.of(
-                "parentSessionId", parentSessionId, "childRunId", childRunId,
-                "turnId", turnId));
+        String key = childStopKey(parentSessionId, childRunId, turnId);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", childSessionId, "turnId", turnId));
         Admission replay = replay(tenantId, CANCEL, key, requestDigest);
@@ -1066,6 +1064,27 @@ public class ManagedAgentService {
      * new-request state checks instead. An unbound Session has no role
      * model beyond its read access.
      */
+    /**
+     * Whether the relay's stop arm requested this child Turn's cancel: the
+     * durable evidence that the Turn's end, whatever status it took, came
+     * after the stop rather than racing ahead of it.
+     */
+    public boolean childTurnStopRequested(String tenantId,
+            String parentSessionId, String childRunId, String turnId) {
+        return store.findCommand(tenantId, CANCEL, childStopKey(
+                parentSessionId, childRunId, turnId)).isPresent();
+    }
+
+    // The tenant-wide command namespace is shared with callers' keys,
+    // which are visible ASCII only (validateIdempotencyKey): the space
+    // makes this key one no caller can claim first.
+    private String childStopKey(String parentSessionId, String childRunId,
+            String turnId) {
+        return "child-stop " + digests.digest(Map.of(
+                "parentSessionId", parentSessionId, "childRunId", childRunId,
+                "turnId", turnId));
+    }
+
     void requireTaskCanceller(SessionRecord session, String actorId) {
         if (session.workspace() != null
                 && !workspaces.accessOf(session.tenantId(), actorId,
