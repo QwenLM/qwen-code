@@ -13145,6 +13145,151 @@ describe('useLlmStream', () => {
     );
 
     it.each(
+      (['raw', 'render'] as const).flatMap((mode) =>
+        ['\n', '\r\n'].flatMap((newline) =>
+          ['aligned rows', 'whitespace before a long row'].map((fixture) => ({
+            mode,
+            newline,
+            fixture,
+          })),
+        ),
+      ),
+    )(
+      'preserves available math body rows at the cap with $fixture in $mode ($newline)',
+      async ({ mode, newline, fixture }) => {
+        const cap = 16_384;
+        const aligned = fixture === 'aligned rows';
+        const rows = Array.from(
+          { length: 2000 },
+          (_, i) => ` a_{${i}} &= b_{${i}} \\\\`,
+        );
+        const stages = aligned
+          ? [
+              ['$$', '\\begin{aligned}', ...rows.slice(0, 1000), ''].join(
+                newline,
+              ),
+              [...rows.slice(1000), '\\end{aligned}', '$$', ''].join(newline),
+            ]
+          : [
+              ['$$', '   ', '\t', 'A'.repeat(cap * 2 + 300), '$$', ''].join(
+                newline,
+              ),
+              `${newline}Later prose.`,
+            ];
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { current: mode },
+        );
+        const stream = await streamStages(result, stages);
+        const assertSource = (expected: string, expectedRows: string[]) => {
+          const committed = llmContentItems().map((item) => item.text);
+          const parts = [
+            ...committed,
+            ...result.current.pendingHistoryItems.map(
+              (item) => item.text ?? '',
+            ),
+          ];
+          expect(committed.length).toBeGreaterThan(0);
+          expect(committed.every((text) => text.length > 0)).toBe(true);
+          expect(parts.every((text) => text.length <= cap)).toBe(true);
+          expect(parts.join('')).toBe(expected);
+          if (aligned) {
+            expect(committed.every((text) => text.endsWith(newline))).toBe(
+              true,
+            );
+            expect(
+              parts
+                .flatMap((text) => text.split(newline))
+                .filter((line) => /^ a_\{/.test(line)),
+            ).toEqual(expectedRows);
+          }
+        };
+        try {
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          assertSource(stages[0]!, aligned ? rows.slice(0, 1000) : []);
+          if (!aligned) {
+            expect(llmContentItems()[0]!.text).toBe(stages[0]!.slice(0, cap));
+          }
+          await stream.advance();
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          assertSource(stages.join(''), aligned ? rows : []);
+          await stream.advance();
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+          expect(result.current.pendingHistoryItems).toEqual([]);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          assertSource(stages.join(''), aligned ? rows : []);
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
+    it.each(
+      (['raw', 'render'] as const).flatMap((mode) =>
+        ['\n', '\r\n'].flatMap((newline) =>
+          [true, false].map((terminated) => ({ mode, newline, terminated })),
+        ),
+      ),
+    )(
+      'retains the cap partition inside a math closer in $mode ($newline, terminated=$terminated)',
+      async ({ mode, newline, terminated }) => {
+        const cap = 16_384;
+        const opener = `$$${newline}`;
+        const body = 'x'.repeat(cap - 1 - opener.length - newline.length);
+        const content =
+          `${opener}${body}${newline}$$` +
+          (terminated ? `${newline}Tail prose.${newline}` : '');
+        const later = `${newline}Later prose.`;
+        const first = content.slice(0, cap);
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { current: mode },
+        );
+        const stream = await streamStages(result, [content, later]);
+        const assertSource = (expected: string) => {
+          const parts = [
+            ...llmContentItems().map((item) => item.text),
+            ...result.current.pendingHistoryItems.map(
+              (item) => item.text ?? '',
+            ),
+          ];
+          expect(parts).toEqual([first, expected.slice(cap)]);
+          expect(
+            parts.every((text) => text.length > 0 && text.length <= cap),
+          ).toBe(true);
+          expect(parts.join('')).toBe(expected);
+          expect(parts[1]).toMatch(/^\$(?:\r?\n|$)/);
+        };
+        try {
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          assertSource(content);
+          await stream.advance();
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          assertSource(content + later);
+          await stream.advance();
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+          expect(result.current.pendingHistoryItems).toEqual([]);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          assertSource(content + later);
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
+    it.each(
       boundaryModes.flatMap((mode) =>
         ['\n', '\r\n'].flatMap((newline) =>
           [

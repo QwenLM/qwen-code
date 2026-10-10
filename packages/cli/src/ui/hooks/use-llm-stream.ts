@@ -1941,6 +1941,7 @@ export const useLlmStream = (
         let codeStart = -1;
         let firstCodeHandoff = -1;
         let lastFreeLineEnd = -1;
+        let lastMathBodyLineEnd = -1;
         for (let offset = 0; offset < target; ) {
           const end = newLlmMessageBuffer.indexOf('\n', offset);
           const prefix = offset === 0 ? mathCarry.linePrefix : '';
@@ -1970,6 +1971,11 @@ export const useLlmStream = (
             } else if (mathStart >= 0) {
               if (end < target && line !== null && /^ *\$\$ *$/.test(line)) {
                 mathStart = -1;
+              } else if (
+                end < target &&
+                (line === null || line.trim() !== '')
+              ) {
+                lastMathBodyLineEnd = end + 1;
               }
             } else if (fence) {
               codeFence = fence[1]!;
@@ -1983,6 +1989,9 @@ export const useLlmStream = (
             }
           }
           if (end < 0 || end >= target) {
+            if (mathStart >= 0 && line !== null && /^ *\$\$ *$/.test(line)) {
+              lastMathBodyLineEnd = -1;
+            }
             const partial =
               prefix === null
                 ? null
@@ -2005,6 +2014,7 @@ export const useLlmStream = (
           codeStart,
           firstCodeHandoff,
           lastFreeLineEnd,
+          lastMathBodyLineEnd,
           carriedMath,
           inMathBlock: consumedMath,
           linePrefix,
@@ -2038,7 +2048,10 @@ export const useLlmStream = (
                       rescueBlock.codeStart < 0 &&
                       rescueBlock.lastFreeLineEnd > 0
                     ? rescueBlock.lastFreeLineEnd
-                    : STREAM_PENDING_ITEM_MAX_CHARS;
+                    : rescueBlock.mathStart === 0 &&
+                        rescueBlock.lastMathBodyLineEnd > 0
+                      ? rescueBlock.lastMathBodyLineEnd
+                      : STREAM_PENDING_ITEM_MAX_CHARS;
         }
 
         // This indicates that we need to split up this LLM message.
