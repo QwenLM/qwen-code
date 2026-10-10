@@ -1058,12 +1058,10 @@ class HostedPublicWorkspaceIT {
             Map<String, Object> body = web ? Map.of("sessionId", session, "actionId", id, "idempotencyKey", id,
                     "requestId", "d6b-action", "response", response) : response;
             assertThat(request("POST", route, body, id, "reader", 403).at("/error/code").asText()).isEqualTo("action_forbidden");
-            // The first approval of each session is answered by a second
-            // OPERATOR who is not the Session owner (R1's handoff); the
-            // rest by the owner, so both responder paths stay covered. The
-            // set records ONLY the chosen responder, so collapsing the
-            // ternary to the owner empties it instead of staying full.
-            String responder = fixedAnswered.add(session) ? "operator2" : "actor";
+            // Files sessions answer the first approval as a second OPERATOR
+            // (R1's handoff) and the rest as the owner. A Shell answer runs
+            // a command, so only the recorded owner may answer it.
+            String responder = !shell && fixedAnswered.add(session) ? "operator2" : "actor";
             if ("operator2".equals(responder)) {
                 operatorAnswered.add(session);
             }
