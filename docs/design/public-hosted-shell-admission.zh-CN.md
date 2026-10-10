@@ -138,7 +138,10 @@ Checkstyle、两轮干净自审及独立审查。结果记录于
 
 在部署具备 #12904、#13010 和公开 FG6f 证据前保持开关关闭。本功能不修复这些独立
 问题，不增加完整 Shell 生命周期，不绕过恢复拒绝。创建 Shell Session 前统一升级
-Session 读取端，旧二进制不得把持久化 profile 解释为 files。本切片的实现选择已确定，
+Session 读取端，旧二进制不得把持久化 profile 解释为 files。打开开关前先升级
+Harness：旧 Harness 会忽略 `suppressChildAgents`，工具列表会重新带上 child agent。
+Shell 审批只允许该 Session 记录上的 owner 回答，不允许任意 Workspace operator，
+因为回答会执行命令。本切片的实现选择已确定，
 公开契约与发布顺序仍需维护者审查。缺少物理测试基础设施时明确报告未验证门禁，
 不记为通过。
 

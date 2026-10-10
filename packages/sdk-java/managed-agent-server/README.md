@@ -546,7 +546,8 @@ never enable it where untrusted clients can reach the server.
 `auto-edit`, any caller with a read grant on the bound Workspace can list and
 inspect pending permission Actions through the public API or WebShell;
 answering one needs the Session's recorded owner or a caller holding OPERATOR
-or above, and that read grant as well. Responses are durable, idempotent
+or above, and that read grant as well. A Shell Session is the exception:
+only its recorded owner may answer, because that answer runs a command. Responses are durable, idempotent
 operations; their final result follows the committed Harness decision.
 `QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT` defaults to `10m` and accepts `1s` to `24h`.
 The approval mode is pinned at Session creation and must be confirmed by the
@@ -565,7 +566,9 @@ Harness's deployment-owned `--managed-runtime-broker-url` and
 the original Session/Turn; changed input conflicts. Disabling the Workspace files
 opt-in refuses creation with input, including replays, while empty bound creation
 remains available. The Shell opt-in selects the persisted profile; it does not
-independently admit creation input. The directory mounted for a Workspace is trusted deployment data,
+independently admit creation input. Upgrade the Harness before enabling the
+Shell flag: an older Harness ignores `suppressChildAgents` and would advertise
+the child agent tool. The directory mounted for a Workspace is trusted deployment data,
 not a filesystem sandbox.
 
 Later Turns may be submitted by any caller holding OPERATOR on the bound

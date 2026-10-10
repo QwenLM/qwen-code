@@ -180,7 +180,10 @@ Keep the flag off until the deployment has evidence for #12904, #13010 and the
 public FG6f gates. This feature does not fix those independent issues, add full
 Shell lifecycle, or bypass a recovery refusal. Deploy all Session readers before
 creating Shell Sessions; an older binary must not reinterpret the stored
-profile as files. The implementation choices for this slice are set; maintainer
+profile as files. Upgrade the Harness before enabling the flag. An older
+Harness ignores `suppressChildAgents` and would advertise the child agent
+tool. Shell Action responses admit only the Session's recorded owner, not
+every Workspace operator, because the answer runs a command. The implementation choices for this slice are set; maintainer
 review of the public contract and rollout sequencing remains required. Missing
 physical test infrastructure is reported as an unverified gate, never a pass.
 
