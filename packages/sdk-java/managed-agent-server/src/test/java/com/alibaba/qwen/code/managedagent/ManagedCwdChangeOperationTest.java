@@ -1027,6 +1027,23 @@ class ManagedCwdChangeOperationTest {
         var afterAction = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
                 "turn-action", "digest", secondId, List.of(), "payload");
         assertThat(afterAction.turnId()).isNotBlank();
+
+        // H4f: a task cancel stops one task and changes no Session context,
+        // so an open one never holds a later Turn either.
+        String thirdId = fixture.createBoundSession(TENANT, WS);
+        fixture.jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                + " session_id, operation_id, operation_kind, actor_digest,"
+                + " idempotency_key, request_digest, state,"
+                + " admission_stage, delivery_state, session_status_before,"
+                + " task_id, available_at, created_at, updated_at) VALUES"
+                + " (?, ?, ?, 'TASK_CANCEL', 'actor', 'cancel-key', 'digest',"
+                + " 'RUNNING', 'JAVA_DURABLE', 'LEASED', 'ACTIVE', ?, 0, 0,"
+                + " 0)", TENANT, thirdId, "task-cancel-op",
+                "task_" + "a".repeat(64));
+        var afterTaskCancel = fixture.store.insertTurnCommand(TENANT,
+                "SUBMIT", "turn-task-cancel", "digest", thirdId, List.of(),
+                "payload");
+        assertThat(afterTaskCancel.turnId()).isNotBlank();
     }
 
     // The legacy Turn route keeps its pre-W2 behavior: the workspace gate
