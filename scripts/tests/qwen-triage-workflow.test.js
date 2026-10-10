@@ -5043,6 +5043,11 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(scopeSelection).toContain(
       'it gets its own A/B as a secondary claim',
     );
+    // A mandated secondary A/B with no budget line would eat the central one
+    // (#13819 review); it takes a harness slot instead.
+    expect(scopeSelection).toContain(
+      'takes one of the harness slots in item 2 rather than time from the central A/B',
+    );
     expect(scopeSelection).toContain(
       'The trigger is therefore the diff, not the claim.',
     );
