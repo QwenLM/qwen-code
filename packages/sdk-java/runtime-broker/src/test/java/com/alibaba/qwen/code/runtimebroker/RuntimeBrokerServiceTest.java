@@ -390,22 +390,24 @@ class RuntimeBrokerServiceTest {
         assertDeliveryPendingKeepsTheMount("blocked");
     }
 
-    private void assertDeliveryPendingKeepsTheMount(String deliveryStatus)
-            throws Exception {
-        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
-        String digest = "sha256:" + HexFormat.of().formatHex(
-                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
-        Map<String, Object> capture = new LinkedHashMap<>();
-        capture.put("captureStatus", "detached");
-        capture.put("captureReason", null);
-        capture.put("manifest", null);
-        capture.put("previewTruncated", false);
-        capture.put("deliveryStatus", deliveryStatus);
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("executionStatus", "success");
-        result.put("responseParts", java.util.List.of(Map.of("text", "done")));
-        result.put("capture", capture);
-        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+    @Test
+    void mountReleaseRunsOnceTheDeliveryIsCommitted() throws Exception {
+        // Negative twin of the open-delivery witnesses: with every piece of
+        // evidence closed the mount does hand back — without this, a gate
+        // that refuses everything would keep the suite green while
+        // re-freezing the #13800 wedge.
+        RuntimePublicationVerifier verifier = deliveryVerifier();
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            var settled = driveDeliveredExecution(fixture, "committed");
+            assertEquals("committed", ((Map<?, ?>) settled.getResult()
+                    .get("capture")).get("deliveryStatus").toString());
+            assertTrue(join(fixture.service.releaseMount("holder", "holder")));
+            assertEquals(1, fixture.transport.releaseMountCalls.get());
+        }
+    }
+
+    private RuntimePublicationVerifier deliveryVerifier() {
+        return new RuntimePublicationVerifier() {
             @Override
             public RuntimePublicationGrant verify(ToolExecutionRecord execution,
                     String publicationId, String token) {
@@ -423,23 +425,47 @@ class RuntimeBrokerServiceTest {
                 throw new AssertionError("Detached family has no publication receipt to compare");
             }
         };
+    }
+
+    private ToolExecutionRecord driveDeliveredExecution(Fixture fixture,
+            String deliveryStatus) throws Exception {
+        // is_background would admit a `<execution>:process` row that needs
+        // its own observation proof — irrelevant to the delivery-vs mount
+        // question this fixture answers, so it stays out (plain foreground).
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\"}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        Map<String, Object> capture = new LinkedHashMap<>();
+        capture.put("captureStatus", "detached");
+        capture.put("captureReason", null);
+        capture.put("manifest", null);
+        capture.put("previewTruncated", false);
+        capture.put("deliveryStatus", deliveryStatus);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("executionStatus", "success");
+        result.put("responseParts", java.util.List.of(Map.of("text", "done")));
+        result.put("capture", capture);
+        join(fixture.service.acquire("holder", "holder", "bootstrap"));
+        Map<String, Object> reference = Map.of("sessionId", "holder",
+                "promptId", "prompt", "callId", "call", "argsDigest",
+                "sha256:" + "a".repeat(64));
+        fixture.transport.executeV3Result = CompletableFuture
+                .completedFuture(Map.of("state", "prepared"));
+        fixture.transport.statusResult = CompletableFuture
+                .completedFuture(Map.of("state", "settled", "result", result));
+        ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                "holder", "holder", "key", reference, digest, "pub-1"));
+        join(fixture.service.startExecution("holder", "holder",
+                prepared.getExecutionCallId(), payload, "pub-1", "token"));
+        return awaitExecution(fixture.executionRepository,
+                prepared.getExecutionCallId(), ToolExecutionRecord.State.SETTLED);
+    }
+
+    private void assertDeliveryPendingKeepsTheMount(String deliveryStatus)
+            throws Exception {
+        RuntimePublicationVerifier verifier = deliveryVerifier();
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
-            join(fixture.service.acquire("holder", "holder", "bootstrap"));
-            Map<String, Object> reference = Map.of("sessionId", "holder",
-                    "promptId", "prompt", "callId", "call", "argsDigest",
-                    "sha256:" + "a".repeat(64));
-            fixture.transport.executeV3Result = CompletableFuture
-                    .completedFuture(Map.of("state", "prepared"));
-            fixture.transport.statusResult = CompletableFuture
-                    .completedFuture(Map.of("state", "settled", "result", result));
-            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
-                    "holder", "holder", "key", reference, digest, "pub-1"));
-            join(fixture.service.startExecution("holder", "holder",
-                    prepared.getExecutionCallId(), payload, "pub-1", "token"));
-            ToolExecutionRecord settled = awaitExecution(
-                    fixture.executionRepository,
-                    prepared.getExecutionCallId(),
-                    ToolExecutionRecord.State.SETTLED);
+            var settled = driveDeliveredExecution(fixture, deliveryStatus);
             assertEquals(deliveryStatus, ((Map<?, ?>) settled.getResult()
                     .get("capture")).get("deliveryStatus").toString());
             // 'pending' (undelivered) or 'blocked' (close not confirmed):
