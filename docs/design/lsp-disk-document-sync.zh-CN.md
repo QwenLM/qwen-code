@@ -86,7 +86,11 @@ incoming/outgoing 调用在预热前后及请求后进行验证。陈旧、缺�
   没有任何应答服务器负责该文件时，才能否决文档级答案。当查询一无所获、且存在
   属于未被查文件排除的服务器的失败记录、或某个声明方的拒绝无人背书、或某个
   可能负责被查文件的服务器不可达时，查询拒绝，工具以
-  `ToolErrorType.EXECUTION_FAILED` 暴露该拒绝。不可能负责被查文件的服务器
+  `ToolErrorType.EXECUTION_FAILED` 暴露该拒绝。权威空报告只有既相关、又在
+  扩展名可被表定位时为正向拥有，才算干净；无法被任何表定位的扩展名
+  （`.h`、`.mts`、无扩展名文件）没有可判定的归属，仅按相关性判定，与本变更
+  引入归属要求之前一致。拒绝信息会指明是哪一条件不成立：相关答案无法归属到
+  被查文件，或无任何已配置服务器覆盖它。不可能负责被查文件的服务器
   不会否决文档级查询；工作区级查询在任一已配置服务器不可达时，拒绝给出无依据的
   干净报告。相关性规则只能豁免一个服务器对*另一台*服务器答案的否决，绝不能豁免
   唯一的答案本身：没有任何被查询服务器应答的文档级查询必须拒绝，即使所有已记录
@@ -141,7 +145,12 @@ javascript-only answerer back a typescript refusal`）；`declaredDiagnosticExte
 不再读取 `extensionToLanguage` 的值（`clears a clean answer through a partial
 extensionToLanguage mapping` 与 `names the failed owner a partial mapping leaves
 unanswered`）；第二个拒绝改用未过滤的 `failures`/`unsupported` 账本指名（`does not
-blame an irrelevant server whose pull resolved to nothing`）。
+blame an irrelevant server whose pull resolved to nothing`）。归属拆分另增两项：把
+`serverDeclaredIrrelevant` 的守卫回退为 `KNOWN_DIAGNOSTIC_EXTENSIONS`（`does not
+let a failed sibling veto a clean answer for a placeable extension`，且 `refuses an
+empty answer with no attributable owner from` 的 `pyright` 行会失去其覆盖性理由）；
+从干净答案闸门中去掉 attributable 项（`keeps a clean answer for an extension the
+tables cannot place`，三行全红）。
 
 按照 AGENTS.md，涉及的服务、管理器及其相邻单元测试此前已重命名为 kebab-case。
 其聚合导出、原生客户端类型导入、集成测试和直接 E2E 测试框架导入已更新。公共类名

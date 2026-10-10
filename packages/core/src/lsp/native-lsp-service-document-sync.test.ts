@@ -2820,9 +2820,11 @@ describe('NativeLspService disk document synchronization', () => {
     ])(
       'lets a failed server veto a clean answer for $scenario',
       async ({ file: name, languages }) => {
-        // Neither an extensionless file nor an unmapped language ID can
-        // positively prove the failed server irrelevant, so the ready
-        // server's empty report must not stand alone.
+        // Row one is an extensionless file: nothing can be attributed there,
+        // so no relevance test can excuse the failed server. Row two's `rust`
+        // alias row places `rs` and positively owns main.rs, so its failure is
+        // a relevant one that must veto. Either way the ready server's empty
+        // report must not stand alone.
         addFile(name, 'content');
         mockDiagnosticsResponses(connection);
         const failedHandle: LspServerHandle = {
@@ -2935,11 +2937,11 @@ describe('NativeLspService disk document synchronization', () => {
 
     it('keeps a clean Go file a push-only TypeScript sibling answers -32601 for', async () => {
       // gopls serves textDocument/diagnostic without advertising it, while
-      // typescript-language-server answers -32601. `.go` is outside
-      // KNOWN_DIAGNOSTIC_EXTENSIONS, so no relevance test can excuse the
-      // refusal — only the reply code can. Without it the push-only sibling
-      // vetoes gopls's authoritative empty report and a clean file reads as a
-      // tool error naming a server that never could have owned it.
+      // typescript-language-server answers -32601. `.go` is placeable, and the
+      // refusal lands in `unsupported`, which never vetoes a sibling's answer;
+      // gopls's own answer then positively owns `.go`, so the clean file stays
+      // clean instead of reading as a tool error naming a server that never
+      // could have owned it.
       const [goPath] = addFile('main.go', 'package main\n');
       const gopls = createConnection();
       mockDiagnosticsResponses(gopls);
@@ -3151,11 +3153,20 @@ describe('NativeLspService disk document synchronization', () => {
     });
 
     it.each([
-      ['pyright', 'python', 'main.go'],
-      ['kotlin', 'kotlin', 'main.ts'],
+      // pyright proves it cannot own `.go` (its `py` is attributable), so the
+      // reason is coverage. kotlin's declaration holds no attributable
+      // extension at all, so its answer is relevance-backed and the reason
+      // says the answer simply could not be attributed.
+      ['pyright', 'python', 'main.go', 'no configured server covers'],
+      [
+        'kotlin',
+        'kotlin',
+        'main.ts',
+        'could not be attributed to the queried file',
+      ],
     ] as const)(
       'refuses an empty answer with no attributable owner from %s',
-      async (name, language, fileName) => {
+      async (name, language, fileName, reason) => {
         const [targetPath] = addFile(fileName, 'const value = "";\n');
         const answerer = createConnection();
         mockDiagnosticsResponses(answerer);
@@ -3167,9 +3178,7 @@ describe('NativeLspService disk document synchronization', () => {
         expect(result.error).toMatchObject({
           type: ToolErrorType.EXECUTION_FAILED,
         });
-        expect(result.error?.message).toContain(
-          'no configured server covers the queried file',
-        );
+        expect(result.error?.message).toContain(reason);
         expect(result.llmContent).not.toContain('No diagnostics found');
       },
     );
@@ -3227,13 +3236,14 @@ describe('NativeLspService disk document synchronization', () => {
     });
 
     it('keeps a clean Rust file a TypeScript sibling answers -32601 for', async () => {
-      // The owner test must key on the *refusing* server's declaration, not on
-      // the answering side. `languages: ['rust']` derives `{'rust'}` through
-      // the `?? [id]` fallback, which never contains `rs`, so rust-analyzer is
-      // no countable owner of main.rs even though it answered authoritatively;
-      // a rule reading only the answers would let an unrelated push-only
-      // sibling veto that clean report. `rs`, `mts` and `yml` stay outside the
-      // rule, the exclusion `serverDeclaredIrrelevant` already states.
+      // The owner test keys on the *answering* server's declaration and on the
+      // table's ability to place the extension. `rust`'s alias row carries
+      // `rs`, so rust-analyzer IS a countable owner of main.rs and its
+      // authoritative empty report stands, while the push-only sibling's
+      // `-32601` refusal is excused out of `failures` instead of vetoing.
+      // `.rs` and `.yml` are placeable this way, through their alias rows;
+      // `.mts` is not placeable at all, so it falls back to the relevance
+      // ledger rather than to a hard refusal.
       const [rsPath] = addFile('main.rs', 'fn main() {}\n');
       const rustAnalyzer = createConnection();
       mockDiagnosticsResponses(rustAnalyzer);
@@ -3480,10 +3490,10 @@ describe('NativeLspService disk document synchronization', () => {
     });
 
     it('keeps a clean answer from the only queried server that answered', async () => {
-      // The queried server is READY and returned an authoritative empty
-      // report, so its answer is the only backing there is and the query
-      // stays clean: the unbacked-answer gate keys on "nothing answered",
-      // never on "the answering server looks irrelevant".
+      // The queried server is READY, owns the JS/TS family, and returned an
+      // authoritative empty report, so its answer is the backing the gate
+      // requires: for a placeable extension the gate demands a positively
+      // owning answerer, and this one provides it.
       const jsFile = path.join(directory, 'index.js');
       fs.writeFileSync(jsFile, 'const a = 1;\n');
       mockDiagnosticsResponses(connection);
@@ -3545,6 +3555,64 @@ describe('NativeLspService disk document synchronization', () => {
         'no configured server covers the queried file',
       );
       expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it.each([
+      ['cpp', 'clangd', 'header.h'],
+      ['typescript', 'tsls', 'main.mts'],
+      ['dockerfile', 'docker-ls', 'Dockerfile'],
+    ] as const)(
+      'keeps a clean answer for an extension the tables cannot place (%s)',
+      async (language, name, fileName) => {
+        // `.h`, `.mts` and an extensionless name appear in no diagnostics
+        // table, so no declaration can be shown to own them: ownership is
+        // undecidable here and the answering server's authoritative empty
+        // report must stand. Refusing would reject a documented working
+        // configuration with a reason the same call's pull counter contradicts.
+        const [targetPath] = addFile(fileName, 'export const value = 1;\n');
+        const answerer = createConnection();
+        mockDiagnosticsResponses(answerer);
+        withServers([[name, serverOn(name, [language], answerer)]]);
+        const result = await execute(lspTool(), {
+          operation: 'diagnostics',
+          filePath: targetPath,
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toMatch(/^No diagnostics found/);
+      },
+    );
+
+    it('does not let a failed sibling veto a clean answer for a placeable extension', async () => {
+      // `.go` is placeable through DIAGNOSTIC_LANGUAGE_IDS, so a downed python
+      // server provably cannot own main.go and is excused from the veto list
+      // rather than counted as unreachable; gopls's authoritative empty report
+      // stands.
+      const [goPath] = addFile('main.go', 'package main\n');
+      const gopls = createConnection();
+      mockDiagnosticsResponses(gopls);
+      withServers([
+        ['go', serverOn('gopls', ['go'], gopls)],
+        [
+          'pyright',
+          {
+            ...handle,
+            config: {
+              ...handle.config,
+              name: 'pyright',
+              languages: ['python'],
+            },
+            status: 'FAILED',
+            connection: undefined,
+            error: new Error('command not found: pyright'),
+          },
+        ],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: goPath,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
     });
 
     it.each(['cpp', 'java', 'go'])(
@@ -3757,7 +3825,7 @@ describe('NativeLspService disk document synchronization', () => {
         type: ToolErrorType.EXECUTION_FAILED,
       });
       expect(result.error?.message).toContain(
-        'no configured server covers the queried file',
+        'could not be attributed to the queried file',
       );
       expect(result.llmContent).not.toContain('No diagnostics found');
     });

@@ -128,7 +128,14 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   retrieves nothing rejects when a recorded failure belongs to a server the
   queried file does not exclude, when a declared owner's refusal stands
   unbacked, or when a server that could own the queried file was unreachable;
-  the tool surfaces the rejection as `ToolErrorType.EXECUTION_FAILED`. A
+  the tool surfaces the rejection as `ToolErrorType.EXECUTION_FAILED`. An
+  authoritative empty report is clean only when it is both relevant and, for an
+  extension the tables can place, positively owned; a file whose extension no
+  table can place (`.h`, `.mts`, an extensionless name) has no decidable owner
+  and is judged on relevance alone, as it was before ownership became a
+  requirement. The rejection names which condition failed: a relevant answer
+  that could not be attributed to the queried file, or no configured server
+  covering it. A
   server that could never own the queried file does not veto a document query;
   a workspace query refuses an unbacked clean report while any configured
   server is unreachable. That relevance rule excuses a server from vetoing
@@ -206,7 +213,13 @@ javascript-only answerer back a typescript refusal`);
 (`clears a clean answer through a partial extensionToLanguage mapping` and
 `names the failed owner a partial mapping leaves unanswered`); the second
 rejection names the unfiltered `failures`/`unsupported` ledgers (`does not
-blame an irrelevant server whose pull resolved to nothing`).
+blame an irrelevant server whose pull resolved to nothing`). The attribution
+split adds two more: reverting the `serverDeclaredIrrelevant` guard to
+`KNOWN_DIAGNOSTIC_EXTENSIONS` (`does not let a failed sibling veto a clean
+answer for a placeable extension`, and the `pyright` row of `refuses an empty
+answer with no attributable owner from` loses its coverage reason); dropping
+the attributable term from the clean-answer gate (`keeps a clean answer for an
+extension the tables cannot place`, all three rows).
 
 The touched service and manager and their collocated unit tests were renamed to
 kebab-case per AGENTS.md. Their barrel exports, native client type imports,

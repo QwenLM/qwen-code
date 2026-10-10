@@ -232,10 +232,8 @@ const DIAGNOSTIC_LANGUAGE_ALIASES: Record<string, string[]> = {
 
 /**
  * Extensions positively attributable to a language through the mapping above.
- * A file whose extension is outside this set cannot prove any server
- * irrelevant for it — a declared language ID is not always an extension
- * (`rust` serves `.rs`, `yaml` serves `.yml`) — so a veto decision fails
- * closed for unknown extensions.
+ * A declared language ID is not always an extension (`rust` serves `.rs`,
+ * `yaml` serves `.yml`), which is what the alias table below carries.
  */
 const KNOWN_DIAGNOSTIC_EXTENSIONS: ReadonlySet<string> = new Set(
   Object.values(LANGUAGE_ID_TO_EXTENSIONS).flat(),
@@ -264,6 +262,21 @@ const DIAGNOSTIC_LANGUAGE_IDS: ReadonlySet<string> = new Set([
   'rust',
   'swift',
   'yaml',
+]);
+
+/**
+ * Every extension the diagnostics tables can place: the mapping above, the
+ * alias rows, and the identity-mapped language IDs. An extension outside this
+ * set (`h`, `mts`, `ps1`, an extensionless file) cannot be attributed to any
+ * language at all, so neither an answer about it can be required to be
+ * positively owned nor a server excused for it — those files are undecidable
+ * and fall back to the relevance ledger, as they did before ownership became a
+ * requirement. Only a placeable extension can carry either decision.
+ */
+const ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS: ReadonlySet<string> = new Set([
+  ...KNOWN_DIAGNOSTIC_EXTENSIONS,
+  ...Object.values(DIAGNOSTIC_LANGUAGE_ALIASES).flat(),
+  ...DIAGNOSTIC_LANGUAGE_IDS,
 ]);
 
 /**
@@ -895,12 +908,13 @@ export class NativeLspService {
   /**
    * Whether the queried file's extension positively proves this server
    * cannot own the file. Fails closed on every uncertainty: an undefined
-   * extension (extensionless or unparseable file), an extension no known
-   * language mapping claims (`rs`, `mts`, `yml`, …), or a server whose
-   * declared set holds no attributable extension can prove nothing, so the
-   * veto stands. Only a positively attributable extension the server does
-   * not declare excuses it — `python`'s `py` vs a queried `.ts` is the
-   * canonical case.
+   * extension (extensionless or unparseable file), an extension no diagnostics
+   * table can place (`h`, `mts`, …), or a server whose declared set holds no
+   * attributable extension can prove nothing, so the veto stands. Only a
+   * positively attributable extension the server does not declare excuses it —
+   * `python`'s `py` vs a queried `.ts` is the canonical case, and `go`'s
+   * identity-mapped `.go` is the one that keeps a downed python server from
+   * vetoing a clean gopls answer.
    */
   private serverDeclaredIrrelevant(
     handle: LspServerHandle,
@@ -908,7 +922,7 @@ export class NativeLspService {
   ): boolean {
     if (
       extension === undefined ||
-      !KNOWN_DIAGNOSTIC_EXTENSIONS.has(extension)
+      !ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(extension)
     ) {
       return false;
     }
@@ -2170,6 +2184,13 @@ export class NativeLspService {
   ): Promise<LspDiagnostic[]> {
     const handles = this.getDiagnosticHandles(serverName, uri);
     const extension = this.diagnosticFileExtension(uri);
+    // Ownership is only decidable for an extension the tables can place. For
+    // anything else (`h`, `mts`, an extensionless file) the answer is backed by
+    // relevance alone, because no declaration can be shown to cover the file
+    // and a refusal on that basis would reject a configuration that works.
+    const attributable =
+      extension !== undefined &&
+      ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(extension);
     const allDiagnostics: LspDiagnostic[] = [];
     const failures: Array<{
       name: string;
@@ -2187,13 +2208,14 @@ export class NativeLspService {
       handle: LspServerHandle;
     }> = [];
     // Queried servers that answered with a usable report, including an
-    // authoritative empty one, and of those the ones the queried file does not
-    // positively exclude. A separate owner ledger prevents an empty report
-    // from an unknown or unowned server from certifying the file.
+    // authoritative empty one, and that `serverDeclaredIrrelevant` does not
+    // exclude. This is the fallback backing for an extension the tables cannot
+    // place, where no declaration can be required to prove ownership.
     let answeredRelevant = 0;
-    // Count only answers that positively own the queried extension. TypeScript
-    // answers widen directionally to the JS/TS family; JavaScript answers stay
-    // strict so they cannot back a TypeScript refusal.
+    // Of those, the answers that positively own an attributable queried
+    // extension. TypeScript answers widen directionally to the JS/TS family;
+    // JavaScript answers stay strict so they cannot back a TypeScript refusal.
+    // Only this ledger can certify an attributable extension clean.
     let answeredOwner = 0;
 
     for (const [name, handle] of handles) {
@@ -2246,9 +2268,9 @@ export class NativeLspService {
             } else if (!this.serverDeclaredIrrelevant(handle, extension)) {
               answeredRelevant++;
               if (
-                extension === undefined
-                  ? !uri.startsWith('file:')
-                  : this.declaredOwnerExtensions(handle, true).has(extension)
+                extension !== undefined &&
+                attributable &&
+                this.declaredOwnerExtensions(handle, true).has(extension)
               ) {
                 answeredOwner++;
               }
@@ -2306,10 +2328,11 @@ export class NativeLspService {
         throw nothingRetrievedForDiagnostics(relevantFailures, unreachable);
       }
       // A -32601 refusal is excluded from `failures`, but an empty result is
-      // clean only when a relevant answer is also positively attributable.
-      // Relevance may excuse one server from vetoing another's answer; it
-      // cannot make an unknown or unowned answer certify the file.
-      if (answeredRelevant === 0 || answeredOwner === 0) {
+      // clean only when a relevant answer is also positively attributable —
+      // and only an attributable extension can be attributed at all. Relevance
+      // may excuse one server from vetoing another's answer; it cannot make an
+      // unknown or unowned answer certify the file.
+      if (answeredRelevant === 0 || (attributable && answeredOwner === 0)) {
         // For a document query, name only a refusal whose strict declaration
         // proves ownership. A server-name key or a language alias that cannot
         // prove ownership cannot explain why this file has no backing answer.
@@ -2326,7 +2349,9 @@ export class NativeLspService {
         throw blame.length > 0
           ? nothingRetrievedForDiagnostics(blame, unreachable)
           : new Error(
-              'No LSP diagnostics could be retrieved (no configured server covers the queried file)',
+              answeredRelevant > 0
+                ? 'No LSP diagnostics could be retrieved (a server answered but its answer could not be attributed to the queried file)'
+                : 'No LSP diagnostics could be retrieved (no configured server covers the queried file)',
             );
       }
     }
