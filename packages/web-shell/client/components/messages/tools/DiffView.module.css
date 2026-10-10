@@ -2,6 +2,9 @@
   margin: 0;
   overflow: hidden;
   font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .stats {
@@ -24,6 +27,8 @@
 .lines {
   max-height: 400px;
   overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .lines:focus-visible {
@@ -87,6 +92,7 @@
 }
 
 .content {
-  white-space: pre;
-  overflow-x: auto;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
