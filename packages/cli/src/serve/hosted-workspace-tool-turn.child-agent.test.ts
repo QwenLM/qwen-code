@@ -463,6 +463,83 @@ it('ends a foreground worktree answer with its merge outcome', async () => {
   expect(consumption).toEqual(['prompt:call-1']);
 });
 
+async function foregroundFailure(
+  isolated: boolean,
+  started: boolean,
+  cancelled = false,
+): Promise<string> {
+  const turn = createTurn(0, undefined, 'prompt', false, true);
+  const childRunId = 'prompt:call-1';
+  const driving = (async () => {
+    for (;;) {
+      if (children.record(childRunId) !== undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    if (started) {
+      await children.dispatchStarted(childRunId, {
+        dispatchId: 'dispatch-1',
+        runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+      });
+      await children.attach(childRunId, '550e8400-e29b-41d4-a716-446655440001');
+    }
+    if (cancelled) await children.settleCancelled(childRunId, { started });
+    else
+      await children.settleFailed(childRunId, {
+        stopReason: started ? 'child_failed' : 'creation_failed',
+        reason: null,
+        started,
+      });
+  })();
+  const responses = (
+    await Promise.all([
+      executeAgent(
+        turn,
+        call({
+          description: 'audit the diff',
+          prompt: 'review the change',
+          run_in_background: false,
+          ...(isolated ? { isolation: 'worktree' } : {}),
+        }),
+      ),
+      driving,
+    ])
+  )[0];
+  return JSON.stringify(responses);
+}
+
+// The relay tells a failure only after a merge it asked for has its
+// outcome, so a started worktree child's failure points the parent at its
+// Workspace. The line covers a merge that conflicted or was pinned away
+// too: it must never say the work landed.
+it('ends a started worktree child failure with the workspace line', async () => {
+  const answer = await foregroundFailure(true, true);
+  expect(answer).toContain('Child agent run failed (child_failed).');
+  expect(answer).toContain(
+    "[child workspace] the child's changes did not land, unless the child had finished its work before this end and its merge landed them here. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.",
+  );
+  expect(answer).not.toContain('then its merge ran first');
+});
+
+it('ends a started worktree child cancellation with the workspace line', async () => {
+  const answer = await foregroundFailure(true, true, true);
+  expect(answer).toContain('Child agent run cancelled (stop_requested).');
+  expect(answer).toContain(
+    "[child workspace] the child's changes did not land, unless the child had finished its work before this end and its merge landed them here. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.",
+  );
+});
+
+it('adds no workspace line to a worktree child that never started', async () => {
+  const answer = await foregroundFailure(true, false);
+  expect(answer).toContain('Child agent run failed (creation_failed).');
+  expect(answer).not.toContain('[child workspace]');
+});
+
+it('adds no workspace line to a failed shared child', async () => {
+  const answer = await foregroundFailure(false, true);
+  expect(answer).toContain('Child agent run failed (child_failed).');
+  expect(answer).not.toContain('[child workspace]');
+});
+
 it('says the outcome is unavailable for a worktree receipt off the shape', async () => {
   const answer = await foregroundWorktreeAnswer(
     'child result',

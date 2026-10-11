@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -51,9 +52,12 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final RuntimeBrokerService service;
     private final RuntimeBrokerHttpServer server;
     private final RuntimeRecoveryCoordinator recovery;
+    private final AgentStateStore store;
     private final WorkspaceRuntimeResolver workspaces;
     private final ChildWorkspaceProvider childWorkspaces;
     private final Set<String> retired = ConcurrentHashMap.newKeySet();
+    private static final Set<String> LIFECYCLE_FENCED = Set.of("CLOSING",
+            "CLOSED", "ARCHIVING", "ARCHIVED", "DELETING", "DELETED");
 
     public EmbeddedRuntimeBroker(AgentStateStore store,
             ManagedAgentProperties properties,
@@ -81,6 +85,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             WorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications,
             ToolPublicationDataStore publicationData) {
+        this.store = store;
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
         require(broker.getToken(), "Runtime Broker token");
@@ -114,20 +119,42 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 : new WorkspaceRuntimeProvisioner(baseProvisioner, workspaces, workspaceExecutionStore);
         HarnessSessionResolver resolver = new HarnessSessionResolver() {
             @Override
-            public java.util.concurrent.CompletionStage<String> resolveTenant(String sessionId) {
-                return store.findSessionById(sessionId).map(session ->
-                        CompletableFuture.completedFuture(session.tenantId())).orElseGet(() ->
-                        CompletableFuture.failedFuture(new IllegalArgumentException("Session is not owned by this service")));
-            }
-
-            @Override
             public CompletionStage<RuntimeScope> resolve(String sessionId) {
-                return resolve(sessionId, null);
+                return resolveScope(sessionId, false, null);
             }
 
             @Override
             public CompletionStage<RuntimeScope> resolve(String sessionId,
-                    com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+                    RuntimeLifecycleAuthority authority) {
+                return resolveScope(sessionId, false, authority);
+            }
+
+            @Override
+            public CompletionStage<RuntimeScope> resolveAdmission(
+                    String sessionId) {
+                return resolveScope(sessionId, true, null);
+            }
+
+            @Override
+            public CompletionStage<RuntimeScope> resolveAdmission(
+                    String sessionId, RuntimeLifecycleAuthority authority) {
+                return resolveScope(sessionId, true, authority);
+            }
+
+            @Override
+            public CompletionStage<String> resolveTenant(String sessionId) {
+                return store.findSessionById(sessionId)
+                        .map(session -> CompletableFuture.completedFuture(
+                                session.tenantId()))
+                        .orElseGet(() -> CompletableFuture.failedFuture(
+                                new IllegalArgumentException(
+                                        "Session is not owned by this"
+                                                + " service")));
+            }
+
+            private CompletionStage<RuntimeScope> resolveScope(
+                    String sessionId, boolean admission,
+                    RuntimeLifecycleAuthority authority) {
                 SessionRecord session = store.findSessionById(sessionId)
                         .orElse(null);
                 if (session == null) {
@@ -146,6 +173,18 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                                     "workspace_unavailable",
                                     "Hosted Workspace execution is not available.",
                                     false));
+                }
+                // The durable row is the admission fence for closing/closed,
+                // archived and deleted Sessions: unlike the in-process
+                // retired set it survives restarts and never accumulates in
+                // memory. Only the admission resolve fences: release and the
+                // unknown-outcome reconcile run after a close and must still
+                // resolve the scope to settle the binding.
+                if (admission && LIFECYCLE_FENCED.contains(session.status())) {
+                    return CompletableFuture.failedFuture(
+                            new RuntimeBrokerException(409,
+                                    "runtime_broker_session_closed",
+                                    "Harness Session is closed.", false));
                 }
                 return CompletableFuture.completedFuture(new RuntimeScope(
                         session.tenantId(), workspaceId,
@@ -232,7 +271,12 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
      */
     @Override
     public CompletionStage<Void> drain(String sessionId) {
-        retired.add(sessionId);
+        // drain() runs while the row still reads CLOSING/DELETING; the
+        // admission resolve fences every lifecycle status durably, so only
+        // a vanished row needs the in-process entry.
+        if (store.findSessionById(sessionId).isEmpty()) {
+            retired.add(sessionId);
+        }
         return CompletableFuture.completedFuture(null);
     }
 
@@ -380,7 +424,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         }
         if ("kubernetes".equals(broker.getProvisioner())) {
             throw new IllegalStateException("Kubernetes Runtime provisioner"
-                    + " is outside this review slice");
+                    + " is not supported (supported: local-process, static)");
         }
         throw new IllegalStateException("Runtime Broker provisioner must be"
                 + " local-process or static");

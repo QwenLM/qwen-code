@@ -143,7 +143,7 @@ class HostedTeamLeadMySqlIT {
                 .contains("#2 [pending] — Audit B").contains("alice: running").contains("bob: running");
         assertThat(toolAnswer("lead-delete-running")).contains("Team \"review\" still has running members:")
                 .contains("alice").contains("bob");
-        assertThat(toolAnswer("lead-own-bob-open")).contains("has finished, so it can own only a completed task");
+        assertThat(toolAnswer("lead-own-bob-open")).contains("Member \"bob\" has finished. If it already did this task's work");
         assertThat(toolAnswer("lead-list-final")).contains("#1 [completed] @alice — Audit A")
                 .contains("#2 [completed] @bob — Audit B").contains("alice: completed").contains("bob: completed");
         assertThat(toolAnswer("lead-delete-final")).contains("Team \"review\" deleted.");
@@ -396,7 +396,8 @@ class HostedTeamLeadMySqlIT {
                             plan.add(Step.calls(call("lead-done-alice", "task_update",
                                     Map.of("taskId", "1", "status", "completed"))));
                         } else {
-                            // A member that finished may own its task only as completed.
+                            // A member that finished, and was given no work in this
+                            // turn, may own its task only as completed (H4e-b2).
                             plan.add(Step.calls(call("lead-own-bob-open", "task_update",
                                     Map.of("taskId", "2", "owner", "bob", "status", "in_progress"))));
                             plan.add(Step.calls(call("lead-own-bob-done", "task_update",
