@@ -14,16 +14,12 @@ import { managedExtensionRecordKey } from './managed-extension-projection.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import { type ManagedSessionDurableRef } from './managed-session-records.js';
 
-// The H4b enablement gates are real in this suite: `child_acceptance` sits
-// in the plain enabled list and the kind gate admits `child_agent`, so no
-// mock is needed to run commits. One case still plants a `shell` chain to
-// prove an acceptance cannot name it, and the H4c cases commit `workflow`
-// chains ahead of that kind's enablement; the flags below lift the kind
-// gate for exactly those plantings.
-const enablement = vi.hoisted(() => ({
-  shellKind: false,
-  workflowKind: false,
-}));
+// The H4b/H3 enablement gates are real in this suite: `child_acceptance`
+// sits in the plain enabled list and the kind gate admits `child_agent`
+// and `shell` (#13856), so no mock is needed to run those commits. The H4c
+// cases commit `workflow` chains ahead of that kind's enablement; the flag
+// below lifts the kind gate for exactly those plantings.
+const enablement = vi.hoisted(() => ({ workflowKind: false }));
 
 vi.mock('./managed-session-records.js', async (importOriginal) => {
   const actual =
@@ -31,10 +27,7 @@ vi.mock('./managed-session-records.js', async (importOriginal) => {
   return {
     ...actual,
     assertManagedSessionChildRunKindEnabled: (kind: string) => {
-      if (
-        !(kind === 'shell' && enablement.shellKind) &&
-        !(kind === 'workflow' && enablement.workflowKind)
-      ) {
+      if (!(kind === 'workflow' && enablement.workflowKind)) {
         actual.assertManagedSessionChildRunKindEnabled(kind);
       }
     },
@@ -44,7 +37,6 @@ vi.mock('./managed-session-records.js', async (importOriginal) => {
 const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
-  enablement.shellKind = false;
   enablement.workflowKind = false;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
@@ -1006,27 +998,30 @@ describe('managed session authority child_agent records', () => {
     });
   });
 
-  it('admits child_agent while refusing a shell body through the kind gate', async () => {
+  it('admits child_agent and shell bodies through the kind gate', async () => {
     const harness = await createHarness();
     const refs = await publishRefs(harness);
     const chain = life(refs);
     await withAuthority(harness, async (authority) => {
-      await expect(
-        authority.commitExtensionRecord(
-          command('shell-1:1'),
-          { domain: 'child_run', record: shellRun(refs) },
-          TRUSTED,
-        ),
-      ).rejects.toThrow(
-        'domain child_run kind shell is registered but not enabled for submission.',
+      // The shell kind is enabled (#13856): it commits through the same
+      // real gate as the child_agent control — under its own record id,
+      // since the child_agent chain below owns run-1.
+      const shellLaunch = await authority.commitExtensionRecord(
+        command('shell-1:1'),
+        {
+          domain: 'child_run',
+          record: { ...shellRun(refs), shellId: 'shell-1' },
+        },
+        TRUSTED,
       );
+      expect(shellLaunch.revision).toBe(1);
       const launch = await authority.commitExtensionRecord(
         command('run-1:1'),
         { domain: 'child_run', record: chain[0] },
         TRUSTED,
       );
       expect(launch.revision).toBe(1);
-      expect(await publishedBodies(harness, 'child_run')).toBe(1);
+      expect(await publishedBodies(harness, 'child_run')).toBe(2);
       // And the kind its sibling gate admitted (`child_acceptance` is real
       // on this chain, not a tolerated-unknown domain).
       await settleChild(harness, authority, chain);
