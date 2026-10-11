@@ -5327,7 +5327,7 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
-    it('does not mount collaboration routes or recovery when the opt-in is off', async () => {
+    it('does not mount collaboration routes when the opt-in is off', async () => {
       const app = createServeApp(baseOpts, undefined, { bridge: fakeBridge() });
       const capabilities = await request(app)
         .get('/capabilities')
@@ -5336,7 +5336,6 @@ describe('createServeApp', () => {
       expect(capabilities.body.features).not.toContain(
         'agent_collaboration_v1',
       );
-      expect(app.locals['stopWorkspaceAgentRecovery']).toBeUndefined();
       expect(app.locals['stopSessionAgentOrchestrators']).toBeUndefined();
 
       const primary = capabilities.body.workspaces.find(
@@ -5412,9 +5411,6 @@ describe('createServeApp', () => {
           '{',
         );
       } finally {
-        (
-          app?.locals['stopWorkspaceAgentRecovery'] as (() => void) | undefined
-        )?.();
         (
           app?.locals['stopSessionAgentOrchestrators'] as
             | (() => void)

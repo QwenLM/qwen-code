@@ -639,9 +639,11 @@ function ManagedSessionsContent({
                 request={pendingApproval}
                 variant="floating"
                 keyboardActive={false}
-                // Only the Session creator may answer; once the service says
-                // so, that is true of every approval this Session raises, so
-                // the latch is scoped to the Session rather than the Action.
+                // Answering needs the Session's owner or a Workspace
+                // operator; once the service refuses this viewer, that
+                // holds for every approval this Session raises — until an
+                // explicit retry re-probes, so the latch is scoped to the
+                // Session rather than the Action.
                 disabled={approvals.respondForbidden}
                 extraDescriptionId={
                   [
@@ -696,20 +698,30 @@ function ManagedSessionsContent({
               guard only bounds the latch: the reason describes a card, and
               once the Session has none there is nothing left to explain. */}
           {pendingApproval !== null && answerNoticeShown && (
-            <p
-              id={answerNoticeId}
-              // The first refusal is news; the latch that keeps every later
-              // approval of this Session disabled only restates it, so it is
-              // a status line rather than a second alert.
-              role={approvals.answerError !== undefined ? 'alert' : 'status'}
-              className="text-sm text-destructive"
-            >
-              {t(
-                approvals.respondForbidden
-                  ? 'managed.approval.forbidden'
-                  : 'managed.approval.failed',
+            <div className="flex items-center gap-2">
+              <p
+                id={answerNoticeId}
+                // The first refusal is news; the latch that keeps every
+                // later approval of this Session disabled only restates it,
+                // so it is a status line rather than a second alert.
+                role={approvals.answerError !== undefined ? 'alert' : 'status'}
+                className="text-sm text-destructive"
+              >
+                {t(
+                  approvals.respondForbidden
+                    ? 'managed.approval.forbidden'
+                    : 'managed.approval.failed',
+                )}
+              </p>
+              {approvals.respondForbidden && (
+                // The refusal came from the viewer's role row, which an
+                // operator can raise while the page stays open — unlike the
+                // load-error retry this renders without a `loadError`.
+                <Button variant="outline" size="sm" onClick={approvals.retry}>
+                  {t('managed.approval.retry')}
+                </Button>
               )}
-            </p>
+            </div>
           )}
           <ManagedSessionProgress
             summary={summary}

@@ -2,13 +2,15 @@
 
 [English](2026-10-04-managed-automation.md) | [简体中文](2026-10-04-managed-automation.zh-CN.md)
 
-Status: proposed design; its H6a record contract is now implemented as
-[Record bodies](#record-bodies-h6a-contract) spells out — the two bodies,
-their validators, occurrence identity and transition witnesses, the shared
-fixtures TypeScript and Java replay, the `MANAGED_EXTENSION_RECORD_BODIES`
-entries and the Java mirrors. No domain it names is enabled for submission:
-`schedule` and `automation_run` stay out of `MANAGED_SESSION_ENABLED_DOMAINS`,
-and `commitExtensionRecord` still refuses them. H6b and H6c remain proposed.
+Status: H6a (the record contract) and H6b with the `persistent` arm of
+H6c (the runtime) are implemented; the
+[runtime design](2026-10-07-managed-automation-runtime.md) records the
+decisions the runtime slice settled and where it supersedes this
+document. Both domains are enabled for submission for the `persistent`
+target mode only (`MANAGED_SESSION_ENABLED_SCHEDULE_SESSION_MODES`); the
+`per_run` target and the delivery policy stay refused until the H4 and H5
+runtime slices land, and the control plane's scanner and mutation routes
+stay behind the `qwen.managed-agent.automation.enabled` deployment opt-in.
 This is the design for slice H6 of
 [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of the
 Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380).
@@ -44,8 +46,8 @@ its delivery without ever re-running the model.
 
 ## Current state
 
-The facts below are from `main` at `5ddfacc9d4`; a bullet that H6a changed
-when it landed says so.
+The facts below are from `main` at `5ddfacc9d4`; a bullet that H6a or H6b
+changed when it landed says so.
 
 - **Domain index.** `schedule` and `automation_run` are registered in the
   closed v1 domain index of
@@ -54,7 +56,9 @@ when it landed says so.
   `MANAGED_SESSION_ENABLED_DOMAINS`, and `commitExtensionRecord` refuses
   them. Since the H6a contract landed, both have record bodies in
   `MANAGED_EXTENSION_RECORD_BODIES` (`managed-extension-projection.ts`),
-  each body under the shared `managed-automation-record/1` contract.
+  each body under the shared `managed-automation-record/1` contract. H6b
+  has since added both to `MANAGED_SESSION_ENABLED_DOMAINS`, gated to the
+  `persistent` mode by `MANAGED_SESSION_ENABLED_SCHEDULE_SESSION_MODES`.
 - **Task projection.** The task kind `automation_run` is declared
   (`MANAGED_TASK_KINDS`) and frozen in the public `TaskKind` enum, and the
   H0b run block carries the run, execution and delivery lines an
@@ -267,11 +271,11 @@ whose concurrency quota H6b enforces, with refusals carrying the shared
 
 ## Slice plan
 
-| Slice | Scope                                                                                                                                                                                                                                                                 | Exit gates                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| H6a   | Record contract: both bodies, validators, occurrence-identity canonicalization (canonical UTC slot, timezone anchors), in the shared `managed-automation-record-v1` fixtures; `MANAGED_EXTENSION_RECORD_BODIES` entries; Java replay. Landed.                         | TypeScript and Java produce and refuse identical chains from the fixtures (met). Both domains stay absent from `MANAGED_SESSION_ENABLED_DOMAINS`; `commitExtensionRecord` still refuses them (met). The Java store ships the bodies before any writer can commit (met — H0c open question 7). No production caller constructs either body (met).                                                                                            |
-| H6b   | Definition CRUD under the planned public routes (moved to `partial`), manual run via command ID, the scanner with workspace lease/fencing and single-claim, the run ledger with skip/queue records, and overlap/catch-up enforcement. Domains enabled for submission. | Two scanner instances claim exactly one run per occurrence (reference section 14, item 6): the loser reads the committed run. A missed window under `none` is recorded and never fires; under `latest` at most one catch-up fires; under `bounded: N` at most N. A manual run replays its `Idempotency-Key`. Definitions and runs page separately; every mutation answers `202 + operationId`.                                              |
-| H6c   | Execution targets and delivery: `persistent` input admission with wake, `per_run` child Sessions through H4, delivery-policy projection onto H5 `channel_delivery` entries.                                                                                           | A `persistent` run's input commits with its wake in one transaction and a scanner crash between claim and admission reconciles by `runId`. A `per_run` dispatch whose answer is unknown never produces a second child for the same `occurrenceKey`. A settled run creates exactly its committed deliveries; a Channel send failure, `partial` or `unknown` reconciles without touching the run's model work (reference section 14, item 6). |
+| Slice | Scope                                                                                                                                                                                                                                                                                                                                                                                                                      | Exit gates                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| H6a   | Record contract: both bodies, validators, occurrence-identity canonicalization (canonical UTC slot, timezone anchors), in the shared `managed-automation-record-v1` fixtures; `MANAGED_EXTENSION_RECORD_BODIES` entries; Java replay. Landed.                                                                                                                                                                              | TypeScript and Java produce and refuse identical chains from the fixtures (met). At this slice both domains stayed absent from `MANAGED_SESSION_ENABLED_DOMAINS` and `commitExtensionRecord` refused them; H6b has since enabled both for the `persistent` mode — see its row (met). The Java store ships the bodies before any writer can commit (met — H0c open question 7). No production caller constructed either body in this slice; H6b's funnel now constructs both (met).                                                        |
+| H6b   | Definition CRUD under the public routes (moved to `partial`, with the mutation routes and the detail read added), manual run via command ID, the scanner with a per-definition lease and fence and single-claim, the run ledger with skip/missed records, and overlap/catch-up enforcement. Domains enabled for submission for the `persistent` mode. Landed ([runtime design](2026-10-07-managed-automation-runtime.md)). | Two scanner instances claim exactly one run per occurrence (met: the lease yields one claimant and the derived run id makes the second claim meet the committed run). A missed window under `none` is recorded and never fires; under `latest` at most one catch-up fires; under `bounded: N` at most N (met). A manual run replays its `Idempotency-Key` (met). Definitions and runs page separately; every mutation takes an `Idempotency-Key` and answers `202` with the committed resource (met, as D8a honours `202 + operationId`). |
+| H6c   | Execution targets and delivery: `persistent` input admission with wake (landed with H6b), `per_run` child Sessions through H4 (waits for #13550), delivery-policy projection onto H5 `channel_delivery` entries (waits for #13572).                                                                                                                                                                                        | A `persistent` run's input commits with its wake in one transaction and a scanner crash between claim and admission reconciles by `runId` (met). A `per_run` dispatch whose answer is unknown never produces a second child for the same `occurrenceKey` (pending H4). A settled run creates exactly its committed deliveries; a Channel send failure, `partial` or `unknown` reconciles without touching the run's model work (pending H5; reference section 14, item 6).                                                                |
 
 Later H6 slices (not scheduled here): webhook triggers with verified event
 IDs; Goal/Live/channel-loop migration onto the ledger; new budget kinds.

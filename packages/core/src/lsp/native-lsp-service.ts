@@ -33,6 +33,7 @@ import {
   DEFAULT_LSP_WORKSPACE_SYMBOL_WARMUP_DELAY_MS,
 } from './constants.js';
 import { LspConfigLoader } from './LspConfigLoader.js';
+import { LspJsonRpcError } from './LspConnectionFactory.js';
 import { LspResponseNormalizer } from './LspResponseNormalizer.js';
 import { LspServerManager } from './lsp-server-manager.js';
 import { sortJsonValue } from './sort-json-value.js';
@@ -61,9 +62,252 @@ import {
 } from './file-routing.js';
 import { resolveWorkspacePath } from '../utils/workspaceContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getErrorMessage } from '../utils/errors.js';
 import { globSync } from 'glob';
 
 const debugLogger = createDebugLogger('LSP');
+
+/**
+ * Render one server a diagnostics query could not use, by name, state and the
+ * cause the manager recorded. Every reachable FAILED transition assigns
+ * `handle.error` in the same block that fails the handle, so the recorded
+ * error is the whole contract: a FAILED handle's stderr tail is vendor
+ * logging, not a cause, and is never rendered as one. The cause goes through
+ * `getErrorMessage` like the failures arm it is joined with, then is bounded
+ * to its last non-empty line (a stack-packed message must not flood the tool
+ * result verbatim).
+ */
+function describeLspServerState(name: string, handle: LspServerHandle): string {
+  if (handle.status === 'READY' && !handle.connection) {
+    return `${name} has no active connection`;
+  }
+  // The recorded cause goes through `getErrorMessage` like the failures arm it
+  // is joined with; the last-line bound below then keeps a stack-packed
+  // message from flooding the tool result verbatim.
+  const raw = handle.error ? getErrorMessage(handle.error) : undefined;
+  const lines = raw
+    ?.split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const reason =
+    lines && lines.length > 0
+      ? lines[lines.length - 1]!.slice(-200)
+      : undefined;
+  const state = handle.status.toLowerCase().replace(/_/g, ' ');
+  return `${name} is ${state}${reason ? ` (${reason})` : ''}`;
+}
+
+/**
+ * Aggregate budget for the `No LSP diagnostics could be retrieved (…)`
+ * detail: per-entry caps (`getErrorMessage`, `describeLspServerState`) bound
+ * each entry, but the join grows linearly with the number of unusable
+ * servers and would otherwise break the message-level bound the tool tests
+ * assert.
+ */
+const MAX_DIAGNOSTIC_REJECTION_DETAIL_LENGTH = 1000;
+
+/**
+ * Join rejection entries under the aggregate budget without dropping a server
+ * name: the join pays `'; '` separators and the shrink ellipsis, so the
+ * per-entry share is what remains after both. When the separators alone
+ * exceed the budget (hundreds of servers) a final hard cut keeps the ceiling
+ * absolute.
+ */
+function boundedRejectionDetail(entries: string[]): string {
+  const detail = entries.join('; ');
+  if (detail.length <= MAX_DIAGNOSTIC_REJECTION_DETAIL_LENGTH) {
+    return detail;
+  }
+  const share = Math.max(
+    1,
+    Math.floor(
+      (MAX_DIAGNOSTIC_REJECTION_DETAIL_LENGTH - 2 * (entries.length - 1)) /
+        entries.length,
+    ) - 1,
+  );
+  const shrunk = entries
+    .map((entry) =>
+      entry.length > share ? `${entry.slice(0, share)}…` : entry,
+    )
+    .join('; ');
+  return shrunk.length > MAX_DIAGNOSTIC_REJECTION_DETAIL_LENGTH
+    ? `${shrunk.slice(0, MAX_DIAGNOSTIC_REJECTION_DETAIL_LENGTH - 1)}…`
+    : shrunk;
+}
+
+/**
+ * Build the rejection for a diagnostics query that retrieved nothing while
+ * something was wrong: a selected server whose pull failed or answered
+ * unusably, or a configured server that was never queried because it is not
+ * ready. Whatever was retrieved is always returned instead, so a partial
+ * success survives and only an unbacked clean answer is refused.
+ */
+function nothingRetrievedForDiagnostics(
+  failures: Array<{ name: string; error: unknown }>,
+  skipped: string[],
+): Error {
+  const entries = [
+    ...failures.map(({ name, error }) => `${name}: ${getErrorMessage(error)}`),
+    ...skipped,
+  ];
+  return new Error(
+    `No LSP diagnostics could be retrieved (${boundedRejectionDetail(entries)})`,
+  );
+}
+
+/** JSON-RPC "method not found": the server does not implement the request. */
+const JSON_RPC_METHOD_NOT_FOUND = -32601;
+
+/**
+ * Whether a diagnostics pull failed because the server does not implement
+ * pull diagnostics at all. The reply code is the only signal that works:
+ * real servers that serve `textDocument/diagnostic` (pyright, gopls) do not
+ * advertise `diagnosticProvider` for it, while servers that do not serve it
+ * (typescript-language-server, clangd) answer `-32601` every time. Such a
+ * server says nothing about the queried file, so it neither vetoes another
+ * server's answer nor backs a clean one — and it is still named when nothing
+ * else answered, with wording that says what it actually did. Every other
+ * failure (a crash, a timeout, a malformed report, `-32600`) keeps vetoing.
+ */
+function pullUnsupported(error: unknown): boolean {
+  return (
+    error instanceof LspJsonRpcError && error.code === JSON_RPC_METHOD_NOT_FOUND
+  );
+}
+
+/** Reason recorded for a server that does not implement the pull at all. */
+const PULL_UNSUPPORTED_REASON = 'does not support pull diagnostics';
+
+/**
+ * Mapping from LSP language identifiers to file extensions, only for cases
+ * where the language ID does NOT match the file extension directly.
+ * Languages whose ID is already a valid extension (e.g. "cpp", "java", "go")
+ * are handled by the fallback in getWorkspaceSymbolExtensions().
+ */
+const LANGUAGE_ID_TO_EXTENSIONS: Record<string, string[]> = {
+  typescript: ['ts', 'tsx'],
+  typescriptreact: ['tsx'],
+  javascript: ['js', 'jsx'],
+  javascriptreact: ['jsx'],
+  python: ['py'],
+  csharp: ['cs'],
+  ruby: ['rb'],
+};
+
+/**
+ * Diagnostics-local aliases for language IDs that do not name their
+ * extension (`rust` serves `.rs`, `yaml` serves `.yml`): the `?? [id]`
+ * fallback would otherwise guess the ID as the extension and an ownership
+ * check misreads the server. Kept OUT of LANGUAGE_ID_TO_EXTENSIONS, which
+ * also feeds the warmup-file chooser — these rows exist only for veto
+ * decisions. A row must still carry its own ID when that ID is in
+ * DIAGNOSTIC_LANGUAGE_IDS: the row shadows the `?? [id]` fallback, so
+ * dropping the ID would leave the server with nothing attributable.
+ */
+const DIAGNOSTIC_LANGUAGE_ALIASES: Record<string, string[]> = {
+  rust: ['rs', 'rust'],
+  yaml: ['yml', 'yaml'],
+  markdown: ['md', 'markdown'],
+  kotlin: ['kt', 'kts'],
+  elixir: ['ex', 'exs'],
+  erlang: ['erl', 'hrl'],
+  haskell: ['hs'],
+  ocaml: ['ml', 'mli'],
+  perl: ['pl', 'pm'],
+  terraform: ['tf'],
+  fortran: ['f', 'for', 'f90', 'f95'],
+  'objective-c': ['m', 'mm'],
+  objectivec: ['m', 'mm'],
+  shellscript: ['sh', 'bash'],
+  protobuf: ['proto'],
+  xml: ['xml'],
+  vue: ['vue'],
+  svelte: ['svelte'],
+  lua: ['lua'],
+  r: ['r'],
+  dart: ['dart'],
+  swift: ['swift'],
+  scala: ['scala', 'sc'],
+  groovy: ['groovy', 'gvy'],
+  clojure: ['clj', 'cljs'],
+  zig: ['zig'],
+};
+
+/**
+ * Extensions positively attributable to a language through the mapping above.
+ * A declared language ID is not always an extension (`rust` serves `.rs`,
+ * `yaml` serves `.yml`), which is what the alias table below carries.
+ */
+const KNOWN_DIAGNOSTIC_EXTENSIONS: ReadonlySet<string> = new Set(
+  Object.values(LANGUAGE_ID_TO_EXTENSIONS).flat(),
+);
+
+/**
+ * Language IDs the table above omits because the ID already names the
+ * language, so `?? [id]` is not a guess for them: `cpp` serves `.cpp`, `go`
+ * serves `.go`. A `.lsp.json` key in this set declares a real language, which
+ * is what makes a veto decision possible; a key that is a server name
+ * (`pyright`, `remote-lsp`) is in neither set and still proves nothing. The
+ * table itself must not be widened to carry these: the set derived from it
+ * also gates which queried files get a relevance decision at all.
+ */
+const DIAGNOSTIC_LANGUAGE_IDS: ReadonlySet<string> = new Set([
+  'c',
+  'cpp',
+  'css',
+  'dockerfile',
+  'go',
+  'html',
+  'java',
+  'json',
+  'markdown',
+  'php',
+  'rust',
+  'swift',
+  'yaml',
+]);
+
+/**
+ * Every extension the diagnostics tables can place: the mapping above, the
+ * alias rows, and the identity-mapped language IDs. An extension outside this
+ * set (`h`, `mts`, `ps1`, an extensionless file) cannot be attributed to any
+ * language at all, so neither an answer about it can be required to be
+ * positively owned nor a server excused for it — those files are undecidable
+ * and fall back to the relevance ledger, as they did before ownership became a
+ * requirement. Only a placeable extension can carry either decision.
+ */
+const ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS: ReadonlySet<string> = new Set([
+  ...KNOWN_DIAGNOSTIC_EXTENSIONS,
+  ...Object.values(DIAGNOSTIC_LANGUAGE_ALIASES).flat(),
+  ...DIAGNOSTIC_LANGUAGE_IDS,
+]);
+
+/**
+ * Language IDs one JS/TS-family server answers for. `warmupTypescriptServer`
+ * already relies on this: it opens a `.js`/`.jsx` file with languageId
+ * `javascript`/`javascriptreact` against a server it recognizes by a
+ * `typescript` name or command. Extensions are derived from the table above so
+ * the two cannot drift; the table itself stays untouched because
+ * `getWorkspaceSymbolExtensions` and the warmup chooser also read it.
+ */
+const JS_TS_FAMILY_LANGUAGE_IDS = [
+  'typescript',
+  'typescriptreact',
+  'javascript',
+  'javascriptreact',
+];
+const JS_TS_FAMILY_EXTENSIONS = JS_TS_FAMILY_LANGUAGE_IDS.flatMap(
+  (id) => LANGUAGE_ID_TO_EXTENSIONS[id] ?? [],
+);
+
+/**
+ * Declarations that cover the whole family, both for relevance and for
+ * ownership: a `typescript` server answers for `.js`/`.jsx` too, while a
+ * `javascript`-only declaration serves neither `.ts` nor `.tsx`, so widening
+ * the other direction would hold that server relevant to a file it can never
+ * own — and its absence would veto a healthy sibling's answer for it.
+ */
+const JS_FAMILY_WIDENING_LANGUAGE_IDS = ['typescript', 'typescriptreact'];
 
 const DEFAULT_EXCLUDE_PATTERNS = [
   '**/node_modules/**',
@@ -85,6 +329,8 @@ class WorkspaceResultScanLimitError extends Error {
 }
 
 class LspDocumentScopeError extends Error {}
+
+class InvalidDiagnosticReportError extends Error {}
 
 class StaleCallHierarchyItemError extends Error {
   constructor(uri?: string) {
@@ -551,6 +797,7 @@ export class NativeLspService {
   private getReadyHandles(
     serverName?: string,
     uri?: string,
+    requireMatch = true,
   ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
     const configured = this.serverManager.getHandles();
     const handles = Array.from(configured.entries()).filter(
@@ -572,7 +819,7 @@ export class NativeLspService {
     const resolvedFilePath = /^file:/i.test(uri)
       ? this.resolveWorkspaceDocument(uri, directories)
       : undefined;
-    this.assertServersAvailable(handles.length, serverName);
+    if (requireMatch) this.assertServersAvailable(handles.length, serverName);
     if (!resolvedFilePath) {
       throw new Error(
         `LSP document ${uri} is not a file URI; only file: documents can be queried`,
@@ -590,6 +837,7 @@ export class NativeLspService {
       return roots === directories || isSubpaths(roots, resolvedFilePath);
     });
     if (scoped.length === 0) {
+      if (!requireMatch) return [];
       const message = `Document ${uri} is outside every ready LSP server's workspaceFolder or its root is unusable; retry with serverName to bypass the workspaceFolder filter (not workspace containment)`;
       debugLogger.warn(message);
       throw new Error(message);
@@ -598,6 +846,7 @@ export class NativeLspService {
       isLspDocumentApplicable(handle.config, fileURLToPath(uri)),
     );
     if (applicable.length === 0) {
+      if (!requireMatch) return [];
       const message = `No ready LSP server matches document ${uri}; check extensionToLanguage and the configured languages`;
       debugLogger.warn(message);
       throw new Error(message);
@@ -626,13 +875,23 @@ export class NativeLspService {
     const cached = cache.get(uri);
     if (cached !== undefined) return cached;
     let current = false;
+    let filePath: string | undefined;
     try {
       const url = new URL(uri);
-      current =
-        url.protocol !== 'file:' ||
-        isSubpaths(directories, resolveWorkspacePath(fileURLToPath(url)));
+      current = url.protocol !== 'file:';
+      if (!current) filePath = fileURLToPath(url);
     } catch {
       current = false;
+    }
+    if (filePath !== undefined) {
+      try {
+        current = isSubpaths(directories, resolveWorkspacePath(filePath));
+      } catch (error) {
+        throw new LspDocumentScopeError(
+          `Cannot resolve LSP document ${uri}: ${getErrorMessage(error)}`,
+          { cause: error },
+        );
+      }
     }
     cache.set(uri, current);
     if (!current) this.deferWorkspaceDocument(uri);
@@ -708,6 +967,261 @@ export class NativeLspService {
     }
   }
 
+  /**
+   * Ready handles for a diagnostics query. Rejects outright when nothing is
+   * ready — no matching server, a server that failed or never started, a
+   * server still starting up — because an empty ready set would otherwise be
+   * reported as a clean result. For a document query (`uri` given) the
+   * rejection names only servers the queried file does not provably exclude;
+   * when every configured server is irrelevant for the file the rejection
+   * says so instead of blaming a server that could never own it. Servers
+   * left out of a non-empty ready set are accounted for at the decision
+   * point by `unreachableDiagnosticServers`, which re-reads live handle
+   * state: a snapshot taken here would be stale by the time the query loop
+   * finishes. `getReadyHandles` itself must keep returning an empty array
+   * for the not-ready case: `replayOpenDocuments` skips handles missing from
+   * its map rather than rejecting.
+   */
+  private getDiagnosticHandles(
+    serverName?: string,
+    uri?: string,
+  ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
+    const handles = this.getReadyHandles(serverName, uri, false);
+    if (handles.length > 0) return handles;
+    const configured = Array.from(this.serverManager.getHandles()).filter(
+      ([name]) => !serverName || name === serverName,
+    );
+    const extension =
+      uri && !serverName ? this.diagnosticFileExtension(uri) : undefined;
+    const skipped = configured
+      .filter(
+        ([, handle]) =>
+          !(handle.status === 'READY' && handle.connection) &&
+          !this.serverDeclaredIrrelevant(handle, extension),
+      )
+      .map(([name, handle]) => describeLspServerState(name, handle));
+    if (skipped.length > 0) {
+      throw new Error(
+        `No LSP server is ready to provide diagnostics (${boundedRejectionDetail(skipped)})`,
+      );
+    }
+    if (uri && configured.length > 0) {
+      try {
+        return this.getReadyHandles(serverName, uri);
+      } catch (error) {
+        if (error instanceof LspDocumentScopeError) throw error;
+        throw new Error(
+          `${getErrorMessage(error)}; no configured server covers the queried file`,
+          { cause: error },
+        );
+      }
+    }
+    throw new Error(
+      serverName
+        ? `No LSP server named ${serverName} is configured or running`
+        : 'No LSP servers are configured or running',
+    );
+  }
+
+  /**
+   * Ready handles a diagnostics query has not asked yet, read from live state
+   * so a server that finished starting while the query was in flight is asked
+   * rather than reported as unreachable. Uses the same relevance test as
+   * `unreachableDiagnosticServers`, so a server the queried file provably
+   * excludes is neither asked nor named.
+   */
+  private newlyReadyDiagnosticHandles(
+    asked: ReadonlyArray<readonly [string, unknown]>,
+    serverName?: string,
+    uri?: string,
+  ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
+    const extension =
+      uri && !serverName ? this.diagnosticFileExtension(uri) : undefined;
+    return this.getReadyHandles(serverName, uri, false).filter(
+      ([name, handle]) =>
+        !asked.some(([askedName]) => askedName === name) &&
+        !this.serverDeclaredIrrelevant(handle, extension),
+    );
+  }
+
+  /**
+   * Lowercased extension of the queried file URI, or undefined when the URI
+   * is unparseable or the file has no extension: an extensionless file
+   * cannot prove any server irrelevant, so the veto decision fails closed.
+   */
+  private diagnosticFileExtension(uri: string): string | undefined {
+    try {
+      return (
+        path.extname(fileURLToPath(uri)).slice(1).toLowerCase() || undefined
+      );
+    } catch {
+      // An unparseable URI cannot prove any server irrelevant; keep the veto.
+      return undefined;
+    }
+  }
+
+  /**
+   * Every extension a server declares it can serve: the explicit
+   * `extensionToLanguage` keys unioned with the extensions its language IDs
+   * imply. Unlike `getWorkspaceSymbolExtensions` — a warmup-file chooser
+   * that deliberately prefers the explicit mapping — a veto decision must
+   * not let a partial user mapping (e.g. only `.tsx`) hide a declared
+   * language (`typescript` still owns `.ts`). The JS/TS family widens in one
+   * direction, exactly as `declaredOwnerExtensions` does: a `typescript`
+   * declaration covers the family's JavaScript side, while a
+   * `javascript`-only declaration serves no `.ts` at all, so it must not be
+   * held relevant to a file it can never own — its absence would otherwise
+   * veto a healthy sibling's answer for that file.
+   */
+  private declaredDiagnosticExtensions(handle: LspServerHandle): Set<string> {
+    const owned = new Set(this.getWorkspaceSymbolExtensions(handle));
+    // The mapping's VALUES are language ids: a partial user mapping (only
+    // `.tsx` for a `typescript` server) must not hide the declared
+    // language's other extensions.
+    const languageIds = [...handle.config.languages];
+    const extMapping = handle.config.extensionToLanguage;
+    if (extMapping) {
+      for (const value of Object.values(extMapping)) languageIds.push(value);
+    }
+    for (const language of languageIds) {
+      // `.lsp.json` keys reach `languages` unnormalized, while every extension
+      // this set is compared against is lowercase.
+      const id = language.toLowerCase();
+      if (JS_FAMILY_WIDENING_LANGUAGE_IDS.includes(id)) {
+        for (const ext of JS_TS_FAMILY_EXTENSIONS) {
+          owned.add(ext);
+        }
+        continue;
+      }
+      for (const ext of DIAGNOSTIC_LANGUAGE_ALIASES[id] ??
+        LANGUAGE_ID_TO_EXTENSIONS[id] ?? [id]) {
+        owned.add(ext);
+      }
+    }
+    return owned;
+  }
+
+  /**
+   * The owner test for a veto: stricter than relevance — no JS/TS family
+   * widening, so a javascript-only server does not own `.ts` (a family
+   * widened set would let its empty answer back a refusal it knows nothing
+   * about), and the diagnostics-local alias map so `rust` owns `.rs`.
+   * Positive answers pass `widenTypescriptFamily` so a TypeScript server can
+   * back the JavaScript side of the family without giving JavaScript-only
+   * servers the reverse ownership.
+   */
+  private declaredOwnerExtensions(
+    handle: LspServerHandle,
+    widenTypescriptFamily = false,
+  ): Set<string> {
+    const owned = new Set(this.getWorkspaceSymbolExtensions(handle));
+    const ids = [...handle.config.languages];
+    const extMapping = handle.config.extensionToLanguage;
+    if (extMapping) {
+      for (const value of Object.values(extMapping)) ids.push(value);
+    }
+    for (const language of ids) {
+      const id = language.toLowerCase();
+      if (
+        widenTypescriptFamily &&
+        JS_FAMILY_WIDENING_LANGUAGE_IDS.includes(id)
+      ) {
+        for (const ext of JS_TS_FAMILY_EXTENSIONS) {
+          owned.add(ext);
+        }
+        continue;
+      }
+      for (const ext of DIAGNOSTIC_LANGUAGE_ALIASES[id] ??
+        LANGUAGE_ID_TO_EXTENSIONS[id] ?? [id]) {
+        owned.add(ext);
+      }
+    }
+    return owned;
+  }
+
+  /**
+   * Whether the queried file's extension positively proves this server
+   * cannot own the file. Fails closed on every uncertainty: an undefined
+   * extension (extensionless or unparseable file), an extension no diagnostics
+   * table can place (`h`, `mts`, …), or a server whose declared set holds no
+   * attributable extension can prove nothing, so the veto stands. Only a
+   * positively attributable extension the server does not declare excuses it —
+   * `python`'s `py` vs a queried `.ts` is the canonical case, and `go`'s
+   * identity-mapped `.go` is the one that keeps a downed python server from
+   * vetoing a clean gopls answer.
+   */
+  private serverDeclaredIrrelevant(
+    handle: LspServerHandle,
+    extension: string | undefined,
+  ): boolean {
+    if (
+      extension === undefined ||
+      !ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(extension)
+    ) {
+      return false;
+    }
+    const owned = this.declaredDiagnosticExtensions(handle);
+    // `.lsp.json` keys reach `languages` unvalidated, so a key that is a
+    // server name (`pyright`, `remote-lsp`) seeds `owned` with the guess
+    // `[id]`. A set made only of such guesses proves nothing about the
+    // queried file — reading it as proof both excuses a downed server from
+    // the veto and strips a ready one of its backing. An ID that names a
+    // real language (`cpp`, `go`) is not such a guess, even though the
+    // mapping table omits it, and neither is an alias row's extension
+    // (`kt`, `yml`, `hs`): the row is a real language fact the mapping and
+    // the ID list both omit, which is why all three sources answer here.
+    const attributed = [...owned].some((ext) =>
+      ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(ext),
+    );
+    return attributed && !owned.has(extension);
+  }
+
+  /**
+   * Rendered states of the servers a diagnostics query did not reach and
+   * still cannot reach, recomputed from live handle state at the decision
+   * point. The query loop re-reads that state after every pull and asks
+   * whatever became ready, so a server that finished starting mid-query is
+   * normally queried instead of being named here; only a server whose
+   * readiness becomes observable after the loop's last read can still arrive
+   * as ready-and-unasked, and it is no clean bill either — it received zero
+   * requests, so its slice of the answer is as unbacked as any other
+   * unreachable server's, and it is named with wording that cannot be
+   * mistaken for an answer. For a document query (`uri` given), only servers
+   * the file does not provably exclude can veto — a server that could never
+   * own the file must not discard another server's authoritative empty
+   * report. For a workspace query every unreachable server vetoes, since the
+   * report would otherwise certify that server's slice of the workspace as
+   * clean.
+   */
+  private unreachableDiagnosticServers(
+    queried: ReadonlyArray<readonly [string, unknown]>,
+    serverName: string | undefined,
+    uri?: string,
+  ): string[] {
+    const extension =
+      uri && !serverName ? this.diagnosticFileExtension(uri) : undefined;
+    const routed = new Set(
+      this.getReadyHandles(serverName, uri, false).map(([name]) => name),
+    );
+    return Array.from(this.serverManager.getHandles())
+      .filter(
+        ([name, handle]) =>
+          (!serverName || name === serverName) &&
+          !queried.some(([queriedName]) => queriedName === name) &&
+          !(
+            handle.status === 'READY' &&
+            handle.connection &&
+            !routed.has(name)
+          ) &&
+          !this.serverDeclaredIrrelevant(handle, extension),
+      )
+      .map(([name, handle]) =>
+        handle.status === 'READY' && handle.connection !== undefined
+          ? `${name} became ready during the query and was not asked`
+          : describeLspServerState(name, handle),
+      );
+  }
+
   /** Synchronize disk text before a query; only a new didOpen needs warmup delay. */
   private async ensureDocumentSynchronized(
     serverName: string,
@@ -747,7 +1261,13 @@ export class NativeLspService {
         uri,
         this.workspaceContext.getDirectories(),
       );
-    } catch {
+    } catch (error) {
+      if (
+        !(error instanceof LspDocumentScopeError) ||
+        error.cause !== undefined
+      ) {
+        throw error;
+      }
       return { sent: false, opened: false, deferred: true };
     }
     if (
@@ -1212,7 +1732,12 @@ export class NativeLspService {
           }
         }
       } catch (error) {
-        if (error instanceof WorkspaceResultScanLimitError) throw error;
+        if (
+          error instanceof WorkspaceResultScanLimitError ||
+          error instanceof LspDocumentScopeError
+        ) {
+          throw error;
+        }
         debugLogger.warn(
           `LSP workspace/symbol failed for ${serverName}:`,
           error,
@@ -1993,10 +2518,54 @@ export class NativeLspService {
     serverName?: string,
   ): Promise<LspDiagnostic[]> {
     uri = this.canonicalDocumentUri(uri);
-    const handles = this.getReadyHandles(serverName, uri);
+    const handles = this.getDiagnosticHandles(serverName, uri);
+    const extension = serverName
+      ? undefined
+      : this.diagnosticFileExtension(uri);
+    // Ownership is only decidable for an extension the tables can place. For
+    // anything else (`h`, `mts`, an extensionless file) the answer is backed by
+    // relevance alone, because no declaration can be shown to cover the file
+    // and a refusal on that basis would reject a configuration that works.
+    const attributable =
+      extension !== undefined &&
+      ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(extension);
     const allDiagnostics: LspDiagnostic[] = [];
+    const failures: Array<{
+      name: string;
+      error: unknown;
+      handle: LspServerHandle;
+    }> = [];
+    // Queried servers that answered `-32601`: they do not implement the pull
+    // at all, so unlike `failures` they never veto a sibling's answer. They
+    // are kept apart to be named when no positively attributable answer exists;
+    // their handles let the error name only a refusal whose declaration proves
+    // ownership of a document query.
+    const unsupported: Array<{
+      name: string;
+      error: unknown;
+      handle: LspServerHandle;
+    }> = [];
+    // Queried servers that answered with a usable report, including an
+    // authoritative empty one, and that `serverDeclaredIrrelevant` does not
+    // exclude. This is the fallback backing for an extension the tables cannot
+    // place, where no declaration can be required to prove ownership.
+    let answeredRelevant = 0;
+    // Of those, the answers that positively own an attributable queried
+    // extension. TypeScript answers widen directionally to the JS/TS family;
+    // JavaScript answers stay strict so they cannot back a TypeScript refusal.
+    // Only this ledger can certify an attributable extension clean.
+    let answeredOwner = 0;
 
-    for (const [name, handle] of handles) {
+    // Every pull re-reads live handle state and appends whatever became ready,
+    // so a server that finishes starting while this query is in flight is
+    // asked too instead of vetoing as unasked at the decision point.
+    const queried: Array<
+      [string, LspServerHandle & { connection: LspConnectionInterface }]
+    > = [];
+    const pending = [...handles];
+    for (let index = 0; index < pending.length; index++) {
+      const [name, handle] = pending[index]!;
+      queried.push([name, handle]);
       // A sync failure must reject, not report incomplete diagnostics as clean.
       await this.warmupAndTrack(name, handle);
       await this.ensureDocumentSynchronized(name, handle, uri);
@@ -2011,44 +2580,140 @@ export class NativeLspService {
           },
         );
 
-        const items =
-          response === null
-            ? []
-            : response && typeof response === 'object'
+        if (response == null) {
+          failures.push({
+            name,
+            handle,
+            error: new Error(
+              'Invalid diagnostic report: server returned no response',
+            ),
+          });
+        } else {
+          const items =
+            typeof response === 'object'
               ? (response as Record<string, unknown>)['items']
               : undefined;
-        if (!Array.isArray(items)) {
-          throw new Error('Invalid diagnostic report: expected an items array');
-        }
-        for (const item of items) {
-          const normalized = this.normalizer.normalizeDiagnostic(item, name);
-          if (!normalized) {
-            throw new Error('Invalid diagnostic report: malformed diagnostic');
+          if (!Array.isArray(items)) {
+            throw new InvalidDiagnosticReportError(
+              'Invalid diagnostic report: server returned an unusable diagnostic report',
+            );
           }
-          allDiagnostics.push(normalized);
+          for (const item of items) {
+            const normalized = this.normalizer.normalizeDiagnostic(item, name);
+            if (!normalized) {
+              throw new InvalidDiagnosticReportError(
+                'Invalid diagnostic report: malformed diagnostic (server returned only unusable diagnostics)',
+              );
+            }
+            allDiagnostics.push(normalized);
+          }
+          if (!this.serverDeclaredIrrelevant(handle, extension)) {
+            answeredRelevant++;
+            if (
+              extension !== undefined &&
+              attributable &&
+              this.declaredOwnerExtensions(handle, true).has(extension)
+            ) {
+              answeredOwner++;
+            }
+          }
         }
       } catch (error) {
         if (error instanceof LspDocumentScopeError) throw error;
-        throw new Error(
-          `LSP textDocument/diagnostic failed for ${name}: ${error instanceof Error ? error.message : String(error)}`,
-          { cause: error },
+        if (error instanceof InvalidDiagnosticReportError) {
+          throw new Error(
+            `LSP textDocument/diagnostic failed for ${name}: ${error.message}`,
+            { cause: error },
+          );
+        }
+        // A failed pull is not a clean result: keep partial results from
+        // healthier servers, but reject when nothing was retrieved.
+        debugLogger.warn(
+          `LSP textDocument/diagnostic failed for ${name}:`,
+          error,
         );
+        if (pullUnsupported(error)) {
+          unsupported.push({
+            name,
+            handle,
+            error: new Error(PULL_UNSUPPORTED_REASON),
+          });
+        } else {
+          failures.push({ name, handle, error });
+        }
       }
+      pending.push(
+        ...this.newlyReadyDiagnosticHandles(pending, serverName, uri),
+      );
     }
 
+    if (allDiagnostics.length === 0) {
+      // A server the queried file provably excludes cannot veto the answer —
+      // its failure says nothing about this file — and neither can a server
+      // that answered `-32601`, which never implemented the pull in the first
+      // place (and so is already out of `failures`). A failure or unusable
+      // answer from a server that could own the file must still veto.
+      const relevantFailures = failures.filter(
+        ({ handle }) => !this.serverDeclaredIrrelevant(handle, extension),
+      );
+      const unreachable = this.unreachableDiagnosticServers(
+        queried,
+        serverName,
+        uri,
+      );
+      if (relevantFailures.length > 0 || unreachable.length > 0) {
+        throw nothingRetrievedForDiagnostics(relevantFailures, unreachable);
+      }
+      // A -32601 refusal is excluded from `failures`, but an empty result is
+      // clean only when a relevant answer is also positively attributable —
+      // and only an attributable extension can be attributed at all. Relevance
+      // may excuse one server from vetoing another's answer; it cannot make an
+      // unknown or unowned answer certify the file.
+      if (answeredRelevant === 0 || (attributable && answeredOwner === 0)) {
+        // For a document query, name a refusal only when the server's
+        // declaration can own the queried extension, using the same
+        // TypeScript-family widening as `answeredOwner`: a `typescript`
+        // declaration answers for the JS family, so its refusal explains the
+        // empty result, while a JavaScript-only declaration cannot claim
+        // TypeScript. A server-name key or an unplaceable alias still cannot
+        // explain why this file has no backing answer. Workspace queries have
+        // no extension to attribute, so retain their existing refusal details.
+        const blame = [
+          ...relevantFailures,
+          ...unsupported.filter(
+            ({ handle }) =>
+              extension === undefined ||
+              this.declaredOwnerExtensions(handle, true).has(extension),
+          ),
+        ];
+        throw blame.length > 0
+          ? nothingRetrievedForDiagnostics(blame, unreachable)
+          : new Error(
+              answeredRelevant > 0
+                ? 'No LSP diagnostics could be retrieved (a server answered but its answer could not be attributed to the queried file)'
+                : 'No LSP diagnostics could be retrieved (no configured server covers the queried file)',
+            );
+      }
+    }
     return allDiagnostics;
   }
 
   /**
-   * Get diagnostics for all documents in the workspace
+   * Get diagnostics for all documents in the workspace. A pull that failed on
+   * a server which never implemented the optional `workspace/diagnostic`
+   * request (`-32601`) says nothing about the workspace and cannot veto a
+   * sibling's report; a failed pull from any other cause, and a configured
+   * server that was never queried, still can.
    */
   async workspaceDiagnostics(
     serverName?: string,
     limit = 100,
   ): Promise<LspFileDiagnostics[]> {
-    const handles = this.getReadyHandles(serverName);
-    this.assertServersAvailable(handles.length, serverName);
+    const handles = this.getDiagnosticHandles(serverName);
     const results: LspFileDiagnostics[] = [];
+    let answered = 0;
+    const failures: Array<{ name: string; error: unknown }> = [];
+    const unsupported: Array<{ name: string; error: unknown }> = [];
     const scanLimit = Math.max(MIN_WORKSPACE_RESULT_SCAN_LIMIT, limit);
     const reportScanLimit = Math.max(
       MIN_WORKSPACE_DIAGNOSTIC_REPORT_SCAN_LIMIT,
@@ -2057,7 +2722,16 @@ export class NativeLspService {
     let scanned = 0;
     let reportsScanned = 0;
 
-    for (const [name, handle] of handles) {
+    // Same worklist as the document leg: a server that finishes starting while
+    // this sweep is in flight is asked, so its slice of the workspace is
+    // queried instead of vetoing the report as unasked.
+    const queried: Array<
+      [string, LspServerHandle & { connection: LspConnectionInterface }]
+    > = [];
+    const pending = [...handles];
+    for (let index = 0; index < pending.length; index++) {
+      const [name, handle] = pending[index]!;
+      queried.push([name, handle]);
       const connection = handle.connection;
       // Capture the tracked set before warmup: for a TypeScript server the warmup's
       // own connection-change reset would otherwise wipe it first, including the
@@ -2113,80 +2787,130 @@ export class NativeLspService {
           },
         );
 
-        const items =
-          response === null
-            ? []
-            : response && typeof response === 'object'
+        if (response == null) {
+          failures.push({
+            name,
+            error: new Error(
+              'Invalid diagnostic report: server returned no response',
+            ),
+          });
+        } else {
+          const items =
+            typeof response === 'object'
               ? (response as Record<string, unknown>)['items']
               : undefined;
-        if (!Array.isArray(items)) {
-          throw new Error('Invalid diagnostic report: expected an items array');
-        }
-        const directories = this.workspaceContext.getDirectories();
-        const scopeCache = new Map<string, boolean>();
-        for (const item of items) {
-          if (results.length >= limit) {
-            break;
-          }
-          scanned++;
-          reportsScanned++;
-          if (scanned > scanLimit || reportsScanned > reportScanLimit) {
-            const exhaustedLimit =
-              scanned > scanLimit ? scanLimit : reportScanLimit;
-            throw new WorkspaceResultScanLimitError(
-              exhaustedLimit,
-              `increase limit above ${exhaustedLimit} or select a server with serverName`,
+          if (!Array.isArray(items)) {
+            throw new InvalidDiagnosticReportError(
+              'Invalid diagnostic report: server returned an unusable diagnostic report',
             );
           }
-          const report =
-            item && typeof item === 'object'
-              ? (item as Record<string, unknown>)
-              : undefined;
-          const uri = report?.['uri'];
-          if (
-            typeof uri !== 'string' ||
-            !this.isCurrentWorkspaceDocument(uri, directories, scopeCache)
-          ) {
-            continue;
+          let dropped = 0;
+          let pushed = 0;
+          const directories = this.workspaceContext.getDirectories();
+          const scopeCache = new Map<string, boolean>();
+          for (const item of items) {
+            if (results.length >= limit) break;
+            scanned++;
+            reportsScanned++;
+            if (scanned > scanLimit || reportsScanned > reportScanLimit) {
+              const exhaustedLimit =
+                scanned > scanLimit ? scanLimit : reportScanLimit;
+              throw new WorkspaceResultScanLimitError(
+                exhaustedLimit,
+                `increase limit above ${exhaustedLimit} or select a server with serverName`,
+              );
+            }
+            const report =
+              item && typeof item === 'object'
+                ? (item as Record<string, unknown>)
+                : undefined;
+            const uri = report?.['uri'];
+            if (typeof uri !== 'string') {
+              dropped++;
+              continue;
+            }
+            if (
+              !this.isCurrentWorkspaceDocument(uri, directories, scopeCache)
+            ) {
+              continue;
+            }
+            const fileItems = report?.['items'];
+            const normalized = this.normalizer.normalizeFileDiagnostics(
+              item,
+              name,
+            );
+            if (
+              !Array.isArray(fileItems) ||
+              !normalized ||
+              normalized.diagnostics.length !== fileItems.length
+            ) {
+              throw new InvalidDiagnosticReportError(
+                `Invalid diagnostic report for ${uri}: server returned only unusable diagnostics`,
+              );
+            }
+            if (normalized.diagnostics.length > 0) {
+              results.push(normalized);
+              pushed++;
+            } else {
+              // Valid clean reports consume only the larger total-report budget.
+              scanned--;
+            }
           }
-          const fileItems = report?.['items'];
-          if (!Array.isArray(fileItems)) {
-            throw new Error(
-              `Invalid diagnostic report for ${uri}: expected an items array`,
+          if (dropped > 0 && pushed === 0) {
+            throw new InvalidDiagnosticReportError(
+              'Invalid diagnostic report: server returned only unusable diagnostics',
             );
           }
-          const normalized = this.normalizer.normalizeFileDiagnostics(
-            item,
-            name,
-          );
-          if (
-            !normalized ||
-            normalized.diagnostics.length !== fileItems.length
-          ) {
-            throw new Error(
-              `Invalid diagnostic report for ${uri}: malformed diagnostic`,
-            );
-          }
-          if (normalized.diagnostics.length > 0) {
-            results.push(normalized);
-          } else {
-            // Valid clean reports consume only the larger total-report budget.
-            scanned--;
-          }
+          answered++;
         }
       } catch (error) {
-        if (error instanceof WorkspaceResultScanLimitError) throw error;
-        throw new Error(
-          `LSP workspace/diagnostic failed for ${name}: ${error instanceof Error ? error.message : String(error)}`,
-          { cause: error },
-        );
+        if (
+          error instanceof WorkspaceResultScanLimitError ||
+          error instanceof LspDocumentScopeError
+        ) {
+          throw error;
+        }
+        if (error instanceof InvalidDiagnosticReportError) {
+          throw new Error(
+            `LSP workspace/diagnostic failed for ${name}: ${error.message}`,
+            { cause: error },
+          );
+        }
+        // A failed pull is not a clean result: keep partial results from
+        // healthier servers, but reject when nothing was retrieved. A server
+        // that answered `-32601` never implemented the optional request, so
+        // its refusal cannot veto a sibling's report — the document leg's
+        // bucket, on a query with no extension to attribute it to.
+        debugLogger.warn(`LSP workspace/diagnostic failed for ${name}:`, error);
+        if (pullUnsupported(error)) {
+          unsupported.push({ name, error: new Error(PULL_UNSUPPORTED_REASON) });
+        } else {
+          failures.push({ name, error });
+        }
       }
+
+      pending.push(...this.newlyReadyDiagnosticHandles(pending, serverName));
 
       if (results.length >= limit) {
         break;
       }
     }
 
+    if (results.length === 0) {
+      const unreachable = this.unreachableDiagnosticServers(
+        queried,
+        serverName,
+      );
+      if (failures.length > 0 || unreachable.length > 0 || answered === 0) {
+        // A workspace query covers every file, so no extension can attribute
+        // a refusal to one: every collected `-32601` refusal is named beside
+        // the failures and the unreachable servers, unfiltered.
+        throw nothingRetrievedForDiagnostics(
+          [...failures, ...unsupported],
+          unreachable,
+        );
+      }
+    }
     return results.slice(0, limit);
   }
 

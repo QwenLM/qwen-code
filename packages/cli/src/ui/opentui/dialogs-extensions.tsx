@@ -23,13 +23,17 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import { toOriginalKey } from './key-map.js';
-import { useKeyboard } from '@opentui/react';
-import { cycleTab } from './dialogs-core.js';
+import { useKeyboard, useTerminalDimensions } from '@opentui/react';
+import { cycleTab, regionListWindow } from './dialogs-core.js';
 import {
+  DEFAULT_MAX_ITEMS_TO_SHOW,
   DialogSelect,
+  dialogAreaWidth,
   useDialogSelect,
   type DialogListItem,
 } from './dialogs-shared.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
+import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
 import type { ExtensionUpdateCheckState } from './dialog-data.js';
 
 export const EXTENSIONS_TABS = {
@@ -151,6 +155,8 @@ export interface OpenTuiExtensionsDialogProps {
     | void;
   /** True while a mutation is in flight (mashing Space is ignored). */
   busy?: boolean;
+  /** The popup region's row budget; the Installed list windows from it. */
+  availableTerminalHeight?: number;
 }
 
 export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
@@ -166,6 +172,7 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
     onRowAction,
     onDetailAction,
     busy = false,
+    availableTerminalHeight,
   } = props;
 
   const [activeTab, setActiveTab] = useState<ExtensionsTab>(
@@ -227,10 +234,37 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
       [rows],
     );
 
+  // The single border (2), the tab bar (1), the content margin (1) and the
+  // margins over the status line and the footer hint are the rows no run can
+  // wrap into; the status text and the footer hint are charged the rows they
+  // wrap into at the frame's content width (border and padding take a column
+  // each side), and the list windows from what is left.
+  const hint =
+    tabFooter ??
+    (tabLocked || view !== 'list'
+      ? t('Enter to select · Esc to go back')
+      : extensionsFooterHint(activeTab));
+  const { width } = useTerminalDimensions();
+  const extensionsContentWidth = Math.max(1, dialogAreaWidth(width) - 4);
+  const listWindow = regionListWindow(
+    clampDialogHeight(availableTerminalHeight),
+    {
+      fixed: 5 + (status ? 1 : 0),
+      runs: [
+        ...(status
+          ? [{ text: status.text, width: extensionsContentWidth }]
+          : []),
+        { text: hint, width: extensionsContentWidth },
+      ],
+    },
+    listItems.length,
+    DEFAULT_MAX_ITEMS_TO_SHOW,
+  );
   const listSelect = useDialogSelect({
     items: listItems,
     numbers: false,
     focused: activeTab === EXTENSIONS_TABS.INSTALLED && view === 'list',
+    maxItemsToShow: listWindow.maxItemsToShow,
     onSelect: (key) => {
       setSelectedKey(key);
       setCheckedUpdateState(undefined);
@@ -394,6 +428,7 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
     } else if (name === 'escape') {
       onClose();
     } else if (activeTab === EXTENSIONS_TABS.INSTALLED && !busy) {
+      if (listWindow.maxItemsToShow < 1) return;
       const row = listItems[listSelect.activeIndexRef.current]?.row;
       if (!row) return;
       if (name === 'space' || original.sequence === ' ') {
@@ -407,12 +442,6 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
       }
     }
   });
-
-  const hint =
-    tabFooter ??
-    (tabLocked || view !== 'list'
-      ? t('Enter to select · Esc to go back')
-      : extensionsFooterHint(activeTab));
 
   const renderInstalledContent = () => {
     if (view === 'detail' && currentRow) {
@@ -565,8 +594,9 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
         items={listItems}
         activeIndex={listSelect.activeIndex}
         scrollOffset={listSelect.scrollOffset}
+        maxItemsToShow={listWindow.maxItemsToShow}
         showNumbers={false}
-        showScrollArrows
+        showScrollArrows={listWindow.showScrollArrows}
         focused={activeTab === EXTENSIONS_TABS.INSTALLED && view === 'list'}
         onHover={listSelect.highlightIndex}
         onWheel={(direction) =>
@@ -586,15 +616,36 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
           const row = item.row;
           const enabled = row.enabled !== false;
           const color = context.isSelected ? C.green : enabled ? C.text : C.dim;
+          // The row is charged one physical row, so its runs clip to the
+          // columns it owns: the content width less DialogSelect's indicator
+          // box (2), less the scope/status run that shares the row. An
+          // unclipped npm-style name wraps the row into two and the window
+          // paints rows the region clips off the tail.
+          const scopeRun = row.scope === 'project' ? ` (${t('project')})` : '';
+          const statusRun = enabled
+            ? ` (${t('active')})`
+            : ` (${t('disabled')})`;
+          const labelWidth = Math.max(
+            1,
+            extensionsContentWidth -
+              2 -
+              getCachedStringWidth(scopeRun) -
+              getCachedStringWidth(statusRun),
+          );
+          const starRun = row.favorite && labelWidth > 2 ? ' ★' : '';
+          const nameRun = truncateToWidth(
+            row.label,
+            Math.max(1, labelWidth - getCachedStringWidth(starRun)),
+          );
           return (
             <box flexDirection="row">
               <box flexGrow={1}>
-                <text fg={color}>{row.label}</text>
-                {row.favorite ? <text fg={C.yellow}> ★</text> : null}
+                <text fg={color}>{nameRun}</text>
+                {starRun ? <text fg={C.yellow}>{starRun}</text> : null}
               </box>
               <text fg={context.isSelected ? C.green : C.dim}>
-                {row.scope === 'project' ? ` (${t('project')})` : ''}
-                {enabled ? ` (${t('active')})` : ` (${t('disabled')})`}
+                {scopeRun}
+                {statusRun}
               </text>
             </box>
           );
@@ -626,7 +677,24 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
           );
         })}
         <text fg={tabLocked || view !== 'list' ? '#555555' : C.dim}>
-          {t('(Tab / ←→ to switch)')}
+          {
+            // The chrome charges the tab bar one row, so the hint gets the
+            // columns the tabs leave rather than wrapping onto a second.
+            truncateToWidth(
+              t('(Tab / ←→ to switch)'),
+              Math.max(
+                0,
+                extensionsContentWidth -
+                  EXTENSIONS_TAB_ORDER.reduce(
+                    (total, tab) =>
+                      total +
+                      getCachedStringWidth(` ${extensionsTabLabel(tab)} `) +
+                      2,
+                    0,
+                  ),
+              ),
+            )
+          }
         </text>
       </box>
 

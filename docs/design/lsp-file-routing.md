@@ -92,8 +92,15 @@ and symbols omit results outside current workspace scope so revoked buffers are 
 presented as current. Valid virtual result URIs remain visible with a non-file
 marker; malformed URIs and bare paths are omitted. Workspace output discloses that out-of-scope file results are omitted, even when
 empty. Result filtering uses fresh physical paths without per-item refusal logs,
-reusing URI decisions only within one synchronous server-response filter. Each
-workspace query has a `max(1000, limit)` result-scan budget across all servers,
+reusing URI decisions only within one synchronous server-response filter. Malformed
+URI syntax is omitted, but physical-resolution failures (including EACCES, ELOOP,
+ESTALE and EIO) reject both workspace queries rather than certifying an unknown
+scope as outside. An unresolved result does not change delivered snapshots,
+pending-close metadata, hierarchy generations or the response-local scope cache;
+confirmed scope loss still defers the document. Tracked-document synchronization
+also rethrows physical-resolution failures rather than treating unknown scope as
+excluded. This uses the existing attempted-synchronization close/replay lifecycle,
+distinct from the state-preserving result-only check. Each workspace query has a `max(1000, limit)` result-scan budget across all servers,
 including rejected, malformed and duplicate entries. Workspace diagnostics refund
 this charge only after a report passes scope and payload validation with an empty
 `items` array. Such clean reports, including duplicates, still count toward a
@@ -134,6 +141,13 @@ The manual E2E harness uses real `WorkspaceContext` root normalization.
 - Preserve explicit-map exclusions, unrelated-server rejection, primary-root
   included-directory routing, symlink-retarget freshness, missing-file errors and
   no-URI hierarchy semantics. Instrument routing directory reads once per filter.
+- Unresolvable server-reported files must reject symbols and diagnostics queries,
+  even after earlier results. Preserve delivered snapshots, lifecycle metadata and
+  hierarchy generations when result scope is unknown; cover EACCES, ELOOP, ESTALE
+  and EIO, with separate rejection and state-preservation assertions. Also reject
+  unknown tracked-file scope before a workspace diagnostic pull, even when the
+  backend would return an empty report; confirmed revoked-directory sweeps remain
+  deferred and recovery still balances close/open notifications.
 - Unavailable workspace queries cannot report clean results. Revoked durable-only
   documents must replay after scope restoration; revoked workspace results must
   not be returned. Mixed valid/malformed URI output preserves valid diagnostics.

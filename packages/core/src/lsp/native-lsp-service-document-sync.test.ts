@@ -18,9 +18,11 @@ import {
   DEFAULT_LSP_WORKSPACE_SYMBOL_WARMUP_DELAY_MS,
 } from './constants.js';
 import { sortJsonValue } from './sort-json-value.js';
+import { LspJsonRpcError } from './LspConnectionFactory.js';
 import { NativeLspService } from './native-lsp-service.js';
 import { NativeLspClient } from './NativeLspClient.js';
 import { LspTool, type LspToolParams } from '../tools/lsp.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 import type { LspServerManager } from './lsp-server-manager.js';
 import type { Config } from '../config/config.js';
 import {
@@ -98,11 +100,14 @@ function createConnection() {
             },
           ];
         }
-        if (
-          method === 'textDocument/diagnostic' ||
-          method === 'workspace/diagnostic'
-        ) {
+        // Diagnostics pulls answer a well-formed empty report by default: a
+        // bare `[]` is an unusable report shape the service must reject, not
+        // the clean answer most tests in this file want as their baseline.
+        if (method === 'textDocument/diagnostic') {
           return { kind: 'full', items: [] };
+        }
+        if (method === 'workspace/diagnostic') {
+          return { items: [] };
         }
         return method === 'textDocument/hover' ? { contents: text } : [];
       },
@@ -186,7 +191,9 @@ describe('NativeLspService disk document synchronization', () => {
             ? service.workspaceSymbols('fn', 50, 'absent')
             : service[operation](item, 'absent');
       await expect(run<unknown>(query)).rejects.toThrow(
-        'absent is not configured',
+        operation === 'workspace'
+          ? 'No LSP server named absent is configured or running'
+          : 'absent is not configured',
       );
       expect(connection.request).not.toHaveBeenCalled();
     },
@@ -212,11 +219,41 @@ describe('NativeLspService disk document synchronization', () => {
               ? service.workspaceSymbols('fn')
               : service[operation](item, 'test');
       await expect(run<unknown>(query)).rejects.toThrow(
-        operation.endsWith('Calls')
-          ? 'test is not ready'
-          : 'No LSP servers are ready',
+        operation === 'document' || operation === 'workspace'
+          ? 'test is in progress'
+          : operation.endsWith('Calls')
+            ? 'test is not ready'
+            : 'No LSP servers are ready',
       );
       expect(connection.request).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['EACCES', 'ELOOP', 'ESTALE', 'EIO'])(
+    'rejects unresolved tracked-file scope with %s before querying diagnostics',
+    async (code) => {
+      useTypescriptManager();
+      handle.warmedUp = true;
+      await run(service.hover({ uri, range }));
+      connection.request.mockClear();
+      connection.request.mockResolvedValue({ items: [] });
+      const realpath = fs.realpathSync;
+      const resolve = vi
+        .spyOn(fs, 'realpathSync')
+        .mockImplementation((target) => {
+          if (target === file) {
+            throw Object.assign(new Error(code), { code, path: file });
+          }
+          return realpath(target);
+        });
+      try {
+        await expect(run(service.workspaceDiagnostics())).rejects.toThrow(
+          'Cannot resolve LSP document',
+        );
+        expect(connection.request).not.toHaveBeenCalled();
+      } finally {
+        resolve.mockRestore();
+      }
     },
   );
 
@@ -256,6 +293,73 @@ describe('NativeLspService disk document synchronization', () => {
             ? service.workspaceSymbols('fn', limit)
             : service.workspaceDiagnostics(undefined, limit),
         );
+
+      it.each(['EACCES', 'ELOOP', 'ESTALE', 'EIO'])(
+        'rejects unresolved result scope with %s instead of reporting clean',
+        async (code) => {
+          const realpath = fs.realpathSync;
+          let filtering = false;
+          const resolve = vi
+            .spyOn(fs, 'realpathSync')
+            .mockImplementation((target) => {
+              if (filtering && target === file) {
+                throw Object.assign(new Error(code), { code, path: file });
+              }
+              return realpath(target);
+            });
+          connection.request.mockImplementation(async () => {
+            filtering = true;
+            return response([uri]);
+          });
+          try {
+            await expect(query()).rejects.toThrow(code);
+          } finally {
+            resolve.mockRestore();
+          }
+        },
+      );
+
+      it('preserves delivered state when result scope cannot be resolved', async () => {
+        await run(service.prepareCallHierarchy({ uri, range }));
+        const state = service as unknown as {
+          openedDocuments: Map<string, Map<string, unknown>>;
+          documentLifecycles: Map<string, Map<string, unknown>>;
+          callHierarchyGenerations: WeakMap<object, Map<string, number>>;
+        };
+        const opened = new Map(state.openedDocuments.get('test'));
+        const lifecycles = new Map(state.documentLifecycles.get('test'));
+        const generations = new Map(
+          state.callHierarchyGenerations.get(connection),
+        );
+        expect(opened.size).toBe(1);
+        const realpath = fs.realpathSync;
+        let filtering = false;
+        const resolve = vi
+          .spyOn(fs, 'realpathSync')
+          .mockImplementation((target) => {
+            if (filtering && target === file) {
+              throw Object.assign(new Error('EACCES'), {
+                code: 'EACCES',
+                path: file,
+              });
+            }
+            return realpath(target);
+          });
+        connection.request.mockImplementation(async () => {
+          filtering = true;
+          return response([uri]);
+        });
+        try {
+          await query().catch(() => undefined);
+          expect(state.openedDocuments.get('test')).toEqual(opened);
+          expect(state.documentLifecycles.get('test')).toEqual(lifecycles);
+          expect(state.callHierarchyGenerations.get(connection)).toEqual(
+            generations,
+          );
+        } finally {
+          resolve.mockRestore();
+        }
+      });
 
       it('resolves duplicate URIs once per response, not across requests', async () => {
         connection.request.mockResolvedValue(
@@ -690,13 +794,17 @@ describe('NativeLspService disk document synchronization', () => {
         },
       );
 
-      it.each([null, { kind: 'full', items: [] }])(
-        'accepts a successful empty report %j as clean',
-        async (report) => {
-          connection.request.mockResolvedValue(report);
-          expect(await run(queryDiagnostics())).toEqual([]);
-        },
-      );
+      it('accepts a successful empty report as clean', async () => {
+        connection.request.mockResolvedValue({ kind: 'full', items: [] });
+        expect(await run(queryDiagnostics())).toEqual([]);
+      });
+
+      it('does not certify a null response as clean', async () => {
+        connection.request.mockResolvedValue(null);
+        await expect(run(queryDiagnostics())).rejects.toThrow(
+          'server returned no response',
+        );
+      });
 
       it('retains empty-message diagnostics beside real errors', async () => {
         const diagnostics = [
@@ -745,7 +853,7 @@ describe('NativeLspService disk document synchronization', () => {
         expect(other.request).toHaveBeenCalled();
       });
 
-      it('does not return partial diagnostics when another server fails', async () => {
+      it('retains actual diagnostics when a later server pull fails', async () => {
         const other = createConnection();
         other.request.mockRejectedValue(new Error('Method not found'));
         useHandles([
@@ -772,7 +880,10 @@ describe('NativeLspService disk document synchronization', () => {
                   },
                 ],
         });
-        await expect(run(queryDiagnostics())).rejects.toThrow('other');
+        const result = await run(queryDiagnostics());
+        expect(result).toHaveLength(1);
+        expect(JSON.stringify(result)).toContain('Value expected');
+        expect(other.request).toHaveBeenCalled();
       });
     },
   );
@@ -1169,8 +1280,14 @@ describe('NativeLspService disk document synchronization', () => {
       async (language, name) => {
         handle.config.languages = [language];
         const [, target] = addFile(name, 'text');
+        connection.request.mockResolvedValue({
+          kind: 'full',
+          items: [{ range, message: 'custom diagnostic' }],
+        });
 
-        await run(service.diagnostics(target));
+        expect(await run(service.diagnostics(target))).toMatchObject([
+          { message: 'custom diagnostic' },
+        ]);
 
         expect(connection.send).toHaveBeenCalledWith(
           didOpen('text', 1, target, language),
@@ -1236,7 +1353,11 @@ describe('NativeLspService disk document synchronization', () => {
         });
 
         expect(result.llmContent).toContain(
-          state === 'missing' ? 'not configured' : 'not ready',
+          state === 'missing'
+            ? 'No LSP server named missing is configured or running'
+            : state === 'unready'
+              ? 'test is in progress'
+              : 'test has no active connection',
         );
         expect(result.llmContent).not.toContain('No diagnostics found');
         expect(connection.send).not.toHaveBeenCalled();
@@ -1649,8 +1770,17 @@ describe('NativeLspService disk document synchronization', () => {
           connection.send.mockClear();
           const read = vi.spyOn(fs, 'readFileSync');
           try {
-            await workspaceDiagnostics();
-            await workspaceDiagnostics();
+            if (scope === 'unresolvable') {
+              await expect(workspaceDiagnostics()).rejects.toThrow(
+                'Cannot resolve LSP document',
+              );
+              await expect(workspaceDiagnostics()).rejects.toThrow(
+                'Cannot resolve LSP document',
+              );
+            } else {
+              await workspaceDiagnostics();
+              await workspaceDiagnostics();
+            }
             expect(read).not.toHaveBeenCalled();
             expect(connection.send).not.toHaveBeenCalled();
             expect(openedDocuments().get('test')?.has(extraUri)).toBe(false);
@@ -3582,11 +3712,13 @@ describe('NativeLspService disk document synchronization', () => {
 
   function queryDiagnosticsTool(
     operation: 'diagnostics' | 'workspaceDiagnostics' = 'diagnostics',
+    serverName?: string,
   ) {
     return lspTool()
       .build({
         operation,
         ...(operation === 'diagnostics' ? { filePath: file } : {}),
+        ...(serverName ? { serverName } : {}),
       })
       .execute(new AbortController().signal);
   }
@@ -3853,25 +3985,29 @@ describe('NativeLspService disk document synchronization', () => {
     },
   );
 
-  it('reports unsupported workspace diagnostics instead of an empty result', async () => {
+  it('rejects a failed workspace diagnostics pull instead of reporting clean', async () => {
     await hover();
     const error = new Error('unsupported workspace pull diagnostics');
     connection.request.mockRejectedValue(error);
-    await expect(workspaceDiagnostics()).rejects.toMatchObject({
-      message:
-        'LSP workspace/diagnostic failed for test: unsupported workspace pull diagnostics',
-      cause: error,
-    });
+    await expect(workspaceDiagnostics()).rejects.toThrow(
+      'unsupported workspace pull diagnostics',
+    );
+    expect(logger.warn).toHaveBeenLastCalledWith(
+      'LSP workspace/diagnostic failed for test:',
+      error,
+    );
   });
 
-  it('reports unsupported document diagnostics instead of an empty result', async () => {
+  it('rejects a failed diagnostics pull instead of reporting clean', async () => {
     const error = new Error('unsupported pull diagnostics');
     connection.request.mockRejectedValue(error);
-    await expect(run(service.diagnostics(uri))).rejects.toMatchObject({
-      message:
-        'LSP textDocument/diagnostic failed for test: unsupported pull diagnostics',
-      cause: error,
-    });
+    await expect(run(service.diagnostics(uri))).rejects.toThrow(
+      'unsupported pull diagnostics',
+    );
+    expect(logger.warn).toHaveBeenLastCalledWith(
+      'LSP textDocument/diagnostic failed for test:',
+      error,
+    );
   });
 
   it('does not issue a document request on an initial read failure', async () => {
@@ -4673,5 +4809,1753 @@ describe('NativeLspService disk document synchronization', () => {
     await run(service.workspaceSymbols('fn'));
     expect(Date.now() - before).toBe(DEFAULT_LSP_WARMUP_DELAY_MS);
     expect(handle.warmedUp).toBe(true);
+  });
+
+  describe('diagnostics failure visibility', () => {
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'rejects at the service layer when every %s pull fails',
+      async (operation) => {
+        connection.request.mockRejectedValue(new Error('server exploded'));
+        await expect(
+          operation === 'diagnostics'
+            ? run(service.diagnostics(uri))
+            : run(service.workspaceDiagnostics()),
+        ).rejects.toThrow('server exploded');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'reports a rejected %s pull as a tool error, not a clean result',
+      async (operation) => {
+        connection.request.mockRejectedValue(new Error('server exploded'));
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain('server exploded');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'reports %s as a tool error when no server is ready',
+      async (operation) => {
+        // A FAILED handle whose admission path recorded no cause must render
+        // as the bare state — the test must describe what the service
+        // actually renders, not hand-set a cause production never recorded.
+        handle.status = 'FAILED';
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        // The state word, not the tool's `LSP diagnostics failed:` prefix.
+        expect(result.error?.message).toContain('test is failed');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+        expect(connection.request).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'renders the cause the manager recorded for a failed server in %s',
+      async (operation) => {
+        // Mirrors what doStartServer records on the command-not-found
+        // admission path (pinned in lsp-server-manager.test.ts).
+        handle.status = 'FAILED';
+        handle.error = new Error('command not found: test-server');
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain('test is failed');
+        expect(result.error?.message).toContain(
+          'command not found: test-server',
+        );
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'names a starting server as pending for %s instead of reporting clean',
+      async (operation) => {
+        handle.status = 'IN_PROGRESS';
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain('in progress');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+        expect(connection.request).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'still displays a successful empty %s report as clean',
+      async (operation) => {
+        connection.request.mockResolvedValue({ kind: 'full', items: [] });
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toMatch(/^No diagnostics found/);
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'keeps a valid %s diagnostic with an empty-string message',
+      async (operation) => {
+        const emptyMessageDiagnostic = { range, severity: 1, message: '' };
+        mockDiagnosticsResponses(connection, [emptyMessageDiagnostic]);
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toContain('1 issues');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'keeps partial %s results when another server fails',
+      async (operation) => {
+        const healthyConnection = createConnection();
+        mockDiagnosticsResponses(healthyConnection, [
+          { range, severity: 2, message: 'real warning' },
+        ]);
+        withServers([
+          ['test', handle],
+          [
+            'healthy',
+            {
+              ...handle,
+              config: { ...handle.config, name: 'healthy' },
+              connection: healthyConnection,
+            },
+          ],
+        ]);
+        connection.request.mockRejectedValue(new Error('server exploded'));
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toContain('real warning');
+      },
+    );
+
+    /** Swap in an explicit server map so a test can drive two servers. */
+    function withServers(servers: Array<[string, LspServerHandle]>) {
+      (service as unknown as { serverManager: unknown }).serverManager = {
+        getHandles: () => new Map(servers),
+        warmupTypescriptServer: vi.fn(),
+        isTypescriptServer: () => false,
+      };
+    }
+
+    /**
+     * Answer every diagnostics pull on the connection with a report carrying
+     * the given items (wrapped in a file entry for a workspace pull).
+     */
+    function mockDiagnosticsResponses(
+      target: ReturnType<typeof createConnection>,
+      items: unknown[] = [],
+    ) {
+      target.request.mockImplementation(async (method: string) =>
+        method === 'workspace/diagnostic'
+          ? { items: items.length ? [{ uri, kind: 'full', items }] : [] }
+          : { kind: 'full', items },
+      );
+    }
+
+    /** A READY server that answers every pull with a valid empty report. */
+    function emptyReportHandle(name: string): LspServerHandle {
+      const emptyConnection = createConnection();
+      mockDiagnosticsResponses(emptyConnection);
+      return {
+        ...handle,
+        config: { ...handle.config, name },
+        connection: emptyConnection,
+      };
+    }
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'reports a failed %s pull when the surviving server retrieves nothing',
+      async (operation) => {
+        withServers([
+          ['test', handle],
+          ['healthy', emptyReportHandle('healthy')],
+        ]);
+        connection.request.mockRejectedValue(new Error('server exploded'));
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain('server exploded');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'names a server that was never queried when %s retrieves nothing',
+      async (operation) => {
+        mockDiagnosticsResponses(connection);
+        const pendingHandle: LspServerHandle = {
+          ...handle,
+          config: { ...handle.config, name: 'pyright' },
+          status: 'IN_PROGRESS',
+          connection: undefined,
+        };
+        withServers([
+          ['test', handle],
+          ['pyright', pendingHandle],
+        ]);
+        const result = await run(queryDiagnosticsTool(operation));
+        // The ready server was queried; the pending one is named, not dropped.
+        expect(connection.request).toHaveBeenCalled();
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain('pyright is in progress');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'rejects %s when a connection answers with no response',
+      async (operation) => {
+        // `sendRequest` resolves `undefined` once disposed instead of
+        // rejecting, and a JSON-RPC success can carry `result: null`; both
+        // leave the handle looking READY and answerable.
+        for (const response of [undefined, null]) {
+          connection.request.mockResolvedValue(response);
+          await expect(
+            operation === 'diagnostics'
+              ? run(service.diagnostics(uri))
+              : run(service.workspaceDiagnostics()),
+          ).rejects.toThrow('server returned no response');
+        }
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'rejects %s when every reported item fails normalization',
+      async (operation) => {
+        // A severity-1 finding without a range cannot be normalized; dropping
+        // it must not certify the file clean. The workspace twin drops a file
+        // report that carries no uri.
+        connection.request.mockImplementation(async (method: string) =>
+          method === 'workspace/diagnostic'
+            ? {
+                items: [
+                  {
+                    kind: 'full',
+                    items: [{ range, severity: 1, message: 'Type error' }],
+                  },
+                ],
+              }
+            : {
+                kind: 'full',
+                items: [{ severity: 1, message: 'Type error' }],
+              },
+        );
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain('unusable');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'caps a huge %s rejection message instead of flooding the tool result',
+      async (operation) => {
+        // Two failing servers: per-entry caps alone leave the aggregate
+        // unbounded, so the join must shrink entries to a shared budget
+        // without dropping a server name.
+        const secondConnection = createConnection();
+        secondConnection.request.mockRejectedValue(new Error('y'.repeat(5000)));
+        withServers([
+          ['test', handle],
+          [
+            'healthy',
+            {
+              ...handle,
+              config: { ...handle.config, name: 'healthy' },
+              connection: secondConnection,
+            },
+          ],
+        ]);
+        connection.request.mockRejectedValue(new Error('x'.repeat(5000)));
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        // getErrorMessage caps each entry's detail; the rendered message
+        // must stay bounded even with the wrapper text around it.
+        expect(result.error!.message.length).toBeLessThan(1100);
+        expect(result.error!.message).toContain('test:');
+        expect(result.error!.message).toContain('healthy:');
+        expect(result.llmContent).not.toContain('x'.repeat(1001));
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'caps a huge cause in the %s rejection when no server is ready',
+      async (operation) => {
+        // A FAILED handle records its cause, and the render must bound it:
+        // 8 KB of message cannot reach the tool result verbatim.
+        handle.status = 'FAILED';
+        handle.connection = undefined;
+        handle.error = new Error('y'.repeat(8192));
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error!.message.length).toBeLessThan(1100);
+        expect(result.llmContent).not.toContain('y'.repeat(1001));
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'keeps the %s rejection bounded when many servers fail at once',
+      async (operation) => {
+        // Thirty failing servers: per-entry caps leave a 30 KB join, so the
+        // aggregate budget must divide what the separators leave — without
+        // dropping a server name.
+        const servers: Array<[string, LspServerHandle]> = [['test', handle]];
+        connection.request.mockRejectedValue(new Error('x'.repeat(5000)));
+        for (let i = 0; i < 29; i++) {
+          const failing = createConnection();
+          failing.request.mockRejectedValue(new Error('y'.repeat(5000)));
+          servers.push([
+            `extra-${i}`,
+            {
+              ...handle,
+              config: { ...handle.config, name: `extra-${i}` },
+              connection: failing,
+            },
+          ]);
+        }
+        withServers(servers);
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error!.message.length).toBeLessThan(1100);
+        expect(result.error!.message).toContain('extra-28');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'keeps the %s no-server-ready rejection bounded over many failed servers',
+      async (operation) => {
+        // Thirty FAILED handles each carrying an 8 KB cause: the skipped
+        // join answers to the same aggregate budget as the failures join.
+        withServers(
+          Array.from({ length: 30 }, (_, i): [string, LspServerHandle] => [
+            `down-${i}`,
+            {
+              ...handle,
+              config: { ...handle.config, name: `down-${i}` },
+              status: 'FAILED',
+              connection: undefined,
+              error: new Error('y'.repeat(8192)),
+            },
+          ]),
+        );
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error!.message.length).toBeLessThan(1100);
+        expect(result.error!.message).toContain('down-29');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'caps a huge cause rendered for a failed server in %s',
+      async (operation) => {
+        // The skipped arm renders the recorded cause next to the failures
+        // arm; an 8 KB message must not reach the tool result whole.
+        mockDiagnosticsResponses(connection);
+        const crashedHandle: LspServerHandle = {
+          ...handle,
+          config: { ...handle.config, name: 'crashed' },
+          status: 'FAILED',
+          connection: undefined,
+          error: new Error('x'.repeat(8192)),
+        };
+        withServers([
+          ['test', handle],
+          ['crashed', crashedHandle],
+        ]);
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error!.message.length).toBeLessThan(1100);
+        expect(result.error!.message).toContain('crashed is failed');
+        expect(result.llmContent).not.toContain('x'.repeat(201));
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'keeps the cause chain of a rejected %s pull',
+      async (operation) => {
+        connection.request.mockRejectedValue(
+          new Error('outer', { cause: new Error('inner root cause') }),
+        );
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain('(cause: inner root cause)');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'names every failing server when all %s pulls fail',
+      async (operation) => {
+        const secondConnection = createConnection();
+        secondConnection.request.mockRejectedValue(
+          new Error('second exploded'),
+        );
+        withServers([
+          ['test', handle],
+          [
+            'healthy',
+            {
+              ...handle,
+              config: { ...handle.config, name: 'healthy' },
+              connection: secondConnection,
+            },
+          ],
+        ]);
+        connection.request.mockRejectedValue(new Error('first exploded'));
+        await expect(
+          operation === 'diagnostics'
+            ? run(service.diagnostics(uri))
+            : run(service.workspaceDiagnostics()),
+        ).rejects.toThrow(/test: first exploded; healthy: second exploded/);
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'names every unreachable server when %s retrieves nothing',
+      async (operation) => {
+        mockDiagnosticsResponses(connection);
+        const failedHandle: LspServerHandle = {
+          ...handle,
+          config: { ...handle.config, name: 'failedone' },
+          status: 'FAILED',
+          connection: undefined,
+        };
+        const pendingHandle: LspServerHandle = {
+          ...handle,
+          config: { ...handle.config, name: 'pendingtwo' },
+          status: 'IN_PROGRESS',
+          connection: undefined,
+        };
+        withServers([
+          ['test', handle],
+          ['failedone', failedHandle],
+          ['pendingtwo', pendingHandle],
+        ]);
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain('failedone is failed');
+        expect(result.error?.message).toContain('pendingtwo is in progress');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'rejects a %s query naming a server that is not configured',
+      async (operation) => {
+        await expect(
+          operation === 'diagnostics'
+            ? run(service.diagnostics(uri, 'missing'))
+            : run(service.workspaceDiagnostics('missing')),
+        ).rejects.toThrow(
+          'No LSP server named missing is configured or running',
+        );
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'does not name other servers as skipped for a server-scoped %s query',
+      async (operation) => {
+        mockDiagnosticsResponses(connection);
+        const pendingHandle: LspServerHandle = {
+          ...handle,
+          config: { ...handle.config, name: 'pyright' },
+          status: 'IN_PROGRESS',
+          connection: undefined,
+        };
+        withServers([
+          ['test', handle],
+          ['pyright', pendingHandle],
+        ]);
+        const result = await run(queryDiagnosticsTool(operation, 'test'));
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toMatch(/^No diagnostics found/);
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'does not let a server that cannot own the file veto a clean %s answer',
+      async (operation) => {
+        mockDiagnosticsResponses(connection);
+        const failedPythonHandle: LspServerHandle = {
+          ...handle,
+          config: {
+            ...handle.config,
+            name: 'pyright',
+            languages: ['python'],
+          },
+          status: 'FAILED',
+          connection: undefined,
+          error: new Error('command not found: pyright-langserver'),
+        };
+        withServers([
+          ['test', handle],
+          ['pyright', failedPythonHandle],
+        ]);
+        const result = await run(queryDiagnosticsTool(operation));
+        if (operation === 'diagnostics') {
+          // pyright could never own main.ts, so the ready server's
+          // authoritative empty report stands.
+          expect(result.error).toBeUndefined();
+          expect(result.llmContent).toMatch(/^No diagnostics found/);
+        } else {
+          // A workspace report would silently certify pyright's slice clean.
+          expect(result.error).toMatchObject({
+            type: ToolErrorType.EXECUTION_FAILED,
+          });
+          expect(result.error?.message).toContain('pyright is failed');
+        }
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'asks a server that became ready during the %s query before deciding',
+      async (operation) => {
+        const lateConnection = createConnection();
+        mockDiagnosticsResponses(lateConnection, [
+          { range, severity: 1, message: 'late report' },
+        ]);
+        const lateHandle: LspServerHandle = {
+          ...handle,
+          config: { ...handle.config, name: 'late' },
+          status: 'IN_PROGRESS',
+          connection: undefined,
+        };
+        withServers([
+          ['test', handle],
+          ['late', lateHandle],
+        ]);
+        connection.request.mockImplementation(async (method: string) => {
+          // The pending server finishes starting while the ready server
+          // answers, so the pre-loop snapshot is stale by the decision point.
+          lateHandle.status = 'READY';
+          lateHandle.connection = lateConnection;
+          return method === 'workspace/diagnostic'
+            ? { items: [] }
+            : { kind: 'full', items: [] };
+        });
+        const result = await run(queryDiagnosticsTool(operation));
+        // The startup race must not discard that server's slice: it is asked
+        // before the gate reads the unreachable list, so its report backs the
+        // result instead of vetoing as a server that was never asked.
+        expect(lateConnection.request).toHaveBeenCalledWith(
+          operation === 'workspaceDiagnostics'
+            ? 'workspace/diagnostic'
+            : 'textDocument/diagnostic',
+          expect.anything(),
+        );
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toContain('late report');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'rejects %s when a connection answers an unusable report shape',
+      async (operation) => {
+        // A non-null response that is not an object carrying an `items`
+        // array answered nothing usable and must not be certified clean.
+        for (const response of [
+          {},
+          [],
+          { items: null },
+          { kind: 'unchanged' },
+          42,
+          'a bare string',
+        ]) {
+          connection.request.mockResolvedValue(response);
+          const result = await run(queryDiagnosticsTool(operation));
+          expect(result.error).toMatchObject({
+            type: ToolErrorType.EXECUTION_FAILED,
+          });
+          expect(result.error?.message).toContain(
+            'server returned an unusable diagnostic report',
+          );
+          expect(result.llmContent).not.toContain('No diagnostics found');
+        }
+      },
+    );
+
+    it.each([
+      {
+        scenario: 'an extensionless file',
+        file: 'Dockerfile',
+        languages: ['dockerfile'],
+      },
+      {
+        scenario: 'a language ID that is not the file extension',
+        file: 'main.rs',
+        languages: ['rust'],
+      },
+    ])(
+      'lets a failed server veto a clean answer for $scenario',
+      async ({ file: name, languages }) => {
+        // Row one is an extensionless file: nothing can be attributed there,
+        // so no relevance test can excuse the failed server. Row two's `rust`
+        // alias row places `rs` and positively owns main.rs, so its failure is
+        // a relevant one that must veto. Either way the ready server's empty
+        // report must not stand alone.
+        addFile(name, 'content');
+        mockDiagnosticsResponses(connection);
+        const failedHandle: LspServerHandle = {
+          ...handle,
+          config: { ...handle.config, name: 'failed', languages },
+          status: 'FAILED',
+          connection: undefined,
+        };
+        withServers([
+          ['test', handle],
+          ['failed', failedHandle],
+        ]);
+        const tool = lspTool();
+        const result = await run(
+          tool
+            .build({
+              operation: 'diagnostics',
+              filePath: path.join(directory, name),
+            })
+            .execute(new AbortController().signal),
+        );
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain('failed is failed');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
+
+    it('lets a failed server veto a clean answer its partial extension mapping hid', async () => {
+      // extensionToLanguage covering only .tsx must not hide the declared
+      // `typescript` language, which still owns the queried .ts file.
+      mockDiagnosticsResponses(connection);
+      const failedHandle: LspServerHandle = {
+        ...handle,
+        config: {
+          ...handle.config,
+          name: 'failed',
+          languages: ['typescript'],
+          extensionToLanguage: { '.tsx': 'typescriptreact' },
+        },
+        status: 'FAILED',
+        connection: undefined,
+      };
+      withServers([
+        ['test', handle],
+        ['failed', failedHandle],
+      ]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain('failed is failed');
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it("does not let an irrelevant server's failed pull veto a clean document answer", async () => {
+      // A ready python server that rejects textDocument/diagnostic (e.g. it
+      // never implemented pull diagnostics) says nothing about main.ts; the
+      // typescript server's authoritative empty report stands.
+      mockDiagnosticsResponses(connection);
+      const failingConnection = createConnection();
+      failingConnection.request.mockRejectedValue(
+        new Error('method not found'),
+      );
+      withServers([
+        ['test', handle],
+        [
+          'pyright',
+          {
+            ...handle,
+            config: {
+              ...handle.config,
+              name: 'pyright',
+              languages: ['python'],
+            },
+            connection: failingConnection,
+          },
+        ],
+      ]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    /** A READY server named `name`, serving `languages`, on connection `target`. */
+    function serverOn(
+      name: string,
+      languages: string[],
+      target: ReturnType<typeof createConnection>,
+      extra?: Partial<LspServerHandle['config']>,
+    ): LspServerHandle {
+      return {
+        ...handle,
+        config: { ...handle.config, name, languages, ...extra },
+        connection: target,
+      };
+    }
+
+    /** A connection that refuses every request with JSON-RPC error `code`. */
+    function refusingConnection(
+      code: number,
+      method = 'textDocument/diagnostic',
+    ): ReturnType<typeof createConnection> {
+      const target = createConnection();
+      target.request.mockRejectedValue(
+        new LspJsonRpcError(`Unhandled method ${method}`, code),
+      );
+      return target;
+    }
+
+    it('keeps a clean Go file a push-only TypeScript sibling answers -32601 for', async () => {
+      // gopls serves textDocument/diagnostic without advertising it, while
+      // typescript-language-server answers -32601. `.go` is placeable, and the
+      // refusal lands in `unsupported`, which never vetoes a sibling's answer;
+      // gopls's own answer then positively owns `.go`, so the clean file stays
+      // clean instead of reading as a tool error naming a server that never
+      // could have owned it.
+      const [goPath] = addFile('main.go', 'package main\n');
+      const gopls = createConnection();
+      mockDiagnosticsResponses(gopls);
+      withServers([
+        ['go', serverOn('gopls', ['go'], gopls)],
+        [
+          'typescript',
+          serverOn(
+            'typescript-language-server',
+            ['typescript'],
+            refusingConnection(-32601),
+          ),
+        ],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: goPath,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it('keeps a clean TypeScript file from the pull-capable of two TS servers', async () => {
+      // Both servers declare `typescript`, so both really could own clean.ts
+      // and no relevance test excuses either. Only the -32601 reply stops the
+      // push-only server from vetoing its sibling's authoritative empty report.
+      const [cleanPath] = addFile('clean.ts', 'export const value = 1;\n');
+      const tsgo = createConnection();
+      mockDiagnosticsResponses(tsgo);
+      withServers([
+        ['tsgo', serverOn('tsgo', ['typescript'], tsgo)],
+        ['tsls', serverOn('tsls', ['typescript'], refusingConnection(-32601))],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: cleanPath,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it('keeps a clean workspace report from the pull-capable of two servers', async () => {
+      // `workspace/diagnostic` is optional, so a push-only server answers
+      // -32601 for it; that refusal says nothing about the workspace and
+      // cannot veto its sibling's authoritative empty report.
+      const tsgo = createConnection();
+      mockDiagnosticsResponses(tsgo);
+      withServers([
+        ['tsgo', serverOn('tsgo', ['typescript'], tsgo)],
+        [
+          'tsls',
+          serverOn(
+            'tsls',
+            ['typescript'],
+            refusingConnection(-32601, 'workspace/diagnostic'),
+          ),
+        ],
+      ]);
+      await expect(workspaceDiagnostics()).resolves.toEqual([]);
+    });
+
+    it('rejects a lone -32601 workspace refusal without an answering server', async () => {
+      // An unsupported pull alone provides no evidence of a clean workspace.
+      withServers([
+        [
+          'tsls',
+          serverOn(
+            'tsls',
+            ['typescript'],
+            refusingConnection(-32601, 'workspace/diagnostic'),
+          ),
+        ],
+      ]);
+      await expect(workspaceDiagnostics()).rejects.toThrow(
+        'does not support pull diagnostics',
+      );
+    });
+
+    it('lets a -32601 refusal from the rust owner veto a non-owner empty answer', async () => {
+      // rust-analyzer declares `rust`, which serves `.rs` — the mapping must
+      // know that, or the refusal reads as no-owner and the non-owner's empty
+      // report certifies a broken file clean.
+      const [rsPath] = addFile('main.rs', 'fn main() { let x: i32 = ""; }\n');
+      const pyright = createConnection();
+      mockDiagnosticsResponses(pyright);
+      withServers([
+        [
+          'rust',
+          serverOn('rust-analyzer', ['rust'], refusingConnection(-32601)),
+        ],
+        ['python', serverOn('pyright', ['python'], pyright)],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: rsPath,
+      });
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'does not support pull diagnostics',
+      );
+    });
+
+    it('keeps the refusal veto when a partial extensionToLanguage mapping exists', async () => {
+      // The mapping lists only .ts/.tsx; its values still declare the
+      // typescriptreact language, which owns .jsx — the refusal on App.jsx
+      // must not be excused as irrelevant. (languages is empty, so only
+      // the mapping can attribute anything.)
+      const [jsxPath] = addFile('App.jsx', 'export const x = "";\n');
+      const pyright = createConnection();
+      mockDiagnosticsResponses(pyright);
+      withServers([
+        [
+          'tsls',
+          serverOn('tsls', [], refusingConnection(-32601), {
+            extensionToLanguage: {
+              '.ts': 'typescript',
+              '.tsx': 'typescriptreact',
+            },
+          }),
+        ],
+        ['python', serverOn('pyright', ['python'], pyright)],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: jsxPath,
+      });
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+    });
+
+    it('does not widen a partial extensionToLanguage mapping for diagnostics', async () => {
+      // The explicit routing set excludes .jsx even if a mapped language owns it.
+      const [jsxPath] = addFile('App.jsx', 'export const x = "";\n');
+      const tsls = createConnection();
+      mockDiagnosticsResponses(tsls);
+      withServers([
+        [
+          'tsls',
+          serverOn('tsls', [], tsls, {
+            extensionToLanguage: {
+              '.ts': 'typescript',
+              '.tsx': 'typescriptreact',
+            },
+          }),
+        ],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: jsxPath,
+      });
+      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+      expect(result.llmContent).toContain(
+        'No ready LSP server matches document',
+      );
+      expect(tsls.request).not.toHaveBeenCalled();
+    });
+
+    it('does not blame a ready server excluded by its explicit mapping', async () => {
+      // An excluded ready server is not an unasked owner; the other answer is unbacked.
+      const [jsxPath] = addFile('App.jsx', 'export const x = "";\n');
+      const remote = createConnection();
+      mockDiagnosticsResponses(remote);
+      const failing = createConnection();
+      failing.request.mockRejectedValue(new Error('connection lost'));
+      withServers([
+        [
+          'tsls',
+          serverOn('tsls', [], failing, {
+            extensionToLanguage: {
+              '.ts': 'typescript',
+              '.tsx': 'typescriptreact',
+            },
+          }),
+        ],
+        ['remote', serverOn('remote-lsp', ['remote-lsp'], remote)],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: jsxPath,
+      });
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain('could not be attributed');
+      expect(result.error?.message).not.toContain('tsls');
+      expect(failing.request).not.toHaveBeenCalled();
+      expect(remote.request).toHaveBeenCalled();
+    });
+
+    it('does not let a javascript-only answerer back a typescript refusal', async () => {
+      // The JS/TS family widening is a relevance device only: a server
+      // declaring `javascript` does not OWN `.ts`, so its empty report must
+      // not back the typescript server's -32601 refusal on main.ts.
+      const [tsPath] = addFile('main.ts', 'const x: number = "";\n');
+      const jsTools = createConnection();
+      mockDiagnosticsResponses(jsTools);
+      withServers([
+        ['js', serverOn('js-tools', ['javascript'], jsTools)],
+        [
+          'ts',
+          serverOn(
+            'typescript-language-server',
+            ['typescript'],
+            refusingConnection(-32601),
+          ),
+        ],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: tsPath,
+      });
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'does not support pull diagnostics',
+      );
+    });
+
+    it('lets a typescript answerer back a javascript refusal for a .jsx file', async () => {
+      const [jsxPath] = addFile('main.jsx', 'const value = "";\n');
+      const typescript = createConnection();
+      mockDiagnosticsResponses(typescript);
+      withServers([
+        [
+          'typescript',
+          serverOn('typescript-language-server', ['typescript'], typescript),
+        ],
+        [
+          'javascript',
+          serverOn(
+            'javascript-language-server',
+            ['javascript'],
+            refusingConnection(-32601),
+          ),
+        ],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: jsxPath,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it.each([
+      // pyright proves it cannot own `.go` (its `py` is attributable), so the
+      // reason is coverage. kotlin's `kt` alias row makes its declaration
+      // placeable too, and none of its extensions is `.ts`, so its answer is
+      // irrelevant the same way and the reason is coverage as well — the
+      // attribution wording is reserved for a declaration no table row can
+      // place at all.
+      ['pyright', 'python', 'main.go', 'no configured server covers'],
+      ['kotlin', 'kotlin', 'main.ts', 'no configured server covers'],
+    ] as const)(
+      'refuses an empty answer with no attributable owner from %s',
+      async (name, language, fileName, reason) => {
+        const [targetPath] = addFile(fileName, 'const value = "";\n');
+        const answerer = createConnection();
+        mockDiagnosticsResponses(answerer);
+        withServers([[name, serverOn(name, [language], answerer)]]);
+        const result = await execute(lspTool(), {
+          operation: 'diagnostics',
+          filePath: targetPath,
+        });
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain(reason);
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
+
+    it('lets an excused -32601 refusal veto when no answering server owns the file', async () => {
+      // clangd is the only server that can own main.cpp and answers -32601;
+      // pyright returns an empty report for a file it never declared. The
+      // refusal excused out of `failures` must still veto when nothing that
+      // could own the file answered — otherwise a broken file certifies
+      // clean.
+      const [cppPath] = addFile('main.cpp', 'int main() { return 1 }\n');
+      const pyright = createConnection();
+      mockDiagnosticsResponses(pyright);
+      withServers([
+        ['cpp', serverOn('clangd', ['cpp'], refusingConnection(-32601))],
+        ['pyright', serverOn('pyright', ['python'], pyright)],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: cppPath,
+      });
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'does not support pull diagnostics',
+      );
+    });
+
+    it('lets an excused -32601 refusal veto when the answering sibling is keyed by server name', async () => {
+      // The pyright entry is keyed by server name, so its derived extension
+      // set is unattributable and it counts as relevant — but it declares
+      // `pyright`, not `typescript`, so it is no owner of main.ts either.
+      const [tsPath] = addFile('main.ts', 'const value: number = "";\n');
+      const pyright = createConnection();
+      mockDiagnosticsResponses(pyright);
+      withServers([
+        ['pyright', serverOn('pyright', ['pyright'], pyright)],
+        [
+          'typescript',
+          serverOn(
+            'typescript-language-server',
+            ['typescript'],
+            refusingConnection(-32601),
+          ),
+        ],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: tsPath,
+      });
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+    });
+
+    it('keeps a clean Rust file a TypeScript sibling answers -32601 for', async () => {
+      // The owner test keys on the *answering* server's declaration and on the
+      // table's ability to place the extension. `rust`'s alias row carries
+      // `rs`, so rust-analyzer IS a countable owner of main.rs and its
+      // authoritative empty report stands, while the push-only sibling's
+      // `-32601` refusal is excused out of `failures` instead of vetoing.
+      // `.rs` and `.yml` are placeable this way, through their alias rows;
+      // `.mts` is not placeable at all, so it falls back to the relevance
+      // ledger rather than to a hard refusal.
+      const [rsPath] = addFile('main.rs', 'fn main() {}\n');
+      const rustAnalyzer = createConnection();
+      mockDiagnosticsResponses(rustAnalyzer);
+      withServers([
+        ['rust', serverOn('rust-analyzer', ['rust'], rustAnalyzer)],
+        [
+          'typescript',
+          serverOn(
+            'typescript-language-server',
+            ['typescript'],
+            refusingConnection(-32601),
+          ),
+        ],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: rsPath,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it('still reports a real problem when a push-only sibling answers -32601', async () => {
+      // Excusing the refusal must not blunt the answer that was retrieved.
+      const [brokenPath] = addFile('broken.ts', 'const value: number = "";\n');
+      const tsgo = createConnection();
+      mockDiagnosticsResponses(tsgo, [
+        { range, severity: 1, message: 'Type error' },
+      ]);
+      withServers([
+        ['tsgo', serverOn('tsgo', ['typescript'], tsgo)],
+        ['tsls', serverOn('tsls', ['typescript'], refusingConnection(-32601))],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: brokenPath,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Type error');
+    });
+
+    it.each([-32600, -32603])(
+      'still lets a %d reply veto a clean document answer',
+      async (code) => {
+        // -32601 is the only code that proves the method is not implemented.
+        // An invalid request or an internal error means the server could own
+        // the file and did not analyze it, so the veto stands.
+        const tsgo = createConnection();
+        mockDiagnosticsResponses(tsgo);
+        withServers([
+          ['tsgo', serverOn('tsgo', ['typescript'], tsgo)],
+          ['tsls', serverOn('tsls', ['typescript'], refusingConnection(code))],
+        ]);
+        const result = await run(queryDiagnosticsTool('diagnostics'));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain(
+          'Unhandled method textDocument/diagnostic',
+        );
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
+
+    it('names a lone push-only server instead of reporting the file clean', async () => {
+      // Nothing else answered, so the refusal cannot be excused: an empty
+      // result would certify a file no server analyzed. The wording says what
+      // the server actually did rather than reporting an opaque failure.
+      withServers([
+        ['tsls', serverOn('tsls', ['typescript'], refusingConnection(-32601))],
+      ]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'tsls: does not support pull diagnostics',
+      );
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('names a push-only TypeScript server that refuses a JS-family file', async () => {
+      // A `typescript` declaration answers for the JS family, so tsls was a
+      // legitimate candidate for App.jsx and its refusal explains the empty
+      // result. Without the family widening the refusal reads as no-owner and
+      // the message claims no configured server covers a file tsls was asked
+      // about.
+      const [jsxPath] = addFile('App.jsx', 'export const x = "";\n');
+      withServers([
+        ['tsls', serverOn('tsls', ['typescript'], refusingConnection(-32601))],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: jsxPath,
+      });
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'tsls: does not support pull diagnostics',
+      );
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('names a -32601 workspace refusal beside the failure that did veto', async () => {
+      // A refusal is not a hard failure, but when the gate rejects for another
+      // reason the refusal still has to appear: it explains why that server
+      // said nothing, and dropping it would name only the sibling that
+      // crashed.
+      const dead = createConnection();
+      dead.request.mockRejectedValue(new Error('crash on startup'));
+      withServers([
+        [
+          'gopls',
+          serverOn(
+            'gopls',
+            ['go'],
+            refusingConnection(-32601, 'workspace/diagnostic'),
+          ),
+        ],
+        ['pyright', serverOn('pyright', ['python'], dead)],
+      ]);
+      const result = await run(queryDiagnosticsTool('workspaceDiagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain('pyright: crash on startup');
+      expect(result.error?.message).toContain(
+        'gopls: does not support pull diagnostics',
+      );
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it("lets an irrelevant server's failed pull veto an unbacked workspace report", async () => {
+      // The workspace leg stays unqualified: with no queried file there is
+      // no relevance test, so any failed pull vetoes an empty report.
+      mockDiagnosticsResponses(connection);
+      const failingConnection = createConnection();
+      failingConnection.request.mockRejectedValue(
+        new Error('method not found'),
+      );
+      withServers([
+        ['test', handle],
+        [
+          'pyright',
+          {
+            ...handle,
+            config: {
+              ...handle.config,
+              name: 'pyright',
+              languages: ['python'],
+            },
+            connection: failingConnection,
+          },
+        ],
+      ]);
+      const result = await run(queryDiagnosticsTool('workspaceDiagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain('method not found');
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('rejects workspaceDiagnostics when a clean sibling entry masks a dropped report', async () => {
+      // One entry normalizes to an empty report while a uri-less sibling
+      // carrying a severity-1 error is dropped: the clean entry must not
+      // absorb the loss.
+      connection.request.mockImplementation(async (method: string) =>
+        method === 'workspace/diagnostic'
+          ? {
+              items: [
+                { uri, kind: 'full', items: [] },
+                {
+                  kind: 'full',
+                  items: [{ range, severity: 1, message: 'Type error' }],
+                },
+              ],
+            }
+          : { kind: 'full', items: [] },
+      );
+      const result = await run(queryDiagnosticsTool('workspaceDiagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain('unusable');
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('rejects workspaceDiagnostics when every inner item fails normalization', async () => {
+      // The file entry has a uri, so the outer entry survives, but its only
+      // reported problem lacks a range and normalizes away.
+      connection.request.mockImplementation(async (method: string) =>
+        method === 'workspace/diagnostic'
+          ? {
+              items: [
+                {
+                  uri,
+                  kind: 'full',
+                  items: [{ severity: 1, message: 'Type error' }],
+                },
+              ],
+            }
+          : { kind: 'full', items: [] },
+      );
+      const result = await run(queryDiagnosticsTool('workspaceDiagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain('unusable');
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('rejects a document query whose only server was excused and retrieved nothing', async () => {
+      // The sole configured server declares python only, so the relevance
+      // rule excuses its failed pull for main.ts — but nothing else was asked
+      // and nothing answered, so the empty result would certify a file no
+      // server analyzed. The rejection states the coverage fact rather than
+      // blaming a server that could never own the file.
+      const failingConnection = createConnection();
+      failingConnection.request.mockRejectedValue(
+        new Error('method not found'),
+      );
+      withServers([
+        [
+          'pyright',
+          {
+            ...handle,
+            config: {
+              ...handle.config,
+              name: 'pyright',
+              languages: ['python'],
+            },
+            connection: failingConnection,
+          },
+        ],
+      ]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'no configured server covers the queried file',
+      );
+      expect(result.error?.message).not.toContain('pyright');
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('does not blame an irrelevant server whose pull resolved to nothing', async () => {
+      // A disposed connection resolves `undefined` instead of rejecting; the
+      // excused server's non-answer must not suppress the coverage fallback
+      // either.
+      const silentConnection = createConnection();
+      silentConnection.request.mockResolvedValue(undefined);
+      withServers([
+        [
+          'pyright',
+          {
+            ...handle,
+            config: {
+              ...handle.config,
+              name: 'pyright',
+              languages: ['python'],
+            },
+            connection: silentConnection,
+          },
+        ],
+      ]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'no configured server covers the queried file',
+      );
+      expect(result.error?.message).not.toContain('pyright');
+    });
+
+    it('keeps a clean answer from the only queried server that answered', async () => {
+      // The queried server is READY, owns the JS/TS family, and returned an
+      // authoritative empty report, so its answer is the backing the gate
+      // requires: for a placeable extension the gate demands a positively
+      // owning answerer, and this one provides it.
+      const jsFile = path.join(directory, 'index.js');
+      fs.writeFileSync(jsFile, 'const a = 1;\n');
+      mockDiagnosticsResponses(connection);
+      const result = await run(
+        lspTool()
+          .build({ operation: 'diagnostics', filePath: jsFile })
+          .execute(new AbortController().signal),
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it('refuses a clean answer whose only backer could never own the file', async () => {
+      // The sole configured server is READY and returns an authoritative empty
+      // report, so nothing failed and nothing was skipped — but it declares
+      // python only, so its report says nothing about main.ts.
+      withServers([
+        [
+          'pyright',
+          {
+            ...emptyReportHandle('pyright'),
+            config: {
+              ...handle.config,
+              name: 'pyright',
+              languages: ['python'],
+            },
+          },
+        ],
+      ]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'no configured server covers the queried file',
+      );
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('refuses a clean answer whose only backer is keyed by a language ID', async () => {
+      // The `cpp` twin of the python-only refusal above. `cpp` is absent from
+      // LANGUAGE_ID_TO_EXTENSIONS only because the ID already equals the
+      // extension, so it is just as attributable: a lone clangd still cannot
+      // certify main.ts clean.
+      withServers([
+        [
+          'clangd',
+          {
+            ...emptyReportHandle('clangd'),
+            config: { ...handle.config, name: 'clangd', languages: ['cpp'] },
+          },
+        ],
+      ]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'no configured server covers the queried file',
+      );
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it.each([
+      ['cpp', 'clangd', 'header.h'],
+      ['typescript', 'tsls', 'main.mts'],
+      ['dockerfile', 'docker-ls', 'Dockerfile'],
+    ] as const)(
+      'keeps a clean answer for an extension the tables cannot place (%s)',
+      async (language, name, fileName) => {
+        // `.h`, `.mts` and an extensionless name appear in no diagnostics
+        // table, so no declaration can be shown to own them: ownership is
+        // undecidable here and the answering server's authoritative empty
+        // report must stand. Refusing would reject a documented working
+        // configuration with a reason the same call's pull counter contradicts.
+        const [targetPath] = addFile(fileName, 'export const value = 1;\n');
+        const answerer = createConnection();
+        mockDiagnosticsResponses(answerer);
+        withServers([[name, serverOn(name, [language], answerer)]]);
+        const result = await execute(lspTool(), {
+          operation: 'diagnostics',
+          filePath: targetPath,
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toMatch(/^No diagnostics found/);
+      },
+    );
+
+    it('refuses a non-file diagnostic query before sending to the server', async () => {
+      const virtualUri = 'jdt://contents/Foo.java?=%2Fsrc';
+      mockDiagnosticsResponses(connection);
+      await expect(run(service.diagnostics(virtualUri))).rejects.toThrow(
+        'not a file URI',
+      );
+      expect(connection.send).not.toHaveBeenCalled();
+      expect(connection.request).not.toHaveBeenCalled();
+    });
+
+    it('does not let a failed sibling veto a clean answer for a placeable extension', async () => {
+      // `.go` is placeable through DIAGNOSTIC_LANGUAGE_IDS, so a downed python
+      // server provably cannot own main.go and is excused from the veto list
+      // rather than counted as unreachable; gopls's authoritative empty report
+      // stands.
+      const [goPath] = addFile('main.go', 'package main\n');
+      const gopls = createConnection();
+      mockDiagnosticsResponses(gopls);
+      withServers([
+        ['go', serverOn('gopls', ['go'], gopls)],
+        [
+          'pyright',
+          {
+            ...handle,
+            config: {
+              ...handle.config,
+              name: 'pyright',
+              languages: ['python'],
+            },
+            status: 'FAILED',
+            connection: undefined,
+            error: new Error('command not found: pyright'),
+          },
+        ],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: goPath,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it.each([
+      'python',
+      'cpp',
+      'java',
+      'go',
+      'javascript',
+      'javascriptreact',
+      'kotlin',
+    ])(
+      'does not let a downed %s sibling veto a clean answer it cannot own',
+      async (languageId) => {
+        // The ready server holds the `.ts` answer, and each downed sibling
+        // provably cannot own it: `python` shows the excuse needs the queried
+        // URI (drop the third argument to `unreachableDiagnosticServers` and
+        // this row vetoes again), `cpp`, `java` and `go` are identity-mapped,
+        // `javascript`/`javascriptreact` serve no `.ts` at all while the
+        // family widening stays one-directional, and `kotlin` reaches `.kt`
+        // only through an alias row.
+        mockDiagnosticsResponses(connection);
+        const failedSibling: LspServerHandle = {
+          ...handle,
+          config: {
+            ...handle.config,
+            name: languageId,
+            languages: [languageId],
+          },
+          status: 'FAILED',
+          connection: undefined,
+          error: new Error(`command not found: ${languageId}`),
+        };
+        withServers([
+          ['test', handle],
+          [languageId, failedSibling],
+        ]);
+        const result = await run(queryDiagnosticsTool('diagnostics'));
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toMatch(/^No diagnostics found/);
+      },
+    );
+
+    it('does not let a downed rust sibling with an explicit mapping veto a clean answer it cannot own', async () => {
+      // The `extensionToLanguage` twin of the identity-mapped cases above: the
+      // mapping sends extension derivation down its keys branch, so `rust`
+      // reaches the owner set only through its alias row. That row carries the
+      // language ID as well as `.rs`, so the downed sibling is still provably
+      // unable to own main.ts and the ready server's empty report stands.
+      mockDiagnosticsResponses(connection);
+      const failedSibling: LspServerHandle = {
+        ...handle,
+        config: {
+          ...handle.config,
+          name: 'rust',
+          languages: ['rust'],
+          extensionToLanguage: { '.rs': 'rust' },
+        },
+        status: 'FAILED',
+        connection: undefined,
+        error: new Error('command not found: rust-analyzer'),
+      };
+      withServers([
+        ['test', handle],
+        ['rust', failedSibling],
+      ]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it('does not excuse a failed server whose config key is capitalized', async () => {
+      // `.lsp.json` keys reach `languages` unnormalized. `"Python"` derives
+      // no attributable extension, so the relevance rule fails CLOSED: the
+      // downed server keeps its veto on the `.py` query and its failure is
+      // named, instead of the sibling's empty report certifying the file.
+      addFile('main.py', 'x = 1\n');
+      mockDiagnosticsResponses(connection);
+      const failingConnection = createConnection();
+      failingConnection.request.mockRejectedValue(
+        new Error('method not found'),
+      );
+      withServers([
+        ['test', handle],
+        [
+          'pyright',
+          {
+            ...handle,
+            config: {
+              ...handle.config,
+              name: 'pyright',
+              languages: ['Python'],
+            },
+            connection: failingConnection,
+          },
+        ],
+      ]);
+      const result = await run(
+        lspTool()
+          .build({
+            operation: 'diagnostics',
+            filePath: path.join(directory, 'main.py'),
+          })
+          .execute(new AbortController().signal),
+      );
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain('method not found');
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('counts a capitalized TypeScript key as owning the .ts file it answered', async () => {
+      // The case the lowercase normalization actually decides: `TypeScript`
+      // must derive `ts` on the OWNER side exactly like `typescript` does, or
+      // its authoritative empty report stops backing main.ts and the
+      // sibling's -32601 refusal flips a clean file to a hard tool error.
+      const [tsPath] = addFile('main.ts', 'const x: number = 1;\n');
+      const answerer = createConnection();
+      mockDiagnosticsResponses(answerer);
+      withServers([
+        [
+          'TypeScript',
+          serverOn('typescript-language-server', ['TypeScript'], answerer),
+        ],
+        ['ts', serverOn('tsls', ['typescript'], refusingConnection(-32601))],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: tsPath,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it('does not excuse a downed typescript server from a .js query it serves', async () => {
+      // `typescript-language-server` answers for `.js` as well, so a FAILED
+      // `typescript` handle keeps its veto on an `index.js` query instead of
+      // being excused by a `{ts,tsx}` declaration; the sibling's empty report
+      // is no backing for a file the downed server owned.
+      addFile('index.js', 'const a = 1;\n');
+      const failedHandle: LspServerHandle = {
+        ...handle,
+        config: { ...handle.config, name: 'typescript' },
+        status: 'FAILED',
+        connection: undefined,
+      };
+      withServers([
+        [
+          'healthy',
+          {
+            ...emptyReportHandle('healthy'),
+            config: { ...handle.config, name: 'healthy', languages: ['yaml'] },
+          },
+        ],
+        ['typescript', failedHandle],
+      ]);
+      const result = await run(
+        lspTool()
+          .build({
+            operation: 'diagnostics',
+            filePath: path.join(directory, 'index.js'),
+          })
+          .execute(new AbortController().signal),
+      );
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain('typescript is failed');
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('does not blame a server that could never own the file when no server is ready', async () => {
+      // Only a python server is configured and it is down; querying main.ts
+      // must still fail hard, but must name the real state instead of
+      // pointing at pyright.
+      const failedPythonHandle: LspServerHandle = {
+        ...handle,
+        config: { ...handle.config, name: 'pyright', languages: ['python'] },
+        status: 'FAILED',
+        connection: undefined,
+      };
+      withServers([['pyright', failedPythonHandle]]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'no configured server covers the queried file',
+      );
+      expect(result.error?.message).not.toContain('pyright');
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('refuses a clean answer from a ready server keyed only by its server name', async () => {
+      // `.lsp.json` keys reach `languages` unvalidated, so a `pyright` key
+      // derives the guess `{'pyright'}`. That set proves nothing about
+      // main.py, so its authoritative empty report cannot certify the file.
+      addFile('main.py', 'x = 1\n');
+      withServers([
+        [
+          'pyright',
+          {
+            ...emptyReportHandle('pyright'),
+            config: {
+              ...handle.config,
+              name: 'pyright',
+              languages: ['pyright'],
+            },
+          },
+        ],
+      ]);
+      const result = await run(
+        lspTool()
+          .build({
+            operation: 'diagnostics',
+            filePath: path.join(directory, 'main.py'),
+          })
+          .execute(new AbortController().signal),
+      );
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'could not be attributed to the queried file',
+      );
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it.each(['pyright', 'remote-lsp'])(
+      'names a downed %s server keyed by its server name',
+      async (key) => {
+        // The unattributed guess must not excuse the failed server from the
+        // veto: it really could own main.py, so the sibling's empty report is
+        // no backing and the recorded cause has to reach the user.
+        addFile('main.py', 'x = 1\n');
+        withServers([
+          [
+            'healthy',
+            {
+              ...emptyReportHandle('healthy'),
+              config: {
+                ...handle.config,
+                name: 'healthy',
+                languages: ['python'],
+              },
+            },
+          ],
+          [
+            key,
+            {
+              ...handle,
+              config: { ...handle.config, name: key, languages: [key] },
+              status: 'FAILED',
+              connection: undefined,
+              error: new Error(`command not found: ${key}`),
+            },
+          ],
+        ]);
+        const result = await run(
+          lspTool()
+            .build({
+              operation: 'diagnostics',
+              filePath: path.join(directory, 'main.py'),
+            })
+            .execute(new AbortController().signal),
+        );
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain(`${key} is failed`);
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
   });
 });

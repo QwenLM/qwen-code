@@ -81,10 +81,31 @@ incoming/outgoing 调用在预热前后及请求后进行验证。陈旧、缺�
   继续延后。管理器捕获内部的
   TypeScript 预热错误；其他预热文件失败不会阻止查询已同步目标。传播的失败使用
   工具已有的失败提示，而不是声称结果干净或完整。成功的空诊断仍显示为干净。
-  诊断请求／拉取 catch 现在拒绝 RPC 失败及无效报告，保留合法的空消息诊断，
-  并按[诊断失败契约](lsp-diagnostic-failures.zh-CN.md) 接受成功的 null 结果。
-  除调用层次来源处理外，其他公共查询的 catch 保持不变；其空数组或 null 不能
-  证明分析成功。更广泛的结构化错误结果设计继续延后。
+  两个诊断拉取只有在存在可用应答服务器背书时，才将空诊断显示为干净。独立的
+  传输失败按服务器记录；按 main 既有的部分结果策略，健康服务器实际返回的非空
+  诊断仍保留，但不能证明分析完整。缺失或 null 响应不能为干净结论背书。无效报告
+  外层结构或畸形的范围内内容立即拒绝，即使此前已有诊断。同步失败、范围解析错误
+  和工作区扫描预算耗尽也仍是硬错误。工具以
+  `ToolErrorType.EXECUTION_FAILED` 暴露被拒绝的诊断查询。
+
+  文档诊断保留仅 file URI 的路由入口、显式扩展映射的权威性、新鲜工作区包含检查
+  和每服务器 root。`serverName` 显式选择绕过语言/root 筛选及基于声明的归属判断，
+  绝不绕过工作区包含性。因路由被排除的 READY 服务器不计为“新就绪但未询问”。
+  相关但未就绪的已配置服务器可否决没有依据的空答案；每次拉取后重读实时就绪
+  句柄，适用的新就绪服务器只查询一次。
+
+  空文档答案必须相关，且对诊断表可定位的扩展名具有正向归属。无法定位的扩展名
+  继续按相关性检查，不臆造归属；旧式投递仍允许服务器名式的不透明语言键返回
+  实际诊断。诊断别名与单向扩展的 TypeScript 归属判断独立于显式扩展路由集合：
+  映射值中的语言不能启用未列出的扩展名。非 file 位置可作为导航结果显示，
+  但不能提交为文档诊断查询。
+
+  `-32601` 拒绝单独记录，因为服务器从未实现该拉取。它不能否决真正应答的
+  兄弟服务器。但如果没有可用应答服务器，不支持的工作区拉取不能证明工作区干净，
+  而是带服务器的不支持原因拒绝。其他传输 catch 保持不变；其空数组或 null
+  不能证明诊断干净。这取代[诊断失败契约](lsp-diagnostic-failures.zh-CN.md)
+  原先关于 null 兼容和严格跨服务器拒绝的决定。
+
 - 传输不确认通知交付。本变更不重构异步写入或已关闭连接的处理。
 
 ## 成本
@@ -109,8 +130,10 @@ incoming/outgoing 调用在预热前后及请求后进行验证。陈旧、缺�
 目标。调用层次测试覆盖工具 JSON 往返、嵌套项、移动行的编辑、其他查询、自行读盘
 服务器及在途响应竞态。固定工作区诊断顺序、结果限制范围及符号重试行为。实际客户端
 和工具测试验证：已跟踪文件被删除、发送抛错或工作区变更不受支持时拒绝操作，包括
-此前已有服务器返回结果的情况。诊断报告测试还保留合法的空消息／null 结果，
-拒绝 RPC 失败及畸形报告。初始化测试通过启动路径验证能力的产生。变异检查必须杀死下列每个具名变异体（除注明外均位于
+此前已有服务器返回结果的情况。其余（非诊断）请求/拉取的捕获逻辑保持不变；两个
+诊断拉取则改为拒绝失败或不可用的拉取，由 `rejects a failed diagnostics pull
+instead of reporting clean` 及其工作区孪生用例钉住。初始化测试通过启动路径
+验证能力的产生。变异检查必须杀死下列每个具名变异体（除注明外均位于
 `native-lsp-service.ts`），并使所列测试变红：R1-5，`ensureDocumentSynchronized`
 返回恒为 `true` 而非打开标志（`does not delay or retry an empty query after
 didChange`）；R1-6，`lsp-server-manager.ts` 的预热 catch 重抛而非返回
@@ -124,7 +147,35 @@ for two documents`）；R1-12，委托的语言 ID 失去相对扩展名推导�
 its sibling reloads`）；R1-15，强制预热传入 `false` 而非强制标志（`forces
 unchanged TypeScript warmup with a monotonic didChange before retry`）。R1-14 是
 阴性对照：将 `constants.ts` 中的 `DEFAULT_LSP_WARMUP_DELAY_MS` 提高到 300 后，
-`preserves replayed snapshots` 仍须通过。
+`preserves replayed snapshots` 仍须通过。拒绝闸门另增四项：`DIAGNOSTIC_LANGUAGE_ALIASES`
+删掉 `rust` 行（`lets a -32601 refusal from the rust owner veto a non-owner empty
+answer`）；`declaredOwnerExtensions` 被加上 JS/TS 家族扩展（`does not let a
+javascript-only answerer back a typescript refusal`）；`declaredDiagnosticExtensions`
+不再读取 `extensionToLanguage` 的值（`clears a clean answer through a partial
+extensionToLanguage mapping` 与 `names the failed owner a partial mapping leaves
+unanswered`）；第二个拒绝改用未过滤的 `failures`/`unsupported` 账本指名（`does not
+blame an irrelevant server whose pull resolved to nothing`）。归属拆分另增两项：把
+`serverDeclaredIrrelevant` 的守卫回退为 `KNOWN_DIAGNOSTIC_EXTENSIONS`（`does not
+let a failed sibling veto a clean answer for a placeable extension`，且 `refuses an
+empty answer with no attributable owner from` 的 `pyright` 行会失去其覆盖性理由）；
+从干净答案闸门中去掉 attributable 项（`keeps a clean answer for an extension the
+tables cannot place`，三行全红，另加 `keeps a clean answer for a non-file URI the
+tables cannot place`）。工作区分支与归属表另增四项：工作区 catch 把
+`pullUnsupported` 重新并入 `failures`（`keeps a clean workspace report from the
+pull-capable of two servers`、`does not treat a lone -32601 workspace refusal as
+a failed pull`、`names a -32601 workspace refusal beside the failure that did
+veto`）；`serverDeclaredIrrelevant` 的归属谓词回退为
+`KNOWN_DIAGNOSTIC_EXTENSIONS` / `DIAGNOSTIC_LANGUAGE_IDS`（`does not let a
+downed kotlin sibling veto a clean answer it cannot own`，且 `refuses an empty
+answer with no attributable owner from` 的 `kotlin` 行会失去其覆盖性理由）；
+`declaredDiagnosticExtensions` 重新扩展全部四个 JS/TS 家族 ID（`does not let a
+downed javascript sibling veto a clean answer it cannot own` 及其
+`javascriptreact` 孪生用例）；文档分支的 `unreachableDiagnosticServers` 调用去掉
+被查 `uri`（`does not let a downed python sibling veto a clean answer it cannot
+own`，身份映射各行一同变红）。晚就绪重试另增一项：删掉任一条分支对
+`newlyReadyDiagnosticHandles` 的 `pending.push`（文档分支对应 `asks a server
+that became ready during the diagnostics query before deciding`，工作区分支对应其
+`workspaceDiagnostics` 孪生用例）。
 
 按照 AGENTS.md，涉及的服务、管理器及其相邻单元测试此前已重命名为 kebab-case。
 其聚合导出、原生客户端类型导入、集成测试和直接 E2E 测试框架导入已更新。公共类名

@@ -465,7 +465,8 @@ describe('build artifact — transcript entry (#11031)', () => {
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js).not.toMatch(/["'`]trajectory\.filter\./);
+    expect(js).not.toMatch(/["'`]trajectory\.(filter|window)\./);
+    expect(readPackageJavascript()).toContain('trajectory.window.older');
     expect(readPackageJavascript()).toContain('trajectory.filter.search');
     expect(readPackageJavascript()).toContain('Search loaded records');
   });

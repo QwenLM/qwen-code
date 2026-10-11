@@ -280,7 +280,7 @@ Parameters:
 
 #### File Diagnostics
 
-Get diagnostic messages (errors, warnings) for a file. The client advertises pull-diagnostic support and requests a current report. Unsupported requests, transport failures, and invalid reports are shown as `LSP diagnostics failed`, not as a clean file. Push-only diagnostic servers without pull support are not supported by this operation. Empty-string diagnostic messages are retained alongside other diagnostics. A successful `null` result is accepted as empty for compatibility; missing or malformed reports and RPC errors still fail.
+Get diagnostic messages (errors, warnings) for a file. The client advertises pull-diagnostic support and requests a current report. Failed queries are shown as `LSP diagnostics failed` and carry a tool error, not a clean-file result. Missing or `null` responses cannot certify a clean file. Invalid reports and synchronization or scope errors reject even after earlier results; actual diagnostics from healthy servers survive independent transport failures, but do not prove complete analysis. A push-only sibling does not veto a usable supported answer. Empty-string diagnostic messages are retained alongside other diagnostics.
 
 ```
 Operation: diagnostics
@@ -290,7 +290,7 @@ Parameters:
 
 #### Workspace Diagnostics
 
-Get all diagnostic messages across the workspace. Servers must support `workspace/diagnostic`; document pull support alone is not sufficient. A request failure is shown as `LSP workspace diagnostics failed`, not as an empty workspace. Diagnostics already returned by another server do not hide that failure. A successful `null` workspace response is valid and empty; it does not erase diagnostics from other servers.
+Get all diagnostic messages across the workspace. Servers must support `workspace/diagnostic`; document pull support alone is not sufficient. Without a usable answering server, failures (including an unsupported method or a `null` response) are shown as `LSP workspace diagnostics failed` with a tool error, not a clean workspace. Unsupported siblings do not veto genuine supported reports. Actual diagnostics survive independent transport failures, but invalid in-scope reports, unresolved file paths, synchronization failures and scan-budget exhaustion reject even after earlier results. An unresolved server-reported path is not treated as outside the workspace and does not retire its delivered state merely because result scope is unknown. Tracked-file scope-resolution failures during synchronization likewise reject, rather than silently excluding an unknown-scope document. Confirmed removed directories are still skipped.
 
 ```
 Operation: workspaceDiagnostics

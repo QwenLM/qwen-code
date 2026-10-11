@@ -526,14 +526,14 @@ describe('NativeLspService Integration Tests', () => {
         'No LSP servers are configured',
       );
       await expect(lspService.workspaceDiagnostics('absent')).rejects.toThrow(
-        'absent is not configured',
+        'No LSP server named absent is configured or running',
       );
     });
 
-    it('should report unavailable diagnostics when no server is ready', async () => {
+    it('should reject diagnostics when no server is ready', async () => {
       const uri = 'file:///test/workspace/src/app.ts';
       await expect(lspService.diagnostics(uri)).rejects.toThrow(
-        'No LSP servers are configured',
+        'No LSP servers are configured or running',
       );
     });
 

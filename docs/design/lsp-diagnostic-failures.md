@@ -19,23 +19,32 @@ Advertise `textDocument.diagnostic` with dynamic registration and related-docume
 support disabled. Use the existing pull request, normalization and tool output;
 do not add a push cache just to repair capability negotiation.
 
-A non-null successful document or workspace report must contain an `items`
-array. A successful `null` workspace response is protocol-allowed; document
-`null` is accepted as an empty result for compatibility, not claimed as a
-protocol-valid document report. This does not accept RPC errors or missing
-results. Each file report for a current URI must contain its own `items` array
-without diagnostics lost during normalization. An empty-string diagnostic
-message is valid and retained; missing or non-string messages remain invalid;
-malformed or out-of-scope locations remain omitted by the existing URI filter.
-No previous result identifier is sent, so an
-unchanged document report without items cannot establish a current result.
-Unsupported methods, transport errors and invalid report envelopes fail the
-query with the server name and original reason. They must not become an empty
-or apparently complete partial result. Existing tool catches render those
-failures without changing the public diagnostic result types. This supersedes
-the earlier request/pull-catch deferral in the
-[disk synchronization design](lsp-disk-document-sync.md); unrelated query catches
-and the broader structured error-result design remain outside this repair.
+Successful document and workspace reports must contain an `items` array. A
+missing or `null` response cannot establish a current clean report; this replaces
+the former null compatibility policy when integrating main's failure accounting.
+Each in-scope file report must contain its own `items` array without diagnostics
+lost during normalization. Empty-string diagnostic messages are valid; missing
+or non-string messages remain invalid. Malformed URI strings and out-of-scope
+locations remain omitted. Physical-resolution failure is distinct from malformed
+URI syntax: it rejects rather than dropping a potentially in-scope report, without
+retiring its delivered state merely because result scope is unknown.
+
+No previous result identifier is sent, so an unchanged report without items
+cannot establish a current result. Invalid report envelopes and malformed
+in-scope payloads reject even after earlier diagnostics; scope, synchronization
+and scan-budget failures also remain hard errors. Independent transport failures
+are accounted for per server under main's policy: actual nonempty diagnostics
+from healthy servers survive, but do not certify complete analysis. Empty results
+require a usable answering server and no relevant failed/unreachable server.
+An unsupported `-32601` sibling cannot veto a genuine supported answer; when no
+server answers, including a lone unsupported workspace pull, the query rejects.
+Document empty-answer ownership checks apply after file routing; explicit
+`serverName` bypasses language/root and declaration-based ownership, never the
+workspace boundary. Rejections name the server or unresolved URI and retain the
+original reason. The tool exposes them as `ToolErrorType.EXECUTION_FAILED` without
+changing the public diagnostic array types. The
+[disk synchronization design](lsp-disk-document-sync.md) records the integrated
+failure/ownership ledger; unrelated transport catches remain outside this repair.
 
 ## Boundaries
 
@@ -55,19 +64,21 @@ out-of-scope filtering are unchanged.
 - The freshly built CLI displays the actual backend error for malformed files,
   not `No diagnostics found`; a mock model is clearly distinguished from a real
   model. Missing model authentication and unavailable platforms are disclosed.
-- RPC rejection, timeout, connection closure and invalid report envelopes surface
-  failure through document and workspace tools. Successful empty reports remain
-  valid, including the successful `null` compatibility case, and an earlier
-  server's results do not conceal a later server failure. Empty-message
-  diagnostics and adjacent real errors are retained on both query paths.
+- RPC rejection, timeout or connection closure cannot establish a clean result.
+  Valid empty reports remain usable; null/missing results alone reject. Actual
+  healthy-server diagnostics survive independent RPC failures, but invalid
+  payloads and scope/synchronization/scan errors reject even after earlier results.
+  A lone unsupported workspace request fails; supported empty sibling reports
+  still succeed. Empty-message diagnostics and adjacent real errors are retained.
 - Existing routing/scope/lifecycle tests, build, typecheck, bundle and scoped
   lint/format checks pass. Real macOS and Linux runs corroborate the protocol
   behavior where available; no claim is made about unexecuted Windows tests.
 
 ## Risks
 
-Diagnostic failures that were previously hidden now become visible. A failed
-server prevents reporting document diagnostics as a complete successful result;
-partial-result reporting would require a separate public contract. This repair
+Diagnostic failures that were previously hidden now become visible. Main's
+partial-result policy preserves actual diagnostics across independent transport
+failures, without certifying completeness. Null responses no longer certify clean
+results. Invalid payloads and unresolved result scope remain hard failures. This repair
 is not full push-diagnostic support or a guarantee that every LSP server supports
 pull diagnostics. Existing filesystem race limits remain unchanged.

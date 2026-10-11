@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import { ToolErrorType } from './tool-error.js';
 import { isSubpaths, unescapePath } from '../utils/paths.js';
 import { resolveWorkspacePath } from '../utils/workspaceContext.js';
 import type { Config } from '../config/config.js';
@@ -668,7 +669,11 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       const message = `LSP diagnostics failed: ${
         (error as Error)?.message || String(error)
       }`;
-      return { llmContent: message, returnDisplay: message };
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
+      };
     }
 
     if (!diagnostics.length) {
@@ -707,7 +712,11 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       const message = `LSP workspace diagnostics failed: ${
         (error as Error)?.message || String(error)
       }`;
-      return { llmContent: message, returnDisplay: message };
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
+      };
     }
 
     if (!fileDiagnostics.length) {

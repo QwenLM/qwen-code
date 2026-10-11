@@ -120,13 +120,41 @@ the [file routing contract](lsp-file-routing.md).
   warmup errors; failure of a different warmup file does not prevent querying a
   synchronized target. Propagated failures reach the tool's existing failure
   message rather than claiming a clean or complete result. Successful empty
-  diagnostics still display as clean. Diagnostic request/pull catches now reject
-  RPC failures and invalid reports, retaining valid empty-message diagnostics
-  and accepting successful null results under the
-  [diagnostic failure contract](lsp-diagnostic-failures.md). Other public query
-  catches remain unchanged except for hierarchy provenance handling; their empty
-  arrays or null are not evidence of a successful analysis. Broader structured
-  error-result design remains deferred.
+  diagnostics still display as clean only when a usable answering server backs
+  them. Independent transport failures are recorded per server; actual nonempty
+  diagnostics from healthy servers survive under main's existing partial-result
+  policy, but do not certify complete analysis. A missing or null response backs
+  no clean answer. Invalid report envelopes or malformed in-scope payloads reject
+  immediately, even after earlier diagnostics. Synchronization failures, scope
+  resolution errors and workspace scan-budget exhaustion also remain hard errors.
+  The tool exposes rejected diagnostic queries as
+  `ToolErrorType.EXECUTION_FAILED`.
+
+  Document diagnostics retain the file-only routing gate, authoritative explicit
+  extension maps, fresh workspace containment and per-server roots. Explicit
+  `serverName` bypasses language/root selection and declaration-based ownership,
+  never workspace containment. READY servers excluded by routing are not counted
+  as newly ready but unasked. Relevant configured servers that are not ready can
+  veto an otherwise unbacked empty answer; live ready handles are refreshed after
+  each pull and eligible newly ready servers are queried once.
+
+  Empty document answers require relevance and, for an extension the diagnostic
+  tables can place, positive ownership. Unplaceable extensions retain relevance
+  checks rather than invented ownership; legacy dispatch still allows actual
+  diagnostics from opaque server-name language keys. Diagnostic aliases and
+  directionally widened TypeScript ownership remain separate from the explicit
+  extension routing set: mapped language values do not enable omitted extensions.
+  Non-file locations may remain visible as navigation results, but cannot be
+  submitted as document diagnostic queries.
+
+  A `-32601` refusal is recorded separately because the server never implemented
+  the pull. It cannot veto a genuine answering sibling. With no usable answering
+  server, however, an unsupported workspace pull cannot certify clean results and
+  rejects with the unsupported server's reason. Other transport catches are
+  unchanged; their empty arrays or null are not evidence of clean diagnostics.
+  This supersedes the former null/strict-cross-server compatibility decisions in
+  the [diagnostic failure contract](lsp-diagnostic-failures.md).
+
 - Notification delivery is not acknowledged by the transport. This change does
   not redesign asynchronous writes/closed connections.
 
@@ -164,9 +192,11 @@ nested items, line-shifting edits, sibling queries, disk-reading servers and
 in-flight response races. Workspace diagnostic ordering, result-limit scoping,
 and symbol retries are pinned. Actual-client/tool tests reject deleted tracked
 files, thrown sends, and unsupported workspace changes, including after an
-earlier server returned results. Diagnostic report tests additionally preserve
-valid empty-message/null results and reject RPC failures and malformed reports.
-Initialization tests exercise capability production through startup.
+earlier server returned results. Other (non-diagnostics) request/pull catches
+are preserved; the two diagnostics pulls now reject a failed or unusable pull
+instead, pinned by `rejects a failed diagnostics pull instead of reporting
+clean` and its workspace twin. Initialization tests exercise capability
+production through startup.
 Mutation checks must kill each named mutant, all in `native-lsp-service.ts`
 unless another file is named, with the listed test going red: R1-5,
 `ensureDocumentSynchronized` returns a constant `true` instead of the open flag
@@ -184,7 +214,40 @@ server's tracking (`retains the unchanged server snapshot when only its sibling
 reloads`); R1-15, forced warmup passes `false` instead of the force flag
 (`forces unchanged TypeScript warmup with a monotonic didChange before retry`).
 R1-14 is the negative control: raising `DEFAULT_LSP_WARMUP_DELAY_MS` to 300 in
-`constants.ts` must leave `preserves replayed snapshots` green.
+`constants.ts` must leave `preserves replayed snapshots` green. The refusal
+gate adds four more: the `rust` row leaves `DIAGNOSTIC_LANGUAGE_ALIASES`
+(`lets a -32601 refusal from the rust owner veto a non-owner empty answer`);
+`declaredOwnerExtensions` gains the JS/TS family widening (`does not let a
+javascript-only answerer back a typescript refusal`);
+`declaredDiagnosticExtensions` stops reading the `extensionToLanguage` values
+(`clears a clean answer through a partial extensionToLanguage mapping` and
+`names the failed owner a partial mapping leaves unanswered`); the second
+rejection names the unfiltered `failures`/`unsupported` ledgers (`does not
+blame an irrelevant server whose pull resolved to nothing`). The attribution
+split adds two more: reverting the `serverDeclaredIrrelevant` guard to
+`KNOWN_DIAGNOSTIC_EXTENSIONS` (`does not let a failed sibling veto a clean
+answer for a placeable extension`, and the `pyright` row of `refuses an empty
+answer with no attributable owner from` loses its coverage reason); dropping
+the attributable term from the clean-answer gate (`keeps a clean answer for an
+extension the tables cannot place`, all three rows, and `keeps a clean answer
+for a non-file URI the tables cannot place`). The workspace leg and the
+attribution tables add four more: the workspace catch routes `pullUnsupported`
+back into `failures` (`keeps a clean workspace report from the pull-capable of
+two servers`, `does not treat a lone -32601 workspace refusal as a failed
+pull`, and `names a -32601 workspace refusal beside the failure that did
+veto`); `serverDeclaredIrrelevant`'s attribution predicate returns to
+`KNOWN_DIAGNOSTIC_EXTENSIONS` / `DIAGNOSTIC_LANGUAGE_IDS` (`does not let a
+downed kotlin sibling veto a clean answer it cannot own`, and the `kotlin` row
+of `refuses an empty answer with no attributable owner from` loses its coverage
+reason); `declaredDiagnosticExtensions` widens all four JS/TS family IDs again
+(`does not let a downed javascript sibling veto a clean answer it cannot own`
+and its `javascriptreact` twin); the document leg drops the queried `uri` from
+its `unreachableDiagnosticServers` call (`does not let a downed python sibling
+veto a clean answer it cannot own`, with the identity-mapped rows). The
+late-ready retry adds one: dropping either leg's `pending.push` of
+`newlyReadyDiagnosticHandles` (`asks a server that became ready during the
+diagnostics query before deciding` for the document leg, its
+`workspaceDiagnostics` twin for the sweep).
 
 The touched service and manager and their collocated unit tests were renamed to
 kebab-case per AGENTS.md. Their barrel exports, native client type imports,

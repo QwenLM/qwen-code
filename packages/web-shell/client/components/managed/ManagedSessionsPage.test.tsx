@@ -507,7 +507,7 @@ describe('ManagedSessionsPage', () => {
     expect(alert).not.toContain('could not be loaded');
   });
 
-  it('explains that a reader cannot answer a creator-only approval', async () => {
+  it('explains that a reader cannot answer a role-based approval', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('s1', {
         capabilities: { canSend: false, canCancel: false, actions: true },
@@ -535,7 +535,7 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(
-      'Only the Session creator can answer this approval.',
+      "Only the Session's owner or a Workspace operator can answer this approval.",
     );
     // The refusal is final for this viewer, so the card stops offering the
     // answer instead of sending one 403 per click.
@@ -547,7 +547,57 @@ describe('ManagedSessionsPage', () => {
     expect(respond).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the next approval of the same Session unanswerable after a creator-only refusal', async () => {
+  it('re-probes a role-based refusal through the check-again affordance', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    const respond = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+    provider = {
+      ...provider,
+      actions: {
+        listPending: vi.fn().mockResolvedValue([pendingAction]),
+        respond,
+      },
+    };
+    await render('s1');
+    const allow = () =>
+      Array.from(container.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Yes, allow once'),
+      ) as HTMLButtonElement;
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(allow().disabled).toBe(true);
+    const alert = container.querySelector('[role="alert"]') as HTMLElement;
+    expect(alert?.textContent).toContain(
+      "Only the Session's owner or a Workspace operator can answer this approval.",
+    );
+    // The latched refusal got its own re-probe affordance, rendered with no
+    // `loadError` in play, so a grant raised while the page is open can stick.
+    const again = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Retry loading approvals'),
+    ) as HTMLButtonElement;
+    expect(again).toBeTruthy();
+    await act(async () => {
+      again.click();
+      await flush();
+    });
+    expect(allow().disabled).toBe(false);
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the next approval of the same Session unanswerable after a role-based refusal', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('s1', {
         capabilities: { canSend: false, canCancel: false, actions: true },
@@ -594,7 +644,7 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(
-      'Only the Session creator can answer this approval.',
+      "Only the Session's owner or a Workspace operator can answer this approval.",
     );
     expect(allow().disabled).toBe(true);
 
@@ -626,7 +676,9 @@ describe('ManagedSessionsPage', () => {
       Array.from(container.querySelectorAll('[role="status"]')).map(
         (node) => node.textContent,
       ),
-    ).toContain('Only the Session creator can answer this approval.');
+    ).toContain(
+      "Only the Session's owner or a Workspace operator can answer this approval.",
+    );
     // On screen is not enough: the reason is a sibling of the dialog, and a
     // polite region that mounts with its text already in place announces
     // nothing, so the dialog's own description is what carries the cause to a
@@ -642,12 +694,12 @@ describe('ManagedSessionsPage', () => {
       .map((id) => document.getElementById(id)?.textContent ?? '')
       .join(' | ');
     expect(described).toContain(
-      'Only the Session creator can answer this approval.',
+      "Only the Session's owner or a Workspace operator can answer this approval.",
     );
     expect(described).toContain('Tool arguments are unavailable');
   });
 
-  it('stops explaining a creator-only refusal once the Session has no approval left', async () => {
+  it('stops explaining a role-based refusal once the Session has no approval left', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('s1', {
         capabilities: { canSend: false, canCancel: false, actions: true },
@@ -674,7 +726,8 @@ describe('ManagedSessionsPage', () => {
         new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
       );
     provider = { ...provider, actions: { listPending, respond } };
-    const refusal = 'Only the Session creator can answer this approval.';
+    const refusal =
+      "Only the Session's owner or a Workspace operator can answer this approval.";
 
     await render('s1');
     await act(async () => flush());
@@ -712,7 +765,7 @@ describe('ManagedSessionsPage', () => {
     );
     // Every HTTP failure the Managed client builds carries a string code, so
     // carrying a code is not what marks a refusal final: only the
-    // creator-only refusal is.
+    // role-based refusal is.
     const respond = vi
       .fn()
       .mockRejectedValueOnce(
