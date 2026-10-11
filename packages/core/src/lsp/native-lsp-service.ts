@@ -870,8 +870,8 @@ export class NativeLspService {
     uri: string,
     directories: readonly string[],
     cache: Map<string, boolean>,
-  ): boolean {
-    if (typeof uri !== 'string' || path.isAbsolute(uri)) return false;
+  ): boolean | undefined {
+    if (typeof uri !== 'string' || path.isAbsolute(uri)) return undefined;
     const cached = cache.get(uri);
     if (cached !== undefined) return cached;
     let current = false;
@@ -881,7 +881,7 @@ export class NativeLspService {
       current = url.protocol !== 'file:';
       if (!current) filePath = fileURLToPath(url);
     } catch {
-      current = false;
+      return undefined;
     }
     if (filePath !== undefined) {
       try {
@@ -2829,11 +2829,13 @@ export class NativeLspService {
               dropped++;
               continue;
             }
-            if (
-              !this.isCurrentWorkspaceDocument(uri, directories, scopeCache)
-            ) {
-              continue;
-            }
+            const current = this.isCurrentWorkspaceDocument(
+              uri,
+              directories,
+              scopeCache,
+            );
+            if (current === undefined) dropped++;
+            if (!current) continue;
             const fileItems = report?.['items'];
             const normalized = this.normalizer.normalizeFileDiagnostics(
               item,

@@ -470,7 +470,7 @@ describe('NativeLspService disk document synchronization', () => {
         );
         const filter = vi.spyOn(
           service as unknown as {
-            isCurrentWorkspaceDocument(target: string): boolean;
+            isCurrentWorkspaceDocument(target: string): boolean | undefined;
           },
           'isCurrentWorkspaceDocument',
         );
@@ -6060,6 +6060,42 @@ describe('NativeLspService disk document synchronization', () => {
       expect(result.error?.message).toContain('unusable');
       expect(result.llmContent).not.toContain('No diagnostics found');
     });
+
+    it.each(
+      [
+        'bare absolute path',
+        'file://[invalid',
+        'https://[invalid',
+        'file:///%ZZ',
+        'not a URI',
+      ].flatMap((target) =>
+        [false, true].map((cleanSibling) => ({ target, cleanSibling })),
+      ),
+    )(
+      'rejects workspaceDiagnostics with unusable URI $target, clean sibling $cleanSibling',
+      async ({ target, cleanSibling }) => {
+        connection.request.mockImplementation(async (method: string) =>
+          method === 'workspace/diagnostic'
+            ? {
+                items: [
+                  ...(cleanSibling ? [{ uri, kind: 'full', items: [] }] : []),
+                  {
+                    uri: target === 'bare absolute path' ? file : target,
+                    kind: 'full',
+                    items: [{ range, severity: 1, message: 'Type error' }],
+                  },
+                ],
+              }
+            : { kind: 'full', items: [] },
+        );
+        const result = await run(queryDiagnosticsTool('workspaceDiagnostics'));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain('unusable');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
 
     it('rejects workspaceDiagnostics when every inner item fails normalization', async () => {
       // The file entry has a uri, so the outer entry survives, but its only

@@ -90,7 +90,10 @@ are marked as requiring `/directory add` before another file query. No automatic
 allow-list or expansion of trusted directories is introduced. Workspace diagnostics
 and symbols omit results outside current workspace scope so revoked buffers are not
 presented as current. Valid virtual result URIs remain visible with a non-file
-marker; malformed URIs and bare paths are omitted. Workspace output discloses that out-of-scope file results are omitted, even when
+marker; malformed URIs and bare paths are omitted. Workspace diagnostics reject a
+report with unusable URI entries when no usable nonempty diagnostics remain;
+legitimate out-of-scope file URIs do not count as unusable. Workspace output
+discloses that out-of-scope file results are omitted, even when
 empty. Result filtering uses fresh physical paths without per-item refusal logs,
 reusing URI decisions only within one synchronous server-response filter. Malformed
 URI syntax is omitted, but physical-resolution failures (including EACCES, ELOOP,
