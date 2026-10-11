@@ -618,12 +618,14 @@ export async function runForkedAgent(
           if (!event.isContinuation) {
             fullText = '';
             usage = { inputTokens: 0, outputTokens: 0, cacheHitTokens: 0 };
+            jsonResult = undefined;
           }
           continue;
         }
         if (event.type === StreamEventType.MODEL_FALLBACK) {
           fullText = '';
           usage = { inputTokens: 0, outputTokens: 0, cacheHitTokens: 0 };
+          jsonResult = undefined;
           resultModel = event.info.toModel;
           continue;
         }

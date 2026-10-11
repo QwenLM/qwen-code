@@ -378,6 +378,69 @@ describe('runForkedAgent (cache path)', () => {
     expect(result.model).toBe('fallback-model');
   });
 
+  describe('structured result across discarded attempts', () => {
+    const schema = {
+      type: 'object',
+      properties: { suggestion: { type: 'string' } },
+    };
+    const schemaChunk = (suggestion: string) => ({
+      type: StreamEventType.CHUNK,
+      value: modelChunk([fnCall('respond_in_schema', { suggestion })]),
+    });
+
+    const runWithEvents = (events: unknown[]) => {
+      vi.mocked(LlmChat).mockImplementation(
+        () =>
+          ({
+            sendMessageStream: vi.fn(async () => streamOf(...events)),
+          }) as unknown as LlmChat,
+      );
+      return runFork({ userMessage: 'suggest', jsonSchema: schema });
+    };
+
+    beforeEach(() => {
+      saveCacheSafeParams({}, [], 'primary-model');
+    });
+
+    it('drops the discarded attempt payload on a fresh retry', async () => {
+      const result = await runWithEvents([
+        schemaChunk('discarded'),
+        { type: StreamEventType.RETRY },
+        schemaChunk('kept'),
+      ]);
+
+      expect(result.jsonResult).toEqual({ suggestion: 'kept' });
+    });
+
+    it('drops the discarded attempt payload on model fallback', async () => {
+      const result = await runWithEvents([
+        schemaChunk('stale'),
+        {
+          type: StreamEventType.MODEL_FALLBACK,
+          info: {
+            fromModel: 'primary-model',
+            toModel: 'fallback-model',
+            fallbackIndex: 1,
+          },
+        },
+        schemaChunk('replacement'),
+      ]);
+
+      expect(result.jsonResult).toEqual({ suggestion: 'replacement' });
+      expect(result.model).toBe('fallback-model');
+    });
+
+    it('keeps the first payload across a continuation retry', async () => {
+      const result = await runWithEvents([
+        schemaChunk('first'),
+        { type: StreamEventType.RETRY, isContinuation: true },
+        schemaChunk('second'),
+      ]);
+
+      expect(result.jsonResult).toEqual({ suggestion: 'first' });
+    });
+  });
+
   it.each(['https://second.example/v1', ''])(
     'resolves an endpoint-qualified selector without passing its suffix as the model ID: %s',
     async (endpoint) => {
