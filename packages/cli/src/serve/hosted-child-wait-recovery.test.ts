@@ -960,7 +960,7 @@ describe('hosted child wait recovery (#13708)', () => {
         );
         if (line)
           expect(callTwo).toContain(
-            "[child workspace] the child's changes did not land, unless the child had finished its work before this end",
+            "[child workspace] the child's changes did not land, unless the child had finished its work before this end and its merge landed them here. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.",
           );
         else expect(callTwo).not.toContain('[child workspace]');
       } finally {

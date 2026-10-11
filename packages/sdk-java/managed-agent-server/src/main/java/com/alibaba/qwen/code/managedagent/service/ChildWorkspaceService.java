@@ -22,6 +22,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import jakarta.annotation.PreDestroy;
@@ -211,10 +212,17 @@ public class ChildWorkspaceService {
         return switch (row.state()) {
             case PREPARING, MERGING, APPLYING, APPLIED, DISCARDING -> true;
             case READY -> row.finishRequest() != null;
-            case CONFLICTED, BLOCKED, FAILED -> DISCARD.equals(row.finishRequest())
-                    || DISCARD_PINNED.equals(row.finishRequest());
+            case CONFLICTED, BLOCKED, FAILED -> isDiscard(row.finishRequest());
             default -> false;
         };
+    }
+
+    /** Whether a recorded finish is a discard — asked plainly, or recorded as
+     * the pin-keeping form of a discard that replaced an unstarted merge. The
+     * predicate only classifies: a compare-and-set matches the request's own
+     * text, so the value is never rewritten. */
+    private static boolean isDiscard(String finish) {
+        return DISCARD.equals(finish) || DISCARD_PINNED.equals(finish);
     }
 
     Row drive(Row row) {
@@ -261,7 +269,7 @@ public class ChildWorkspaceService {
     private void step(ChildWorkspaceProvider provider, Row claimed) {
         switch (claimed.state()) {
             case PREPARING -> {
-                if (DISCARD.equals(claimed.finishRequest())) {
+                if (isDiscard(claimed.finishRequest())) {
                     advance(claimed, DISCARDING, columns());
                 } else {
                     prepareStep(provider, claimed);
@@ -351,8 +359,7 @@ public class ChildWorkspaceService {
             ChildWorktreeGit.Repository repository = git.open(root, claimed.repositoryRelative());
             String result = claimed.resultCommit();
             if (result == null) {
-                result = git.result(root, repository, id, claimed.baseCommit());
-                git.pin(root, repository, id, "result", result);
+                result = pinResult(git, root, repository, claimed);
                 advance(claimed, MERGING, columns("result_commit", result));
             }
             ChildWorktreeGit.Merge merge = git.merge(root, repository, claimed.baseCommit(), result);
@@ -413,10 +420,25 @@ public class ChildWorkspaceService {
         advance(applied, MERGED, columns("outcome_code", "merged"));
     }
 
+    /**
+     * The child's result, taken and pinned under `result` — the layout the
+     * receipt's `resultRef` and the operator's
+     * refs/qwen/child-workspaces/&lt;id&gt;/result both name. The caller
+     * keeps the repository it opened: a merge goes on to use it.
+     */
+    private static String pinResult(ChildWorktreeGit git, Path root,
+            ChildWorktreeGit.Repository repository, Row claimed) {
+        String result = git.result(root, repository, claimed.childWorkspaceId(),
+                claimed.baseCommit());
+        git.pin(root, repository, claimed.childWorkspaceId(), "result", result);
+        return result;
+    }
+
     private void discardStep(ChildWorkspaceProvider provider, Row claimed) {
         // A merge that landed and then ended blocked keeps no result pin:
         // its work is in the parent's tree.
         boolean merged = "merged".equals(claimed.outcomeCode());
+        AtomicReference<String> pinFailure = new AtomicReference<>();
         held(provider, claimed, root -> {
             ChildWorktreeGit git = provider.git();
             String result = claimed.resultCommit();
@@ -430,14 +452,16 @@ public class ChildWorkspaceService {
                 // discard, which is what the discard was before the pin.
                 try {
                     ChildWorktreeGit.Repository repository = git.open(root, claimed.repositoryRelative());
-                    result = git.result(root, repository, claimed.childWorkspaceId(), claimed.baseCommit());
-                    git.pin(root, repository, claimed.childWorkspaceId(), "result", result);
+                    result = pinResult(git, root, repository, claimed);
                 } catch (ChildWorkspaceException error) {
                     if (error.retryable() && claimed.attempts() + 1 < MAX_ATTEMPTS) {
                         throw error;
                     }
-                    LOG.warn("child workspace discard goes on without the result pin run={} code={}",
-                            claimed.childRunId(), error.code());
+                    LOG.warn("child workspace discard goes on without the result pin"
+                                    + " tenant={} parent={} run={} code={} failure={}",
+                            claimed.tenantId(), claimed.parentSessionId(),
+                            claimed.childRunId(), error.code(), error.getMessage(), error);
+                    pinFailure.set(error.getMessage());
                     result = null;
                 }
                 if (result != null) {
@@ -448,8 +472,14 @@ public class ChildWorkspaceService {
                     result != null && !merged);
             return null;
         });
-        advance(claimed, DISCARDED, columns("outcome_code",
-                claimed.outcomeCode() == null ? "discarded" : claimed.outcomeCode()));
+        java.util.Map<String, Object> discarded = columns("outcome_code",
+                claimed.outcomeCode() == null ? "discarded" : claimed.outcomeCode());
+        if (pinFailure.get() != null) {
+            // The row itself records that a pin was owed and could not be
+            // written: on a non-retryable failure nothing else names the loss.
+            discarded.put("last_error", truncate(pinFailure.get()));
+        }
+        advance(claimed, DISCARDED, discarded);
     }
 
     private Row find(Row row) {

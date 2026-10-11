@@ -33,8 +33,8 @@ import {
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
 import {
+  childRunEndedText,
   childWorkspaceAnswerSuffix,
-  childWorkspaceEndedSuffix,
   type HostedChildAgentSession,
 } from './hosted-child-agent-session.js';
 import type { HostedSessionMessageSession } from './hosted-session-message-session.js';
@@ -857,8 +857,7 @@ export async function fillParkedRoundAgentGaps(input: {
                 name,
                 callId,
                 [],
-                `Child agent run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).` +
-                  childWorkspaceEndedSuffix(record),
+                childRunEndedText(record),
               ),
             );
             filled += 1;

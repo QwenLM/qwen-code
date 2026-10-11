@@ -38,7 +38,7 @@ I1 交付了能力，但没有调用方。本变更把唯一的生产方——ho
 
    恢复的等待与恢复 gap fill 以同一行结束其回答：折叠会在结果之后完整保留这一行。
 
-   已启动、之后失败或被取消的 `worktree` run 没有回执（记录只在有结果时才设置 `terminalReceiptRef`），所以它的回答无法写出合并结果，而是以 `[child workspace] the child's changes did not land, unless the child had finished its work before this end: then its merge ran first. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.` 结尾。决策 5 保证了这句话成立：relay 请求过的合并在失败提交之前就已有结果。从未启动的 run 与 `shared` run 不增加任何内容。
+   已启动、之后失败或被取消的 `worktree` run 没有回执（记录只在有结果时才设置 `terminalReceiptRef`），所以它的回答无法写出合并结果，而是以 `[child workspace] the child's changes did not land, unless the child had finished its work before this end and its merge landed them here. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.` 结尾。这句话陈述的是顺序，而不是落地：决策 5 把 run 的收尾扣住，直到 relay 请求过的合并有了结果，所以读到这句回答时，已落地的工作已经在本 Workspace 里；而没有落地的结果——冲突、被阻塞的合并、先 pin 住的丢弃——已把工作保留在结果 ref 上。从未启动的 run 与 `shared` run 不增加任何内容。
 
    冲突路径是 child 选定的名字：每个先以 JSON 加引号（换行保持为转义，不会自成一行），再剥离显示控制字符，JSON 不转义的行分隔符与段分隔符也被转义，列表在 4 KiB 处截止并以 `and N more` 结尾（计入回执省略的路径）。后台通知在 `<status>` 旁的 `<workspace>` 元素中携带同一句话。两者都读取 acceptance 所指的回执；`shared` run 不增加任何内容。
 

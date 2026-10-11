@@ -488,21 +488,24 @@ async function foregroundFailure(
   return JSON.stringify(responses);
 }
 
-// The relay tells a failure only after a merge it asked for has landed, so
-// a started worktree child's failure points the parent at its Workspace.
+// The relay tells a failure only after a merge it asked for has its
+// outcome, so a started worktree child's failure points the parent at its
+// Workspace. The line covers a merge that conflicted or was pinned away
+// too: it must never say the work landed.
 it('ends a started worktree child failure with the workspace line', async () => {
   const answer = await foregroundFailure(true, true);
   expect(answer).toContain('Child agent run failed (child_failed).');
   expect(answer).toContain(
-    "[child workspace] the child's changes did not land, unless the child had finished its work before this end: then its merge ran first. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.",
+    "[child workspace] the child's changes did not land, unless the child had finished its work before this end and its merge landed them here. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.",
   );
+  expect(answer).not.toContain('then its merge ran first');
 });
 
 it('ends a started worktree child cancellation with the workspace line', async () => {
   const answer = await foregroundFailure(true, true, true);
   expect(answer).toContain('Child agent run cancelled (stop_requested).');
   expect(answer).toContain(
-    "[child workspace] the child's changes did not land, unless the child had finished its work before this end",
+    "[child workspace] the child's changes did not land, unless the child had finished its work before this end and its merge landed them here. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.",
   );
 });
 

@@ -294,6 +294,15 @@ class ChildWorkspaceServiceTest {
         assertThat(store.find(parent.tenantId(), parent.sessionId(), "run-1")).isNull();
     }
 
+    // The predicate the relay's merge wait reads: it must agree with
+    // scan()'s own on which hosts run the steps.
+    @Test
+    void capableAnswersWhetherThisHostRunsSteps() {
+        assertThat(service.capable()).isTrue();
+        warmer.provider = null;
+        assertThat(service.capable()).isFalse();
+    }
+
     @Test
     void finishRequestsFollowDecisionEight() throws Exception {
         var parent = createSession("project");
@@ -416,6 +425,28 @@ class ChildWorkspaceServiceTest {
         assertThat(project.resolve("new.txt")).doesNotExist();
     }
 
+    // owes() reads the pinning discard as a discard; the step that meets one
+    // on a preparing row must read it the same way, or the row is prepared
+    // first — re-creating the worktree from its base and losing the child's
+    // work before the pin can keep it. (No API records a finish on a
+    // preparing row: a merge is admitted only from ready, and only a merge
+    // becomes discard_pinned. The state is injected to pin the two spellings
+    // of "a discard" to one reading.)
+    @Test
+    void aPreparingRowAskedToDiscardPinnedIsNotPreparedFirst() throws Exception {
+        var parent = createSession("project");
+        Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
+        Files.writeString(root.resolve(ready.childCwdRelative()).resolve("new.txt"), "child\n");
+        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'preparing',"
+                + " finish_request = 'discard_pinned' WHERE child_workspace_id = ?",
+                ready.childWorkspaceId());
+        service.scan();
+        Row discarded = service.find(parent.tenantId(), parent.sessionId(), "run-1");
+        assertThat(discarded.state()).isEqualTo(ChildWorkspaceStore.DISCARDED);
+        String pin = ChildWorktreeGit.PIN_PREFIX + ready.childWorkspaceId() + "/result";
+        assertThat(plain(project, "show", pin + ":new.txt")).isEqualTo("child");
+    }
+
     // A worktree that is gone or broken, or a repository that is gone,
     // holds no result to keep: the discard goes on as an ordinary one.
     @org.junit.jupiter.params.ParameterizedTest
@@ -441,6 +472,8 @@ class ChildWorkspaceServiceTest {
         assertThat(discarded.state()).as(removed).isEqualTo(ChildWorkspaceStore.DISCARDED);
         assertThat(discarded.outcomeCode()).as(removed).isEqualTo("discarded");
         assertThat(discarded.resultCommit()).as(removed).isNull();
+        // The row names the pin failure: on this path nothing else records it.
+        assertThat(discarded.lastError()).as(removed).isNotNull();
         assertThat(worktree).as(removed).doesNotExist();
     }
 
