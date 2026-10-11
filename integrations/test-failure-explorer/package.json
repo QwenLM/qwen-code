@@ -15,7 +15,7 @@
   "scripts": {
     "build": "npm run clean && node scripts/build.mjs",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "lint": "eslint src",
+    "lint": "eslint src scripts",
     "test": "npm run build && vitest run --config vitest.config.ts",
     "test:ci": "npm run build && vitest run --config vitest.config.ts",
     "typecheck": "tsc --noEmit"

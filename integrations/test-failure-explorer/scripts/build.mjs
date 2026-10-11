@@ -3,6 +3,7 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+import { Buffer } from 'node:buffer';
 import { readFile, writeFile } from 'node:fs/promises';
 import { build } from 'esbuild';
 
