@@ -128,10 +128,12 @@ The facts below are from `main` at `66ddb151cb`, which includes #13846 (merged a
    - **Legacy's `summary`** is refused as an unsupported argument. An argument that would mean nothing is the dead switch H4b decision 11 refused.
 
 4. **`to: "*"` reaches every member.** A broadcast sends to every member of the open team, in roster order. Each member is routed as in decision 3 and committed on its own.
-   - **Ids.** Each recipient's ids take the place of the call id with a digest of the call id and the member's 1-based roster position: `bcast-` plus the first 24 hex characters of `sha256(callId \0 position)`.
-     - The message id and the continuation's run id are then minted from that digest as a single send's are from its call id.
-     - The digest cannot equal another call's id short of a hash collision, so a broadcast never takes the ids of another call in the same turn.
-     - The digest has a fixed length of 30 characters, so a recipient's ids do not grow with the call id.
+   - **Ids.** A recipient's ids live in a namespace no single send or launch can reach, whatever call ids the provider hands out. A digest of the call id alone would not do: a plain call whose provider id equals the digest would mint the same ids.
+     - **The run id** of a recipient's continuation is `bcast_` plus the first 32 hex characters of `sha256(promptKey \0 callId \0 position)`, where `position` is the member's 1-based roster position. Every single-send or launch run id is `${promptKey}:${callId}` and so contains a colon. A broadcast run id contains none, so the two sets never meet.
+     - **The message id** is `msgb_` plus the first 32 hex characters of `sha256(senderSessionId \0 turnId \0 callId \0 position)`. Every single-send message id starts with `msg_`, so the two sets never meet. Within broadcasts, the digest separates calls and positions.
+     - Both have a fixed length of at most 38 characters, so a recipient's ids do not grow with the call id and stay within the 128-character `parentChildRunId` bound.
+     - Positions never change on an append-only roster.
+     - A recipient's continuation or message names the broadcast call's key, `${promptKey}:${callId}`, as its `executionCallId`, as a single send's does, so the owner rule of decision 7 counts it as work given in this Turn.
    - **Batch rule.** A batch that broadcasts must not also launch a member, create the team or delete it. The roster a broadcast reads is then the one its batch leaves, so a re-driven batch reaches the same members.
    - **Partial outcomes.** A refused recipient does not stop the others. A recipient is refused when its head ended or is stopping, when a message bound refuses it (`count_limit` or `budget_exhausted`), or when its continuation's launch admission refuses it (decision 3).
    - **Answers.** As in Legacy:
@@ -186,19 +188,24 @@ The facts below are from `main` at `66ddb151cb`, which includes #13846 (merged a
    - **The member is running.** A running member usually runs on the very task the lead is recording, which its launch prompt carried, so a delivered assignment would repeat that work. When the task is new work, its turn becomes the member's newest and its result (decision 5), so the report of the work the member was doing would be lost.
    - **On replay.** A replayed `task_update` cannot tell whether the call owed a delivery. Its first revision has overwritten the owner and status the conditions compare.
 
-   So a finished member takes new work in two steps, in one batch:
+   So a finished member takes new work in two steps, in one Turn and best in one batch:
    1. `send_message` to its name continues it, and its head runs.
-   2. `task_update` then makes it the owner of the open task, because the owner rule reads the running head (decision 2).
+   2. `task_update` then makes it the owner of the open task, because the member was given work in this Turn (below).
 
-   One batch runs its calls in order on the same authority, so the second call sees the continuation the first committed. Split across two model rounds, the continuation may already have settled when `task_update` lands, which is the race #13846's pass met.
+   One batch runs its calls in order, so the send is committed before `task_update` runs, but nothing keeps the member running until then. The relay commits and settles a child's result while the lead's Turn runs, and the two funnels share no lock across a batch. A member that the send continued, or that was running and read the message, can therefore complete between the two calls. The owner rule covers that with one notion, work given in this Turn:
+   - **A Turn** is one prompt id. It spans all of its model rounds, and a Turn resumed after an interruption is the same Turn.
+   - **Work given in this Turn.** A member was given work in this Turn when an earlier call of the same Turn committed, for its chain, either a continuation that has not been proven never to have started, or an outbound message to the chain head that was not cancelled or rejected. Both name the sending call's key as their `executionCallId`, which is one of this Turn's call keys, so the lead's records decide it.
+   - **Accepted.** Such a member may be set as the owner of an open task whether its head still runs or has completed since. The send gave the work, so the board records who has it, and the lead sets the status `completed` when the report arrives.
+   - **Still refused.** A member whose head failed, was cancelled after it started, is stopping, or completed after a stop request is refused, as decision 2 counts it ended.
 
-   The texts lead the model there:
-   - For a member owner, `task_update`'s answer says that it notified nobody, and that if the member does not already have this work, `send_message` to its name gives it. The answer does not tell the model to send. A send earlier in the same batch, or the launch prompt, may already have given the work, and a second send would repeat it.
-   - The owner rule's refusal of a completed, continuable member on open work names the two steps. It keeps #13846's other way out: if the member did this task's work, set the status `completed` with this owner.
-   - The refusal of a member that cannot be continued, because it failed, was cancelled, is stopping or completed after a stop request, says it has ended. It points to launching a new member, or, for one that completed, to completing the task with it as owner.
-   - The `task_update`, `task_create` and `task_list` descriptions, and the team form's `send_message` description, say the same, and `task_list` no longer calls the task id the way to reach a member.
+   The texts lead the model there. None of them claims which task a past send carried, because no record ties a send to a task, and none offers to skip a send for work that never arrived:
+   - **The `task_update` answer.** For a member owner, it says that it notified nobody, and that if the member does not already have this work, `send_message` to its name gives it. It does not tell the model to send: a send earlier in the Turn, or the launch prompt, may already have given the work, and a second send would repeat it.
+   - **A completed, continuable member not given work in this Turn.** It is refused on open work with one conditional text. If it already did this task's work, from its launch prompt or a message the lead sent it, set the status `completed` with this owner once its report is in. Otherwise give it the work with `send_message` to its name first, which continues it, and then assign it. The first branch is #13846's way out, kept.
+   - **A head whose newest continuation never started.** The refusal says that this continuation never started and why, and that the work it carried did not arrive. It points to sending that work again by name and then assigning the task, with no branch that skips the send.
+   - **A member that cannot be continued.** One that failed, was cancelled, is stopping or completed after a stop request is refused as ended. The refusal points to launching a new member, or, for one that completed, to completing the task with it as owner if it did the work.
+   - **The descriptions.** The `task_update`, `task_create` and `task_list` descriptions, and the team form's `send_message` description, say the same. `task_list` no longer calls the task id the way to reach a member.
 
-   If the continuation never starts, the board keeps the owner on the open task. `task_list` shows the continuation that never started (decision 2), and the kept-owner check refuses to keep that member when the task next moves to another open status.
+   If the continuation never starts after `task_update` accepted the owner, the board keeps the owner on the open task. `task_list` shows the continuation that never started (decision 2), and the kept-owner check refuses to keep that member when the task next moves to another open status.
 
    `task_assignment` stays unproduced, and Legacy's assignment prompt has no counterpart. The lead's own message is the assignment.
 
@@ -294,7 +301,7 @@ To a running member, step 1 is an outbound `session_message` to the head, and H4
   - chain-following membership and member state, including stopping heads;
   - the roster view over chain heads, with a continuation that never started;
   - `team_delete` over chain heads;
-  - the owner rule reading the head, and its refusal text;
+  - the owner rule reading the head, accepting a member given work in this Turn, and its refusal texts;
   - the recipients of a name or a broadcast;
   - the `task_update`, `task_create` and `task_list` texts that point to `send_message` by name.
 - `packages/cli/src/serve/hosted-session-message-session.ts`: the `<teammate>` element on a member's message to the lead.
@@ -327,7 +334,7 @@ To a running member, step 1 is an outbound `session_message` to the head, and H4
   - A send by name to a member that is running, completed, failed, stopping, or completed after a stop request.
   - A send by name after a continuation that never started, whose answer names it.
   - A broadcast with mixed outcomes, including the active cap, and its replay.
-  - A broadcast whose call id is a prefix of another call's id in the same turn, whose ids still differ.
+  - A broadcast and, in the same turn, a plain call whose provider id equals the broadcast's derived `bcast_…` run id or `msgb_…` message id, or is a prefix of the broadcast's call id: every message and run id still differs, and recovery tells the two calls apart.
   - One approval covering a broadcast.
   - A replay by name after `team_delete`, which answers the committed send.
   - A named launch whose prompt fits alone but not with the preamble, refused as `byte_limit`.
@@ -341,10 +348,13 @@ To a running member, step 1 is an outbound `session_message` to the head, and H4
   - `team_delete` refused while a continued member runs.
   - `task_list` showing heads, stop requests and continuations that never started.
   - The owner rule reading the head:
-    - a finished member refused on open work, with the two-step refusal text;
-    - the same member accepted after a send by name in the same batch;
-    - the same member refused on open work again after that continuation never started;
-    - a stopping member refused.
+    - a finished member not given work in this Turn, refused on open work with the conditional text;
+    - the same member accepted after a send by name earlier in the Turn, while the continuation runs and after it has already completed;
+    - a running member that was sent a message earlier in the Turn and has completed since, accepted;
+    - a `task_update` in a later model round, or in the resumed Turn, of the Turn that sent, accepted as the same Turn;
+    - a `task_update` in a later Turn, refused with the conditional text;
+    - a member whose continuation from this Turn never started, refused with the never-started text, which has no branch that skips the send;
+    - a member whose continuation from this Turn completed after a stop request, and a stopping member, refused as ended.
   - The `task_update` answer for a member owner, in a batch that sent the member the work first, which does not ask for another send.
   - The refusal texts for a continuable member and for one that cannot be continued.
 - **Child funnel.**
@@ -375,6 +385,7 @@ To a running member, step 1 is an outbound `session_message` to the head, and H4
   - A lead reaches a member by name, and every member at once with `*`.
   - A running member receives the message as its next input.
   - A finished member is continued and stays a member: it is labeled, may own open work, and is counted by `team_delete`.
+  - A `task_update` in the Turn of the send that gave the work records the owner even when the member has already completed, and no answer or refusal claims which task a past send carried or offers to skip a send for work that never arrived.
   - A member whose head failed or was cancelled after it started, or was stopped on request, is refused by name.
   - A continuation that never started is shown on the roster and in the next answer by name, and leaves its member continuable.
 - **Member-to-lead delivery.** A member's message reaches the lead labeled with its name, with a hint to answer by its task id.
