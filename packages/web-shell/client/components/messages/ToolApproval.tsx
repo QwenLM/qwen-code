@@ -684,7 +684,11 @@ export function ToolApproval({
         <div className={styles.content} data-plan-interactive>
           {diffs.map((block, index) => (
             <div key={index}>
-              <div>{block.path}</div>
+              {/* The path is model-supplied (`block.path`) and sits one line
+                  above the diff body, so it is the same unsanitized class as
+                  `GitDiffDialog`'s file paths: escape it here rather than
+                  leaving the gap half-closed. */}
+              <div>{block.path ? sanitizeControlChars(block.path) : null}</div>
               <DiffView diff={block.diff} />
             </div>
           ))}

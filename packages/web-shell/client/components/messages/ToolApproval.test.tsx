@@ -731,6 +731,100 @@ describe('ToolApproval accessibility', () => {
     expect(commandPre).toBeTruthy();
   });
 
+  it('neutralises bidi controls in the rendered diff body and its path', () => {
+    // Built as a literal request on purpose. `extractPendingPermission` runs
+    // `escapePreviewText` over diff blocks on the way in, so a request built
+    // through the adapter would arrive pre-escaped and make this case vacuous;
+    // the sink has to hold for every caller, including the ones that do not go
+    // through that adapter.
+    const craftedPath = '/outside/\u202elooking.ts';
+    const craftedRequest: PermissionRequest = {
+      ...request,
+      toolName: 'edit',
+      title: 'Edit',
+      content: [
+        {
+          type: 'diff',
+          path: craftedPath,
+          oldText: 'safe looking\n',
+          newText: 'safe\u202elooking\n',
+        },
+      ],
+    };
+    render();
+    act(() =>
+      root!.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsEditDiffPreview: false }}
+        >
+          <I18nProvider language="en">
+            <ToolApproval request={craftedRequest} onConfirm={onConfirm} />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      ),
+    );
+    const rendered = container!.querySelector(
+      '[role="alertdialog"]',
+    )!.textContent!;
+    // The invisible override must not survive into the DOM, while the payload
+    // stays readable as its escaped form (mirroring the command/description
+    // cases above).
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).toContain('safe\\u202elooking');
+    expect(rendered).toContain('/outside/\\u202elooking.ts');
+  });
+
+  it('localizes the omitted-diff notice instead of hardcoding English', () => {
+    // `buildContextBoundedDiff` lives in an import-free module, so it cannot
+    // reach the `t()` catalog: it used to emit an English sentence that then
+    // rendered verbatim inside an otherwise fully translated panel. The
+    // builder now emits a marker and the render boundary resolves it.
+    const longOld = Array.from(
+      { length: 400 },
+      (_, i) => `old-${i}-${'x'.repeat(140)}`,
+    ).join('\n');
+    const longNew = Array.from(
+      { length: 400 },
+      (_, i) => `new-${i}-${'y'.repeat(140)}`,
+    ).join('\n');
+    expect(longOld.length + longNew.length).toBeGreaterThan(100_000);
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-zh',
+        kind: 'permission',
+        requestId: 'request-edit-zh',
+        sessionId: 'session-edit-zh',
+        title: 'Edit: /outside/zh.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            {
+              type: 'diff',
+              path: '/outside/zh.txt',
+              oldText: longOld,
+              newText: longNew,
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render(
+      undefined,
+      { ...adapted, options: request.options },
+      undefined,
+      'zh-CN',
+    );
+    expect(container!.textContent).toContain(
+      '差异过大，为保证安全已省略显示。',
+    );
+    expect(container!.textContent).not.toContain('Diff omitted');
+  });
+
   it('renders exec warnings alongside the command block', () => {
     const adapted = extractPendingPermission([
       {

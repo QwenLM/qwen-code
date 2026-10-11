@@ -2,8 +2,16 @@ import { describe, expect, it } from 'vitest';
 import {
   buildContextBoundedDiff,
   buildUnifiedDiff,
+  DIFF_OMITTED_MARKER,
+  localizeDiffNotice,
   parseUnifiedDiff,
 } from './unifiedDiff';
+
+// The builder must emit an ASCII-safe marker, not a user-facing sentence: this
+// module is import-free, so the `t()` catalog can only reach the notice at the
+// render boundary. Asserting through a stub translator means re-hardcoding an
+// English literal into the builder turns these cases red.
+const stubT = (key: string) => `[${key}]`;
 
 describe('buildContextBoundedDiff', () => {
   it('reports distant edits that exceed the trimmed LCS budget without a coarse hunk', () => {
@@ -15,7 +23,8 @@ describe('buildContextBoundedDiff', () => {
       oldLines.join('\n'),
       newLines.join('\n'),
     );
-    expect(diff).toContain('Diff omitted because it is too large');
+    expect(diff).toBe(DIFF_OMITTED_MARKER);
+    expect(localizeDiffNotice(diff, stubT)).toBe('[approval.diffOmitted]');
     expect(diff).not.toContain('@@');
     expect(parseUnifiedDiff(diff)).toMatchObject({
       additions: 0,
@@ -26,7 +35,7 @@ describe('buildContextBoundedDiff', () => {
 
   it('limits rendered rows for a large insertion with no LCS product', () => {
     const diff = buildContextBoundedDiff('', 'line\n'.repeat(2_000));
-    expect(diff).toContain('Diff omitted because it is too large');
+    expect(localizeDiffNotice(diff, stubT)).toBe('[approval.diffOmitted]');
     expect(diff).not.toContain('@@');
     expect(parseUnifiedDiff(diff).lines).toMatchObject([{ type: 'header' }]);
   });
@@ -43,9 +52,7 @@ describe('buildContextBoundedDiff', () => {
     expect(oldText.length + newText.length).toBeGreaterThan(100_000);
 
     const diff = buildContextBoundedDiff(oldText, newText);
-    expect(diff).toContain(
-      'Diff omitted because it is too large to display safely.',
-    );
+    expect(localizeDiffNotice(diff, stubT)).toBe('[approval.diffOmitted]');
     expect(parseUnifiedDiff(diff).lines).toMatchObject([{ type: 'header' }]);
   });
 
@@ -55,18 +62,16 @@ describe('buildContextBoundedDiff', () => {
     expect(oldText.length + newText.length).toBeLessThanOrEqual(100_000);
 
     const diff = buildContextBoundedDiff(oldText, newText);
-    expect(diff).toContain(
-      'Diff omitted because it is too large to display safely.',
-    );
+    expect(localizeDiffNotice(diff, stubT)).toBe('[approval.diffOmitted]');
     expect(parseUnifiedDiff(diff).lines).toMatchObject([{ type: 'header' }]);
   });
 
   it.each([
-    ['#!/bin/sh\nexit 0\n', '#!/bin/sh\nexit 0', 'removed'],
-    ['#!/bin/sh\nexit 0', '#!/bin/sh\nexit 0\n', 'added'],
-  ])('shows a trailing-newline-only change', (oldText, newText, action) => {
+    ['#!/bin/sh\nexit 0\n', '#!/bin/sh\nexit 0', 'trailingNewlineRemoved'],
+    ['#!/bin/sh\nexit 0', '#!/bin/sh\nexit 0\n', 'trailingNewlineAdded'],
+  ])('shows a trailing-newline-only change', (oldText, newText, key) => {
     const diff = buildContextBoundedDiff(oldText, newText);
-    expect(diff).toContain(`Trailing newline ${action}`);
+    expect(localizeDiffNotice(diff, stubT)).toBe(`[approval.${key}]`);
     expect(parseUnifiedDiff(diff)).toMatchObject({
       additions: 0,
       deletions: 0,
@@ -277,5 +282,22 @@ describe('parseUnifiedDiff', () => {
         { type: 'context', content: 'same', oldLine: 1, newLine: 1 },
       ],
     });
+  });
+});
+
+describe('localizeDiffNotice', () => {
+  it('passes real diff content and git notices through untouched', () => {
+    // Only the markers `buildContextBoundedDiff` owns are translated; git's own
+    // backslash notice, hunk headers and ordinary rows must survive verbatim or
+    // the diff would be rewritten on the way to the screen.
+    for (const line of [
+      '@@ -1,1 +1,1 @@',
+      '\\ No newline at end of file',
+      '\\diff-something-else',
+      'const answer = 42;',
+      '',
+    ]) {
+      expect(localizeDiffNotice(line, stubT)).toBe(line);
+    }
   });
 });

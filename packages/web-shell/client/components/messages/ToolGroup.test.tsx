@@ -24,7 +24,7 @@ import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../../workflowDetailsContext';
 import { McpAppHostContext } from '../../mcpAppHostContext';
-import { buildUnifiedDiff } from '../../utils/unifiedDiff';
+import { buildUnifiedDiff, DIFF_OMITTED_MARKER } from '../../utils/unifiedDiff';
 import {
   result as managedResult,
   notStartedResult,
@@ -2883,7 +2883,7 @@ describe('tool output logic', () => {
           args: { oldText: oldLines.join('\n'), newText: newLines.join('\n') },
         }),
       );
-      expect(diff).toContain('Diff omitted because it is too large');
+      expect(diff).toBe(DIFF_OMITTED_MARKER);
       expect(diff).not.toContain('@@');
     }
   });

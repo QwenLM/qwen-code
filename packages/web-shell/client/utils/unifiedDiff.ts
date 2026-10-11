@@ -5,6 +5,48 @@
 // the LCS itself from allocating unbounded memory.
 const MAX_DIFF_PRODUCT = 250_000;
 
+/**
+ * Non-diff outcomes are signalled with ASCII-safe, non-prose markers rather
+ * than user-facing sentences. This module is deliberately import-free, so the
+ * Web Shell `t()` catalog can never reach it — `formatRelativeTime.ts` threads
+ * a translator in, but a translator returns prose whose first character the
+ * diff grammar would then have to accept. A backslash-prefixed marker stays
+ * under our control here and is still classified as a `header` by
+ * {@link parseUnifiedDiff} (the same branch that handles git's
+ * `\ No newline at end of file`), so neither marker is counted as a
+ * context/add/del row and the `+N/-M` badge stays correct. The render boundary
+ * ({@link localizeDiffNotice} in `DiffView`) swaps them for localized copy.
+ */
+export const DIFF_OMITTED_MARKER = '\\diff-omitted';
+export const DIFF_TRAILING_NEWLINE_ADDED_MARKER =
+  '\\diff-trailing-newline-added';
+export const DIFF_TRAILING_NEWLINE_REMOVED_MARKER =
+  '\\diff-trailing-newline-removed';
+
+type Translate = (
+  key: string,
+  vars?: Record<string, string | number>,
+) => string;
+
+/**
+ * Maps the marker lines {@link buildContextBoundedDiff} emits onto their
+ * localized copy. Every other line — real diff content, hunk headers, and
+ * git's own `\ No newline at end of file` notice — is returned unchanged, so
+ * this is safe to run over any parsed line.
+ */
+export function localizeDiffNotice(content: string, t: Translate): string {
+  switch (content) {
+    case DIFF_OMITTED_MARKER:
+      return t('approval.diffOmitted');
+    case DIFF_TRAILING_NEWLINE_ADDED_MARKER:
+      return t('approval.trailingNewlineAdded');
+    case DIFF_TRAILING_NEWLINE_REMOVED_MARKER:
+      return t('approval.trailingNewlineRemoved');
+    default:
+      return content;
+  }
+}
+
 function splitLines(text: string): string[] {
   if (!text) return [];
   const lines = text.split('\n');
@@ -66,7 +108,7 @@ export function buildContextBoundedDiff(
   oldText: string,
   newText: string,
 ): string {
-  const omitted = '\\ Diff omitted because it is too large to display safely.';
+  const omitted = DIFF_OMITTED_MARKER;
   if (oldText.length + newText.length > 100_000) return omitted;
   const oldLines = splitLines(oldText);
   const newLines = splitLines(newText);
@@ -82,7 +124,9 @@ export function buildContextBoundedDiff(
   if (prefix === oldLines.length && prefix === newLines.length) {
     return oldText === newText
       ? ''
-      : `\\ Trailing newline ${newText.endsWith('\n') ? 'added' : 'removed'} at end of file.`;
+      : newText.endsWith('\n')
+        ? DIFF_TRAILING_NEWLINE_ADDED_MARKER
+        : DIFF_TRAILING_NEWLINE_REMOVED_MARKER;
   }
   let suffix = 0;
   while (
