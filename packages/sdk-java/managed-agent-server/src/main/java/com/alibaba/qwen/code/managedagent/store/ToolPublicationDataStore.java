@@ -483,14 +483,14 @@ public final class ToolPublicationDataStore {
                 if (bytes == null || bytes.length != stored.length()
                         || !ToolPublicationContract.sha256(bytes).equals(stored.digest())) {
                     quarantineCandidate(task.scope(), task.publicationId(), slot, task.operationId());
-                    throw new IllegalArgumentException("Terminal digest changed");
+                    throw new CorruptObjectException("Terminal digest changed");
                 }
                 finish(task.key(), task.publicationId(), null, task.operationId(), bytes);
             } else {
                 if (stored.objectKey() != null) {
                     try {
                         verify(task.scope(), task.publicationId(), stored.objectKey(), stored.length(), stored.digest());
-                    } catch (IllegalArgumentException error) {
+                    } catch (CorruptObjectException error) {
                         quarantineCandidate(task.scope(), task.publicationId(), slot, task.operationId());
                         throw error;
                     }
@@ -498,7 +498,7 @@ public final class ToolPublicationDataStore {
                     if (inline == null || inline.length != stored.length()
                             || !ToolPublicationContract.sha256(inline).equals(stored.digest())) {
                         quarantineCandidate(task.scope(), task.publicationId(), slot, task.operationId());
-                        throw new IllegalArgumentException("Inline candidate changed");
+                        throw new CorruptObjectException("Inline candidate changed");
                     }
                 }
                 String kind = jdbc.queryForObject("SELECT resource_kind FROM qwen_tool_publication_object"
@@ -544,7 +544,8 @@ public final class ToolPublicationDataStore {
             }
             return api.getStatus().is4xxClientError() || api.getStatus() == HttpStatus.INSUFFICIENT_STORAGE ? api : null;
         }
-        if (error instanceof IllegalArgumentException) {
+        if (error instanceof CorruptObjectException
+                || error instanceof ToolPublicationContract.ContractViolationException) {
             return new ApiException(HttpStatus.BAD_REQUEST, "invalid_request", "Publication verification failed");
         }
         if (error instanceof OSSException storage && "AccessDenied".equals(storage.getErrorCode())) {
@@ -1180,7 +1181,7 @@ public final class ToolPublicationDataStore {
             retention.put(key, scope, publicationId, candidate.objectKey(), bytes, objects);
             try {
                 verify(scope, publicationId, candidate.objectKey(), bytes.length, digest);
-            } catch (IllegalArgumentException error) {
+            } catch (CorruptObjectException error) {
                 try {
                     if (candidate.verified()) {
                         quarantine(scope, publicationId, "admission");
@@ -1272,7 +1273,7 @@ public final class ToolPublicationDataStore {
                 }
                 try {
                     verify(scope, publicationId, claim.objectKey(), bytes.length, digest);
-                } catch (IllegalArgumentException error) {
+                } catch (CorruptObjectException error) {
                     quarantineCandidate(scope, publicationId, "terminal", operationId);
                     throw error;
                 }
@@ -1742,8 +1743,8 @@ public final class ToolPublicationDataStore {
         }
     }
 
-    private IllegalArgumentException corruptPublication(String scope, String publicationId, String slot, String message) {
-        var error = new IllegalArgumentException(message);
+    private CorruptObjectException corruptPublication(String scope, String publicationId, String slot, String message) {
+        var error = new CorruptObjectException(message);
         try {
             quarantine(scope, publicationId, slot);
         } catch (RuntimeException cleanup) {
@@ -1799,7 +1800,7 @@ public final class ToolPublicationDataStore {
             if (candidate.objectKey() != null) {
                 try {
                     verify(scope, publicationId, candidate.objectKey(), bytes.length, digest);
-                } catch (IllegalArgumentException error) {
+                } catch (CorruptObjectException error) {
                     try {
                         quarantine(scope, publicationId, slot);
                     } catch (RuntimeException cleanup) {
@@ -1817,7 +1818,7 @@ public final class ToolPublicationDataStore {
                 retention.put(key, scope, publicationId, candidate.objectKey(), bytes, objects);
                 try {
                     verify(scope, publicationId, candidate.objectKey(), bytes.length, digest);
-                } catch (IllegalArgumentException error) {
+                } catch (CorruptObjectException error) {
                     quarantineCandidate(scope, publicationId, slot, operationId);
                     throw error;
                 }
@@ -2092,10 +2093,13 @@ public final class ToolPublicationDataStore {
                 guard.run();
                 hash.update(buffer, 0, count);
                 read += count;
-                require(read <= length, "Publication object length changed");
+                if (read > length) {
+                    throw new CorruptObjectException("Publication object length changed");
+                }
             }
-            require(read == length && HexFormat.of().formatHex(hash.digest()).equals(digest),
-                    "Publication object digest changed");
+            if (read != length || !HexFormat.of().formatHex(hash.digest()).equals(digest)) {
+                throw new CorruptObjectException("Publication object digest changed");
+            }
         } catch (IOException | java.security.NoSuchAlgorithmException error) {
             throw new IllegalStateException("Publication object verification failed", error);
         }
@@ -2593,6 +2597,12 @@ public final class ToolPublicationDataStore {
 
     private Timestamp now() {
         return jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class);
+    }
+
+    private static final class CorruptObjectException extends IllegalArgumentException {
+        private CorruptObjectException(String message) {
+            super(message);
+        }
     }
 
     private record Submission(long epoch, String objectKey, JsonNode response) {}

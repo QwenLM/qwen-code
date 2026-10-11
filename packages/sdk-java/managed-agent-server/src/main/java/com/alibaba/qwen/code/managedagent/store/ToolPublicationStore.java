@@ -170,11 +170,16 @@ public final class ToolPublicationStore {
 
     ProducerBinding producerVerificationBindingLocked(String scope, String publicationId,
             String bindingDigest, String tokenHash) {
-        require(bindingDigest != null && tokenHash != null, "Accepted verification identity is missing");
-        // Completing an accepted claim. CLAIM still allows a settled CSI execution
-        // after retirement; PRODUCE would fail that claim permanently.
-        return producerBindingWithHashLocked(scope, publicationId, tokenHash, bindingDigest,
-                Access.CLAIM, true);
+        try {
+            require(bindingDigest != null && tokenHash != null, "Accepted verification identity is missing");
+            // Completing an accepted claim. CLAIM still allows a settled CSI execution
+            // after retirement; PRODUCE would fail that claim permanently.
+            return producerBindingWithHashLocked(scope, publicationId, tokenHash, bindingDigest,
+                    Access.CLAIM, true);
+        } catch (IllegalArgumentException error) {
+            throw new ApiException(HttpStatus.CONFLICT, "managed_tool_publication_fenced",
+                    "Original publication authority is fenced", error);
+        }
     }
 
     private ProducerBinding producerBindingWithHashLocked(String scope, String publicationId,
@@ -255,9 +260,14 @@ public final class ToolPublicationStore {
         require(row.workspace().equals(head.get("workspace_id")) && "ACTIVE".equals(head.get("state"))
                 && text(binding, "writerId").equals(head.get("writer_id"))
                 && ((Number) head.get("writer_generation")).longValue() == binding.get("writerGeneration").longValue()
-                && ((Number) head.get("writer_live")).intValue() == 1 && "READY".equals(head.get("recovery_status"))
+                && ((Number) head.get("writer_live")).intValue() == 1
                 && ((Number) head.get("activation_epoch")).longValue() == binding.get("activationEpoch").longValue(),
                 "Original Session owner is fenced");
+        if (deferActivationLapse && !"READY".equals(head.get("recovery_status"))) {
+            throw new ApiException(HttpStatus.CONFLICT, "managed_tool_publication_busy",
+                    "Session recovery is blocked");
+        }
+        require("READY".equals(head.get("recovery_status")), "Original Session owner is fenced");
         // The grant expiry is min(writer lease, activation horizon), so a
         // real activation lapse expires the grant on the same clock and
         // this check runs before the activation deferral below.

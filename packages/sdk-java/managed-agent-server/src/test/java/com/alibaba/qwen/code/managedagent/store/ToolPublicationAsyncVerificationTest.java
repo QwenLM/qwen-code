@@ -474,6 +474,67 @@ public class ToolPublicationAsyncVerificationTest {
     }
 
     @Test
+    void unclassifiedReadFailureCannotCertifyCorruption() {
+        publish("retry", 0, "healthy");
+        byte[] bytes = bucket.objects.values().iterator().next().clone();
+        bucket.readFailure = new IllegalArgumentException("Unclassified storage read failure");
+        assertThat(data.verifyNextOperation()).isTrue();
+        assertThat(status("retry").path("state").asText()).isEqualTo("PENDING");
+        assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
+                .isEqualTo("CANDIDATE");
+        assertThat(bucket.objects.values().iterator().next()).isEqualTo(bytes);
+        due("retry");
+        assertThat(data.verifyNextOperation()).isTrue();
+        assertThat(status("retry").path("state").asText()).isEqualTo("SUCCEEDED");
+        assertThat(bucket.puts).hasValue(1);
+    }
+
+    @Test
+    void recoveryBlockDuringReadKeepsHealthyCandidateForRetry() {
+        data = replacement(Duration.ofMinutes(2), Duration.ofSeconds(3));
+        byte[] bytes = "h".repeat(70000).getBytes(StandardCharsets.US_ASCII);
+        data.publishResource(key, "pub-1", PUBLICATION_TOKEN, "resource", "content:test",
+                "managed-tool-result-content", bytes, true);
+        bucket.midRead = () -> fixture.jdbc.update("UPDATE qwen_managed_session_journal_head"
+                + " SET recovery_status = 'BLOCKED_EXECUTION'");
+        assertThat(data.verifyNextOperation()).isTrue();
+        assertThat(status("resource").path("state").asText()).isEqualTo("PENDING");
+        assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
+                .isEqualTo("CANDIDATE");
+        assertThat(fixture.jdbc.queryForObject("SELECT sha256 FROM qwen_tool_publication_object", String.class))
+                .isEqualTo(ToolPublicationContract.sha256(bytes));
+        assertThat(bucket.objects.values().iterator().next()).isEqualTo(bytes);
+        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET recovery_status = 'READY'");
+        due("resource");
+        assertThat(data.verifyNextOperation()).isTrue();
+        assertThat(status("resource").path("state").asText()).isEqualTo("SUCCEEDED");
+        assertThat(bucket.puts).hasValue(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"BLOCKED_EXECUTION", "BLOCKED_RESOURCE", "BLOCKED", "UNKNOWN"})
+    void recoveryBlockBeforeClaimRetainsAcceptedTerminal(String recovery) {
+        byte[] bytes = terminal(70000);
+        data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", bytes, true);
+        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET recovery_status = ?", recovery);
+        assertThat(data.verifyNextOperation()).isTrue();
+        assertThat(status("finish").path("state").asText()).isEqualTo("PENDING");
+        assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
+                .isEqualTo("CANDIDATE");
+        assertThat(fixture.jdbc.queryForObject("SELECT producer_used_bytes FROM qwen_tool_publication", Long.class))
+                .isEqualTo(bytes.length);
+        assertThat(bucket.objects.values().iterator().next()).isEqualTo(bytes);
+        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at > CURRENT_TIMESTAMP(6)"
+                + " FROM qwen_tool_publication_operation", Boolean.class)).isTrue();
+        assertThat(data.verifyNextOperation()).isFalse();
+        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET recovery_status = 'READY'");
+        due("finish");
+        assertThat(data.verifyNextOperation()).isTrue();
+        assertThat(status("finish").path("state").asText()).isEqualTo("SUCCEEDED");
+        assertThat(bucket.puts).hasValue(1);
+    }
+
+    @Test
     void lostSlotBeforeClaimCanRetryAfterTheSlotIsRestored() {
         publish("slot", 0, "bytes");
         fixture.jdbc.update("UPDATE qwen_tool_publication SET active_operation_id = 'other'");
@@ -811,9 +872,10 @@ public class ToolPublicationAsyncVerificationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"lease", "takeover"})
-    void fencedAcceptedWorkFailsWithoutReadingAndStatusDoesNotReviveOrRenewIt(String cause) {
+    @CsvSource({"lease,READY", "takeover,READY", "lease,BLOCKED_EXECUTION", "takeover,BLOCKED_EXECUTION"})
+    void fencedAcceptedWorkFailsWithoutReadingAndStatusDoesNotReviveOrRenewIt(String cause, String recovery) {
         publish("fenced", 0, "bytes");
+        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET recovery_status = ?", recovery);
         Timestamp deadline = fixture.jdbc.queryForObject("SELECT deadline FROM qwen_tool_publication_operation",
                 Timestamp.class);
         Timestamp expired = Timestamp.valueOf("2000-01-01 00:00:00");
@@ -828,6 +890,7 @@ public class ToolPublicationAsyncVerificationTest {
             assertThat(verifier.runOnce()).isTrue();
         }
         assertThat(status("fenced").path("state").asText()).isEqualTo("FAILED");
+        assertThat(status("fenced").path("error").path("code").asText()).isEqualTo("managed_tool_publication_fenced");
         assertThat(bucket.opens).hasValue(0);
         assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation",
                 Timestamp.class)).isNull();
@@ -857,8 +920,8 @@ public class ToolPublicationAsyncVerificationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void finishVerifiesTheCompleteCaptureAndRejectsChangedManifestIdentity(boolean invalid) {
+    @CsvSource({"false,false", "true,false", "false,true"})
+    void finishVerifiesTheCompleteCaptureAndRejectsChangedManifestIdentity(boolean invalid, boolean readFailure) {
         byte[] bytes = new byte[] {1, 2};
         String digest = ToolPublicationContract.sha256(bytes);
         try (var verifier = manualVerifier(data)) {
@@ -910,7 +973,21 @@ public class ToolPublicationAsyncVerificationTest {
             data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish",
                     envelope.toString().getBytes(StandardCharsets.UTF_8), true);
             bucket.opens.set(0);
+            if (readFailure) {
+                bucket.readFailure = new IllegalArgumentException("Unclassified capture read failure");
+            }
             assertThat(verifier.runOnce()).isTrue();
+            if (readFailure) {
+                assertThat(status("finish").path("state").asText()).isEqualTo("PENDING");
+                assertThat(fixture.jdbc.queryForObject("SELECT producer_phase FROM qwen_tool_publication", String.class))
+                        .isEqualTo("FINISHING");
+                assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object"
+                        + " WHERE slot_key = 'terminal'", String.class)).isEqualTo("CANDIDATE");
+                assertThat(fixture.jdbc.queryForObject("SELECT producer_used_bytes FROM qwen_tool_publication", Long.class))
+                        .isPositive();
+                due("finish");
+                assertThat(verifier.runOnce()).isTrue();
+            }
             assertThat(status("finish").path("state").asText()).isEqualTo(invalid ? "FAILED" : "SUCCEEDED");
             if (!invalid) {
                 assertThat(bucket.opens.get()).isPositive();
@@ -971,6 +1048,7 @@ public class ToolPublicationAsyncVerificationTest {
         private boolean failRead;
         private boolean failPut;
         private RuntimeException readFailure;
+        private Runnable midRead;
 
         @Override
         public void putIfAbsent(String objectKey, byte[] bytes) {
@@ -1012,7 +1090,24 @@ public class ToolPublicationAsyncVerificationTest {
                 readFailure = null;
                 throw failure;
             }
-            return new ByteArrayInputStream(bytes);
+            return new ByteArrayInputStream(bytes) {
+                private int reads;
+
+                @Override
+                public synchronized int read(byte[] target, int offset, int length) {
+                    if (++reads == 2 && midRead != null) {
+                        midRead.run();
+                        midRead = null;
+                        try {
+                            Thread.sleep(1100);
+                        } catch (InterruptedException error) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(error);
+                        }
+                    }
+                    return super.read(target, offset, length);
+                }
+            };
         }
 
         @Override
@@ -1020,6 +1115,7 @@ public class ToolPublicationAsyncVerificationTest {
 
         @Override
         public void deleteIfPresent(String key) {
+            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
             objects.remove(key);
         }
 
