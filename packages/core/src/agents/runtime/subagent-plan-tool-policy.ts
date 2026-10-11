@@ -150,9 +150,13 @@ export function hasAgentSkillExecBinding(
  *
  * In CodeModeOnly the exec gateway is the ONLY Skill route — the invocation
  * gate (`AgentCore.canInvokeSkill`) never counts a direct Skill declaration
- * there — so when `exec` itself is missing from the registry (a deny rule or
- * a legacy coreTools allowlist keeps it out) no `toolConfig` shape reaches
- * Skill: not the wildcard, not registry inheritance, not an explicit entry.
+ * there — so when that route is closed no `toolConfig` shape reaches Skill:
+ * not the wildcard, not registry inheritance, not an explicit entry. The
+ * route is closed when `exec` itself is missing from the registry (a deny
+ * rule or a legacy coreTools allowlist keeps it out), when the agent
+ * blocklists `exec` (`prepareTools()` drops it from the declarations), or
+ * when an execution allowlist names neither `skill` nor `exec` (`skill`
+ * stays out of `codeModeAllowedToolNames`).
  *
  * Matching is exact, as `prepareTools()`'s is: `SubagentManager` resolves
  * configured names to canonical tool names before they reach a `ToolConfig`.
@@ -200,6 +204,12 @@ export function toolConfigAllowsSkill(
       : toolConfig.executionAllowedTools === undefined ||
         toolConfig.executionAllowedTools.includes(ToolNames.SKILL) ||
         toolConfig.executionAllowedTools.includes(ToolNames.EXEC));
+  // In CodeModeOnly a closed exec route reaches no skill whatever the
+  // declaration list says. Ordered after the `!toolConfig` early return:
+  // execRouteOpen is only defined for a concrete config.
+  if (codeModeOnly && !execRouteOpen) {
+    return false;
+  }
   const reachesThroughExec =
     execBindingsAvailable && execRouteOpen && names.includes(ToolNames.EXEC);
   return (

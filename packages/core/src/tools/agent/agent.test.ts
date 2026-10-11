@@ -1283,7 +1283,8 @@ describe('AgentTool', () => {
       expect(forkTools.minItems).toBeUndefined();
       expectText(forkTools.description, [
         'Only valid with subagent_type "fork"',
-        'tool declarations remain unchanged',
+        'In `direct` mode the model-visible tool declarations remain unchanged',
+        "this allowlist also narrows the fork's declarations",
       ]);
     });
 

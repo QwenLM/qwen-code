@@ -289,6 +289,59 @@ describe('subagent plan tool policy', () => {
         ),
       ).toBe(true);
     });
+
+    // In CodeModeOnly the exec gateway is the ONLY Skill route, so a
+    // toolConfig that closes that route must answer false whatever the
+    // declaration list says: prepareTools() drops a blocklisted exec, and
+    // leaves skill out of codeModeAllowedToolNames when the execution
+    // allowlists name neither skill nor exec; canInvokeSkill never counts a
+    // direct Skill declaration there.
+    it.each([
+      [
+        'a wildcard with exec disallowed',
+        { tools: ['*'], disallowedTools: [ToolNames.EXEC] },
+      ],
+      [
+        'an explicit Skill entry with exec disallowed',
+        { tools: [ToolNames.SKILL], disallowedTools: [ToolNames.EXEC] },
+      ],
+      [
+        'a wildcard whose execution allowlist omits skill and exec',
+        { tools: ['*'], executionAllowedTools: [ToolNames.READ_FILE] },
+      ],
+      [
+        'a wildcard whose nested execution allowlist omits skill',
+        { tools: ['*'], nestedExecutionAllowedTools: [ToolNames.READ_FILE] },
+      ],
+    ])(
+      'closes the CodeModeOnly Skill route when the exec gateway is unreachable: %s',
+      (_label, toolConfig) => {
+        expect(toolConfigAllowsSkill(toolConfig, true, false, true)).toBe(
+          false,
+        );
+      },
+    );
+
+    // The same shapes stay open outside CodeModeOnly: canInvokeSkill counts a
+    // direct Skill declaration in Direct and Hybrid, so the exec-route veto
+    // must not fire there.
+    it.each([
+      [
+        'a wildcard with exec disallowed',
+        { tools: ['*'], disallowedTools: [ToolNames.EXEC] },
+      ],
+      [
+        'a wildcard whose nested execution allowlist omits skill',
+        { tools: ['*'], nestedExecutionAllowedTools: [ToolNames.READ_FILE] },
+      ],
+    ])(
+      'keeps the Skill route open outside CodeModeOnly: %s',
+      (_label, toolConfig) => {
+        expect(toolConfigAllowsSkill(toolConfig, true, false, false)).toBe(
+          true,
+        );
+      },
+    );
   });
 
   describe('hasAgentSkillExecBinding', () => {

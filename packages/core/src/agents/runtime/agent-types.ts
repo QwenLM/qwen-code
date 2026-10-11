@@ -98,8 +98,10 @@ export interface ToolConfig {
   tools: Array<string | FunctionDeclaration>;
 
   /**
-   * Optional execution-layer allowlist. Tool declarations remain unchanged,
-   * but calls outside this list are rejected before scheduling or approval.
+   * Optional execution-layer allowlist. Calls outside this list are rejected
+   * before scheduling or approval. In `direct` mode the tool declarations
+   * remain unchanged; under hybrid `code_mode` the allowlist also narrows
+   * the agent's top-level declarations.
    * Supports exact tool names and MCP server-level patterns.
    */
   executionAllowedTools?: string[];

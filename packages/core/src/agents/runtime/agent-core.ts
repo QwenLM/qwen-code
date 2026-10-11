@@ -2187,9 +2187,11 @@ export class AgentCore {
       ]),
     );
 
-    // The model-visible declarations and the execution allowlist are separate:
-    // forks keep the parent's declaration prefix for cache sharing while
-    // optionally narrowing which declared tools may actually run.
+    // The model-visible declarations and the execution allowlist are separate
+    // in `direct` mode: forks keep the parent's declaration prefix for cache
+    // sharing while optionally narrowing which declared tools may actually
+    // run. Under hybrid `code_mode` the allowlist also narrows the fork's
+    // declarations (see prepareTools' admission pool).
     const declaredToolNames = new Set(toolsList.map((t) => t.name));
     const isReplayOfHandledCall = (fc: FunctionCall): boolean => {
       const providerCallId = getProviderToolCallId(fc) ?? fc.id;

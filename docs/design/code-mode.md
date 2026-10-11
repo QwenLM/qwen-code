@@ -50,7 +50,7 @@ force `direct`. Container execution exposes direct tools only: selecting
 | -------------------- | --------------------------- | ------------------------------- | ---------------------------------- |
 | Ordinary eager tools | Direct                      | Direct and nested               | Nested only                        |
 | Deferred tools       | `tool_search` + `tool_call` | Bridge and nested               | Nested only                        |
-| Direct-control tools | Direct                      | Direct only                     | Direct only                        |
+| Direct-control tools | Direct                      | Direct; bridge when withheld    | Direct only                        |
 | `exec`               | Not registered              | Direct                          | Direct                             |
 | Discovery bridge     | Existing direct behavior    | Direct where already applicable | Top-level search; tool_call hidden |
 

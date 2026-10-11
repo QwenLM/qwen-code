@@ -438,8 +438,9 @@ export interface QueryOptions {
    * an actual nested exec binding remain callable through exec, and their
    * schemas are included in the exec description when either bridge tool is
    * unavailable; `direct-only` tools (`agent`, `send_message`,
-   * `create_sub_session`, the worktree tools) never get a nested binding and
-   * stay reachable only by a direct call by name. CodeModeOnly discovers deferred schemas through top-level tool_search and invokes them through exec. It skips deferred preload and startup catalogs; tools.eager reduces the initial exec description. When search is unavailable in the current scope, exec includes all allowed signatures. In Hybrid mode, AgentCore excludes tools still hidden by tools.eager
+   * `create_sub_session`, the worktree tools) never get a nested binding;
+   * when withheld they stay reachable through the `tool_search` + `tool_call`
+   * bridge, not through `exec`. CodeModeOnly discovers deferred schemas through top-level tool_search and invokes them through exec. It skips deferred preload and startup catalogs; tools.eager reduces the initial exec description. When search is unavailable in the current scope, exec includes all allowed signatures. In Hybrid mode, AgentCore excludes tools still hidden by tools.eager
    * from nested bindings. In both code modes, agent allowlists that do not grant `exec` narrow nested bindings.
    * Inheriting or explicitly granting `exec` keeps all otherwise admitted
    * ordinary code-mode-callable bindings. An execution allowlist that
@@ -519,7 +520,8 @@ export interface QueryOptions {
    *   exec, and their schemas are included in the exec description when either
    *   bridge tool is unavailable; `direct-only` tools (`agent`,
    *   `send_message`, `create_sub_session`, the worktree tools) never get a
-   *   nested binding and stay reachable only by a direct call by name. CodeModeOnly discovers deferred schemas through
+   *   nested binding; when withheld they stay reachable through the
+   *   `tool_search` + `tool_call` bridge, not through `exec`. CodeModeOnly discovers deferred schemas through
    *   top-level tool_search and invokes them through exec. It skips deferred
    *   preload and startup catalogs; tools.eager reduces the initial exec
    *   description. When search is unavailable in the current scope, exec
