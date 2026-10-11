@@ -254,6 +254,9 @@ export async function runHostedWorkflowTurn(input: {
       signal: input.signal,
       script: input.launch.script,
       args: input.launch.args ?? undefined,
+      // Admission already refuses a script with any `workflow(` call; this
+      // is the runtime second line if resolution is somehow reached.
+      restrictNestedScriptPaths: true,
     });
     input.signal.addEventListener('abort', () => handle.abort(), {
       once: true,

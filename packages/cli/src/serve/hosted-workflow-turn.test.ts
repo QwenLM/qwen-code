@@ -233,6 +233,9 @@ describe('runHostedWorkflowTurn', () => {
         script: SCRIPT,
         args: { x: 1 },
         signal,
+        // The runtime second line under the admission gate: a nested
+        // scriptPath reference throws instead of resolving.
+        restrictNestedScriptPaths: true,
         config: expect.objectContaining({
           initialize: expect.any(Function),
           refreshAuth: expect.any(Function),

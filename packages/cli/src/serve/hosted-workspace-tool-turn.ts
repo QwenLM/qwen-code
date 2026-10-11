@@ -513,7 +513,7 @@ export const HOSTED_AGENT_TOOL: FunctionDeclaration = {
 export const HOSTED_WORKFLOW_TOOL: FunctionDeclaration = {
   name: 'workflow',
   description:
-    'Launch one workflow as an independent child Session of this Workspace. The script is deterministic JavaScript with the injected globals phase(), log(), agent(), parallel(), pipeline(), workflow(), args and budget, and cannot import anything; Date and Math.random() throw. Runs in the background by default: the run settles later and its result arrives as a notification input. With run_in_background false the call waits and returns the run result directly. Saved-workflow names, script paths, resume and nesting are unavailable in this profile: pass the complete script inline.',
+    'Launch one workflow as an independent child Session of this Workspace. The script is deterministic JavaScript with the injected globals phase(), log(), agent(), parallel(), pipeline(), args and budget, and cannot import anything; Date and Math.random() throw. Runs in the background by default: the run settles later and its result arrives as a notification input. With run_in_background false the call waits and returns the run result directly. Saved-workflow names, script paths, resume and nesting are unavailable in this profile: pass the complete script inline.',
   parametersJsonSchema: {
     type: 'object',
     properties: {
@@ -1975,11 +1975,17 @@ export class HostedWorkspaceToolTurn {
               validationError = `Hosted workflow script is invalid: ${describeWorkflowCompileError(cause, args['script'].split(/\r\n|[\n\r\u2028\u2029]/).length)}`;
             }
             if (validationError === undefined) {
-              const violations = scanWorkflowScriptShape(
-                args['script'],
-              ).determinismViolations;
-              if (violations.length > 0) {
-                validationError = `Hosted workflow script is invalid: ${describeWorkflowDeterminismViolations(violations)}`;
+              const shape = scanWorkflowScriptShape(args['script']);
+              if (shape.determinismViolations.length > 0) {
+                validationError = `Hosted workflow script is invalid: ${describeWorkflowDeterminismViolations(shape.determinismViolations)}`;
+              } else if (shape.nestedWorkflowCalls.length > 0) {
+                // A nested launch resolves script bytes the pin never
+                // examined (a saved workflow from any tier). Refuse with
+                // the same model-correctable text the reference arguments
+                // carry, so the launched bytes stay exactly the pinned
+                // ones.
+                const extra = shape.nestedWorkflowCalls.length - 1;
+                validationError = `Hosted workflow script is invalid: workflow() on line ${shape.nestedWorkflowCalls[0]}${extra > 0 ? ` and ${extra} more` : ''} launches a nested run whose script this launch never pinned. This profile runs a complete inline script only: name, scriptPath, resumeFromRunId and sourceRef belong to the legacy Workflow tool and its reference follow-up.`;
               }
             }
           }

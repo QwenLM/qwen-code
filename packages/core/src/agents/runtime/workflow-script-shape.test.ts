@@ -321,3 +321,45 @@ describe('scanWorkflowScriptShape — LineTerminator-terminated comments (#12651
     );
   });
 });
+
+// A nested workflow() resolves script bytes the parent's launch block
+// never pinned (a saved workflow from any tier); the hosted profile
+// refuses the script at admission on this signal (#13803 R1-1).
+describe('scanWorkflowScriptShape — nested workflow calls', () => {
+  it('reports each call on the injected global with its line', () => {
+    const shape = scanWorkflowScriptShape(
+      script(
+        "await workflow('audit')",
+        "await workflow({ scriptPath: '.qwen/workflows/x.js' })",
+        'const noun = workflow',
+      ),
+    );
+    expect(shape.nestedWorkflowCalls).toEqual([1, 2]);
+  });
+
+  it('ignores the name inside strings, templates and comments', () => {
+    const shape = scanWorkflowScriptShape(
+      script(
+        "// workflow('not a call')",
+        '/* workflow(x) */',
+        "const note = 'workflow(x)'",
+        'const t = `template workflow(y)`',
+        'return note + t',
+      ),
+    );
+    expect(shape.nestedWorkflowCalls).toEqual([]);
+  });
+
+  it('does not mistake members or longer names for the global', () => {
+    const shape = scanWorkflowScriptShape(
+      script(
+        'host.workflow(x)',
+        'const myworkflow = () => 1',
+        'myworkflow(x)',
+        'const workflows = () => 1',
+        'workflows(x)',
+      ),
+    );
+    expect(shape.nestedWorkflowCalls).toEqual([]);
+  });
+});

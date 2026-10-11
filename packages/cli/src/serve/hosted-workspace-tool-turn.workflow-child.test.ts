@@ -219,6 +219,10 @@ beforeEach(async () => {
     { authority: session.authority, resources: session.resources },
     sessionKey,
   );
+  // A live turn always holds the harness's before_model checkpoint from
+  // its start; commit it here so the tool arms meet the same durable
+  // basis the real driver provides.
+  await createManagedHarnessHandle(session).ensureCheckpoint();
   consumption = [];
 });
 
@@ -287,6 +291,33 @@ it('refuses the reference arguments as a named follow-up scope', async () => {
   }
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     0,
+  );
+});
+
+it('refuses a script whose masked source calls workflow() as a nested launch', async () => {
+  for (const source of [
+    "return await workflow('x');",
+    "return await workflow({ scriptPath: '.qwen/workflows/x.js' });",
+  ]) {
+    const responses = await executeWorkflow(
+      createTurn(),
+      call({ script: source }),
+    );
+    expect(JSON.stringify(responses)).toContain('script is invalid');
+    expect(JSON.stringify(responses)).toContain('workflow() on line 1');
+    expect(JSON.stringify(responses)).toContain('reference follow-up');
+  }
+  // The same text inside a string or a comment is not a call: only the
+  // launch the pin never examined is refused.
+  const admitted = await executeWorkflow(
+    createTurn(),
+    call({
+      script: 'const label = "workflow(x)"; /* workflow(x) */ return 1;',
+    }),
+  );
+  expect(JSON.stringify(admitted)).toContain('Workflow child started');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    1,
   );
 });
 

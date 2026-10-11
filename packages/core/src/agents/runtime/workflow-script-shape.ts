@@ -63,6 +63,11 @@ export interface WorkflowScriptShape {
   readonly rows: readonly WorkflowShapeRow[];
   readonly agentCalls: number;
   readonly determinismViolations: readonly WorkflowDeterminismViolation[];
+  /**
+   * 1-based lines of `workflow(` call sites on the injected global; a
+   * member call (`x.workflow(`) is not the injected global and is absent.
+   */
+  readonly nestedWorkflowCalls: readonly number[];
 }
 
 const PROMPT_SUMMARY_CHARS = 60;
@@ -254,6 +259,7 @@ export function scanWorkflowScriptShape(source: string): WorkflowScriptShape {
   const rows: WorkflowShapeRow[] = [];
   const rowByContext = new Map<number, WorkflowShapeRow>();
   const violations: WorkflowDeterminismViolation[] = [];
+  const nestedWorkflowCalls: number[] = [];
   const stack: Context[] = [];
   // Indexes of the `}` that closed a `do { }` body, so its `while (...)` tail
   // is not read as a new loop around the next statement.
@@ -398,6 +404,14 @@ export function scanWorkflowScriptShape(source: string): WorkflowScriptShape {
         if (code[open] === '(') recordAgent(start, open);
         return;
       }
+      case 'workflow': {
+        // A nested launch resolves script bytes the parent's launch block
+        // never pinned; the hosted profile refuses the script at admission
+        // on this signal, so the launched bytes stay exactly the pinned
+        // ones.
+        if (code[skipSpace(end)] === '(') nestedWorkflowCalls.push(line);
+        return;
+      }
       case 'parallel':
       case 'pipeline': {
         const open = skipSpace(end);
@@ -528,7 +542,12 @@ export function scanWorkflowScriptShape(source: string): WorkflowScriptShape {
     i = end - 1;
   }
 
-  return { rows, agentCalls, determinismViolations: violations };
+  return {
+    rows,
+    agentCalls,
+    determinismViolations: violations,
+    nestedWorkflowCalls,
+  };
 }
 
 /**
