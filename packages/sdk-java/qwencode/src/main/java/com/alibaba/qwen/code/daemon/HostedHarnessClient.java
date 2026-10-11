@@ -395,6 +395,42 @@ public final class HostedHarnessClient implements AutoCloseable {
     }
 
     /**
+     * H4d-b: one session message operation onto the Session's journal (the
+     * message relay's verbs). The Hosted side commits through its funnel
+     * and answers 202 once settled; a non-2xx answer surfaces as a
+     * {@link DaemonHttpException}, and anything ambiguous is an unknown
+     * outcome for the caller to retry, never to guess at.
+     */
+    public void runMessageOperation(HarnessSessionRef session,
+            Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/messages/operations";
+        HttpSupport.Response response = sendMutation(
+                sessionPath(ref.getHarnessSessionId())
+                        + "/messages/operations",
+                body, ref.getHarnessClientId(), operation);
+        try {
+            DaemonClient.requireStatus(response, 202, operation);
+            Map<String, Object> json = JsonSupport.parseObject(
+                    response.getBody(), "message operation response");
+            String state = JsonSupport.requiredString(json, "state",
+                    "message operation");
+            if (!"settled".equals(state)) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness did not settle the message operation");
+            }
+            String operationId = JsonSupport.requiredString(json,
+                    "operationId", "message operation");
+            if (!operationId.equals(body.get("operationId"))) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness settled a different message operation");
+            }
+        } catch (DaemonProtocolException e) {
+            throw new MutationOutcomeUnknownException(operation, e);
+        }
+    }
+
+    /**
      * H5b/H5c: one channel operation onto the Session's journal (the control
      * plane's verbs). The Hosted side commits through its funnel and answers
      * 202 with the settled result; a non-2xx answer surfaces as a

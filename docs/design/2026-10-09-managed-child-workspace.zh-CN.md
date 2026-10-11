@@ -2,7 +2,7 @@
 
 [English](2026-10-09-managed-child-workspace.md) | [简体中文](2026-10-09-managed-child-workspace.zh-CN.md)
 
-状态：I1 已在本变更中实现。已落地：child Workspace（父 storage 内的一个 Git linked worktree）、它带 fencing 与恢复的持久命令、合并与丢弃两种收尾、storage lease 的维护 hold，以及把 child Session 绑定到已准备好的 child Workspace。仍是设计：I2（`worktree` 准入、relay 与级联接线）与 I3（`snapshot`，以及串行化的裁定），各有后续切片（见后续工作）。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827)（Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的阶段 H）的隔离切片，由 [#13753](https://github.com/QwenLM/qwen-code/issues/13753) 跟踪。它拆分自 H4c（[#13743](https://github.com/QwenLM/qwen-code/issues/13743)，PR #13754），其[设计](2026-10-09-managed-workflow-child-kind.zh-CN.md)在决策 11 中确定了词汇。它承接 H4a（[记录契约](2026-10-06-managed-child-agent-runtime.zh-CN.md)）与 H4b（[child Session 运行时](2026-10-07-managed-child-session-runtime.zh-CN.md)）。
+状态：I1 已在本变更中实现。已落地：child Workspace（父 storage 内的一个 Git linked worktree）、它带 fencing 与恢复的持久命令、合并与丢弃两种收尾、storage lease 的维护 hold，以及把 child Session 绑定到已准备好的 child Workspace。I2（`worktree` 准入、relay 与级联接线）已由其单独的[设计](2026-10-10-managed-child-worktree-admission.zh-CN.md)实现。仍是设计：I3（`snapshot`，以及串行化的裁定），有其后续切片（见后续工作）。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827)（Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的阶段 H）的隔离切片，由 [#13753](https://github.com/QwenLM/qwen-code/issues/13753) 跟踪。它拆分自 H4c（[#13743](https://github.com/QwenLM/qwen-code/issues/13743)，PR #13754），其[设计](2026-10-09-managed-workflow-child-kind.zh-CN.md)在决策 11 中确定了词汇。它承接 H4a（[记录契约](2026-10-06-managed-child-agent-runtime.zh-CN.md)）与 H4b（[child Session 运行时](2026-10-07-managed-child-session-runtime.zh-CN.md)）。
 
 ## 问题与范围
 
@@ -49,7 +49,7 @@ Issue #13753 要求三项：
    - `preparing`、`ready`、`conflicted`、`blocked` 或 `failed` → `discarding` → `discarded`。
    - 任何活动状态在证据无法对齐时 → `blocked`。以 `blocked` 结束的 `applied` 行保留 `merged` 作为结果，清理的失败记为最后的错误，之后失败的丢弃也不会改变它；它的丢弃会移除两个 pin。
 
-   无法完成的丢弃以 `blocked` 结束并清除其请求，所以行绝不会回到刚刚失败的丢弃中循环；新的丢弃请求会重试它。收尾请求（`merge` 或 `discard`）只记录一次。重复的请求直接回答这一行；不同的请求被拒绝，例外是 `discard` 可以跟在以 `conflicted` 或 `blocked` 结束的 `merge` 之后。只有 `ready` 的行才接受合并；绑定的 child Session 未关闭时不接受任何收尾，因为收尾会在一个运行中的 Session 脚下移除目录。
+   无法完成的丢弃以 `blocked` 结束并清除其请求，所以行绝不会回到刚刚失败的丢弃中循环；新的丢弃请求会重试它。收尾请求（`merge` 或 `discard`）只记录一次。重复的请求直接回答这一行；不同的请求被拒绝，例外是 `discard` 可以跟在以 `conflicted` 或 `blocked` 结束的 `merge` 之后。只有 `ready` 的行才接受合并；绑定的 child Session 未关闭时不接受任何收尾，因为收尾会在一个运行中的 Session 脚下移除目录。（I2 修订了这一点：child 运行期间请求即被记录，行在 child 关闭后才执行它；尚未开始的合并可以被丢弃取代。见 [I2 决策 4](2026-10-10-managed-child-worktree-admission.zh-CN.md#决策)。）
 
 9. **claim 隔开写入方；scan 续做工作。** 行带有 `claimed_by`、`claimed_until` 与 `claim_generation`。每次迁移都是对状态与 claim generation 的比较并设置，所以 claim 已过期的 worker 无法提交步骤。定时 scan（`qwen.managed-agent.child-workspace.scan-delay`，2 秒）驱动每一条处于活动状态或欠着收尾的行，从服务调用的操作同步驱动相同的步骤。每个物理步骤都是幂等的，从磁盘与行中的内容对齐，绝不依赖内存。一次 claim 持续 2 分钟，步骤运行期间每隔其三分之一续期一次，所以缓慢的 Git 命令绝不会让第二个 worker 进入仍在进行的步骤；步骤结束即释放。存活的 claim 绝不会被认领两次，连它自己的 worker 也不行，所以同步调用与 scan 不会同时运行同一行。claim 已被他人接走、或在其大部分生命期内都未能续期的步骤会停止：不再启动新的 Git 命令，正在运行的那条会被终止，所以失去 claim 的 worker 绝不会与接管该行的 worker 同时写入。拿不到 storage lease 的步骤等待 1 秒且不消耗尝试次数。一次 scan 最多驱动 20 行，60 秒后不再开始新的行，其余留给下一次 scan。其他失败以从 1 秒翻倍到 60 秒的退避重试，16 次尝试后行以 `blocked` 结束并带上最后的错误。
 10. **物理步骤在 storage lease 的维护 hold 下运行。** 每个步骤之前，worker 以维护 holder 的身份占用该 storage 的 `managed_workspace_execution_lease` 行：`holder_key = sha256("child-workspace" NUL id NUL claimGeneration)`，Runtime holder 各列为空，新增的 `maintenance_id` 列设为行 id。步骤结束时释放 hold。
@@ -75,7 +75,7 @@ Issue #13753 要求三项：
 
 12. **能力属于 Workspace provider，默认关闭。** `RuntimeWarmer.childWorkspaces()` 回答 provider 或 null。只有在 `qwen.managed-agent.runtime-broker.child-workspaces-enabled` 为 true、部署有 Workspace 挂载、且启动探测发现 Git 2.40 或更新版本（第一个带 `merge-tree --merge-base` 的版本；步骤用到的其他选项都更早，两个测试套件在 Git 2.40.0 上均通过）时，`EmbeddedRuntimeBroker` 才回答一个 provider。在没有 Workspace 挂载或 Git 版本过旧时开启它，启动会失败。没有 provider 时，`prepare` 以 `child_workspace_unsupported` 拒绝，什么都不提交。
 13. **把 child Session 绑定到它的 Workspace。** `createChildSession` 增加 `isolated` 参数。设置时，store 在创建事务中锁住同一父与 run 的行，要求它处于 `ready`、没有收尾请求、准备自父当前的 Workspace、generation 与 storage、且指名所请求的目录，然后用该目录代替父的目录插入 child。收尾请求锁住同一行，所以创建与收尾不会互相越过。child 目录是请求摘要的一部分，所以指名不同绑定的重放是幂等冲突。不处于 `ready` 的行以 `child_workspace_not_ready` 拒绝创建。
-14. **I2 的方向。** relay 在 `createChildSession` 之前为 `worktree` run 准备 child Workspace，然后创建绑定到它的 child。在 `completed` 时，它在 `commit_result` 之前以 `merge` 收尾，以便终态回执能报告 `merged` 或带路径的 `conflicted`。决策 8 在 child Session 未关闭时拒绝收尾，而今天的 relay 要到结果提交之后才关闭已结束的 child，所以 I2 对 `worktree` run 把这次关闭移到合并之前。在失败、取消、配额或放弃时，它以 `discard` 收尾，关闭级联丢弃它所取消的 child 的 Workspace。随后 `MANAGED_CHILD_ADMITTED_WORKSPACE_MODES` 对 `child_agent` 与 `workflow` 一并放行 `worktree`。合并结果需要一个记录键，还是随终态回执传递，由 I2 决定。I2 建立在 H4c（#13754，已合入）之上，二者共享文件。
+14. **I2 的方向。** relay 在 `createChildSession` 之前为 `worktree` run 准备 child Workspace，然后创建绑定到它的 child。在 `completed` 时，它在 `commit_result` 之前以 `merge` 收尾，以便终态回执能报告 `merged` 或带路径的 `conflicted`。决策 8 在 child Session 未关闭时拒绝收尾，而今天的 relay 要到结果提交之后才关闭已结束的 child，所以 I2 对 `worktree` run 把这次关闭移到合并之前。在失败、取消、配额或放弃时，它以 `discard` 收尾，关闭级联丢弃它所取消的 child 的 Workspace。随后 `MANAGED_CHILD_ADMITTED_WORKSPACE_MODES` 对 `child_agent` 与 `workflow` 一并放行 `worktree`。合并结果需要一个记录键，还是随终态回执传递，由 I2 决定。I2 建立在 H4c（#13754，已合入）之上，二者共享文件。I2 的[设计](2026-10-10-managed-child-worktree-admission.zh-CN.md)对此作了裁定：合并结果随终态回执传递；relay 先请求合并，再承认 child 的关闭，行在该关闭完成后才执行合并。
 15. **I3 的方向。**
     - 串行共享不需要单独的取值。storage lease 一次只接纳一个 holder，而 storage 的每个写入方（父、`shared` child、`worktree` child 或 child Workspace 维护）都在写入前获取它。因此它们中任何两个都不能同时持有 storage，lease 本身就是 2026-10-04 问题框架所要求的 generation barrier。
     - `snapshot` 可以复用本能力：一个总是被丢弃的 child Workspace，绑定到一个工具 profile 拒绝所有写入的 child。由 I3 决定 profile 级别的拒绝是否足以作为「不能写」的证据。
@@ -169,7 +169,7 @@ Issue #13753 要求三项：
 
 1. **容器化 provider 的 Git 步骤在哪里运行**：在控制面针对已挂载的卷运行，还是经由 worker 操作在 Pod 内运行。
 2. **`conflicted` 或 `blocked` 的行被丢弃后 result pin 的保留**：保留到运维移除为止，还是以 Session 归档为界。
-3. **合并结果的契约**：一个记录键，还是终态回执（I2）。
+3. **合并结果的契约**：一个记录键，还是终态回执（I2）。已由 I2 裁定：终态回执。
 
 ## 后续工作
 

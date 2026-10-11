@@ -123,6 +123,7 @@
      | child 的 Turn 为 `CANCELLED`，或在取消已对其生效之后为 `FAILED` | 从已提交证据得出启动配对（`reconcileAttach`，会重放丢失的 dispatch 或 attach），先接纳 child 的关闭，再以 `close_scope` 结算。已铸造但从未启动的 child 具名结束；无法关闭的主机照旧保留关闭债务。 |
      | child 的 Turn 先 `COMPLETED`，或没有任何取消到达而 `FAILED`     | child 的自然结果优先（契约第 4.4 节）：走普通流程交付结果，或以 `child_failed` 结算为 `failed`。已结算的 run 保留已记录的请求。                                                                   |
 
+   - 持有 session message 的 child 还会运行不成为 Turn 的消息 turn（[H4d-b 决策 15](2026-10-10-managed-session-message-runtime.zh-CN.md)）。只要还有消息 input 在等待或运行，上表每一行都会同时向 child 的消息路由发送 `stop` 并在心跳时等待，`CANCELLED` 那一行也不例外；结果是最新已结算的 turn（Turn 或消息 turn），所以即使 Turn 已 `COMPLETED`，被停止取消的消息 turn 也会让 run 成为 `cancelled`。
    - 落在恢复中的 Turn 上的取消可能让它以 `FAILED` 而非 `CANCELLED` 结束。停止分支凭“取消已对该 Turn 生效”的持久证据区分两种 `FAILED`：该 Turn 进入过 `CANCELLING`，且 child Session 在同一事务中记录了 `turn.cancel.requested`。在已结束的 Turn 上接纳的取消命令不会记录任何东西，所以抢在停止之前的自然失败仍为 `child_failed`。停止分支自己的取消命令以父会话、run 与 Turn 为键，键中的空格使其不会被调用者在租户级共享命令命名空间里的可见 ASCII key 抢占。
    - 中继在有限次尝试内无法完成的停止（无法证明的 attach 链、反复失败的关闭）会走中继既有的放弃链：结算为 `failed`，账本行归为 `unknown`，与中继无法完成的任何 run 相同。这条路径属于 H4b，本次未改。
    - 请求停止后才完成的 run 保留该请求，因此 H4d 的续接拒绝把它作为前驱（`continueChildRun` 不接受已请求停止的前驱）。
