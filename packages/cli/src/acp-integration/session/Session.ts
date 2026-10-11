@@ -10824,6 +10824,7 @@ export class Session implements SessionContext {
       signal: this.teamSinkAbort.signal,
       injectLeaderMessage: (modelText, displayText, senders) =>
         this.#enqueueTeammateMessage(modelText, displayText, senders),
+      reportRosterChange: (change) => this.#enqueueTeamRosterChange(change),
       requestPermission: (params, signal) =>
         this.#requestPermissionQueued(params, signal),
     });
@@ -10855,6 +10856,37 @@ export class Session implements SessionContext {
             },
           }
         : {}),
+      continuesTodoStopGuardWorkChain: false,
+    });
+  }
+
+  /**
+   * Roster membership as wire-visible events, so a client reconstructs who is
+   * on the team from joins and exits without a roster route. Status changes
+   * and idle pulses are deliberately not projected: they fire on every
+   * transition and each would wake the leader into an automatic turn for noise.
+   */
+  #enqueueTeamRosterChange(change: {
+    type: 'joined' | 'exited';
+    name: string;
+    status?: string;
+  }): void {
+    if (this.disposed || this.closing) return;
+    const joined = change.type === 'joined';
+    const tail = joined
+      ? 'joined the team'
+      : `left the team${change.status ? ` (${change.status})` : ''}`;
+    this.#enqueueBackgroundNotification({
+      kind: 'peer',
+      taskId: `teammate-roster-${++this.teammateMessageSeq}`,
+      status: change.type,
+      modelText: `Teammate ${change.name} ${tail}.`,
+      displayText: `teammate ${change.name} ${tail}`,
+      agent: {
+        agentName: `${ROOT_AGENT_IDENTITY.agentName}/${change.name}`,
+        depth: 1,
+        kind: 'teammate',
+      },
       continuesTodoStopGuardWorkChain: false,
     });
   }

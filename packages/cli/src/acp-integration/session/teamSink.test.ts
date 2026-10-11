@@ -117,6 +117,7 @@ describe('attachTeamSink', () => {
   let config: ReturnType<typeof makeConfig>;
   let injectLeaderMessage: ReturnType<typeof vi.fn>;
   let requestPermission: ReturnType<typeof vi.fn>;
+  let reportRosterChange: ReturnType<typeof vi.fn>;
   let deps: TeamSinkDeps;
 
   beforeEach(() => {
@@ -124,11 +125,13 @@ describe('attachTeamSink', () => {
     config = makeConfig(manager);
     injectLeaderMessage = vi.fn();
     requestPermission = vi.fn();
+    reportRosterChange = vi.fn();
     deps = {
       config: config as unknown as Config,
       sessionId: 's1',
       signal: new AbortController().signal,
       injectLeaderMessage,
+      reportRosterChange,
       requestPermission,
     };
   });
@@ -266,5 +269,39 @@ describe('attachTeamSink', () => {
     expect(next.leaderCallback).not.toBeNull();
     detach();
     expect(next.leaderCallback).toBeNull();
+  });
+
+  it('reports roster joins and exits, and retracts them on detach', () => {
+    const detach = attachTeamSink(deps);
+
+    manager.emitter.emit(TeamEventType.TEAMMATE_JOINED, {
+      agentId: 'a1',
+      name: 'correctness',
+      timestamp: 1,
+    });
+    manager.emitter.emit(TeamEventType.TEAMMATE_EXITED, {
+      agentId: 'a1',
+      name: 'correctness',
+      status: 'completed',
+      timestamp: 2,
+    });
+
+    expect(reportRosterChange).toHaveBeenNthCalledWith(1, {
+      type: 'joined',
+      name: 'correctness',
+    });
+    expect(reportRosterChange).toHaveBeenNthCalledWith(2, {
+      type: 'exited',
+      name: 'correctness',
+      status: 'completed',
+    });
+
+    detach();
+    manager.emitter.emit(TeamEventType.TEAMMATE_JOINED, {
+      agentId: 'a2',
+      name: 'tests',
+      timestamp: 3,
+    });
+    expect(reportRosterChange).toHaveBeenCalledTimes(2);
   });
 });

@@ -1252,9 +1252,13 @@ describe('Session', () => {
       );
 
       // The sink adopts the manager that already existed at construction and
-      // registers for teammate approvals.
+      // registers for teammate approvals plus roster membership.
       expect(manager.leaderCallback).not.toBeNull();
-      expect(manager.subscribedTypes).toEqual(['teammate_approval_request']);
+      expect(manager.subscribedTypes).toEqual([
+        'teammate_approval_request',
+        'teammate_joined',
+        'teammate_exited',
+      ]);
 
       manager.leaderCallback?.(
         '<teammate_message from="security">found an injection</teammate_message>',
@@ -1374,6 +1378,41 @@ describe('Session', () => {
 
       expect(manager.leaderCallback).toBeNull();
       expect(manager.listenerCount('teammate_approval_request')).toBe(0);
+      session.dispose();
+    });
+
+    it('surfaces roster joins as peer notifications carrying member identity', async () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      manager.emit('teammate_joined', {
+        agentId: 'a1',
+        name: 'correctness',
+        timestamp: 1,
+      });
+
+      await vi.waitFor(() => expect(sentPeerNotifications()).toHaveLength(1));
+      const [peer] = sentPeerNotifications();
+      expect(
+        (peer!._meta?.['backgroundTask'] as { status: string }).status,
+      ).toBe('joined');
+      expect(peer!._meta?.['agent']).toEqual({
+        agentName: '/root/correctness',
+        depth: 1,
+        kind: 'teammate',
+      });
       session.dispose();
     });
   });
