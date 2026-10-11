@@ -1316,7 +1316,15 @@ export interface BridgeClientRequestContext {
    * unchanged. HTTP routes never populate this from request input.
    */
   modelPrompt?: string;
-  /** Original text explicitly declared by a supported submission producer. */
+  /**
+   * Original text explicitly declared by a supported submission producer.
+   * Caller-controlled: transport routes forward it from request `_meta`. On a
+   * `sourceType: 'channel'` session a nonblank, control-neutralized
+   * declaration becomes the turn's live display projection (pending entry and
+   * user echo) when no worker projection is supplied; it never reaches the
+   * recorded display text and confers no worker authority. `promptDisplayText`
+   * still wins when both are present.
+   */
   submittedPrompt?: string;
   /** User-facing projection supplied by an authenticated channel worker. */
   promptDisplayText?: string;

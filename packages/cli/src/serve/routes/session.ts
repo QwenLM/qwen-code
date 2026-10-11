@@ -7997,9 +7997,12 @@ export function registerSessionRoutes(
             ? promptDisplayText
             : undefined;
         // Channel classification opts the turn out of loop-detected
-        // rejection, so it rides the same worker authorization as the
+        // rejection, so it rides worker authorization just like the recorded
         // display projection; a forged key from any other caller is dropped
-        // here and again at the bridge admission strip.
+        // here and again at the bridge admission strip. (A submission
+        // declaration below can still project the turn's transient live
+        // display — pending entry and echo — but never the recorded display
+        // text.)
         const trustedChannelPrompt =
           channelWorkerAuthorized && channelPrompt === true;
 

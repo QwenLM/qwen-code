@@ -17168,10 +17168,15 @@ describe('createAcpSessionBridge', () => {
           { type: 'text', text: submittedPrompt },
         ],
         _meta: {
-          'qwen.daemon.promptDisplayText': submittedPrompt,
           'qwen.daemon.submittedPrompt': submittedPrompt,
         },
       });
+      // The declaration projects the live echo and pending entry only; the
+      // recorded display text stays content-derived so a caller declaration
+      // never becomes model input downstream (auto-title, `@session`).
+      expect(handle.agent.promptCalls[0]?._meta).not.toHaveProperty(
+        'qwen.daemon.promptDisplayText',
+      );
       expect(handle.agent.promptCalls[0]?._meta).not.toHaveProperty(
         'qwen.channel.prompt',
       );
@@ -17206,8 +17211,12 @@ describe('createAcpSessionBridge', () => {
         }
         throw new Error('no user_message_chunk observed');
       })();
-      const submittedPrompt = 'hi\u001b]0;pwned\u0007';
-      const sanitizedDeclaration = 'hi ]0;pwned ';
+      // One representative per class alternative: BEL/ESC for the C0 halves,
+      // NEL for C1, DEL, U+2028, and a variation selector, with TAB and LF
+      // retained by contract.
+      const submittedPrompt =
+        'a\u0007b\u001bc\u0085d\u007fe\u2028f\u2764\ufe0fg\th\ni';
+      const sanitizedDeclaration = 'a b c d e f\u2764 g\th\ni';
       const promptPromise = bridge.sendPrompt(
         session.sessionId,
         {
@@ -17228,9 +17237,11 @@ describe('createAcpSessionBridge', () => {
         { text: sanitizedDeclaration, state: 'running' },
       ]);
       await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      // The neutralized declaration projects the live echo and pending
+      // entry but is never stamped into the recorded display text.
       expect(
         handle.agent.promptCalls[0]?._meta?.['qwen.daemon.promptDisplayText'],
-      ).toBe(sanitizedDeclaration);
+      ).toBeUndefined();
       // The provenance key keeps the raw declaration for hooks; only the
       // display projection is neutralized.
       expect(
@@ -17313,6 +17324,15 @@ describe('createAcpSessionBridge', () => {
       { name: 'empty', context: { submittedPrompt: '' } },
       { name: 'whitespace', context: { submittedPrompt: ' \n\t ' } },
       { name: 'zero-width-only', context: { submittedPrompt: '\u200b' } },
+      { name: 'hangul-filler-only', context: { submittedPrompt: '\u3164' } },
+      { name: 'braille-blank-only', context: { submittedPrompt: '\u2800' } },
+      { name: 'lone-surrogate-only', context: { submittedPrompt: '\ud800' } },
+      // U+FFF9 is a format character outside the Default_Ignorable set, so
+      // it pins the `\p{Cf}` alternative independently.
+      {
+        name: 'annotation-anchor-only',
+        context: { submittedPrompt: '\ufff9' },
+      },
       {
         name: 'invalid',
         context: { submittedPrompt: 42 as unknown as string },
@@ -17372,6 +17392,46 @@ describe('createAcpSessionBridge', () => {
         'channelPrompt' in context ? context.channelPrompt : undefined,
       );
       abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('does not scan an ineligible declaration during synchronous admission', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const sendWithDeclaration = (submittedPrompt: string) => {
+        const start = performance.now();
+        const promptPromise = bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'question' }],
+          },
+          undefined,
+          { submittedPrompt },
+        );
+        const admissionMs = performance.now() - start;
+        return { promptPromise, admissionMs };
+      };
+
+      // Warm up one-time admission costs so neither measured arm pays them.
+      await sendWithDeclaration('warmup').promptPromise;
+      const prose = sendWithDeclaration(
+        'ordinary prose sentence. '.repeat(40_000),
+      );
+      await prose.promptPromise;
+      // An all-invisible megabyte is the neutralization scan's worst case; a
+      // session that cannot project a declaration must never pay it on the
+      // daemon's single event loop.
+      const invisible = sendWithDeclaration('\u200b'.repeat(1_000_000));
+      await invisible.promptPromise;
+
+      expect(invisible.admissionMs).toBeLessThan(
+        Math.max(20, prose.admissionMs * 10),
+      );
       await bridge.shutdown();
     });
 

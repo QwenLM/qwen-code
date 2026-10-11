@@ -384,22 +384,31 @@ function standaloneWorkingDirectoryMissingError(): RequestError {
  * Controls neutralized in a submission declaration before it may become the
  * Channel display projection: C0/DEL except TAB/LF (raw whitespace a
  * declaration keeps), the C1 block, Unicode line/paragraph separators, every
- * format character (bidi overrides, zero-widths), and variation selectors.
- * Applied BEFORE the blankness test so an invisible-only declaration reads as
- * blank and keeps content-derived display. The class mirrors the one the
- * `channels/base` display sanitizers apply; it is duplicated here because
- * acp-bridge cannot import from channels (they depend on this package).
+ * format character (bidi overrides, zero-widths), the Default_Ignorable set
+ * (Hangul fillers, variation selectors, and friends), lone surrogates, and
+ * U+2800 (BRAILLE PATTERN BLANK is invisible but not Default_Ignorable).
+ * Applied BEFORE the blankness test so an invisible-only declaration reads
+ * as blank and keeps content-derived display. The class mirrors
+ * `PROMPT_UNSAFE_INVISIBLES` / `sanitizeDisplayText`
+ * (packages/channels/base/src/sanitize.ts). It is repeated here because
+ * acp-bridge declares no channel-base dependency and channel packages are
+ * bundled separately (packages/cli/scripts/schema-bundling.mjs). One
+ * deliberate delta: TAB is preserved here and neutralized there.
  */
 const DECLARATION_UNSAFE_DISPLAY_CHARS =
   // eslint-disable-next-line no-control-regex
-  /[\u0000-\u0008\u000b-\u001f\u007f\u0080-\u009f\p{Cf}\u2028\u2029]|\p{Variation_Selector}/gu;
+  /[\u0000-\u0008\u000b-\u001f\u007f\u0080-\u009f\p{Cf}\p{Default_Ignorable_Code_Point}\u2800\u2028\u2029]|[\ud800-\udfff]/gu;
 
 /**
  * Channel display text comes from the authenticated worker or an explicit
  * submission declaration. It never grants channel-turn classification. Every
  * other source echoes its prompt content verbatim. Single source of truth for
- * the echo, pending-entry text, and child metadata so their `''`/undefined
- * semantics cannot drift apart.
+ * the echo and pending-entry text so their `''`/undefined semantics cannot
+ * drift apart. The durable record is stamped separately from the worker value
+ * alone (`recordedDisplayText` in `sendPrompt`): a caller declaration is
+ * display-only and must never reach the recorded display text, which
+ * downstream consumers read as model input (auto-title generation,
+ * cross-session `@session` references).
  */
 function getChannelPromptDisplayText(
   entry: Pick<SessionEntry, 'sourceType'>,
@@ -11049,23 +11058,39 @@ export function createSessionControlPlane(
         }
       }
       const submittedPrompt = context?.submittedPrompt;
+      // Cheap eligibility discards run before the caller-controlled
+      // neutralization scan, so a non-channel session or an ineligible
+      // request never pays for it on this synchronous admission path. The
+      // raw-blank term is only a pre-gate: the projecting blankness test
+      // below still runs after neutralization, so an invisible-only
+      // declaration reads as blank and keeps content-derived display.
+      const declarationEligible =
+        entry.sourceType === 'channel' &&
+        context?.channelPrompt !== true &&
+        req.prompt.some((block) => isRecord(block) && block['type'] === 'text');
       const declaredSubmission =
-        typeof submittedPrompt === 'string'
+        declarationEligible &&
+        typeof submittedPrompt === 'string' &&
+        submittedPrompt.trim().length > 0
           ? submittedPrompt.replace(DECLARATION_UNSAFE_DISPLAY_CHARS, ' ')
           : undefined;
-      const hasValidDeclaration =
-        declaredSubmission !== undefined &&
-        declaredSubmission.trim().length > 0;
-      const hasTextBlock = req.prompt.some(
-        (block) => isRecord(block) && block['type'] === 'text',
-      );
       const declaredChannelDisplayText =
-        context?.channelPrompt !== true && hasValidDeclaration && hasTextBlock
+        declaredSubmission !== undefined && declaredSubmission.trim().length > 0
           ? declaredSubmission
           : undefined;
       const channelDisplayText = getChannelPromptDisplayText(
         entry,
         context?.promptDisplayText ?? declaredChannelDisplayText,
+      );
+      // The durable record stamps only the authenticated worker value. A
+      // caller declaration projects the live echo and pending entry (both
+      // genuinely display-only) but must never reach the recorded display
+      // text: downstream consumers read it as model input (auto-title
+      // generation, cross-session `@session` references, the turn-result
+      // record's promptText and its OTel input-message attribute).
+      const recordedDisplayText = getChannelPromptDisplayText(
+        entry,
+        context?.promptDisplayText,
       );
       const pendingText =
         channelDisplayText === undefined
@@ -11350,7 +11375,7 @@ export function createSessionControlPlane(
                     copy._meta && typeof copy._meta === 'object'
                       ? { ...copy._meta }
                       : {};
-                  const promptDisplayText = channelDisplayText;
+                  const promptDisplayText = recordedDisplayText;
                   const channelOutputMode = meta[CHANNEL_OUTPUT_MODE_META_KEY];
                   delete meta[DAEMON_RETRY_META_KEY];
                   delete meta[INVOCATION_CONTEXT_META_KEY];
