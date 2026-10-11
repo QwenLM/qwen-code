@@ -155,6 +155,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private com.fasterxml.jackson.databind.JsonNode doSettleLifecycle(
             com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
         SessionRecord session = sessions.requireSession(operation.tenantId(), operation.sessionId());
+        requireShellApproval(session);
         AttachmentKey key = new AttachmentKey(operation.tenantId(), operation.sessionId());
         HarnessSessionRef ref = attachments.get(key);
         if (ref == null) {
@@ -567,12 +568,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
      */
     private HarnessSessionRef messageStopAttachment(String tenantId,
             String sessionId) {
+        SessionRecord session = sessions.requireSession(tenantId, sessionId);
+        requireShellApproval(session);
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
         HarnessSessionRef cached = attachments.get(key);
         if (cached != null) {
             return cached;
         }
-        SessionRecord session = sessions.requireSession(tenantId, sessionId);
         if (session.workspace() != null) {
             if (!isWorkspaceFilesAvailable()) {
                 throw new IllegalStateException("Hosted Workspace files are disabled");

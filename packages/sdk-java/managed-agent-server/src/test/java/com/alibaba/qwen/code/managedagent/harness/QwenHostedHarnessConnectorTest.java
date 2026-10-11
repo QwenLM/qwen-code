@@ -299,10 +299,21 @@ class QwenHostedHarnessConnectorTest {
         var connector = new QwenHostedHarnessConnector(properties, sessions, mock(WorkspaceExecutionStore.class), actions);
         ReflectionTestUtils.setField(connector, "client", client);
         when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn(mode);
+        OperationRecord operation = mock(OperationRecord.class);
+        when(operation.tenantId()).thenReturn("tenant-a");
+        when(operation.sessionId()).thenReturn(SESSION_ID);
+        when(operation.operationId()).thenReturn("close-1");
+        when(operation.claimGeneration()).thenReturn(2L);
+        when(operation.kind()).thenReturn(OperationKind.CLOSE);
         for (boolean exists : new boolean[] {false, true}) {
             assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, exists))
                     .hasMessageContaining("requires persisted default or auto-edit");
         }
+        assertThatThrownBy(() -> connector.settleLifecycle(operation))
+                .hasMessageContaining("requires persisted default or auto-edit");
+        assertThatThrownBy(() -> connector.runMessageOperation("tenant-a", SESSION_ID, Map.of(
+                "operationId", "66666666-6666-4666-8666-666666666666", "kind", "stop")))
+                .hasMessageContaining("requires persisted default or auto-edit");
         verifyNoInteractions(client);
         when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
         connector.createOrLoad("tenant-a", SESSION_ID, true);
@@ -326,6 +337,11 @@ class QwenHostedHarnessConnectorTest {
         assertThatThrownBy(() -> connector.stream("tenant-a", SESSION_ID, 0, "epoch"))
                 .hasMessageContaining("requires persisted default or auto-edit");
         assertThatThrownBy(() -> connector.rename("tenant-a", SESSION_ID, "title"))
+                .hasMessageContaining("requires persisted default or auto-edit");
+        assertThatThrownBy(() -> connector.settleLifecycle(operation))
+                .hasMessageContaining("requires persisted default or auto-edit");
+        assertThatThrownBy(() -> connector.runMessageOperation("tenant-a", SESSION_ID, Map.of(
+                "operationId", "66666666-6666-4666-8666-666666666666", "kind", "stop")))
                 .hasMessageContaining("requires persisted default or auto-edit");
         verifyNoInteractions(client);
     }
