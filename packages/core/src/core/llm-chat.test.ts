@@ -18173,6 +18173,52 @@ describe('LlmChat', async () => {
     );
 
     it.each([
+      ['one chunk', false],
+      ['separate chunks', true],
+    ])(
+      'does not strip a distinct Responses message that completes a cut-short replay (%s)',
+      async (_label, splitChunks) => {
+        const base = {
+          text: 'The commentary ends with shared recovery suffix',
+          responsesMessage: { id: 'msg_c', phase: 'commentary' },
+        };
+        const replay = {
+          text: 'shared recovery',
+          responsesMessage: { id: 'msg_c', phase: 'commentary' },
+        };
+        const final = {
+          text: ' suffix Final answer.',
+          responsesMessage: { id: 'msg_f', phase: 'final_answer' },
+        };
+        serveStreams(
+          truncated('discarded initial'),
+          streamOf(modelChunk([base], 'MAX_TOKENS')),
+          splitChunks
+            ? streamOf(modelChunk([replay]), modelChunk([final], 'STOP'))
+            : streamOf(modelChunk([replay, final], 'STOP')),
+        );
+        const events = await sendCollect(
+          'write an answer',
+          'recovery-cut-short-replay',
+        );
+
+        let delivered = '';
+        for (const event of events) {
+          if (event.type === StreamEventType.RETRY && !event.isContinuation) {
+            delivered = '';
+          } else if (event.type === StreamEventType.CHUNK) {
+            delivered += (event.value.candidates?.[0]?.content?.parts ?? [])
+              .map((part) => part.text ?? '')
+              .join('');
+          }
+        }
+        const parts = chat.getHistory().at(-1)?.parts ?? [];
+        expect(parts.at(-1)).toEqual(final);
+        expect(delivered).toBe(parts.map((part) => part.text ?? '').join(''));
+      },
+    );
+
+    it.each([
       ['a distinct', 'msg_f', 'separate'],
       ['the same', 'msg_c', 'merged'],
     ])(

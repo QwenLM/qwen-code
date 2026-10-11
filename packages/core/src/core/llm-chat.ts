@@ -1159,11 +1159,28 @@ function getRecoveryContinuationSuffix(
   return continuationText;
 }
 
+/**
+ * The continuation parts a replay can come from: those before the first
+ * plain-text part of a different Responses message than `anchor` (the base's
+ * last plain-text part). Distinct messages are never treated as replay.
+ */
+function getRecoveryReplayWindow(
+  anchor: Part | undefined,
+  parts: readonly Part[],
+): readonly Part[] {
+  if (!anchor) return parts;
+  const end = parts.findIndex(
+    (part) => isPlainTextPart(part) && !sameResponsesMessage(anchor, part),
+  );
+  return end < 0 ? parts : parts.slice(0, end);
+}
+
 function getRecoveryReplayLength(
   previousText: string,
   continuationParts: readonly Part[],
+  anchor?: Part,
 ): number {
-  const continuationText = continuationParts
+  const continuationText = getRecoveryReplayWindow(anchor, continuationParts)
     .filter(isPlainTextPart)
     .map((part) => part.text)
     .join('');
@@ -1177,9 +1194,14 @@ function stripRecoveryOverlapFromParts(
   parts: readonly Part[],
   replay: { remaining: number },
   onFullyReplayedPart?: (part: Part) => void,
+  anchor?: Part,
 ): Part[] {
   return parts.flatMap((part) => {
     if (!isPlainTextPart(part) || replay.remaining === 0) return [part];
+    if (anchor && !sameResponsesMessage(anchor, part)) {
+      replay.remaining = 0;
+      return [part];
+    }
     const consumed = Math.min(replay.remaining, part.text.length);
     replay.remaining -= consumed;
     const text = part.text.slice(consumed);
@@ -1210,7 +1232,11 @@ function stripRecoveryOverlapFromChunks(
   }
   const previousText = getPlainTextFromParts(previousParts);
   const replay = {
-    remaining: getRecoveryReplayLength(previousText, allParts),
+    remaining: getRecoveryReplayLength(
+      previousText,
+      allParts,
+      previousTextPart,
+    ),
   };
   if (replay.remaining === 0) return [...chunks];
 
@@ -1222,6 +1248,7 @@ function stripRecoveryOverlapFromChunks(
       content.parts,
       replay,
       onFullyReplayedPart,
+      previousTextPart,
     );
     return Object.assign(chunk, {
       candidates: [
@@ -1408,6 +1435,8 @@ function appendRecoveryContinuationParts(
   // because the dedup block gets skipped wholesale.
   const previousTextIndex = findLastPlainTextPartIndex(mergedParts);
   const continuationTextIndex = nextParts.findIndex(isPlainTextPart);
+  const replayAnchor =
+    previousTextIndex >= 0 ? mergedParts[previousTextIndex] : undefined;
   // Distinct Responses messages carry their own meaning, even when their
   // text overlaps (for example commentary repeated as the final answer).
   if (
@@ -1440,17 +1469,23 @@ function appendRecoveryContinuationParts(
       remaining: getRecoveryReplayLength(
         getPlainTextFromParts(mergedParts),
         nextParts,
+        replayAnchor,
       ),
     };
     let replayedPartMetadata: Record<string, unknown> | undefined;
-    nextParts = stripRecoveryOverlapFromParts(nextParts, replay, (part) => {
-      if (part.partMetadata) {
-        replayedPartMetadata = {
-          ...replayedPartMetadata,
-          ...part.partMetadata,
-        };
-      }
-    });
+    nextParts = stripRecoveryOverlapFromParts(
+      nextParts,
+      replay,
+      (part) => {
+        if (part.partMetadata) {
+          replayedPartMetadata = {
+            ...replayedPartMetadata,
+            ...part.partMetadata,
+          };
+        }
+      },
+      replayAnchor,
+    );
     if (replayedPartMetadata) {
       const replayBoundaryIndex = findLastPlainTextPartIndex(mergedParts);
       if (replayBoundaryIndex >= 0) {
