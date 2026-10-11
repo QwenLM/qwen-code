@@ -265,7 +265,13 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
 
   const handleManagerChange = (manager: TeamManager | null): void => {
     if (detached) return;
-    if (boundManager && boundManager !== manager) {
+    // Same-instance re-notification: Config.setTeamManager fires the change
+    // callbacks even when the manager object is identical, so without this
+    // guard the five emitter.on() calls below would register a second copy of
+    // every listener — one approval request would prompt the host twice and
+    // race two respond() calls, and detach() would leave one copy leaked.
+    if (boundManager === manager) return;
+    if (boundManager) {
       detachFromManager(boundManager);
     }
     boundManager = manager;

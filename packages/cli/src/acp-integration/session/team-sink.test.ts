@@ -121,6 +121,12 @@ describe('attachTeamSink', () => {
   let reportTeammateActivity: ReturnType<typeof vi.fn>;
   let deps: TeamSinkDeps;
 
+  // Re-fires the team-manager change callback with the already-bound manager,
+  // mirroring Config.setTeamManager's unconditional callback invocation.
+  const handleSameManagerNotify = (): void => {
+    config.fireChange(manager);
+  };
+
   beforeEach(() => {
     manager = makeManager();
     config = makeConfig(manager);
@@ -306,6 +312,27 @@ describe('attachTeamSink', () => {
       timestamp: 3,
     });
     expect(reportRosterChange).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores a same-instance manager re-notification instead of doubling listeners', () => {
+    // Config.setTeamManager fires change callbacks even for the identical
+    // manager object; without the identity guard the sink registers a second
+    // copy of every listener, so one approval prompts the host twice and
+    // detach leaks one copy.
+    const detach = attachTeamSink(deps);
+    const emitter = manager.emitter;
+    expect(emitter.listenerCount('teammate_approval_request')).toBe(1);
+
+    handleSameManagerNotify();
+
+    expect(emitter.listenerCount('teammate_approval_request')).toBe(1);
+    expect(emitter.listenerCount('teammate_joined')).toBe(1);
+    expect(emitter.listenerCount('teammate_exited')).toBe(1);
+    expect(emitter.listenerCount('teammate_activity')).toBe(1);
+    expect(emitter.listenerCount('message_sent')).toBe(1);
+
+    detach();
+    expect(emitter.listenerCount('teammate_approval_request')).toBe(0);
   });
 
   it('reports teammate tool activity and inter-teammate messages, and retracts them on detach', () => {
