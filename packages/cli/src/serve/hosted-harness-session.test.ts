@@ -125,7 +125,6 @@ const wakeDeps = vi.hoisted(() => ({
 const domainEnablement = vi.hoisted(() => ({
   childRun: false,
   monitorRun: false,
-  teams: false,
 }));
 
 vi.mock(
@@ -142,7 +141,6 @@ vi.mock(
       ) => {
         if (domain === 'child_run' && domainEnablement.childRun) return;
         if (domain === 'monitor_run' && domainEnablement.monitorRun) return;
-        if (domain.startsWith('team_') && domainEnablement.teams) return;
         actual.assertManagedSessionDomainEnabled(domain);
       },
       // H4b: record commits gate per kind, beside the admission mock.
@@ -2451,7 +2449,6 @@ describe('Hosted Harness no-tool session', () => {
   // its tool_result landed: the aftermath answers it from its record before
   // the Turn settles, so the next Turn's model is never told to retry it.
   it('answers a committed team call of a crashed wake Turn from its record', async () => {
-    domainEnablement.teams = true;
     const inputId = await prewriteAutomationCrashedTurnSession();
     const key = {
       tenantId: 'tenant',
@@ -2541,7 +2538,6 @@ describe('Hosted Harness no-tool session', () => {
         'committed its team change',
       );
     } finally {
-      domainEnablement.teams = false;
       await managed.close().catch(() => undefined);
     }
   });
@@ -5856,7 +5852,6 @@ describe('Hosted Harness no-tool session', () => {
   // a Session that led a team reopens with its own committed history.
   it('reopens a Session whose journal carries its team and board', async () => {
     domainEnablement.childRun = true;
-    domainEnablement.teams = true;
     try {
       const key = {
         tenantId: 'tenant',
@@ -5962,7 +5957,7 @@ describe('Hosted Harness no-tool session', () => {
           .status,
       ).toBe(204);
     } finally {
-      domainEnablement.teams = false;
+      domainEnablement.childRun = false;
     }
   });
 
@@ -9909,22 +9904,13 @@ describe('Hosted Harness no-tool session', () => {
       body,
     );
     expect(created.status).toBe(200);
+    // Captured here and asserted after the Turn: an assertion inside the
+    // model mock fails only the Turn, which the test would not see.
+    let firstDeclarations: string[] | undefined;
     state.model.mockImplementationOnce(async ({ toolTurn }) => {
-      expect(
-        (await toolTurn!.declarations(new AbortController().signal)).map(
-          (tool) => tool.name,
-        ),
-      ).toEqual([
-        'read_file',
-        'write_file',
-        'edit',
-        'run_shell_command',
-        'monitor',
-        // H4b: a Shell-laned root Session advertises its Agent tool,
-        // and (H4d-b) messages the child tasks it launched.
-        'agent',
-        'send_message',
-      ]);
+      firstDeclarations = (
+        await toolTurn!.declarations(new AbortController().signal)
+      ).map((tool) => tool.name!);
       return { text: 'text without side effects', model: 'test-model' };
     });
     const prompt = [{ type: 'text', text: 'hello' }];
@@ -9949,6 +9935,23 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 10_000 },
     );
+    expect(firstDeclarations).toEqual([
+      'read_file',
+      'write_file',
+      'edit',
+      'run_shell_command',
+      'monitor',
+      // H4b: a Shell-laned root Session advertises its Agent tool,
+      // and (H4d-b) messages the child tasks it launched.
+      'agent',
+      // H4e-b1: with the team domains enabled, so are its team tools.
+      'team_create',
+      'team_delete',
+      'task_create',
+      'task_update',
+      'task_list',
+      'send_message',
+    ]);
     expect(acquire).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
@@ -10002,6 +10005,12 @@ describe('Hosted Harness no-tool session', () => {
       // H4b: a Shell-laned root Session advertises its Agent tool,
       // and (H4d-b) messages the child tasks it launched.
       'agent',
+      // H4e-b1: with the team domains enabled, so are its team tools.
+      'team_create',
+      'team_delete',
+      'task_create',
+      'task_update',
+      'task_list',
       'send_message',
     ]);
     expect(state.model).toHaveBeenCalledTimes(2);
@@ -10869,6 +10878,62 @@ describe('Hosted Harness no-tool session', () => {
       );
     },
   );
+
+  it('fences an accepted delayed title and deduplicates a completed delivery', async () => {
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const send = (title: string, managedRenameRevision: string) =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/title`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({ title, managedRenameRevision });
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = LocalManagedSessionAuthority.prototype.commitDomainRecord;
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'commitDomainRecord',
+    ).mockImplementation(function (
+      this: LocalManagedSessionAuthority,
+      command,
+      request,
+      actor,
+    ) {
+      if (request.content['managedRenameRevision'] === '1') {
+        entered();
+        return held.then(() => original.call(this, command, request, actor));
+      }
+      return original.call(this, command, request, actor);
+    });
+    const older = send('A', '1').then((response) => response);
+    await waiting;
+    await send('B', '2')
+      .expect(200)
+      .expect((response) =>
+        expect(response.body.managedRenameRevision).toBe('2'),
+      );
+    release();
+    expect((await older).status).toBe(409);
+    const before = await readFile(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      'utf8',
+    );
+    await send('B', '2').expect(200);
+    expect(
+      await readFile(path.join(state.root, `${SESSION_ID}.jsonl`), 'utf8'),
+    ).toBe(before);
+    await send('A', '3').expect(200);
+  });
 
   it.each(['hosted-workspace-files/1', 'hosted-workspace-shell/1'])(
     'loads a renamed %s Session and verifies its retained title resources',
@@ -20081,7 +20146,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
   // retry it and the retry opens a second task.
   it('answers a committed team call of a cancelled user Turn from its record', async () => {
     domainEnablement.childRun = true;
-    domainEnablement.teams = true;
     try {
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
       vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
@@ -20228,7 +20292,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
         supertest(replacement).delete(`/session/${SESSION_ID}`),
       );
     } finally {
-      domainEnablement.teams = false;
       domainEnablement.childRun = false;
     }
   }, 30_000);
@@ -20241,7 +20304,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
     'answers a committed team sibling of a Runtime park through the %s route',
     async (route) => {
       domainEnablement.childRun = true;
-      domainEnablement.teams = true;
       try {
         vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
         acquireSpy = vi
@@ -20477,7 +20539,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
           supertest(replacement).delete(`/session/${SESSION_ID}`),
         );
       } finally {
-        domainEnablement.teams = false;
         domainEnablement.childRun = false;
       }
     },
@@ -20498,7 +20559,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
     'answers a committed %s sibling before the bare-load resume of a publication Session',
     async (sibling, expected) => {
       domainEnablement.childRun = true;
-      domainEnablement.teams = true;
       try {
         const key = {
           tenantId: 'tenant',
@@ -20789,7 +20849,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
         );
         await headers(supertest(second).delete(`/session/${SESSION_ID}`));
       } finally {
-        domainEnablement.teams = false;
         domainEnablement.childRun = false;
       }
     },
@@ -20806,7 +20865,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
     async (sibling) => {
       const kind = 'task_create' as 'task_create' | 'agent';
       domainEnablement.childRun = true;
-      domainEnablement.teams = true;
       try {
         vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
         vi.spyOn(
@@ -21022,10 +21080,76 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(retried).toBe(0);
         expect(domainCommits('team_task')).toBe(1);
       } finally {
-        domainEnablement.teams = false;
         domainEnablement.childRun = false;
       }
     },
     30_000,
   );
+});
+
+it('pins stored definitions across resident and cold loads and delivers instructions to the Turn', async () => {
+  const server = await app();
+  const resources = LocalManagedSessionResourceStore.create({
+    runtimeBaseDir: state.root,
+    sessionKey: {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    },
+  });
+  const instructionsRef = await resources.publish(
+    'managed-agent-instructions',
+    Buffer.from('D8_PINNED_INSTRUCTIONS'),
+  );
+  const identity = {
+    agentId: `agent_${'a'.repeat(32)}`,
+    revision: '1',
+    digest: 'b'.repeat(64),
+  };
+  const definition = {
+    ...identity,
+    model: { id: 'configured' },
+    instructionsRef,
+  };
+  const created = await headers(supertest(server).post('/session')).send({
+    sessionId: SESSION_ID,
+    sessionScope: 'thread',
+    managedSessionStore: store(),
+    agentDefinition: definition,
+  });
+  expect(created.status).toBe(200);
+  const load = (agentDefinition?: typeof identity) =>
+    headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+      managedSessionStore: store(),
+      agentDefinition,
+      driveRuntimeRecovery: true,
+    });
+  expect((await load()).body.error).toBe('hosted_agent_definition_conflict');
+  expect((await load({ ...identity, digest: 'c'.repeat(64) })).body.error).toBe(
+    'hosted_agent_definition_conflict',
+  );
+  expect((await load(identity)).status).toBe(200);
+  await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(204);
+  const loaded = await load(identity);
+  expect(loaded.status).toBe(200);
+  const prompt = [{ type: 'text', text: 'hello' }];
+  await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+    .set('X-Qwen-Client-Id', loaded.body.clientId)
+    .send({
+      prompt,
+      promptId: PROMPT_ID,
+      payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+    })
+    .expect(202);
+  await vi.waitFor(() => expect(state.model).toHaveBeenCalled());
+  expect(state.model.mock.calls.at(-1)?.[0]).toMatchObject({
+    agentDefinition: definition,
+    agentInstructions: 'D8_PINNED_INSTRUCTIONS',
+  });
+  await vi.waitFor(async () => {
+    const response = await headers(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(response.status).toBe(204);
+  });
 });
