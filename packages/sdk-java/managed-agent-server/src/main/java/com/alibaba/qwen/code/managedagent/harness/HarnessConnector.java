@@ -14,6 +14,8 @@ public interface HarnessConnector extends AutoCloseable {
 
     default boolean supportsLifecycle() { return false; }
 
+    default boolean supportsFencedTitles() { return false; }
+
     default JsonNode settleLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted lifecycle is unavailable");
     }
@@ -135,6 +137,10 @@ public interface HarnessConnector extends AutoCloseable {
     }
 
     void rename(String tenantId, String sessionId, String title);
+
+    default void rename(String tenantId, String sessionId, String title, long revision) {
+        throw new UnsupportedOperationException("Fenced Session titles are unavailable");
+    }
 
     /**
      * Closes the Session and returns the boot ID of the Harness that
