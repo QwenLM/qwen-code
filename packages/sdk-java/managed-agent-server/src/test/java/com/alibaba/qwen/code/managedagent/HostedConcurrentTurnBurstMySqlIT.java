@@ -43,6 +43,7 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
@@ -63,6 +64,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 //
 // Requires a real MySQL 8 server: pass -Dmysql.url/-Dmysql.user/
 // -Dmysql.password (defaults match a local throwaway server on 13306).
+//
+// The Hosted*IT classes share one failsafe fork and one MySQL schema, so
+// the context is closed after the class: cached for the rest of the fork,
+// its operation and Turn recovery would go on scanning every tenant and
+// claim later classes' work on a host with no Runtime Broker, which cannot
+// close their Workspace Sessions.
 @SpringBootTest(properties = {
         "qwen.managed-agent.harness.enabled=false",
         "qwen.managed-agent.runtime-broker.enabled=false",
@@ -71,6 +78,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "qwen.managed-agent.events.materialize-interval=10ms"})
 @AutoConfigureMockMvc
 @Import(HostedConcurrentTurnBurstMySqlIT.BurstHarnessConfiguration.class)
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class HostedConcurrentTurnBurstMySqlIT {
     private static final Duration ROUND_DEADLINE = Duration.ofSeconds(150);
     private static final Duration SILENCE_LIMIT = Duration.ofSeconds(20);

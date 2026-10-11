@@ -384,11 +384,13 @@ describe('Hosted real-process gates', () => {
     `com/alibaba/qwen/code/managedagent/${className}.java`;
   // Java code without its string literals and comments, so neither a
   // commented-out annotation nor a "/*" inside a string skews the counts.
-  const hostedTestSource = (className) =>
-    read(hostedTestPath(className))
+  const javaCode = (source) =>
+    source
       .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/\/\/.*$/gm, '');
+  const hostedTestSource = (className) =>
+    javaCode(read(hostedTestPath(className)));
   const ceilingsOf = (source) =>
     [...source.matchAll(/@(?:[\w.]+\.)?Timeout\((\d+)\)/g)].map((m) =>
       Number(m[1]),
@@ -426,5 +428,49 @@ describe('Hosted real-process gates', () => {
     expect(read(hostedTestPath('HostedTeamLeadMySqlIT'))).toContain(
       'await().failFast("The case\'s @Timeout interrupted it"',
     );
+  });
+
+  // The Hosted*IT classes share one fork, and Spring caches a test context
+  // for the rest of it. A Managed Agent context's operation and Turn
+  // recovery scan every tenant of its schema, so one left open on the
+  // shared MySQL schema claims the work of the classes that run after it.
+  it('closes every Hosted IT Spring test context after its class', () => {
+    const root = 'packages/sdk-java/managed-agent-server/src/test/java/';
+    const contexts = readdirSync(new URL(`../../${root}`, import.meta.url), {
+      recursive: true,
+    })
+      .map(String)
+      .filter((file) => /^Hosted\w*IT\.java$/.test(path.basename(file)))
+      .map((file) => {
+        const name = path.basename(file, '.java');
+        const code = javaCode(read(root + file.split(path.sep).join('/')));
+        const declaration = code.search(new RegExp(`\\bclass\\s+${name}\\b`));
+        expect(declaration, name).toBeGreaterThan(0);
+        // Only the annotations on the test class itself.
+        return { name, header: code.slice(0, declaration) };
+      })
+      .filter(({ header }) =>
+        /@(?:[\w.]+\.)?(?:SpringBootTest|SpringJUnitConfig|ContextConfiguration)\b/.test(
+          header,
+        ),
+      );
+    expect(contexts.map(({ name }) => name)).toEqual(
+      expect.arrayContaining([
+        'HostedConcurrentTurnBurstMySqlIT',
+        'HostedWorkspaceRecoveryWorkerIT',
+      ]),
+    );
+    for (const { name, header } of contexts) {
+      const dirties = header.match(
+        /@(?:[\w.]+\.)?DirtiesContext\b(?:\s*\(([^)]*)\))?/,
+      );
+      expect(dirties, name).not.toBeNull();
+      // Without arguments it defaults to AFTER_CLASS.
+      if (dirties[1] !== undefined) {
+        expect(dirties[1], name).toMatch(
+          /^\s*classMode\s*=\s*(?:[\w.]+\.)?AFTER_CLASS\s*$/,
+        );
+      }
+    }
   });
 });
