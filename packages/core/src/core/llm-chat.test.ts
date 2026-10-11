@@ -12644,14 +12644,30 @@ describe('LlmChat', async () => {
 
     it('records an escalated turn once when the provider fails after its buffered tool call', async () => {
       const recordAssistantTurn = vi.fn();
-      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const recordGoalTurnUsage = vi.fn();
+      const recordingChat = chatWithRecorder(
+        recordAssistantTurn,
+        recordGoalTurnUsage,
+      );
       const call = fnCall('read_file', { path: '/tmp/e.txt' }, 'call_buffered');
+      const initialUsage = {
+        promptTokenCount: 10,
+        candidatesTokenCount: 100,
+        totalTokenCount: 110,
+      };
+      const escalatedUsage = {
+        promptTokenCount: 120,
+        candidatesTokenCount: 20,
+        totalTokenCount: 140,
+      };
       const streams = [
-        makeStream([makeChunk([{ text: 'partial answer' }], 'MAX_TOKENS')]),
+        streamOf(
+          modelChunk([{ text: 'partial answer' }], 'MAX_TOKENS', initialUsage),
+        ),
         streamThenThrow(
           [
             modelChunk([{ text: 'visible escalated text' }]),
-            modelChunk([call], 'STOP'),
+            modelChunk([call], 'STOP', escalatedUsage),
           ],
           new Error('cut after a buffered terminal tool call'),
         ),
@@ -12665,6 +12681,7 @@ describe('LlmChat', async () => {
         'gemini-pro',
         { message: 'essay' },
         'escalated-buffered-call-then-error',
+        { goalId: 'goal-1', revision: 1, turnId: 'turn-1' },
       );
       await expect(async () => {
         for await (const _event of stream) {
@@ -12675,9 +12692,18 @@ describe('LlmChat', async () => {
       const history = recordingChat.getHistory();
       expect(history.filter((entry) => entry.role === 'model')).toHaveLength(1);
       expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
-      expect(recordAssistantTurn.mock.calls[0]![0].message).toEqual(
-        history.at(-1)?.parts,
+      const record = recordAssistantTurn.mock.calls[0]![0];
+      expect(record.message).toEqual(history.at(-1)?.parts);
+      // The record carries the escalated attempt's usage and leaves its Goal
+      // billing to the recorder; the truncated attempt was billed per attempt.
+      expect(record.tokens).toEqual(escalatedUsage);
+      expect(record.goalContext).toEqual(
+        expect.objectContaining({ turnId: 'turn-1' }),
       );
+      expect(record.goalTokensAlreadyAccumulated).toBeFalsy();
+      expect(recordGoalTurnUsage.mock.calls.map((c) => c[1])).toEqual([
+        initialUsage,
+      ]);
     });
 
     it('restores the truncated turn when escalation fails without output', async () => {

@@ -5446,21 +5446,24 @@ export class LlmChat {
                 escalatedCommittedModelContent !== undefined &&
                 self.history.includes(escalatedCommittedModelContent)
               ) {
-                // When settling records this turn, drop its partial so the
-                // generator's finally does not record it a second time.
+                // Settling writes this turn's single record, so hand it the
+                // attempt's pending partial (usage, Goal billing) instead of
+                // letting the generator's finally record the turn again.
+                const pendingRecord = self.pendingPartialAssistantRecord;
                 const pendingIndex = self.pendingPartialAssistantTurnIndex;
                 if (
+                  pendingRecord !== null &&
                   pendingIndex !== null &&
                   self.history[pendingIndex] ===
                     escalatedCommittedModelContent &&
                   !self.activeRecoveryUserContent &&
                   self.deferredMaxTokensRecordTarget ===
-                    escalatedCommittedModelContent &&
-                  self.deferredMaxTokensRecords.some(
-                    ({ modelContent }) =>
-                      modelContent === escalatedCommittedModelContent,
-                  )
+                    escalatedCommittedModelContent
                 ) {
+                  self.deferredMaxTokensRecords.push({
+                    record: pendingRecord,
+                    modelContent: escalatedCommittedModelContent,
+                  });
                   self.clearPendingPartialState();
                 }
                 self.settleDeferredMaxTokensRecords();
