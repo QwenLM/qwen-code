@@ -167,7 +167,7 @@ function createTurn(
     { resources: session.resources, assertWritable: async () => undefined },
     undefined,
     {
-      profile: 'hosted-workspace-shell/1',
+      profile: 'hosted-workspace-team-lead/1',
       childAgents: {
         funnel: children,
         depth: options.depth ?? 0,
