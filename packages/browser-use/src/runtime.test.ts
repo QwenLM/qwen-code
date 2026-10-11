@@ -27,6 +27,17 @@ vi.mock('./native-host-installer.js', async (importOriginal) => ({
   nativeHostInstallHome: installer.home,
 }));
 
+// No published endpoint anywhere, so a wait can only end at its deadline. The
+// poll loop, the deadline and the platform guard stay the real ones.
+const discovery = vi.hoisted(() => ({
+  discover: vi.fn(async (): Promise<never[]> => []),
+}));
+
+vi.mock('./bridge/discovery.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./bridge/discovery.js')>()),
+  discoverChromeProfiles: discovery.discover,
+}));
+
 import { createBrowserBackend } from './runtime.js';
 
 beforeEach(() => {
@@ -173,4 +184,101 @@ describe('createBrowserBackend', () => {
       expect(installer.ensure).not.toHaveBeenCalled();
     },
   );
+
+  it('lists no browsers at once where no Native Host can be registered', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', '');
+    vi.stubEnv('QWEN_BROWSER_USE_DISCOVERY_DIR', '');
+
+    const backend = await createBrowserBackend();
+    expect(installer.ensure).not.toHaveBeenCalled();
+
+    const startedAt = Date.now();
+    let settledAfterMs = Number.NaN;
+    const listing = backend.dispatch('browsers.list', {}).then(
+      (value) => {
+        settledAfterMs = Date.now() - startedAt;
+        return value;
+      },
+      (error: unknown) => {
+        settledAfterMs = Date.now() - startedAt;
+        throw error;
+      },
+    );
+    // Nothing can publish an endpoint on this platform, so the honest answer
+    // must be available at once instead of after the transport's whole 35s
+    // connect budget (#13692).
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settledAfterMs).toBeLessThanOrEqual(1_000);
+    await expect(listing).resolves.toEqual([]);
+  });
+
+  it('rejects a start at once where no Native Host can be registered', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', '');
+    vi.stubEnv('QWEN_BROWSER_USE_DISCOVERY_DIR', '');
+
+    const backend = await createBrowserBackend();
+    const startedAt = Date.now();
+    let settledAfterMs = Number.NaN;
+    const getting = backend.dispatch('browsers.get', { id: 'chrome:x' }).then(
+      () => {
+        settledAfterMs = Date.now() - startedAt;
+        return undefined;
+      },
+      (error: { code?: string }) => {
+        settledAfterMs = Date.now() - startedAt;
+        return error;
+      },
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settledAfterMs).toBeLessThanOrEqual(1_000);
+    await expect(getting).resolves.toMatchObject({
+      code: 'BROWSER_DISCONNECTED',
+    });
+  });
+
+  it.each([
+    ['QWEN_BROWSER_USE_SOCKET_PATH', '/tmp/managed.sock'],
+    ['QWEN_BROWSER_USE_DISCOVERY_DIR', '/tmp/managed-discovery'],
+  ])(
+    'still waits out the connect budget for a managed %s on such a platform',
+    async (name, value) => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', '');
+      vi.stubEnv(name, value);
+
+      const backend = await createBrowserBackend();
+      expect(installer.ensure).not.toHaveBeenCalled();
+
+      let settled = false;
+      void backend
+        .dispatch('browsers.list', {})
+        .then(() => (settled = true))
+        .catch(() => (settled = true));
+      // Something else publishes a managed endpoint and it may still appear,
+      // so the guard above must not short-circuit this wait.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settled).toBe(false);
+    },
+  );
+
+  it('still waits out the connect budget where a Native Host is registered', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+    vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', '');
+    vi.stubEnv('QWEN_BROWSER_USE_DISCOVERY_DIR', '');
+
+    const backend = await createBrowserBackend();
+    expect(installer.ensure).toHaveBeenCalledOnce();
+
+    let settled = false;
+    void backend
+      .dispatch('browsers.list', {})
+      .then(() => (settled = true))
+      .catch(() => (settled = true));
+    // Chrome relaunches its Host on a 30s alarm, so an empty snapshot is not
+    // proof that no browser exists on a platform that can register one.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settled).toBe(false);
+  });
 });

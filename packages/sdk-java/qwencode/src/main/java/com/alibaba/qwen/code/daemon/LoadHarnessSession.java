@@ -12,6 +12,29 @@ public final class LoadHarnessSession {
     private final boolean driveRuntimeRecovery;
     private final boolean cancellationTakeover;
     private Map<String, Object> lifecycleAuthority;
+    private Map<String, Object> agentDefinition;
+    private boolean stopMessages;
+
+    /**
+     * #13753 I2: a copy that tells the Hosted side this control plane
+     * serves child Workspaces (see {@link CreateHarnessSession.Builder#childWorkspaces}).
+     */
+    private boolean childWorkspaces;
+
+    public LoadHarnessSession withAgentDefinition(Map<String, Object> value) {
+        this.agentDefinition = value == null ? null : Map.copyOf(value);
+        return this;
+    }
+
+    public LoadHarnessSession withChildWorkspaces(boolean value) {
+        LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
+                passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover);
+        copy.agentDefinition = agentDefinition;
+        copy.lifecycleAuthority = lifecycleAuthority;
+        copy.childWorkspaces = value;
+        copy.stopMessages = stopMessages;
+        return copy;
+    }
 
     public LoadHarnessSession forLifecycle(String operationId, long claimGeneration) {
         if (operationId == null || !operationId.matches("[A-Za-z0-9._:-]{1,128}") || claimGeneration < 1) {
@@ -19,7 +42,22 @@ public final class LoadHarnessSession {
         }
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover);
+        copy.agentDefinition = agentDefinition;
         copy.lifecycleAuthority = Map.of("operationId", operationId, "claimGeneration", claimGeneration);
+        copy.childWorkspaces = childWorkspaces;
+        copy.stopMessages = stopMessages;
+        return copy;
+    }
+
+    /** The load of a stopped run's child (H4f): its wake pump starts none
+     * of its message inputs, from before the load can kick it. */
+    public LoadHarnessSession withStoppedMessages() {
+        LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
+                passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover);
+        copy.agentDefinition = agentDefinition;
+        copy.lifecycleAuthority = lifecycleAuthority;
+        copy.childWorkspaces = childWorkspaces;
+        copy.stopMessages = true;
         return copy;
     }
 
@@ -99,6 +137,15 @@ public final class LoadHarnessSession {
         }
         if (cancellationTakeover) {
             result.put("cancellationTakeover", true);
+        }
+        if (agentDefinition != null) {
+            result.put("agentDefinition", agentDefinition);
+        }
+        if (stopMessages) {
+            result.put("stopMessages", true);
+        }
+        if (childWorkspaces) {
+            result.put("childWorkspaces", true);
         }
         return result;
     }

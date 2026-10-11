@@ -2705,11 +2705,12 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // agent 120m + install/build 15m + gate ~40m (the 15m round budget is
     // checked BEFORE each reset, so the last invocation drags its reset
     // plus its -k 30 600 cap; add the OID pin and the post-gate reset)
-    // + misc ~5m ≈ 180m — the job limit must stay comfortably above the
-    // sum or the container is killed mid-run and the ship-what-ran path
-    // is bypassed (see the budget comment).
+    // + misc ~5m + java toolchain/repo/modules ≤ ~20m (Java diffs only,
+    // each download and mvn install capped) ≈ 200m — the job limit must
+    // stay comfortably above the sum or the container is killed mid-run
+    // and the ship-what-ran path is bypassed (see the budget comment).
     assert.ok(
-      verifyJob['timeout-minutes'] >= 190,
+      verifyJob['timeout-minutes'] >= 210,
       `timeout-minutes must cover the gate budget (got ${verifyJob['timeout-minutes']})`,
     );
   });

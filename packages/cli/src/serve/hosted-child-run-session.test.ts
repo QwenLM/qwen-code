@@ -18,6 +18,7 @@ import { HostedChildRunSession } from './hosted-child-run-session.js';
 
 // child_run is enabled by the H3 enablement slice; this suite drives the
 // hosted orchestrator ahead of it, like the core authority suite does.
+// H4b turned the gate per-kind, so the mock lifts the kind gate instead.
 const enablement = vi.hoisted(() => ({ childRun: true }));
 
 vi.mock(
@@ -29,11 +30,9 @@ vi.mock(
       >();
     return {
       ...actual,
-      assertManagedSessionDomainEnabled: (
-        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
-      ) => {
-        if (domain !== 'child_run' || !enablement.childRun) {
-          actual.assertManagedSessionDomainEnabled(domain);
+      assertManagedSessionChildRunKindEnabled: (kind: string) => {
+        if (!enablement.childRun) {
+          actual.assertManagedSessionChildRunKindEnabled(kind);
         }
       },
     };

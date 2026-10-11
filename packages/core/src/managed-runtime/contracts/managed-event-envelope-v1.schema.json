@@ -45,7 +45,8 @@
         "lifecycle.changed",
         "domain.committed",
         "message.delta",
-        "message.retracted"
+        "message.retracted",
+        "operation.replayed"
       ]
     },
     "streams": {
@@ -224,7 +225,8 @@
             "lifecycle.changed",
             "domain.committed",
             "message.delta",
-            "message.retracted"
+            "message.retracted",
+            "operation.replayed"
           ]
         },
         "occurredAt": {

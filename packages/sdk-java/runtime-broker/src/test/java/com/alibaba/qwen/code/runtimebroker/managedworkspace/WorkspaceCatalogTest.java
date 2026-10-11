@@ -38,15 +38,15 @@ class WorkspaceCatalogTest {
 
     private static final WorkspaceAccessPolicy GRANTS =
             GrantedWorkspaceAccessPolicy.builder()
-                    .grant(TENANT, "alice", "alpha", WorkspaceAccess.CREATE)
-                    .grant(TENANT, "alice", "beta", WorkspaceAccess.CREATE)
-                    .grant(TENANT, "alice", "draining", WorkspaceAccess.CREATE)
-                    .grant(TENANT, "alice", "readonly", WorkspaceAccess.READ)
-                    .grant(TENANT, "alice", "removed", WorkspaceAccess.CREATE)
+                    .grant(TENANT, "alice", "alpha", WorkspaceAccess.OPERATOR)
+                    .grant(TENANT, "alice", "beta", WorkspaceAccess.OPERATOR)
+                    .grant(TENANT, "alice", "draining", WorkspaceAccess.OPERATOR)
+                    .grant(TENANT, "alice", "readonly", WorkspaceAccess.READER)
+                    .grant(TENANT, "alice", "removed", WorkspaceAccess.OPERATOR)
                     .grant(OTHER_TENANT, "alice", "alpha",
-                            WorkspaceAccess.CREATE)
+                            WorkspaceAccess.OPERATOR)
                     .grant(OTHER_TENANT, "alice", "gamma",
-                            WorkspaceAccess.CREATE)
+                            WorkspaceAccess.OPERATOR)
                     .build();
 
     @Test
@@ -129,7 +129,7 @@ class WorkspaceCatalogTest {
                         workspace(TENANT, "peek", WorkspaceState.REMOVED)),
                         Map.of()),
                 GrantedWorkspaceAccessPolicy.builder()
-                        .grant(TENANT, "alice", "peek", WorkspaceAccess.READ)
+                        .grant(TENANT, "alice", "peek", WorkspaceAccess.READER)
                         .build());
 
         assertEquals("workspace_not_found", assertThrows(
@@ -224,15 +224,15 @@ class WorkspaceCatalogTest {
                         workspace(TENANT, "zz-hidden", WorkspaceState.ACTIVE)),
                         Map.of()),
                 GrantedWorkspaceAccessPolicy.builder()
-                        .grant(TENANT, "alice", "alpha", WorkspaceAccess.READ)
-                        .grant(TENANT, "alice", "beta", WorkspaceAccess.READ)
+                        .grant(TENANT, "alice", "alpha", WorkspaceAccess.READER)
+                        .grant(TENANT, "alice", "beta", WorkspaceAccess.READER)
                         .build());
         WorkspaceCatalog faulty = new WorkspaceCatalog(
                 new FixedRegistry(List.of(
                         workspace(TENANT, "alpha", WorkspaceState.ACTIVE),
                         workspace(OTHER_TENANT, "zeta", WorkspaceState.ACTIVE)),
                         Optional.empty()),
-                (actor, workspace) -> WorkspaceAccess.READ);
+                (actor, workspace) -> WorkspaceAccess.READER);
 
         assertPage(catalog.list(ALICE, null, 2), false, "alpha", "beta");
         assertPage(faulty.list(ALICE, null, 1), false, "alpha");
@@ -262,12 +262,12 @@ class WorkspaceCatalogTest {
     @Test
     void asksThePolicyOnEveryCall() {
         AtomicReference<WorkspaceAccess> access = new AtomicReference<>(
-                WorkspaceAccess.CREATE);
+                WorkspaceAccess.OPERATOR);
         WorkspaceCatalog catalog = new WorkspaceCatalog(registry(Map.of()),
                 (actor, workspace) -> access.get());
         catalog.resolve(ALICE, WorkspaceSelection.explicit("alpha"));
 
-        access.set(WorkspaceAccess.READ);
+        access.set(WorkspaceAccess.READER);
 
         assertEquals("workspace_forbidden", assertThrows(
                 WorkspaceException.class, () -> catalog.resolve(ALICE,
@@ -306,7 +306,7 @@ class WorkspaceCatalogTest {
                     new FixedRegistry(List.of(foreign), Optional.of("alpha")),
                     (actor, workspace) -> {
                         asked.add(workspace);
-                        return WorkspaceAccess.CREATE;
+                        return WorkspaceAccess.OPERATOR;
                     });
 
             assertEquals("workspace_not_found", assertThrows(
@@ -331,7 +331,7 @@ class WorkspaceCatalogTest {
             WorkspaceCatalog catalog = new WorkspaceCatalog(
                     new FixedRegistry(List.of(workspace(TENANT, workspaceId,
                             WorkspaceState.ACTIVE)), Optional.of("alpha")),
-                    (actor, workspace) -> WorkspaceAccess.CREATE);
+                    (actor, workspace) -> WorkspaceAccess.OPERATOR);
 
             assertEquals("workspace_not_found", assertThrows(
                     WorkspaceException.class, () -> catalog.resolve(ALICE,
@@ -352,7 +352,7 @@ class WorkspaceCatalogTest {
                         workspace(TENANT, "_x", WorkspaceState.ACTIVE),
                         workspace(TENANT, "B", WorkspaceState.ACTIVE)),
                         Map.of()),
-                (actor, workspace) -> WorkspaceAccess.CREATE);
+                (actor, workspace) -> WorkspaceAccess.OPERATOR);
 
         assertPage(catalog.list(ALICE, null, 10), false, "B", "_x", "a");
         assertPage(catalog.list(ALICE, "B", 10), false, "_x", "a");
@@ -367,7 +367,7 @@ class WorkspaceCatalogTest {
                         workspace(TENANT, "b", WorkspaceState.ACTIVE),
                         workspace(TENANT, "a", WorkspaceState.ACTIVE)),
                         Optional.empty()),
-                (actor, workspace) -> WorkspaceAccess.CREATE);
+                (actor, workspace) -> WorkspaceAccess.OPERATOR);
 
         assertThrows(IllegalStateException.class,
                 () -> catalog.list(ALICE, null, 10));
@@ -379,7 +379,7 @@ class WorkspaceCatalogTest {
                         workspace(OTHER_TENANT, "zeta", WorkspaceState.ACTIVE),
                         workspace(TENANT, "beta", WorkspaceState.ACTIVE)),
                         Optional.empty()),
-                (actor, workspace) -> WorkspaceAccess.CREATE);
+                (actor, workspace) -> WorkspaceAccess.OPERATOR);
         assertThrows(IllegalStateException.class,
                 () -> mixed.list(ALICE, null, 10));
     }
@@ -397,7 +397,7 @@ class WorkspaceCatalogTest {
                 new ConfiguredWorkspaceRegistry(records, Map.of()));
         WorkspaceCatalog catalog = new WorkspaceCatalog(registry,
                 GrantedWorkspaceAccessPolicy.builder()
-                        .grant(TENANT, "alice", "visible", WorkspaceAccess.READ)
+                        .grant(TENANT, "alice", "visible", WorkspaceAccess.READER)
                         .build());
 
         WorkspacePage page = catalog.list(ALICE, null, 1);
@@ -422,14 +422,14 @@ class WorkspaceCatalogTest {
 
         // Every record is readable: the third one ends the scan.
         assertPage(new WorkspaceCatalog(dense,
-                (actor, workspace) -> WorkspaceAccess.READ).list(ALICE, null, 2),
+                (actor, workspace) -> WorkspaceAccess.READER).list(ALICE, null, 2),
                 true, "ws-0000", "ws-0001");
         assertEquals(List.of(1000), dense.limits);
         // Only the first two are readable: an exact hasMore scans to the end.
         assertPage(new WorkspaceCatalog(sparse,
                 (actor, workspace) -> workspace.getWorkspaceId()
                         .compareTo("ws-0002") < 0
-                        ? WorkspaceAccess.READ
+                        ? WorkspaceAccess.READER
                         : WorkspaceAccess.NONE).list(ALICE, null, 2),
                 false, "ws-0000", "ws-0001");
         assertEquals(List.of(1000, 1000, 1000), sparse.limits);
@@ -456,7 +456,7 @@ class WorkspaceCatalogTest {
                 new InclusiveRegistry(List.of(
                         workspace(TENANT, "a", WorkspaceState.ACTIVE),
                         workspace(TENANT, "b", WorkspaceState.ACTIVE))),
-                (actor, workspace) -> WorkspaceAccess.CREATE);
+                (actor, workspace) -> WorkspaceAccess.OPERATOR);
 
         assertThrows(IllegalStateException.class,
                 () -> catalog.list(ALICE, "a", 10));
@@ -469,7 +469,7 @@ class WorkspaceCatalogTest {
                 "policy:strict-7", "bundle@r42");
         WorkspaceCatalog catalog = new WorkspaceCatalog(
                 new ConfiguredWorkspaceRegistry(List.of(zeta), Map.of()),
-                (actor, workspace) -> WorkspaceAccess.CREATE);
+                (actor, workspace) -> WorkspaceAccess.OPERATOR);
 
         ResolvedWorkspace resolved = catalog.resolve(
                 new WorkspaceActor("tenant-z", "zed"),

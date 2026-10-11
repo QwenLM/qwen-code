@@ -138,11 +138,13 @@ export function buildReattachParts(
 }
 
 /**
- * `partMetadata` key stamped on the leading text marker of the volatile
- * reattach region. `buildReattachParts` re-generates that region on every
- * request, so the DashScope cache pass uses this marker to place the
- * conversation breakpoint *before* the reattached images instead of after
- * them — keeping the cached prefix stable across turns (issue #11627).
+ * `partMetadata` key stamped on the first part of a trailing volatile region:
+ * one that is re-generated per request and never enters stored history.
+ * `buildReattachParts` marks the reattach region's leading text marker, and
+ * `appendAutoMemoryContext` marks the request-only auto-memory catalog. The
+ * provider cache passes use this marker to place the conversation breakpoint
+ * *before* the volatile tail instead of after it — keeping the cached prefix
+ * stable across turns (issue #11627).
  * It is client-side metadata only: the OpenAI-compatible converters never
  * serialize `partMetadata`, and the native SDK generator strips it in
  * `LlmContentGenerator.stripPartFields` before the request is built, so it
@@ -151,11 +153,12 @@ export function buildReattachParts(
 export const REATTACH_BOUNDARY_METADATA = 'qwen-code:reattach-boundary';
 
 /**
- * Number of trailing parts of the last content that belong to the reattach
- * region, or 0 when the request ends without one. Each reattach part (one
- * text marker, then a text label and an inline image per replayed image)
- * converts to exactly one OpenAI content block, so this equals the
- * trailing reattach block count on the wire.
+ * Number of trailing parts of the last content that belong to a volatile
+ * region, or 0 when the request ends without one. Each such part (one
+ * text marker, then a text label and an inline image per replayed image; or
+ * the catalog's single text part) converts to exactly one content block on
+ * both the OpenAI-compatible and the Anthropic wire, so this equals the
+ * trailing volatile block count.
  */
 export function trailingReattachPartCount(contents: ContentListUnion): number {
   const last = Array.isArray(contents) ? contents.at(-1) : undefined;
