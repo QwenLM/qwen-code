@@ -23,6 +23,7 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
+  HOSTED_CHILD_MOUNT_REFUSALS,
   HostedWorkspaceToolTurn,
   HOSTED_WORKFLOW_TOOL,
   workflowDefinitionPin,
@@ -350,23 +351,35 @@ it('refuses a script whose masked source calls workflow() as a nested launch', a
 });
 
 it('refuses the foreground workflow launch and rejects the sibling batch while a Workspace mount is at stake', async () => {
-  // Foreground + mount held: the launch cannot own the mount the child
-  // needs while this Turn or a Session owner already holds it.
-  const responses = await executeWorkflow(
+  // A Session-scoped hold (here the Hook catalog's) blocks foreground and
+  // background alike and is answered by the Session-owner arm.
+  const foreground = await executeWorkflow(
     createTurn(0, true),
     call({ script: SCRIPT, run_in_background: false }),
   );
-  expect(JSON.stringify(responses)).toContain(
-    'unavailable while this Turn holds the Workspace mount',
+  expect(JSON.stringify(foreground)).toContain(
+    HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner,
   );
-  // Background + Hooks mount held: the Hook catalog's own mount blocks a
-  // background child run as long as the Session stays alive.
   const background = await executeWorkflow(
     createTurn(0, true),
     call({ script: SCRIPT, run_in_background: true }),
   );
   expect(JSON.stringify(background)).toContain(
-    'Hook catalog or MCP owner holds the Workspace mount',
+    HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner,
+  );
+  // A Turn-owned hold refuses only the foreground launch, naming the Turn:
+  // its background advice is real because this hold releases at finish.
+  const turnHeld = createTurn();
+  (turnHeld as unknown as { acquired: boolean }).acquired = true;
+  const turnRefused = await executeWorkflow(
+    turnHeld,
+    call({ script: SCRIPT, run_in_background: false }),
+  );
+  expect(JSON.stringify(turnRefused)).toContain(
+    HOSTED_CHILD_MOUNT_REFUSALS.turn,
+  );
+  expect(JSON.stringify(turnRefused)).not.toContain(
+    HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner,
   );
   // Foreground share a batch with a non-child tool call: no mount-arm —
   // the sibling still wedges the foreground child's single-mount world.
@@ -487,7 +500,6 @@ it('admits a batch of a foreground child agent beside a background workflow', as
 it('answers an aborted half-batch: the first launch commits, the aborted second is refused by the admission cancel guard and never minted', async () => {
   const turn = createTurn();
   const controller = new AbortController();
-  await turn.initialize?.();
   // The abort must arrive between admissions — early enough for the second
   // workflow arm's own `if (signal.aborted)` guard to fire, late enough to
   // keep the first launch's commit. Waiting on the first record's

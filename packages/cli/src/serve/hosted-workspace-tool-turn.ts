@@ -1974,15 +1974,10 @@ export class HostedWorkspaceToolTurn {
           } else if (backgroundIllFormed) {
             validationError =
               'Hosted workflow run_in_background must be a boolean.';
-          } else if (!agentBackground && this.sessionHoldsMount()) {
-            validationError =
-              'Hosted workflow run_in_background=false is unavailable while this Turn holds the Workspace mount; run it in the background or let the current tool work finish first in a fresh turn.';
-          } else if (
-            agentBackground &&
-            (this.mcp?.mountHeld === true || this.hooks?.mountHeld === true)
-          ) {
-            validationError =
-              'Hosted workflow run_in_background=true is unavailable while the Session’s Hook catalog or MCP owner holds the Workspace mount, which ends when the Session closes; launch after the owner closes or from a Session without the mount held.';
+          } else if (this.sessionOwnerMayHoldMount()) {
+            validationError = `Hosted workflow is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; a Session-owned hold releases only when the Session closes, so read the work through ordinary tools instead.`;
+          } else if (!agentBackground && this.acquired) {
+            validationError = `Hosted workflow run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
           } else if (
             !agentBackground &&
             calls.some(
